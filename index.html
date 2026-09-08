@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>femfun · geometry playground</title>
+  <link data-trunk rel="rust" href="crates/femfun-app/Cargo.toml" data-bin="femfun-app">
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #111820; color: #d8e4ee; font: 16px system-ui; }
+    canvas { width: 100%; height: 100%; display: block; outline: none; }
+    #startup { position: absolute; inset: 30% 15% auto; padding: 24px; background: #182430; border: 1px solid #466078; border-radius: 12px; }
+    #startup[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="femfun" tabindex="0" aria-label="Spline geometry editor"></canvas>
+  <div id="startup" role="status">Starting femfun… WebGPU is required.</div>
+  <script>
+    const startup = document.getElementById('startup');
+    let failed = false;
+    const fail = detail => { failed = true; startup.hidden = false; startup.textContent = 'Unable to start WebGPU. Use a WebGPU-capable browser with hardware acceleration on, over HTTPS or localhost. ' + detail; };
+    if (!navigator.gpu) fail('This browser does not expose navigator.gpu.');
+    addEventListener('error', e => fail(e.message));
+    addEventListener('unhandledrejection', e => fail(String(e.reason)));
+    setTimeout(() => { if (!startup.hidden && !failed) fail('GPU initialization has not completed. Check the browser console for details.'); }, 30000);
+  </script>
+</body>
+</html>
