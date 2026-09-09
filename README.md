@@ -67,16 +67,20 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 
 ## Edit
 
-- **Select:** left-click a handle or curve; drag handles to reshape. Double-click
-  a curve to insert a knot without changing its shape. Clicking near an existing
-  knot selects its associated control instead of adding a repeated knot.
-- **Boundary spans:** clicking a hole or open baffle selects its highlighted logical
-  knot span. A hole span can be reflecting or use a first-order matched impedance
-  with an adjustable ratio against its exterior medium. Baffles expose the same
-  choice independently on their highlighted left and right faces. A baffle span can
-  also couple its coincident faces as a conservative thin-gap spring; increasing its
-  stiffness can reduce the solver time step.
-- **Geometry role:** choose Hole, Material interface, or Reflecting baffle before
+- **Select:** left-click a handle, curve, or outer domain edge; drag handles to
+  reshape. Double-click a curve to insert a knot without changing its shape.
+  Clicking near an existing knot selects its associated control instead of adding
+  a repeated knot.
+- **Boundaries:** clicking an outer edge, hole, or open baffle selects and highlights
+  that boundary in the viewport. One Boundary inspector shows the conditions that
+  apply to the selected target. Outer edges support reflecting, prescribed
+  time-varying Neumann and Dirichlet data, and first- or second-order outgoing
+  conditions. Hole and baffle spans support reflecting or scaled impedance faces.
+  The baffle face selector stays in the inspector because its left and right traces
+  are geometrically coincident. A baffle span can also couple both traces as a
+  conservative thin-gap spring; increasing its stiffness can reduce the solver time
+  step.
+- **Geometry role:** choose Hole, Material interface, or Open baffle before
   creating. An interface retains its interior and shares its finite-element trace
   with the exterior. A baffle is an open curve with two independent coincident
   traces; waves reflect from its faces and diffract around its free endpoints.

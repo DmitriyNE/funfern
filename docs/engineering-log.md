@@ -36,6 +36,23 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
 
+## 2026-09-10 — Unified boundary selection and inspector
+
+- Replaced the four outer-side buttons and the separate hole/baffle controls with
+  one boundary target selected in the viewport. Outer edges, hole knot spans, and
+  baffle knot spans share one inspector; the selected geometry is highlighted.
+- The inspector exposes only conditions implemented for its target. The baffle
+  left/right face choice remains explicit because both traces occupy the same
+  screen curve, and thin-gap coupling is shown separately as a between-face law.
+- Boundary editing no longer depends on an initialized wave operator. Boundary
+  selection remains transient and does not enter history or scene files.
+- Added egui input coverage for outer-edge selection and assignment and migrated
+  the existing hole/baffle selection tests to the unified interaction.
+- Verification passes with formatting, Clippy warnings denied, all 110 workspace
+  tests, native release compilation, and a release Trunk/WebGPU build. Chromium
+  rendered the updated inspector and viewport without runtime console errors; the
+  only browser error was the existing missing optional favicon.
+
 ## 2026-09-09 — Live browser loop restored
 
 - Playwright reproduced the reported frozen first frame in Chromium 152 on the

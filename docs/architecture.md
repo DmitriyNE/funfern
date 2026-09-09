@@ -69,6 +69,10 @@ segments. Sampling copies a span assignment onto every resulting constrained edg
 Knot insertion can split an assignment exactly; removal, seam movement, and span
 merging need explicit inheritance rules and must reject ambiguous drafts. Junction
 nodes and higher-order auxiliary fields belong to this semantic boundary graph.
+The editor represents an outer edge, hole span, or baffle span/face with one
+transient boundary-selection type. Viewport hit testing creates that selection and
+one inspector dispatches to the conditions supported by its target; selection is
+excluded from scene files and document history.
 
 Open splines now store one law per nonempty knot span. Each law has independent
 left and right face conditions plus an optional paired-trace coupling. Reflecting

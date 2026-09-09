@@ -55,6 +55,19 @@ struct InternalCurve {
     id: InternalBoundaryId,
     samples: Vec<Sample>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundarySelection {
+    Outer(OuterSide),
+    Hole {
+        id: ObstacleId,
+        span: usize,
+    },
+    Baffle {
+        id: InternalBoundaryId,
+        span: usize,
+        face: InternalBoundarySide,
+    },
+}
 struct SimulationCandidate {
     mesh: Arc<TriMesh>,
     scene: Scene,
@@ -79,11 +92,8 @@ pub struct Playground {
     material_selection: MaterialId,
     region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
-    obstacle_span_selection: Option<(ObstacleId, usize)>,
     internal_selection: Option<(InternalBoundaryId, Option<usize>)>,
-    internal_span_selection: Option<(InternalBoundaryId, usize)>,
-    internal_face_selection: InternalBoundarySide,
-    outer_side_selection: OuterSide,
+    boundary_selection: Option<BoundarySelection>,
     custom: Vec<Point2>,
     drag: Option<Drag>,
     internal_drag: Option<InternalDrag>,
@@ -167,11 +177,11 @@ impl Default for Playground {
             material_selection: DEFAULT_MATERIAL,
             region_selection: BACKGROUND_REGION,
             selection: Some((ObstacleId(1), None)),
-            obstacle_span_selection: Some((ObstacleId(1), 0)),
             internal_selection: None,
-            internal_span_selection: None,
-            internal_face_selection: InternalBoundarySide::Left,
-            outer_side_selection: OuterSide::Bottom,
+            boundary_selection: Some(BoundarySelection::Hole {
+                id: ObstacleId(1),
+                span: 0,
+            }),
             custom: vec![],
             drag: None,
             internal_drag: None,
@@ -261,9 +271,8 @@ impl Playground {
     }
     fn clear_transient(&mut self) {
         self.selection = None;
-        self.obstacle_span_selection = None;
         self.internal_selection = None;
-        self.internal_span_selection = None;
+        self.boundary_selection = None;
         self.region_selection = BACKGROUND_REGION;
         self.drag = None;
         self.internal_drag = None;
@@ -295,9 +304,12 @@ impl Playground {
             let result = self.editor.create_internal_boundary(spline, region);
             if let Some(id) = self.error(result) {
                 self.selection = None;
-                self.obstacle_span_selection = None;
                 self.internal_selection = Some((id, None));
-                self.internal_span_selection = Some((id, 0));
+                self.boundary_selection = Some(BoundarySelection::Baffle {
+                    id,
+                    span: 0,
+                    face: InternalBoundarySide::Left,
+                });
                 self.custom.clear();
                 self.mode = Mode::Select;
             }
@@ -313,8 +325,8 @@ impl Playground {
         let result = self.create_spline(spline, center);
         if let Some(id) = self.error(result) {
             self.selection = Some((id, None));
-            self.obstacle_span_selection =
-                (self.creation_role == CreationRole::Hole).then_some((id, 0));
+            self.boundary_selection = (self.creation_role == CreationRole::Hole)
+                .then_some(BoundarySelection::Hole { id, span: 0 });
             self.custom.clear();
             self.mode = Mode::Select;
         }
@@ -908,7 +920,7 @@ impl Playground {
             .selected_text(match self.creation_role {
                 CreationRole::Hole => "Hole",
                 CreationRole::MaterialInterface => "Material interface",
-                CreationRole::InternalBoundary => "Reflecting baffle",
+                CreationRole::InternalBoundary => "Open baffle",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.creation_role, CreationRole::Hole, "Hole");
@@ -920,7 +932,7 @@ impl Playground {
                 ui.selectable_value(
                     &mut self.creation_role,
                     CreationRole::InternalBoundary,
-                    "Reflecting baffle",
+                    "Open baffle",
                 );
             });
         if self.creation_role == CreationRole::MaterialInterface {
@@ -1023,10 +1035,9 @@ impl Playground {
                         .clicked()
                     {
                         self.selection = Some((o.id, None));
-                        self.obstacle_span_selection =
-                            matches!(o.role, LoopRole::Hole { .. }).then_some((o.id, 0));
                         self.internal_selection = None;
-                        self.internal_span_selection = None;
+                        self.boundary_selection = matches!(o.role, LoopRole::Hole { .. })
+                            .then_some(BoundarySelection::Hole { id: o.id, span: 0 });
                     }
                 }
                 for boundary in &self.editor.document.draft.internal_boundaries {
@@ -1052,9 +1063,12 @@ impl Playground {
                         .clicked()
                     {
                         self.selection = None;
-                        self.obstacle_span_selection = None;
                         self.internal_selection = Some((boundary.id, None));
-                        self.internal_span_selection = Some((boundary.id, 0));
+                        self.boundary_selection = Some(BoundarySelection::Baffle {
+                            id: boundary.id,
+                            span: 0,
+                            face: InternalBoundarySide::Left,
+                        });
                     }
                 }
             });
@@ -1062,59 +1076,9 @@ impl Playground {
             if ui.button("Delete loop").clicked() {
                 self.editor.delete_obstacle(id);
                 self.selection = None;
-                self.obstacle_span_selection = None;
-            }
-            if let Some(obstacle) = self.editor.obstacle(id)
-                && matches!(obstacle.role, LoopRole::Hole { .. })
-            {
-                let span_count = obstacle.span_conditions.len();
-                let mut span = self
-                    .obstacle_span_selection
-                    .filter(|selection| selection.0 == id && selection.1 < span_count)
-                    .map_or(0, |selection| selection.1);
-                egui::ComboBox::from_id_salt(("hole_span", id.0))
-                    .selected_text(format!("Span {} / {span_count}", span + 1))
-                    .show_ui(ui, |ui| {
-                        for candidate in 0..span_count {
-                            ui.selectable_value(
-                                &mut span,
-                                candidate,
-                                format!("Span {}", candidate + 1),
-                            );
-                        }
-                    });
-                self.obstacle_span_selection = Some((id, span));
-                ui.small("This face borders the hole's exterior medium");
-                let mut condition = obstacle.span_conditions[span];
-                let mut impedance = matches!(condition, FaceBoundaryCondition::Impedance { .. });
-                if ui
-                    .checkbox(&mut impedance, "Matched impedance boundary")
-                    .changed()
+                if matches!(self.boundary_selection, Some(BoundarySelection::Hole { id: selected, .. }) if selected == id)
                 {
-                    condition = if impedance {
-                        FaceBoundaryCondition::Impedance { ratio: 1.0 }
-                    } else {
-                        FaceBoundaryCondition::Reflecting
-                    };
-                    let result = self
-                        .editor
-                        .set_obstacle_boundary_condition(id, span, condition);
-                    self.error(result);
-                } else if let FaceBoundaryCondition::Impedance { ratio } = &mut condition {
-                    let response = ui.add(
-                        egui::DragValue::new(ratio)
-                            .speed(0.02)
-                            .range(0.01..=100.0)
-                            .prefix("impedance ratio ")
-                            .update_while_editing(false),
-                    );
-                    if response.changed() {
-                        let result = self
-                            .editor
-                            .set_obstacle_boundary_condition(id, span, condition);
-                        self.error(result);
-                    }
-                    ui.small("1.0 matches the exterior medium");
+                    self.boundary_selection = None;
                 }
             }
             if let Some(index) = index
@@ -1182,97 +1146,9 @@ impl Playground {
             if ui.button("Delete baffle").clicked() {
                 self.editor.delete_internal_boundary(id);
                 self.internal_selection = None;
-                self.internal_span_selection = None;
-            }
-            if let Some(boundary) = self.editor.internal_boundary(id) {
-                let span_count = boundary.span_laws.len();
-                let mut span = self
-                    .internal_span_selection
-                    .filter(|selection| selection.0 == id && selection.1 < span_count)
-                    .map_or(0, |selection| selection.1);
-                egui::ComboBox::from_id_salt(("baffle_span", id.0))
-                    .selected_text(format!("Span {} / {span_count}", span + 1))
-                    .show_ui(ui, |ui| {
-                        for candidate in 0..span_count {
-                            ui.selectable_value(
-                                &mut span,
-                                candidate,
-                                format!("Span {}", candidate + 1),
-                            );
-                        }
-                    });
-                self.internal_span_selection = Some((id, span));
-                ui.horizontal(|ui| {
-                    ui.label("Face");
-                    ui.selectable_value(
-                        &mut self.internal_face_selection,
-                        InternalBoundarySide::Left,
-                        "Left",
-                    );
-                    ui.selectable_value(
-                        &mut self.internal_face_selection,
-                        InternalBoundarySide::Right,
-                        "Right",
-                    );
-                });
-                ui.small("Left/right follow the spline start → end direction");
-                let mut law = boundary.span_laws[span];
-                let face = match self.internal_face_selection {
-                    InternalBoundarySide::Left => &mut law.left,
-                    InternalBoundarySide::Right => &mut law.right,
-                };
-                let mut impedance = matches!(face, FaceBoundaryCondition::Impedance { .. });
-                if ui
-                    .checkbox(&mut impedance, "Matched impedance face")
-                    .changed()
+                if matches!(self.boundary_selection, Some(BoundarySelection::Baffle { id: selected, .. }) if selected == id)
                 {
-                    *face = if impedance {
-                        FaceBoundaryCondition::Impedance { ratio: 1.0 }
-                    } else {
-                        FaceBoundaryCondition::Reflecting
-                    };
-                    let result = self.editor.set_internal_boundary_law(id, span, law);
-                    self.error(result);
-                } else if let FaceBoundaryCondition::Impedance { ratio } = face {
-                    let response = ui.add(
-                        egui::DragValue::new(ratio)
-                            .speed(0.02)
-                            .range(0.01..=100.0)
-                            .prefix("impedance ratio ")
-                            .update_while_editing(false),
-                    );
-                    if response.changed() {
-                        let result = self.editor.set_internal_boundary_law(id, span, law);
-                        self.error(result);
-                    }
-                    ui.small("1.0 matches the adjacent medium");
-                }
-                let mut thin_gap = matches!(law.coupling, InternalBoundaryCoupling::ThinGap { .. });
-                if ui.checkbox(&mut thin_gap, "Couple as thin gap").changed() {
-                    law.coupling = if thin_gap {
-                        InternalBoundaryCoupling::ThinGap {
-                            stiffness_ratio: 1.0,
-                        }
-                    } else {
-                        InternalBoundaryCoupling::Independent
-                    };
-                    let result = self.editor.set_internal_boundary_law(id, span, law);
-                    self.error(result);
-                } else if let InternalBoundaryCoupling::ThinGap { stiffness_ratio } =
-                    &mut law.coupling
-                {
-                    let response = ui.add(
-                        egui::DragValue::new(stiffness_ratio)
-                            .speed(0.02)
-                            .range(0.01..=100.0)
-                            .prefix("gap stiffness ")
-                            .update_while_editing(false),
-                    );
-                    if response.changed() {
-                        let result = self.editor.set_internal_boundary_law(id, span, law);
-                        self.error(result);
-                    }
-                    ui.small("Conservative paired-trace spring · tighter gaps reduce dt");
+                    self.boundary_selection = None;
                 }
             }
             if let Some(index) = index
@@ -1338,6 +1214,7 @@ impl Playground {
                 }
             }
         }
+        self.boundary_inspector(ui);
         ui.add_space(8.0);
         ui.collapsing("Regions and materials", |ui| {
             let materials = self.editor.document.draft.materials.clone();
@@ -1591,93 +1468,6 @@ impl Playground {
         let wave_available = self.wave_operator.is_some();
         ui.add_enabled_ui(wave_available, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Outer side");
-                for side in OuterSide::ALL {
-                    ui.selectable_value(&mut self.outer_side_selection, side, side.label());
-                }
-            });
-            let side = self.outer_side_selection;
-            let mut condition = self.editor.document.draft.outer_boundaries.get(side);
-            let previous = condition;
-            egui::ComboBox::from_label("Boundary condition")
-                .selected_text(condition.label())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut condition,
-                        OuterBoundaryCondition::Reflecting,
-                        "Neumann · zero / reflecting",
-                    );
-                    let signal = previous.signal().unwrap_or(BoundarySignal::ZERO);
-                    ui.selectable_value(
-                        &mut condition,
-                        OuterBoundaryCondition::Neumann { signal },
-                        "Neumann · prescribed flux",
-                    );
-                    ui.selectable_value(
-                        &mut condition,
-                        OuterBoundaryCondition::Dirichlet { signal },
-                        "Dirichlet · prescribed value",
-                    );
-                    ui.selectable_value(
-                        &mut condition,
-                        OuterBoundaryCondition::FirstOrderOutgoing,
-                        "First-order outgoing",
-                    );
-                    ui.selectable_value(
-                        &mut condition,
-                        OuterBoundaryCondition::SecondOrderOutgoing,
-                        "Second-order auxiliary",
-                    );
-                });
-            if condition != previous {
-                let result = self.editor.set_outer_boundary_condition(side, condition);
-                self.error(result);
-            }
-            if let Some(mut signal) = condition.signal() {
-                ui.small("value(t) = offset + amplitude · sin(2π f t + phase)");
-                let responses = [
-                    ui.add(
-                        egui::DragValue::new(&mut signal.offset)
-                            .speed(0.01)
-                            .prefix("offset ")
-                            .update_while_editing(false),
-                    ),
-                    ui.add(
-                        egui::DragValue::new(&mut signal.amplitude)
-                            .speed(0.01)
-                            .prefix("amplitude ")
-                            .update_while_editing(false),
-                    ),
-                    ui.add(
-                        egui::DragValue::new(&mut signal.frequency_hz)
-                            .speed(0.05)
-                            .range(0.0..=1.0e6)
-                            .suffix(" Hz")
-                            .update_while_editing(false),
-                    ),
-                    ui.add(
-                        egui::DragValue::new(&mut signal.phase_radians)
-                            .speed(0.05)
-                            .prefix("phase ")
-                            .suffix(" rad")
-                            .update_while_editing(false),
-                    ),
-                ];
-                if responses.iter().any(egui::Response::changed) {
-                    condition = match condition {
-                        OuterBoundaryCondition::Neumann { .. } => {
-                            OuterBoundaryCondition::Neumann { signal }
-                        }
-                        OuterBoundaryCondition::Dirichlet { .. } => {
-                            OuterBoundaryCondition::Dirichlet { signal }
-                        }
-                        _ => unreachable!(),
-                    };
-                    let result = self.editor.set_outer_boundary_condition(side, condition);
-                    self.error(result);
-                }
-            }
-            ui.horizontal(|ui| {
                 if ui
                     .button(if self.wave_running { "Pause" } else { "Run" })
                     .clicked()
@@ -1791,6 +1581,270 @@ impl Playground {
             ui.colored_label(GOLD, &self.message);
         }
     }
+
+    fn boundary_inspector(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label("Boundary");
+        let Some(selection) = self.boundary_selection else {
+            ui.small("Click a domain edge, hole span, or baffle span to configure it.");
+            return;
+        };
+        match selection {
+            BoundarySelection::Outer(side) => self.outer_boundary_inspector(ui, side),
+            BoundarySelection::Hole { id, span } => self.hole_boundary_inspector(ui, id, span),
+            BoundarySelection::Baffle { id, span, face } => {
+                self.baffle_boundary_inspector(ui, id, span, face);
+            }
+        }
+    }
+
+    fn outer_boundary_inspector(&mut self, ui: &mut egui::Ui, side: OuterSide) {
+        ui.strong(format!("Domain · {} edge", side.label()));
+        let mut condition = self.editor.document.draft.outer_boundaries.get(side);
+        let previous = condition;
+        egui::ComboBox::from_label("Condition")
+            .selected_text(condition.label())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut condition,
+                    OuterBoundaryCondition::Reflecting,
+                    "Neumann · zero / reflecting",
+                );
+                let signal = previous.signal().unwrap_or(BoundarySignal::ZERO);
+                ui.selectable_value(
+                    &mut condition,
+                    OuterBoundaryCondition::Neumann { signal },
+                    "Neumann · prescribed flux",
+                );
+                ui.selectable_value(
+                    &mut condition,
+                    OuterBoundaryCondition::Dirichlet { signal },
+                    "Dirichlet · prescribed value",
+                );
+                ui.selectable_value(
+                    &mut condition,
+                    OuterBoundaryCondition::FirstOrderOutgoing,
+                    "First-order outgoing",
+                );
+                ui.selectable_value(
+                    &mut condition,
+                    OuterBoundaryCondition::SecondOrderOutgoing,
+                    "Second-order auxiliary",
+                );
+            });
+        if condition != previous {
+            let result = self.editor.set_outer_boundary_condition(side, condition);
+            self.error(result);
+        }
+        if let Some(mut signal) = condition.signal() {
+            ui.small("value(t) = offset + amplitude · sin(2π f t + phase)");
+            let responses = [
+                ui.add(
+                    egui::DragValue::new(&mut signal.offset)
+                        .speed(0.01)
+                        .prefix("offset ")
+                        .update_while_editing(false),
+                ),
+                ui.add(
+                    egui::DragValue::new(&mut signal.amplitude)
+                        .speed(0.01)
+                        .prefix("amplitude ")
+                        .update_while_editing(false),
+                ),
+                ui.add(
+                    egui::DragValue::new(&mut signal.frequency_hz)
+                        .speed(0.05)
+                        .range(0.0..=1.0e6)
+                        .suffix(" Hz")
+                        .update_while_editing(false),
+                ),
+                ui.add(
+                    egui::DragValue::new(&mut signal.phase_radians)
+                        .speed(0.05)
+                        .prefix("phase ")
+                        .suffix(" rad")
+                        .update_while_editing(false),
+                ),
+            ];
+            if responses.iter().any(egui::Response::changed) {
+                condition = match condition {
+                    OuterBoundaryCondition::Neumann { .. } => {
+                        OuterBoundaryCondition::Neumann { signal }
+                    }
+                    OuterBoundaryCondition::Dirichlet { .. } => {
+                        OuterBoundaryCondition::Dirichlet { signal }
+                    }
+                    _ => unreachable!(),
+                };
+                let result = self.editor.set_outer_boundary_condition(side, condition);
+                self.error(result);
+            }
+        }
+    }
+
+    fn hole_boundary_inspector(&mut self, ui: &mut egui::Ui, id: ObstacleId, span: usize) {
+        let Some(obstacle) = self.editor.obstacle(id) else {
+            self.boundary_selection = None;
+            return;
+        };
+        if !matches!(obstacle.role, LoopRole::Hole { .. }) || obstacle.span_conditions.is_empty() {
+            self.boundary_selection = None;
+            return;
+        }
+        let span_count = obstacle.span_conditions.len();
+        let mut selected_span = span.min(span_count - 1);
+        let mut condition = obstacle.span_conditions[selected_span];
+        ui.strong(format!("Hole {} · exterior face", id.0));
+        Self::span_selector(ui, ("hole_boundary", id.0), &mut selected_span, span_count);
+        if selected_span != span {
+            self.boundary_selection = Some(BoundarySelection::Hole {
+                id,
+                span: selected_span,
+            });
+            condition = self.editor.obstacle(id).unwrap().span_conditions[selected_span];
+        }
+        if Self::face_condition_editor(ui, &mut condition) {
+            let result = self
+                .editor
+                .set_obstacle_boundary_condition(id, selected_span, condition);
+            self.error(result);
+        }
+    }
+
+    fn baffle_boundary_inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: InternalBoundaryId,
+        span: usize,
+        face: InternalBoundarySide,
+    ) {
+        let Some(boundary) = self.editor.internal_boundary(id) else {
+            self.boundary_selection = None;
+            return;
+        };
+        if boundary.span_laws.is_empty() {
+            self.boundary_selection = None;
+            return;
+        }
+        let span_count = boundary.span_laws.len();
+        let mut selected_span = span.min(span_count - 1);
+        let mut selected_face = face;
+        let mut law = boundary.span_laws[selected_span];
+        ui.strong(format!("Baffle {}", id.0));
+        Self::span_selector(
+            ui,
+            ("baffle_boundary", id.0),
+            &mut selected_span,
+            span_count,
+        );
+        ui.horizontal(|ui| {
+            ui.label("Face");
+            ui.selectable_value(&mut selected_face, InternalBoundarySide::Left, "Left");
+            ui.selectable_value(&mut selected_face, InternalBoundarySide::Right, "Right");
+        });
+        ui.small("Left/right follow the spline start → end direction");
+        if selected_span != span {
+            law = self.editor.internal_boundary(id).unwrap().span_laws[selected_span];
+        }
+        if selected_span != span || selected_face != face {
+            self.boundary_selection = Some(BoundarySelection::Baffle {
+                id,
+                span: selected_span,
+                face: selected_face,
+            });
+        }
+        let condition = match selected_face {
+            InternalBoundarySide::Left => &mut law.left,
+            InternalBoundarySide::Right => &mut law.right,
+        };
+        let mut changed = Self::face_condition_editor(ui, condition);
+        ui.separator();
+        ui.small("Between faces");
+        let mut thin_gap = matches!(law.coupling, InternalBoundaryCoupling::ThinGap { .. });
+        if ui.checkbox(&mut thin_gap, "Couple as thin gap").changed() {
+            law.coupling = if thin_gap {
+                InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 1.0,
+                }
+            } else {
+                InternalBoundaryCoupling::Independent
+            };
+            changed = true;
+        } else if let InternalBoundaryCoupling::ThinGap { stiffness_ratio } = &mut law.coupling {
+            changed |= ui
+                .add(
+                    egui::DragValue::new(stiffness_ratio)
+                        .speed(0.02)
+                        .range(0.01..=100.0)
+                        .prefix("gap stiffness ")
+                        .update_while_editing(false),
+                )
+                .changed();
+            ui.small("Conservative paired-trace spring · tighter gaps reduce dt");
+        }
+        if changed {
+            let result = self
+                .editor
+                .set_internal_boundary_law(id, selected_span, law);
+            self.error(result);
+        }
+    }
+
+    fn span_selector(
+        ui: &mut egui::Ui,
+        id: impl std::hash::Hash + std::fmt::Debug,
+        span: &mut usize,
+        span_count: usize,
+    ) {
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(format!("Span {} / {span_count}", *span + 1))
+            .show_ui(ui, |ui| {
+                for candidate in 0..span_count {
+                    ui.selectable_value(span, candidate, format!("Span {}", candidate + 1));
+                }
+            });
+    }
+
+    fn face_condition_editor(ui: &mut egui::Ui, condition: &mut FaceBoundaryCondition) -> bool {
+        let previous = *condition;
+        egui::ComboBox::from_label("Condition")
+            .selected_text(match condition {
+                FaceBoundaryCondition::Reflecting => "Neumann · zero / reflecting",
+                FaceBoundaryCondition::Impedance { .. } => "Matched impedance",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    condition,
+                    FaceBoundaryCondition::Reflecting,
+                    "Neumann · zero / reflecting",
+                );
+                let ratio = match previous {
+                    FaceBoundaryCondition::Impedance { ratio } => ratio,
+                    FaceBoundaryCondition::Reflecting => 1.0,
+                };
+                ui.selectable_value(
+                    condition,
+                    FaceBoundaryCondition::Impedance { ratio },
+                    "Matched impedance",
+                );
+            });
+        let mut changed = *condition != previous;
+        if let FaceBoundaryCondition::Impedance { ratio } = condition {
+            changed |= ui
+                .add(
+                    egui::DragValue::new(ratio)
+                        .speed(0.02)
+                        .range(0.01..=100.0)
+                        .prefix("impedance ratio ")
+                        .update_while_editing(false),
+                )
+                .changed();
+            ui.small("1.0 matches the adjacent medium");
+        }
+        changed
+    }
+
     fn viewport(&mut self, ui: &mut egui::Ui, wave_display: Option<&WaveDisplay>) -> Rect {
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
@@ -1897,13 +1951,12 @@ impl Playground {
                     self.refresh_curves();
                     if let Some((id, index)) = self.hit_handle(p, r) {
                         self.selection = Some((id, Some(index)));
-                        self.obstacle_span_selection = self
+                        self.boundary_selection = self
                             .editor
                             .obstacle(id)
                             .filter(|obstacle| matches!(obstacle.role, LoopRole::Hole { .. }))
-                            .map(|_| (id, index));
+                            .map(|_| BoundarySelection::Hole { id, span: index });
                         self.internal_selection = None;
-                        self.internal_span_selection = None;
                         self.editor.begin();
                         let point = self.editor.obstacle(id).unwrap().spline.controls()[index];
                         self.drag = Some(Drag {
@@ -1913,9 +1966,8 @@ impl Playground {
                         });
                     } else if let Some((id, index)) = self.hit_internal_handle(p, r) {
                         self.selection = None;
-                        self.obstacle_span_selection = None;
                         self.internal_selection = Some((id, Some(index)));
-                        self.internal_span_selection = None;
+                        self.boundary_selection = None;
                         self.editor.begin();
                         let point =
                             self.editor.internal_boundary(id).unwrap().spline.controls()[index];
@@ -1925,14 +1977,15 @@ impl Playground {
                             offset: point - self.world(p, r),
                         });
                     } else {
+                        let previous_boundary_selection = self.boundary_selection;
                         let obstacle_hit = self.hit_curve(p, r);
                         self.selection = obstacle_hit.map(|(id, _)| (id, None));
-                        self.obstacle_span_selection = obstacle_hit.and_then(|(id, parameter)| {
+                        self.boundary_selection = obstacle_hit.and_then(|(id, parameter)| {
                             self.editor
                                 .obstacle(id)
                                 .filter(|obstacle| matches!(obstacle.role, LoopRole::Hole { .. }))
                                 .and_then(|obstacle| obstacle.spline.span_index(parameter))
-                                .map(|span| (id, span))
+                                .map(|span| BoundarySelection::Hole { id, span })
                         });
                         let internal_hit = if self.selection.is_none() {
                             self.hit_internal_curve(p, r)
@@ -1940,12 +1993,24 @@ impl Playground {
                             None
                         };
                         self.internal_selection = internal_hit.map(|(id, _)| (id, None));
-                        self.internal_span_selection = internal_hit.and_then(|(id, parameter)| {
-                            self.editor
+                        if let Some((id, parameter)) = internal_hit {
+                            let face = match previous_boundary_selection {
+                                Some(BoundarySelection::Baffle {
+                                    id: selected_id,
+                                    face,
+                                    ..
+                                }) if selected_id == id => face,
+                                _ => InternalBoundarySide::Left,
+                            };
+                            self.boundary_selection = self
+                                .editor
                                 .internal_boundary(id)
                                 .and_then(|boundary| boundary.spline.span_index(parameter))
-                                .map(|span| (id, span))
-                        });
+                                .map(|span| BoundarySelection::Baffle { id, span, face });
+                        } else if self.selection.is_none() {
+                            self.boundary_selection =
+                                self.hit_outer_boundary(p, r).map(BoundarySelection::Outer);
+                        }
                         if self.selection.is_none() && self.internal_selection.is_none() {
                             self.region_selection = self.region_at(self.world(p, r));
                         }
@@ -1985,21 +2050,19 @@ impl Playground {
                         let result = self.editor.insert(id, t);
                         if let Some(index) = self.error(result) {
                             self.selection = Some((id, Some(index)));
-                            self.obstacle_span_selection = self
+                            self.boundary_selection = self
                                 .editor
                                 .obstacle(id)
                                 .filter(|obstacle| matches!(obstacle.role, LoopRole::Hole { .. }))
-                                .map(|_| (id, index));
+                                .map(|_| BoundarySelection::Hole { id, span: index });
                             self.internal_selection = None;
-                            self.internal_span_selection = None;
                         }
                     } else if let Some((id, parameter)) = self.hit_internal_curve(p, r) {
                         let result = self.editor.insert_internal_boundary(id, parameter);
                         if let Some(index) = self.error(result) {
                             self.selection = None;
-                            self.obstacle_span_selection = None;
                             self.internal_selection = Some((id, Some(index)));
-                            self.internal_span_selection = None;
+                            self.boundary_selection = None;
                         }
                     }
                 } else if response.clicked() && !space && !self.panning {
@@ -2019,9 +2082,12 @@ impl Playground {
                                 );
                                 if let Some(id) = self.error(result) {
                                     self.selection = None;
-                                    self.obstacle_span_selection = None;
                                     self.internal_selection = Some((id, None));
-                                    self.internal_span_selection = Some((id, 0));
+                                    self.boundary_selection = Some(BoundarySelection::Baffle {
+                                        id,
+                                        span: 0,
+                                        face: InternalBoundarySide::Left,
+                                    });
                                     self.mode = Mode::Select;
                                 }
                             } else {
@@ -2031,11 +2097,10 @@ impl Playground {
                                 );
                                 if let Some(id) = self.error(result) {
                                     self.selection = Some((id, None));
-                                    self.obstacle_span_selection = (self.creation_role
+                                    self.boundary_selection = (self.creation_role
                                         == CreationRole::Hole)
-                                        .then_some((id, 0));
+                                        .then_some(BoundarySelection::Hole { id, span: 0 });
                                     self.internal_selection = None;
-                                    self.internal_span_selection = None;
                                     self.mode = Mode::Select;
                                 }
                             }
@@ -2154,16 +2219,6 @@ impl Playground {
             domain.map(|p| self.screen(p, r)).to_vec(),
             Stroke::new(1.5, Color32::from_rgb(100, 123, 140)),
         ));
-        let selected_outer = match self.outer_side_selection {
-            OuterSide::Bottom => [domain[0], domain[1]],
-            OuterSide::Right => [domain[1], domain[2]],
-            OuterSide::Top => [domain[2], domain[3]],
-            OuterSide::Left => [domain[3], domain[4]],
-        };
-        painter.line_segment(
-            selected_outer.map(|point| self.screen(point, r)),
-            Stroke::new(3.0, TEAL),
-        );
         if self.show_mesh
             && let Some(mesh) = &self.mesh
         {
@@ -2207,6 +2262,18 @@ impl Playground {
                 }
             }
         }
+        if let Some(BoundarySelection::Outer(side)) = self.boundary_selection {
+            let selected_outer = match side {
+                OuterSide::Bottom => [domain[0], domain[1]],
+                OuterSide::Right => [domain[1], domain[2]],
+                OuterSide::Top => [domain[2], domain[3]],
+                OuterSide::Left => [domain[3], domain[4]],
+            };
+            painter.line_segment(
+                selected_outer.map(|point| self.screen(point, r)),
+                Stroke::new(3.5, TEAL),
+            );
+        }
         if self.reference && self.editor.document.draft != self.editor.document.accepted {
             for curve in &self.accepted_curves {
                 self.draw_curve(&painter, r, curve, Color32::from_rgb(66, 100, 98), 3.0);
@@ -2226,7 +2293,7 @@ impl Playground {
         for curve in &self.draft_internal_curves {
             self.draw_internal_curve(&painter, r, curve, color, 3.0);
         }
-        if let Some((id, span)) = self.obstacle_span_selection
+        if let Some(BoundarySelection::Hole { id, span }) = self.boundary_selection
             && let Some(curve) = self.draft_curves.iter().find(|curve| curve.id == id)
             && let Some(bounds) = self
                 .editor
@@ -2235,7 +2302,7 @@ impl Playground {
         {
             self.draw_curve_span(&painter, r, curve, bounds);
         }
-        if let Some((id, span)) = self.internal_span_selection
+        if let Some(BoundarySelection::Baffle { id, span, face }) = self.boundary_selection
             && let Some(curve) = self
                 .draft_internal_curves
                 .iter()
@@ -2245,7 +2312,7 @@ impl Playground {
                 .internal_boundary(id)
                 .and_then(|boundary| boundary.spline.span_bounds(span))
         {
-            self.draw_internal_span_face(&painter, r, curve, bounds, self.internal_face_selection);
+            self.draw_internal_span_face(&painter, r, curve, bounds, face);
         }
         for o in &self.editor.document.draft.obstacles {
             let selected = self.selection.is_some_and(|s| s.0 == o.id);
@@ -2403,6 +2470,38 @@ impl Playground {
         }
         r
     }
+
+    fn hit_outer_boundary(&self, p: Pos2, r: Rect) -> Option<OuterSide> {
+        let point = self.world(p, r);
+        [
+            (
+                OuterSide::Bottom,
+                Point2::new(-1.0, -1.0),
+                Point2::new(1.0, -1.0),
+            ),
+            (
+                OuterSide::Right,
+                Point2::new(1.0, -1.0),
+                Point2::new(1.0, 1.0),
+            ),
+            (
+                OuterSide::Top,
+                Point2::new(1.0, 1.0),
+                Point2::new(-1.0, 1.0),
+            ),
+            (
+                OuterSide::Left,
+                Point2::new(-1.0, 1.0),
+                Point2::new(-1.0, -1.0),
+            ),
+        ]
+        .into_iter()
+        .map(|(side, a, b)| (side, point_segment_distance(point, a, b)))
+        .filter(|(_, distance)| *distance * self.scale <= 8.0)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(side, _)| side)
+    }
+
     fn hit_handle(&self, p: Pos2, r: Rect) -> Option<(ObstacleId, usize)> {
         if !self.handles {
             return None;
@@ -3823,10 +3922,18 @@ mod tests {
         );
         let id = harness.state.editor.document.draft.internal_boundaries[0].id;
         assert_eq!(harness.state.internal_selection, Some((id, None)));
-        assert_eq!(harness.state.internal_span_selection, Some((id, 0)));
+        assert_eq!(
+            harness.state.boundary_selection,
+            Some(BoundarySelection::Baffle {
+                id,
+                span: 0,
+                face: InternalBoundarySide::Left,
+            })
+        );
 
         let history_before_laws = harness.state.editor.history_len().0;
-        harness.click_text("Matched impedance face");
+        harness.click_text("Neumann · zero / reflecting");
+        harness.click_text("Matched impedance");
         harness.settle();
         assert_eq!(
             harness
@@ -3887,12 +3994,16 @@ mod tests {
             .evaluate(3.5);
         harness.click(harness.point(point));
         assert_eq!(
-            harness.state.obstacle_span_selection,
-            Some((ObstacleId(1), 3))
+            harness.state.boundary_selection,
+            Some(BoundarySelection::Hole {
+                id: ObstacleId(1),
+                span: 3,
+            })
         );
 
         let history = harness.state.editor.history_len().0;
-        harness.click_text("Matched impedance boundary");
+        harness.click_text("Neumann · zero / reflecting");
+        harness.click_text("Matched impedance");
         harness.settle();
         assert_eq!(
             harness
@@ -3927,7 +4038,7 @@ mod tests {
         harness.settle();
         harness.state.selection = None;
         harness.state.internal_selection = None;
-        harness.state.internal_span_selection = None;
+        harness.state.boundary_selection = None;
         let point = harness
             .state
             .editor
@@ -3937,7 +4048,42 @@ mod tests {
             .evaluate(1.5);
         harness.click(harness.point(point));
         assert_eq!(harness.state.internal_selection, Some((id, None)));
-        assert_eq!(harness.state.internal_span_selection, Some((id, 1)));
+        assert_eq!(
+            harness.state.boundary_selection,
+            Some(BoundarySelection::Baffle {
+                id,
+                span: 1,
+                face: InternalBoundarySide::Left,
+            })
+        );
+    }
+
+    #[test]
+    fn outer_edge_click_selects_and_configures_that_boundary() {
+        let mut harness = Harness::new();
+        harness.click(harness.point(Point2::new(0.35, 1.0)));
+        assert_eq!(
+            harness.state.boundary_selection,
+            Some(BoundarySelection::Outer(OuterSide::Top))
+        );
+        assert_eq!(harness.state.selection, None);
+        assert_eq!(harness.state.internal_selection, None);
+
+        let history = harness.state.editor.history_len().0;
+        harness.click_text("Reflecting");
+        harness.click_text("First-order outgoing");
+        harness.settle();
+        assert_eq!(
+            harness
+                .state
+                .editor
+                .document
+                .draft
+                .outer_boundaries
+                .get(OuterSide::Top),
+            OuterBoundaryCondition::FirstOrderOutgoing
+        );
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
     }
 
     fn commit_mesh_without_gpu(state: &mut Playground) {
