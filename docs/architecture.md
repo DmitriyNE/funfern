@@ -1,9 +1,8 @@
 # Architecture notes
 
-The spline editor, constrained mesher, bounded coordinate-edit repair, P1 GPU wave
-solver, and geometry-edit simulation transactions are implemented. An enriched
-quadratic mass-lumped CPU reference now establishes the next production solver;
-its GPU evolution, display, and transfer path and broader adaptation remain work.
+The spline editor, constrained mesher, bounded coordinate-edit repair, enriched
+quadratic GPU wave solver, and geometry-edit simulation transactions are
+implemented. Broader adaptation and radiation boundaries remain work.
 
 ## Responsibilities and dependencies
 
@@ -246,7 +245,7 @@ of that bound. The f64 CPU implementation is the reference and conserves the
 scheme's discrete half-step energy to roundoff in the undamped test.
 
 The f32 GPU kernel stores both committed time levels and a scratch level in one
-storage buffer. Each vertex invocation gathers its CSR row and writes only its
+storage buffer. Each solution-DOF invocation gathers its CSR row and writes only its
 own scratch value; a second dispatch rotates levels. This avoids scatter atomics.
 The operator, state, source, and controls use Bevy's render-world buffers and its
 existing wgpu device. State remains GPU-resident; asynchronous readback supplies
@@ -288,11 +287,17 @@ comparisons. The finer parent-h=0.04 quadratic case reaches roughly 0.0005 rad
 phase error, but its 37,443 DOFs, 4.70 MiB estimate, smaller timestep, and dense
 element rows reduce CPU throughput to about one simulated second per wall second.
 
-The production application remains P1 until quadratic GPU evolution, field
-evaluation, and transaction transfer are implemented and checked against this f64
-reference. Ordinary higher-degree triangular Lagrange bases must not inherit P1
-lumping. Report mesh preparation, operator preparation, display time, and stepping
-throughput separately, with DOFs, memory, timestep, and phase/amplitude error.
+The production application now uses this enriched quadratic operator at parent
+h=0.08 by default. The CSR gather evolution is independent of element degree; GPU
+node data includes the parent vertices, shared edge midpoints, and element bubble
+centroids. Field display splits each parent triangle into six visual triangles so
+all seven coefficients contribute. Transaction transfer locates every new node in
+an old parent triangle and applies its seven enriched basis values to displacement
+and velocity. Source velocity is reconstructed once per old DOF and cached before
+the interpolation gather, avoiding repeated old-operator rows. Ordinary
+higher-degree triangular Lagrange bases must not inherit P1 lumping. Report mesh
+preparation, operator preparation, display time, and stepping throughput separately,
+with DOFs, memory, timestep, and phase/amplitude error.
 
 The application requests at most 16 substeps per display frame and reports achieved
 simulation time per wall time. Pulse injection modifies both stored levels equally,
@@ -333,10 +338,10 @@ the retained old buffers.
 
 The old mesh/operators remain fixed during candidate preparation; only the old
 state evolves. Transfer maps target the source discretization, not a captured
-field snapshot. For triangles, map new samples to old triangle indices and
-barycentric weights on the CPU, then apply that map to current state on the GPU.
+field snapshot. For enriched quadratic triangles, map every new solution node to an
+old parent triangle on the CPU, then evaluate that triangle's seven basis functions.
 The CPU lookup uses a uniform spatial bin index rather than testing every old
-triangle for every new vertex. Keep other discretizations free to provide different
+triangle for every new node. Keep other discretizations free to provide different
 transfer operations.
 
 Coalesce pointer events. Do not restart all preparation on every event: useful
@@ -350,27 +355,28 @@ Transfer both the field and its time derivative (or equivalent complete integrat
 state). Respect time staggering; changing the timestep must not reinterpret an old
 half-step state as a new one. Boundary auxiliary fields need an explicit policy.
 
-Barycentric interpolation is used initially and does not conserve energy. A target
-vertex maps only through an old triangle that contains it, so transfer never crosses
-an excluded obstacle. Vertices newly exposed by a shrinking or moved obstacle start
-with zero displacement and velocity. Mild local smoothing is a possible response to
+Enriched quadratic interpolation does not conserve energy. A target node maps only
+through an old triangle that contains it, so transfer never crosses an excluded
+obstacle. Nodes newly exposed by a shrinking or moved obstacle start with zero
+displacement and velocity. Mild local smoothing is a possible response to
 edit-induced bursts, not a substitute for stable stepping.
 
-The hard zero policy is intentionally temporary. When newly exposed vertices meet a
+The hard zero policy is intentionally temporary. When newly exposed nodes meet a
 nonzero retained field, it creates a steep artificial front and injects broadband
 wave content. A future commit pass should construct a narrow transition band around
 the exposed region and smooth or taper both displacement and velocity there while
-leaving established vertices outside that band unchanged. The pass needs a bounded
+leaving established nodes outside that band unchanged. The pass needs a bounded
 work budget and diagnostics for its energy and spectral effect; it must not silently
 renormalize the whole field.
 
 For the centered two-level scheme, the first GPU transfer dispatch reconstructs
-the current velocity from the old previous/current displacements, old operator,
-damping, forcing, and timestep. It barycentrically maps current displacement and
-velocity. A second dispatch applies the new operator and forcing to initialize the
-new previous displacement consistently with the new timestep. The exact GPU clock
-is copied at commit, so a continuous source retains its phase. Both transfer
-dispatches stay within WebGPU's portable eight-storage-buffer-per-stage limit.
+current velocity once per old DOF from previous/current displacement, the old
+operator, damping, forcing, and timestep. It stores velocity in the old state's
+otherwise disposable scratch component. A second dispatch maps current displacement
+and velocity with seven basis weights. A third applies the new operator and forcing
+to initialize the new previous displacement consistently with the new timestep.
+The exact GPU clock is copied at commit, so a continuous source retains its phase.
+Every pipeline stays within WebGPU's portable eight-storage-buffer-per-stage limit.
 
 Validate finite values, positive areas/masses, operator consistency, and admissible
 timesteps. State magnitude guards and recovery behavior can be added based on

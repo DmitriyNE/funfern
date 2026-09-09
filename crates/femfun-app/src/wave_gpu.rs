@@ -25,7 +25,7 @@ use bevy::{
         storage::{GpuShaderBuffer, ShaderBuffer},
     },
 };
-use femfun_core::{Point2, TransferMap, TriMesh, WaveOperator};
+use femfun_core::{Point2, QuadraticTransferMap, QuadraticWaveOperator, TriMesh};
 
 const WORKGROUP_SIZE: u32 = 128;
 const STATUS_READY: u8 = 1;
@@ -43,11 +43,12 @@ pub struct SourceSettings {
 
 pub struct WaveTransfer<'a> {
     pub source_mesh: &'a TriMesh,
+    pub source_operator: &'a QuadraticWaveOperator,
     pub target_mesh: &'a TriMesh,
-    pub target_operator: &'a WaveOperator,
+    pub target_operator: &'a QuadraticWaveOperator,
     pub target_time_step: f64,
     pub source: SourceSettings,
-    pub map: &'a TransferMap,
+    pub map: &'a QuadraticTransferMap,
 }
 
 impl Default for SourceSettings {
@@ -91,7 +92,7 @@ impl WaveGpuStats {
 #[derive(Clone)]
 struct WaveTransferHandles {
     old: WaveBufferHandles,
-    old_vertex_count: u32,
+    old_dof_count: u32,
     entries: Handle<ShaderBuffer>,
 }
 
@@ -103,7 +104,7 @@ struct WaveBufferHandles {
     row_offsets: Handle<ShaderBuffer>,
     columns: Handle<ShaderBuffer>,
     stiffness: Handle<ShaderBuffer>,
-    vertices: Handle<ShaderBuffer>,
+    nodes: Handle<ShaderBuffer>,
     state: Handle<ShaderBuffer>,
 }
 
@@ -116,7 +117,7 @@ impl WaveBufferHandles {
             &self.row_offsets,
             &self.columns,
             &self.stiffness,
-            &self.vertices,
+            &self.nodes,
             &self.state,
         ]
     }
@@ -126,7 +127,7 @@ impl WaveBufferHandles {
 pub struct WaveGpuRequest {
     generation: u64,
     buffers: Option<WaveBufferHandles>,
-    vertex_count: u32,
+    dof_count: u32,
     desired_steps: u64,
     pulse_serial: u64,
     buffer_revision: u64,
@@ -140,7 +141,7 @@ impl Default for WaveGpuRequest {
         Self {
             generation: 0,
             buffers: None,
-            vertex_count: 0,
+            dof_count: 0,
             desired_steps: 0,
             pulse_serial: 0,
             buffer_revision: 0,
@@ -177,13 +178,13 @@ impl WaveGpuRequest {
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
         mesh: &TriMesh,
-        operator: &WaveOperator,
+        operator: &QuadraticWaveOperator,
         time_step: f64,
         source: SourceSettings,
     ) -> Result<(), String> {
-        let (handles, vertex_count) =
+        let (handles, dof_count) =
             create_buffers(assets, mesh, operator, time_step, source, false)?;
-        self.install(assets, commands, handles, vertex_count, None);
+        self.install(assets, commands, handles, dof_count, None);
         Ok(())
     }
 
@@ -198,6 +199,7 @@ impl WaveGpuRequest {
         }
         let WaveTransfer {
             source_mesh,
+            source_operator,
             target_mesh,
             target_operator,
             target_time_step,
@@ -208,8 +210,8 @@ impl WaveGpuRequest {
             .buffers
             .clone()
             .ok_or("The source wave solver is not initialized")?;
-        if !map.matches_meshes(source_mesh, target_mesh)
-            || self.vertex_count as usize != source_mesh.vertices.len()
+        if !map.matches(source_mesh, source_operator, target_mesh, target_operator)
+            || self.dof_count as usize != source_operator.degrees_of_freedom()
         {
             return Err("The transfer map does not match the active and candidate meshes".into());
         }
@@ -218,16 +220,23 @@ impl WaveGpuRequest {
             .iter()
             .map(|sample| match sample {
                 Some(sample) => GpuTransferEntry {
-                    indices: UVec4::new(
-                        sample.vertices[0],
-                        sample.vertices[1],
-                        sample.vertices[2],
-                        1,
+                    indices_a: UVec4::new(
+                        sample.nodes[0],
+                        sample.nodes[1],
+                        sample.nodes[2],
+                        sample.nodes[3],
                     ),
-                    weights: Vec4::new(
+                    weights_a: Vec4::new(
                         sample.weights[0] as f32,
                         sample.weights[1] as f32,
                         sample.weights[2] as f32,
+                        sample.weights[3] as f32,
+                    ),
+                    indices_b: UVec4::new(sample.nodes[4], sample.nodes[5], sample.nodes[6], 0),
+                    weights_b: Vec4::new(
+                        sample.weights[4] as f32,
+                        sample.weights[5] as f32,
+                        sample.weights[6] as f32,
                         0.0,
                     ),
                     ..default()
@@ -235,10 +244,13 @@ impl WaveGpuRequest {
                 None => GpuTransferEntry::default(),
             })
             .collect::<Vec<_>>();
-        if entries.iter().any(|entry| !entry.weights.is_finite()) {
+        if entries
+            .iter()
+            .any(|entry| !entry.weights_a.is_finite() || !entry.weights_b.is_finite())
+        {
             return Err("Transfer weights cannot be represented on the GPU".into());
         }
-        let (handles, vertex_count) = create_buffers(
+        let (handles, dof_count) = create_buffers(
             assets,
             target_mesh,
             target_operator,
@@ -248,10 +260,10 @@ impl WaveGpuRequest {
         )?;
         let transfer = WaveTransferHandles {
             old,
-            old_vertex_count: self.vertex_count,
+            old_dof_count: self.dof_count,
             entries: assets.add(ShaderBuffer::from(entries)),
         };
-        self.install(assets, commands, handles, vertex_count, Some(transfer));
+        self.install(assets, commands, handles, dof_count, Some(transfer));
         Ok(())
     }
 
@@ -283,7 +295,7 @@ impl WaveGpuRequest {
             commands.entity(entity).despawn();
         }
         self.generation = self.generation.wrapping_add(1).max(1);
-        self.vertex_count = transfer.old_vertex_count;
+        self.dof_count = transfer.old_dof_count;
         self.desired_steps = 0;
         self.pulse_serial = 0;
         self.buffer_revision = self.buffer_revision.wrapping_add(1);
@@ -309,7 +321,7 @@ impl WaveGpuRequest {
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
         handles: WaveBufferHandles,
-        vertex_count: u32,
+        dof_count: u32,
         transfer: Option<WaveTransferHandles>,
     ) {
         let expects_transfer = transfer.is_some();
@@ -330,7 +342,7 @@ impl WaveGpuRequest {
             }
         }
         self.generation = self.generation.wrapping_add(1).max(1);
-        self.vertex_count = vertex_count;
+        self.dof_count = dof_count;
         self.desired_steps = 0;
         self.pulse_serial = 0;
         self.buffer_revision = self.buffer_revision.wrapping_add(1);
@@ -363,7 +375,7 @@ impl WaveGpuRequest {
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
         mesh: &TriMesh,
-        operator: &WaveOperator,
+        operator: &QuadraticWaveOperator,
         time_step: f64,
         source: SourceSettings,
     ) -> Result<(), String> {
@@ -372,11 +384,13 @@ impl WaveGpuRequest {
 
     fn validate_inputs(
         mesh: &TriMesh,
-        operator: &WaveOperator,
+        operator: &QuadraticWaveOperator,
         time_step: f64,
     ) -> Result<(), String> {
-        if mesh.vertices.len() != operator.degrees_of_freedom() {
-            return Err("Mesh and wave operator sizes do not agree".into());
+        if mesh.geometry_revision != operator.geometry_revision()
+            || mesh.triangles.len() != operator.element_nodes().len()
+        {
+            return Err("Mesh and quadratic wave operator do not agree".into());
         }
         let dt = time_step as f32;
         if !dt.is_finite() || dt <= 0.0 {
@@ -435,14 +449,14 @@ impl WaveGpuRequest {
 fn create_buffers(
     assets: &mut Assets<ShaderBuffer>,
     mesh: &TriMesh,
-    operator: &WaveOperator,
+    operator: &QuadraticWaveOperator,
     time_step: f64,
     source: SourceSettings,
     awaits_transfer: bool,
 ) -> Result<(WaveBufferHandles, u32), String> {
     WaveGpuRequest::validate_inputs(mesh, operator, time_step)?;
-    let vertex_count =
-        u32::try_from(mesh.vertices.len()).map_err(|_| "The wave mesh is too large for the GPU")?;
+    let dof_count = u32::try_from(operator.degrees_of_freedom())
+        .map_err(|_| "The wave discretization is too large for the GPU")?;
     let normalized = operator
         .normalized_stiffness_f32()
         .map_err(|error| error.to_string())?;
@@ -450,17 +464,18 @@ fn create_buffers(
         .damping_ratios_f32()
         .map_err(|error| error.to_string())?;
     let dt = time_step as f32;
-    let vertices: Vec<_> = mesh
-        .vertices
+    let nodes: Vec<_> = operator
+        .node_points()
         .iter()
         .zip(damping)
-        .map(|(vertex, damping)| GpuVertex {
-            position_damping: Vec4::new(vertex.point.x as f32, vertex.point.y as f32, damping, 0.0),
+        .map(|(point, damping)| GpuNode {
+            position_damping: Vec4::new(point.x as f32, point.y as f32, damping, 0.0),
         })
         .collect();
-    if vertices.iter().any(|vertex| {
-        !vertex.position_damping.x.is_finite() || !vertex.position_damping.y.is_finite()
-    }) {
+    if nodes
+        .iter()
+        .any(|node| !node.position_damping.x.is_finite() || !node.position_damping.y.is_finite())
+    {
         return Err("Mesh coordinates cannot be represented on the GPU".into());
     }
     let initial_state = GpuState {
@@ -468,7 +483,7 @@ fn create_buffers(
     };
     let parameters = GpuParameters {
         time_data: Vec4::new(dt, dt * dt, 0.0, 0.0),
-        count_data: UVec4::new(vertex_count, 0, 0, 0),
+        count_data: UVec4::new(dof_count, 0, 0, 0),
     };
     let pulse = GpuPulse {
         position_width_amplitude: Vec4::new(0.0, 0.0, 0.06_f32.powi(2), 0.65),
@@ -481,10 +496,13 @@ fn create_buffers(
             row_offsets: assets.add(ShaderBuffer::from(operator.row_offsets().to_vec())),
             columns: assets.add(ShaderBuffer::from(operator.columns().to_vec())),
             stiffness: assets.add(ShaderBuffer::from(normalized)),
-            vertices: assets.add(ShaderBuffer::from(vertices)),
-            state: assets.add(ShaderBuffer::from(vec![initial_state; mesh.vertices.len()])),
+            nodes: assets.add(ShaderBuffer::from(nodes)),
+            state: assets.add(ShaderBuffer::from(vec![
+                initial_state;
+                operator.degrees_of_freedom()
+            ])),
         },
-        vertex_count,
+        dof_count,
     ))
 }
 
@@ -539,7 +557,7 @@ struct GpuPulse {
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
-struct GpuVertex {
+struct GpuNode {
     position_damping: Vec4,
 }
 
@@ -550,8 +568,10 @@ struct GpuState {
 
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuTransferEntry {
-    indices: UVec4,
-    weights: Vec4,
+    indices_a: UVec4,
+    weights_a: Vec4,
+    indices_b: UVec4,
+    weights_b: Vec4,
     mapped: Vec4,
     auxiliary: Vec4,
 }
@@ -623,6 +643,7 @@ struct WavePipeline {
     step: CachedComputePipelineId,
     rotate: CachedComputePipelineId,
     inject: CachedComputePipelineId,
+    transfer_velocity: CachedComputePipelineId,
     transfer_old: CachedComputePipelineId,
     transfer_new: CachedComputePipelineId,
 }
@@ -643,7 +664,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<f32>>(false),
-                storage_buffer_read_only::<Vec<GpuVertex>>(false),
+                storage_buffer_read_only::<Vec<GpuNode>>(false),
                 storage_buffer::<Vec<GpuState>>(false),
             ),
         ),
@@ -669,8 +690,8 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<f32>>(false),
-                storage_buffer_read_only::<Vec<GpuVertex>>(false),
-                storage_buffer_read_only::<Vec<GpuState>>(false),
+                storage_buffer_read_only::<Vec<GpuNode>>(false),
+                storage_buffer::<Vec<GpuState>>(false),
                 storage_buffer::<Vec<GpuTransferEntry>>(false),
             ),
         ),
@@ -685,13 +706,14 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<f32>>(false),
-                storage_buffer_read_only::<Vec<GpuVertex>>(false),
+                storage_buffer_read_only::<Vec<GpuNode>>(false),
                 storage_buffer::<Vec<GpuState>>(false),
                 storage_buffer_read_only::<Vec<GpuTransferEntry>>(false),
             ),
         ),
     );
     let transfer_pipeline = |label: &'static str,
+                             entry: &'static str,
                              layout: BindGroupLayoutDescriptor,
                              shader: Handle<Shader>|
      -> ComputePipelineDescriptor {
@@ -699,17 +721,26 @@ fn init_pipeline(
             label: Some(Cow::Borrowed(label)),
             layout: vec![layout],
             shader,
-            entry_point: Some(Cow::Borrowed("transfer")),
+            entry_point: Some(Cow::Borrowed(entry)),
             ..default()
         }
     };
+    let old_transfer_shader = load_embedded_asset!(asset_server.as_ref(), "wave_transfer_old.wgsl");
+    let transfer_velocity = pipeline_cache.queue_compute_pipeline(transfer_pipeline(
+        "wave transfer velocity",
+        "prepare_velocity",
+        transfer_old_layout.clone(),
+        old_transfer_shader.clone(),
+    ));
     let transfer_old = pipeline_cache.queue_compute_pipeline(transfer_pipeline(
         "wave transfer old",
+        "transfer",
         transfer_old_layout.clone(),
-        load_embedded_asset!(asset_server.as_ref(), "wave_transfer_old.wgsl"),
+        old_transfer_shader,
     ));
     let transfer_new = pipeline_cache.queue_compute_pipeline(transfer_pipeline(
         "wave transfer new",
+        "transfer",
         transfer_new_layout.clone(),
         load_embedded_asset!(asset_server.as_ref(), "wave_transfer_new.wgsl"),
     ));
@@ -720,6 +751,7 @@ fn init_pipeline(
         step,
         rotate,
         inject,
+        transfer_velocity,
         transfer_old,
         transfer_new,
     });
@@ -781,7 +813,7 @@ fn prepare_bind_group(
     let Some(stiffness) = gpu_buffers.get(&handles.stiffness) else {
         return;
     };
-    let Some(vertices) = gpu_buffers.get(&handles.vertices) else {
+    let Some(nodes) = gpu_buffers.get(&handles.nodes) else {
         return;
     };
     let Some(state) = gpu_buffers.get(&handles.state) else {
@@ -797,7 +829,7 @@ fn prepare_bind_group(
             row_offsets.buffer.as_entire_buffer_binding(),
             columns.buffer.as_entire_buffer_binding(),
             stiffness.buffer.as_entire_buffer_binding(),
-            vertices.buffer.as_entire_buffer_binding(),
+            nodes.buffer.as_entire_buffer_binding(),
             state.buffer.as_entire_buffer_binding(),
         )),
     );
@@ -818,7 +850,7 @@ fn prepare_bind_group(
         let Some(old_stiffness) = gpu_buffers.get(&old.stiffness) else {
             return;
         };
-        let Some(old_vertices) = gpu_buffers.get(&old.vertices) else {
+        let Some(old_nodes) = gpu_buffers.get(&old.nodes) else {
             return;
         };
         let Some(old_state) = gpu_buffers.get(&old.state) else {
@@ -836,7 +868,7 @@ fn prepare_bind_group(
                 old_row_offsets.buffer.as_entire_buffer_binding(),
                 old_columns.buffer.as_entire_buffer_binding(),
                 old_stiffness.buffer.as_entire_buffer_binding(),
-                old_vertices.buffer.as_entire_buffer_binding(),
+                old_nodes.buffer.as_entire_buffer_binding(),
                 old_state.buffer.as_entire_buffer_binding(),
                 entries.buffer.as_entire_buffer_binding(),
             )),
@@ -850,7 +882,7 @@ fn prepare_bind_group(
                 row_offsets.buffer.as_entire_buffer_binding(),
                 columns.buffer.as_entire_buffer_binding(),
                 stiffness.buffer.as_entire_buffer_binding(),
-                vertices.buffer.as_entire_buffer_binding(),
+                nodes.buffer.as_entire_buffer_binding(),
                 state.buffer.as_entire_buffer_binding(),
                 entries.buffer.as_entire_buffer_binding(),
             )),
@@ -897,6 +929,7 @@ fn compute_wave(
         pipeline.step,
         pipeline.rotate,
         pipeline.inject,
+        pipeline.transfer_velocity,
         pipeline.transfer_old,
         pipeline.transfer_new,
     ];
@@ -916,7 +949,7 @@ fn compute_wave(
     ) else {
         return;
     };
-    let workgroups = request.vertex_count.div_ceil(WORKGROUP_SIZE);
+    let workgroups = request.dof_count.div_ceil(WORKGROUP_SIZE);
     if workgroups == 0 {
         return;
     }
@@ -926,7 +959,11 @@ fn compute_wave(
         else {
             return;
         };
-        let (Some(transfer_old), Some(transfer_new)) = (
+        let Some(transfer) = &request.transfer else {
+            return;
+        };
+        let (Some(transfer_velocity), Some(transfer_old), Some(transfer_new)) = (
+            pipeline_cache.get_compute_pipeline(pipeline.transfer_velocity),
             pipeline_cache.get_compute_pipeline(pipeline.transfer_old),
             pipeline_cache.get_compute_pipeline(pipeline.transfer_new),
         ) else {
@@ -939,8 +976,10 @@ fn compute_wave(
                     label: Some("wave state transfer"),
                     ..default()
                 });
-        pass.set_pipeline(transfer_old);
+        pass.set_pipeline(transfer_velocity);
         pass.set_bind_group(0, &transfer_groups.old, &[]);
+        pass.dispatch_workgroups(transfer.old_dof_count.div_ceil(WORKGROUP_SIZE), 1, 1);
+        pass.set_pipeline(transfer_old);
         pass.dispatch_workgroups(workgroups, 1, 1);
         pass.set_pipeline(transfer_new);
         pass.set_bind_group(0, &transfer_groups.new, &[]);
@@ -951,7 +990,7 @@ fn compute_wave(
             .stats
             .status
             .store(STATUS_TRANSFERRING, Ordering::Relaxed);
-        request.stats.dispatches.fetch_add(2, Ordering::Relaxed);
+        request.stats.dispatches.fetch_add(3, Ordering::Relaxed);
         return;
     }
     if request.transfer.is_none() {

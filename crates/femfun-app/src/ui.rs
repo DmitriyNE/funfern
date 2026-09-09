@@ -42,13 +42,13 @@ struct SimulationCandidate {
     scene: Scene,
     max_edge: f64,
     low_quality: Vec<bool>,
-    operator: Arc<WaveOperator>,
+    operator: Arc<QuadraticWaveOperator>,
     time_step: f64,
-    transfer: Option<TransferMap>,
+    transfer: Option<QuadraticTransferMap>,
     generation: Option<u64>,
     resume_running: bool,
     simulation_time: f64,
-    exposed_vertices: usize,
+    exposed_nodes: usize,
 }
 #[derive(Resource)]
 pub struct Playground {
@@ -102,7 +102,7 @@ pub struct Playground {
     show_field: bool,
     field_gain: f32,
     wave_mesh: Option<Arc<TriMesh>>,
-    wave_operator: Option<Arc<WaveOperator>>,
+    wave_operator: Option<Arc<QuadraticWaveOperator>>,
     wave_time_step: f64,
     wave_time_offset: f64,
     wave_running: bool,
@@ -164,7 +164,7 @@ impl Default for Playground {
             mesh_report: None,
             mesh_attempts: 0,
             mesh_fallbacks: 0,
-            mesh_max_edge: 0.04,
+            mesh_max_edge: 0.08,
             mesh_source_max_edge: 0.0,
             mesh_low_quality: vec![],
             mesh_error: None,
@@ -380,18 +380,28 @@ impl Playground {
                         .map(|i| mesh.triangle_quality(i).unwrap().minimum_angle_degrees < 15.0)
                         .collect();
                     let prepare = Instant::now();
-                    match WaveOperator::assemble(&mesh, WaveCoefficients::default()) {
+                    match QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()) {
                         Ok(operator) => {
                             let transfer = self
                                 .wave_mesh
                                 .as_ref()
-                                .map(|source| TransferMap::build(source, &mesh))
+                                .zip(self.wave_operator.as_ref())
+                                .map(|(source_mesh, source_operator)| {
+                                    QuadraticTransferMap::build(
+                                        source_mesh,
+                                        source_operator,
+                                        &mesh,
+                                        &operator,
+                                    )
+                                })
                                 .transpose();
                             match transfer {
                                 Ok(transfer) => {
-                                    let exposed_vertices = transfer
+                                    let exposed_nodes = transfer
                                         .as_ref()
-                                        .map_or(mesh.vertices.len(), TransferMap::exposed_vertices);
+                                        .map_or(operator.degrees_of_freedom(), |map| {
+                                            map.exposed_nodes()
+                                        });
                                     let time_step = operator.recommended_time_step();
                                     self.simulation_candidate = Some(SimulationCandidate {
                                         mesh,
@@ -404,7 +414,7 @@ impl Playground {
                                         generation: None,
                                         resume_running: self.wave_running,
                                         simulation_time: 0.0,
-                                        exposed_vertices,
+                                        exposed_nodes,
                                     });
                                     self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
                                     self.mesh_error = None;
@@ -475,14 +485,15 @@ impl Playground {
             if request.caught_up() {
                 candidate.simulation_time = self.wave_time_offset
                     + request.stats().completed_steps() as f64 * self.wave_time_step;
-                let replacement = if let (Some(source_mesh), Some(map)) =
-                    (&self.wave_mesh, &candidate.transfer)
+                let replacement = if let (Some(source_mesh), Some(source_operator), Some(map)) =
+                    (&self.wave_mesh, &self.wave_operator, &candidate.transfer)
                 {
                     request.replace_transferred(
                         assets,
                         commands,
                         WaveTransfer {
                             source_mesh,
+                            source_operator,
                             target_mesh: &candidate.mesh,
                             target_operator: &candidate.operator,
                             target_time_step: candidate.time_step,
@@ -513,14 +524,14 @@ impl Playground {
             candidate.generation == Some(request.generation())
                 && request.ready()
                 && display.generation == request.generation()
-                && display.current.len() == candidate.mesh.vertices.len()
+                && display.current.len() == candidate.operator.degrees_of_freedom()
         });
         if candidate_ready {
             let candidate = self.simulation_candidate.take().unwrap();
             let commit_message = if candidate.transfer.is_some() {
                 format!(
-                    "Simulation mesh committed · {} newly exposed vertices initialized to zero",
-                    candidate.exposed_vertices
+                    "Simulation mesh committed · {} newly exposed solution nodes initialized to zero",
+                    candidate.exposed_nodes
                 )
             } else {
                 "Initial simulation mesh committed".into()
@@ -837,11 +848,15 @@ impl Playground {
         egui::ComboBox::from_id_salt("mesh_resolution")
             .selected_text(format!("Max edge {:.2}", self.mesh_max_edge))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.mesh_max_edge, 0.16, "Preview · h ≤ 0.16");
-                ui.selectable_value(&mut self.mesh_max_edge, 0.04, "Finer · h ≤ 0.04");
-                ui.selectable_value(&mut self.mesh_max_edge, 0.02, "Fine · h ≤ 0.02");
+                ui.selectable_value(
+                    &mut self.mesh_max_edge,
+                    0.16,
+                    "Coarse P2e · parent h ≤ 0.16",
+                );
+                ui.selectable_value(&mut self.mesh_max_edge, 0.08, "P2e · parent h ≤ 0.08");
+                ui.selectable_value(&mut self.mesh_max_edge, 0.04, "Fine P2e · parent h ≤ 0.04");
             });
-        ui.small("Wave accuracy still requires a convergence check.");
+        ui.small("Seven-node enriched quadratic wave basis.");
         if self.editor.editing() && self.mesh_source != self.editor.document.accepted {
             ui.small("Waiting for edit to finish…");
         } else if let Some(job) = &self.mesh_job {
@@ -975,10 +990,7 @@ impl Playground {
             } else {
                 0.0
             };
-            let entries = operator.columns().len();
-            let gpu_bytes = (operator.row_offsets().len() * 4
-                + entries * 8
-                + operator.degrees_of_freedom() * 32) as f64;
+            let gpu_bytes = operator.estimated_gpu_bytes() as f64;
             ui.small(format!(
                 "GPU {} · {} DOFs · {:.2} MiB\ndt {:.6} · t {:.3} · {} substeps/frame\n{:.2} simulated s / wall s · operator/map {:.1} ms",
                 self.wave_gpu_status,
@@ -1207,25 +1219,20 @@ impl Playground {
             }
         }
         if self.show_field
-            && let (Some(mesh), Some(display)) = (&self.wave_mesh, wave_display)
+            && let (Some(operator), Some(display)) = (&self.wave_operator, wave_display)
             && display.generation > 0
-            && display.current.len() == mesh.vertices.len()
+            && display.current.len() == operator.degrees_of_freedom()
         {
             let mut field = egui::Mesh::default();
-            field.reserve_vertices(mesh.vertices.len());
-            field.reserve_triangles(mesh.triangles.len());
-            for (vertex, value) in mesh.vertices.iter().zip(&display.current) {
-                field.colored_vertex(
-                    self.screen(vertex.point, r),
-                    field_color(*value, self.field_gain),
-                );
+            field.reserve_vertices(operator.degrees_of_freedom());
+            field.reserve_triangles(operator.element_nodes().len() * 6);
+            for (point, value) in operator.node_points().iter().zip(&display.current) {
+                field.colored_vertex(self.screen(*point, r), field_color(*value, self.field_gain));
             }
-            for triangle in &mesh.triangles {
-                field.add_triangle(
-                    triangle.vertices[0] as u32,
-                    triangle.vertices[1] as u32,
-                    triangle.vertices[2] as u32,
-                );
+            for nodes in operator.element_nodes() {
+                for [a, b] in [[0, 3], [3, 1], [1, 4], [4, 2], [2, 5], [5, 0]] {
+                    field.add_triangle(nodes[a], nodes[b], nodes[6]);
+                }
             }
             painter.add(egui::Shape::mesh(field));
         }
@@ -1525,7 +1532,7 @@ pub fn frame(
 }
 
 /// Opt-in scripted edits in the real native renderer, including validation,
-/// scheduling, mesh publication and the visible fine-mesh overlay.
+/// scheduling, mesh publication and the visible production-mesh overlay.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource, Default)]
 pub struct MeshBenchmark {
@@ -1538,7 +1545,7 @@ pub struct MeshBenchmark {
 pub fn mesh_benchmark_scene() -> Playground {
     let mut state = Playground {
         automated_benchmark: true,
-        mesh_max_edge: 0.02,
+        mesh_max_edge: 0.08,
         show_mesh: true,
         ..Default::default()
     };
@@ -1604,7 +1611,7 @@ pub fn wave_gpu_benchmark(
         return;
     }
     if !benchmark.prepared {
-        let (Some(mesh), Some(operator)) = (&state.wave_mesh, &state.wave_operator) else {
+        let Some(operator) = &state.wave_operator else {
             return;
         };
         let position = Point2::new(-0.42, 0.11);
@@ -1615,13 +1622,13 @@ pub fn wave_gpu_benchmark(
             exit.write(bevy::app::AppExit::error());
             return;
         }
-        let mut cpu = WaveState::zero(operator, state.wave_time_step).unwrap();
-        let pulse: Vec<_> = mesh
-            .vertices
+        let mut cpu = QuadraticWaveState::zero(operator, state.wave_time_step).unwrap();
+        let pulse: Vec<_> = operator
+            .node_points()
             .iter()
-            .map(|vertex| {
-                let dx = vertex.point.x as f32 - position.x as f32;
-                let dy = vertex.point.y as f32 - position.y as f32;
+            .map(|point| {
+                let dx = point.x as f32 - position.x as f32;
+                let dy = point.y as f32 - position.y as f32;
                 (amplitude * (-0.5 * (dx * dx + dy * dy) / (width * width)).exp()) as f64
             })
             .collect();
@@ -1729,7 +1736,7 @@ impl Default for WaveTransferBenchmark {
 }
 
 /// Exercises a real edit transaction and compares both transferred GPU levels
-/// with the same barycentric and centered-level formulas in f64.
+/// with the same enriched-quadratic and centered-level formulas in f64.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn wave_transfer_benchmark(
     mut benchmark: ResMut<WaveTransferBenchmark>,
@@ -2433,8 +2440,8 @@ mod tests {
         commit_mesh_without_gpu(&mut h.state);
         let mesh = h.state.mesh.clone().expect("initial accepted mesh");
         assert_eq!(mesh.geometry_revision, 0);
-        assert!(mesh.triangles.len() > 10_000);
-        assert!(mesh.quality.maximum_edge_length <= 0.04);
+        assert!(mesh.triangles.len() > 2_500);
+        assert!(mesh.quality.maximum_edge_length <= 0.08);
         assert_eq!(h.state.mesh_low_quality.len(), mesh.triangles.len());
 
         h.state.editor.begin();
@@ -2460,7 +2467,7 @@ mod tests {
         assert_eq!(h.state.mesh_source_max_edge, 0.16);
         let preview = h.state.mesh.as_ref().unwrap();
         assert!(preview.quality.maximum_edge_length <= 0.16);
-        assert!(preview.triangles.len() < mesh.triangles.len() / 4);
+        assert!(preview.triangles.len() < mesh.triangles.len() / 2);
         assert_eq!(h.state.editor.document, document);
         assert_eq!(h.state.editor.history_len(), history);
     }
@@ -2518,6 +2525,6 @@ mod tests {
         }
         assert!(h.state.mesh_error.is_some());
         assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &displayed));
-        assert_eq!(h.state.mesh_committed_max_edge, 0.04);
+        assert_eq!(h.state.mesh_committed_max_edge, 0.08);
     }
 }

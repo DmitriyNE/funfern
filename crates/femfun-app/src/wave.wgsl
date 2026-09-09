@@ -12,7 +12,7 @@ struct Pulse {
     position_width_amplitude: vec4<f32>,
 }
 
-struct VertexData {
+struct NodeData {
     position_damping: vec4<f32>,
 }
 
@@ -26,7 +26,7 @@ struct State {
 @group(0) @binding(3) var<storage, read> row_offsets: array<u32>;
 @group(0) @binding(4) var<storage, read> columns: array<u32>;
 @group(0) @binding(5) var<storage, read> stiffness_over_mass: array<f32>;
-@group(0) @binding(6) var<storage, read> vertices: array<VertexData>;
+@group(0) @binding(6) var<storage, read> nodes: array<NodeData>;
 @group(0) @binding(7) var<storage, read_write> states: array<State>;
 
 @compute @workgroup_size(128)
@@ -47,8 +47,8 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let dt = parameters.time_data.x;
     let dt2 = parameters.time_data.y;
-    let gamma = vertices[i].position_damping.z;
-    let delta = vertices[i].position_damping.xy - source.position_width_amplitude.xy;
+    let gamma = nodes[i].position_damping.z;
+    let delta = nodes[i].position_damping.xy - source.position_width_amplitude.xy;
     let gaussian = exp(-0.5 * dot(delta, delta) / source.position_width_amplitude.z);
     let acceleration = source.frequency_enabled.y
         * source.position_width_amplitude.w
@@ -88,7 +88,7 @@ fn inject(@builtin(global_invocation_id) id: vec3<u32>) {
     if i >= parameters.count_data.x {
         return;
     }
-    let delta = vertices[i].position_damping.xy - pulse.position_width_amplitude.xy;
+    let delta = nodes[i].position_damping.xy - pulse.position_width_amplitude.xy;
     let addition = pulse.position_width_amplitude.w
         * exp(-0.5 * dot(delta, delta) / pulse.position_width_amplitude.z);
     states[i].levels.x += addition;

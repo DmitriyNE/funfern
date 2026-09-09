@@ -4,13 +4,12 @@ A browser finite-element wave playground with editable periodic cubic spline
 obstacles, constrained triangle meshes, persistent invalid drafts, undo/redo,
 and versioned scene files.
 
-The production P1 wave solver is implemented on both an f64 CPU reference and an
-f32 WebGPU gather kernel. The core also contains an enriched quadratic,
-mass-lumped CPU reference and an equal-error convergence benchmark. Geometry edits
-commit transactionally: the previous mesh continues to run during candidate
-construction, then both wave time levels transfer on the GPU before the new mesh
-becomes visible. Native automated checks pass; interactive browser checks for the
-solver remain deferred.
+The production wave solver uses seven-node enriched quadratic, mass-lumped
+triangles on both an f64 CPU reference and an f32 WebGPU gather kernel. Geometry
+edits commit transactionally: the previous mesh continues to run during candidate
+construction, then displacement and velocity transfer with the quadratic basis
+before both new time levels and mesh become visible. Native automated checks pass;
+interactive browser checks for this solver revision remain deferred.
 
 ## Run
 
@@ -133,7 +132,7 @@ cargo run -p femfun-app --release --locked -- --wave-gpu-check
 cargo run -p femfun-app --release --locked -- --wave-transfer-check
 ```
 
-The 69 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
+The 71 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, refinement limits, geometry
 rejection, draft/accepted history, scene files, and egui pointer/keyboard
 interactions, local Delaunay legality, incremental work, slice-independent output,
@@ -150,7 +149,7 @@ five box-crossing times.
 Omit `--slices` for per-phase profiling.
 `mesh_edit_timing --paced` applies edits with 2 ms mesh slices at a simulated
 60 Hz schedule, excluding rendering. `--mesh-edit-benchmark` opens the real native
-app with eight obstacles and the fine overlay, applies three small control edits,
+app with eight obstacles and the production parent-h=0.08 overlay, applies three small control edits,
 prints edit-to-ready and active/scheduling times plus exact element reuse, then
 exits. Interactive editor input is disabled during this scripted run. It does not
 read or overwrite scene files. The native benchmark includes
@@ -159,9 +158,11 @@ editor validation and rendering load; mesh-ready means the atomic simulation com
 levels back, compares them to f64, reports solve-to-readback throughput, and exits.
 `--wave-transfer-check` injects a nonzero field, performs a real control-point edit,
 and compares both GPU-transferred levels to an independent f64 reconstruction.
-Native GPU startup and the wave kernel were exercised on Apple M1 Max / Metal. The user
+The field view tessellates every quadratic parent triangle into six display
+triangles around its shared edge-midpoint and element bubble nodes. Native GPU
+startup and the wave kernel were exercised on Apple M1 Max / Metal. The user
 reports completing the Milestone 1 browser interaction checks; browser metadata
-and Milestone 2 overlay performance have not been recorded.
+and interactive checks for the quadratic solver have not been recorded.
 
 ## Layout
 

@@ -22,9 +22,43 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
   cooldown in a later adaptation pass.
-- [ ] Integrate the selected enriched-quadratic operator with GPU evolution,
-  quadratic field display, and geometry-edit state transfer; compare native GPU
-  results with the new f64 reference before changing the application default.
+
+## 2026-09-09 — Production enriched-quadratic GPU solver
+
+- Replaced the application's P1 operator with the seven-node mass-lumped enriched
+  quadratic operator and changed the default parent mesh from h=.04 to h=.08. The
+  empty-box convergence study gives the new default far smaller phase error at
+  lower DOF than the former h=.02 P1 comparison.
+- The existing CSR WGSL evolution kernel now consumes quadratic node positions,
+  damping, and rows. Pulse and continuous-source profiles are sampled at every
+  vertex, shared edge midpoint, and element centroid. The field view splits each
+  parent triangle into six display triangles around those nodes.
+- Added `QuadraticTransferMap`: every target solution node is located in the source
+  parent mesh and receives the seven enriched basis weights. Tests reproduce full
+  quadratic polynomials between meshes, arbitrary nodal state on a self-map, and
+  reject mismatched operator/mesh revisions. Newly exposed solution nodes retain
+  the existing explicit zero policy pending the localized smoothing experiment.
+- A first direct seven-point transfer repeated source stiffness rows and took
+  53.6 ms through tagged readback. The final three-dispatch path reconstructs and
+  caches velocity once per old DOF in the old state's disposable scratch component,
+  then gathers displacement/velocity and builds the new previous level. Final runs
+  took 21.1–23.3 ms for this stage while retaining the portable eight-storage-buffer
+  ceiling.
+- Native Apple M1 Max / Metal checks:
+
+  - 9,326 DOFs, dt=.00479230, 128 GPU steps: current and previous relative
+    mass-weighted L2 errors `1.887e-6` and `1.874e-6`; solve through tagged readback
+    was 36.86 ms, or 16.64 simulated seconds per wall second.
+  - A real control edit and quadratic transfer produced current/previous relative
+    errors `1.662e-8` and `2.965e-8`. Across final runs, mesh request through commit
+    was 58–72 ms and synchronous operator/map preparation was 6.9–8.7 ms.
+  - The eight-obstacle parent-h=.08 scripted run produced 2,921 parent triangles.
+    Three local edits preserved 2,540–2,541 triangles; request-to-commit was
+    125–215 ms, active meshing 25–29 ms, and largest slices 7.4–8.9 ms. Multi-frame
+    scheduling gaps and over-budget mesh slices remain performance work.
+
+- All 71 tests, formatting, Clippy, native release compilation, and native GPU
+  checks pass. Interactive browser testing remains deferred at the user's request.
 
 ## 2026-09-09 — Enriched quadratic wave reference and P1 comparison
 

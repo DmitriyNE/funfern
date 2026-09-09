@@ -1,4 +1,4 @@
-use crate::{Point2, TriMesh};
+use crate::{MeshVertex, Point2, QuadraticWaveOperator, TriMesh, enriched_quadratic_basis};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransferSample {
@@ -180,6 +180,168 @@ impl TransferMap {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QuadraticTransferSample {
+    pub nodes: [u32; 7],
+    pub weights: [f64; 7],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuadraticTransferMap {
+    source_revision: u64,
+    target_revision: u64,
+    source_dofs: usize,
+    samples: Vec<Option<QuadraticTransferSample>>,
+}
+
+impl QuadraticTransferMap {
+    /// Locates every target quadratic node in the source parent triangulation and
+    /// evaluates the source element's enriched quadratic basis at that point.
+    pub fn build(
+        source_mesh: &TriMesh,
+        source_operator: &QuadraticWaveOperator,
+        target_mesh: &TriMesh,
+        target_operator: &QuadraticWaveOperator,
+    ) -> Result<Self, TransferError> {
+        validate_quadratic_pair(source_mesh, source_operator, true)?;
+        validate_quadratic_pair(target_mesh, target_operator, false)?;
+
+        // The P1 locator only needs target points; its triangle validation remains
+        // valid because a quadratic operator starts with the parent mesh vertices.
+        let mut expanded_target = target_mesh.clone();
+        expanded_target.vertices = target_operator
+            .node_points()
+            .iter()
+            .map(|point| MeshVertex {
+                point: *point,
+                boundary: None,
+            })
+            .collect();
+        let located = TransferMap::build(source_mesh, &expanded_target)?;
+
+        let elements = source_mesh
+            .triangles
+            .iter()
+            .zip(source_operator.element_nodes())
+            .map(|(triangle, nodes)| (triangle.vertices.map(|index| index as u32), *nodes))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let samples = located
+            .samples()
+            .iter()
+            .map(|sample| {
+                let Some(sample) = sample else {
+                    return Ok(None);
+                };
+                elements
+                    .get(&sample.vertices)
+                    .copied()
+                    .map(|nodes| {
+                        Some(QuadraticTransferSample {
+                            nodes,
+                            weights: enriched_quadratic_basis(sample.weights),
+                        })
+                    })
+                    .ok_or(TransferError::InvalidSource)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            source_revision: source_mesh.geometry_revision,
+            target_revision: target_mesh.geometry_revision,
+            source_dofs: source_operator.degrees_of_freedom(),
+            samples,
+        })
+    }
+
+    pub fn source_dofs(&self) -> usize {
+        self.source_dofs
+    }
+
+    pub fn samples(&self) -> &[Option<QuadraticTransferSample>] {
+        &self.samples
+    }
+
+    pub fn matches(
+        &self,
+        source_mesh: &TriMesh,
+        source_operator: &QuadraticWaveOperator,
+        target_mesh: &TriMesh,
+        target_operator: &QuadraticWaveOperator,
+    ) -> bool {
+        self.source_revision == source_mesh.geometry_revision
+            && self.target_revision == target_mesh.geometry_revision
+            && self.source_dofs == source_operator.degrees_of_freedom()
+            && self.samples.len() == target_operator.degrees_of_freedom()
+            && source_operator.geometry_revision() == source_mesh.geometry_revision
+            && target_operator.geometry_revision() == target_mesh.geometry_revision
+    }
+
+    pub fn exposed_nodes(&self) -> usize {
+        self.samples
+            .iter()
+            .filter(|sample| sample.is_none())
+            .count()
+    }
+
+    pub fn interpolate(
+        &self,
+        source_values: &[f64],
+        exposed_value: f64,
+    ) -> Result<Vec<f64>, TransferError> {
+        if source_values.len() != self.source_dofs {
+            return Err(TransferError::SizeMismatch {
+                expected: self.source_dofs,
+                actual: source_values.len(),
+            });
+        }
+        if !exposed_value.is_finite() || source_values.iter().any(|value| !value.is_finite()) {
+            return Err(TransferError::NonFiniteValues);
+        }
+        Ok(self
+            .samples
+            .iter()
+            .map(|sample| match sample {
+                Some(sample) => sample
+                    .nodes
+                    .iter()
+                    .zip(sample.weights)
+                    .map(|(&index, weight)| source_values[index as usize] * weight)
+                    .sum(),
+                None => exposed_value,
+            })
+            .collect())
+    }
+}
+
+fn validate_quadratic_pair(
+    mesh: &TriMesh,
+    operator: &QuadraticWaveOperator,
+    source: bool,
+) -> Result<(), TransferError> {
+    let error = if source {
+        TransferError::InvalidSource
+    } else {
+        TransferError::InvalidTarget
+    };
+    if operator.geometry_revision() != mesh.geometry_revision
+        || operator.element_nodes().len() != mesh.triangles.len()
+        || operator.node_points().len() < mesh.vertices.len()
+        || operator
+            .node_points()
+            .iter()
+            .zip(&mesh.vertices)
+            .any(|(node, vertex)| *node != vertex.point)
+        || operator
+            .element_nodes()
+            .iter()
+            .flatten()
+            .any(|index| *index as usize >= operator.degrees_of_freedom())
+    {
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
 /// Reconstructs velocity at the current level from a centered two-level state.
 /// `undamped_acceleration` is forcing minus `M^-1 K u`, before `-gamma v`.
 pub fn centered_velocity(
@@ -282,7 +444,7 @@ fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MeshQuality, MeshTriangle, MeshVertex};
+    use crate::{MeshQuality, MeshTriangle, MeshVertex, WaveCoefficients};
 
     fn mesh(revision: u64, points: &[[f64; 2]], triangles: &[[usize; 3]]) -> TriMesh {
         TriMesh {
@@ -332,6 +494,65 @@ mod tests {
         let mut stale = source.clone();
         stale.geometry_revision += 1;
         assert!(!map.matches_meshes(&stale, &target));
+    }
+
+    #[test]
+    fn quadratic_transfer_reproduces_quadratics_and_arbitrary_self_state() {
+        let source = mesh(
+            3,
+            &[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            &[[0, 1, 2], [0, 2, 3]],
+        );
+        let target = mesh(8, &[[0.25, 0.1], [0.8, 0.4], [0.2, 0.9]], &[[0, 1, 2]]);
+        let source_operator =
+            QuadraticWaveOperator::assemble(&source, WaveCoefficients::default()).unwrap();
+        let target_operator =
+            QuadraticWaveOperator::assemble(&target, WaveCoefficients::default()).unwrap();
+        let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
+            .unwrap();
+        assert!(map.matches(&source, &source_operator, &target, &target_operator));
+        assert_eq!(map.exposed_nodes(), 0);
+        let polynomial = |point: Point2| {
+            0.7 + 2.0 * point.x - 0.4 * point.y + 1.3 * point.x * point.x - 0.8 * point.x * point.y
+                + 0.2 * point.y * point.y
+        };
+        let source_values = source_operator
+            .node_points()
+            .iter()
+            .map(|point| polynomial(*point))
+            .collect::<Vec<_>>();
+        let transferred = map.interpolate(&source_values, -10.0).unwrap();
+        for (point, value) in target_operator.node_points().iter().zip(transferred) {
+            assert!((value - polynomial(*point)).abs() < 2.0e-13);
+        }
+
+        let self_map =
+            QuadraticTransferMap::build(&source, &source_operator, &source, &source_operator)
+                .unwrap();
+        let arbitrary = (0..source_operator.degrees_of_freedom())
+            .map(|index| (index as f64 * 1.7).sin())
+            .collect::<Vec<_>>();
+        let copied = self_map.interpolate(&arbitrary, 0.0).unwrap();
+        for (actual, expected) in copied.iter().zip(arbitrary) {
+            assert!((actual - expected).abs() < 2.0e-13);
+        }
+    }
+
+    #[test]
+    fn quadratic_transfer_rejects_mismatched_operator_revisions() {
+        let source = mesh(3, &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], &[[0, 1, 2]]);
+        let operator =
+            QuadraticWaveOperator::assemble(&source, WaveCoefficients::default()).unwrap();
+        let mut stale = source.clone();
+        stale.geometry_revision += 1;
+        assert_eq!(
+            QuadraticTransferMap::build(&stale, &operator, &source, &operator),
+            Err(TransferError::InvalidSource)
+        );
+        assert_eq!(
+            QuadraticTransferMap::build(&source, &operator, &stale, &operator),
+            Err(TransferError::InvalidTarget)
+        );
     }
 
     #[test]

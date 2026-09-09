@@ -245,6 +245,37 @@ impl QuadraticWaveOperator {
         Ok(result)
     }
 
+    /// Values for the GPU gather kernel, normalized row-wise by lumped mass.
+    pub fn normalized_stiffness_f32(&self) -> Result<Vec<f32>, WaveError> {
+        let mut result = Vec::with_capacity(self.stiffness.len());
+        for row in 0..self.degrees_of_freedom() {
+            for entry in self.row_offsets[row] as usize..self.row_offsets[row + 1] as usize {
+                let value = (self.stiffness[entry] / self.lumped_mass[row]) as f32;
+                if !value.is_finite() {
+                    return Err(WaveError::InvalidMesh("the f32 GPU operator overflows"));
+                }
+                result.push(value);
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn damping_ratios_f32(&self) -> Result<Vec<f32>, WaveError> {
+        self.lumped_damping
+            .iter()
+            .zip(&self.lumped_mass)
+            .map(|(damping, mass)| {
+                let value = (damping / mass) as f32;
+                value
+                    .is_finite()
+                    .then_some(value)
+                    .ok_or(WaveError::InvalidMesh(
+                        "the f32 GPU damping ratio overflows",
+                    ))
+            })
+            .collect()
+    }
+
     pub fn estimated_gpu_bytes(&self) -> usize {
         self.row_offsets.len() * 4 + self.columns.len() * 8 + self.degrees_of_freedom() * 32
     }
@@ -347,6 +378,15 @@ impl QuadraticWaveState {
         })
     }
 
+    pub fn zero(operator: &QuadraticWaveOperator, time_step: f64) -> Result<Self, WaveError> {
+        Self::new(
+            operator,
+            time_step,
+            vec![0.0; operator.degrees_of_freedom()],
+            vec![0.0; operator.degrees_of_freedom()],
+        )
+    }
+
     pub fn current(&self) -> &[f64] {
         &self.current
     }
@@ -411,6 +451,25 @@ impl QuadraticWaveState {
         self.steps = self.steps.checked_add(1).ok_or(WaveError::InvalidState)?;
         Ok(())
     }
+
+    pub fn add_displacement(&mut self, values: &[f64]) -> Result<(), WaveError> {
+        if values.len() != self.current.len() {
+            return Err(WaveError::SizeMismatch {
+                expected: self.current.len(),
+                actual: values.len(),
+            });
+        }
+        for ((current, previous), addition) in
+            self.current.iter_mut().zip(&mut self.previous).zip(values)
+        {
+            if !addition.is_finite() {
+                return Err(WaveError::InvalidState);
+            }
+            *current += addition;
+            *previous += addition;
+        }
+        Ok(())
+    }
 }
 
 fn validate_coefficients(coefficients: WaveCoefficients) -> Result<(), WaveError> {
@@ -442,8 +501,9 @@ fn basis_gradients(barycentric: [f64; 3], gradients: [Point2; 3]) -> [Point2; 7]
     ]
 }
 
-#[cfg(test)]
-fn basis_values([l0, l1, l2]: [f64; 3]) -> [f64; 7] {
+/// Cardinal basis values for the seven local nodes in the order returned by
+/// [`QuadraticWaveOperator::element_nodes`].
+pub fn enriched_quadratic_basis([l0, l1, l2]: [f64; 3]) -> [f64; 7] {
     let bubble = 27.0 * l0 * l1 * l2;
     [
         l0 * (2.0 * l0 - 1.0) + bubble / 9.0,
@@ -558,14 +618,17 @@ mod tests {
             [1.0 / 3.0; 3],
         ];
         for (node, barycentric) in nodes.into_iter().enumerate() {
-            for (basis, value) in basis_values(barycentric).into_iter().enumerate() {
+            for (basis, value) in enriched_quadratic_basis(barycentric)
+                .into_iter()
+                .enumerate()
+            {
                 let expected = usize::from(node == basis) as f64;
                 assert!((value - expected).abs() < 2.0e-15);
             }
         }
 
         let barycentric = [0.17, 0.29, 0.54];
-        let values = basis_values(barycentric);
+        let values = enriched_quadratic_basis(barycentric);
         assert!((values.iter().sum::<f64>() - 1.0).abs() < 2.0e-15);
         let node_x = [0.0, 1.0, 0.0, 0.5, 0.5, 0.0, 1.0 / 3.0];
         let interpolated_x = values

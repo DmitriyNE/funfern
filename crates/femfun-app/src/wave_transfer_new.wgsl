@@ -8,7 +8,7 @@ struct Source {
     frequency_enabled: vec4<f32>,
 }
 
-struct VertexData {
+struct NodeData {
     position_damping: vec4<f32>,
 }
 
@@ -17,8 +17,10 @@ struct State {
 }
 
 struct TransferEntry {
-    indices: vec4<u32>,
-    weights: vec4<f32>,
+    indices_a: vec4<u32>,
+    weights_a: vec4<f32>,
+    indices_b: vec4<u32>,
+    weights_b: vec4<f32>,
     mapped: vec4<f32>,
     auxiliary: vec4<f32>,
 }
@@ -28,7 +30,7 @@ struct TransferEntry {
 @group(0) @binding(2) var<storage, read> row_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> columns: array<u32>;
 @group(0) @binding(4) var<storage, read> stiffness_over_mass: array<f32>;
-@group(0) @binding(5) var<storage, read> vertices: array<VertexData>;
+@group(0) @binding(5) var<storage, read> nodes: array<NodeData>;
 @group(0) @binding(6) var<storage, read_write> states: array<State>;
 @group(0) @binding(7) var<storage, read> transfers: array<TransferEntry>;
 
@@ -51,13 +53,13 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
         entry += 1u;
     }
     let time = transfers[0].auxiliary.x;
-    let delta = vertices[i].position_damping.xy - source.position_width_amplitude.xy;
+    let delta = nodes[i].position_damping.xy - source.position_width_amplitude.xy;
     let gaussian = exp(-0.5 * dot(delta, delta) / source.position_width_amplitude.z);
     let forcing = source.frequency_enabled.y
         * source.position_width_amplitude.w
         * gaussian
         * sin(source.frequency_enabled.x * time);
-    let gamma = vertices[i].position_damping.z;
+    let gamma = nodes[i].position_damping.z;
     let acceleration = forcing - ku - gamma * velocity;
     let dt = parameters.time_data.x;
     let previous = current - dt * velocity + 0.5 * dt * dt * acceleration;
