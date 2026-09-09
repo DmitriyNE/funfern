@@ -318,7 +318,13 @@ impl Editor {
         law: InternalBoundaryLaw,
     ) -> Result<(), String> {
         if !law.valid() {
-            return Err("Boundary-law coefficients must be positive and finite".into());
+            if matches!(law.coupling, InternalBoundaryCoupling::ThinGap { .. })
+                && (law.left != FaceBoundaryCondition::Reflecting
+                    || law.right != FaceBoundaryCondition::Reflecting)
+            {
+                return Err("A thin-gap law replaces both independent face conditions".into());
+            }
+            return Err("Boundary-law parameters must be valid and finite".into());
         }
         let boundary = self
             .document
@@ -662,7 +668,7 @@ impl Editor {
         condition: FaceBoundaryCondition,
     ) -> Result<(), String> {
         if !condition.valid() {
-            return Err("Boundary impedance must be positive and finite".into());
+            return Err("Boundary parameters must be valid and finite".into());
         }
         let obstacle = self.obstacle(id).ok_or("Missing obstacle")?;
         if !matches!(obstacle.role, LoopRole::Hole { .. }) {

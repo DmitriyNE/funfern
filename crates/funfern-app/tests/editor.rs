@@ -213,7 +213,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 7.into(),
+            0 => value["version"] = 8.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -271,11 +271,10 @@ fn open_internal_boundary_round_trip_and_history() {
     assert_eq!(editor.document, created);
 
     let law = InternalBoundaryLaw {
-        left: FaceBoundaryCondition::Impedance { ratio: 1.25 },
-        right: FaceBoundaryCondition::Reflecting,
         coupling: InternalBoundaryCoupling::ThinGap {
             stiffness_ratio: 0.5,
         },
+        ..InternalBoundaryLaw::REFLECTING
     };
     editor.set_internal_boundary_law(boundary, 0, law).unwrap();
     settle(&mut editor);
@@ -291,12 +290,21 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        6
+        7
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
     assert_eq!(decoded.draft.internal_boundaries[0].id, boundary);
     assert_eq!(decoded.draft.internal_boundaries[0].span_laws, [law]);
+
+    let mut parallel_gap: serde_json::Value = serde_json::from_str(&json).unwrap();
+    parallel_gap["version"] = 6.into();
+    for scene in ["draft", "accepted"] {
+        parallel_gap[scene]["internal_boundaries"][0]["span_laws"][0]["left"] =
+            serde_json::json!({ "kind": "impedance", "ratio": 1.25 });
+    }
+    let migrated_gap = decode(serde_json::to_string(&parallel_gap).unwrap().as_bytes()).unwrap();
+    assert_eq!(migrated_gap.draft.internal_boundaries[0].span_laws, [law]);
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
     legacy["version"] = 3.into();
@@ -331,10 +339,7 @@ fn baffle_span_laws_follow_insertion_and_guard_ambiguous_removal() {
     settle(&mut editor);
     let assigned = InternalBoundaryLaw {
         left: FaceBoundaryCondition::Impedance { ratio: 0.75 },
-        right: FaceBoundaryCondition::Reflecting,
-        coupling: InternalBoundaryCoupling::ThinGap {
-            stiffness_ratio: 2.0,
-        },
+        ..InternalBoundaryLaw::REFLECTING
     };
     editor.set_internal_boundary_law(id, 0, assigned).unwrap();
     settle(&mut editor);
@@ -367,7 +372,14 @@ fn baffle_span_laws_follow_insertion_and_guard_ambiguous_removal() {
 fn hole_span_conditions_round_trip_follow_seam_insertion_and_guard_removal() {
     let mut editor = Editor::default();
     let id = ObstacleId(1);
-    let assigned = FaceBoundaryCondition::Impedance { ratio: 0.75 };
+    let assigned = FaceBoundaryCondition::Dirichlet {
+        signal: BoundarySignal {
+            offset: 0.2,
+            amplitude: 0.7,
+            frequency_hz: 2.5,
+            phase_radians: 0.3,
+        },
+    };
     editor
         .set_obstacle_boundary_condition(id, 7, assigned)
         .unwrap();

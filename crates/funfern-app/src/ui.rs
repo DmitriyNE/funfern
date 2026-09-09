@@ -1637,49 +1637,20 @@ impl Playground {
             let result = self.editor.set_outer_boundary_condition(side, condition);
             self.error(result);
         }
-        if let Some(mut signal) = condition.signal() {
-            ui.small("value(t) = offset + amplitude · sin(2π f t + phase)");
-            let responses = [
-                ui.add(
-                    egui::DragValue::new(&mut signal.offset)
-                        .speed(0.01)
-                        .prefix("offset ")
-                        .update_while_editing(false),
-                ),
-                ui.add(
-                    egui::DragValue::new(&mut signal.amplitude)
-                        .speed(0.01)
-                        .prefix("amplitude ")
-                        .update_while_editing(false),
-                ),
-                ui.add(
-                    egui::DragValue::new(&mut signal.frequency_hz)
-                        .speed(0.05)
-                        .range(0.0..=1.0e6)
-                        .suffix(" Hz")
-                        .update_while_editing(false),
-                ),
-                ui.add(
-                    egui::DragValue::new(&mut signal.phase_radians)
-                        .speed(0.05)
-                        .prefix("phase ")
-                        .suffix(" rad")
-                        .update_while_editing(false),
-                ),
-            ];
-            if responses.iter().any(egui::Response::changed) {
-                condition = match condition {
-                    OuterBoundaryCondition::Neumann { .. } => {
-                        OuterBoundaryCondition::Neumann { signal }
-                    }
-                    OuterBoundaryCondition::Dirichlet { .. } => {
-                        OuterBoundaryCondition::Dirichlet { signal }
-                    }
-                    _ => unreachable!(),
-                };
-                let result = self.editor.set_outer_boundary_condition(side, condition);
-                self.error(result);
-            }
+        if let Some(mut signal) = condition.signal()
+            && Self::boundary_signal_editor(ui, &mut signal)
+        {
+            condition = match condition {
+                OuterBoundaryCondition::Neumann { .. } => {
+                    OuterBoundaryCondition::Neumann { signal }
+                }
+                OuterBoundaryCondition::Dirichlet { .. } => {
+                    OuterBoundaryCondition::Dirichlet { signal }
+                }
+                _ => unreachable!(),
+            };
+            let result = self.editor.set_outer_boundary_condition(side, condition);
+            self.error(result);
         }
     }
 
@@ -1738,14 +1709,32 @@ impl Playground {
             &mut selected_span,
             span_count,
         );
-        ui.horizontal(|ui| {
-            ui.label("Face");
-            ui.selectable_value(&mut selected_face, InternalBoundarySide::Left, "Left");
-            ui.selectable_value(&mut selected_face, InternalBoundarySide::Right, "Right");
-        });
-        ui.small("Left/right follow the spline start → end direction");
         if selected_span != span {
             law = self.editor.internal_boundary(id).unwrap().span_laws[selected_span];
+        }
+        let was_thin_gap = matches!(law.coupling, InternalBoundaryCoupling::ThinGap { .. });
+        let mut thin_gap = was_thin_gap;
+        egui::ComboBox::from_label("Span law")
+            .selected_text(if thin_gap {
+                "Coupled thin gap"
+            } else {
+                "Independent faces"
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut thin_gap, false, "Independent faces");
+                ui.selectable_value(&mut thin_gap, true, "Coupled thin gap");
+            });
+        let mut changed = thin_gap != was_thin_gap;
+        if thin_gap != was_thin_gap {
+            law.left = FaceBoundaryCondition::Reflecting;
+            law.right = FaceBoundaryCondition::Reflecting;
+            law.coupling = if thin_gap {
+                InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 1.0,
+                }
+            } else {
+                InternalBoundaryCoupling::Independent
+            };
         }
         if selected_span != span || selected_face != face {
             self.boundary_selection = Some(BoundarySelection::Baffle {
@@ -1754,24 +1743,7 @@ impl Playground {
                 face: selected_face,
             });
         }
-        let condition = match selected_face {
-            InternalBoundarySide::Left => &mut law.left,
-            InternalBoundarySide::Right => &mut law.right,
-        };
-        let mut changed = Self::face_condition_editor(ui, condition);
-        ui.separator();
-        ui.small("Between faces");
-        let mut thin_gap = matches!(law.coupling, InternalBoundaryCoupling::ThinGap { .. });
-        if ui.checkbox(&mut thin_gap, "Couple as thin gap").changed() {
-            law.coupling = if thin_gap {
-                InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 1.0,
-                }
-            } else {
-                InternalBoundaryCoupling::Independent
-            };
-            changed = true;
-        } else if let InternalBoundaryCoupling::ThinGap { stiffness_ratio } = &mut law.coupling {
+        if let InternalBoundaryCoupling::ThinGap { stiffness_ratio } = &mut law.coupling {
             changed |= ui
                 .add(
                     egui::DragValue::new(stiffness_ratio)
@@ -1781,7 +1753,26 @@ impl Playground {
                         .update_while_editing(false),
                 )
                 .changed();
-            ui.small("Conservative paired-trace spring · tighter gaps reduce dt");
+            ui.small("One coupled law replaces both face conditions; tighter gaps reduce dt.");
+        } else {
+            ui.horizontal(|ui| {
+                ui.label("Face");
+                ui.selectable_value(&mut selected_face, InternalBoundarySide::Left, "Left");
+                ui.selectable_value(&mut selected_face, InternalBoundarySide::Right, "Right");
+            });
+            ui.small("Left/right follow the spline start → end direction");
+            if selected_face != face {
+                self.boundary_selection = Some(BoundarySelection::Baffle {
+                    id,
+                    span: selected_span,
+                    face: selected_face,
+                });
+            }
+            let condition = match selected_face {
+                InternalBoundarySide::Left => &mut law.left,
+                InternalBoundarySide::Right => &mut law.right,
+            };
+            changed |= Self::face_condition_editor(ui, condition);
         }
         if changed {
             let result = self
@@ -1809,10 +1800,7 @@ impl Playground {
     fn face_condition_editor(ui: &mut egui::Ui, condition: &mut FaceBoundaryCondition) -> bool {
         let previous = *condition;
         egui::ComboBox::from_label("Condition")
-            .selected_text(match condition {
-                FaceBoundaryCondition::Reflecting => "Neumann · zero / reflecting",
-                FaceBoundaryCondition::Impedance { .. } => "Matched impedance",
-            })
+            .selected_text(condition.label())
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     condition,
@@ -1821,12 +1809,28 @@ impl Playground {
                 );
                 let ratio = match previous {
                     FaceBoundaryCondition::Impedance { ratio } => ratio,
-                    FaceBoundaryCondition::Reflecting => 1.0,
+                    _ => 1.0,
                 };
                 ui.selectable_value(
                     condition,
                     FaceBoundaryCondition::Impedance { ratio },
-                    "Matched impedance",
+                    "First-order outgoing / impedance",
+                );
+                ui.selectable_value(
+                    condition,
+                    FaceBoundaryCondition::SecondOrderOutgoing,
+                    "Second-order outgoing",
+                );
+                let signal = previous.signal().unwrap_or(BoundarySignal::ZERO);
+                ui.selectable_value(
+                    condition,
+                    FaceBoundaryCondition::Neumann { signal },
+                    "Neumann · prescribed flux",
+                );
+                ui.selectable_value(
+                    condition,
+                    FaceBoundaryCondition::Dirichlet { signal },
+                    "Dirichlet · prescribed value",
                 );
             });
         let mut changed = *condition != previous;
@@ -1841,8 +1845,53 @@ impl Playground {
                 )
                 .changed();
             ui.small("1.0 matches the adjacent medium");
+        } else if let Some(mut signal) = condition.signal()
+            && Self::boundary_signal_editor(ui, &mut signal)
+        {
+            *condition = match condition {
+                FaceBoundaryCondition::Neumann { .. } => FaceBoundaryCondition::Neumann { signal },
+                FaceBoundaryCondition::Dirichlet { .. } => {
+                    FaceBoundaryCondition::Dirichlet { signal }
+                }
+                _ => unreachable!(),
+            };
+            changed = true;
         }
         changed
+    }
+
+    fn boundary_signal_editor(ui: &mut egui::Ui, signal: &mut BoundarySignal) -> bool {
+        ui.small("value(t) = offset + amplitude · sin(2π f t + phase)");
+        [
+            ui.add(
+                egui::DragValue::new(&mut signal.offset)
+                    .speed(0.01)
+                    .prefix("offset ")
+                    .update_while_editing(false),
+            ),
+            ui.add(
+                egui::DragValue::new(&mut signal.amplitude)
+                    .speed(0.01)
+                    .prefix("amplitude ")
+                    .update_while_editing(false),
+            ),
+            ui.add(
+                egui::DragValue::new(&mut signal.frequency_hz)
+                    .speed(0.05)
+                    .range(0.0..=1.0e6)
+                    .suffix(" Hz")
+                    .update_while_editing(false),
+            ),
+            ui.add(
+                egui::DragValue::new(&mut signal.phase_radians)
+                    .speed(0.05)
+                    .prefix("phase ")
+                    .suffix(" rad")
+                    .update_while_editing(false),
+            ),
+        ]
+        .iter()
+        .any(egui::Response::changed)
     }
 
     fn viewport(&mut self, ui: &mut egui::Ui, wave_display: Option<&WaveDisplay>) -> Rect {
@@ -2829,11 +2878,22 @@ pub fn wave_gpu_check_scene() -> Playground {
             .unwrap(),
             region: BACKGROUND_REGION,
             span_laws: vec![InternalBoundaryLaw {
-                left: FaceBoundaryCondition::Impedance { ratio: 0.7 },
-                coupling: InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 2.0,
+                left: FaceBoundaryCondition::Dirichlet {
+                    signal: BoundarySignal {
+                        offset: 0.01,
+                        amplitude: 0.03,
+                        frequency_hz: 1.25,
+                        phase_radians: 0.2,
+                    },
                 },
-                ..InternalBoundaryLaw::REFLECTING
+                right: FaceBoundaryCondition::Neumann {
+                    signal: BoundarySignal {
+                        amplitude: 0.15,
+                        frequency_hz: 0.75,
+                        ..BoundarySignal::ZERO
+                    },
+                },
+                coupling: InternalBoundaryCoupling::Independent,
             }],
         }],
         materials: vec![
@@ -3157,6 +3217,30 @@ pub fn wave_transfer_benchmark(
         0 => {
             let target =
                 OuterBoundaryConditions::uniform(OuterBoundaryCondition::SecondOrderOutgoing);
+            let hole_dirichlet = FaceBoundaryCondition::Dirichlet {
+                signal: BoundarySignal {
+                    offset: 0.015,
+                    amplitude: 0.025,
+                    frequency_hz: 1.1,
+                    phase_radians: 0.3,
+                },
+            };
+            let hole_neumann = FaceBoundaryCondition::Neumann {
+                signal: BoundarySignal {
+                    amplitude: 0.12,
+                    frequency_hz: 0.8,
+                    ..BoundarySignal::ZERO
+                },
+            };
+            if state.editor.document.accepted.obstacles[0].span_conditions[0] != hole_dirichlet
+                || state.editor.document.accepted.obstacles[0].span_conditions[2] != hole_neumann
+            {
+                state.editor.document.draft.obstacles[0].span_conditions[0] = hole_dirichlet;
+                state.editor.document.draft.obstacles[0].span_conditions[2] = hole_neumann;
+                state.editor.document.accepted.obstacles[0].span_conditions[0] = hole_dirichlet;
+                state.editor.document.accepted.obstacles[0].span_conditions[2] = hole_neumann;
+                return;
+            }
             if state.editor.document.accepted.outer_boundaries != target {
                 state.editor.document.draft.outer_boundaries = target;
                 state.editor.document.accepted.outer_boundaries = target;
@@ -3233,6 +3317,8 @@ pub fn wave_transfer_benchmark(
             let auxiliary = operator
                 .apply_auxiliary_stiffness(&benchmark.source_auxiliary)
                 .unwrap();
+            let source_time = state.wave_time_offset
+                + request.stats().completed_steps() as f64 * state.wave_time_step;
             benchmark.source_velocity = benchmark
                 .source_current
                 .iter()
@@ -3241,16 +3327,28 @@ pub fn wave_transfer_benchmark(
                 .zip(auxiliary)
                 .zip(operator.lumped_mass())
                 .zip(operator.lumped_damping())
+                .enumerate()
                 .map(
-                    |(((((current, previous), ku), auxiliary), mass), damping)| {
-                        centered_velocity(
-                            *previous,
-                            *current,
-                            -(ku + auxiliary) / mass,
-                            damping / mass,
-                            state.wave_time_step,
-                        )
-                        .unwrap()
+                    |(node, (((((current, previous), ku), auxiliary), mass), damping))| {
+                        if operator.prescribed_value(node, source_time).is_some() {
+                            (operator
+                                .prescribed_value(node, source_time + state.wave_time_step)
+                                .unwrap()
+                                - operator
+                                    .prescribed_value(node, source_time - state.wave_time_step)
+                                    .unwrap())
+                                / (2.0 * state.wave_time_step)
+                        } else {
+                            centered_velocity(
+                                *previous,
+                                *current,
+                                -(ku + auxiliary) / mass
+                                    + operator.neumann_acceleration(node, source_time),
+                                damping / mass,
+                                state.wave_time_step,
+                            )
+                            .unwrap()
+                        }
                     },
                 )
                 .collect();
@@ -3273,9 +3371,27 @@ pub fn wave_transfer_benchmark(
                 return;
             };
             benchmark.expected_current = map.interpolate(&benchmark.source_current, 0.0).unwrap();
-            let velocity = map.interpolate(&benchmark.source_velocity, 0.0).unwrap();
+            let mut velocity = map.interpolate(&benchmark.source_velocity, 0.0).unwrap();
             benchmark.expected_auxiliary =
                 map.interpolate(&benchmark.source_auxiliary, 0.0).unwrap();
+            for (node, velocity) in velocity.iter_mut().enumerate() {
+                if let Some(value) = candidate
+                    .operator
+                    .prescribed_value(node, candidate.simulation_time)
+                {
+                    benchmark.expected_current[node] = value;
+                    *velocity = (candidate
+                        .operator
+                        .prescribed_value(node, candidate.simulation_time + candidate.time_step)
+                        .unwrap()
+                        - candidate
+                            .operator
+                            .prescribed_value(node, candidate.simulation_time - candidate.time_step)
+                            .unwrap())
+                        / (2.0 * candidate.time_step);
+                    benchmark.expected_auxiliary[node] = 0.0;
+                }
+            }
             let stiffness = candidate
                 .operator
                 .apply_stiffness(&benchmark.expected_current)
@@ -3292,16 +3408,34 @@ pub fn wave_transfer_benchmark(
                 .zip(auxiliary)
                 .zip(candidate.operator.lumped_mass())
                 .zip(candidate.operator.lumped_damping())
+                .enumerate()
                 .map(
-                    |(((((current, velocity), ku), auxiliary), mass), damping)| {
-                        centered_previous(
-                            *current,
-                            velocity,
-                            -(ku + auxiliary) / mass,
-                            damping / mass,
-                            candidate.time_step,
-                        )
-                        .unwrap()
+                    |(node, (((((current, velocity), ku), auxiliary), mass), damping))| {
+                        if candidate
+                            .operator
+                            .prescribed_value(node, candidate.simulation_time)
+                            .is_some()
+                        {
+                            candidate
+                                .operator
+                                .prescribed_value(
+                                    node,
+                                    candidate.simulation_time - candidate.time_step,
+                                )
+                                .unwrap()
+                        } else {
+                            centered_previous(
+                                *current,
+                                velocity,
+                                -(ku + auxiliary) / mass
+                                    + candidate
+                                        .operator
+                                        .neumann_acceleration(node, candidate.simulation_time),
+                                damping / mass,
+                                candidate.time_step,
+                            )
+                            .unwrap()
+                        }
                     },
                 )
                 .collect();
@@ -3367,6 +3501,8 @@ pub fn wave_transfer_benchmark(
             let auxiliary = operator
                 .apply_auxiliary_stiffness(&benchmark.source_auxiliary)
                 .unwrap();
+            let source_time = state.wave_time_offset
+                + request.stats().completed_steps() as f64 * state.wave_time_step;
             benchmark.source_velocity = benchmark
                 .source_current
                 .iter()
@@ -3375,16 +3511,28 @@ pub fn wave_transfer_benchmark(
                 .zip(auxiliary)
                 .zip(operator.lumped_mass())
                 .zip(operator.lumped_damping())
+                .enumerate()
                 .map(
-                    |(((((current, previous), ku), auxiliary), mass), damping)| {
-                        centered_velocity(
-                            *previous,
-                            *current,
-                            -(ku + auxiliary) / mass,
-                            damping / mass,
-                            state.wave_time_step,
-                        )
-                        .unwrap()
+                    |(node, (((((current, previous), ku), auxiliary), mass), damping))| {
+                        if operator.prescribed_value(node, source_time).is_some() {
+                            (operator
+                                .prescribed_value(node, source_time + state.wave_time_step)
+                                .unwrap()
+                                - operator
+                                    .prescribed_value(node, source_time - state.wave_time_step)
+                                    .unwrap())
+                                / (2.0 * state.wave_time_step)
+                        } else {
+                            centered_velocity(
+                                *previous,
+                                *current,
+                                -(ku + auxiliary) / mass
+                                    + operator.neumann_acceleration(node, source_time),
+                                damping / mass,
+                                state.wave_time_step,
+                            )
+                            .unwrap()
+                        }
                     },
                 )
                 .collect();
@@ -3414,7 +3562,25 @@ pub fn wave_transfer_benchmark(
                 return;
             }
             benchmark.expected_current = map.interpolate(&benchmark.source_current, 0.0).unwrap();
-            let velocity = map.interpolate(&benchmark.source_velocity, 0.0).unwrap();
+            let mut velocity = map.interpolate(&benchmark.source_velocity, 0.0).unwrap();
+            benchmark.expected_auxiliary = vec![0.0; candidate.operator.degrees_of_freedom()];
+            for (node, velocity) in velocity.iter_mut().enumerate() {
+                if let Some(value) = candidate
+                    .operator
+                    .prescribed_value(node, candidate.simulation_time)
+                {
+                    benchmark.expected_current[node] = value;
+                    *velocity = (candidate
+                        .operator
+                        .prescribed_value(node, candidate.simulation_time + candidate.time_step)
+                        .unwrap()
+                        - candidate
+                            .operator
+                            .prescribed_value(node, candidate.simulation_time - candidate.time_step)
+                            .unwrap())
+                        / (2.0 * candidate.time_step);
+                }
+            }
             let stiffness = candidate
                 .operator
                 .apply_stiffness(&benchmark.expected_current)
@@ -3426,18 +3592,32 @@ pub fn wave_transfer_benchmark(
                 .zip(stiffness)
                 .zip(candidate.operator.lumped_mass())
                 .zip(candidate.operator.lumped_damping())
-                .map(|((((current, velocity), ku), mass), damping)| {
-                    centered_previous(
-                        *current,
-                        velocity,
-                        -ku / mass,
-                        damping / mass,
-                        candidate.time_step,
-                    )
-                    .unwrap()
+                .enumerate()
+                .map(|(node, ((((current, velocity), ku), mass), damping))| {
+                    if candidate
+                        .operator
+                        .prescribed_value(node, candidate.simulation_time)
+                        .is_some()
+                    {
+                        candidate
+                            .operator
+                            .prescribed_value(node, candidate.simulation_time - candidate.time_step)
+                            .unwrap()
+                    } else {
+                        centered_previous(
+                            *current,
+                            velocity,
+                            -ku / mass
+                                + candidate
+                                    .operator
+                                    .neumann_acceleration(node, candidate.simulation_time),
+                            damping / mass,
+                            candidate.time_step,
+                        )
+                        .unwrap()
+                    }
                 })
                 .collect();
-            benchmark.expected_auxiliary = vec![0.0; candidate.operator.degrees_of_freedom()];
             benchmark.generation = generation;
             benchmark.phase = 5;
         }
@@ -3498,6 +3678,8 @@ pub fn wave_transfer_benchmark(
             let source_previous: Vec<_> =
                 display.previous.iter().map(|value| *value as f64).collect();
             let stiffness = operator.apply_stiffness(&benchmark.source_current).unwrap();
+            let source_time = state.wave_time_offset
+                + request.stats().completed_steps() as f64 * state.wave_time_step;
             benchmark.source_velocity = benchmark
                 .source_current
                 .iter()
@@ -3505,15 +3687,26 @@ pub fn wave_transfer_benchmark(
                 .zip(stiffness)
                 .zip(operator.lumped_mass())
                 .zip(operator.lumped_damping())
-                .map(|((((current, previous), ku), mass), damping)| {
-                    centered_velocity(
-                        previous,
-                        *current,
-                        -ku / mass,
-                        damping / mass,
-                        state.wave_time_step,
-                    )
-                    .unwrap()
+                .enumerate()
+                .map(|(node, ((((current, previous), ku), mass), damping))| {
+                    if operator.prescribed_value(node, source_time).is_some() {
+                        (operator
+                            .prescribed_value(node, source_time + state.wave_time_step)
+                            .unwrap()
+                            - operator
+                                .prescribed_value(node, source_time - state.wave_time_step)
+                                .unwrap())
+                            / (2.0 * state.wave_time_step)
+                    } else {
+                        centered_velocity(
+                            previous,
+                            *current,
+                            -ku / mass + operator.neumann_acceleration(node, source_time),
+                            damping / mass,
+                            state.wave_time_step,
+                        )
+                        .unwrap()
+                    }
                 })
                 .collect();
             let material = state.editor.add_material().unwrap();
@@ -3553,7 +3746,24 @@ pub fn wave_transfer_benchmark(
                 return;
             }
             benchmark.expected_current = map.interpolate(&benchmark.source_current, 0.0).unwrap();
-            let velocity = map.interpolate(&benchmark.source_velocity, 0.0).unwrap();
+            let mut velocity = map.interpolate(&benchmark.source_velocity, 0.0).unwrap();
+            for (node, velocity) in velocity.iter_mut().enumerate() {
+                if let Some(value) = candidate
+                    .operator
+                    .prescribed_value(node, candidate.simulation_time)
+                {
+                    benchmark.expected_current[node] = value;
+                    *velocity = (candidate
+                        .operator
+                        .prescribed_value(node, candidate.simulation_time + candidate.time_step)
+                        .unwrap()
+                        - candidate
+                            .operator
+                            .prescribed_value(node, candidate.simulation_time - candidate.time_step)
+                            .unwrap())
+                        / (2.0 * candidate.time_step);
+                }
+            }
             let stiffness = candidate
                 .operator
                 .apply_stiffness(&benchmark.expected_current)
@@ -3565,15 +3775,30 @@ pub fn wave_transfer_benchmark(
                 .zip(stiffness)
                 .zip(candidate.operator.lumped_mass())
                 .zip(candidate.operator.lumped_damping())
-                .map(|((((current, velocity), ku), mass), damping)| {
-                    centered_previous(
-                        *current,
-                        velocity,
-                        -ku / mass,
-                        damping / mass,
-                        candidate.time_step,
-                    )
-                    .unwrap()
+                .enumerate()
+                .map(|(node, ((((current, velocity), ku), mass), damping))| {
+                    if candidate
+                        .operator
+                        .prescribed_value(node, candidate.simulation_time)
+                        .is_some()
+                    {
+                        candidate
+                            .operator
+                            .prescribed_value(node, candidate.simulation_time - candidate.time_step)
+                            .unwrap()
+                    } else {
+                        centered_previous(
+                            *current,
+                            velocity,
+                            -ku / mass
+                                + candidate
+                                    .operator
+                                    .neumann_acceleration(node, candidate.simulation_time),
+                            damping / mass,
+                            candidate.time_step,
+                        )
+                        .unwrap()
+                    }
                 })
                 .collect();
             benchmark.expected_auxiliary = vec![0.0; candidate.operator.degrees_of_freedom()];
@@ -3932,8 +4157,8 @@ mod tests {
         );
 
         let history_before_laws = harness.state.editor.history_len().0;
-        harness.click_text("Neumann · zero / reflecting");
-        harness.click_text("Matched impedance");
+        harness.click_text("Reflecting");
+        harness.click_text("First-order outgoing / impedance");
         harness.settle();
         assert_eq!(
             harness
@@ -3945,7 +4170,8 @@ mod tests {
                 .left,
             FaceBoundaryCondition::Impedance { ratio: 1.0 }
         );
-        harness.click_text("Couple as thin gap");
+        harness.click_text("Independent faces");
+        harness.click_text("Coupled thin gap");
         harness.settle();
         assert!(matches!(
             harness
@@ -3959,6 +4185,16 @@ mod tests {
                 stiffness_ratio: 1.0
             }
         ));
+        assert_eq!(
+            harness
+                .state
+                .editor
+                .internal_boundary(id)
+                .unwrap()
+                .span_laws[0]
+                .left,
+            FaceBoundaryCondition::Reflecting
+        );
         assert_eq!(
             harness.state.editor.history_len().0,
             history_before_laws + 2
@@ -4002,8 +4238,8 @@ mod tests {
         );
 
         let history = harness.state.editor.history_len().0;
-        harness.click_text("Neumann · zero / reflecting");
-        harness.click_text("Matched impedance");
+        harness.click_text("Reflecting");
+        harness.click_text("First-order outgoing / impedance");
         harness.settle();
         assert_eq!(
             harness
@@ -4015,6 +4251,40 @@ mod tests {
             FaceBoundaryCondition::Impedance { ratio: 1.0 }
         );
         assert_eq!(harness.state.editor.history_len().0, history + 1);
+    }
+
+    #[test]
+    fn face_condition_picker_exposes_driven_and_second_order_conditions() {
+        let mut harness = Harness::new();
+        let history = harness.state.editor.history_len().0;
+        harness.click_text("Reflecting");
+        harness.click_text("Dirichlet · prescribed value");
+        harness.settle();
+        assert_eq!(
+            harness
+                .state
+                .editor
+                .obstacle(ObstacleId(1))
+                .unwrap()
+                .span_conditions[0],
+            FaceBoundaryCondition::Dirichlet {
+                signal: BoundarySignal::ZERO
+            }
+        );
+
+        harness.click_text("Prescribed Dirichlet");
+        harness.click_text("Second-order outgoing");
+        harness.settle();
+        assert_eq!(
+            harness
+                .state
+                .editor
+                .obstacle(ObstacleId(1))
+                .unwrap()
+                .span_conditions[0],
+            FaceBoundaryCondition::SecondOrderOutgoing
+        );
+        assert_eq!(harness.state.editor.history_len().0, history + 2);
     }
 
     #[test]
@@ -4463,9 +4733,6 @@ mod tests {
                 0,
                 InternalBoundaryLaw {
                     left: FaceBoundaryCondition::Impedance { ratio: 1.0 },
-                    coupling: InternalBoundaryCoupling::ThinGap {
-                        stiffness_ratio: 2.0,
-                    },
                     ..InternalBoundaryLaw::REFLECTING
                 },
             )

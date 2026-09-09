@@ -1,10 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    BACKGROUND_REGION, BoundaryLabel, FaceBoundaryCondition, InternalBoundaryCoupling,
-    InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition, OuterBoundaryConditions,
-    OuterSide, Point2, RegionId, Scene, TriMesh, WaveCoefficients, WaveError,
+    BACKGROUND_REGION, BoundaryLabel, BoundarySignal, FaceBoundaryCondition,
+    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition,
+    OuterBoundaryConditions, OuterSide, Point2, RegionId, Scene, TriMesh, WaveCoefficients,
+    WaveError,
 };
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BoundaryLoad {
+    pub signal: BoundarySignal,
+    pub normalized_weight: f64,
+}
 
 /// Seven-node mass-lumped triangle: `P2` enriched by the cubic interior bubble.
 /// Vertex, edge-midpoint, and centroid masses use the positive degree-three nodal
@@ -21,7 +28,9 @@ pub struct QuadraticWaveOperator {
     auxiliary_stiffness: Vec<f64>,
     auxiliary_active: Vec<bool>,
     dirichlet_sides: Vec<Option<OuterSide>>,
+    dirichlet_signals: Vec<Option<BoundarySignal>>,
     normalized_neumann_weights: Vec<[f64; 4]>,
+    face_neumann_loads: Vec<[BoundaryLoad; 2]>,
     lumped_mass: Vec<f64>,
     lumped_damping: Vec<f64>,
     maximum_eigenvalue_bound: f64,
@@ -164,7 +173,9 @@ impl QuadraticWaveOperator {
         let mut auxiliary_rows = vec![BTreeMap::<usize, f64>::new(); count];
         let mut auxiliary_active = vec![false; count];
         let mut dirichlet_sides = vec![None; count];
+        let mut dirichlet_signals = vec![None; count];
         let mut neumann_weights = vec![[0.0; 4]; count];
+        let mut face_neumann_loads = vec![[BoundaryLoad::default(); 2]; count];
         let mut mass = vec![0.0; count];
         let mut damping = vec![0.0; count];
         for (triangle, indices) in mesh.triangles.iter().zip(&local_nodes) {
@@ -258,6 +269,7 @@ impl QuadraticWaveOperator {
                                 "adjacent Dirichlet sides disagree at their shared corner",
                             ));
                         }
+                        assign_dirichlet(&mut dirichlet_signals, node, signal)?;
                         dirichlet_sides[node] = Some(side);
                     }
                 }
@@ -284,21 +296,17 @@ impl QuadraticWaveOperator {
             }
         }
         if let Some(scene) = scene {
-            assemble_hole_boundary_conditions(
-                mesh,
-                scene,
-                &coefficients_by_region,
-                &edge_nodes,
-                &mut damping,
-            )?;
-            assemble_internal_boundary_laws(
-                mesh,
-                scene,
-                &coefficients_by_region,
-                &edge_nodes,
-                &mut rows,
-                &mut damping,
-            )?;
+            let mut assembly = BoundaryAssembly {
+                edge_nodes: &edge_nodes,
+                rows: &mut rows,
+                auxiliary_rows: &mut auxiliary_rows,
+                auxiliary_active: &mut auxiliary_active,
+                dirichlet_signals: &mut dirichlet_signals,
+                face_neumann_loads: &mut face_neumann_loads,
+                damping: &mut damping,
+            };
+            assemble_hole_boundary_conditions(mesh, scene, &coefficients_by_region, &mut assembly)?;
+            assemble_internal_boundary_laws(mesh, scene, &coefficients_by_region, &mut assembly)?;
         }
         if mass.iter().any(|value| !value.is_finite() || *value <= 0.0)
             || damping
@@ -312,6 +320,11 @@ impl QuadraticWaveOperator {
         for (weights, mass) in neumann_weights.iter_mut().zip(&mass) {
             for weight in weights {
                 *weight /= *mass;
+            }
+        }
+        for (loads, mass) in face_neumann_loads.iter_mut().zip(&mass) {
+            for load in loads {
+                load.normalized_weight /= *mass;
             }
         }
 
@@ -371,7 +384,9 @@ impl QuadraticWaveOperator {
             auxiliary_stiffness,
             auxiliary_active,
             dirichlet_sides,
+            dirichlet_signals,
             normalized_neumann_weights: neumann_weights,
+            face_neumann_loads,
             lumped_mass: mass,
             lumped_damping: damping,
             maximum_eigenvalue_bound,
@@ -406,12 +421,20 @@ impl QuadraticWaveOperator {
         &self.normalized_neumann_weights
     }
 
+    pub fn dirichlet_signals(&self) -> &[Option<BoundarySignal>] {
+        &self.dirichlet_signals
+    }
+
+    pub fn face_neumann_loads(&self) -> &[[BoundaryLoad; 2]] {
+        &self.face_neumann_loads
+    }
+
     pub fn prescribed_value(&self, node: usize, time: f64) -> Option<f64> {
-        let side = *self.dirichlet_sides.get(node)?;
-        match self.outer_boundaries.get(side?) {
-            OuterBoundaryCondition::Dirichlet { signal } => Some(signal.value(time)),
-            _ => None,
-        }
+        self.dirichlet_signals
+            .get(node)
+            .copied()
+            .flatten()
+            .map(|signal| signal.value(time))
     }
 
     pub fn neumann_acceleration(&self, node: usize, time: f64) -> f64 {
@@ -428,6 +451,16 @@ impl QuadraticWaveOperator {
                     .sum()
             })
             .unwrap_or(0.0)
+            + self
+                .face_neumann_loads
+                .get(node)
+                .map(|loads| {
+                    loads
+                        .iter()
+                        .map(|load| load.normalized_weight * load.signal.value(time))
+                        .sum()
+                })
+                .unwrap_or(0.0)
     }
 
     pub fn node_points(&self) -> &[Point2] {
@@ -825,7 +858,7 @@ impl QuadraticWaveState {
             }
         }
         for i in 0..self.auxiliary.len() {
-            if operator.auxiliary_active[i] && operator.dirichlet_sides[i].is_none() {
+            if operator.auxiliary_active[i] && operator.dirichlet_signals[i].is_none() {
                 self.auxiliary[i] += 0.5 * dt * (self.current[i] + self.scratch[i]);
             } else {
                 self.auxiliary[i] = 0.0;
@@ -859,12 +892,21 @@ impl QuadraticWaveState {
 
 type TraceNodes = ([usize; 3], f64);
 
+struct BoundaryAssembly<'a> {
+    edge_nodes: &'a BTreeMap<(usize, usize), usize>,
+    rows: &'a mut [BTreeMap<usize, f64>],
+    auxiliary_rows: &'a mut [BTreeMap<usize, f64>],
+    auxiliary_active: &'a mut [bool],
+    dirichlet_signals: &'a mut [Option<BoundarySignal>],
+    face_neumann_loads: &'a mut [[BoundaryLoad; 2]],
+    damping: &'a mut [f64],
+}
+
 fn assemble_hole_boundary_conditions(
     mesh: &TriMesh,
     scene: &Scene,
     coefficients_by_region: &BTreeMap<RegionId, WaveCoefficients>,
-    edge_nodes: &BTreeMap<(usize, usize), usize>,
-    damping: &mut [f64],
+    assembly: &mut BoundaryAssembly<'_>,
 ) -> Result<(), WaveError> {
     for edge in &mesh.boundary_edges {
         let BoundaryLabel::Obstacle(id) = edge.label else {
@@ -889,7 +931,7 @@ fn assemble_hole_boundary_conditions(
             ));
         }
         let key = if a < b { (a, b) } else { (b, a) };
-        let midpoint = *edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
+        let midpoint = *assembly.edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
             "a hole boundary edge does not belong to a triangle",
         ))?;
         let [parameter_a, parameter_b] = edge.parameters;
@@ -904,9 +946,7 @@ fn assemble_hole_boundary_conditions(
             .ok_or(WaveError::InvalidMesh(
                 "a hole boundary edge has an invalid spline parameter",
             ))?;
-        let FaceBoundaryCondition::Impedance { ratio } = obstacle.span_conditions[span] else {
-            continue;
-        };
+        let condition = obstacle.span_conditions[span];
         let coefficients = *coefficients_by_region
             .get(&exterior)
             .ok_or(WaveError::InvalidCoefficients)?;
@@ -916,13 +956,7 @@ fn assemble_hole_boundary_conditions(
                 "a hole boundary edge has invalid length",
             ));
         }
-        let impedance = ratio * (coefficients.mass_density * coefficients.stiffness).sqrt();
-        for (node, weight) in [a, midpoint, b]
-            .into_iter()
-            .zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
-        {
-            damping[node] += impedance * length * weight;
-        }
+        assemble_face_condition(condition, [a, midpoint, b], length, coefficients, assembly)?;
     }
     Ok(())
 }
@@ -931,9 +965,7 @@ fn assemble_internal_boundary_laws(
     mesh: &TriMesh,
     scene: &Scene,
     coefficients_by_region: &BTreeMap<RegionId, WaveCoefficients>,
-    edge_nodes: &BTreeMap<(usize, usize), usize>,
-    rows: &mut [BTreeMap<usize, f64>],
-    damping: &mut [f64],
+    assembly: &mut BoundaryAssembly<'_>,
 ) -> Result<(), WaveError> {
     let mut traces = BTreeMap::<(InternalBoundaryId, u64, u64), [Option<TraceNodes>; 2]>::new();
     for edge in &mesh.boundary_edges {
@@ -957,7 +989,7 @@ fn assemble_internal_boundary_laws(
             ));
         }
         let key = if a < b { (a, b) } else { (b, a) };
-        let midpoint = *edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
+        let midpoint = *assembly.edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
             "an internal-boundary edge does not belong to a triangle",
         ))?;
         let [parameter_a, parameter_b] = edge.parameters;
@@ -989,12 +1021,7 @@ fn assemble_internal_boundary_laws(
         } else {
             [b, midpoint, a]
         };
-        if let FaceBoundaryCondition::Impedance { ratio } = condition {
-            let impedance = ratio * (coefficients.mass_density * coefficients.stiffness).sqrt();
-            for (node, weight) in nodes.into_iter().zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0]) {
-                damping[node] += impedance * length * weight;
-            }
-        }
+        assemble_face_condition(condition, nodes, length, coefficients, assembly)?;
         let (start, end) = if parameter_a < parameter_b {
             (parameter_a, parameter_b)
         } else {
@@ -1048,13 +1075,112 @@ fn assemble_internal_boundary_laws(
                 continue;
             }
             let scale = spring * 0.5 * (left_length + right_length) * weight;
-            *rows[left_node].entry(left_node).or_default() += scale;
-            *rows[left_node].entry(right_node).or_default() -= scale;
-            *rows[right_node].entry(left_node).or_default() -= scale;
-            *rows[right_node].entry(right_node).or_default() += scale;
+            *assembly.rows[left_node].entry(left_node).or_default() += scale;
+            *assembly.rows[left_node].entry(right_node).or_default() -= scale;
+            *assembly.rows[right_node].entry(left_node).or_default() -= scale;
+            *assembly.rows[right_node].entry(right_node).or_default() += scale;
         }
     }
     Ok(())
+}
+
+fn assemble_face_condition(
+    condition: FaceBoundaryCondition,
+    nodes: [usize; 3],
+    length: f64,
+    coefficients: WaveCoefficients,
+    assembly: &mut BoundaryAssembly<'_>,
+) -> Result<(), WaveError> {
+    let weights = [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0];
+    match condition {
+        FaceBoundaryCondition::Reflecting => {}
+        FaceBoundaryCondition::Impedance { ratio } => {
+            let impedance = ratio * (coefficients.mass_density * coefficients.stiffness).sqrt();
+            for (node, weight) in nodes.into_iter().zip(weights) {
+                assembly.damping[node] += impedance * length * weight;
+            }
+        }
+        FaceBoundaryCondition::SecondOrderOutgoing => {
+            let impedance = (coefficients.mass_density * coefficients.stiffness).sqrt();
+            for (node, weight) in nodes.into_iter().zip(weights) {
+                assembly.damping[node] += impedance * length * weight;
+            }
+            let wave_speed = (coefficients.stiffness / coefficients.mass_density).sqrt();
+            assemble_auxiliary_line(
+                nodes,
+                length,
+                0.5 * coefficients.stiffness * wave_speed,
+                assembly.auxiliary_rows,
+                assembly.auxiliary_active,
+            );
+        }
+        FaceBoundaryCondition::Neumann { signal } => {
+            for (node, weight) in nodes.into_iter().zip(weights) {
+                add_face_neumann_load(assembly.face_neumann_loads, node, signal, length * weight)?;
+            }
+        }
+        FaceBoundaryCondition::Dirichlet { signal } => {
+            for node in nodes {
+                assign_dirichlet(assembly.dirichlet_signals, node, signal)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn assemble_auxiliary_line(
+    nodes: [usize; 3],
+    length: f64,
+    scale: f64,
+    auxiliary_rows: &mut [BTreeMap<usize, f64>],
+    auxiliary_active: &mut [bool],
+) {
+    let local = [[7.0, 1.0, -8.0], [1.0, 7.0, -8.0], [-8.0, -8.0, 16.0]];
+    for i in 0..3 {
+        auxiliary_active[nodes[i]] = true;
+        for j in 0..3 {
+            *auxiliary_rows[nodes[i]].entry(nodes[j]).or_default() +=
+                scale * local[i][j] / (3.0 * length);
+        }
+    }
+}
+
+fn assign_dirichlet(
+    signals: &mut [Option<BoundarySignal>],
+    node: usize,
+    signal: BoundarySignal,
+) -> Result<(), WaveError> {
+    if let Some(previous) = signals[node]
+        && previous != signal
+    {
+        return Err(WaveError::InvalidMesh(
+            "Dirichlet conditions disagree at a shared boundary node",
+        ));
+    }
+    signals[node] = Some(signal);
+    Ok(())
+}
+
+fn add_face_neumann_load(
+    loads: &mut [[BoundaryLoad; 2]],
+    node: usize,
+    signal: BoundarySignal,
+    weight: f64,
+) -> Result<(), WaveError> {
+    if let Some(load) = loads[node]
+        .iter_mut()
+        .find(|load| load.normalized_weight == 0.0 || load.signal == signal)
+    {
+        if load.normalized_weight == 0.0 {
+            load.signal = signal;
+        }
+        load.normalized_weight += weight;
+        Ok(())
+    } else {
+        Err(WaveError::InvalidMesh(
+            "more than two Neumann signals meet at one boundary node",
+        ))
+    }
 }
 
 fn validate_coefficients(coefficients: WaveCoefficients) -> Result<(), WaveError> {
@@ -1662,6 +1788,108 @@ mod tests {
             impedance.lumped_damping()[right[1]],
             reflecting.lumped_damping()[right[1]]
         );
+    }
+
+    #[test]
+    fn driven_conditions_apply_to_hole_and_baffle_faces() {
+        let dirichlet = BoundarySignal {
+            offset: 0.35,
+            amplitude: 0.2,
+            frequency_hz: 1.5,
+            phase_radians: 0.4,
+        };
+        let neumann = BoundarySignal {
+            offset: 1.25,
+            ..BoundarySignal::ZERO
+        };
+        let law = InternalBoundaryLaw {
+            left: FaceBoundaryCondition::Dirichlet { signal: dirichlet },
+            right: FaceBoundaryCondition::Neumann { signal: neumann },
+            coupling: InternalBoundaryCoupling::Independent,
+        };
+        let (scene, mesh) = open_baffle_scene(law);
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let left = trace_edge_nodes(&mesh, &operator, InternalBoundarySide::Left)[1];
+        let right = trace_edge_nodes(&mesh, &operator, InternalBoundarySide::Right)[1];
+        assert_eq!(
+            operator.prescribed_value(left, 0.3),
+            Some(dirichlet.value(0.3))
+        );
+        assert!(operator.prescribed_value(right, 0.3).is_none());
+        assert!(operator.neumann_acceleration(right, 0.3) > 0.0);
+
+        let mut hole_scene = Scene::initial();
+        hole_scene.obstacles[0].span_conditions[0] =
+            FaceBoundaryCondition::Dirichlet { signal: dirichlet };
+        hole_scene.obstacles[0].span_conditions[1] =
+            FaceBoundaryCondition::Neumann { signal: neumann };
+        let hole_mesh = mesh_scene(&hole_scene, 12, MeshingOptions::default()).unwrap();
+        let hole_operator = QuadraticWaveOperator::assemble_scene(
+            &hole_mesh,
+            &hole_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let mut found_dirichlet = false;
+        let mut found_neumann = false;
+        for edge in &hole_mesh.boundary_edges {
+            if edge.label != BoundaryLabel::Obstacle(ObstacleId(1)) {
+                continue;
+            }
+            let span = hole_scene.obstacles[0]
+                .spline
+                .span_index(0.5 * (edge.parameters[0] + edge.parameters[1]))
+                .unwrap();
+            let midpoint = boundary_edge_nodes(&hole_mesh, &hole_operator, edge)[1];
+            if span == 0 {
+                found_dirichlet = true;
+                assert_eq!(
+                    hole_operator.prescribed_value(midpoint, 0.3),
+                    Some(dirichlet.value(0.3))
+                );
+            } else if span == 1 {
+                found_neumann = true;
+                assert!(hole_operator.neumann_acceleration(midpoint, 0.3) > 0.0);
+            }
+        }
+        assert!(found_dirichlet && found_neumann);
+    }
+
+    #[test]
+    fn second_order_absorber_applies_to_curved_and_baffle_faces() {
+        let mut hole_scene = Scene::initial();
+        hole_scene.obstacles[0].span_conditions[0] = FaceBoundaryCondition::SecondOrderOutgoing;
+        let hole_mesh = mesh_scene(&hole_scene, 12, MeshingOptions::default()).unwrap();
+        let hole = QuadraticWaveOperator::assemble_scene(
+            &hole_mesh,
+            &hole_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        assert!(hole.auxiliary_active().iter().any(|active| *active));
+        assert!(hole.lumped_damping().iter().any(|value| *value > 0.0));
+
+        let law = InternalBoundaryLaw {
+            left: FaceBoundaryCondition::SecondOrderOutgoing,
+            ..InternalBoundaryLaw::REFLECTING
+        };
+        let (scene, mesh) = open_baffle_scene(law);
+        let baffle = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let left = trace_edge_nodes(&mesh, &baffle, InternalBoundarySide::Left)[1];
+        let right = trace_edge_nodes(&mesh, &baffle, InternalBoundarySide::Right)[1];
+        assert!(baffle.auxiliary_active()[left]);
+        assert!(!baffle.auxiliary_active()[right]);
+        assert!(baffle.lumped_damping()[left] > baffle.lumped_damping()[right]);
     }
 
     #[test]

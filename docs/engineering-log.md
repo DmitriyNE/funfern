@@ -36,14 +36,43 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
 
+## 2026-09-10 — Driven and absorbing internal faces
+
+- Extended hole and baffle faces with harmonic prescribed Neumann flux and strong
+  Dirichlet displacement, plus first- and second-order outgoing conditions. The
+  second-order condition assembles boundary damping and the tangential auxiliary
+  operator using the material adjacent to that face.
+- Replaced the GPU's outer-side-only signal assumption with per-node Dirichlet
+  signals and two bounded Neumann signal/weight slots. They are packed into the
+  existing node storage buffer, keeping the portable eight-binding layout.
+- Made baffle span modes explicit and exclusive: either independent left/right
+  face conditions or one coupled thin-gap spring. Selecting thin gap clears both
+  face laws. Core validation rejects parallel combinations.
+- Scene JSON is version 7. Versions 1–6 remain readable; version-6 baffles that
+  combined thin-gap coupling with face conditions migrate with the coupled law
+  taking precedence.
+- Verification passes formatting, Clippy with warnings denied, all **113 workspace
+  tests**, native release compilation, and the release Trunk/WebGPU build. The
+  Apple M1 Max / Metal GPU comparison exercised driven baffle faces at 9,720 DOFs;
+  relative L2 errors were `5.84e-6` for current displacement, `5.82e-6` for the
+  previous level, and `1.28e-5` for auxiliary state.
+- The native transfer check also runs driven Dirichlet and Neumann data on hole
+  spans. Geometry, boundary-law, and material transactions passed their f64
+  comparisons; their largest reported relative L2 errors were `2.72e-8`,
+  `3.09e-9`, and `3.09e-8`, respectively.
+- A clean Compose rebuild serves the new release bundle from a healthy nginx
+  container. Chromium initialized BrowserWebGPU and rendered a 2,000 × 1,300
+  backing canvas at a 1,000 × 650 CSS viewport without shader or application
+  errors; the existing optional favicon 404 and capability warning remain.
+
 ## 2026-09-10 — Unified boundary selection and inspector
 
 - Replaced the four outer-side buttons and the separate hole/baffle controls with
   one boundary target selected in the viewport. Outer edges, hole knot spans, and
   baffle knot spans share one inspector; the selected geometry is highlighted.
-- The inspector exposes only conditions implemented for its target. The baffle
+- The inspector exposes conditions implemented for its target. The baffle
   left/right face choice remains explicit because both traces occupy the same
-  screen curve, and thin-gap coupling is shown separately as a between-face law.
+  screen curve.
 - Boundary editing no longer depends on an initialized wave operator. Boundary
   selection remains transient and does not enter history or scene files.
 - Added egui input coverage for outer-edge selection and assignment and migrated

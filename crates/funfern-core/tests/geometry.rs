@@ -289,6 +289,14 @@ fn internal_boundary_span_laws_match_knots_and_reject_bad_coefficients() {
         ..InternalBoundaryLaw::REFLECTING
     }];
     assert!(!scene.structure_valid());
+    scene.internal_boundaries[0].span_laws = vec![InternalBoundaryLaw {
+        left: FaceBoundaryCondition::Impedance { ratio: 1.0 },
+        coupling: InternalBoundaryCoupling::ThinGap {
+            stiffness_ratio: 1.0,
+        },
+        ..InternalBoundaryLaw::REFLECTING
+    }];
+    assert!(!scene.structure_valid());
 }
 
 #[test]

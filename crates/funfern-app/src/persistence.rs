@@ -109,6 +109,9 @@ struct StoredSpanLaw {
 enum StoredFaceCondition {
     Reflecting,
     Impedance { ratio: f64 },
+    SecondOrderOutgoing,
+    Neumann { signal: StoredBoundarySignal },
+    Dirichlet { signal: StoredBoundarySignal },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -296,6 +299,13 @@ fn encode_face_condition(condition: FaceBoundaryCondition) -> StoredFaceConditio
     match condition {
         FaceBoundaryCondition::Reflecting => StoredFaceCondition::Reflecting,
         FaceBoundaryCondition::Impedance { ratio } => StoredFaceCondition::Impedance { ratio },
+        FaceBoundaryCondition::SecondOrderOutgoing => StoredFaceCondition::SecondOrderOutgoing,
+        FaceBoundaryCondition::Neumann { signal } => StoredFaceCondition::Neumann {
+            signal: encode_signal(signal),
+        },
+        FaceBoundaryCondition::Dirichlet { signal } => StoredFaceCondition::Dirichlet {
+            signal: encode_signal(signal),
+        },
     }
 }
 
@@ -303,6 +313,13 @@ fn decode_face_condition(condition: StoredFaceCondition) -> FaceBoundaryConditio
     match condition {
         StoredFaceCondition::Reflecting => FaceBoundaryCondition::Reflecting,
         StoredFaceCondition::Impedance { ratio } => FaceBoundaryCondition::Impedance { ratio },
+        StoredFaceCondition::SecondOrderOutgoing => FaceBoundaryCondition::SecondOrderOutgoing,
+        StoredFaceCondition::Neumann { signal } => FaceBoundaryCondition::Neumann {
+            signal: decode_signal(signal),
+        },
+        StoredFaceCondition::Dirichlet { signal } => FaceBoundaryCondition::Dirichlet {
+            signal: decode_signal(signal),
+        },
     }
 }
 
@@ -370,6 +387,7 @@ fn decode_scene(
     stored: StoredScene,
     require_loop_conditions: bool,
     require_outer_boundaries: bool,
+    normalize_legacy_parallel_gap: bool,
 ) -> Result<Scene, String> {
     if stored.loops.len() > MAX_OBSTACLES
         || stored.internal_boundaries.len() > MAX_INTERNAL_BOUNDARIES
@@ -458,15 +476,25 @@ fn decode_scene(
                 boundary
                     .span_laws
                     .into_iter()
-                    .map(|law| InternalBoundaryLaw {
-                        left: decode_face_condition(law.left),
-                        right: decode_face_condition(law.right),
-                        coupling: match law.coupling {
+                    .map(|law| {
+                        let coupling = match law.coupling {
                             StoredCoupling::Independent => InternalBoundaryCoupling::Independent,
                             StoredCoupling::ThinGap { stiffness_ratio } => {
                                 InternalBoundaryCoupling::ThinGap { stiffness_ratio }
                             }
-                        },
+                        };
+                        let mut decoded = InternalBoundaryLaw {
+                            left: decode_face_condition(law.left),
+                            right: decode_face_condition(law.right),
+                            coupling,
+                        };
+                        if normalize_legacy_parallel_gap
+                            && matches!(coupling, InternalBoundaryCoupling::ThinGap { .. })
+                        {
+                            decoded.left = FaceBoundaryCondition::Reflecting;
+                            decoded.right = FaceBoundaryCondition::Reflecting;
+                        }
+                        decoded
                     })
                     .collect()
             };
@@ -500,7 +528,7 @@ fn decode_scene(
 
 pub fn save(document: &Document) -> Result<String, String> {
     serde_json::to_string_pretty(&FileV2 {
-        version: 6,
+        version: 7,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
@@ -525,14 +553,24 @@ pub fn parse(bytes: &[u8]) -> Result<LoadCandidate, String> {
                 accepted: decode_v1(file.accepted)?,
             }
         }
-        2..=6 => {
+        2..=7 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
             }
             Document {
-                draft: decode_scene(file.draft, header.version >= 5, header.version >= 6)?,
-                accepted: decode_scene(file.accepted, header.version >= 5, header.version >= 6)?,
+                draft: decode_scene(
+                    file.draft,
+                    header.version >= 5,
+                    header.version >= 6,
+                    header.version < 7,
+                )?,
+                accepted: decode_scene(
+                    file.accepted,
+                    header.version >= 5,
+                    header.version >= 6,
+                    header.version < 7,
+                )?,
             }
         }
         _ => return Err("Unsupported scene version".into()),

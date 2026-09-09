@@ -228,10 +228,12 @@ remeshing.
 ## 8. Boundary spans and assigned conditions
 
 Open-baffle knot spans are implemented. A selected span exposes its left and right
-faces independently; each face can reflect or use a scaled matched impedance, and
-the pair can use a conservative thin-gap spring. Assignments survive resampling,
+faces independently; each face can reflect, use driven Dirichlet/Neumann data, or
+use either outgoing order. Alternatively, the pair can use one conservative
+thin-gap spring. Assignments survive resampling,
 knot insertion, undo/redo, and versioned persistence. Removal rejects a merge when
-the two affected spans disagree. Outer-side and closed-loop span assignment remain.
+the two affected spans disagree. Outer sides, hole spans, and baffle spans now use
+the same viewport selection and inspector workflow.
 
 - Represent selectable logical spans independently of sampled mesh edges. Outer
   sides and spline knot spans retain stable assignments through resampling and
@@ -239,9 +241,9 @@ the two affected spans disagree. Outer-side and closed-loop span assignment rema
 - Assign the existing reflecting, first-order outgoing, and second-order auxiliary conditions per span,
   with explicit defaults and visible viewport/panel labels. Add further fixed or
   prescribed conditions only with defined scalar-wave semantics.
-- Add per-face impedance laws for open baffles, followed by an energy-stable paired
-  trace law for thin gaps/layers. Include its coupling in the explicit timestep
-  bound and treat frequency-dependent laws as auxiliary boundary state.
+- Keep independent baffle face laws and paired thin-gap coupling as exclusive span
+  modes. Include coupling in the explicit timestep bound and treat
+  frequency-dependent laws as auxiliary boundary state.
 - Define how insertion, removal, seam changes, splitting, and merging inherit or
   combine span assignments. Ambiguous edits remain drafts until resolved.
 - Assemble mixed boundary conditions and handle junction nodes where neighboring

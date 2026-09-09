@@ -75,11 +75,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   that boundary in the viewport. One Boundary inspector shows the conditions that
   apply to the selected target. Outer edges support reflecting, prescribed
   time-varying Neumann and Dirichlet data, and first- or second-order outgoing
-  conditions. Hole and baffle spans support reflecting or scaled impedance faces.
-  The baffle face selector stays in the inspector because its left and right traces
-  are geometrically coincident. A baffle span can also couple both traces as a
-  conservative thin-gap spring; increasing its stiffness can reduce the solver time
-  step.
+  conditions. Hole and baffle faces support the same choices, with an adjustable
+  impedance ratio for first-order outgoing behavior. The baffle face selector stays
+  in the inspector because its left and right traces are geometrically coincident.
+  A baffle span instead can use one conservative thin-gap law coupling both traces;
+  this is mutually exclusive with independent face conditions, and increasing its
+  stiffness can reduce the solver time step.
 - **Geometry role:** choose Hole, Material interface, or Open baffle before
   creating. An interface retains its interior and shares its finite-element trace
   with the exterior. A baffle is an open curve with two independent coincident
@@ -160,10 +161,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   candidate retains the previous simulation.
 
 Scenes allow 32 geometric features, 32 materials, and 128 controls per curve.
-Version 5 JSON stores hole-span conditions, open-baffle span and face laws, plus
-draft and accepted material/region topology; versions 2–4 remain compatible, and version 1 files
-migrate their loops to background holes. JSON files are capped at 2 MiB and require
-finite coordinates. The editor uses a fixed
+Version 7 JSON stores the complete outer, hole-span, and open-baffle laws together
+with draft and accepted material/region topology. Versions 2–6 remain compatible,
+and version 1 files migrate their loops to background holes. Legacy baffles that
+combined a thin-gap spring with face laws load with the thin-gap law taking
+precedence. JSON files are capped at 2 MiB and require finite coordinates. The editor uses a fixed
 world-space validation tolerance of `0.0002`, independent of zoom. The editor
 validator is deliberately conservative; final mesh topology uses adaptive exact
 orientation and incircle signs rather than geometric epsilons.
@@ -189,7 +191,7 @@ cargo run -p funfern-app --release --locked -- --wave-transfer-check
 ```
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
-constrained topology, concave and multiple holes, per-span hole impedance,
+constrained topology, concave and multiple holes, driven and absorbing internal spans,
 nested material inclusions,
 shared interface traces, separated wall traces, refinement limits, geometry
 rejection, draft/accepted history, scene files, and egui pointer/keyboard
@@ -216,10 +218,9 @@ prints edit-to-ready and active/scheduling times plus exact element reuse, then
 exits. Interactive editor input is disabled during this scripted run. It does not
 read or overwrite scene files. The native benchmark includes
 editor validation and rendering load; mesh-ready means the atomic simulation commit.
-`--wave-gpu-check` runs a mixed outer-boundary configuration with harmonic
-Dirichlet and Neumann data, both outgoing orders, a closed wall, and an
-impedance/thin-gap baffle for 128 steps. It reads both time levels and boundary
-memory back, compares them to f64, reports
+`--wave-gpu-check` runs mixed harmonic Dirichlet and Neumann data on the outer box
+and both faces of a baffle, both outgoing orders, and a closed wall for 128 steps.
+It reads both time levels and boundary memory back, compares them to f64, reports
 solve-to-readback throughput, and exits. `--wave-transfer-check` injects a nonzero
 field, performs a real control-point edit, verifies transfer of all three state
 components, then verifies that a lower-order boundary transaction clears the

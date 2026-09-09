@@ -29,6 +29,10 @@ struct NodeData {
     regions: vec4<u32>,
     boundary: vec4<u32>,
     neumann_weights: vec4<f32>,
+    dirichlet_signal: vec4<f32>,
+    face_neumann_signal_a: vec4<f32>,
+    face_neumann_signal_b: vec4<f32>,
+    face_neumann_weights: vec4<f32>,
 }
 
 struct MatrixEntry {
@@ -65,9 +69,12 @@ fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
     return select(0.0, 1.0, first || second);
 }
 
-fn boundary_value(side: u32, time: f32) -> f32 {
-    let signal = forcing.outer[side].values;
+fn signal_value(signal: vec4<f32>, time: f32) -> f32 {
     return signal.x + signal.y * sin(signal.z * time + signal.w);
+}
+
+fn boundary_value(side: u32, time: f32) -> f32 {
+    return signal_value(forcing.outer[side].values, time);
 }
 
 fn neumann_acceleration(i: u32, time: f32) -> f32 {
@@ -75,6 +82,10 @@ fn neumann_acceleration(i: u32, time: f32) -> f32 {
     for (var side = 0u; side < 4u; side += 1u) {
         value += nodes[i].neumann_weights[side] * boundary_value(side, time);
     }
+    value += nodes[i].face_neumann_weights.x
+        * signal_value(nodes[i].face_neumann_signal_a, time);
+    value += nodes[i].face_neumann_weights.y
+        * signal_value(nodes[i].face_neumann_signal_b, time);
     return value;
 }
 
@@ -86,12 +97,11 @@ fn prepare_boundary(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let dirichlet = nodes[i].boundary.x;
     if dirichlet != 0u {
-        let side = dirichlet - 1u;
         let time = transfers[0].auxiliary.x;
         let dt = parameters.time_data.x;
-        transfers[i].mapped.x = (boundary_value(side, time + dt)
-            - boundary_value(side, time - dt)) / (2.0 * dt);
-        transfers[i].mapped.y = boundary_value(side, time);
+        transfers[i].mapped.x = (signal_value(nodes[i].dirichlet_signal, time + dt)
+            - signal_value(nodes[i].dirichlet_signal, time - dt)) / (2.0 * dt);
+        transfers[i].mapped.y = signal_value(nodes[i].dirichlet_signal, time);
         transfers[i].mapped.z = 0.0;
     }
 }
@@ -130,9 +140,8 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     let dt = parameters.time_data.x;
     let dirichlet = nodes[i].boundary.x;
     if dirichlet != 0u {
-        let side = dirichlet - 1u;
-        let prescribed = boundary_value(side, time);
-        let previous = boundary_value(side, time - dt);
+        let prescribed = signal_value(nodes[i].dirichlet_signal, time);
+        let previous = signal_value(nodes[i].dirichlet_signal, time - dt);
         states[i].levels = vec4<f32>(previous, prescribed, prescribed, 0.0);
     } else {
         let previous = current - dt * velocity + 0.5 * dt * dt * acceleration;

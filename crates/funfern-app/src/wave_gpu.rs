@@ -241,8 +241,9 @@ impl WaveGpuRequest {
         {
             return Err("The transfer map does not match the active and candidate meshes".into());
         }
-        let preserve_auxiliary =
-            source_operator.outer_boundaries() == target_operator.outer_boundaries();
+        let preserve_auxiliary = source_operator.outer_boundaries()
+            == target_operator.outer_boundaries()
+            && source_operator.auxiliary_active() == target_operator.auxiliary_active();
         let entries = map
             .samples()
             .iter()
@@ -531,37 +532,41 @@ fn create_buffers(
         .damping_ratios_f32()
         .map_err(|error| error.to_string())?;
     let dt = time_step as f32;
+    let regions = node_regions(mesh, operator)?;
     let nodes: Vec<_> = operator
         .node_points()
         .iter()
-        .zip(damping)
-        .zip(operator.auxiliary_active())
-        .zip(operator.dirichlet_sides())
-        .zip(operator.normalized_neumann_weights())
-        .zip(node_regions(mesh, operator)?)
-        .map(
-            |(
-                ((((point, damping), auxiliary_active), dirichlet_side), neumann_weights),
-                regions,
-            )| {
-                GpuNode {
-                    position_damping: Vec4::new(
-                        point.x as f32,
-                        point.y as f32,
-                        damping,
-                        if *auxiliary_active { 1.0 } else { 0.0 },
-                    ),
-                    regions: gpu_region_pair(regions[0], regions[1]),
-                    boundary: UVec4::new(
-                        dirichlet_side.map_or(0, |side| side.index() as u32 + 1),
-                        0,
-                        0,
-                        0,
-                    ),
-                    neumann_weights: Vec4::from_array(neumann_weights.map(|value| value as f32)),
-                }
-            },
-        )
+        .enumerate()
+        .map(|(index, point)| {
+            let dirichlet = operator.dirichlet_signals()[index];
+            let face_loads = operator.face_neumann_loads()[index];
+            GpuNode {
+                position_damping: Vec4::new(
+                    point.x as f32,
+                    point.y as f32,
+                    damping[index],
+                    if operator.auxiliary_active()[index] {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                ),
+                regions: gpu_region_pair(regions[index][0], regions[index][1]),
+                boundary: UVec4::new(u32::from(dirichlet.is_some()), 0, 0, 0),
+                neumann_weights: Vec4::from_array(
+                    operator.normalized_neumann_weights()[index].map(|value| value as f32),
+                ),
+                dirichlet_signal: gpu_boundary_signal(dirichlet.unwrap_or(BoundarySignal::ZERO)),
+                face_neumann_signal_a: gpu_boundary_signal(face_loads[0].signal),
+                face_neumann_signal_b: gpu_boundary_signal(face_loads[1].signal),
+                face_neumann_weights: Vec4::new(
+                    face_loads[0].normalized_weight as f32,
+                    face_loads[1].normalized_weight as f32,
+                    0.0,
+                    0.0,
+                ),
+            }
+        })
         .collect();
     if nodes
         .iter()
@@ -921,6 +926,10 @@ struct GpuNode {
     regions: UVec4,
     boundary: UVec4,
     neumann_weights: Vec4,
+    dirichlet_signal: Vec4,
+    face_neumann_signal_a: Vec4,
+    face_neumann_signal_b: Vec4,
+    face_neumann_weights: Vec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]

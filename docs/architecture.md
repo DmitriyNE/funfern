@@ -2,12 +2,11 @@
 
 The spline editor, constrained mesher, bounded coordinate-edit repair, enriched
 quadratic GPU wave solver, and geometry-edit simulation transactions are
-implemented. Each outer side independently supports reflecting or prescribed
-Neumann data, prescribed Dirichlet data, and first- or second-order radiation.
-Stable material regions, transmitting interfaces, closed
-two-sided walls, and open baffles with assigned face impedance and compliant
-thin-gap spans are implemented. Broader adaptation and assigned conditions on
-closed-loop spans remain work.
+implemented. Outer sides, hole spans, and baffle faces support reflecting or
+prescribed Neumann data, prescribed Dirichlet data, and first- or second-order
+radiation. Stable material regions, transmitting interfaces, closed two-sided
+walls, and open baffles with independent face laws or coupled thin-gap spans are
+implemented. Broader adaptation remains work.
 
 ## Responsibilities and dependencies
 
@@ -74,26 +73,31 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Open splines now store one law per nonempty knot span. Each law has independent
-left and right face conditions plus an optional paired-trace coupling. Reflecting
-faces add no weak boundary term. A face impedance ratio multiplies the adjacent
-material's characteristic impedance `sqrt(rho * kappa)` and contributes positive
-lumped boundary damping. The thin-gap law adds a symmetric positive-semidefinite
-spring for the trace jump, scaled by the material stiffness. This conservative
-coupling enters the assembled spectral bound and can reduce the explicit time
-step. A dissipative relative dashpot is deferred because preserving the centered
-scheme would require an off-diagonal damping solve.
+Open splines store one law per nonempty knot span. A span either has independent
+left and right face conditions or one paired thin-gap law. These modes are mutually
+exclusive. Reflecting faces add no weak boundary term. Prescribed Neumann data adds
+a quadratic boundary load, prescribed Dirichlet data owns the trace nodes strongly,
+and both use the same harmonic time law as outer boundaries. A first-order outgoing
+face multiplies the adjacent material's characteristic impedance
+`sqrt(rho * kappa)` by its adjustable ratio and contributes positive lumped
+boundary damping. Second-order outgoing faces also assemble the tangential
+auxiliary operator along curved or open spans. The thin-gap law adds a symmetric
+positive-semidefinite spring for the trace jump, scaled by material stiffness. It
+enters the assembled spectral bound and can reduce the explicit time step. A
+dissipative relative dashpot is deferred because preserving the centered scheme
+would require an off-diagonal damping solve.
 
-Periodic loops likewise store one exterior-face condition per knot interval.
-Hole spans currently assemble reflecting or scaled matched-impedance behavior
-against the material in the hole's exterior region. Periodic knot insertion copies
-the split condition to both child spans, including across the stored seam. Removal
+Periodic loops likewise store one exterior-face condition per knot interval. Hole
+spans support reflecting, driven Neumann or Dirichlet, and first- or second-order
+outgoing behavior against the material in the hole's exterior region. Periodic
+knot insertion copies the split condition to both child spans, including across the
+stored seam. Removal
 merges the deleted interval into its predecessor and is rejected when those two
 conditions differ. Boundary-law edits are excluded from geometry equality, so an
 accepted condition change rebuilds the operator on the existing mesh.
 
-The initial implementation handles obstacle loops in a fixed outer box. Outer
-editable boundaries and more involved topology are future extensions.
+The initial implementation handles obstacle loops and open baffles in a fixed
+outer box. More involved topology remains a future extension.
 
 ## Milestone 1 spline and document model
 
@@ -143,11 +147,13 @@ excludes selection and navigation. Stable obstacle IDs increase independently of
 undo, preventing reuse after undoing creation. Loading derives the next ID from
 both scenes and clears history.
 
-Version 5 JSON stores the fixed domain, loop roles, hole-span conditions,
-open-baffle span/face laws, materials, regions, controls, intervals, and both scenes. Versions 2–4 remain
+Version 7 JSON stores the fixed domain, loop roles, all assigned boundary laws,
+materials, regions, controls, intervals, and both scenes. Versions 2–6 remain
 compatible; version 1 loads by assigning its loops the background hole role and
 creating the default background material/region. Older loop records migrate to a
-reflecting condition on every periodic span.
+reflecting condition on every periodic span. Version-6 baffles that combined a
+thin-gap law with independent face laws migrate with the thin-gap law taking
+precedence.
 Serde and rfd live only in the app crate. Round-trip f64 parsing preserves exact
 stored values. Files have a 2 MiB limit, strict fields/version/domain, finite
 values, and scene/control-count checks. A prospective load validates its accepted
@@ -535,16 +541,17 @@ unrelated endpoint states. The added stored energy is
 `ψᵀ (k c/2 KΓ) ψ / 2`.
 
 The centered displacement step reads `ψ[n]`; after predicting `u[n+1]`, a
-trapezoidal update advances `ψ` by `dt (u[n] + u[n+1]) / 2` on outer-boundary
-DOFs. CPU and WGSL use the same update. The GPU packs interior and boundary
+trapezoidal update advances `ψ` by `dt (u[n] + u[n+1]) / 2` on DOFs assigned a
+second-order condition. CPU and WGSL use the same update. The GPU packs interior and boundary
 coefficients together, keeping a single CSR gather. At the production timestep,
 a 10,000-step regression remains finite and decays.
 
-A transaction with unchanged outer-side laws interpolates `ψ` with the same
-quadratic map used for displacement and velocity. A boundary-law change clears
-auxiliary memory conservatively; unchanged same-mesh settings still bypass spatial
-point location. The tangential operator is assembled only on sides assigned the
-second-order law, and essential values take precedence at mixed junctions.
+A geometry transaction with an unchanged auxiliary boundary layout interpolates
+`ψ` with the same quadratic map used for displacement and velocity. A boundary-law
+change clears auxiliary memory conservatively; unchanged same-mesh settings still
+bypass spatial point location. The tangential operator is assembled only on spans
+assigned the second-order law, and essential values take precedence at mixed
+junctions.
 
 The rational form follows the [original Engquist-Majda absorbing-boundary
 construction](https://doi.org/10.1090/S0025-5718-1977-0436612-4). Further

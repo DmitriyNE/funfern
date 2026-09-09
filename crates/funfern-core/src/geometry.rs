@@ -1,6 +1,6 @@
 use crate::{
-    OpenCubicSpline, OpenSampler, PeriodicCubicSpline, Point2, Sample, Sampler, SamplingOptions,
-    point_segment_distance,
+    BoundarySignal, OpenCubicSpline, OpenSampler, PeriodicCubicSpline, Point2, Sample, Sampler,
+    SamplingOptions, point_segment_distance,
 };
 pub const MAX_OBSTACLES: usize = 32;
 pub const MAX_INTERNAL_BOUNDARIES: usize = 32;
@@ -119,13 +119,41 @@ pub enum FaceBoundaryCondition {
     Impedance {
         ratio: f64,
     },
+    /// Second-order local outgoing condition with a tangential auxiliary field.
+    SecondOrderOutgoing,
+    /// Prescribed outward flux `stiffness * partial_n u = value(t)`.
+    Neumann {
+        signal: BoundarySignal,
+    },
+    /// Strongly prescribed displacement `u = value(t)`.
+    Dirichlet {
+        signal: BoundarySignal,
+    },
 }
 
 impl FaceBoundaryCondition {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Reflecting => "Reflecting",
+            Self::Impedance { .. } => "First-order outgoing",
+            Self::SecondOrderOutgoing => "Second-order outgoing",
+            Self::Neumann { .. } => "Prescribed Neumann",
+            Self::Dirichlet { .. } => "Prescribed Dirichlet",
+        }
+    }
+
+    pub fn signal(self) -> Option<BoundarySignal> {
+        match self {
+            Self::Neumann { signal } | Self::Dirichlet { signal } => Some(signal),
+            _ => None,
+        }
+    }
+
     pub fn valid(self) -> bool {
         match self {
-            Self::Reflecting => true,
+            Self::Reflecting | Self::SecondOrderOutgoing => true,
             Self::Impedance { ratio } => ratio.is_finite() && ratio > 0.0,
+            Self::Neumann { signal } | Self::Dirichlet { signal } => signal.valid(),
         }
     }
 }
@@ -166,7 +194,12 @@ impl InternalBoundaryLaw {
     };
 
     pub fn valid(self) -> bool {
-        self.left.valid() && self.right.valid() && self.coupling.valid()
+        self.left.valid()
+            && self.right.valid()
+            && self.coupling.valid()
+            && (!matches!(self.coupling, InternalBoundaryCoupling::ThinGap { .. })
+                || self.left == FaceBoundaryCondition::Reflecting
+                    && self.right == FaceBoundaryCondition::Reflecting)
     }
 }
 
