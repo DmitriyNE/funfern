@@ -798,7 +798,8 @@ mod tests {
     use super::*;
     use crate::{
         BACKGROUND_REGION, BoundaryEdge, Material, MaterialId, MeshQuality, MeshTriangle,
-        MeshVertex, Obstacle, ObstacleId, OuterSide, PeriodicCubicSpline, Region,
+        MeshVertex, MeshingOptions, Obstacle, ObstacleId, OuterSide, PeriodicCubicSpline, Region,
+        mesh_scene,
     };
 
     fn two_material_scene() -> Scene {
@@ -954,6 +955,48 @@ mod tests {
             ),
             Err(WaveError::InvalidMesh("a triangle has an unknown region"))
         ));
+    }
+
+    #[test]
+    fn closed_wall_regions_evolve_as_disconnected_neumann_domains() {
+        let mut scene = two_material_scene();
+        scene.obstacles[0].role = crate::LoopRole::Wall {
+            exterior: BACKGROUND_REGION,
+            interior: RegionId(2),
+        };
+        let mesh = mesh_scene(&scene, 12, MeshingOptions::default()).unwrap();
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let mut node_region = vec![None; operator.degrees_of_freedom()];
+        for (triangle, nodes) in mesh.triangles.iter().zip(operator.element_nodes()) {
+            for node in nodes {
+                let assigned = &mut node_region[*node as usize];
+                assert!(assigned.is_none_or(|region| region == triangle.region));
+                *assigned = Some(triangle.region);
+            }
+        }
+        let displacement = node_region
+            .iter()
+            .map(|region| f64::from(*region == Some(BACKGROUND_REGION)))
+            .collect::<Vec<_>>();
+        let mut state = QuadraticWaveState::new(
+            &operator,
+            operator.recommended_time_step(),
+            displacement,
+            vec![0.0; operator.degrees_of_freedom()],
+        )
+        .unwrap();
+        for _ in 0..100 {
+            state.step(&operator, &[]).unwrap();
+        }
+        for (value, region) in state.current().iter().zip(node_region) {
+            let expected = f64::from(region == Some(BACKGROUND_REGION));
+            assert!((value - expected).abs() < 1.0e-11);
+        }
     }
 
     #[test]

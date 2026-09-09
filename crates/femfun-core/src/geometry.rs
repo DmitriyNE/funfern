@@ -91,7 +91,7 @@ impl LoopRole {
         match self {
             Self::Hole { .. } => "Hole",
             Self::MaterialInterface { .. } => "Material interface",
-            Self::Wall { .. } => "Closed wall",
+            Self::Wall { .. } => "Two-sided wall",
         }
     }
 }

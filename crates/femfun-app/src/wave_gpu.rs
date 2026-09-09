@@ -25,7 +25,7 @@ use bevy::{
         storage::{GpuShaderBuffer, ShaderBuffer},
     },
 };
-use femfun_core::{Point2, QuadraticTransferMap, QuadraticWaveOperator, TriMesh};
+use femfun_core::{Point2, QuadraticTransferMap, QuadraticWaveOperator, RegionId, TriMesh};
 
 const WORKGROUP_SIZE: u32 = 128;
 const STATUS_READY: u8 = 1;
@@ -39,6 +39,7 @@ pub struct SourceSettings {
     pub amplitude: f32,
     pub width: f32,
     pub frequency_hz: f32,
+    pub region: RegionId,
 }
 
 pub struct WaveTransfer<'a> {
@@ -59,6 +60,7 @@ impl Default for SourceSettings {
             amplitude: 18.0,
             width: 0.06,
             frequency_hz: 2.5,
+            region: femfun_core::BACKGROUND_REGION,
         }
     }
 }
@@ -426,6 +428,7 @@ impl WaveGpuRequest {
         position: Point2,
         amplitude: f32,
         width: f32,
+        region: RegionId,
     ) -> Result<(), String> {
         let handles = self
             .buffers
@@ -438,6 +441,7 @@ impl WaveGpuRequest {
                 width * width,
                 amplitude,
             ),
+            region: gpu_region_pair(region, RegionId(0)),
         };
         if !pulse.position_width_amplitude.is_finite() || width <= 0.0 {
             return Err("Pulse parameters must be finite with positive width".into());
@@ -484,13 +488,15 @@ fn create_buffers(
         .iter()
         .zip(damping)
         .zip(operator.auxiliary_active())
-        .map(|((point, damping), auxiliary_active)| GpuNode {
+        .zip(node_regions(mesh, operator)?)
+        .map(|(((point, damping), auxiliary_active), regions)| GpuNode {
             position_damping: Vec4::new(
                 point.x as f32,
                 point.y as f32,
                 damping,
                 if *auxiliary_active { 1.0 } else { 0.0 },
             ),
+            regions: gpu_region_pair(regions[0], regions[1]),
         })
         .collect();
     if nodes
@@ -509,6 +515,7 @@ fn create_buffers(
     };
     let pulse = GpuPulse {
         position_width_amplitude: Vec4::new(0.0, 0.0, 0.06_f32.powi(2), 0.65),
+        region: gpu_region_pair(femfun_core::BACKGROUND_REGION, RegionId(0)),
     };
     Ok((
         WaveBufferHandles {
@@ -542,7 +549,43 @@ fn gpu_source(source: SourceSettings) -> GpuSource {
             0.0,
             0.0,
         ),
+        region: gpu_region_pair(source.region, RegionId(0)),
     }
+}
+
+fn node_regions(
+    mesh: &TriMesh,
+    operator: &QuadraticWaveOperator,
+) -> Result<Vec<[RegionId; 2]>, String> {
+    let mut regions = vec![[RegionId(0); 2]; operator.degrees_of_freedom()];
+    for (triangle, nodes) in mesh.triangles.iter().zip(operator.element_nodes()) {
+        for node in nodes {
+            let assigned = &mut regions[*node as usize];
+            if assigned.contains(&triangle.region) {
+                continue;
+            }
+            if assigned[0].0 == 0 {
+                assigned[0] = triangle.region;
+            } else if assigned[1].0 == 0 {
+                assigned[1] = triangle.region;
+            } else {
+                return Err("A wave node belongs to more than two material regions".into());
+            }
+        }
+    }
+    if regions.iter().any(|regions| regions[0].0 == 0) {
+        return Err("A wave node does not belong to a material region".into());
+    }
+    Ok(regions)
+}
+
+fn gpu_region_pair(first: RegionId, second: RegionId) -> UVec4 {
+    UVec4::new(
+        first.0 as u32,
+        (first.0 >> 32) as u32,
+        second.0 as u32,
+        (second.0 >> 32) as u32,
+    )
 }
 
 #[derive(Resource, Default)]
@@ -572,16 +615,19 @@ struct GpuParameters {
 struct GpuSource {
     position_width_amplitude: Vec4,
     frequency_enabled: Vec4,
+    region: UVec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuPulse {
     position_width_amplitude: Vec4,
+    region: UVec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuNode {
     position_damping: Vec4,
+    regions: UVec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -1081,6 +1127,7 @@ mod tests {
             amplitude: 7.0,
             width: 0.04,
             frequency_hz: 2.5,
+            region: femfun_core::BACKGROUND_REGION,
         });
         assert_eq!(source.position_width_amplitude.x, 0.2);
         assert_eq!(source.position_width_amplitude.y, -0.3);

@@ -30,6 +30,32 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
   cooldown in a later adaptation pass.
 
+## 2026-09-09 — Wall-isolated excitation and transfer
+
+- User testing found apparent energy leakage into retained subdomains enclosed by
+  two-sided walls. The assembled wall operator was already block-disconnected;
+  the leak came from pulse and continuous-source Gaussians being applied by
+  Euclidean distance to every node on both sides.
+- GPU nodes now carry up to two exact 64-bit region IDs. Pulse and continuous
+  sources carry their containing region and excite matching nodes only. Shared
+  interface nodes retain membership in both regions, so transmitting interfaces
+  do not become artificial source barriers.
+- Geometry transfer now computes connected components of regions joined by
+  material interfaces and prevents interpolation across walls for every target
+  DOF. Newly created or exposed wall-separated areas initialize independently.
+- Added an f64 evolution regression with field one outside and zero inside a wall;
+  both disconnected Neumann domains remain constant for 100 steps. The existing
+  coincident-trace transfer test now checks every P2e node rather than trace nodes
+  alone.
+- Final verification passes formatting, Clippy with warnings denied, all **85
+  tests**, native release compilation, and a release WASM/Trunk build. The native
+  Apple M1 Max / Metal GPU regression excites only the exterior of a centered
+  two-sided wall and measures an interior peak of exactly `0.0`; its GPU/CPU
+  relative L2 error is `1.35e-6` after the scripted evolution.
+- The native transfer regression also passes after the component restriction:
+  geometry-transfer current-state relative L2 error is `7.49e-16`; boundary and
+  material transactions report zero current-state error.
+
 ## 2026-09-09 — Interior regions and assigned materials
 
 - Added stable region and material IDs plus explicit Hole, Material interface,

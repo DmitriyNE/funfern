@@ -30,10 +30,12 @@ fn main() {
     }
     #[cfg(not(target_arch = "wasm32"))]
     if std::env::args().any(|arg| arg == "--wave-gpu-check") {
-        app.init_resource::<ui::WaveGpuBenchmark>().add_systems(
-            EguiPrimaryContextPass,
-            ui::wave_gpu_benchmark.after(ui::frame),
-        );
+        app.insert_resource(ui::wave_gpu_check_scene())
+            .init_resource::<ui::WaveGpuBenchmark>()
+            .add_systems(
+                EguiPrimaryContextPass,
+                ui::wave_gpu_benchmark.after(ui::frame),
+            );
     }
     #[cfg(not(target_arch = "wasm32"))]
     if std::env::args().any(|arg| arg == "--wave-transfer-check") {

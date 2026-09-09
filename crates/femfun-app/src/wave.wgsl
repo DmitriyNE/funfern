@@ -6,14 +6,17 @@ struct Parameters {
 struct Source {
     position_width_amplitude: vec4<f32>,
     frequency_enabled: vec4<f32>,
+    region: vec4<u32>,
 }
 
 struct Pulse {
     position_width_amplitude: vec4<f32>,
+    region: vec4<u32>,
 }
 
 struct NodeData {
     position_damping: vec4<f32>,
+    regions: vec4<u32>,
 }
 
 struct MatrixEntry {
@@ -33,6 +36,13 @@ struct State {
 @group(0) @binding(5) var<storage, read> matrix_over_mass: array<MatrixEntry>;
 @group(0) @binding(6) var<storage, read> nodes: array<NodeData>;
 @group(0) @binding(7) var<storage, read_write> states: array<State>;
+
+fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
+    let first = node.x == region.x && node.y == region.y;
+    let second = (node.z != 0u || node.w != 0u)
+        && node.z == region.x && node.w == region.y;
+    return select(0.0, 1.0, first || second);
+}
 
 @compute @workgroup_size(128)
 fn step(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -59,6 +69,7 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     let delta = nodes[i].position_damping.xy - source.position_width_amplitude.xy;
     let gaussian = exp(-0.5 * dot(delta, delta) / source.position_width_amplitude.z);
     let acceleration = source.frequency_enabled.y
+        * region_match(nodes[i].regions, source.region)
         * source.position_width_amplitude.w
         * gaussian
         * sin(source.frequency_enabled.x * parameters.time_data.z);
@@ -104,6 +115,7 @@ fn inject(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let delta = nodes[i].position_damping.xy - pulse.position_width_amplitude.xy;
     let addition = pulse.position_width_amplitude.w
+        * region_match(nodes[i].regions, pulse.region)
         * exp(-0.5 * dot(delta, delta) / pulse.position_width_amplitude.z);
     states[i].levels.x += addition;
     states[i].levels.y += addition;

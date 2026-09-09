@@ -57,6 +57,7 @@ struct SimulationCandidate {
     resume_running: bool,
     simulation_time: f64,
     exposed_nodes: usize,
+    source_region: RegionId,
 }
 #[derive(Resource)]
 pub struct Playground {
@@ -295,17 +296,7 @@ impl Playground {
     fn region_at(&self, point: Point2) -> RegionId {
         self.mesh
             .as_ref()
-            .and_then(|mesh| {
-                mesh.triangles.iter().find_map(|triangle| {
-                    let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
-                    let orientation = (b - a).cross(c - a);
-                    let inside = orientation > 0.0
-                        && (b - a).cross(point - a) >= -1.0e-12
-                        && (c - b).cross(point - b) >= -1.0e-12
-                        && (a - c).cross(point - c) >= -1.0e-12;
-                    inside.then_some(triangle.region)
-                })
-            })
+            .and_then(|mesh| mesh_region_at(mesh, point))
             .unwrap_or(BACKGROUND_REGION)
     }
     fn update_files(&mut self) {
@@ -471,6 +462,11 @@ impl Playground {
                                         });
                                     let time_step = operator.recommended_time_step();
                                     self.simulation_candidate = Some(SimulationCandidate {
+                                        source_region: mesh_region_at(
+                                            &mesh,
+                                            self.wave_source.position,
+                                        )
+                                        .unwrap_or(RegionId(0)),
                                         mesh,
                                         scene: self.mesh_source.clone(),
                                         max_edge: self.mesh_source_max_edge,
@@ -517,6 +513,8 @@ impl Playground {
                         Ok(transfer) => {
                             let time_step = operator.recommended_time_step();
                             self.simulation_candidate = Some(SimulationCandidate {
+                                source_region: mesh_region_at(mesh, self.wave_source.position)
+                                    .unwrap_or(RegionId(0)),
                                 mesh: mesh.clone(),
                                 scene: self.editor.document.accepted.clone(),
                                 max_edge: self.mesh_committed_max_edge,
@@ -593,6 +591,8 @@ impl Playground {
             // previously requested step before changing buffer generations.
             self.wave_running = false;
             if request.caught_up() {
+                let mut target_source = self.wave_source;
+                target_source.region = candidate.source_region;
                 candidate.simulation_time = self.wave_time_offset
                     + request.stats().completed_steps() as f64 * self.wave_time_step;
                 let replacement = if let (Some(source_mesh), Some(source_operator), Some(map)) =
@@ -607,7 +607,7 @@ impl Playground {
                             target_mesh: &candidate.mesh,
                             target_operator: &candidate.operator,
                             target_time_step: candidate.time_step,
-                            source: self.wave_source,
+                            source: target_source,
                             map,
                         },
                     )
@@ -618,7 +618,7 @@ impl Playground {
                         &candidate.mesh,
                         &candidate.operator,
                         candidate.time_step,
-                        self.wave_source,
+                        target_source,
                     )
                 };
                 match replacement {
@@ -676,6 +676,7 @@ impl Playground {
             self.wave_energy = None;
             self.wave_energy_step = u64::MAX;
             self.wave_source_dirty = false;
+            self.wave_source.region = candidate.source_region;
             self.wave_running = candidate.resume_running;
             self.mesh_build_ms = self
                 .mesh_started
@@ -709,7 +710,12 @@ impl Playground {
         if self.simulation_candidate.is_none()
             && let Some(position) = self.wave_pending_pulse.take()
         {
-            match request.inject_pulse(assets, position, 0.65, 0.06) {
+            let region = self
+                .wave_mesh
+                .as_ref()
+                .and_then(|mesh| mesh_region_at(mesh, position))
+                .unwrap_or(RegionId(0));
+            match request.inject_pulse(assets, position, 0.65, 0.06, region) {
                 Ok(()) => {
                     // Commit one level after injection so the readback marker
                     // and energy identify the pulse even while paused.
@@ -809,7 +815,7 @@ impl Playground {
             .selected_text(match self.creation_role {
                 CreationRole::Hole => "Hole",
                 CreationRole::MaterialInterface => "Material interface",
-                CreationRole::Wall => "Closed wall",
+                CreationRole::Wall => "Two-sided wall",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.creation_role, CreationRole::Hole, "Hole");
@@ -818,7 +824,11 @@ impl Playground {
                     CreationRole::MaterialInterface,
                     "Material interface",
                 );
-                ui.selectable_value(&mut self.creation_role, CreationRole::Wall, "Closed wall");
+                ui.selectable_value(
+                    &mut self.creation_role,
+                    CreationRole::Wall,
+                    "Two-sided wall",
+                );
             });
         if self.creation_role != CreationRole::Hole {
             let materials = self.editor.document.draft.materials.clone();
@@ -1513,6 +1523,11 @@ impl Playground {
                         }
                         Mode::Source => {
                             self.wave_source.position = self.world(p, r);
+                            self.wave_source.region = self
+                                .wave_mesh
+                                .as_ref()
+                                .and_then(|mesh| mesh_region_at(mesh, self.wave_source.position))
+                                .unwrap_or(RegionId(0));
                             self.wave_source_dirty = true;
                             self.mode = Mode::Select;
                         }
@@ -1849,6 +1864,18 @@ fn field_color(value: f32, gain: f32) -> Color32 {
     )
 }
 
+fn mesh_region_at(mesh: &TriMesh, point: Point2) -> Option<RegionId> {
+    mesh.triangles.iter().find_map(|triangle| {
+        let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
+        let orientation = (b - a).cross(c - a);
+        let inside = orientation > 0.0
+            && (b - a).cross(point - a) >= -1.0e-12
+            && (c - b).cross(point - b) >= -1.0e-12
+            && (a - c).cross(point - c) >= -1.0e-12;
+        inside.then_some(triangle.region)
+    })
+}
+
 pub fn frame(
     mut contexts: EguiContexts,
     mut state: ResMut<Playground>,
@@ -1935,6 +1962,52 @@ pub fn mesh_benchmark_scene() -> Playground {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub fn wave_gpu_check_scene() -> Playground {
+    let mut state = Playground {
+        automated_benchmark: true,
+        ..Default::default()
+    };
+    let scene = Scene {
+        obstacles: vec![Obstacle {
+            id: ObstacleId(1),
+            spline: PeriodicCubicSpline::rounded(Point2::default(), 0.30),
+            role: LoopRole::Wall {
+                exterior: BACKGROUND_REGION,
+                interior: RegionId(2),
+            },
+        }],
+        materials: vec![
+            Material::default_medium(),
+            Material {
+                id: MaterialId(2),
+                name: "Isolated interior".into(),
+                mass_density: 1.0,
+                stiffness: 1.0,
+                damping: 0.0,
+                color: [77, 121, 164],
+            },
+        ],
+        regions: vec![
+            Region {
+                id: BACKGROUND_REGION,
+                material: DEFAULT_MATERIAL,
+            },
+            Region {
+                id: RegionId(2),
+                material: MaterialId(2),
+            },
+        ],
+    };
+    state
+        .editor
+        .replace_validated(femfun_app::editor::Document {
+            draft: scene.clone(),
+            accepted: scene,
+        });
+    state
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource)]
 pub struct WaveGpuBenchmark {
     started: Instant,
@@ -1943,6 +2016,7 @@ pub struct WaveGpuBenchmark {
     expected_current: Vec<f64>,
     expected_previous: Vec<f64>,
     expected_auxiliary: Vec<f64>,
+    exterior_nodes: Vec<bool>,
     prepared: bool,
 }
 
@@ -1956,6 +2030,7 @@ impl Default for WaveGpuBenchmark {
             expected_current: Vec::new(),
             expected_previous: Vec::new(),
             expected_auxiliary: Vec::new(),
+            exterior_nodes: Vec::new(),
             prepared: false,
         }
     }
@@ -1990,22 +2065,40 @@ pub fn wave_gpu_benchmark(
         let Some(operator) = &state.wave_operator else {
             return;
         };
+        let Some(mesh) = &state.wave_mesh else {
+            return;
+        };
         let position = Point2::new(-0.42, 0.11);
         let amplitude = 0.65_f32;
         let width = 0.06_f32;
-        if let Err(error) = request.inject_pulse(&mut assets, position, amplitude, width) {
+        if let Err(error) =
+            request.inject_pulse(&mut assets, position, amplitude, width, BACKGROUND_REGION)
+        {
             error!("Wave GPU pulse setup failed: {error}");
             exit.write(bevy::app::AppExit::error());
             return;
         }
         let mut cpu = QuadraticWaveState::zero(operator, state.wave_time_step).unwrap();
+        benchmark.exterior_nodes = vec![false; operator.degrees_of_freedom()];
+        for (triangle, nodes) in mesh.triangles.iter().zip(operator.element_nodes()) {
+            if triangle.region == BACKGROUND_REGION {
+                for node in nodes {
+                    benchmark.exterior_nodes[*node as usize] = true;
+                }
+            }
+        }
         let pulse: Vec<_> = operator
             .node_points()
             .iter()
-            .map(|point| {
+            .zip(&benchmark.exterior_nodes)
+            .map(|(point, exterior)| {
                 let dx = point.x as f32 - position.x as f32;
                 let dy = point.y as f32 - position.y as f32;
-                (amplitude * (-0.5 * (dx * dx + dy * dy) / (width * width)).exp()) as f64
+                if *exterior {
+                    (amplitude * (-0.5 * (dx * dx + dy * dy) / (width * width)).exp()) as f64
+                } else {
+                    0.0
+                }
             })
             .collect();
         cpu.add_displacement(&pulse).unwrap();
@@ -2064,6 +2157,13 @@ pub fn wave_gpu_benchmark(
         .iter()
         .map(|value| value.abs())
         .fold(0.0_f64, f64::max);
+    let isolated_peak = display
+        .current
+        .iter()
+        .zip(&benchmark.exterior_nodes)
+        .filter(|(_, exterior)| !**exterior)
+        .map(|(value, _)| value.abs())
+        .fold(0.0_f32, f32::max);
     let solve_seconds = benchmark
         .solve_started
         .map_or(0.0, |start| start.elapsed().as_secs_f64());
@@ -2073,12 +2173,17 @@ pub fn wave_gpu_benchmark(
         auxiliary_relative_l2 = auxiliary_error,
         actual_peak,
         expected_peak,
+        isolated_peak,
         elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
         solve_readback_ms = solve_seconds * 1000.0,
         simulated_seconds_per_wall_second = 128.0 * state.wave_time_step / solve_seconds,
         "Wave GPU check complete"
     );
-    if current_error <= 2.0e-4 && previous_error <= 2.0e-4 && auxiliary_error <= 2.0e-4 {
+    if current_error <= 2.0e-4
+        && previous_error <= 2.0e-4
+        && auxiliary_error <= 2.0e-4
+        && isolated_peak <= 1.0e-7
+    {
         exit.write(bevy::app::AppExit::Success);
     } else {
         error!("Wave GPU result differs from the CPU reference");
@@ -2154,9 +2259,13 @@ pub fn wave_transfer_benchmark(
                 return;
             }
             state.wave_source.enabled = false;
-            if let Err(error) =
-                request.inject_pulse(&mut assets, Point2::new(-0.82, 0.11), 0.65, 0.06)
-            {
+            if let Err(error) = request.inject_pulse(
+                &mut assets,
+                Point2::new(-0.82, 0.11),
+                0.65,
+                0.06,
+                BACKGROUND_REGION,
+            ) {
                 error!("Wave transfer pulse setup failed: {error}");
                 exit.write(bevy::app::AppExit::error());
                 return;

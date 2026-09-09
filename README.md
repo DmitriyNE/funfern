@@ -58,7 +58,7 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
 - **Select:** left-click a handle or curve; drag handles to reshape. Double-click
   a curve to insert a knot without changing its shape. Clicking near an existing
   knot selects its associated control instead of adding a repeated knot.
-- **Loop role:** choose Hole, Material interface, or Closed wall before creating.
+- **Loop role:** choose Hole, Material interface, or Two-sided wall before creating.
   An interface retains its interior and shares its finite-element trace with the
   exterior. A wall retains its interior with two independent, coincident traces.
   Nested loops inherit the region under the creation point.
@@ -107,6 +107,8 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   Gaussian displacement with zero initial velocity. Move source positions the
   optional continuous sinusoidal source. Simulation speed is bounded to 16
   substeps per display frame. Field colors use an adjustable symmetric gain.
+  Pulses and continuous sources act only in their containing wall-separated
+  region; their Gaussian support can pass through transmitting material interfaces.
   The panel reports DOFs, GPU buffer size, operator-derived timestep, simulated
   time, substeps, throughput, operator/map preparation time, and discrete energy.
 - **Outer boundary:** choose Reflecting, First-order outgoing, or Second-order

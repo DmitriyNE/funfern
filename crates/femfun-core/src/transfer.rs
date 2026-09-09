@@ -43,20 +43,21 @@ impl TransferMap {
     /// Locates every target vertex in the source triangulation. Vertices outside
     /// the old domain are deliberately left unmapped and initialize to zero.
     pub fn build(source: &TriMesh, target: &TriMesh) -> Result<Self, TransferError> {
-        Self::build_restricted(source, target, &vec![None; target.vertices.len()])
+        Self::build_restricted(source, target, &vec![None; target.vertices.len()], None)
     }
 
     fn build_restricted(
         source: &TriMesh,
         target: &TriMesh,
-        target_regions: &[Option<crate::RegionId>],
+        target_groups: &[Option<crate::RegionId>],
+        region_groups: Option<&std::collections::BTreeMap<crate::RegionId, crate::RegionId>>,
     ) -> Result<Self, TransferError> {
         if source.triangles.is_empty() {
             return Err(TransferError::EmptySource);
         }
         validate_mesh(source, true)?;
         validate_mesh(target, false)?;
-        if target_regions.len() != target.vertices.len() {
+        if target_groups.len() != target.vertices.len() {
             return Err(TransferError::InvalidTarget);
         }
 
@@ -98,7 +99,7 @@ impl TransferMap {
         }
 
         let mut samples = Vec::with_capacity(target.vertices.len());
-        for (vertex, target_region) in target.vertices.iter().zip(target_regions) {
+        for (vertex, target_group) in target.vertices.iter().zip(target_groups) {
             let point = vertex.point;
             if point.x < minimum.x
                 || point.x > maximum.x
@@ -112,8 +113,14 @@ impl TransferMap {
             let mut found = None;
             for &triangle_index in &bins[y * dimension + x] {
                 let triangle = source.triangles[triangle_index as usize];
-                if target_region.is_some_and(|region| triangle.region != region) {
-                    continue;
+                if let Some(target_group) = target_group {
+                    let source_group = region_groups
+                        .and_then(|groups| groups.get(&triangle.region))
+                        .copied()
+                        .unwrap_or(triangle.region);
+                    if source_group != *target_group {
+                        continue;
+                    }
                 }
                 let points = triangle.vertices.map(|i| source.vertices[i].point);
                 if let Some(weights) = barycentric(point, points) {
@@ -264,49 +271,30 @@ impl QuadraticTransferMap {
                 boundary: None,
             })
             .collect();
-        let mut target_regions = vec![None; target_operator.degrees_of_freedom()];
-        let mut edge_nodes = std::collections::BTreeMap::new();
+        let region_groups = region_components(target_mesh)?;
+        let mut target_groups = vec![None; target_operator.degrees_of_freedom()];
         for (triangle, nodes) in target_mesh
             .triangles
             .iter()
             .zip(target_operator.element_nodes())
         {
-            for ([a, b], midpoint) in [
-                ([triangle.vertices[0], triangle.vertices[1]], nodes[3]),
-                ([triangle.vertices[1], triangle.vertices[2]], nodes[4]),
-                ([triangle.vertices[2], triangle.vertices[0]], nodes[5]),
-            ] {
-                edge_nodes.insert(edge_key(a, b), midpoint as usize);
-            }
-        }
-        for boundary in &target_mesh.boundary_edges {
-            if !matches!(boundary.label, crate::BoundaryLabel::Wall { .. }) {
-                continue;
-            }
-            let adjacent = target_mesh
-                .triangles
-                .iter()
-                .filter(|triangle| {
-                    triangle.vertices.contains(&boundary.vertices[0])
-                        && triangle.vertices.contains(&boundary.vertices[1])
-                })
-                .collect::<Vec<_>>();
-            if adjacent.len() != 1 {
-                return Err(TransferError::InvalidTarget);
-            }
-            let region = adjacent[0].region;
-            let midpoint = *edge_nodes
-                .get(&edge_key(boundary.vertices[0], boundary.vertices[1]))
+            let group = *region_groups
+                .get(&triangle.region)
                 .ok_or(TransferError::InvalidTarget)?;
-            for node in [boundary.vertices[0], boundary.vertices[1], midpoint] {
-                if target_regions[node].is_some_and(|assigned| assigned != region) {
+            for node in nodes {
+                let assigned = &mut target_groups[*node as usize];
+                if assigned.is_some_and(|assigned| assigned != group) {
                     return Err(TransferError::InvalidTarget);
                 }
-                target_regions[node] = Some(region);
+                *assigned = Some(group);
             }
         }
-        let located =
-            TransferMap::build_restricted(source_mesh, &expanded_target, &target_regions)?;
+        let located = TransferMap::build_restricted(
+            source_mesh,
+            &expanded_target,
+            &target_groups,
+            Some(&region_groups),
+        )?;
 
         let elements = source_mesh
             .triangles
@@ -510,8 +498,41 @@ fn bin_index(point: Point2, minimum: Point2, cell: Point2, dimension: usize) -> 
     ]
 }
 
-fn edge_key(a: usize, b: usize) -> (usize, usize) {
-    if a < b { (a, b) } else { (b, a) }
+fn region_components(
+    mesh: &TriMesh,
+) -> Result<std::collections::BTreeMap<crate::RegionId, crate::RegionId>, TransferError> {
+    let mut groups = mesh
+        .triangles
+        .iter()
+        .map(|triangle| (triangle.region, triangle.region))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for boundary in &mesh.boundary_edges {
+        if !matches!(boundary.label, crate::BoundaryLabel::MaterialInterface(_)) {
+            continue;
+        }
+        let adjacent = mesh
+            .triangles
+            .iter()
+            .filter(|triangle| {
+                triangle.vertices.contains(&boundary.vertices[0])
+                    && triangle.vertices.contains(&boundary.vertices[1])
+            })
+            .map(|triangle| triangle.region)
+            .collect::<Vec<_>>();
+        if adjacent.len() != 2 {
+            return Err(TransferError::InvalidTarget);
+        }
+        let a = groups[&adjacent[0]];
+        let b = groups[&adjacent[1]];
+        let keep = a.min(b);
+        let replace = a.max(b);
+        for group in groups.values_mut() {
+            if *group == replace {
+                *group = keep;
+            }
+        }
+    }
+    Ok(groups)
 }
 
 fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
@@ -732,13 +753,11 @@ mod tests {
             values[node as usize] = 9.0;
         }
         let transferred = map.interpolate(&values, -1.0).unwrap();
-        for local in [0, 1, 3] {
-            let node = target_operator.element_nodes()[0][local];
-            assert_eq!(transferred[node as usize], 1.0);
+        for node in target_operator.element_nodes()[0] {
+            assert!((transferred[node as usize] - 1.0).abs() < 1.0e-12);
         }
-        for local in [0, 1, 3] {
-            let node = target_operator.element_nodes()[1][local];
-            assert_eq!(transferred[node as usize], 9.0);
+        for node in target_operator.element_nodes()[1] {
+            assert!((transferred[node as usize] - 9.0).abs() < 1.0e-12);
         }
     }
 

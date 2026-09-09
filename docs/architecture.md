@@ -390,6 +390,12 @@ obstacle. Nodes newly exposed by a shrinking or moved obstacle start with zero
 displacement and velocity. Mild local smoothing is a possible response to
 edit-induced bursts, not a substitute for stable stepping.
 
+Transfer also respects topological connectivity. Regions joined through material
+interfaces form one transferable component, while a two-sided wall separates its
+components even where old and new domains overlap geometrically. Pulse and
+continuous-source Gaussians use the same region membership: interface nodes can
+belong to both adjacent regions, but wall traces and interiors remain isolated.
+
 The hard zero policy is intentionally temporary. When newly exposed nodes meet a
 nonzero retained field, it creates a steep artificial front and injects broadband
 wave content. A future commit pass should construct a narrow transition band around
