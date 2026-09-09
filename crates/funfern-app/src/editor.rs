@@ -1,4 +1,11 @@
 use funfern_core::*;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeometryControl {
+    Loop(ObstacleId, usize),
+    Baffle(InternalBoundaryId, usize),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Document {
     pub draft: Scene,
@@ -50,6 +57,67 @@ impl Default for Editor {
     }
 }
 impl Editor {
+    pub fn control_point(&self, control: GeometryControl) -> Option<Point2> {
+        match control {
+            GeometryControl::Loop(id, index) => self
+                .obstacle(id)
+                .and_then(|obstacle| obstacle.spline.controls().get(index))
+                .copied(),
+            GeometryControl::Baffle(id, index) => self
+                .internal_boundary(id)
+                .and_then(|boundary| boundary.spline.controls().get(index))
+                .copied(),
+        }
+    }
+
+    /// Updates any mixture of loop and baffle controls as one document revision.
+    /// The caller owns the surrounding history transaction.
+    pub fn set_control_points(
+        &mut self,
+        points: &[(GeometryControl, Point2)],
+    ) -> Result<(), String> {
+        if points.iter().any(|(_, point)| !point.finite()) {
+            return Err("Control coordinates must be finite".into());
+        }
+        for (control, _) in points {
+            if self.control_point(*control).is_none() {
+                return Err("Missing selected control".into());
+            }
+        }
+        let changed = points
+            .iter()
+            .any(|(control, point)| self.control_point(*control) != Some(*point));
+        if !changed {
+            return Ok(());
+        }
+        for (control, point) in points {
+            match *control {
+                GeometryControl::Loop(id, index) => self
+                    .document
+                    .draft
+                    .obstacles
+                    .iter_mut()
+                    .find(|obstacle| obstacle.id == id)
+                    .unwrap()
+                    .spline
+                    .set_control(index, *point)
+                    .map_err(|error| error.to_string())?,
+                GeometryControl::Baffle(id, index) => self
+                    .document
+                    .draft
+                    .internal_boundaries
+                    .iter_mut()
+                    .find(|boundary| boundary.id == id)
+                    .unwrap()
+                    .spline
+                    .set_control(index, *point)
+                    .map_err(|error| error.to_string())?,
+            }
+        }
+        self.changed();
+        Ok(())
+    }
+
     pub fn set_outer_boundary_condition(
         &mut self,
         side: OuterSide,
@@ -228,6 +296,81 @@ impl Editor {
             .retain(|boundary| boundary.id != id);
         self.changed();
         self.commit();
+    }
+
+    pub fn duplicate_internal_boundary(
+        &mut self,
+        id: InternalBoundaryId,
+        offset: Point2,
+    ) -> Result<InternalBoundaryId, String> {
+        if self.document.draft.obstacles.len() + self.document.draft.internal_boundaries.len()
+            >= MAX_OBSTACLES
+        {
+            return Err("Maximum 32 geometric features".into());
+        }
+        let source = self
+            .internal_boundary(id)
+            .cloned()
+            .ok_or("Missing internal boundary")?;
+        let controls = source
+            .spline
+            .controls()
+            .iter()
+            .map(|point| *point + offset)
+            .collect();
+        let spline = OpenCubicSpline::new(controls, source.spline.intervals().to_vec())
+            .map_err(|error| error.to_string())?;
+        let new_id = InternalBoundaryId(self.next_internal_boundary_id);
+        self.next_internal_boundary_id = self
+            .next_internal_boundary_id
+            .checked_add(1)
+            .ok_or("Internal-boundary IDs exhausted")?;
+        self.begin();
+        self.document
+            .draft
+            .internal_boundaries
+            .push(InternalBoundary {
+                id: new_id,
+                spline,
+                region: source.region,
+                span_laws: source.span_laws,
+            });
+        self.changed();
+        self.commit();
+        Ok(new_id)
+    }
+
+    pub fn straighten_internal_boundary(&mut self, id: InternalBoundaryId) -> Result<(), String> {
+        let boundary = self
+            .internal_boundary(id)
+            .ok_or("Missing internal boundary")?;
+        let count = boundary.spline.controls().len();
+        let start = boundary.spline.controls()[0];
+        let end = boundary.spline.controls()[count - 1];
+        if (end - start).norm() <= f64::EPSILON {
+            return Err("A straight baffle needs distinct endpoints".into());
+        }
+        let spline = OpenCubicSpline::new(
+            (0..count)
+                .map(|index| start.lerp(end, index as f64 / (count - 1) as f64))
+                .collect(),
+            boundary.spline.intervals().to_vec(),
+        )
+        .map_err(|error| error.to_string())?;
+        if spline == boundary.spline {
+            return Ok(());
+        }
+        self.begin();
+        self.document
+            .draft
+            .internal_boundaries
+            .iter_mut()
+            .find(|boundary| boundary.id == id)
+            .unwrap()
+            .spline = spline;
+        self.changed();
+        self.commit();
+        Ok(())
     }
 
     pub fn insert_internal_boundary(
@@ -492,6 +635,75 @@ impl Editor {
         }
         self.changed();
         self.commit();
+    }
+
+    pub fn duplicate_obstacle(
+        &mut self,
+        id: ObstacleId,
+        offset: Point2,
+    ) -> Result<ObstacleId, String> {
+        if self.document.draft.obstacles.len() + self.document.draft.internal_boundaries.len()
+            >= MAX_OBSTACLES
+        {
+            return Err("Maximum 32 geometric features".into());
+        }
+        let source = self.obstacle(id).cloned().ok_or("Missing obstacle")?;
+        let spline = PeriodicCubicSpline::new(
+            source
+                .spline
+                .controls()
+                .iter()
+                .map(|point| *point + offset)
+                .collect(),
+            source.spline.intervals().to_vec(),
+        )
+        .map_err(|error| error.to_string())?;
+        let new_id = ObstacleId(self.next_obstacle_id);
+        self.next_obstacle_id = self
+            .next_obstacle_id
+            .checked_add(1)
+            .ok_or("Obstacle IDs exhausted")?;
+        let role = if let Some(interior) = source.role.interior() {
+            let old_region = self
+                .document
+                .draft
+                .region(interior)
+                .cloned()
+                .ok_or("Loop references a missing interior region")?;
+            let new_region = RegionId(self.next_region_id);
+            self.next_region_id = self
+                .next_region_id
+                .checked_add(1)
+                .ok_or("Region IDs exhausted")?;
+            self.begin();
+            self.document.draft.regions.push(Region {
+                id: new_region,
+                material: old_region.material,
+            });
+            match source.role {
+                LoopRole::MaterialInterface { exterior, .. } => LoopRole::MaterialInterface {
+                    exterior,
+                    interior: new_region,
+                },
+                LoopRole::Wall { exterior, .. } => LoopRole::Wall {
+                    exterior,
+                    interior: new_region,
+                },
+                LoopRole::Hole { .. } => unreachable!(),
+            }
+        } else {
+            self.begin();
+            source.role
+        };
+        self.document.draft.obstacles.push(Obstacle {
+            id: new_id,
+            spline,
+            role,
+            span_conditions: source.span_conditions,
+        });
+        self.changed();
+        self.commit();
+        Ok(new_id)
     }
 
     pub fn add_material(&mut self) -> Result<MaterialId, String> {

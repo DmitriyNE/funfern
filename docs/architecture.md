@@ -147,6 +147,13 @@ excludes selection and navigation. Stable obstacle IDs increase independently of
 undo, preventing reuse after undoing creation. Loading derives the next ID from
 both scenes and clears history.
 
+Selection may address one whole curve or a transient set of controls across loops
+and baffles. Group drags and numeric affine transforms write all selected controls
+through one editor revision and one history transaction. Duplication creates new
+stable geometry IDs, copies knot intervals and span laws, and gives duplicated
+material-interface or wall loops their own interior region with the same material.
+Selection, transform inputs, snapping preferences, and pivots remain transient.
+
 Version 7 JSON stores the fixed domain, loop roles, all assigned boundary laws,
 materials, regions, controls, intervals, and both scenes. Versions 2–6 remain
 compatible; version 1 loads by assigning its loops the background hole role and

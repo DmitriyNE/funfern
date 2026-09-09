@@ -257,6 +257,12 @@ junction, transaction, and long-time stability checks.
 
 ## 9. Product spline editing
 
+The first transform slice is implemented: Shift-based multi-control selection,
+whole-curve dragging, numeric translate/rotate/scale, snapping and alignment,
+duplication with span assignments, and exact straightening of open baffles. The
+second slice must extend the spline representation for explicit corners and
+continuity before adding split/merge topology operations.
+
 - Add multi-selection and translate/rotate/scale operations for controls and whole
   loops, plus duplication and practical snapping/alignment tools.
 - Expose knot-interval and seam editing without conflating control positions with

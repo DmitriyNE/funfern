@@ -16,9 +16,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   spring is conservative.
 - [ ] Replace the temporary wave reset after open-baffle geometry edits with a
   side-aware transfer that preserves each moving trace without cross-wall sampling.
-- [ ] Expand product spline editing with multi-selection and transforms, direct
-  span selection, knot/seam controls, duplication, snapping, and safe topology
-  workflows. Rational weights remain conditional on a demonstrated workflow need.
+- [ ] Add stage-two spline topology editing: explicit corner/continuity controls,
+  repeated-knot and seam editing, and safe split/merge workflows. Box selection
+  and selection filters remain useful follow-ups for dense scenes. Rational
+  weights remain conditional on a demonstrated workflow need.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
   and local-repair cases. The user reports that the end-to-end handoff still feels
   slow even though the small scripted transfer case is much faster.
@@ -35,6 +36,25 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Improve open-baffle crack-tip element quality. The assigned-law native check
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
+
+## 2026-09-10 — Product spline transforms, duplication, and straight baffles
+
+- Added Shift-based control and whole-curve multi-selection. Dragging a selected
+  handle moves the complete selected set, while dragging a curve translates all
+  of its controls. Each gesture remains one document-history action.
+- Added a transform inspector with translation, rotation, uniform scale, grid
+  snapping, and axis alignment. It uses the selected controls' centroid as pivot
+  and can transform controls from loops and baffles together.
+- Added loop and baffle duplication with new stable IDs and copied intervals and
+  span assignments. Duplicated material-interface and wall loops receive a new
+  interior region carrying the source material.
+- Added **Straighten baffle**, which distributes all controls along the segment
+  between its endpoints and makes an exact straight cubic boundary. Explicit
+  corners and continuity, repeated knots, and split/merge remain the next spline
+  data-model stage.
+- Verification passes formatting, Clippy with warnings denied, all **117 workspace
+  tests**, native release compilation, and the release Trunk/WebGPU build. A
+  Playwright smoke check confirmed startup and rendering without console errors.
 
 ## 2026-09-10 — Driven and absorbing internal faces
 

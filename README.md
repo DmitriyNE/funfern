@@ -68,9 +68,14 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 ## Edit
 
 - **Select:** left-click a handle, curve, or outer domain edge; drag handles to
-  reshape. Double-click a curve to insert a knot without changing its shape.
-  Clicking near an existing knot selects its associated control instead of adding
-  a repeated knot.
+  reshape, or drag a curve to translate all of its controls. Shift-click handles
+  or curves to build a multi-control selection. Double-click a curve to insert a
+  knot without changing its shape. Clicking near an existing knot selects its
+  associated control instead of adding a repeated knot.
+- **Transform:** the selection inspector applies numeric translation, rotation,
+  uniform scale, grid snapping, and horizontal/vertical alignment as one undoable
+  action. Whole loops and baffles can be duplicated with their span assignments;
+  selected baffles can also be straightened between their endpoints.
 - **Boundaries:** clicking an outer edge, hole, or open baffle selects and highlights
   that boundary in the viewport. One Boundary inspector shows the conditions that
   apply to the selected target. Outer edges support reflecting, prescribed

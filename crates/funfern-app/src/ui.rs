@@ -10,7 +10,7 @@ use bevy_egui::{
     egui::{self, Color32, Pos2, Rect, Stroke},
 };
 use funfern_app::{
-    editor::{Acceptance, Editor},
+    editor::{Acceptance, Editor, GeometryControl},
     persistence::{self, LoadCandidate},
 };
 use funfern_core::*;
@@ -38,14 +38,8 @@ enum CreationRole {
     InternalBoundary,
 }
 struct Drag {
-    id: ObstacleId,
-    index: usize,
-    offset: Point2,
-}
-struct InternalDrag {
-    id: InternalBoundaryId,
-    index: usize,
-    offset: Point2,
+    anchor: Point2,
+    controls: Vec<(GeometryControl, Point2)>,
 }
 struct Curve {
     id: ObstacleId,
@@ -93,10 +87,15 @@ pub struct Playground {
     region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
     internal_selection: Option<(InternalBoundaryId, Option<usize>)>,
+    selected_controls: Vec<GeometryControl>,
     boundary_selection: Option<BoundarySelection>,
     custom: Vec<Point2>,
     drag: Option<Drag>,
-    internal_drag: Option<InternalDrag>,
+    transform_translation: Point2,
+    transform_rotation_degrees: f64,
+    transform_scale: f64,
+    snap_to_grid: bool,
+    snap_step: f64,
     panning: bool,
     center: Point2,
     scale: f64,
@@ -178,13 +177,18 @@ impl Default for Playground {
             region_selection: BACKGROUND_REGION,
             selection: Some((ObstacleId(1), None)),
             internal_selection: None,
+            selected_controls: vec![],
             boundary_selection: Some(BoundarySelection::Hole {
                 id: ObstacleId(1),
                 span: 0,
             }),
             custom: vec![],
             drag: None,
-            internal_drag: None,
+            transform_translation: Point2::default(),
+            transform_rotation_degrees: 0.0,
+            transform_scale: 1.0,
+            snap_to_grid: false,
+            snap_step: 0.05,
             panning: false,
             center: Point2::default(),
             scale: 300.0,
@@ -272,10 +276,10 @@ impl Playground {
     fn clear_transient(&mut self) {
         self.selection = None;
         self.internal_selection = None;
+        self.selected_controls.clear();
         self.boundary_selection = None;
         self.region_selection = BACKGROUND_REGION;
         self.drag = None;
-        self.internal_drag = None;
         self.panning = false;
         self.custom.clear();
         self.mode = Mode::Select;
@@ -292,6 +296,162 @@ impl Playground {
             }
         }
     }
+
+    fn active_controls(&self) -> Vec<GeometryControl> {
+        if !self.selected_controls.is_empty() {
+            return self.selected_controls.clone();
+        }
+        if let Some((id, index)) = self.selection {
+            return match index {
+                Some(index) => vec![GeometryControl::Loop(id, index)],
+                None => self
+                    .editor
+                    .obstacle(id)
+                    .map(|obstacle| {
+                        (0..obstacle.spline.controls().len())
+                            .map(|index| GeometryControl::Loop(id, index))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+        }
+        if let Some((id, index)) = self.internal_selection {
+            return match index {
+                Some(index) => vec![GeometryControl::Baffle(id, index)],
+                None => self
+                    .editor
+                    .internal_boundary(id)
+                    .map(|boundary| {
+                        (0..boundary.spline.controls().len())
+                            .map(|index| GeometryControl::Baffle(id, index))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            };
+        }
+        vec![]
+    }
+
+    fn select_control(&mut self, control: GeometryControl, additive: bool) {
+        if additive {
+            if let Some(index) = self
+                .selected_controls
+                .iter()
+                .position(|candidate| *candidate == control)
+            {
+                self.selected_controls.remove(index);
+                self.focus_control(self.selected_controls.last().copied());
+                return;
+            } else {
+                self.selected_controls.push(control);
+            }
+        } else {
+            self.selected_controls.clear();
+            self.selected_controls.push(control);
+        }
+        self.focus_control(Some(control));
+    }
+
+    fn focus_control(&mut self, control: Option<GeometryControl>) {
+        match control {
+            None => {
+                self.selection = None;
+                self.internal_selection = None;
+            }
+            Some(GeometryControl::Loop(id, index)) => {
+                self.selection = Some((id, Some(index)));
+                self.internal_selection = None;
+            }
+            Some(GeometryControl::Baffle(id, index)) => {
+                self.selection = None;
+                self.internal_selection = Some((id, Some(index)));
+            }
+        }
+    }
+
+    fn select_loop(&mut self, id: ObstacleId) {
+        self.selection = Some((id, None));
+        self.internal_selection = None;
+        self.selected_controls.clear();
+    }
+
+    fn select_baffle(&mut self, id: InternalBoundaryId) {
+        self.selection = None;
+        self.internal_selection = Some((id, None));
+        self.selected_controls.clear();
+    }
+
+    fn selected_control_points(&self) -> Vec<(GeometryControl, Point2)> {
+        self.active_controls()
+            .into_iter()
+            .filter_map(|control| {
+                self.editor
+                    .control_point(control)
+                    .map(|point| (control, point))
+            })
+            .collect()
+    }
+
+    fn selection_pivot(&self) -> Option<Point2> {
+        let points = self.selected_control_points();
+        (!points.is_empty()).then(|| {
+            points
+                .iter()
+                .fold(Point2::default(), |sum, (_, point)| sum + *point)
+                / points.len() as f64
+        })
+    }
+
+    fn snap_point(&self, point: Point2) -> Point2 {
+        if !self.snap_to_grid || !self.snap_step.is_finite() || self.snap_step <= 0.0 {
+            return point;
+        }
+        Point2::new(
+            (point.x / self.snap_step).round() * self.snap_step,
+            (point.y / self.snap_step).round() * self.snap_step,
+        )
+    }
+
+    fn apply_selection_transform(&mut self) {
+        let Some(pivot) = self.selection_pivot() else {
+            return;
+        };
+        if !self.transform_scale.is_finite()
+            || self.transform_scale <= 0.0
+            || !self.transform_rotation_degrees.is_finite()
+            || !self.transform_translation.finite()
+        {
+            self.message = "Transform values must be finite and scale must be positive".into();
+            return;
+        }
+        let angle = self.transform_rotation_degrees.to_radians();
+        let (sin, cos) = angle.sin_cos();
+        let updates = self
+            .selected_control_points()
+            .into_iter()
+            .map(|(control, point)| {
+                let relative = (point - pivot) * self.transform_scale;
+                let rotated = Point2::new(
+                    cos * relative.x - sin * relative.y,
+                    sin * relative.x + cos * relative.y,
+                );
+                (
+                    control,
+                    self.snap_point(pivot + rotated + self.transform_translation),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.editor.begin();
+        let result = self.editor.set_control_points(&updates);
+        if self.error(result).is_some() {
+            self.editor.commit();
+            self.transform_translation = Point2::default();
+            self.transform_rotation_degrees = 0.0;
+            self.transform_scale = 1.0;
+        } else {
+            self.editor.cancel();
+        }
+    }
     fn finish_custom(&mut self) {
         if self.custom.len() < 4 {
             self.message = "A cubic curve needs at least four control points".into();
@@ -305,6 +465,7 @@ impl Playground {
             if let Some(id) = self.error(result) {
                 self.selection = None;
                 self.internal_selection = Some((id, None));
+                self.selected_controls.clear();
                 self.boundary_selection = Some(BoundarySelection::Baffle {
                     id,
                     span: 0,
@@ -325,6 +486,7 @@ impl Playground {
         let result = self.create_spline(spline, center);
         if let Some(id) = self.error(result) {
             self.selection = Some((id, None));
+            self.selected_controls.clear();
             self.boundary_selection = (self.creation_role == CreationRole::Hole)
                 .then_some(BoundarySelection::Hole { id, span: 0 });
             self.custom.clear();
@@ -979,7 +1141,7 @@ impl Playground {
             }
         });
         ui.small(match self.mode {
-            Mode::Select => "Drag handles · double-click a curve to insert",
+            Mode::Select => "Drag curves or handles · Shift-click adds controls",
             Mode::Preset if self.creation_role == CreationRole::InternalBoundary => {
                 "Click the viewport to place a length 0.5 reflecting baffle"
             }
@@ -1036,6 +1198,7 @@ impl Playground {
                     {
                         self.selection = Some((o.id, None));
                         self.internal_selection = None;
+                        self.selected_controls.clear();
                         self.boundary_selection = matches!(o.role, LoopRole::Hole { .. })
                             .then_some(BoundarySelection::Hole { id: o.id, span: 0 });
                     }
@@ -1064,6 +1227,7 @@ impl Playground {
                     {
                         self.selection = None;
                         self.internal_selection = Some((boundary.id, None));
+                        self.selected_controls.clear();
                         self.boundary_selection = Some(BoundarySelection::Baffle {
                             id: boundary.id,
                             span: 0,
@@ -1076,9 +1240,21 @@ impl Playground {
             if ui.button("Delete loop").clicked() {
                 self.editor.delete_obstacle(id);
                 self.selection = None;
+                self.selected_controls.clear();
                 if matches!(self.boundary_selection, Some(BoundarySelection::Hole { id: selected, .. }) if selected == id)
                 {
                     self.boundary_selection = None;
+                }
+            }
+            if index.is_none() && ui.button("Duplicate loop").clicked() {
+                let result = self.editor.duplicate_obstacle(id, Point2::new(0.05, -0.05));
+                if let Some(id) = self.error(result) {
+                    self.select_loop(id);
+                    self.boundary_selection = self
+                        .editor
+                        .obstacle(id)
+                        .filter(|obstacle| matches!(obstacle.role, LoopRole::Hole { .. }))
+                        .map(|_| BoundarySelection::Hole { id, span: 0 });
                 }
             }
             if let Some(index) = index
@@ -1138,6 +1314,7 @@ impl Playground {
                     let result = self.editor.remove_point(id, index);
                     if self.error(result).is_some() {
                         self.selection = Some((id, None));
+                        self.selected_controls.clear();
                     }
                 }
             }
@@ -1146,10 +1323,28 @@ impl Playground {
             if ui.button("Delete baffle").clicked() {
                 self.editor.delete_internal_boundary(id);
                 self.internal_selection = None;
+                self.selected_controls.clear();
                 if matches!(self.boundary_selection, Some(BoundarySelection::Baffle { id: selected, .. }) if selected == id)
                 {
                     self.boundary_selection = None;
                 }
+            }
+            if index.is_none() && ui.button("Duplicate baffle").clicked() {
+                let result = self
+                    .editor
+                    .duplicate_internal_boundary(id, Point2::new(0.05, -0.05));
+                if let Some(id) = self.error(result) {
+                    self.select_baffle(id);
+                    self.boundary_selection = Some(BoundarySelection::Baffle {
+                        id,
+                        span: 0,
+                        face: InternalBoundarySide::Left,
+                    });
+                }
+            }
+            if ui.button("Straighten baffle").clicked() {
+                let result = self.editor.straighten_internal_boundary(id);
+                self.error(result);
             }
             if let Some(index) = index
                 && let Some(boundary) = self.editor.internal_boundary(id)
@@ -1210,9 +1405,114 @@ impl Playground {
                     let result = self.editor.remove_internal_boundary_point(id, index);
                     if self.error(result).is_some() {
                         self.internal_selection = Some((id, None));
+                        self.selected_controls.clear();
                     }
                 }
             }
+        }
+        let selected_count = self.active_controls().len();
+        if selected_count > 0 {
+            ui.add_space(8.0);
+            ui.collapsing(
+                format!("Transform selection · {selected_count} controls"),
+                |ui| {
+                    if let Some(pivot) = self.selection_pivot() {
+                        ui.small(format!("Pivot  x {:.4}  y {:.4}", pivot.x, pivot.y));
+                    }
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.transform_translation.x)
+                                .speed(0.005)
+                                .prefix("dx "),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.transform_translation.y)
+                                .speed(0.005)
+                                .prefix("dy "),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.transform_rotation_degrees)
+                                .speed(0.5)
+                                .prefix("rotate ")
+                                .suffix("°"),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.transform_scale)
+                                .speed(0.01)
+                                .range(1.0e-4..=1.0e4)
+                                .prefix("scale "),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.snap_to_grid, "Snap");
+                        ui.add_enabled(
+                            self.snap_to_grid,
+                            egui::DragValue::new(&mut self.snap_step)
+                                .speed(0.005)
+                                .range(1.0e-6..=2.0)
+                                .prefix("step "),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply transform").clicked() {
+                            self.apply_selection_transform();
+                        }
+                        if ui
+                            .add_enabled(self.snap_to_grid, egui::Button::new("Snap now"))
+                            .clicked()
+                        {
+                            let updates = self
+                                .selected_control_points()
+                                .into_iter()
+                                .map(|(control, point)| (control, self.snap_point(point)))
+                                .collect::<Vec<_>>();
+                            self.editor.begin();
+                            let result = self.editor.set_control_points(&updates);
+                            if self.error(result).is_some() {
+                                self.editor.commit();
+                            } else {
+                                self.editor.cancel();
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Align horizontal").clicked()
+                            && let Some(pivot) = self.selection_pivot()
+                        {
+                            let updates = self
+                                .selected_control_points()
+                                .into_iter()
+                                .map(|(control, point)| (control, Point2::new(point.x, pivot.y)))
+                                .collect::<Vec<_>>();
+                            self.editor.begin();
+                            let result = self.editor.set_control_points(&updates);
+                            if self.error(result).is_some() {
+                                self.editor.commit();
+                            } else {
+                                self.editor.cancel();
+                            }
+                        }
+                        if ui.button("Align vertical").clicked()
+                            && let Some(pivot) = self.selection_pivot()
+                        {
+                            let updates = self
+                                .selected_control_points()
+                                .into_iter()
+                                .map(|(control, point)| (control, Point2::new(pivot.x, point.y)))
+                                .collect::<Vec<_>>();
+                            self.editor.begin();
+                            let result = self.editor.set_control_points(&updates);
+                            if self.error(result).is_some() {
+                                self.editor.commit();
+                            } else {
+                                self.editor.cancel();
+                            }
+                        }
+                    });
+                },
+            );
         }
         self.boundary_inspector(ui);
         ui.add_space(8.0);
@@ -1910,10 +2210,7 @@ impl Playground {
         let enabled = !self.automated_benchmark && !self.file_busy && self.load.is_none();
         if enabled {
             if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                if self.drag.take().is_some()
-                    || self.internal_drag.take().is_some()
-                    || self.editor.editing()
-                {
+                if self.drag.take().is_some() || self.editor.editing() {
                     self.editor.cancel();
                 } else {
                     self.custom.clear();
@@ -1943,6 +2240,7 @@ impl Playground {
                     let result = self.editor.remove_point(id, index);
                     if self.error(result).is_some() {
                         self.selection = Some((id, None));
+                        self.selected_controls.clear();
                     }
                 } else if ctx.input(|i| i.key_pressed(egui::Key::Delete))
                     && let Some((id, Some(index))) = self.internal_selection
@@ -1950,6 +2248,7 @@ impl Playground {
                     let result = self.editor.remove_internal_boundary_point(id, index);
                     if self.error(result).is_some() {
                         self.internal_selection = Some((id, None));
+                        self.selected_controls.clear();
                     }
                 }
                 let p = pointer.unwrap();
@@ -1981,11 +2280,7 @@ impl Playground {
                         })
                         .sum::<f32>()
                 });
-                if wheel != 0.0
-                    && self.drag.is_none()
-                    && self.internal_drag.is_none()
-                    && !self.panning
-                {
+                if wheel != 0.0 && self.drag.is_none() && !self.panning {
                     let before = self.world(p, r);
                     self.scale = (self.scale * (wheel as f64 * 0.002).exp()).clamp(20.0, 20_000.0);
                     let after = self.world(p, r);
@@ -1998,37 +2293,50 @@ impl Playground {
                     self.panning = true;
                 } else if primary && self.mode == Mode::Select {
                     self.refresh_curves();
+                    let additive = ctx.input(|input| input.modifiers.shift);
                     if let Some((id, index)) = self.hit_handle(p, r) {
-                        self.selection = Some((id, Some(index)));
+                        let control = GeometryControl::Loop(id, index);
+                        let keep_group = !additive
+                            && self.selected_controls.len() > 1
+                            && self.selected_controls.contains(&control);
+                        if !keep_group {
+                            self.select_control(control, additive);
+                        } else {
+                            self.focus_control(Some(control));
+                        }
                         self.boundary_selection = self
                             .editor
                             .obstacle(id)
                             .filter(|obstacle| matches!(obstacle.role, LoopRole::Hole { .. }))
                             .map(|_| BoundarySelection::Hole { id, span: index });
-                        self.internal_selection = None;
-                        self.editor.begin();
-                        let point = self.editor.obstacle(id).unwrap().spline.controls()[index];
-                        self.drag = Some(Drag {
-                            id,
-                            index,
-                            offset: point - self.world(p, r),
-                        });
+                        if self.selected_controls.contains(&control) {
+                            self.editor.begin();
+                            self.drag = Some(Drag {
+                                anchor: self.world(p, r),
+                                controls: self.selected_control_points(),
+                            });
+                        }
                     } else if let Some((id, index)) = self.hit_internal_handle(p, r) {
-                        self.selection = None;
-                        self.internal_selection = Some((id, Some(index)));
+                        let control = GeometryControl::Baffle(id, index);
+                        let keep_group = !additive
+                            && self.selected_controls.len() > 1
+                            && self.selected_controls.contains(&control);
+                        if !keep_group {
+                            self.select_control(control, additive);
+                        } else {
+                            self.focus_control(Some(control));
+                        }
                         self.boundary_selection = None;
-                        self.editor.begin();
-                        let point =
-                            self.editor.internal_boundary(id).unwrap().spline.controls()[index];
-                        self.internal_drag = Some(InternalDrag {
-                            id,
-                            index,
-                            offset: point - self.world(p, r),
-                        });
+                        if self.selected_controls.contains(&control) {
+                            self.editor.begin();
+                            self.drag = Some(Drag {
+                                anchor: self.world(p, r),
+                                controls: self.selected_control_points(),
+                            });
+                        }
                     } else {
                         let previous_boundary_selection = self.boundary_selection;
                         let obstacle_hit = self.hit_curve(p, r);
-                        self.selection = obstacle_hit.map(|(id, _)| (id, None));
                         self.boundary_selection = obstacle_hit.and_then(|(id, parameter)| {
                             self.editor
                                 .obstacle(id)
@@ -2036,13 +2344,75 @@ impl Playground {
                                 .and_then(|obstacle| obstacle.spline.span_index(parameter))
                                 .map(|span| BoundarySelection::Hole { id, span })
                         });
-                        let internal_hit = if self.selection.is_none() {
+                        let internal_hit = if obstacle_hit.is_none() {
                             self.hit_internal_curve(p, r)
                         } else {
                             None
                         };
-                        self.internal_selection = internal_hit.map(|(id, _)| (id, None));
-                        if let Some((id, parameter)) = internal_hit {
+                        if let Some((id, _)) = obstacle_hit {
+                            let mut begin_drag = true;
+                            if additive {
+                                let controls = self
+                                    .editor
+                                    .obstacle(id)
+                                    .map(|obstacle| obstacle.spline.controls().len())
+                                    .unwrap_or(0);
+                                let all_selected = (0..controls).all(|index| {
+                                    self.selected_controls
+                                        .contains(&GeometryControl::Loop(id, index))
+                                });
+                                self.selected_controls.retain(|control| {
+                                    !matches!(control, GeometryControl::Loop(selected, _) if *selected == id)
+                                });
+                                if !all_selected {
+                                    self.selected_controls.extend(
+                                        (0..controls).map(|index| GeometryControl::Loop(id, index)),
+                                    );
+                                    self.selection = Some((id, None));
+                                    self.internal_selection = None;
+                                } else {
+                                    self.focus_control(self.selected_controls.last().copied());
+                                    begin_drag = false;
+                                }
+                            } else {
+                                self.select_loop(id);
+                            }
+                            if begin_drag {
+                                self.editor.begin();
+                                self.drag = Some(Drag {
+                                    anchor: self.world(p, r),
+                                    controls: self.selected_control_points(),
+                                });
+                            }
+                        } else if let Some((id, parameter)) = internal_hit {
+                            let mut begin_drag = true;
+                            if additive {
+                                let controls = self
+                                    .editor
+                                    .internal_boundary(id)
+                                    .map(|boundary| boundary.spline.controls().len())
+                                    .unwrap_or(0);
+                                let all_selected = (0..controls).all(|index| {
+                                    self.selected_controls
+                                        .contains(&GeometryControl::Baffle(id, index))
+                                });
+                                self.selected_controls.retain(|control| {
+                                    !matches!(control, GeometryControl::Baffle(selected, _) if *selected == id)
+                                });
+                                if !all_selected {
+                                    self.selected_controls.extend(
+                                        (0..controls)
+                                            .map(|index| GeometryControl::Baffle(id, index)),
+                                    );
+                                    self.selection = None;
+                                    self.internal_selection = Some((id, None));
+                                } else {
+                                    self.focus_control(self.selected_controls.last().copied());
+                                    begin_drag = false;
+                                }
+                            } else {
+                                self.select_baffle(id);
+                            }
                             let face = match previous_boundary_selection {
                                 Some(BoundarySelection::Baffle {
                                     id: selected_id,
@@ -2056,7 +2426,19 @@ impl Playground {
                                 .internal_boundary(id)
                                 .and_then(|boundary| boundary.spline.span_index(parameter))
                                 .map(|span| BoundarySelection::Baffle { id, span, face });
-                        } else if self.selection.is_none() {
+                            if begin_drag {
+                                self.editor.begin();
+                                self.drag = Some(Drag {
+                                    anchor: self.world(p, r),
+                                    controls: self.selected_control_points(),
+                                });
+                            }
+                        } else {
+                            if !additive {
+                                self.selection = None;
+                                self.internal_selection = None;
+                                self.selected_controls.clear();
+                            }
                             self.boundary_selection =
                                 self.hit_outer_boundary(p, r).map(BoundarySelection::Outer);
                         }
@@ -2072,18 +2454,13 @@ impl Playground {
                 } else if let Some(drag) = &self.drag
                     && response.dragged_by(egui::PointerButton::Primary)
                 {
-                    let result =
-                        self.editor
-                            .set_point(drag.id, drag.index, self.world(p, r) + drag.offset);
-                    self.error(result);
-                } else if let Some(drag) = &self.internal_drag
-                    && response.dragged_by(egui::PointerButton::Primary)
-                {
-                    let result = self.editor.set_internal_boundary_point(
-                        drag.id,
-                        drag.index,
-                        self.world(p, r) + drag.offset,
-                    );
+                    let delta = self.world(p, r) - drag.anchor;
+                    let updates = drag
+                        .controls
+                        .iter()
+                        .map(|(control, point)| (*control, self.snap_point(*point + delta)))
+                        .collect::<Vec<_>>();
+                    let result = self.editor.set_control_points(&updates);
                     self.error(result);
                 }
                 if response.double_clicked()
@@ -2094,11 +2471,11 @@ impl Playground {
                 {
                     self.editor.commit();
                     self.drag = None;
-                    self.internal_drag = None;
                     if let Some((id, t)) = self.hit_curve(p, r) {
                         let result = self.editor.insert(id, t);
                         if let Some(index) = self.error(result) {
                             self.selection = Some((id, Some(index)));
+                            self.selected_controls = vec![GeometryControl::Loop(id, index)];
                             self.boundary_selection = self
                                 .editor
                                 .obstacle(id)
@@ -2111,6 +2488,7 @@ impl Playground {
                         if let Some(index) = self.error(result) {
                             self.selection = None;
                             self.internal_selection = Some((id, Some(index)));
+                            self.selected_controls = vec![GeometryControl::Baffle(id, index)];
                             self.boundary_selection = None;
                         }
                     }
@@ -2132,6 +2510,7 @@ impl Playground {
                                 if let Some(id) = self.error(result) {
                                     self.selection = None;
                                     self.internal_selection = Some((id, None));
+                                    self.selected_controls.clear();
                                     self.boundary_selection = Some(BoundarySelection::Baffle {
                                         id,
                                         span: 0,
@@ -2150,6 +2529,7 @@ impl Playground {
                                         == CreationRole::Hole)
                                         .then_some(BoundarySelection::Hole { id, span: 0 });
                                     self.internal_selection = None;
+                                    self.selected_controls.clear();
                                     self.mode = Mode::Select;
                                 }
                             }
@@ -2186,7 +2566,7 @@ impl Playground {
             }
         }
         if !ctx.input(|i| i.pointer.primary_down()) {
-            if self.drag.take().is_some() || self.internal_drag.take().is_some() {
+            if self.drag.take().is_some() {
                 self.editor.commit();
             }
             if !ctx.input(|i| i.pointer.button_down(egui::PointerButton::Middle)) {
@@ -2364,7 +2744,11 @@ impl Playground {
             self.draw_internal_span_face(&painter, r, curve, bounds, face);
         }
         for o in &self.editor.document.draft.obstacles {
-            let selected = self.selection.is_some_and(|s| s.0 == o.id);
+            let selected = self.selection.is_some_and(|s| s.0 == o.id)
+                || self
+                    .selected_controls
+                    .iter()
+                    .any(|control| matches!(control, GeometryControl::Loop(id, _) if *id == o.id));
             let points = o.spline.controls();
             if self.polygon {
                 let mut polygon: Vec<_> = points.iter().map(|p| self.screen(*p, r)).collect();
@@ -2384,7 +2768,12 @@ impl Playground {
             if self.handles {
                 for (i, p) in points.iter().enumerate() {
                     let pos = self.screen(*p, r);
-                    let active = self.selection == Some((o.id, Some(i)));
+                    let active = if self.selected_controls.is_empty() {
+                        self.selection == Some((o.id, Some(i)))
+                    } else {
+                        self.selected_controls
+                            .contains(&GeometryControl::Loop(o.id, i))
+                    };
                     painter.circle_filled(
                         pos,
                         if active { 6.0 } else { 4.0 },
@@ -2412,7 +2801,10 @@ impl Playground {
         for boundary in &self.editor.document.draft.internal_boundaries {
             let selected = self
                 .internal_selection
-                .is_some_and(|selection| selection.0 == boundary.id);
+                .is_some_and(|selection| selection.0 == boundary.id)
+                || self.selected_controls.iter().any(|control| {
+                    matches!(control, GeometryControl::Baffle(id, _) if *id == boundary.id)
+                });
             let points = boundary.spline.controls();
             if self.polygon {
                 painter.add(egui::Shape::line(
@@ -2430,7 +2822,12 @@ impl Playground {
             if self.handles {
                 for (index, point) in points.iter().enumerate() {
                     let position = self.screen(*point, r);
-                    let active = self.internal_selection == Some((boundary.id, Some(index)));
+                    let active = if self.selected_controls.is_empty() {
+                        self.internal_selection == Some((boundary.id, Some(index)))
+                    } else {
+                        self.selected_controls
+                            .contains(&GeometryControl::Baffle(boundary.id, index))
+                    };
                     painter.circle_filled(
                         position,
                         if active { 6.0 } else { 4.0 },
@@ -4055,6 +4452,27 @@ mod tests {
             self.button(p, PointerButton::Primary, true);
             self.button(p, PointerButton::Primary, false);
         }
+        fn click_with_modifiers(&mut self, p: Pos2, modifiers: Modifiers) {
+            self.frame(vec![
+                Event::ModifiersChanged(modifiers),
+                Event::PointerMoved(p),
+                Event::PointerButton {
+                    pos: p,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers,
+                },
+            ]);
+            self.frame(vec![
+                Event::PointerButton {
+                    pos: p,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers,
+                },
+                Event::ModifiersChanged(Modifiers::NONE),
+            ]);
+        }
         fn click_text(&mut self, text: &str) {
             self.frame(vec![]);
             let position = self
@@ -4398,6 +4816,95 @@ mod tests {
         h.button(p, PointerButton::Primary, false);
         assert_eq!(h.state.editor.document, before);
         assert_eq!(h.state.editor.history_len(), (1, 0));
+    }
+
+    #[test]
+    fn shift_selected_controls_drag_as_one_history_action() {
+        let mut harness = Harness::new();
+        let id = ObstacleId(1);
+        let controls = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .spline
+            .controls()
+            .to_vec();
+        harness.click(harness.point(controls[0]));
+        harness.click_with_modifiers(harness.point(controls[2]), Modifiers::SHIFT);
+        assert_eq!(harness.state.selected_controls.len(), 2);
+
+        let delta = Point2::new(0.04, 0.03);
+        harness.button(harness.point(controls[0]), PointerButton::Primary, true);
+        harness.move_to(harness.point(controls[0] + delta));
+        harness.button(
+            harness.point(controls[0] + delta),
+            PointerButton::Primary,
+            false,
+        );
+        harness.settle();
+        let moved = harness.state.editor.obstacle(id).unwrap().spline.controls();
+        assert!((moved[0] - controls[0] - delta).norm() < 1.0e-6);
+        assert!((moved[2] - controls[2] - delta).norm() < 1.0e-6);
+        assert_eq!(moved[1], controls[1]);
+        assert_eq!(harness.state.editor.history_len(), (1, 0));
+    }
+
+    #[test]
+    fn whole_curve_drag_and_panel_transform_move_all_controls() {
+        let mut harness = Harness::new();
+        let id = ObstacleId(1);
+        let before = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .spline
+            .controls()
+            .to_vec();
+        let curve_point = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .spline
+            .evaluate(0.5);
+        let start = harness.point(curve_point);
+        assert!(harness.state.hit_handle(start, harness.rect).is_none());
+        let delta = Point2::new(0.04, -0.02);
+        harness.button(start, PointerButton::Primary, true);
+        harness.move_to(harness.point(curve_point + delta));
+        harness.button(
+            harness.point(curve_point + delta),
+            PointerButton::Primary,
+            false,
+        );
+        harness.settle();
+        let moved = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .spline
+            .controls()
+            .to_vec();
+        assert!(
+            moved
+                .iter()
+                .zip(&before)
+                .all(|(moved, before)| (*moved - *before - delta).norm() < 1.0e-6)
+        );
+        assert_eq!(harness.state.editor.history_len(), (1, 0));
+
+        harness.state.transform_translation = Point2::new(-0.02, 0.01);
+        harness.state.transform_rotation_degrees = 30.0;
+        harness.state.transform_scale = 0.9;
+        harness.state.apply_selection_transform();
+        harness.settle();
+        assert_eq!(harness.state.editor.history_len(), (2, 0));
+        assert_eq!(harness.state.transform_translation, Point2::default());
+        assert_eq!(harness.state.transform_rotation_degrees, 0.0);
+        assert_eq!(harness.state.transform_scale, 1.0);
     }
     #[test]
     fn both_creation_workflows_and_custom_cancel() {

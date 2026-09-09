@@ -542,3 +542,117 @@ fn material_edits_and_region_assignments_are_undoable() {
     );
     assert!(editor.delete_material(material).is_err());
 }
+
+#[test]
+fn mixed_control_update_is_one_history_action() {
+    let mut editor = Editor::default();
+    let baffle = editor
+        .create_internal_boundary(
+            OpenCubicSpline::uniform(vec![
+                Point2::new(-0.7, 0.5),
+                Point2::new(-0.25, 0.6),
+                Point2::new(0.25, 0.4),
+                Point2::new(0.7, 0.5),
+            ])
+            .unwrap(),
+            BACKGROUND_REGION,
+        )
+        .unwrap();
+    settle(&mut editor);
+    let before = editor.document.clone();
+    let history = editor.history_len().0;
+    editor.begin();
+    editor
+        .set_control_points(&[
+            (
+                GeometryControl::Loop(ObstacleId(1), 0),
+                Point2::new(0.2, 0.05),
+            ),
+            (GeometryControl::Baffle(baffle, 1), Point2::new(-0.2, 0.55)),
+        ])
+        .unwrap();
+    editor.commit();
+    assert_eq!(editor.history_len().0, history + 1);
+    assert_ne!(editor.document, before);
+    editor.undo();
+    assert_eq!(editor.document, before);
+}
+
+#[test]
+fn duplication_preserves_assignments_and_straightens_baffles() {
+    let mut editor = Editor::default();
+    editor.document.draft.obstacles[0].span_conditions[2] =
+        FaceBoundaryCondition::SecondOrderOutgoing;
+    editor.document.accepted = editor.document.draft.clone();
+    let duplicate = editor
+        .duplicate_obstacle(ObstacleId(1), Point2::new(0.4, 0.0))
+        .unwrap();
+    let source = editor.obstacle(ObstacleId(1)).unwrap();
+    let copy = editor.obstacle(duplicate).unwrap();
+    assert_eq!(copy.span_conditions, source.span_conditions);
+    assert_eq!(copy.spline.intervals(), source.spline.intervals());
+    assert!(
+        copy.spline
+            .controls()
+            .iter()
+            .zip(source.spline.controls())
+            .all(|(copy, source)| (*copy - *source - Point2::new(0.4, 0.0)).norm() < 1.0e-12)
+    );
+
+    let law = InternalBoundaryLaw {
+        left: FaceBoundaryCondition::SecondOrderOutgoing,
+        ..InternalBoundaryLaw::REFLECTING
+    };
+    let baffle = editor
+        .create_internal_boundary(
+            OpenCubicSpline::uniform(vec![
+                Point2::new(-0.8, 0.65),
+                Point2::new(-0.4, 0.8),
+                Point2::new(0.0, 0.55),
+                Point2::new(0.4, 0.75),
+                Point2::new(0.8, 0.6),
+            ])
+            .unwrap(),
+            BACKGROUND_REGION,
+        )
+        .unwrap();
+    editor.set_internal_boundary_law(baffle, 0, law).unwrap();
+    let duplicate = editor
+        .duplicate_internal_boundary(baffle, Point2::new(0.0, -0.25))
+        .unwrap();
+    assert_eq!(
+        editor.internal_boundary(duplicate).unwrap().span_laws[0],
+        law
+    );
+    editor.straighten_internal_boundary(duplicate).unwrap();
+    let spline = &editor.internal_boundary(duplicate).unwrap().spline;
+    let start = spline.evaluate(0.0);
+    let direction = spline.evaluate(spline.period()) - start;
+    for index in 0..=20 {
+        let point = spline.evaluate(spline.period() * index as f64 / 20.0);
+        assert!((point - start).cross(direction).abs() < 1.0e-12);
+    }
+
+    let material = editor.add_material().unwrap();
+    let interface = editor
+        .create_region_loop(
+            PeriodicCubicSpline::rounded(Point2::new(0.55, -0.55), 0.08),
+            BACKGROUND_REGION,
+            material,
+            false,
+        )
+        .unwrap();
+    let source_region = editor.obstacle(interface).unwrap().role.interior().unwrap();
+    let copy = editor
+        .duplicate_obstacle(interface, Point2::new(-0.25, 0.0))
+        .unwrap();
+    let copy_region = editor.obstacle(copy).unwrap().role.interior().unwrap();
+    assert_ne!(copy_region, source_region);
+    assert_eq!(
+        editor.document.draft.region(copy_region).unwrap().material,
+        material
+    );
+    editor.undo();
+    assert!(editor.obstacle(copy).is_none());
+    assert!(editor.document.draft.region(copy_region).is_none());
+}
