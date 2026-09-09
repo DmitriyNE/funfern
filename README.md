@@ -9,7 +9,8 @@ triangles on both an f64 CPU reference and an f32 WebGPU gather kernel. Geometry
 edits commit transactionally: the previous mesh continues to run during candidate
 construction, then displacement and velocity transfer with the quadratic basis
 before both new time levels and mesh become visible. Native automated checks pass;
-interactive browser checks for this solver revision remain deferred.
+the first browser launch exposed and led to a fix for a portable WebGPU binding-limit
+violation. A post-fix interactive browser pass remains pending.
 
 ## Run
 

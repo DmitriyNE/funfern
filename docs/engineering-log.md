@@ -27,10 +27,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   transition/blur pass. A hard jump against the retained field produces artificial
   wideband excitation when an obstacle boundary moves inward. Measure added spectral
   energy and keep established regions outside the transition band unchanged.
-- [ ] Exercise the static wave solver interactively in a WebGPU browser and record
-  display frame time and long-run behavior; the user deferred browser testing.
-- [ ] Record browser/GPU metadata and frame-time ranges when the mesh overlay is
-  next exercised interactively; the user has deferred this pass.
+- [ ] Repeat the browser interaction checklist after the storage-binding fix and
+  record browser/GPU metadata, display frame time, and long-run behavior.
 - [ ] Make operator assembly and transfer-map construction resumable if their
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
@@ -38,6 +36,23 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Improve open-baffle crack-tip element quality. The assigned-law native check
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
+
+## 2026-09-09 — Portable WebGPU wave bindings
+
+- The first actual browser launch rendered the initial frame but then stopped
+  processing controls and resize events. Pipeline startup was creating ten storage
+  bindings in the wave compute stage, above WebGPU's portable per-stage limit of
+  eight; the native Metal adapter had accepted that layout.
+- Packed source and pulse parameters into one forcing buffer and paired their
+  precomputed path-distance weights in one `vec2` buffer. The wave stage now has
+  eight storage bindings. The transfer shaders read the same packed forcing buffer
+  and remain at eight bindings. GPU-owned time and state stay in separate buffers,
+  so source edits cannot overwrite the simulation clock.
+- All 33 application/editor tests and Clippy with warnings denied pass. The native
+  release GPU check passes at 9,720 DOFs with current/previous/auxiliary relative
+  L2 errors of `7.85e-6`, `7.80e-6`, and `7.39e-6`. A clean release Trunk build
+  passes and its WASM contains the eight-binding shader. Integrated browser control
+  was unavailable in this environment, so the post-fix interaction pass is pending.
 
 ## 2026-09-09 — Containerized browser serving
 

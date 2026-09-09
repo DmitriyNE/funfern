@@ -14,6 +14,11 @@ struct Pulse {
     region: vec4<u32>,
 }
 
+struct Forcing {
+    source: Source,
+    pulse: Pulse,
+}
+
 struct NodeData {
     position_damping: vec4<f32>,
     regions: vec4<u32>,
@@ -29,15 +34,13 @@ struct State {
 }
 
 @group(0) @binding(0) var<storage, read_write> parameters: Parameters;
-@group(0) @binding(1) var<storage, read> source: Source;
-@group(0) @binding(2) var<storage, read> pulse: Pulse;
-@group(0) @binding(3) var<storage, read> row_offsets: array<u32>;
-@group(0) @binding(4) var<storage, read> columns: array<u32>;
-@group(0) @binding(5) var<storage, read> matrix_over_mass: array<MatrixEntry>;
-@group(0) @binding(6) var<storage, read> nodes: array<NodeData>;
-@group(0) @binding(7) var<storage, read_write> states: array<State>;
-@group(0) @binding(8) var<storage, read> source_weights: array<f32>;
-@group(0) @binding(9) var<storage, read> pulse_weights: array<f32>;
+@group(0) @binding(1) var<storage, read> forcing: Forcing;
+@group(0) @binding(2) var<storage, read> row_offsets: array<u32>;
+@group(0) @binding(3) var<storage, read> columns: array<u32>;
+@group(0) @binding(4) var<storage, read> matrix_over_mass: array<MatrixEntry>;
+@group(0) @binding(5) var<storage, read> nodes: array<NodeData>;
+@group(0) @binding(6) var<storage, read_write> states: array<State>;
+@group(0) @binding(7) var<storage, read> forcing_weights: array<vec2<f32>>;
 
 fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
     let first = node.x == region.x && node.y == region.y;
@@ -68,11 +71,11 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     let dt = parameters.time_data.x;
     let dt2 = parameters.time_data.y;
     let gamma = nodes[i].position_damping.z;
-    let acceleration = source.frequency_enabled.y
-        * region_match(nodes[i].regions, source.region)
-        * source.position_width_amplitude.w
-        * source_weights[i]
-        * sin(source.frequency_enabled.x * parameters.time_data.z);
+    let acceleration = forcing.source.frequency_enabled.y
+        * region_match(nodes[i].regions, forcing.source.region)
+        * forcing.source.position_width_amplitude.w
+        * forcing_weights[i].x
+        * sin(forcing.source.frequency_enabled.x * parameters.time_data.z);
     let previous = states[i].levels.x;
     let current = states[i].levels.y;
     states[i].levels.z = (
@@ -113,9 +116,9 @@ fn inject(@builtin(global_invocation_id) id: vec3<u32>) {
     if i >= parameters.count_data.x {
         return;
     }
-    let addition = pulse.position_width_amplitude.w
-        * region_match(nodes[i].regions, pulse.region)
-        * pulse_weights[i];
+    let addition = forcing.pulse.position_width_amplitude.w
+        * region_match(nodes[i].regions, forcing.pulse.region)
+        * forcing_weights[i].y;
     states[i].levels.x += addition;
     states[i].levels.y += addition;
 }

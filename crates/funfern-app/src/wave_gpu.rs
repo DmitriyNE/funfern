@@ -30,6 +30,13 @@ use bevy::{
 use funfern_core::{Point2, QuadraticTransferMap, QuadraticWaveOperator, RegionId, TriMesh};
 
 const WORKGROUP_SIZE: u32 = 128;
+const WAVE_STORAGE_BINDINGS: usize = 8;
+const TRANSFER_STORAGE_BINDINGS: usize = 8;
+const WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT: usize = 8;
+const _: () = {
+    assert!(WAVE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
+    assert!(TRANSFER_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
+};
 const STATUS_READY: u8 = 1;
 const STATUS_ERROR: u8 = 2;
 const STATUS_TRANSFERRING: u8 = 3;
@@ -111,30 +118,30 @@ struct WaveTransferHandles {
 #[derive(Clone)]
 struct WaveBufferHandles {
     parameters: Handle<ShaderBuffer>,
-    source: Handle<ShaderBuffer>,
-    pulse: Handle<ShaderBuffer>,
+    forcing: Handle<ShaderBuffer>,
     row_offsets: Handle<ShaderBuffer>,
     columns: Handle<ShaderBuffer>,
     stiffness: Handle<ShaderBuffer>,
     nodes: Handle<ShaderBuffer>,
     state: Handle<ShaderBuffer>,
-    source_weights: Handle<ShaderBuffer>,
-    pulse_weights: Handle<ShaderBuffer>,
+    forcing_weights: Handle<ShaderBuffer>,
+    source: SourceSettings,
+    pulse: PulseSettings,
+    source_weights: Arc<[f32]>,
+    pulse_weights: Arc<[f32]>,
 }
 
 impl WaveBufferHandles {
-    fn all(&self) -> [&Handle<ShaderBuffer>; 10] {
+    fn all(&self) -> [&Handle<ShaderBuffer>; WAVE_STORAGE_BINDINGS] {
         [
             &self.parameters,
-            &self.source,
-            &self.pulse,
+            &self.forcing,
             &self.row_offsets,
             &self.columns,
             &self.stiffness,
             &self.nodes,
             &self.state,
-            &self.source_weights,
-            &self.pulse_weights,
+            &self.forcing_weights,
         ]
     }
 }
@@ -431,18 +438,19 @@ impl WaveGpuRequest {
             .buffers
             .as_mut()
             .ok_or("The wave solver is not initialized")?;
-        let replacement = assets.add(ShaderBuffer::from(gpu_source(source)));
-        let old = std::mem::replace(&mut handles.source, replacement);
-        assets.remove(old.id());
-        let replacement = assets.add(ShaderBuffer::from(forcing_weights(
-            mesh,
-            operator,
-            source.position,
-            source.width,
-            source.region,
+        let source_weights =
+            forcing_weights(mesh, operator, source.position, source.width, source.region)?;
+        let forcing = assets.add(ShaderBuffer::from(gpu_forcing(source, handles.pulse)));
+        let weights = assets.add(ShaderBuffer::from(zip_forcing_weights(
+            &source_weights,
+            &handles.pulse_weights,
         )?));
-        let old = std::mem::replace(&mut handles.source_weights, replacement);
+        let old = std::mem::replace(&mut handles.forcing, forcing);
         assets.remove(old.id());
+        let old = std::mem::replace(&mut handles.forcing_weights, weights);
+        assets.remove(old.id());
+        handles.source = source;
+        handles.source_weights = source_weights.into();
         self.buffer_revision = self.buffer_revision.wrapping_add(1);
         Ok(())
     }
@@ -458,30 +466,31 @@ impl WaveGpuRequest {
             .buffers
             .as_mut()
             .ok_or("The wave solver is not initialized")?;
-        let pulse = GpuPulse {
-            position_width_amplitude: Vec4::new(
-                pulse_settings.position.x as f32,
-                pulse_settings.position.y as f32,
-                pulse_settings.width * pulse_settings.width,
-                pulse_settings.amplitude,
-            ),
-            region: gpu_region_pair(pulse_settings.region, RegionId(0)),
-        };
+        let pulse = gpu_pulse(pulse_settings);
         if !pulse.position_width_amplitude.is_finite() || pulse_settings.width <= 0.0 {
             return Err("Pulse parameters must be finite with positive width".into());
         }
-        let replacement = assets.add(ShaderBuffer::from(pulse));
-        let old = std::mem::replace(&mut handles.pulse, replacement);
-        assets.remove(old.id());
-        let replacement = assets.add(ShaderBuffer::from(forcing_weights(
+        let pulse_weights = forcing_weights(
             mesh,
             operator,
             pulse_settings.position,
             pulse_settings.width,
             pulse_settings.region,
+        )?;
+        let forcing = assets.add(ShaderBuffer::from(gpu_forcing(
+            handles.source,
+            pulse_settings,
+        )));
+        let weights = assets.add(ShaderBuffer::from(zip_forcing_weights(
+            &handles.source_weights,
+            &pulse_weights,
         )?));
-        let old = std::mem::replace(&mut handles.pulse_weights, replacement);
+        let old = std::mem::replace(&mut handles.forcing, forcing);
         assets.remove(old.id());
+        let old = std::mem::replace(&mut handles.forcing_weights, weights);
+        assets.remove(old.id());
+        handles.pulse = pulse_settings;
+        handles.pulse_weights = pulse_weights.into();
         self.pulse_serial = self.pulse_serial.wrapping_add(1).max(1);
         self.buffer_revision = self.buffer_revision.wrapping_add(1);
         Ok(())
@@ -546,9 +555,11 @@ fn create_buffers(
         time_data: Vec4::new(dt, dt * dt, 0.0, 0.0),
         count_data: UVec4::new(dof_count, 0, 0, 0),
     };
-    let pulse = GpuPulse {
-        position_width_amplitude: Vec4::new(0.0, 0.0, 0.06_f32.powi(2), 0.65),
-        region: gpu_region_pair(funfern_core::BACKGROUND_REGION, RegionId(0)),
+    let pulse = PulseSettings {
+        position: Point2::default(),
+        amplitude: 0.65,
+        width: 0.06,
+        region: funfern_core::BACKGROUND_REGION,
     };
     let source_weights =
         forcing_weights(mesh, operator, source.position, source.width, source.region)?;
@@ -562,8 +573,7 @@ fn create_buffers(
     Ok((
         WaveBufferHandles {
             parameters: assets.add(ShaderBuffer::from(parameters)),
-            source: assets.add(ShaderBuffer::from(gpu_source(source))),
-            pulse: assets.add(ShaderBuffer::from(pulse)),
+            forcing: assets.add(ShaderBuffer::from(gpu_forcing(source, pulse))),
             row_offsets: assets.add(ShaderBuffer::from(operator.row_offsets().to_vec())),
             columns: assets.add(ShaderBuffer::from(operator.columns().to_vec())),
             stiffness: assets.add(ShaderBuffer::from(matrix)),
@@ -572,8 +582,14 @@ fn create_buffers(
                 initial_state;
                 operator.degrees_of_freedom()
             ])),
-            source_weights: assets.add(ShaderBuffer::from(source_weights)),
-            pulse_weights: assets.add(ShaderBuffer::from(pulse_weights)),
+            forcing_weights: assets.add(ShaderBuffer::from(zip_forcing_weights(
+                &source_weights,
+                &pulse_weights,
+            )?)),
+            source,
+            pulse,
+            source_weights: source_weights.into(),
+            pulse_weights: pulse_weights.into(),
         },
         dof_count,
     ))
@@ -595,6 +611,36 @@ fn gpu_source(source: SourceSettings) -> GpuSource {
         ),
         region: gpu_region_pair(source.region, RegionId(0)),
     }
+}
+
+fn gpu_pulse(pulse: PulseSettings) -> GpuPulse {
+    GpuPulse {
+        position_width_amplitude: Vec4::new(
+            pulse.position.x as f32,
+            pulse.position.y as f32,
+            pulse.width * pulse.width,
+            pulse.amplitude,
+        ),
+        region: gpu_region_pair(pulse.region, RegionId(0)),
+    }
+}
+
+fn gpu_forcing(source: SourceSettings, pulse: PulseSettings) -> GpuForcing {
+    GpuForcing {
+        source: gpu_source(source),
+        pulse: gpu_pulse(pulse),
+    }
+}
+
+fn zip_forcing_weights(source: &[f32], pulse: &[f32]) -> Result<Vec<Vec2>, String> {
+    if source.len() != pulse.len() {
+        return Err("Source and pulse weights do not match the wave discretization".into());
+    }
+    Ok(source
+        .iter()
+        .zip(pulse)
+        .map(|(&source, &pulse)| Vec2::new(source, pulse))
+        .collect())
 }
 
 fn node_regions(
@@ -802,6 +848,12 @@ struct GpuPulse {
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
+struct GpuForcing {
+    source: GpuSource,
+    pulse: GpuPulse,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
 struct GpuNode {
     position_damping: Vec4,
     regions: UVec4,
@@ -917,15 +969,13 @@ fn init_pipeline(
             ShaderStages::COMPUTE,
             (
                 storage_buffer::<GpuParameters>(false),
-                storage_buffer_read_only::<GpuSource>(false),
-                storage_buffer_read_only::<GpuPulse>(false),
+                storage_buffer_read_only::<GpuForcing>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<GpuMatrixEntry>>(false),
                 storage_buffer_read_only::<Vec<GpuNode>>(false),
                 storage_buffer::<Vec<GpuState>>(false),
-                storage_buffer_read_only::<Vec<f32>>(false),
-                storage_buffer_read_only::<Vec<f32>>(false),
+                storage_buffer_read_only::<Vec<Vec2>>(false),
             ),
         ),
     );
@@ -946,7 +996,7 @@ fn init_pipeline(
             ShaderStages::COMPUTE,
             (
                 storage_buffer_read_only::<GpuParameters>(false),
-                storage_buffer_read_only::<GpuSource>(false),
+                storage_buffer_read_only::<GpuForcing>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<GpuMatrixEntry>>(false),
@@ -962,7 +1012,7 @@ fn init_pipeline(
             ShaderStages::COMPUTE,
             (
                 storage_buffer::<GpuParameters>(false),
-                storage_buffer_read_only::<GpuSource>(false),
+                storage_buffer_read_only::<GpuForcing>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<GpuMatrixEntry>>(false),
@@ -1058,10 +1108,7 @@ fn prepare_bind_group(
     let Some(parameters) = gpu_buffers.get(&handles.parameters) else {
         return;
     };
-    let Some(source) = gpu_buffers.get(&handles.source) else {
-        return;
-    };
-    let Some(pulse) = gpu_buffers.get(&handles.pulse) else {
+    let Some(forcing) = gpu_buffers.get(&handles.forcing) else {
         return;
     };
     let Some(row_offsets) = gpu_buffers.get(&handles.row_offsets) else {
@@ -1079,10 +1126,7 @@ fn prepare_bind_group(
     let Some(state) = gpu_buffers.get(&handles.state) else {
         return;
     };
-    let Some(source_weights) = gpu_buffers.get(&handles.source_weights) else {
-        return;
-    };
-    let Some(pulse_weights) = gpu_buffers.get(&handles.pulse_weights) else {
+    let Some(forcing_weights) = gpu_buffers.get(&handles.forcing_weights) else {
         return;
     };
     let bind_group = render_device.create_bind_group(
@@ -1090,15 +1134,13 @@ fn prepare_bind_group(
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
         &BindGroupEntries::sequential((
             parameters.buffer.as_entire_buffer_binding(),
-            source.buffer.as_entire_buffer_binding(),
-            pulse.buffer.as_entire_buffer_binding(),
+            forcing.buffer.as_entire_buffer_binding(),
             row_offsets.buffer.as_entire_buffer_binding(),
             columns.buffer.as_entire_buffer_binding(),
             stiffness.buffer.as_entire_buffer_binding(),
             nodes.buffer.as_entire_buffer_binding(),
             state.buffer.as_entire_buffer_binding(),
-            source_weights.buffer.as_entire_buffer_binding(),
-            pulse_weights.buffer.as_entire_buffer_binding(),
+            forcing_weights.buffer.as_entire_buffer_binding(),
         )),
     );
     if let Some(transfer) = &request.transfer {
@@ -1106,7 +1148,7 @@ fn prepare_bind_group(
         let Some(old_parameters) = gpu_buffers.get(&old.parameters) else {
             return;
         };
-        let Some(old_source) = gpu_buffers.get(&old.source) else {
+        let Some(old_forcing) = gpu_buffers.get(&old.forcing) else {
             return;
         };
         let Some(old_row_offsets) = gpu_buffers.get(&old.row_offsets) else {
@@ -1132,7 +1174,7 @@ fn prepare_bind_group(
             &pipeline_cache.get_bind_group_layout(&pipeline.transfer_old_layout),
             &BindGroupEntries::sequential((
                 old_parameters.buffer.as_entire_buffer_binding(),
-                old_source.buffer.as_entire_buffer_binding(),
+                old_forcing.buffer.as_entire_buffer_binding(),
                 old_row_offsets.buffer.as_entire_buffer_binding(),
                 old_columns.buffer.as_entire_buffer_binding(),
                 old_stiffness.buffer.as_entire_buffer_binding(),
@@ -1146,7 +1188,7 @@ fn prepare_bind_group(
             &pipeline_cache.get_bind_group_layout(&pipeline.transfer_new_layout),
             &BindGroupEntries::sequential((
                 parameters.buffer.as_entire_buffer_binding(),
-                source.buffer.as_entire_buffer_binding(),
+                forcing.buffer.as_entire_buffer_binding(),
                 row_offsets.buffer.as_entire_buffer_binding(),
                 columns.buffer.as_entire_buffer_binding(),
                 stiffness.buffer.as_entire_buffer_binding(),

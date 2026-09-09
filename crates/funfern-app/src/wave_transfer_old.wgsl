@@ -9,6 +9,16 @@ struct Source {
     region: vec4<u32>,
 }
 
+struct Pulse {
+    position_width_amplitude: vec4<f32>,
+    region: vec4<u32>,
+}
+
+struct Forcing {
+    source: Source,
+    pulse: Pulse,
+}
+
 struct NodeData {
     position_damping: vec4<f32>,
     regions: vec4<u32>,
@@ -33,7 +43,7 @@ struct TransferEntry {
 }
 
 @group(0) @binding(0) var<storage, read> parameters: Parameters;
-@group(0) @binding(1) var<storage, read> source: Source;
+@group(0) @binding(1) var<storage, read> forcing: Forcing;
 @group(0) @binding(2) var<storage, read> row_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> columns: array<u32>;
 @group(0) @binding(4) var<storage, read> matrix_over_mass: array<MatrixEntry>;
@@ -49,13 +59,13 @@ fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
 }
 
 fn source_acceleration(i: u32) -> f32 {
-    let delta = nodes[i].position_damping.xy - source.position_width_amplitude.xy;
-    let gaussian = exp(-0.5 * dot(delta, delta) / source.position_width_amplitude.z);
-    return source.frequency_enabled.y
-        * region_match(nodes[i].regions, source.region)
-        * source.position_width_amplitude.w
+    let delta = nodes[i].position_damping.xy - forcing.source.position_width_amplitude.xy;
+    let gaussian = exp(-0.5 * dot(delta, delta) / forcing.source.position_width_amplitude.z);
+    return forcing.source.frequency_enabled.y
+        * region_match(nodes[i].regions, forcing.source.region)
+        * forcing.source.position_width_amplitude.w
         * gaussian
-        * sin(source.frequency_enabled.x * parameters.time_data.z);
+        * sin(forcing.source.frequency_enabled.x * parameters.time_data.z);
 }
 
 fn compute_velocity(i: u32) -> f32 {

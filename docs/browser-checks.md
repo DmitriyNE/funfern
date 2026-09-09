@@ -1,9 +1,10 @@
 # Milestone 1 browser checks
 
-Status: the user reports exercising the Milestone 1 browser editor successfully
-on 2026-09-09. Exact browser/GPU metadata and frame-time ranges were not supplied.
-Retain this list as the reproducible checklist; a fresh interactive pass for the
-Milestone 2 mesh overlay is intentionally deferred at the user's request.
+Status: the first actual browser launch on 2026-09-09 rendered one frame and then
+stopped processing input and resize events. The wave compute layout exceeded the
+portable WebGPU limit with ten storage buffers in one shader stage; it has been
+repacked into eight bindings. Native GPU execution and a release WASM build pass.
+The post-fix interactive browser pass and browser/GPU metadata remain pending.
 
 Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
 

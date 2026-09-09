@@ -9,6 +9,16 @@ struct Source {
     region: vec4<u32>,
 }
 
+struct Pulse {
+    position_width_amplitude: vec4<f32>,
+    region: vec4<u32>,
+}
+
+struct Forcing {
+    source: Source,
+    pulse: Pulse,
+}
+
 struct NodeData {
     position_damping: vec4<f32>,
     regions: vec4<u32>,
@@ -33,7 +43,7 @@ struct TransferEntry {
 }
 
 @group(0) @binding(0) var<storage, read_write> parameters: Parameters;
-@group(0) @binding(1) var<storage, read> source: Source;
+@group(0) @binding(1) var<storage, read> forcing: Forcing;
 @group(0) @binding(2) var<storage, read> row_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> columns: array<u32>;
 @group(0) @binding(4) var<storage, read> matrix_over_mass: array<MatrixEntry>;
@@ -70,15 +80,15 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
         entry += 1u;
     }
     let time = transfers[0].auxiliary.x;
-    let delta = nodes[i].position_damping.xy - source.position_width_amplitude.xy;
-    let gaussian = exp(-0.5 * dot(delta, delta) / source.position_width_amplitude.z);
-    let forcing = source.frequency_enabled.y
-        * region_match(nodes[i].regions, source.region)
-        * source.position_width_amplitude.w
+    let delta = nodes[i].position_damping.xy - forcing.source.position_width_amplitude.xy;
+    let gaussian = exp(-0.5 * dot(delta, delta) / forcing.source.position_width_amplitude.z);
+    let source_forcing = forcing.source.frequency_enabled.y
+        * region_match(nodes[i].regions, forcing.source.region)
+        * forcing.source.position_width_amplitude.w
         * gaussian
-        * sin(source.frequency_enabled.x * time);
+        * sin(forcing.source.frequency_enabled.x * time);
     let gamma = nodes[i].position_damping.z;
-    let acceleration = forcing - ku - gamma * velocity;
+    let acceleration = source_forcing - ku - gamma * velocity;
     let dt = parameters.time_data.x;
     let previous = current - dt * velocity + 0.5 * dt * dt * acceleration;
     states[i].levels = vec4<f32>(previous, current, current, 0.0);
