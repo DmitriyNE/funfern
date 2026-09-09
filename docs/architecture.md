@@ -43,6 +43,26 @@ Keep these semantics distinct as they arrive:
 - A thin wall needs the correct separation of the two sides' degrees of freedom;
   a constrained edge alone is insufficient.
 
+The product topology model will add stable `RegionId`, `MaterialId`, and logical
+boundary/span identities before adding more solver conditions. A closed loop has
+an explicit role; its winding or containment must not silently decide whether it
+is a hole, a transmitting material interface, or a two-sided wall. Regions form a
+validated containment graph. Mesh triangles carry their owning region/material ID,
+while constrained edges carry their logical boundary/span ID and side information.
+Those labels survive remeshing even though numerical indices do not.
+
+Material interfaces use a conforming field with piecewise mass density, stiffness,
+and damping, giving the scalar weak-form transmission condition. Internal walls
+require separate traces on their two sides and therefore a topology/DOF operation,
+not merely a coefficient label. Material-value changes reuse the current mesh and
+enter the same transactional operator replacement path as boundary changes.
+
+Boundary conditions attach to logical parameter spans rather than individual mesh
+segments. Sampling copies a span assignment onto every resulting constrained edge.
+Knot insertion can split an assignment exactly; removal, seam movement, and span
+merging need explicit inheritance rules and must reject ambiguous drafts. Junction
+nodes and higher-order auxiliary fields belong to this semantic boundary graph.
+
 The initial implementation handles obstacle loops in a fixed outer box. Outer
 editable boundaries and more involved topology are future extensions.
 
@@ -427,14 +447,16 @@ energy. These measurements include finite-beam bandwidth, diffraction, spatial
 discretization, and time integration, so the plane-wave values are context rather
 than exact expected outputs.
 
-Investigate higher-order auxiliary-boundary conditions next. Corner coupling and
-long-time stability remain explicit work items. Keep the outer box fixed while the
-interior evolves.
+The higher-order auxiliary condition will be built after logical span assignment,
+so its edge state and endpoint/corner coupling attach to stable semantic spans
+rather than transient mesh edges. Long-time stability remains an explicit work
+item. Keep the outer box fixed while the interior evolves.
 
-IGA is an intended experiment after triangles. Start with an untrimmed single
-patch. Boundary splines alone do not supply an interior parameterization. Evaluate
-quadrature, mass treatment, spectral behavior, timestep restrictions, and transfer
-on their own merits before extending to multipatch or trimmed geometry.
+IGA follows the interior-region, assigned-boundary, and expanded spline-editing
+product work. Start with an untrimmed single patch. Boundary splines alone do not
+supply an interior parameterization. Evaluate quadrature, mass treatment, spectral
+behavior, timestep restrictions, and transfer on their own merits before extending
+to multipatch or trimmed geometry.
 
 ## Reference starting points
 

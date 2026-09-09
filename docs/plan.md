@@ -167,21 +167,80 @@ Persistent cooldown and broader adaptation remain pending.
 **Completion:** local edits normally preserve most of the mesh, adaptation advances
 across frames without starvation, and challenging edits respect the budgets.
 
-## 6. Boundary-only radiation conditions
+## 6. First-order boundary radiation
 
 - First-order outgoing conditions on the fixed outer box are implemented and
   selectable at runtime. The P2e boundary mass uses positive diagonal Simpson
   weights, and a CPU benchmark measures two angles and two wavelengths.
-- Select and implement a higher-order auxiliary-boundary formulation in the
-  Hagstrom-Warburton direction, including corner coupling and state lifecycle.
 - Keep codimension-1 absorption as the intended design. A damping layer or PML is
   only an optional intermediate experiment, not the target implementation.
 
 **Completion:** quantify pulse reflections versus angle and frequency and check
 long-time behavior. Imperfect absorption is acceptable; unexplained growing modes
-are not. A small first-order boundary prototype may be pulled forward if useful.
+are not.
 
-## 7. Single-patch IGA
+## 7. Interior topology and material assignment
+
+- Give regions, materials, interfaces, and internal walls stable semantic IDs
+  independent of mesh vertices and element indices. Keep holes, transmitting
+  material interfaces, and two-sided walls distinct.
+- Let closed interior loops create material regions without removing their
+  interiors. Replace blanket nested-loop rejection with topology-aware containment
+  validation and explicit region ownership.
+- Store per-material mass density, stiffness, and volume damping. Label mesh
+  elements and interface edges from geometry rather than rediscovering regions
+  from coordinates after every rebuild.
+- Assemble piecewise P2e operators with conforming transmission across material
+  interfaces. A true internal wall must separate the two traces; a constrained
+  mesh edge alone does not create that separation.
+- Add viewport region selection, material creation/assignment, clear material
+  colors and legends, and versioned scene persistence with migration from version 1.
+- Treat coefficient-only edits as same-mesh simulation transactions. Topology
+  changes use the normal remesh and field-transfer path.
+
+**Completion:** nested material inclusions and internal boundaries mesh with stable
+labels, piecewise coefficients reach both CPU and GPU solvers, assignments survive
+save/load and undo/redo, and coefficient edits preserve the running field without
+remeshing.
+
+## 8. Boundary spans and assigned conditions
+
+- Represent selectable logical spans independently of sampled mesh edges. Outer
+  sides and spline knot spans retain stable assignments through resampling and
+  ordinary control-point motion.
+- Assign the existing reflecting and first-order outgoing conditions per span,
+  with explicit defaults and visible viewport/panel labels. Add further fixed or
+  prescribed conditions only with defined scalar-wave semantics.
+- Define how insertion, removal, seam changes, splitting, and merging inherit or
+  combine span assignments. Ambiguous edits remain drafts until resolved.
+- Assemble mixed boundary conditions and handle junction nodes where neighboring
+  spans use different conditions.
+- Implement the higher-order auxiliary-boundary formulation on assigned exterior
+  spans, including endpoint/corner coupling and transactional auxiliary-state
+  transfer.
+
+**Completion:** mixed conditions can be painted onto stable spans, survive all
+document operations, assemble consistently on remeshed edges, and pass reflection,
+junction, transaction, and long-time stability checks.
+
+## 9. Product spline editing
+
+- Add multi-selection and translate/rotate/scale operations for controls and whole
+  loops, plus duplication and practical snapping/alignment tools.
+- Expose knot-interval and seam editing without conflating control positions with
+  interpolation points. Preserve or clearly report changes to span assignments.
+- Add direct span selection and the topology operations needed by interior regions,
+  including explicit loop role changes and safe split/merge workflows.
+- Keep every completed gesture as one history action, retain invalid drafts, and
+  make dense scenes manageable through selection filtering and clearer overlays.
+- Evaluate rational weights and additional continuity/corner controls after the
+  product workflows identify a concrete need.
+
+**Completion:** common geometry and assignment tasks do not require editing JSON,
+all new actions round-trip and undo correctly, and viewport interactions remain
+predictable on representative dense scenes.
+
+## 10. Single-patch IGA
 
 - Implement an untrimmed spline patch and spline solution basis, quadrature,
   operators, field evaluation, and state transfer.
@@ -196,8 +255,7 @@ documented numerical and performance observations.
 
 ## Later experiments
 
-Multipatch/trimmed IGA, rational weights and knot controls, material interfaces,
-thin internal walls, higher-order triangles, and physical moving-boundary effects.
+Multipatch/trimmed IGA, higher-order triangles, and physical moving-boundary effects.
 Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
 ## Working practice

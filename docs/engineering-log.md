@@ -7,8 +7,14 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Select and implement the higher-order auxiliary-boundary formulation,
-  including corner coupling and transactional auxiliary-state transfer.
+- [ ] Add stable interior-region/material/interface/wall semantics, piecewise
+  coefficients, assignment UI, persistence, meshing labels, and solver transactions.
+- [ ] Add stable selectable boundary spans and per-span conditions. Then implement
+  the higher-order auxiliary condition against those spans, including junction and
+  corner coupling plus transactional auxiliary-state transfer.
+- [ ] Expand product spline editing with multi-selection and transforms, direct
+  span selection, knot/seam controls, duplication, snapping, and safe topology
+  workflows. Rational weights remain conditional on a demonstrated workflow need.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
   and local-repair cases. The user reports that the end-to-end handoff still feels
   slow even though the small scripted transfer case is much faster.
@@ -24,6 +30,16 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
   cooldown in a later adaptation pass.
+
+## 2026-09-09 — Product roadmap before IGA
+
+- IGA now follows three product milestones: interior topology and material
+  assignment, per-span boundary conditions, and expanded spline editing.
+- Stable region/material/span identities are the shared foundation. Holes,
+  transmitting material interfaces, and two-sided internal walls remain distinct
+  semantics rather than modes inferred from loop winding.
+- Higher-order radiation follows span assignment so its auxiliary fields and
+  corner/junction state attach to stable logical spans from the first implementation.
 
 ## 2026-09-09 — First-order outgoing outer boundary
 
