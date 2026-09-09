@@ -77,8 +77,9 @@ and topology tests include degeneracies and near-degeneracies.
 **Performance follow-up implemented:** persistent adjacency, a local edge queue,
 and an ordered quality queue replace global refinement sweeps. Topology searches
 and verification are resumable, and the app targets 2 ms of meshing per frame.
-The engineering log records native timings. Reusing a mesh across geometry edits
-remains in milestone 5; the next milestone is still static-domain waves.
+The engineering log records native timings. The first geometry-only part of
+milestone 5 has also been brought forward: bounded local repair for coordinate
+edits, with full rebuilding as a fallback. Static-domain waves remain next.
 
 ## 3. Static-domain GPU waves
 
@@ -129,6 +130,13 @@ never mix revisions, rejected candidates recover cleanly, and the transfer uses
 the state at commit time rather than the state when preparation began.
 
 ## 5. Bounded incremental adaptation
+
+**Partial implementation brought forward:** control-coordinate edits reuse the
+previous mesh, move a bounded region, and repair with constrained flips,
+refinement, and conservative interior coarsening. Remote elements remain fixed.
+The application reports latency, exact element reuse, and fallback frequency.
+Creation/deletion, knot edits, large motions and failed repair rebuild globally.
+Wave-state transfer, persistent cooldown, and broader adaptation remain pending.
 
 - Implement local mesh motion, retriangulation, refinement, and coarsening, keeping
   full remeshing as a fallback.

@@ -11,7 +11,7 @@ use femfun_app::{
 };
 use femfun_core::*;
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     mpsc::{self, Receiver, Sender},
 };
 const TEAL: Color32 = Color32::from_rgb(91, 220, 194);
@@ -35,6 +35,7 @@ struct Curve {
 }
 #[derive(Resource)]
 pub struct Playground {
+    automated_benchmark: bool,
     editor: Editor,
     mode: Mode,
     selection: Option<(ObstacleId, Option<usize>)>,
@@ -62,9 +63,14 @@ pub struct Playground {
     frame_ms: f32,
     ready: bool,
     keyboard_captured: bool,
-    mesh: Option<TriMesh>,
-    mesh_job: Option<MeshingJob>,
+    mesh: Option<Arc<TriMesh>>,
+    mesh_job: Option<MeshUpdateJob>,
     mesh_source: Scene,
+    mesh_committed_scene: Scene,
+    mesh_committed_max_edge: f64,
+    mesh_report: Option<MeshUpdateReport>,
+    mesh_attempts: usize,
+    mesh_fallbacks: usize,
     mesh_max_edge: f64,
     mesh_source_max_edge: f64,
     mesh_low_quality: Vec<bool>,
@@ -80,6 +86,7 @@ impl Default for Playground {
     fn default() -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
+            automated_benchmark: false,
             editor: Editor::default(),
             mode: Mode::Select,
             selection: Some((ObstacleId(1), None)),
@@ -110,6 +117,11 @@ impl Default for Playground {
             mesh: None,
             mesh_job: None,
             mesh_source: Scene::default(),
+            mesh_committed_scene: Scene::default(),
+            mesh_committed_max_edge: 0.0,
+            mesh_report: None,
+            mesh_attempts: 0,
+            mesh_fallbacks: 0,
             mesh_max_edge: 0.04,
             mesh_source_max_edge: 0.0,
             mesh_low_quality: vec![],
@@ -236,17 +248,25 @@ impl Playground {
     }
 
     fn refresh_mesh(&mut self) {
-        // A drag can promote many valid draft revisions. Mesh the complete
-        // accepted document once the edit transaction ends.
+        // Prepare from the displayed mesh's own scene, never an obsolete
+        // in-flight request. Geometry edits are coalesced until the drag ends.
         if self.editor.editing() {
             return;
         }
+        let start = Instant::now();
         if self.mesh_source != self.editor.document.accepted
             || self.mesh_source_max_edge != self.mesh_max_edge
         {
+            self.mesh_started = Some(start);
             self.mesh_source = self.editor.document.accepted.clone();
             self.mesh_source_max_edge = self.mesh_max_edge;
-            self.mesh_job = Some(MeshingJob::new(
+            let previous = self
+                .mesh
+                .as_ref()
+                .filter(|_| self.mesh_committed_max_edge == self.mesh_max_edge)
+                .map(|mesh| (mesh.clone(), self.mesh_committed_scene.clone()));
+            self.mesh_job = Some(MeshUpdateJob::new(
+                previous,
                 self.mesh_source.clone(),
                 self.editor.revision,
                 MeshingOptions {
@@ -259,14 +279,12 @@ impl Playground {
                 },
             ));
             self.mesh_error = None;
-            self.mesh_started = Some(Instant::now());
             self.mesh_build_ms = 0.0;
             self.mesh_work_ms = 0.0;
             self.mesh_max_slice_ms = 0.0;
         }
         // A soft 2 ms deadline plus an operation ceiling. Check between units,
         // including topology preparation and individual edge flips.
-        let start = Instant::now();
         let mut result = None;
         let active = self.mesh_job.is_some();
         if let Some(job) = &mut self.mesh_job {
@@ -278,18 +296,30 @@ impl Playground {
             }
         }
         if let Some(result) = result {
+            let report = match &result {
+                Ok(result) => result.report.clone(),
+                Err(_) => self.mesh_job.as_ref().unwrap().report().clone(),
+            };
+            if report.local_attempted {
+                self.mesh_attempts += 1;
+                if !report.used_local {
+                    self.mesh_fallbacks += 1;
+                }
+            }
+            self.mesh_report = Some(report);
             self.mesh_job = None;
             match result {
-                Ok(mesh) => {
+                Ok(result) => {
+                    let mesh = result.mesh;
                     self.mesh_low_quality = (0..mesh.triangles.len())
                         .map(|i| mesh.triangle_quality(i).unwrap().minimum_angle_degrees < 15.0)
                         .collect();
-                    self.mesh = Some(mesh);
+                    self.mesh = Some(Arc::new(mesh));
+                    self.mesh_committed_scene = self.mesh_source.clone();
+                    self.mesh_committed_max_edge = self.mesh_source_max_edge;
                     self.mesh_error = None;
                 }
                 Err(error) => {
-                    self.mesh = None;
-                    self.mesh_low_quality.clear();
                     self.mesh_error = Some(error.to_string());
                 }
             }
@@ -305,6 +335,10 @@ impl Playground {
         }
     }
     fn panel(&mut self, ui: &mut egui::Ui) {
+        if self.automated_benchmark {
+            ui.label("Automated mesh benchmark");
+            ui.disable();
+        }
         ui.add_space(10.0);
         ui.heading(egui::RichText::new("femfun").size(29.0).color(TEAL));
         ui.label(
@@ -516,6 +550,9 @@ impl Playground {
             ui.small("Waiting for edit to finish…");
         } else if let Some(job) = &self.mesh_job {
             ui.small(format!("{}…", job.phase()));
+        } else if let Some(error) = &self.mesh_error {
+            ui.colored_label(RED, error);
+            ui.small("Previous mesh retained.");
         } else if let Some(mesh) = &self.mesh {
             let low_quality = self.mesh_low_quality.iter().filter(|poor| **poor).count();
             ui.small(format!(
@@ -526,15 +563,34 @@ impl Playground {
                 mesh.quality.maximum_edge_length,
                 low_quality
             ));
-        } else if let Some(error) = &self.mesh_error {
-            ui.colored_label(RED, error);
         } else {
             ui.small("Preparing…");
         }
         if self.mesh_started.is_some() {
             ui.small(format!(
-                "Build {:.0} ms · work {:.1} ms\nlongest mesh slice {:.2} ms (2 ms target)",
-                self.mesh_build_ms, self.mesh_work_ms, self.mesh_max_slice_ms
+                "Request → ready {:.0} ms\nActive mesh {:.1} ms · between slices {:.1} ms\nLongest mesh slice {:.2} ms (2 ms target)",
+                self.mesh_build_ms, self.mesh_work_ms, (self.mesh_build_ms-self.mesh_work_ms).max(0.0), self.mesh_max_slice_ms
+            ));
+        }
+        if let Some(report) = self
+            .mesh_job
+            .as_ref()
+            .map(|job| job.report())
+            .or(self.mesh_report.as_ref())
+        {
+            if report.used_local {
+                ui.small(format!("Local repair · {:.1}% of previous elements unchanged\n{} moved vertices · {} inserted · {} collapsed",
+                    100.0 * report.preserved_triangles as f64 / report.original_triangles.max(1) as f64,
+                    report.moved_vertices, report.inserted_vertices, report.collapsed_vertices));
+            }
+            if let Some(reason) = &report.fallback_reason {
+                ui.small(format!("Full rebuild: {reason}"));
+            }
+        }
+        if self.mesh_attempts > 0 {
+            ui.small(format!(
+                "Full fallbacks: {} / {} completed edits",
+                self.mesh_fallbacks, self.mesh_attempts
             ));
         }
         ui.add_space(8.0);
@@ -568,7 +624,7 @@ impl Playground {
         let pointer = ctx.input(|i| i.pointer.hover_pos());
         let over = response.contains_pointer() && pointer.is_some_and(|p| r.contains(p));
         let typing = self.keyboard_captured || ctx.text_edit_focused();
-        let enabled = !self.file_busy && self.load.is_none();
+        let enabled = !self.automated_benchmark && !self.file_busy && self.load.is_none();
         if enabled {
             if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 if self.drag.take().is_some() || self.editor.editing() {
@@ -996,6 +1052,115 @@ pub fn frame(mut contexts: EguiContexts, mut state: ResMut<Playground>, time: Re
     state.editor.validate_frame(12_000);
     state.refresh_mesh();
     Ok(())
+}
+
+/// Opt-in scripted edits in the real native renderer, including validation,
+/// scheduling, mesh publication and the visible fine-mesh overlay.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource, Default)]
+pub struct MeshBenchmark {
+    edits: usize,
+    start: Option<Instant>,
+    target: Option<Scene>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn mesh_benchmark_scene() -> Playground {
+    let mut state = Playground {
+        automated_benchmark: true,
+        mesh_max_edge: 0.02,
+        show_mesh: true,
+        ..Default::default()
+    };
+    let scene = Scene {
+        obstacles: (0..8)
+            .map(|i| Obstacle {
+                id: ObstacleId(i + 1),
+                spline: PeriodicCubicSpline::rounded(
+                    Point2::new(-0.66 + (i % 4) as f64 * 0.44, -0.4 + (i / 4) as f64 * 0.8),
+                    0.12,
+                ),
+            })
+            .collect(),
+    };
+    state
+        .editor
+        .replace_validated(femfun_app::editor::Document {
+            draft: scene.clone(),
+            accepted: scene,
+        });
+    state
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn mesh_benchmark(
+    mut state: ResMut<Playground>,
+    mut benchmark: ResMut<MeshBenchmark>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if benchmark
+        .start
+        .is_some_and(|start| start.elapsed().as_secs_f64() > 60.0)
+    {
+        eprintln!(
+            "NATIVE_MESH_BENCHMARK timed out: editing={} acceptance={:?} requested_revision={} mesh_revision={:?}",
+            state.editor.editing(),
+            state.editor.acceptance,
+            state.editor.revision,
+            state.mesh.as_ref().map(|m| m.geometry_revision)
+        );
+        exit.write(AppExit::Error(std::num::NonZeroU8::new(1).unwrap()));
+        return;
+    }
+    if let Some(error) = &state.mesh_error {
+        eprintln!("NATIVE_MESH_BENCHMARK failed: {error}");
+        exit.write(AppExit::Error(std::num::NonZeroU8::new(1).unwrap()));
+        return;
+    }
+    if state.mesh.is_none()
+        || state.mesh_job.is_some()
+        || state.editor.acceptance != Acceptance::Valid
+        || state.mesh_committed_scene != state.editor.document.accepted
+        || benchmark
+            .target
+            .as_ref()
+            .is_some_and(|target| target != &state.mesh_committed_scene)
+    {
+        return;
+    }
+    let mesh = state.mesh.as_ref().unwrap();
+    println!(
+        "NATIVE_MESH_BENCHMARK edit={} edit_to_ready_ms={:.2} request_to_ready_ms={:.2} active_ms={:.2} gap_ms={:.2} max_slice_ms={:.2} frame_ms={:.2} triangles={} report={:?}",
+        benchmark.edits,
+        benchmark
+            .start
+            .map_or(state.mesh_build_ms, |t| t.elapsed().as_secs_f64() * 1000.0),
+        state.mesh_build_ms,
+        state.mesh_work_ms,
+        (state.mesh_build_ms - state.mesh_work_ms).max(0.0),
+        state.mesh_max_slice_ms,
+        state.frame_ms,
+        mesh.triangles.len(),
+        state.mesh_report
+    );
+    if benchmark.edits == 3 {
+        exit.write(AppExit::Success);
+        return;
+    }
+    let delta = [
+        Point2::new(0.005, 0.0),
+        Point2::new(0.0, 0.005),
+        Point2::new(-0.005, -0.005),
+    ][benchmark.edits];
+    let p = state.editor.document.accepted.obstacles[0]
+        .spline
+        .controls()[0];
+    benchmark.start = Some(Instant::now());
+    state.editor.begin();
+    state.editor.set_point(ObstacleId(1), 0, p + delta).unwrap();
+    state.editor.commit();
+    benchmark.target = Some(state.editor.document.draft.clone());
+    benchmark.edits += 1;
 }
 
 impl Playground {
@@ -1451,5 +1616,67 @@ mod tests {
         assert!(preview.triangles.len() < mesh.triangles.len() / 4);
         assert_eq!(h.state.editor.document, document);
         assert_eq!(h.state.editor.history_len(), history);
+    }
+
+    #[test]
+    fn mesh_edits_use_committed_source_and_failed_build_keeps_displayed_mesh() {
+        let mut h = Harness::new();
+        for _ in 0..5000 {
+            h.state.refresh_mesh();
+            if h.state.mesh.is_some() {
+                break;
+            }
+        }
+        let original = h.state.mesh.clone().unwrap();
+        let original_scene = h.state.mesh_committed_scene.clone();
+        for delta in [Point2::new(0.003, 0.0), Point2::new(0.003, 0.002)] {
+            let p = original_scene.obstacles[0].spline.controls()[0];
+            h.state.editor.begin();
+            h.state
+                .editor
+                .set_point(ObstacleId(1), 0, p + delta)
+                .unwrap();
+            h.state.editor.commit();
+            h.settle();
+            h.state.refresh_mesh();
+            assert!(h.state.mesh_job.is_some());
+            assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &original));
+            assert_eq!(h.state.mesh_committed_scene, original_scene);
+        }
+        let history = h.state.editor.history_len();
+        for _ in 0..5000 {
+            h.state.refresh_mesh();
+            if h.state.mesh_job.is_none() {
+                break;
+            }
+        }
+        assert!(h.state.mesh_error.is_none());
+        assert!(h.state.mesh_report.as_ref().unwrap().used_local);
+        assert_eq!(
+            h.state.mesh.as_ref().unwrap().geometry_revision,
+            h.state.editor.revision
+        );
+        assert_eq!(
+            h.state.mesh_committed_scene,
+            h.state.editor.document.accepted
+        );
+        assert_eq!(h.state.editor.history_len(), history);
+        assert!(h.state.mesh_build_ms >= h.state.mesh_work_ms);
+        assert_eq!(
+            h.state.mesh_attempts, 1,
+            "superseded jobs are not completed edits"
+        );
+        let displayed = h.state.mesh.clone().unwrap();
+        // Deliberately exceed the fixed mesh capacity to exercise the error path.
+        h.state.mesh_max_edge = 0.00001;
+        for _ in 0..5000 {
+            h.state.refresh_mesh();
+            if h.state.mesh_job.is_none() {
+                break;
+            }
+        }
+        assert!(h.state.mesh_error.is_some());
+        assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &displayed));
+        assert_eq!(h.state.mesh_committed_max_edge, 0.04);
     }
 }

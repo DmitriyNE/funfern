@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use femfun_core::*;
 
@@ -458,4 +459,138 @@ fn representative_eight_obstacle_scene_meshes_within_limits() {
     assert_mesh_invariants(&mesh, 8);
     assert!(mesh.vertices.len() < 5_000);
     assert!(mesh.triangles.len() < 10_000);
+}
+
+fn finish_update(mut job: MeshUpdateJob, budget: usize) -> MeshUpdateResult {
+    for _ in 0..2_000_000 {
+        if let Some(result) = job.advance(budget) {
+            assert!(job.advance(1).is_none());
+            return result.unwrap();
+        }
+    }
+    panic!("mesh update did not terminate");
+}
+
+fn geometric_keys(mesh: &TriMesh, filter: impl Fn(Point2) -> bool) -> BTreeSet<[(u64, u64); 3]> {
+    mesh.triangles
+        .iter()
+        .filter_map(|t| {
+            let points = t.vertices.map(|v| mesh.vertices[v].point);
+            if !points.iter().all(|p| filter(*p)) {
+                return None;
+            }
+            let mut key = points.map(|p| (p.x.to_bits(), p.y.to_bits()));
+            key.sort();
+            Some(key)
+        })
+        .collect()
+}
+
+#[test]
+fn repeated_control_edits_preserve_distant_elements_and_quality() {
+    let options = MeshingOptions {
+        target_edge_length: 0.04 / 1.05,
+        curve_tolerance: 0.0008,
+        minimum_angle_degrees: 12.0,
+        max_vertices: 50_000,
+        max_triangles: 100_000,
+        max_refinement_steps: 50_000,
+    };
+    let mut scene = Scene::initial();
+    let mut mesh = Arc::new(mesh_scene(&scene, 0, options).unwrap());
+    for revision in 1..=6 {
+        let original = mesh.clone();
+        let mut next = scene.clone();
+        let point = next.obstacles[0].spline.controls()[0];
+        let delta = if revision % 2 == 1 {
+            Point2::new(0.004, 0.002)
+        } else {
+            Point2::new(-0.004, -0.002)
+        };
+        next.obstacles[0]
+            .spline
+            .set_control(0, point + delta)
+            .unwrap();
+        let job = MeshUpdateJob::new(
+            Some((mesh.clone(), scene.clone())),
+            next.clone(),
+            revision,
+            options,
+        );
+        let result = finish_update(job, 257);
+        assert!(result.report.used_local, "{:?}", result.report);
+        assert!(result.report.preserved_triangles as f64 / mesh.triangles.len() as f64 > 0.85);
+        assert_eq!(
+            geometric_keys(&mesh, |p| p.norm() > 0.5),
+            geometric_keys(&result.mesh, |p| p.norm() > 0.5)
+        );
+        let unchanged = geometric_keys(&mesh, |_| true)
+            .intersection(&geometric_keys(&result.mesh, |_| true))
+            .count();
+        assert_eq!(unchanged, result.report.preserved_triangles);
+        assert_mesh_invariants(&result.mesh, 1);
+        assert!(result.mesh.quality.maximum_edge_length <= 0.04);
+        assert!(result.mesh.quality.minimum_angle_degrees >= 12.0 - 1e-9);
+        assert_eq!(result.mesh.geometry_revision, revision);
+        assert_eq!(original, mesh, "source mesh must remain immutable");
+        mesh = Arc::new(result.mesh);
+        scene = next;
+    }
+}
+
+#[test]
+fn adaptation_scheduling_and_fallback_are_explicit() {
+    let options = MeshingOptions {
+        target_edge_length: 0.06,
+        minimum_angle_degrees: 12.0,
+        ..Default::default()
+    };
+    let scene = Scene::initial();
+    let mesh = Arc::new(mesh_scene(&scene, 1, options).unwrap());
+    let mut next = scene.clone();
+    let p = next.obstacles[0].spline.controls()[0];
+    next.obstacles[0]
+        .spline
+        .set_control(0, p + Point2::new(0.003, 0.0))
+        .unwrap();
+    let mut job = MeshUpdateJob::new(
+        Some((mesh.clone(), scene.clone())),
+        next.clone(),
+        2,
+        options,
+    );
+    assert!(job.advance(0).is_none());
+    assert!(job.advance(1).is_none());
+    let a = finish_update(job, 1);
+    let b = finish_update(
+        MeshUpdateJob::new(Some((mesh.clone(), scene.clone())), next, 2, options),
+        10000,
+    );
+    assert!(a.report.used_local);
+    assert_eq!(a.mesh, b.mesh);
+    assert_eq!(a.report, b.report);
+
+    let mut cases = vec![Scene::default()];
+    let mut inserted = scene.clone();
+    inserted.obstacles[0].spline.insert(0.2).unwrap();
+    cases.push(inserted);
+    let mut shifted = scene.clone();
+    for i in 0..8 {
+        let p = shifted.obstacles[0].spline.controls()[i];
+        shifted.obstacles[0]
+            .spline
+            .set_control(i, p + Point2::new(0.4, 0.0))
+            .unwrap();
+    }
+    cases.push(shifted);
+    for next in cases {
+        let holes = next.obstacles.len();
+        let result = finish_update(
+            MeshUpdateJob::new(Some((mesh.clone(), scene.clone())), next, 9, options),
+            10000,
+        );
+        assert!(!result.report.used_local);
+        assert!(result.report.fallback_reason.is_some());
+        assert_mesh_invariants(&result.mesh, holes);
+    }
 }

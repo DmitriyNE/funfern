@@ -10,7 +10,80 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Milestone 3: static-domain CPU reference and GPU wave evolution.
 - [ ] Record browser/GPU metadata and frame-time ranges when the mesh overlay is
   next exercised interactively; the user has deferred this pass.
-- [ ] Reuse unaffected mesh regions across edits during milestone 5.
+- [ ] Extend local mesh reuse beyond coordinate edits; add persistent connectivity
+  caching and cooldown as needed, and wave-state transfer when a solver exists.
+
+## 2026-09-09 — Bounded mesh reuse across control edits
+
+- Brought the first geometry-only part of milestone 5 forward. `MeshUpdateJob`
+  imports the displayed mesh and its committed geometry, moves affected boundary
+  vertices using spline parameters, extends displacement through a fixed local
+  region, and repairs using constrained flips, refinement, and conservative
+  interior coarsening. Distant positions and elements remain exactly unchanged.
+  The repair region cannot grow during flips/refinement: exceeding it falls back.
+- Motion >2h, a large affected fraction, obstacle/knot changes, invalid motion,
+  exhausted repair budgets, or failed quality checks trigger full construction.
+  Resolution changes request a fresh mesh. Old meshes are immutable shared
+  snapshots and stay visible during both local repair and fallback, including
+  when the candidate build fails. Superseded jobs use the committed scene/mesh
+  pair, not the previous in-flight scene. Geometry/history are unaffected.
+- Reuse reporting compares original vertex identities and exact coordinates
+  before compaction, separating unchanged geometry from connectivity alone.
+  Interior edge collapse preserves the link condition and quality bounds; a
+  0.35h collapse threshold is separated from the 1.05h refinement threshold.
+  Tests exercise actual removal and compaction, not only eligibility checks.
+- UI now distinguishes request-to-ready wall time, accumulated active meshing,
+  time outside slices, and maximum mesh slice. Completed-edit fallback frequency,
+  moved/inserted/collapsed vertices, and exact preserved-element fraction are
+  displayed. Request time begins after editor acceptance; the native benchmark
+  also logs from the edit itself, including editor validation.
+- Added `cargo run -p femfun-app --release --locked -- --mesh-edit-benchmark`:
+  the real native Bevy/egui app, eight obstacles, h≤0.02, visible fine overlay,
+  three coordinate deltas (+.005,0), (0,+.005), (-.005,-.005), then automatic exit.
+  It uses a temporary scene without file I/O and disables interactive editor
+  input during the scripted run. A strict target-scene check prevents reporting
+  stale completion statistics. An initial diagnostic run exposed that missing
+  benchmark guard; its stale second-edit result was discarded.
+- Corrected native release run: Rust 1.96.0, Apple M1 Max / Metal, 1280×800 window.
+  Initial mesh: 46,147 triangles, **12,245.47 ms request-to-ready**, 2,970.93 ms
+  active meshing, 9,274.54 ms outside mesh slices. This reproduces the user's
+  roughly 12-second native observation, rather than attributing it to a browser.
+
+  | Edit | Edit → ready | Request → ready | Active mesh | Outside slices | Max slice | Exactly unchanged |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 1 | 985.88 ms | 708.56 ms | 110.17 ms | 598.39 ms | 8.12 ms | 45,527 / 46,147 |
+  | 2 | 995.04 ms | 715.45 ms | 109.49 ms | 605.96 ms | 7.36 ms | 45,524 / 46,147 |
+  | 3 | 969.16 ms | 689.42 ms | 108.53 ms | 580.89 ms | 8.50 ms | 45,524 / 46,149 |
+
+- All three edits used local repair, **0/3 fallbacks**, and preserved about 98.6%
+  of previous elements exactly; connectivity-only preservation was above 99.97%.
+  The overlay remained visible, with smoothed frame intervals around 13.5–13.7 ms
+  at publication. These are three specific small edits, not a latency guarantee
+  for arbitrary drags. Mesh-ready means publication to app state, not a GPU
+  presentation fence. Final cleanup and quality-flag caching can exceed the soft
+  2 ms slice target; the measured peak is reported rather than hidden.
+- Added `mesh_edit_timing` CPU harness, with optional `--paced` (2 ms slices on
+  a requested 60 Hz schedule). Continuous fine repair took ~84–86 ms in an early
+  run. A separate paced run took 2.53–2.87 s wall / 284–328 ms active, with peaks
+  up to 9.25 ms; coarse repairs took .43–.74 s wall. The cause of timing differences
+  between harness and native app was not isolated. The harness excludes editor
+  validation and rendering and must not substitute for application latency.
+- Verification: **49 tests**, formatting, Clippy with warnings denied, native
+  release compilation/run, and release WASM packaging pass. Tests cover repeated
+  edits/reversal, exact preservation of remote triangles, independent manifold /
+  Euler / area / Delaunay checks, slice-size independence, explicit fallback,
+  frozen-patch coarsening guards, actual coarsening/compaction, superseded requests,
+  invalid drafts/history, and retaining the displayed mesh after build failure.
+  WASM command used isolated output:
+  `NO_COLOR=true trunk build --release --dist /private/tmp/femfun-local-repair-dist`.
+  Native run retains the existing Metal bindless fallback warning; normal exit
+  also logged an unknown-window Destroyed-event warning. Browser testing remains
+  deferred at the user's request.
+- Remaining limits: import, connectivity indexing, final verification and
+  compaction still make resumable whole-mesh passes; point location and
+  encroachment scan globally. Only geometry/topology changes are bounded locally.
+  Creation/deletion, knot changes and difficult motion still rebuild. Persistent
+  connectivity caching, cooldown and wave-state transfer remain future work.
 
 ## 2026-09-09 — Wave-resolution meshes and honest performance baselines
 

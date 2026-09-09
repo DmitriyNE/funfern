@@ -5,6 +5,8 @@ use crate::{
     ValidationJob, incircle, orient2d,
 };
 use crate::{Scene, WORLD_TOLERANCE};
+mod adaptation;
+pub use adaptation::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OuterSide {
@@ -172,6 +174,8 @@ struct MeshBuilder {
     bad_triangles: BTreeSet<(u64, usize)>,
     scores: Vec<Option<u64>>,
     stats: MeshingStats,
+    incident: Vec<BTreeSet<usize>>,
+    repair_region: Option<Vec<bool>>,
 }
 
 /// Deterministic counters for profiling without introducing a clock dependency.
@@ -350,6 +354,8 @@ impl MeshBuilder {
             bad_triangles: BTreeSet::new(),
             scores: vec![],
             stats: MeshingStats::default(),
+            incident: vec![],
+            repair_region: None,
         }
     }
 
@@ -361,6 +367,9 @@ impl MeshBuilder {
 
     fn register_triangle(&mut self, index: usize) {
         let triangle = self.triangles[index];
+        for vertex in triangle.vertices {
+            self.incident[vertex].insert(index);
+        }
         for opposite in 0..3 {
             let edge = edge_key(
                 triangle.vertices[(opposite + 1) % 3],
@@ -386,8 +395,11 @@ impl MeshBuilder {
         }
     }
 
-    fn replace_triangle(&mut self, index: usize, triangle: MeshTriangle) {
+    fn unregister_triangle(&mut self, index: usize) {
         let old = self.triangles[index];
+        for vertex in old.vertices {
+            self.incident[vertex].remove(&index);
+        }
         for opposite in 0..3 {
             let edge = edge_key(
                 old.vertices[(opposite + 1) % 3],
@@ -402,6 +414,10 @@ impl MeshBuilder {
         if let Some(score) = self.scores[index].take() {
             self.bad_triangles.remove(&(score, index));
         }
+    }
+
+    fn replace_triangle(&mut self, index: usize, triangle: MeshTriangle) {
+        self.unregister_triangle(index);
         self.triangles[index] = triangle;
         self.register_triangle(index);
     }
@@ -427,6 +443,10 @@ impl MeshBuilder {
         }
         let index = self.vertices.len();
         self.vertices.push(MeshVertex { point, boundary });
+        self.incident.push(BTreeSet::new());
+        if let Some(region) = &mut self.repair_region {
+            region.push(true);
+        }
         Ok(index)
     }
 
@@ -634,6 +654,15 @@ impl MeshBuilder {
         if incircle(x, y, z, pd) != PredicateSign::Positive {
             return Ok(());
         }
+        if self
+            .repair_region
+            .as_ref()
+            .is_some_and(|region| [a, b, c, d].iter().any(|i| !region[*i]))
+        {
+            return Err(MeshError::Topology(
+                "edge legalization reached the fixed patch boundary",
+            ));
+        }
         let left = self.ccw_triangle([c, d, a])?;
         let right = self.ccw_triangle([d, c, b])?;
         self.replace_triangle(left_index, left);
@@ -749,6 +778,15 @@ impl MeshBuilder {
         if adjacent.is_empty() || adjacent.len() > 2 {
             return Err(MeshError::Topology("edge has invalid triangle adjacency"));
         }
+        if self.repair_region.as_ref().is_some_and(|region| {
+            adjacent
+                .iter()
+                .any(|(i, _)| self.triangles[*i].vertices.iter().any(|v| !region[*v]))
+        }) {
+            return Err(MeshError::Topology(
+                "edge split reached the fixed patch boundary",
+            ));
+        }
         for (index, opposite) in adjacent.into_iter().rev() {
             self.replace_triangle(index, self.ccw_triangle([edge[0], vertex, opposite])?);
             self.push_triangle(self.ccw_triangle([vertex, edge[1], opposite])?)?;
@@ -783,6 +821,10 @@ impl MeshBuilder {
                 // exact candidate only when it is the segment midpoint.
                 let midpoint = self.point(edge[0]).lerp(self.point(edge[1]), 0.5);
                 self.vertices.pop();
+                self.incident.pop();
+                if let Some(region) = &mut self.repair_region {
+                    region.pop();
+                }
                 if midpoint != point {
                     return Err(MeshError::Topology(
                         "refinement point lies on a constrained edge",
@@ -822,11 +864,26 @@ impl MeshBuilder {
             return Err(self.capacity_error());
         }
         let triangle = self.triangles[triangle_index];
+        if self
+            .repair_region
+            .as_ref()
+            .is_some_and(|region| triangle.vertices.iter().any(|i| !region[*i]))
+        {
+            return Err(MeshError::Topology(
+                "quality repair reached the fixed patch boundary",
+            ));
+        }
         let points = self.triangle_points(triangle);
         let centroid = (points[0] + points[1] + points[2]) / 3.0;
         let mut candidate = self
             .circumcenter(triangle)
-            .filter(|point| self.containing_triangle(*point).is_some())
+            .filter(|point| {
+                self.containing_triangle(*point).is_some_and(|(index, _)| {
+                    self.repair_region.as_ref().is_none_or(|region| {
+                        self.triangles[index].vertices.iter().all(|v| region[*v])
+                    })
+                })
+            })
             .unwrap_or(centroid);
         if !self.in_domain(candidate) {
             candidate = centroid;
@@ -836,6 +893,14 @@ impl MeshBuilder {
             let b = self.point(edge.vertices[1]);
             (candidate - a).dot(candidate - b) < 0.0
         }) {
+            if self.repair_region.as_ref().is_some_and(|region| {
+                self.boundary_edges[edge_index]
+                    .vertices
+                    .iter()
+                    .any(|v| !region[*v])
+            }) {
+                return Err(MeshError::Topology("boundary repair left the local patch"));
+            }
             self.split_boundary(edge_index)?;
         } else {
             self.insert_point(candidate)?;
@@ -1312,7 +1377,11 @@ impl MeshingJob {
                     if orient2d(a, v, c) != PredicateSign::Positive {
                         return Err(MeshError::Topology("mesh contains an inverted triangle"));
                     }
-                    if !b.in_domain((a + v + c) / 3.0) {
+                    let changed_region = b
+                        .repair_region
+                        .as_ref()
+                        .is_none_or(|region| triangle.vertices.iter().any(|v| region[*v]));
+                    if changed_region && !b.in_domain((a + v + c) / 3.0) {
                         return Err(MeshError::Topology(
                             "triangle was classified outside the domain",
                         ));

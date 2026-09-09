@@ -168,19 +168,52 @@ still use linear capacity-bounded scans, and OS scheduling can delay a call.
 There is also a 50-million-unit job ceiling, a per-legalization work ceiling, and
 the existing refinement/vertex/triangle limits. Deterministic counters report
 quality evaluations, edge tests/flips, and insertions. The UI reports elapsed
-build time, accumulated active work, and the longest mesh slice, separately from
-its existing display frame-time indicator.
+request-to-ready time, accumulated active work, time outside mesh slices, and the
+longest mesh slice, separately from its existing display frame-time indicator.
+Request-to-ready starts when accepted geometry requests a mesh; the opt-in native
+benchmark additionally measures from the control edit, including editor validation.
 
 Jobs run after an edit transaction ends and are replaced when a newer accepted
 scene arrives. The previous accepted mesh remains available during preparation
-and invalid drafts. Each accepted geometry edit still starts a full construction;
-local reuse across edits remains a later adaptation task.
-Even within a build, local edge updates can propagate, and candidate point
-location, encroachment tests, and global quality selection are not spatially
-localized. The implementation does not restrict adaptation to a neighborhood of
-the geometry edit. Mesh resolution is part of a job's request identity; changing
-it rebuilds even if the accepted document is unchanged. Resolution remains an
-application preference, excluded from geometry files and undo history.
+and invalid drafts, and is retained if candidate preparation fails. The displayed
+mesh has its own committed scene and resolution, separate from the latest request.
+Superseding a job always starts from that committed pair, so a half-finished
+candidate cannot become the source of a later edit.
+
+`MeshUpdateJob` attempts reuse for control-coordinate edits with unchanged obstacle
+IDs and knot intervals at the same resolution. It imports the accepted mesh and
+connectivity in resumable linear passes. Boundary vertices whose spline parameter
+positions changed move to the new spline; unchanged boundary vertices remain fixed.
+Interior displacement uses 24 Jacobi averaging sweeps with fixed boundary values
+and zero displacement outside a radius max(4h, 4×maximum boundary displacement).
+An extra triangle ring forms a frozen repair boundary. Motion exceeding 2h or a
+patch touching more than max(256, one third of the old elements) falls back.
+
+Moved elements must remain positively oriented. Changed spline edges are checked
+against cubic Bezier hulls and subdivided locally when needed. Constrained edge
+flips and quality refinement are confined to the frozen patch; an operation that
+needs to cross its boundary triggers full reconstruction. Conservative interior
+edge collapse checks the link condition, orientation, angle, and edge-size bounds.
+Collapse is attempted below 0.35h, separated from the 1.05h refinement threshold
+to reduce oscillation. Boundary vertices are never collapsed. Final compaction
+removes unused interior vertices; indices may change, but distant geometry and
+triangles are preserved. There is no persistent per-vertex cooldown yet.
+
+Local work is limited to five million units, 256 curved-boundary subdivisions and
+512 quality insertions, with the existing capacities and per-frame budget. Output
+passes check orientation, adjacency, and quality globally, and domain membership
+in the changed patch; unchanged regions inherit the source mesh's certificate.
+Import, final verification and compaction still touch the whole mesh; candidate
+point location and encroachment checks still scan globally. Geometry/topology
+changes, unlike those bookkeeping passes, are spatially bounded. Preserved-element
+statistics require both identical connectivity and exactly identical coordinates,
+and are computed before compaction. Connectivity-only reuse is reported separately
+by the core. Fallback frequency counts completed requests, excluding canceled jobs.
+
+Creation, deletion, knot edits, resolution changes, excessive motion and failed
+repair use the full resumable mesher. Resolution remains an application preference,
+excluded from geometry files and undo history. This is the first geometry-only
+part of milestone 5; wave-state transfer and broader adaptation remain pending.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a
