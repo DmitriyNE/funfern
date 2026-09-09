@@ -1,8 +1,9 @@
 # Milestone 1 browser checks
 
-Status: pending a connected browser. The release bundle builds and the native
-GPU path starts. Automated egui tests cover the corresponding input semantics,
-but do not establish browser GPU, DOM file-dialog, or presentation behavior.
+Status: the user reports exercising the Milestone 1 browser editor successfully
+on 2026-09-09. Exact browser/GPU metadata and frame-time ranges were not supplied.
+Retain this list as the reproducible checklist; a fresh interactive pass for the
+Milestone 2 mesh overlay is intentionally deferred at the user's request.
 
 Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
 

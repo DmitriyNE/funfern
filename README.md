@@ -1,13 +1,12 @@
 # femfun
 
-A browser geometry playground for a future 2D finite-element wave toy. Edit
-periodic cubic spline obstacles inside a fixed square, with persistent invalid
-drafts, geometric validation, undo/redo, and versioned scene files.
+A browser geometry and meshing playground for a future 2D finite-element wave
+toy. Edit periodic cubic spline obstacles inside a fixed square, with persistent
+invalid drafts, constrained triangle meshes, undo/redo, and versioned scene files.
 
-Milestone 1 is implemented. Native startup and automated checks pass. Browser
-interaction and GPU/frame-time measurements still need a connected browser;
-see [verification notes](docs/engineering-log.md). Meshing and wave simulation
-are later milestones; simulation buttons are intentionally disabled.
+Milestones 1 and 2 are implemented. Native startup and automated checks pass;
+the user has exercised the Milestone 1 browser editor. The wave simulation is a
+later milestone, so simulation buttons remain disabled.
 
 ## Run
 
@@ -78,11 +77,17 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   dialog. Load scene uses file upload/native selection and validates before
   replacement. Successful loading clears history; malformed files leave the
   current document intact. Camera and selection are not saved.
+- **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
+  constrained mesh and its labeled outer/obstacle edges. Elements below 15° are
+  amber; the panel reports counts, minimum angle, maximum edge, refinement
+  progress, and explicit construction failures. An invalid draft keeps the last
+  accepted mesh.
 
 Scenes allow 32 obstacles and 128 controls per obstacle. JSON files are capped at
 2 MiB and require finite coordinates. The editor uses a fixed
-world-space validation tolerance of `0.0002`, independent of zoom. This is an
-approximate editor validator; robust meshing predicates arrive in milestone 2.
+world-space validation tolerance of `0.0002`, independent of zoom. The editor
+validator is deliberately conservative; final mesh topology uses adaptive exact
+orientation and incircle signs rather than geometric epsilons.
 Load [examples/eight-obstacles.json](examples/eight-obstacles.json) for a
 representative scene.
 
@@ -96,17 +101,17 @@ cargo build -p femfun-app --locked
 trunk build --release
 ```
 
-The tests cover spline evaluation/derivatives, seam insertion, geometry rejection,
-validation budgets, draft/accepted history, scene files, and egui pointer/keyboard
-interactions. Native GPU startup was exercised on Apple M1 Max / Metal. Browser
-upload/download, visual rendering, unsupported-WebGPU behavior, and performance
-must additionally be checked in a real browser; see the
-[browser checklist](docs/browser-checks.md).
+The 40 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
+constrained topology, concave and multiple holes, refinement limits, geometry
+rejection, draft/accepted history, scene files, and egui pointer/keyboard
+interactions. Native GPU startup was exercised on Apple M1 Max / Metal. The user
+reports completing the Milestone 1 browser interaction checks; browser metadata
+and Milestone 2 overlay performance have not been recorded.
 
 ## Layout
 
 ```text
-crates/femfun-core/       Dependency-free f64 splines, sampling, geometry validation
+crates/femfun-core/       Dependency-free f64 geometry, exact predicates, triangle meshing
 crates/femfun-app/        Bevy/egui UI, document/history model, JSON and file dialogs
 examples/                Scene files for exercising the editor
 docs/plan.md             Milestones and completion criteria

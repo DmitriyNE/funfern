@@ -7,11 +7,44 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Connect a browser and complete [browser-checks.md](browser-checks.md), including
-  upload/download, visual QA, unsupported-WebGPU messaging, and frame-time observations.
-- [ ] Record browser version, GPU/backend, display scale, and performance for the
-  supplied eight-obstacle scene. Do not treat the headless tests as browser QA.
-- [ ] Milestone 2: robust meshing predicates and constrained triangular meshing.
+- [ ] Milestone 3: static-domain CPU reference and GPU wave evolution.
+- [ ] Record browser/GPU metadata and frame-time ranges when the mesh overlay is
+  next exercised interactively; the user has deferred this pass.
+- [ ] Consider time-slicing topology preparation if browser measurements show a
+  visible pause on complex accepted scenes. Refinement is already cooperative.
+
+## 2026-09-09 — Milestone 2 constrained triangular meshing
+
+- Added adaptive exact-sign `orient2d` and `incircle`: common inputs use certified
+  error bounds; ambiguous inputs use non-overlapping expansion arithmetic. Exact
+  segment relations and polygon location build on the same orientation predicate.
+- Added deterministic constrained triangulation of the fixed square with multiple
+  spline holes, including concave obstacles. Visibility bridges and exact-sign ear
+  clipping establish topology; unconstrained edge flips produce a locally Delaunay
+  mesh without changing labeled boundary segments.
+- Added circumcenter refinement, centroid fallback, encroached-boundary splitting,
+  and explicit curve, vertex, triangle, and refinement-step limits. Split boundary
+  edges preserve stable outer/obstacle labels and continuous parameter ranges.
+- `MeshingJob` snapshots the accepted revision and advances at most one refinement
+  insertion per work unit. The app advances two units per frame after an edit ends,
+  discards obsolete jobs, and retains the previous mesh for invalid drafts.
+- Added the accepted triangle overlay, labeled boundary emphasis, amber elements
+  below 15°, counts, quality extrema, progress, and structured failure messages.
+- Verification: all **40 tests** pass (3 predicate, 10 spline/validation, 10 mesh,
+  9 document/persistence, 8 egui interaction). Mesh tests cover exact degeneracies,
+  integer predicate agreement, empty and rounded domains, concave and multiple
+  holes, Euler/manifold/area invariants, classification, deterministic output,
+  cooperative work, limits, and an eight-obstacle scene.
+- Known limit: topology preparation (sampling, bridge search, initial ear clipping)
+  is one capacity-bounded work phase. Quality refinement is cooperative, but a
+  complex accepted scene can still cause one longer frame during preparation.
+- Interactive browser testing was skipped at the user's request. The user reports
+  the previous Milestone 1 browser state looked good; exact browser/GPU and timing
+  observations were not provided.
+- Final checks pass: formatting, Clippy with warnings denied, the full workspace
+  test suite, native compilation, and `NO_COLOR=true trunk build --release`.
+  The current native app also ran on Apple M1 Max / Metal through initial mesh
+  completion without a runtime error; the existing Metal bindless warning remains.
 
 ## 2026-09-09 — Milestone 1 implementation and verification
 
@@ -48,11 +81,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   **24 MiB WASM + 112 KiB JS**, uncompressed. `trunk serve --release` builds,
   watches/rebuilds, and serves at localhost:8080; an HTTP probe returns 200.
   The sandbox required permission for helper-cache writes and local serving.
-- **Browser verification remains incomplete:** browser connection discovery
-  returned no available browsers. No browser version, browser GPU, visual QA,
-  upload/download result, unsupported-WebGPU runtime result, or browser frame-time
-  measurement is claimed. The browser checklist and eight-obstacle JSON fixture
-  are ready. Native file-dialog interaction is also unexercised; JSON logic is tested.
+- The user subsequently reported exercising this Milestone 1 browser state and
+  finding it good. Exact browser/GPU metadata and timing were not supplied. Native
+  file-dialog interaction remains unrecorded; JSON behavior is automated.
 - Updated README, architecture, and milestone notes. Meshing, wave evolution,
   and solver transaction machinery remain deferred.
 
@@ -60,8 +91,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 - Performance budgets need measurements on an actual browser/GPU; no fixed mesh
   capacity or realtime throughput is promised yet.
-- Custom predicate robustness and handling of nearly touching geometry need focused
-  design and tests in the mesher milestone.
+- Exact signs now cover meshing topology. The editor's approximate near-contact
+  policy remains intentionally conservative until stronger feature-scale rules are
+  developed alongside mesh adaptation.
 - Newly exposed region initialization and time-staggered state transfer need concrete
   policies before live geometry commits.
 - Select the higher-order boundary radiation formulation and corner treatment during

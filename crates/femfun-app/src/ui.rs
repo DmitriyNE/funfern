@@ -61,6 +61,12 @@ pub struct Playground {
     frame_ms: f32,
     ready: bool,
     keyboard_captured: bool,
+    mesh: Option<TriMesh>,
+    mesh_job: Option<MeshingJob>,
+    mesh_source: Scene,
+    mesh_error: Option<String>,
+    show_mesh: bool,
+    show_mesh_boundary: bool,
 }
 impl Default for Playground {
     fn default() -> Self {
@@ -93,6 +99,12 @@ impl Default for Playground {
             frame_ms: 0.0,
             ready: false,
             keyboard_captured: false,
+            mesh: None,
+            mesh_job: None,
+            mesh_source: Scene::default(),
+            mesh_error: None,
+            show_mesh: false,
+            show_mesh_boundary: true,
         }
     }
 }
@@ -206,6 +218,44 @@ impl Playground {
         };
         self.draft_curves = curves(&self.editor.document.draft);
         self.accepted_curves = curves(&self.editor.document.accepted);
+    }
+
+    fn refresh_mesh(&mut self) {
+        // A drag can promote many valid draft revisions. Mesh the complete
+        // accepted document once the edit transaction ends.
+        if self.editor.editing() {
+            return;
+        }
+        if self.mesh_source != self.editor.document.accepted {
+            self.mesh_source = self.editor.document.accepted.clone();
+            self.mesh_job = Some(MeshingJob::new(
+                self.mesh_source.clone(),
+                self.editor.revision,
+                MeshingOptions {
+                    curve_tolerance: 1.5e-3,
+                    target_edge_length: 0.16,
+                    minimum_angle_degrees: 12.0,
+                    max_vertices: 8_000,
+                    max_triangles: 16_000,
+                    max_refinement_steps: 5_000,
+                },
+            ));
+            self.mesh_error = None;
+        }
+        let result = self.mesh_job.as_mut().and_then(|job| job.advance(2));
+        if let Some(result) = result {
+            self.mesh_job = None;
+            match result {
+                Ok(mesh) => {
+                    self.mesh = Some(mesh);
+                    self.mesh_error = None;
+                }
+                Err(error) => {
+                    self.mesh = None;
+                    self.mesh_error = Some(error.to_string());
+                }
+            }
+        }
     }
     fn panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
@@ -399,7 +449,33 @@ impl Playground {
             ui.checkbox(&mut self.polygon, "Control polygons");
             ui.checkbox(&mut self.handles, "Handles");
             ui.checkbox(&mut self.reference, "Accepted reference");
+            ui.checkbox(&mut self.show_mesh, "Accepted triangle mesh");
+            ui.add_enabled_ui(self.show_mesh, |ui| {
+                ui.checkbox(&mut self.show_mesh_boundary, "Mesh boundary labels");
+            });
         });
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label("Accepted mesh");
+        if self.editor.editing() && self.mesh_source != self.editor.document.accepted {
+            ui.small("Waiting for edit to finish…");
+        } else if self.mesh_job.is_some() {
+            ui.small("Refining across frames…");
+        } else if let Some(mesh) = &self.mesh {
+            let low_quality = mesh.poor_triangles(15.0).len();
+            ui.small(format!(
+                "{} vertices · {} triangles\nmin angle {:.1}° · max edge {:.3}\n{} elements below 15°",
+                mesh.vertices.len(),
+                mesh.triangles.len(),
+                mesh.quality.minimum_angle_degrees,
+                mesh.quality.maximum_edge_length,
+                low_quality
+            ));
+        } else if let Some(error) = &self.mesh_error {
+            ui.colored_label(RED, error);
+        } else {
+            ui.small("Preparing…");
+        }
         ui.add_space(8.0);
         ui.label("Simulation · later milestone");
         ui.add_enabled_ui(false, |ui| {
@@ -613,6 +689,42 @@ impl Playground {
             domain.map(|p| self.screen(p, r)).to_vec(),
             Stroke::new(1.5, Color32::from_rgb(100, 123, 140)),
         ));
+        if self.show_mesh
+            && let Some(mesh) = &self.mesh
+        {
+            for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+                let low_quality = mesh
+                    .triangle_quality(triangle_index)
+                    .is_some_and(|quality| quality.minimum_angle_degrees < 15.0);
+                let mesh_stroke = Stroke::new(
+                    if low_quality { 1.1 } else { 0.65 },
+                    if low_quality {
+                        Color32::from_rgba_unmultiplied(248, 196, 112, 165)
+                    } else {
+                        Color32::from_rgba_unmultiplied(78, 123, 151, 105)
+                    },
+                );
+                let positions = triangle
+                    .vertices
+                    .map(|index| self.screen(mesh.vertices[index].point, r));
+                for edge in [[0, 1], [1, 2], [2, 0]] {
+                    painter.line_segment([positions[edge[0]], positions[edge[1]]], mesh_stroke);
+                }
+            }
+            if self.show_mesh_boundary {
+                for edge in &mesh.boundary_edges {
+                    let color = match edge.label {
+                        BoundaryLabel::Outer(_) => Color32::from_rgb(142, 161, 175),
+                        BoundaryLabel::Obstacle(_) => Color32::from_rgb(119, 155, 255),
+                    };
+                    painter.line_segment(
+                        edge.vertices
+                            .map(|index| self.screen(mesh.vertices[index].point, r)),
+                        Stroke::new(2.0, color),
+                    );
+                }
+            }
+        }
         if self.reference && self.editor.document.draft != self.editor.document.accepted {
             for curve in &self.accepted_curves {
                 self.draw_curve(&painter, r, curve, Color32::from_rgb(66, 100, 98), 3.0);
@@ -823,6 +935,7 @@ pub fn frame(mut contexts: EguiContexts, mut state: ResMut<Playground>, time: Re
     );
     state.show(&mut root);
     state.editor.validate_frame(12_000);
+    state.refresh_mesh();
     Ok(())
 }
 
@@ -1233,5 +1346,31 @@ mod tests {
         assert!(h.state.custom.is_empty());
         assert_eq!(h.state.editor.document.draft.obstacles.len(), 2);
         assert_eq!(h.state.editor.history_len(), (1, 0));
+    }
+
+    #[test]
+    fn accepted_mesh_finishes_cooperatively_and_survives_an_invalid_draft() {
+        let mut h = Harness::new();
+        for _ in 0..5_000 {
+            h.state.refresh_mesh();
+            if h.state.mesh.is_some() {
+                break;
+            }
+        }
+        let mesh = h.state.mesh.clone().expect("initial accepted mesh");
+        assert_eq!(mesh.geometry_revision, 0);
+        assert!(!mesh.triangles.is_empty());
+
+        h.state.editor.begin();
+        h.state
+            .editor
+            .set_point(ObstacleId(1), 0, Point2::new(8.0, 0.0))
+            .unwrap();
+        h.state.editor.commit();
+        h.settle();
+        assert!(matches!(h.state.editor.acceptance, Acceptance::Invalid(_)));
+        h.state.refresh_mesh();
+        assert_eq!(h.state.mesh.as_ref().unwrap(), &mesh);
+        assert!(h.state.mesh_job.is_none());
     }
 }

@@ -109,6 +109,60 @@ box. JSON excludes the viewport. There is no independent wgpu device, WebGL
 fallback, audio subsystem, or 3D rendering pipeline. This editor acceptance model
 is separate from the future solver transaction machinery below.
 
+## Custom triangular meshing
+
+Milestone 2 keeps meshing in `femfun-core` with no numerical dependencies. The
+predicate layer first evaluates orientation and incircle determinants with a
+certified floating-point error bound. Ambiguous results fall back to exact-sign
+non-overlapping expansions. Tests compare thousands of integer-coordinate cases
+against `i128` determinants and exercise nearly collinear and cocircular inputs.
+The editor's proximity tolerance remains separate: exact predicate signs answer
+topology questions, while the editor tolerance decides whether near-contact is
+acceptable input.
+
+Mesh construction samples the fixed outer square and every accepted spline. The
+outer loop is counter-clockwise and obstacle loops are clockwise. A visibility
+bridge turns each hole into one weakly-simple polygon; exact-sign ear clipping
+creates the initial constrained triangulation. Boundary segments are authoritative
+constraints. Global edge legalization flips only unconstrained convex diagonals,
+using the robust incircle predicate, to produce a locally constrained-Delaunay
+mesh. Triangle centroids are checked against the sampled domain before a result
+is published.
+
+Quality refinement selects the worst size or angle violation. It inserts a
+circumcenter when that point remains in the meshed domain and otherwise uses the
+triangle centroid. A candidate that encroaches a constrained edge splits that
+edge and carries its label and continuous parameter range to both children.
+Interior insertions split their containing triangle or edge, followed by robust
+legalization. The defaults target an 18° minimum angle and 0.18 maximum edge;
+the interactive overlay uses 12°, 0.16, and a coarser 0.0015 curve tolerance for
+responsive diagnostics. Both are explicit choices rather than solver accuracy
+claims.
+
+`TriMesh` stores f64 vertices, counter-clockwise triangle indices, labeled outer
+and obstacle edges, stable obstacle IDs, continuous boundary parameters, and
+aggregate quality. Boundary labels are independent of temporary vertex and
+triangle indices. Verification requires positive triangle orientation, manifold
+edge adjacency, exactly one incident triangle for every boundary edge, domain
+classification of every centroid, and configured size/angle targets.
+
+`MeshingJob` snapshots an accepted geometry revision. Its topology-preparation
+phase is bounded by sampling and mesh capacities; each later `advance` unit makes
+at most one refinement insertion plus legalization. The application advances two
+units per frame after an edit transaction ends and replaces obsolete jobs when a
+new accepted scene arrives. It keeps the previous accepted mesh throughout an
+invalid draft. Current topology preparation is a single phase rather than fully
+time-sliced; a complex valid scene can therefore still cause one longer frame.
+Later transaction machinery can split or move that phase if measurements require
+it.
+
+The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
+elements below 15° amber, and reports counts and extrema. A meshing failure is a
+structured diagnostic and never changes the draft, accepted geometry, or history.
+The current bridge search is deliberately simple and deterministic. Difficult
+valid arrangements may return a topology or capacity error rather than attempting
+unbounded recovery.
+
 ## Initial evolution model
 
 Use a dimensionless scalar model

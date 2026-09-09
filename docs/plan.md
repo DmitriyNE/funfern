@@ -60,6 +60,9 @@ accidentally manipulate geometry underneath.
 
 ## 2. Custom triangular mesher
 
+Implemented with automated topology/quality coverage. The user has deferred a
+fresh interactive browser pass for the mesh overlay.
+
 - Implement robust geometric predicates, constrained triangulation, domain
   classification, and bounded quality refinement.
 - Preserve boundary and region identities independently of temporary mesh indices.
