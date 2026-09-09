@@ -1,5 +1,5 @@
 [package]
-name = "femfun-app"
+name = "funfern-app"
 description = "Bevy WebGPU geometry playground"
 version.workspace = true
 edition.workspace = true
@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-femfun-core = { path = "../femfun-core" }
+funfern-core = { path = "../funfern-core" }
 bevy = { version = "=0.19.1", default-features = false, features = ["std", "async_executor", "bevy_asset", "bevy_color", "bevy_core_pipeline", "bevy_render", "bevy_camera", "bevy_window", "bevy_winit", "bevy_log", "multi_threaded", "webgpu", "x11", "wayland"] }
 bevy_egui = { version = "=0.42.0", default-features = false, features = ["render", "default_fonts"] }
 serde = { version = "1", features = ["derive"] }

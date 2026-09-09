@@ -27,7 +27,7 @@ use bevy::{
         storage::{GpuShaderBuffer, ShaderBuffer},
     },
 };
-use femfun_core::{Point2, QuadraticTransferMap, QuadraticWaveOperator, RegionId, TriMesh};
+use funfern_core::{Point2, QuadraticTransferMap, QuadraticWaveOperator, RegionId, TriMesh};
 
 const WORKGROUP_SIZE: u32 = 128;
 const STATUS_READY: u8 = 1;
@@ -70,7 +70,7 @@ impl Default for SourceSettings {
             amplitude: 18.0,
             width: 0.06,
             frequency_hz: 2.5,
-            region: femfun_core::BACKGROUND_REGION,
+            region: funfern_core::BACKGROUND_REGION,
         }
     }
 }
@@ -232,9 +232,9 @@ impl WaveGpuRequest {
             return Err("The transfer map does not match the active and candidate meshes".into());
         }
         let preserve_auxiliary = source_operator.outer_boundary()
-            == femfun_core::OuterBoundaryCondition::SecondOrderOutgoing
+            == funfern_core::OuterBoundaryCondition::SecondOrderOutgoing
             && target_operator.outer_boundary()
-                == femfun_core::OuterBoundaryCondition::SecondOrderOutgoing;
+                == funfern_core::OuterBoundaryCondition::SecondOrderOutgoing;
         let entries = map
             .samples()
             .iter()
@@ -548,7 +548,7 @@ fn create_buffers(
     };
     let pulse = GpuPulse {
         position_width_amplitude: Vec4::new(0.0, 0.0, 0.06_f32.powi(2), 0.65),
-        region: gpu_region_pair(femfun_core::BACKGROUND_REGION, RegionId(0)),
+        region: gpu_region_pair(funfern_core::BACKGROUND_REGION, RegionId(0)),
     };
     let source_weights =
         forcing_weights(mesh, operator, source.position, source.width, source.region)?;
@@ -557,7 +557,7 @@ fn create_buffers(
         operator,
         Point2::default(),
         0.06,
-        femfun_core::BACKGROUND_REGION,
+        funfern_core::BACKGROUND_REGION,
     )?;
     Ok((
         WaveBufferHandles {
@@ -669,7 +669,7 @@ pub(crate) fn forcing_weights(
     if !mesh.boundary_edges.iter().any(|edge| {
         matches!(
             edge.label,
-            femfun_core::BoundaryLabel::InternalBoundary { .. }
+            funfern_core::BoundaryLabel::InternalBoundary { .. }
         )
     }) {
         return Ok(operator
@@ -1314,7 +1314,7 @@ mod tests {
             amplitude: 7.0,
             width: 0.04,
             frequency_hz: 2.5,
-            region: femfun_core::BACKGROUND_REGION,
+            region: funfern_core::BACKGROUND_REGION,
         });
         assert_eq!(source.position_width_amplitude.x, 0.2);
         assert_eq!(source.position_width_amplitude.y, -0.3);
@@ -1326,7 +1326,7 @@ mod tests {
 
     #[test]
     fn open_boundary_forcing_uses_mesh_path_distance() {
-        use femfun_core::*;
+        use funfern_core::*;
 
         let mut scene = Scene::default();
         scene.internal_boundaries.push(InternalBoundary {

@@ -1,5 +1,5 @@
 use crate::editor::Document;
-use femfun_core::*;
+use funfern_core::*;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;

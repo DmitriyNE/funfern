@@ -92,7 +92,7 @@ editable boundaries and more involved topology are future extensions.
 
 ## Milestone 1 spline and document model
 
-`femfun-core` is dependency-free. It owns `Point2`, `PeriodicCubicSpline`,
+`funfern-core` is dependency-free. It owns `Point2`, `PeriodicCubicSpline`,
 `ObstacleId`, `Scene`, parameter-bearing samples, and structured validation
 results. Controls and one period of positive nonuniform knot intervals are f64.
 There are 4–128 controls, each associated with its same-index knot. Knots and
@@ -159,7 +159,7 @@ is separate from the future solver transaction machinery below.
 
 ## Custom triangular meshing
 
-Milestone 2 keeps meshing in `femfun-core` with no numerical dependencies. The
+Milestone 2 keeps meshing in `funfern-core` with no numerical dependencies. The
 predicate layer first evaluates orientation and incircle determinants with a
 certified floating-point error bound. Ambiguous results fall back to exact-sign
 non-overlapping expansions. Tests compare thousands of integer-coordinate cases

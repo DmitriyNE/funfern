@@ -39,6 +39,19 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
 
+## 2026-09-09 — Renamed project to funfern
+
+- Renamed the workspace packages and source directories to `funfern-core` and
+  `funfern-app`, including Rust crate imports, documented commands, and Cargo lock
+  entries. The native executable and Trunk artifacts now use the `funfern-app` name.
+- Updated the browser title/canvas target, native window title, editor heading,
+  startup message, scene-file filters, and default `funfern-scene.json` filename.
+  The version 5 scene schema is unchanged and existing scene files remain compatible.
+- Formatting, Clippy with warnings denied, all **107 tests**, native release
+  compilation, Apple M1 Max / Metal solver and transfer checks, and a release
+  WASM/Trunk build pass under the new package names. Interactive browser testing
+  was skipped as previously requested.
+
 ## 2026-09-09 — Assigned hole-span conditions
 
 - Periodic loops now carry one exterior-face condition per knot interval. Clicking
@@ -409,7 +422,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   native GPU check exercises shader compilation, storage layouts, both time levels,
   and readback. All **57 tests**, formatting, Clippy with warnings denied, native
   release compilation, and release Trunk packaging pass. WASM packaging used
-  `NO_COLOR=true trunk build --release --dist /private/tmp/femfun-wave-solver-dist`.
+  `NO_COLOR=true trunk build --release --dist /private/tmp/funfern-wave-solver-dist`.
   Interactive browser verification remains deferred as requested.
 - User feedback retained: local mesh repair still falls back often for small-ish
   moves and is fragile. This solver change does not alter that repair policy.
@@ -438,7 +451,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   moved/inserted/collapsed vertices, and exact preserved-element fraction are
   displayed. Request time begins after editor acceptance; the native benchmark
   also logs from the edit itself, including editor validation.
-- Added `cargo run -p femfun-app --release --locked -- --mesh-edit-benchmark`:
+- Added `cargo run -p funfern-app --release --locked -- --mesh-edit-benchmark`:
   the real native Bevy/egui app, eight obstacles, h≤0.02, visible fine overlay,
   three coordinate deltas (+.005,0), (0,+.005), (-.005,-.005), then automatic exit.
   It uses a temporary scene without file I/O and disables interactive editor
@@ -476,7 +489,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   frozen-patch coarsening guards, actual coarsening/compaction, superseded requests,
   invalid drafts/history, and retaining the displayed mesh after build failure.
   WASM command used isolated output:
-  `NO_COLOR=true trunk build --release --dist /private/tmp/femfun-local-repair-dist`.
+  `NO_COLOR=true trunk build --release --dist /private/tmp/funfern-local-repair-dist`.
   Native run retains the existing Metal bindless fallback warning; normal exit
   also logged an unknown-window Destroyed-event warning. Browser testing remains
   deferred at the user's request.
@@ -501,7 +514,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   obstacle scenes, prints spatial P1 DOFs, achieved edge/angle extrema, and a
   reference wavelength / h ratio, and reports failures with a failing exit code.
   Mesh construction is the only measured operation; there is no wave solve yet.
-- Command: `cargo run -p femfun-core --release --example mesh_timing -- --wave --slices`.
+- Command: `cargo run -p funfern-core --release --example mesh_timing -- --wave --slices`.
   Rust 1.96.0, release native CPU, same previously identified Apple M1 Max host.
   Final run after our build commands completed:
 
@@ -533,7 +546,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Verification: 43 workspace tests passed, plus the expanded UI regression for
   the finer default, cached quality, resolution changes, and preservation of
   invalid drafts/history. Formatting, Clippy with warnings denied, native build,
-  and release Trunk packaging to `/private/tmp/femfun-wave-resolution-dist` pass.
+  and release Trunk packaging to `/private/tmp/funfern-wave-resolution-dist` pass.
   All six wave-resolution benchmark cases meet their requested edge bounds.
   Interactive browser testing remains deferred by user request.
 
@@ -554,7 +567,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   geometry, refinement, and mesh capacities remain enforced.
 - Added a reproducible native timing example for 1, 8, and 32 obstacles using
   app settings (curve tolerance .0015, edge target .16, minimum angle 12°).
-  Commands: `cargo run -p femfun-core --release --example mesh_timing` and the
+  Commands: `cargo run -p funfern-core --release --example mesh_timing` and the
   same command with `-- --slices`. Rust 1.96.0, release build, same macOS host
   previously identified as Apple M1 Max. These are CPU measurements, not browser
   frame times. Before/after single-unit profiling observations:
@@ -581,7 +594,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   WASM build pass. No dependency or lockfile changes were needed.
 - A final default-output Trunk rerun encountered truncated WASM in `dist/.stage`.
   Direct release WASM compilation passed, and packaging succeeded using
-  `NO_COLOR=true trunk build --release --dist /private/tmp/femfun-mesh-verification-dist`.
+  `NO_COLOR=true trunk build --release --dist /private/tmp/funfern-mesh-verification-dist`.
   Isolating the staging output resolved the failure; a competing watched build
   was suspected but not confirmed.
 - Interactive browser testing remains deferred by user request. Boundary assembly,
@@ -627,7 +640,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Added the Bevy 0.19.1 / bevy_egui 0.42.0 application, explicit rendering/window/
   input/WebGPU features, full-window canvas, startup diagnostics, and Trunk setup.
   Bevy owns the only wgpu device. Active dependencies exclude audio, PBR/3D
-  rendering, and WebGL fallback; `femfun-core` still has no dependencies.
+  rendering, and WebGL fallback; `funfern-core` still has no dependencies.
 - Implemented nonuniform periodic cubic de Boor evaluation and two derivatives,
   shape-preserving seam insertion, reshaping removal, and adaptive hull sampling.
 - Implemented preset/custom creation, hit testing, coordinate editing, curve and
@@ -649,7 +662,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   validation limits and revisions, both creation workflows, handle dragging,
   Escape, one-entry history, numeric edits, typing capture, panel scrolling,
   insertion/removal, cursor zoom, both pan gestures, and viewport resize.
-- `cargo build -p femfun-app --locked` passes. `cargo run -p femfun-app --locked`
+- `cargo build -p funfern-app --locked` passes. `cargo run -p funfern-app --locked`
   starts a native window and initializes **Apple M1 Max / Metal**. bevy_egui
   reports its known Metal bindless-texture fallback; no startup failure observed.
 - `NO_COLOR=true trunk build --release` passes with Rust 1.96.0 and Trunk 0.21.14.
@@ -680,7 +693,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 ## 2026-09-09 — Project setup and agreed direction
 
 - Added milestone 0 for repository setup, documentation, and project initialization.
-- Initialized a Rust workspace with an empty, dependency-free `femfun-core` library.
+- Initialized a Rust workspace with an empty, dependency-free `funfern-core` library.
   The application and its dependencies start in milestone 1.
 - Wrote the README, milestone plan, and architecture notes.
 - Adopted egui for panels and this file for lightweight development notes.

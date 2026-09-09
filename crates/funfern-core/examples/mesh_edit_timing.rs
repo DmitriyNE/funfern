@@ -1,6 +1,6 @@
 //! Native meshing harness. --paced runs 2 ms slices on a 60 Hz schedule.
 //! It excludes rendering/GPU work; the app reports its own observed latency.
-use femfun_core::*;
+use funfern_core::*;
 use std::{
     sync::Arc,
     time::{Duration, Instant},

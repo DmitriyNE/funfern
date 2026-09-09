@@ -7,8 +7,8 @@ fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: "femfun · wave playground".into(),
-            canvas: Some("#femfun".into()),
+            title: "funfern · wave playground".into(),
+            canvas: Some("#funfern".into()),
             fit_canvas_to_parent: true,
             resolution: (1280, 800).into(),
             ..default()

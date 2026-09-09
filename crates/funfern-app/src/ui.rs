@@ -9,11 +9,11 @@ use bevy_egui::{
     EguiContexts,
     egui::{self, Color32, Pos2, Rect, Stroke},
 };
-use femfun_app::{
+use funfern_app::{
     editor::{Acceptance, Editor},
     persistence::{self, LoadCandidate},
 };
-use femfun_core::*;
+use funfern_core::*;
 use std::sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, Sender},
@@ -882,7 +882,7 @@ impl Playground {
             ui.disable();
         }
         ui.add_space(10.0);
-        ui.heading(egui::RichText::new("femfun").size(29.0).color(TEAL));
+        ui.heading(egui::RichText::new("funfern").size(29.0).color(TEAL));
         ui.label(
             egui::RichText::new("GEOMETRY PLAYGROUND")
                 .small()
@@ -2620,7 +2620,7 @@ pub fn mesh_benchmark_scene() -> Playground {
     };
     state
         .editor
-        .replace_validated(femfun_app::editor::Document {
+        .replace_validated(funfern_app::editor::Document {
             draft: scene.clone(),
             accepted: scene,
         });
@@ -2684,7 +2684,7 @@ pub fn wave_gpu_check_scene() -> Playground {
     };
     state
         .editor
-        .replace_validated(femfun_app::editor::Document {
+        .replace_validated(funfern_app::editor::Document {
             draft: scene.clone(),
             accepted: scene,
         });

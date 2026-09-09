@@ -1,4 +1,4 @@
-use femfun_core::*;
+use funfern_core::*;
 fn near(a: Point2, b: Point2, tol: f64) {
     assert!((a - b).norm() < tol, "{a:?} != {b:?}");
 }

@@ -1,4 +1,4 @@
-# femfun
+# funfern
 
 A browser finite-element wave playground with editable periodic and open cubic
 splines, material regions, holes and reflecting baffles, constrained triangle meshes,
@@ -34,7 +34,7 @@ on rebuild; its first build downloads matching WASM helpers.
 Native development:
 
 ```sh
-cargo run -p femfun-app --locked
+cargo run -p funfern-app --locked
 ```
 
 Release browser bundle (output: `dist/`):
@@ -158,16 +158,16 @@ representative scene.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-cargo build -p femfun-app --locked
+cargo build -p funfern-app --locked
 trunk build --release
-cargo run -p femfun-core --release --example mesh_timing -- --slices
-cargo run -p femfun-core --release --example mesh_timing -- --wave --slices
-cargo run -p femfun-core --release --example mesh_edit_timing -- --paced
-cargo run -p femfun-core --release --example wave_convergence
-cargo run -p femfun-core --release --example wave_boundary_reflection
-cargo run -p femfun-app --release --locked -- --mesh-edit-benchmark
-cargo run -p femfun-app --release --locked -- --wave-gpu-check
-cargo run -p femfun-app --release --locked -- --wave-transfer-check
+cargo run -p funfern-core --release --example mesh_timing -- --slices
+cargo run -p funfern-core --release --example mesh_timing -- --wave --slices
+cargo run -p funfern-core --release --example mesh_edit_timing -- --paced
+cargo run -p funfern-core --release --example wave_convergence
+cargo run -p funfern-core --release --example wave_boundary_reflection
+cargo run -p funfern-app --release --locked -- --mesh-edit-benchmark
+cargo run -p funfern-app --release --locked -- --wave-gpu-check
+cargo run -p funfern-app --release --locked -- --wave-transfer-check
 ```
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
@@ -215,8 +215,8 @@ and interactive checks for the quadratic solver have not been recorded.
 ## Layout
 
 ```text
-crates/femfun-core/       Dependency-free f64 geometry, meshing, and CPU wave reference
-crates/femfun-app/        Bevy/egui editor, persistence, GPU waves, and field display
+crates/funfern-core/       Dependency-free f64 geometry, meshing, and CPU wave reference
+crates/funfern-app/        Bevy/egui editor, persistence, GPU waves, and field display
 examples/                Scene files for exercising the editor
 docs/plan.md             Milestones and completion criteria
 docs/architecture.md     Representation, draft model, and later solver design

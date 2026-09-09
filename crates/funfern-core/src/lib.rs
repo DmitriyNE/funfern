@@ -1,4 +1,4 @@
-//! Dependency-free f64 geometry for the femfun editor.
+//! Dependency-free f64 geometry for the funfern editor.
 mod geometry;
 mod mesh;
 mod predicates;

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use femfun_core::*;
+use funfern_core::*;
 
 fn mesh(scene: &Scene) -> TriMesh {
     mesh_scene(

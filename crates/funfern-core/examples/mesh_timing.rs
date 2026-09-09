@@ -1,5 +1,5 @@
-//! Native CPU timings; run with `cargo run -p femfun-core --release --example mesh_timing`.
-use femfun_core::*;
+//! Native CPU timings; run with `cargo run -p funfern-core --release --example mesh_timing`.
+use funfern_core::*;
 use std::collections::BTreeMap;
 use std::time::Instant;
 

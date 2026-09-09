@@ -1,6 +1,6 @@
 [package]
-name = "femfun-core"
-description = "Custom geometry and numerical methods for the femfun wave toy"
+name = "funfern-core"
+description = "Custom geometry and numerical methods for the funfern wave toy"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

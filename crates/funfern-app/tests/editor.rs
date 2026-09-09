@@ -1,5 +1,5 @@
-use femfun_app::{editor::*, persistence::*};
-use femfun_core::*;
+use funfern_app::{editor::*, persistence::*};
+use funfern_core::*;
 fn settle(e: &mut Editor) {
     for _ in 0..10000 {
         e.validate_frame(1000);

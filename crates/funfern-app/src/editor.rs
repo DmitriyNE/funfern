@@ -1,4 +1,4 @@
-use femfun_core::*;
+use funfern_core::*;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Document {
     pub draft: Scene,

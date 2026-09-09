@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use femfun_core::{
+use funfern_core::{
     MeshingOptions, Point2, QuadraticWaveOperator, QuadraticWaveState, Scene, TriMesh,
     WaveCoefficients, WaveOperator, WaveState, mesh_scene,
 };
