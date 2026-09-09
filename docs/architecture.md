@@ -1,8 +1,8 @@
 # Architecture notes
 
-The spline editor, constrained mesher, bounded coordinate-edit repair, and static
-P1 GPU wave solver are implemented. Simulation transactions and state transfer in
-later sections remain design directions.
+The spline editor, constrained mesher, bounded coordinate-edit repair, P1 GPU wave
+solver, and geometry-edit simulation transactions are implemented. Higher-order
+discretizations and broader adaptation remain design directions.
 
 ## Responsibilities and dependencies
 
@@ -282,14 +282,14 @@ giving zero added velocity. The continuous source is a Gaussian nodal accelerati
 with a sinusoidal time factor; its default frequency is 2.5 cycles per dimensionless
 time, corresponding to wavelength 0.4 at wave speed one.
 
-Publishing a new committed mesh currently resets GPU state. The old solver keeps
-running while the new mesh is prepared, but transfer is intentionally deferred to
-the transaction lifecycle below. Invalid drafts do not alter the active solver.
+The old solver keeps running while a replacement mesh is prepared. Invalid drafts
+do not alter the active solver. Reset is explicit; accepted geometry edits carry
+the field forward through the transaction lifecycle below.
 
 ## Transaction lifecycle
 
-Maintain an accepted simulation revision, at most one active candidate, and the
-latest requested geometry/parameter revision.
+The implementation maintains an accepted simulation revision, at most one active
+candidate, and the latest requested geometry revision.
 
 1. Capture a candidate request and its accepted source-discretization revision.
 2. Prepare geometry, mesh, connectivity, operators, boundary labels, transfer map,
@@ -304,15 +304,22 @@ latest requested geometry/parameter revision.
 6. Switch all accepted resources together, then schedule the latest outstanding
    request if necessary.
 
-GPU validation may itself take time; design its ordering/readback deliberately so
-the old simulation remains usable while a commit is pending. A CPU-valid mesh
-alone does not establish that a transferred GPU state is finite.
+Candidate mesh construction remains resumable. Operator assembly and the spatial
+transfer map are currently prepared synchronously when meshing finishes; their
+measured cost is small at current capacities, but this is the remaining bounded-work
+gap in the transaction. The old solver continues until all previously requested
+steps have been encoded. The application then pauses scheduling briefly, dispatches
+the transfer, and waits for a generation-tagged finite GPU readback before switching
+mesh, operator, timestep, and displayed field together. A shader failure restores
+the retained old buffers.
 
 The old mesh/operators remain fixed during candidate preparation; only the old
 state evolves. Transfer maps target the source discretization, not a captured
 field snapshot. For triangles, map new samples to old triangle indices and
 barycentric weights on the CPU, then apply that map to current state on the GPU.
-Keep other discretizations free to provide different transfer operations.
+The CPU lookup uses a uniform spatial bin index rather than testing every old
+triangle for every new vertex. Keep other discretizations free to provide different
+transfer operations.
 
 Coalesce pointer events. Do not restart all preparation on every event: useful
 intermediate shapes may commit while a newer request waits. Obsolete or invalid
@@ -325,11 +332,19 @@ Transfer both the field and its time derivative (or equivalent complete integrat
 state). Respect time staggering; changing the timestep must not reinterpret an old
 half-step state as a new one. Boundary auxiliary fields need an explicit policy.
 
-Barycentric interpolation is acceptable initially. It need not conserve energy.
-Avoid interpolation across excluded obstacles or incorrectly across distinct
-regions. Newly exposed domain needs a documented initialization policy before live
-edits are enabled. Mild local smoothing is a possible response to edit-induced
-bursts, not a substitute for stable stepping.
+Barycentric interpolation is used initially and does not conserve energy. A target
+vertex maps only through an old triangle that contains it, so transfer never crosses
+an excluded obstacle. Vertices newly exposed by a shrinking or moved obstacle start
+with zero displacement and velocity. Mild local smoothing is a possible response to
+edit-induced bursts, not a substitute for stable stepping.
+
+For the centered two-level scheme, the first GPU transfer dispatch reconstructs
+the current velocity from the old previous/current displacements, old operator,
+damping, forcing, and timestep. It barycentrically maps current displacement and
+velocity. A second dispatch applies the new operator and forcing to initialize the
+new previous displacement consistently with the new timestep. The exact GPU clock
+is copied at commit, so a continuous source retains its phase. Both transfer
+dispatches stay within WebGPU's portable eight-storage-buffer-per-stage limit.
 
 Validate finite values, positive areas/masses, operator consistency, and admissible
 timesteps. State magnitude guards and recovery behavior can be added based on

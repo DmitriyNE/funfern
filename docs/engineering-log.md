@@ -11,9 +11,41 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   display frame time and long-run behavior; the user deferred browser testing.
 - [ ] Record browser/GPU metadata and frame-time ranges when the mesh overlay is
   next exercised interactively; the user has deferred this pass.
-- [ ] Implement transactional transfer of both wave time levels when a new mesh is
-  committed. Extend fragile local repair/fallback behavior, persistent connectivity,
-  and cooldown in a later adaptation pass.
+- [ ] Make operator assembly and transfer-map construction resumable if their
+  synchronous post-mesh tail becomes visible on larger discretizations.
+- [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
+  cooldown in a later adaptation pass.
+
+## 2026-09-09 — Transactional geometry edits and GPU state transfer
+
+- Completed meshes now remain candidates until their operator, timestep, transfer
+  map, GPU buffers, and transferred state are ready. The active mesh and field stay
+  visible and continue evolving during meshing. Scheduling pauses only after the
+  candidate is ready and prior GPU steps have been encoded; a finite tagged readback
+  commits mesh, operator, timestep, and field together. Failed candidates retain the
+  active simulation, and retained GPU buffers support rollback on shader failure.
+- Added a dependency-free spatially indexed barycentric `TransferMap`. Target
+  vertices outside the old triangulated domain initialize to zero displacement and
+  velocity. Revision and size checks reject stale maps.
+- The first transfer dispatch reconstructs velocity from old previous/current
+  levels, stiffness, damping, forcing, and timestep, then maps current displacement
+  and velocity. The second applies the new operator and initializes the new previous
+  level consistently with the new timestep. GPU time is copied so continuous-source
+  phase remains continuous.
+- Fixed a pre-existing dynamic-buffer race found by the new checks: source/pulse
+  updates now replace their asset buffer and advance a binding revision, and compute
+  waits for a bind group with that exact revision. This prevents stepping once with
+  stale pulse data.
+- Native `--wave-transfer-check` on Apple M1 Max / Metal injected a nonzero field,
+  performed a real control edit and remesh, then matched the independent f64 result:
+  current relative mass-weighted L2 `4.68e-9`, previous `2.52e-8`. The small-edit
+  mesh request through atomic commit took `116–117 ms`; synchronous operator/map
+  prep took `4.4–4.6 ms`, and transfer submission through tagged readback took
+  `21.6–25.4 ms` across two runs. The existing 128-step GPU check still matches f64
+  at about `1.22e-6` for both levels.
+- Operator assembly plus transfer-map construction is still a synchronous tail when
+  a mesh job finishes. Browser interaction and long-run verification remain deferred
+  at the user's request.
 
 ## 2026-09-09 — Static P1 CPU/GPU wave solver
 

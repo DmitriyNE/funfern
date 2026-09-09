@@ -1,5 +1,5 @@
 use crate::files::{self, FileEvent};
-use crate::wave_gpu::{SourceSettings, WaveDisplay, WaveGpuRequest};
+use crate::wave_gpu::{SourceSettings, WaveDisplay, WaveGpuRequest, WaveTransfer};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
@@ -37,6 +37,19 @@ struct Curve {
     id: ObstacleId,
     samples: Vec<Sample>,
 }
+struct SimulationCandidate {
+    mesh: Arc<TriMesh>,
+    scene: Scene,
+    max_edge: f64,
+    low_quality: Vec<bool>,
+    operator: Arc<WaveOperator>,
+    time_step: f64,
+    transfer: Option<TransferMap>,
+    generation: Option<u64>,
+    resume_running: bool,
+    simulation_time: f64,
+    exposed_vertices: usize,
+}
 #[derive(Resource)]
 pub struct Playground {
     automated_benchmark: bool,
@@ -68,6 +81,7 @@ pub struct Playground {
     ready: bool,
     keyboard_captured: bool,
     mesh: Option<Arc<TriMesh>>,
+    simulation_candidate: Option<SimulationCandidate>,
     mesh_job: Option<MeshUpdateJob>,
     mesh_source: Scene,
     mesh_committed_scene: Scene,
@@ -90,6 +104,7 @@ pub struct Playground {
     wave_mesh: Option<Arc<TriMesh>>,
     wave_operator: Option<Arc<WaveOperator>>,
     wave_time_step: f64,
+    wave_time_offset: f64,
     wave_running: bool,
     wave_speed: f64,
     wave_accumulator: f64,
@@ -141,6 +156,7 @@ impl Default for Playground {
             ready: false,
             keyboard_captured: false,
             mesh: None,
+            simulation_candidate: None,
             mesh_job: None,
             mesh_source: Scene::default(),
             mesh_committed_scene: Scene::default(),
@@ -163,6 +179,7 @@ impl Default for Playground {
             wave_mesh: None,
             wave_operator: None,
             wave_time_step: 0.0,
+            wave_time_offset: 0.0,
             wave_running: false,
             wave_speed: 1.0,
             wave_accumulator: 0.0,
@@ -298,7 +315,7 @@ impl Playground {
     fn refresh_mesh(&mut self) {
         // Prepare from the displayed mesh's own scene, never an obsolete
         // in-flight request. Geometry edits are coalesced until the drag ends.
-        if self.editor.editing() {
+        if self.editor.editing() || self.simulation_candidate.is_some() {
             return;
         }
         let start = Instant::now();
@@ -358,14 +375,45 @@ impl Playground {
             self.mesh_job = None;
             match result {
                 Ok(result) => {
-                    let mesh = result.mesh;
-                    self.mesh_low_quality = (0..mesh.triangles.len())
+                    let mesh = Arc::new(result.mesh);
+                    let low_quality = (0..mesh.triangles.len())
                         .map(|i| mesh.triangle_quality(i).unwrap().minimum_angle_degrees < 15.0)
                         .collect();
-                    self.mesh = Some(Arc::new(mesh));
-                    self.mesh_committed_scene = self.mesh_source.clone();
-                    self.mesh_committed_max_edge = self.mesh_source_max_edge;
-                    self.mesh_error = None;
+                    let prepare = Instant::now();
+                    match WaveOperator::assemble(&mesh, WaveCoefficients::default()) {
+                        Ok(operator) => {
+                            let transfer = self
+                                .wave_mesh
+                                .as_ref()
+                                .map(|source| TransferMap::build(source, &mesh))
+                                .transpose();
+                            match transfer {
+                                Ok(transfer) => {
+                                    let exposed_vertices = transfer
+                                        .as_ref()
+                                        .map_or(mesh.vertices.len(), TransferMap::exposed_vertices);
+                                    let time_step = operator.recommended_time_step();
+                                    self.simulation_candidate = Some(SimulationCandidate {
+                                        mesh,
+                                        scene: self.mesh_source.clone(),
+                                        max_edge: self.mesh_source_max_edge,
+                                        low_quality,
+                                        operator: Arc::new(operator),
+                                        time_step,
+                                        transfer,
+                                        generation: None,
+                                        resume_running: self.wave_running,
+                                        simulation_time: 0.0,
+                                        exposed_vertices,
+                                    });
+                                    self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
+                                    self.mesh_error = None;
+                                }
+                                Err(error) => self.mesh_error = Some(error.to_string()),
+                            }
+                        }
+                        Err(error) => self.mesh_error = Some(error.to_string()),
+                    }
                 }
                 Err(error) => {
                     self.mesh_error = Some(error.to_string());
@@ -391,15 +439,11 @@ impl Playground {
         commands: &mut Commands,
         delta_seconds: f64,
     ) {
-        let mesh_changed = match (&self.mesh, &self.wave_mesh) {
-            (Some(mesh), Some(wave_mesh)) => !Arc::ptr_eq(mesh, wave_mesh),
-            (Some(_), None) => true,
-            _ => false,
-        };
-        if mesh_changed || self.wave_reset_requested {
+        if self.wave_reset_requested && self.simulation_candidate.is_none() {
             self.wave_reset_requested = false;
             self.wave_running = false;
             self.wave_accumulator = 0.0;
+            self.wave_time_offset = 0.0;
             self.wave_active_wall_seconds = 0.0;
             self.wave_completed_steps = 0;
             self.wave_dispatches = 0;
@@ -407,40 +451,116 @@ impl Playground {
             self.wave_energy = None;
             self.wave_energy_step = 0;
             self.wave_error = None;
-            if let Some(mesh) = self.mesh.clone() {
-                let start = Instant::now();
-                match WaveOperator::assemble(&mesh, WaveCoefficients::default()) {
-                    Ok(operator) => {
-                        let time_step = operator.recommended_time_step();
-                        match request.replace(
-                            assets,
-                            commands,
-                            &mesh,
-                            &operator,
-                            time_step,
-                            self.wave_source,
-                        ) {
-                            Ok(()) => {
-                                self.wave_time_step = time_step;
-                                self.wave_operator = Some(Arc::new(operator));
-                                self.wave_mesh = Some(mesh);
-                                self.wave_source_dirty = false;
-                            }
-                            Err(error) => {
-                                self.wave_operator = None;
-                                self.wave_mesh = Some(mesh);
-                                self.wave_error = Some(error);
-                            }
-                        }
-                    }
+            if let (Some(mesh), Some(operator)) = (&self.wave_mesh, &self.wave_operator) {
+                if let Err(error) = request.reset(
+                    assets,
+                    commands,
+                    mesh,
+                    operator,
+                    self.wave_time_step,
+                    self.wave_source,
+                ) {
+                    self.wave_error = Some(error);
+                } else {
+                    self.wave_source_dirty = false;
+                }
+            }
+        }
+        if let Some(candidate) = &mut self.simulation_candidate
+            && candidate.generation.is_none()
+        {
+            // Stop issuing new steps and let the render world encode every
+            // previously requested step before changing buffer generations.
+            self.wave_running = false;
+            if request.caught_up() {
+                candidate.simulation_time = self.wave_time_offset
+                    + request.stats().completed_steps() as f64 * self.wave_time_step;
+                let replacement = if let (Some(source_mesh), Some(map)) =
+                    (&self.wave_mesh, &candidate.transfer)
+                {
+                    request.replace_transferred(
+                        assets,
+                        commands,
+                        WaveTransfer {
+                            source_mesh,
+                            target_mesh: &candidate.mesh,
+                            target_operator: &candidate.operator,
+                            target_time_step: candidate.time_step,
+                            source: self.wave_source,
+                            map,
+                        },
+                    )
+                } else {
+                    request.replace(
+                        assets,
+                        commands,
+                        &candidate.mesh,
+                        &candidate.operator,
+                        candidate.time_step,
+                        self.wave_source,
+                    )
+                };
+                match replacement {
+                    Ok(()) => candidate.generation = Some(request.generation()),
                     Err(error) => {
-                        self.wave_operator = None;
-                        self.wave_mesh = Some(mesh);
-                        self.wave_error = Some(error.to_string());
+                        self.wave_error = Some(format!("Candidate upload failed: {error}"));
+                        self.simulation_candidate = None;
                     }
                 }
-                self.wave_prepare_ms = start.elapsed().as_secs_f64() * 1000.0;
             }
+        }
+        let candidate_ready = self.simulation_candidate.as_ref().is_some_and(|candidate| {
+            candidate.generation == Some(request.generation())
+                && request.ready()
+                && display.generation == request.generation()
+                && display.current.len() == candidate.mesh.vertices.len()
+        });
+        if candidate_ready {
+            let candidate = self.simulation_candidate.take().unwrap();
+            let commit_message = if candidate.transfer.is_some() {
+                format!(
+                    "Simulation mesh committed · {} newly exposed vertices initialized to zero",
+                    candidate.exposed_vertices
+                )
+            } else {
+                "Initial simulation mesh committed".into()
+            };
+            request.finish_transfer(assets);
+            self.mesh = Some(candidate.mesh.clone());
+            self.mesh_low_quality = candidate.low_quality;
+            self.mesh_committed_scene = candidate.scene;
+            self.mesh_committed_max_edge = candidate.max_edge;
+            self.wave_mesh = Some(candidate.mesh);
+            self.wave_operator = Some(candidate.operator);
+            self.wave_time_step = candidate.time_step;
+            self.wave_time_offset = candidate.simulation_time;
+            self.wave_completed_steps = 0;
+            self.wave_energy = None;
+            self.wave_energy_step = u64::MAX;
+            self.wave_source_dirty = false;
+            self.wave_running = candidate.resume_running;
+            self.mesh_build_ms = self
+                .mesh_started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            self.message = commit_message;
+        } else if self
+            .simulation_candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.generation.is_some())
+            && request.failed()
+        {
+            if request.transfer_pending() {
+                let rollback = request.rollback_transfer(assets, commands);
+                if let Err(error) = rollback {
+                    self.wave_error = Some(format!("Transfer failed and rollback failed: {error}"));
+                } else {
+                    self.wave_error =
+                        Some("Candidate GPU transfer failed; active simulation retained".into());
+                }
+            } else {
+                self.wave_error = Some("Candidate GPU initialization failed".into());
+            }
+            self.simulation_candidate = None;
         }
         if self.wave_source_dirty && self.wave_operator.is_some() {
             match request.update_source(assets, self.wave_source) {
@@ -448,7 +568,9 @@ impl Playground {
                 Err(error) => self.wave_error = Some(error),
             }
         }
-        if let Some(position) = self.wave_pending_pulse.take() {
+        if self.simulation_candidate.is_none()
+            && let Some(position) = self.wave_pending_pulse.take()
+        {
             match request.inject_pulse(assets, position, 0.65, 0.06) {
                 Ok(()) => {
                     // Commit one level after injection so the readback marker
@@ -724,6 +846,12 @@ impl Playground {
             ui.small("Waiting for edit to finish…");
         } else if let Some(job) = &self.mesh_job {
             ui.small(format!("{}…", job.phase()));
+        } else if let Some(candidate) = &self.simulation_candidate {
+            ui.small(format!(
+                "Committing candidate · {} vertices · {} triangles",
+                candidate.mesh.vertices.len(),
+                candidate.mesh.triangles.len()
+            ));
         } else if let Some(error) = &self.mesh_error {
             ui.colored_label(RED, error);
             ui.small("Previous mesh retained.");
@@ -840,7 +968,8 @@ impl Playground {
             });
         });
         if let Some(operator) = &self.wave_operator {
-            let simulated_time = self.wave_completed_steps as f64 * self.wave_time_step;
+            let simulated_time =
+                self.wave_time_offset + self.wave_completed_steps as f64 * self.wave_time_step;
             let throughput = if self.wave_active_wall_seconds > 0.0 {
                 simulated_time / self.wave_active_wall_seconds
             } else {
@@ -851,7 +980,7 @@ impl Playground {
                 + entries * 8
                 + operator.degrees_of_freedom() * 32) as f64;
             ui.small(format!(
-                "GPU {} · {} DOFs · {:.2} MiB\ndt {:.6} · t {:.3} · {} substeps/frame\n{:.2} simulated s / wall s · assembly {:.1} ms",
+                "GPU {} · {} DOFs · {:.2} MiB\ndt {:.6} · t {:.3} · {} substeps/frame\n{:.2} simulated s / wall s · operator/map {:.1} ms",
                 self.wave_gpu_status,
                 operator.degrees_of_freedom(),
                 gpu_bytes / (1024.0 * 1024.0),
@@ -866,6 +995,8 @@ impl Playground {
             }
         } else if self.mesh.is_some() {
             ui.small("Preparing wave operator…");
+        } else if self.simulation_candidate.is_some() {
+            ui.small("Preparing initial wave state…");
         } else {
             ui.small("Waiting for an accepted mesh…");
         }
@@ -1537,12 +1668,24 @@ pub fn wave_gpu_benchmark(
     };
     let current_error = error_norm(&display.current, &benchmark.expected_current);
     let previous_error = error_norm(&display.previous, &benchmark.expected_previous);
+    let actual_peak = display
+        .current
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f32, f32::max);
+    let expected_peak = benchmark
+        .expected_current
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
     let solve_seconds = benchmark
         .solve_started
         .map_or(0.0, |start| start.elapsed().as_secs_f64());
     info!(
         current_relative_l2 = current_error,
         previous_relative_l2 = previous_error,
+        actual_peak,
+        expected_peak,
         elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
         solve_readback_ms = solve_seconds * 1000.0,
         simulated_seconds_per_wall_second = 128.0 * state.wave_time_step / solve_seconds,
@@ -1553,6 +1696,205 @@ pub fn wave_gpu_benchmark(
     } else {
         error!("Wave GPU result differs from the CPU reference");
         exit.write(bevy::app::AppExit::error());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource)]
+pub struct WaveTransferBenchmark {
+    started: Instant,
+    phase: u8,
+    generation: u64,
+    source_current: Vec<f64>,
+    source_velocity: Vec<f64>,
+    expected_current: Vec<f64>,
+    expected_previous: Vec<f64>,
+    transfer_started: Option<Instant>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for WaveTransferBenchmark {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            phase: 0,
+            generation: 0,
+            source_current: vec![],
+            source_velocity: vec![],
+            expected_current: vec![],
+            expected_previous: vec![],
+            transfer_started: None,
+        }
+    }
+}
+
+/// Exercises a real edit transaction and compares both transferred GPU levels
+/// with the same barycentric and centered-level formulas in f64.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn wave_transfer_benchmark(
+    mut benchmark: ResMut<WaveTransferBenchmark>,
+    mut state: ResMut<Playground>,
+    mut request: ResMut<WaveGpuRequest>,
+    display: Res<WaveDisplay>,
+    mut assets: ResMut<Assets<ShaderBuffer>>,
+    mut exit: MessageWriter<bevy::app::AppExit>,
+) {
+    if benchmark.started.elapsed().as_secs_f64() > 60.0 {
+        error!("Wave transfer check timed out at phase {}", benchmark.phase);
+        exit.write(bevy::app::AppExit::error());
+        return;
+    }
+    match benchmark.phase {
+        0 => {
+            if !request.ready() || state.wave_operator.is_none() {
+                return;
+            }
+            state.wave_source.enabled = false;
+            if let Err(error) =
+                request.inject_pulse(&mut assets, Point2::new(-0.42, 0.11), 0.65, 0.06)
+            {
+                error!("Wave transfer pulse setup failed: {error}");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+            benchmark.generation = request.generation();
+            request.request_steps(32);
+            benchmark.phase = 1;
+        }
+        1 => {
+            let Some(operator) = &state.wave_operator else {
+                return;
+            };
+            if request.stats().completed_steps() < 32
+                || display.generation != benchmark.generation
+                || display.completed_steps < 32
+                || display.current.len() != operator.degrees_of_freedom()
+            {
+                return;
+            }
+            benchmark.source_current = display.current.iter().map(|value| *value as f64).collect();
+            if benchmark
+                .source_current
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max)
+                < 1.0e-6
+            {
+                error!("Wave transfer source field is unexpectedly zero");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+            let source_previous: Vec<_> =
+                display.previous.iter().map(|value| *value as f64).collect();
+            let stiffness = operator.apply_stiffness(&benchmark.source_current).unwrap();
+            benchmark.source_velocity = benchmark
+                .source_current
+                .iter()
+                .zip(&source_previous)
+                .zip(stiffness)
+                .zip(operator.lumped_mass())
+                .zip(operator.lumped_damping())
+                .map(|((((current, previous), ku), mass), damping)| {
+                    centered_velocity(
+                        *previous,
+                        *current,
+                        -ku / mass,
+                        damping / mass,
+                        state.wave_time_step,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let point = state.editor.document.accepted.obstacles[0]
+                .spline
+                .controls()[0];
+            state.editor.begin();
+            state
+                .editor
+                .set_point(ObstacleId(1), 0, point + Point2::new(0.002, 0.001))
+                .unwrap();
+            state.editor.commit();
+            benchmark.phase = 2;
+        }
+        2 => {
+            let Some(candidate) = &state.simulation_candidate else {
+                return;
+            };
+            let (Some(map), Some(generation)) = (&candidate.transfer, candidate.generation) else {
+                return;
+            };
+            benchmark.expected_current = map.interpolate(&benchmark.source_current, 0.0).unwrap();
+            let velocity = map.interpolate(&benchmark.source_velocity, 0.0).unwrap();
+            let stiffness = candidate
+                .operator
+                .apply_stiffness(&benchmark.expected_current)
+                .unwrap();
+            benchmark.expected_previous = benchmark
+                .expected_current
+                .iter()
+                .zip(velocity)
+                .zip(stiffness)
+                .zip(candidate.operator.lumped_mass())
+                .zip(candidate.operator.lumped_damping())
+                .map(|((((current, velocity), ku), mass), damping)| {
+                    centered_previous(
+                        *current,
+                        velocity,
+                        -ku / mass,
+                        damping / mass,
+                        candidate.time_step,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            benchmark.generation = generation;
+            benchmark.transfer_started = Some(Instant::now());
+            benchmark.phase = 3;
+        }
+        _ => {
+            let Some(operator) = &state.wave_operator else {
+                return;
+            };
+            if state.simulation_candidate.is_some()
+                || display.generation != benchmark.generation
+                || display.current.len() != benchmark.expected_current.len()
+            {
+                return;
+            }
+            let relative_error = |actual: &[f32], expected: &[f64]| {
+                let numerator = actual
+                    .iter()
+                    .zip(expected)
+                    .zip(operator.lumped_mass())
+                    .map(|((actual, expected), mass)| mass * (*actual as f64 - expected).powi(2))
+                    .sum::<f64>();
+                let denominator = expected
+                    .iter()
+                    .zip(operator.lumped_mass())
+                    .map(|(value, mass)| mass * value * value)
+                    .sum::<f64>();
+                (numerator / denominator.max(f64::MIN_POSITIVE)).sqrt()
+            };
+            let current_error = relative_error(&display.current, &benchmark.expected_current);
+            let previous_error = relative_error(&display.previous, &benchmark.expected_previous);
+            info!(
+                current_relative_l2 = current_error,
+                previous_relative_l2 = previous_error,
+                elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
+                mesh_request_to_commit_ms = state.mesh_build_ms,
+                operator_map_ms = state.wave_prepare_ms,
+                transfer_to_readback_ms = benchmark
+                    .transfer_started
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                "Wave transfer check complete"
+            );
+            if current_error <= 3.0e-5 && previous_error <= 3.0e-5 {
+                exit.write(bevy::app::AppExit::Success);
+            } else {
+                error!("Transferred GPU levels differ from the f64 reference");
+                exit.write(bevy::app::AppExit::error());
+            }
+        }
     }
 }
 
@@ -1800,6 +2142,30 @@ mod tests {
             }
             panic!("did not settle");
         }
+    }
+
+    fn build_mesh_candidate(state: &mut Playground) {
+        for _ in 0..5_000 {
+            state.refresh_mesh();
+            if state.simulation_candidate.is_some() || state.mesh_error.is_some() {
+                return;
+            }
+        }
+        panic!("mesh candidate did not finish");
+    }
+
+    fn commit_mesh_without_gpu(state: &mut Playground) {
+        let candidate = state
+            .simulation_candidate
+            .take()
+            .expect("completed mesh candidate");
+        state.mesh = Some(candidate.mesh.clone());
+        state.mesh_low_quality = candidate.low_quality;
+        state.mesh_committed_scene = candidate.scene;
+        state.mesh_committed_max_edge = candidate.max_edge;
+        state.wave_mesh = Some(candidate.mesh);
+        state.wave_operator = Some(candidate.operator);
+        state.wave_time_step = candidate.time_step;
     }
     #[test]
     fn pointer_drag_escape_and_one_entry_history() {
@@ -2063,12 +2429,8 @@ mod tests {
     #[test]
     fn accepted_mesh_finishes_cooperatively_and_survives_an_invalid_draft() {
         let mut h = Harness::new();
-        for _ in 0..5_000 {
-            h.state.refresh_mesh();
-            if h.state.mesh.is_some() {
-                break;
-            }
-        }
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
         let mesh = h.state.mesh.clone().expect("initial accepted mesh");
         assert_eq!(mesh.geometry_revision, 0);
         assert!(mesh.triangles.len() > 10_000);
@@ -2092,12 +2454,9 @@ mod tests {
         let document = h.state.editor.document.clone();
         let history = h.state.editor.history_len();
         h.state.mesh_max_edge = 0.16;
-        for _ in 0..5_000 {
-            h.state.refresh_mesh();
-            if h.state.mesh_job.is_none() {
-                break;
-            }
-        }
+        build_mesh_candidate(&mut h.state);
+        assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &mesh));
+        commit_mesh_without_gpu(&mut h.state);
         assert_eq!(h.state.mesh_source_max_edge, 0.16);
         let preview = h.state.mesh.as_ref().unwrap();
         assert!(preview.quality.maximum_edge_length <= 0.16);
@@ -2109,12 +2468,8 @@ mod tests {
     #[test]
     fn mesh_edits_use_committed_source_and_failed_build_keeps_displayed_mesh() {
         let mut h = Harness::new();
-        for _ in 0..5000 {
-            h.state.refresh_mesh();
-            if h.state.mesh.is_some() {
-                break;
-            }
-        }
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
         let original = h.state.mesh.clone().unwrap();
         let original_scene = h.state.mesh_committed_scene.clone();
         for delta in [Point2::new(0.003, 0.0), Point2::new(0.003, 0.002)] {
@@ -2132,14 +2487,12 @@ mod tests {
             assert_eq!(h.state.mesh_committed_scene, original_scene);
         }
         let history = h.state.editor.history_len();
-        for _ in 0..5000 {
-            h.state.refresh_mesh();
-            if h.state.mesh_job.is_none() {
-                break;
-            }
-        }
+        build_mesh_candidate(&mut h.state);
         assert!(h.state.mesh_error.is_none());
         assert!(h.state.mesh_report.as_ref().unwrap().used_local);
+        assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &original));
+        assert_eq!(h.state.mesh_committed_scene, original_scene);
+        commit_mesh_without_gpu(&mut h.state);
         assert_eq!(
             h.state.mesh.as_ref().unwrap().geometry_revision,
             h.state.editor.revision

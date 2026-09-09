@@ -4,10 +4,11 @@ A browser finite-element wave playground with editable periodic cubic spline
 obstacles, constrained triangle meshes, persistent invalid drafts, undo/redo,
 and versioned scene files.
 
-The static-domain P1 wave solver is implemented on both an f64 CPU reference and
-an f32 WebGPU gather kernel. Native startup and automated checks pass; the user
-has exercised the earlier browser editor state. Interactive browser checks for
-the solver remain deferred.
+The P1 wave solver is implemented on both an f64 CPU reference and an f32 WebGPU
+gather kernel. Geometry edits commit transactionally: the previous mesh continues
+to run during candidate construction, then both wave time levels transfer on the
+GPU before the new mesh becomes visible. Native automated checks pass; interactive
+browser checks for the solver remain deferred.
 
 ## Run
 
@@ -97,11 +98,13 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   optional continuous sinusoidal source. Simulation speed is bounded to 16
   substeps per display frame. Field colors use an adjustable symmetric gain.
   The panel reports DOFs, GPU buffer size, operator-derived timestep, simulated
-  time, substeps, throughput, assembly time, and discrete energy.
+  time, substeps, throughput, operator/map preparation time, and discrete energy.
 - **Mesh changes:** simulation continues on the displayed committed mesh while a
-  replacement is prepared. Publishing a new mesh resets the field in this static
-  milestone. Transfer of both time levels belongs to the transactional editing
-  milestone.
+  replacement mesh, operator, timestep, and transfer map are prepared. The GPU
+  reconstructs velocity from both old displacement levels, interpolates field and
+  velocity, initializes the new staggered level for its new timestep, and commits
+  after a finite tagged readback. Newly exposed domain starts at zero. A failed
+  candidate retains the previous simulation.
 
 Scenes allow 32 obstacles and 128 controls per obstacle. JSON files are capped at
 2 MiB and require finite coordinates. The editor uses a fixed
@@ -125,9 +128,10 @@ cargo run -p femfun-core --release --example mesh_edit_timing -- --paced
 cargo run -p femfun-core --release --example wave_convergence
 cargo run -p femfun-app --release --locked -- --mesh-edit-benchmark
 cargo run -p femfun-app --release --locked -- --wave-gpu-check
+cargo run -p femfun-app --release --locked -- --wave-transfer-check
 ```
 
-The 57 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
+The 61 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, refinement limits, geometry
 rejection, draft/accepted history, scene files, and egui pointer/keyboard
 interactions, local Delaunay legality, incremental work, slice-independent output,
@@ -146,9 +150,11 @@ app with eight obstacles and the fine overlay, applies three small control edits
 prints edit-to-ready and active/scheduling times plus exact element reuse, then
 exits. Interactive editor input is disabled during this scripted run. It does not
 read or overwrite scene files. The native benchmark includes
-editor validation and rendering load; mesh-ready means publication to app state.
+editor validation and rendering load; mesh-ready means the atomic simulation commit.
 `--wave-gpu-check` runs the real compute pipeline for 128 steps, reads both time
 levels back, compares them to f64, reports solve-to-readback throughput, and exits.
+`--wave-transfer-check` injects a nonzero field, performs a real control-point edit,
+and compares both GPU-transferred levels to an independent f64 reconstruction.
 Native GPU startup and the wave kernel were exercised on Apple M1 Max / Metal. The user
 reports completing the Milestone 1 browser interaction checks; browser metadata
 and Milestone 2 overlay performance have not been recorded.

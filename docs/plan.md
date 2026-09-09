@@ -117,6 +117,11 @@ preview mesh benchmarks do not establish wave-solver performance.
 
 ## 4. Transactional live editing with full remeshing
 
+Core geometry-edit transactions and GPU transfer are implemented. Candidate mesh
+construction is resumable; operator and transfer-map preparation still form a
+short synchronous tail and should be made resumable if larger discretizations make
+it visible. Material and boundary-condition transactions remain future work.
+
 - Prepare candidate geometry, mesh, operators, boundary state policy, transfer map,
   and timestep while continuing to simulate on the accepted revision.
 - Apply the transfer to the latest state at commit, between complete timesteps.
@@ -140,7 +145,7 @@ previous mesh, move a bounded region, and repair with constrained flips,
 refinement, and conservative interior coarsening. Remote elements remain fixed.
 The application reports latency, exact element reuse, and fallback frequency.
 Creation/deletion, knot edits, large motions and failed repair rebuild globally.
-Wave-state transfer, persistent cooldown, and broader adaptation remain pending.
+Persistent cooldown and broader adaptation remain pending.
 
 - Implement local mesh motion, retriangulation, refinement, and coarsening, keeping
   full remeshing as a fallback.
