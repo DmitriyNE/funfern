@@ -16,8 +16,13 @@ struct NodeData {
     position_damping: vec4<f32>,
 }
 
+struct MatrixEntry {
+    coefficients: vec2<f32>,
+}
+
 struct State {
     levels: vec4<f32>,
+    auxiliary: vec4<f32>,
 }
 
 @group(0) @binding(0) var<storage, read_write> parameters: Parameters;
@@ -25,7 +30,7 @@ struct State {
 @group(0) @binding(2) var<storage, read> pulse: Pulse;
 @group(0) @binding(3) var<storage, read> row_offsets: array<u32>;
 @group(0) @binding(4) var<storage, read> columns: array<u32>;
-@group(0) @binding(5) var<storage, read> stiffness_over_mass: array<f32>;
+@group(0) @binding(5) var<storage, read> matrix_over_mass: array<MatrixEntry>;
 @group(0) @binding(6) var<storage, read> nodes: array<NodeData>;
 @group(0) @binding(7) var<storage, read_write> states: array<State>;
 
@@ -42,7 +47,10 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
         if entry >= end {
             break;
         }
-        ku += stiffness_over_mass[entry] * states[columns[entry]].levels.y;
+        let column = columns[entry];
+        let coefficients = matrix_over_mass[entry].coefficients;
+        ku += coefficients.x * states[column].levels.y
+            + coefficients.y * states[column].auxiliary.x;
         entry += 1u;
     }
     let dt = parameters.time_data.x;
@@ -73,6 +81,12 @@ fn rotate(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if i >= parameters.count_data.x {
         return;
+    }
+    if nodes[i].position_damping.w > 0.5 {
+        states[i].auxiliary.x += 0.5 * parameters.time_data.x
+            * (states[i].levels.y + states[i].levels.z);
+    } else {
+        states[i].auxiliary.x = 0.0;
     }
     states[i].levels.x = states[i].levels.y;
     states[i].levels.y = states[i].levels.z;

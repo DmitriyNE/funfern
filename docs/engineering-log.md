@@ -7,9 +7,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Implement the higher-order auxiliary radiation condition on stable outer
-  sides, including corner coupling, GPU evolution, transactional state, reflection
-  measurements, and long-time checks.
+- [ ] Extend outer-boundary measurements across more angles/frequencies and assess
+  whether higher auxiliary orders justify their state and compute cost.
 - [ ] Add stable interior-region/material/interface/wall semantics, piecewise
   coefficients, assignment UI, persistence, meshing labels, and solver transactions.
 - [ ] Add stable selectable boundary spans and per-span conditions, then generalize
@@ -33,6 +32,44 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
   cooldown in a later adaptation pass.
 
+## 2026-09-09 — Second-order auxiliary radiation
+
+- Added a selectable second-order Engquist-Majda condition alongside reflecting
+  and first-order outgoing modes. It introduces `ψ_t = u` on the outer boundary
+  and the symmetric positive-semidefinite tangential term `(k c/2) KΓ ψ` while
+  retaining diagonal mass/damping and explicit centered stepping.
+- Quadratic edge stiffness is assembled into the main CSR sparsity. Shared global
+  corner nodes sum the two incident side contributions. CPU and WGSL advance the
+  memory with the same trapezoidal update, include its force in velocity/time-level
+  reconstruction, and include its quadratic term in the energy diagnostic.
+- Geometry transactions preserve and interpolate memory only from second order to
+  second order. Entering the mode initializes it to zero; leaving drops it. The
+  native transfer check moved a nonzero memory field through a control edit with
+  relative mass-weighted L2 error `2.95e-15`, then switched to first order with
+  zero residual memory. Two final same-mesh boundary runs took 78–145 ms end to
+  end, including 5.12–6.14 ms operator/map preparation; the remaining observed
+  latency is GPU scheduling/readback and window-frame timing.
+- The Apple M1 Max / Metal check ran 128 production-timestep steps and matched f64
+  with relative errors `2.01e-6` (current), `2.00e-6` (previous), and `3.92e-7`
+  (memory), at 19.2–19.9 simulated seconds per wall second for two measured
+  dispatch and readback intervals.
+- Finite-packet reflection results (`|R|` is the square root of residual-energy
+  ratio against a reflecting run):
+
+  | wavelength | parent h | angle | first order | second order | second-order ideal |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | .40 | .08 | 0° | .0257 | .0159 | 0 |
+  | .40 | .08 | 30° | .0981 | .0684 | .0052 |
+  | .20 | .04 | 0° | .0106 | .0068 | 0 |
+  | .20 | .04 | 30° | .0978 | .0471 | .0052 |
+
+  The wavelength-.4 normal packet stayed finite through t=10 and retained
+  `4.794e-5` of its initial energy. A 10,000-step core regression also passes at
+  the production recommended timestep.
+- All 75 tests, formatting, Clippy with warnings denied, native release compilation,
+  both native Metal GPU checks, and `NO_COLOR=true trunk build --release` pass.
+  Interactive browser verification remains deferred at the user's request.
+
 ## 2026-09-09 — Product roadmap before IGA
 
 - IGA now follows three product milestones: interior topology and material
@@ -40,9 +77,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Stable region/material/span identities are the shared foundation. Holes,
   transmitting material interfaces, and two-sided internal walls remain distinct
   semantics rather than modes inferred from loop winding.
-- Higher-order radiation remains the next milestone and initially attaches its
-  auxiliary state to the four stable outer-side identities. Per-span assignment
-  later generalizes that condition to selectable subspans and mixed junctions.
+- Higher-order radiation was placed before the three product milestones. Per-span
+  assignment later generalizes it to selectable subspans and mixed junctions.
 
 ## 2026-09-09 — First-order outgoing outer boundary
 
@@ -488,8 +524,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   developed alongside mesh adaptation.
 - Newly exposed region initialization and time-staggered state transfer need concrete
   policies before live geometry commits.
-- Select the higher-order boundary radiation formulation and corner treatment during
-  the absorber milestone.
+- Measure broader angle/frequency coverage before selecting further auxiliary
+  radiation orders.
 - IGA mass treatment and explicit timestep behavior are research tasks for the
   single-patch implementation.
 

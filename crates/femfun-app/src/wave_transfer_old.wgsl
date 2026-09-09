@@ -12,8 +12,13 @@ struct NodeData {
     position_damping: vec4<f32>,
 }
 
+struct MatrixEntry {
+    coefficients: vec2<f32>,
+}
+
 struct State {
     levels: vec4<f32>,
+    auxiliary: vec4<f32>,
 }
 
 struct TransferEntry {
@@ -29,7 +34,7 @@ struct TransferEntry {
 @group(0) @binding(1) var<storage, read> source: Source;
 @group(0) @binding(2) var<storage, read> row_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> columns: array<u32>;
-@group(0) @binding(4) var<storage, read> stiffness_over_mass: array<f32>;
+@group(0) @binding(4) var<storage, read> matrix_over_mass: array<MatrixEntry>;
 @group(0) @binding(5) var<storage, read> nodes: array<NodeData>;
 @group(0) @binding(6) var<storage, read_write> states: array<State>;
 @group(0) @binding(7) var<storage, read_write> transfers: array<TransferEntry>;
@@ -51,7 +56,10 @@ fn compute_velocity(i: u32) -> f32 {
         if entry >= end {
             break;
         }
-        ku += stiffness_over_mass[entry] * states[columns[entry]].levels.y;
+        let column = columns[entry];
+        let coefficients = matrix_over_mass[entry].coefficients;
+        ku += coefficients.x * states[column].levels.y
+            + coefficients.y * states[column].auxiliary.x;
         entry += 1u;
     }
     let dt = parameters.time_data.x;
@@ -79,19 +87,23 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     var current = 0.0;
     var mapped_velocity = 0.0;
+    var mapped_auxiliary = 0.0;
     for (var local = 0u; local < 4u; local += 1u) {
         let source_index = transfers[i].indices_a[local];
         let weight = transfers[i].weights_a[local];
         current += weight * states[source_index].levels.y;
         mapped_velocity += weight * states[source_index].levels.z;
+        mapped_auxiliary += weight * states[source_index].auxiliary.x;
     }
     for (var local = 0u; local < 4u; local += 1u) {
         let source_index = transfers[i].indices_b[local];
         let weight = transfers[i].weights_b[local];
         current += weight * states[source_index].levels.y;
         mapped_velocity += weight * states[source_index].levels.z;
+        mapped_auxiliary += weight * states[source_index].auxiliary.x;
     }
-    transfers[i].mapped = vec4<f32>(mapped_velocity, current, 0.0, 0.0);
+    mapped_auxiliary *= transfers[i].auxiliary.z;
+    transfers[i].mapped = vec4<f32>(mapped_velocity, current, mapped_auxiliary, 0.0);
     if i == 0u {
         transfers[0].auxiliary.x = parameters.time_data.z;
     }

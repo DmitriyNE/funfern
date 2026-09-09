@@ -25,7 +25,10 @@ impl Default for WaveCoefficients {
 pub enum OuterBoundaryCondition {
     #[default]
     Reflecting,
+    /// Local impedance condition `partial_n u = -u_t / c`.
     FirstOrderOutgoing,
+    /// Second-order Engquist-Majda condition using boundary memory `psi_t = u`.
+    SecondOrderOutgoing,
 }
 
 impl OuterBoundaryCondition {
@@ -33,6 +36,7 @@ impl OuterBoundaryCondition {
         match self {
             Self::Reflecting => "Reflecting",
             Self::FirstOrderOutgoing => "First-order outgoing",
+            Self::SecondOrderOutgoing => "Second-order auxiliary",
         }
     }
 }

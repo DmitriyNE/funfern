@@ -169,20 +169,24 @@ across frames without starvation, and challenging edits respect the budgets.
 
 ## 6. Higher-order boundary radiation
 
-- First-order outgoing conditions on the fixed outer box are implemented and
-  selectable at runtime. The P2e boundary mass uses positive diagonal Simpson
-  weights, and a CPU benchmark measures two angles and two wavelengths.
-- Select and implement a higher-order auxiliary-boundary formulation in the
-  Hagstrom-Warburton direction on the four fixed outer sides, including corner
-  coupling and transactional auxiliary-state lifecycle.
-- Extend the reflection benchmark across more angles, frequencies, auxiliary
-  orders, and long runs. Compare cost and reflection with the first-order condition.
+The first higher-order condition is implemented. Reflecting, first-order outgoing,
+and second-order Engquist-Majda auxiliary modes are selectable at runtime. The
+second-order mode retains explicit lumped stepping, couples the two incident sides
+through shared corner nodes, and transactionally preserves its boundary memory
+through geometry edits. CPU and GPU evolution, state handoff, reflection, and
+long-time stability have automated checks.
+
+- Extend the reflection benchmark across more angles and frequencies.
+- Add higher auxiliary orders only after comparing their cost and stability with
+  the implemented second-order condition; use a symmetric formulation compatible
+  with explicit mass lumping.
 - Keep codimension-1 absorption as the intended design. A damping layer or PML is
   only an optional intermediate experiment, not the target implementation.
 
-**Completion:** the auxiliary condition outperforms first order over a documented
-angle/frequency range, its GPU and f64 implementations agree, corner coupling and
-transactions are covered, and long runs have no unexplained growing modes.
+**Completion achieved for second order:** it outperforms first order over the
+documented angle/frequency cases, its GPU and f64 implementations agree, corner
+coupling and transactions are covered, and long runs have no unexplained growing
+modes.
 
 ## 7. Interior topology and material assignment
 
@@ -213,7 +217,7 @@ remeshing.
 - Represent selectable logical spans independently of sampled mesh edges. Outer
   sides and spline knot spans retain stable assignments through resampling and
   ordinary control-point motion.
-- Assign the existing reflecting and first-order outgoing conditions per span,
+- Assign the existing reflecting, first-order outgoing, and second-order auxiliary conditions per span,
   with explicit defaults and visible viewport/panel labels. Add further fixed or
   prescribed conditions only with defined scalar-wave semantics.
 - Define how insertion, removal, seam changes, splitting, and merging inherit or

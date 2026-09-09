@@ -215,6 +215,10 @@ impl WaveGpuRequest {
         {
             return Err("The transfer map does not match the active and candidate meshes".into());
         }
+        let preserve_auxiliary = source_operator.outer_boundary()
+            == femfun_core::OuterBoundaryCondition::SecondOrderOutgoing
+            && target_operator.outer_boundary()
+                == femfun_core::OuterBoundaryCondition::SecondOrderOutgoing;
         let entries = map
             .samples()
             .iter()
@@ -239,6 +243,7 @@ impl WaveGpuRequest {
                         sample.weights[6] as f32,
                         0.0,
                     ),
+                    auxiliary: Vec4::new(0.0, 0.0, if preserve_auxiliary { 1.0 } else { 0.0 }, 0.0),
                     ..default()
                 },
                 None => GpuTransferEntry::default(),
@@ -460,6 +465,16 @@ fn create_buffers(
     let normalized = operator
         .normalized_stiffness_f32()
         .map_err(|error| error.to_string())?;
+    let normalized_auxiliary = operator
+        .normalized_auxiliary_stiffness_f32()
+        .map_err(|error| error.to_string())?;
+    let matrix = normalized
+        .into_iter()
+        .zip(normalized_auxiliary)
+        .map(|(stiffness, auxiliary)| GpuMatrixEntry {
+            coefficients: Vec2::new(stiffness, auxiliary),
+        })
+        .collect::<Vec<_>>();
     let damping = operator
         .damping_ratios_f32()
         .map_err(|error| error.to_string())?;
@@ -468,8 +483,14 @@ fn create_buffers(
         .node_points()
         .iter()
         .zip(damping)
-        .map(|(point, damping)| GpuNode {
-            position_damping: Vec4::new(point.x as f32, point.y as f32, damping, 0.0),
+        .zip(operator.auxiliary_active())
+        .map(|((point, damping), auxiliary_active)| GpuNode {
+            position_damping: Vec4::new(
+                point.x as f32,
+                point.y as f32,
+                damping,
+                if *auxiliary_active { 1.0 } else { 0.0 },
+            ),
         })
         .collect();
     if nodes
@@ -480,6 +501,7 @@ fn create_buffers(
     }
     let initial_state = GpuState {
         levels: Vec4::new(0.0, 0.0, 0.0, if awaits_transfer { -1.0 } else { 0.0 }),
+        auxiliary: Vec4::ZERO,
     };
     let parameters = GpuParameters {
         time_data: Vec4::new(dt, dt * dt, 0.0, 0.0),
@@ -495,7 +517,7 @@ fn create_buffers(
             pulse: assets.add(ShaderBuffer::from(pulse)),
             row_offsets: assets.add(ShaderBuffer::from(operator.row_offsets().to_vec())),
             columns: assets.add(ShaderBuffer::from(operator.columns().to_vec())),
-            stiffness: assets.add(ShaderBuffer::from(normalized)),
+            stiffness: assets.add(ShaderBuffer::from(matrix)),
             nodes: assets.add(ShaderBuffer::from(nodes)),
             state: assets.add(ShaderBuffer::from(vec![
                 initial_state;
@@ -528,6 +550,7 @@ pub struct WaveDisplay {
     pub generation: u64,
     pub current: Vec<f32>,
     pub previous: Vec<f32>,
+    pub auxiliary: Vec<f32>,
     pub completed_steps: u64,
     pub readbacks: u64,
 }
@@ -562,8 +585,14 @@ struct GpuNode {
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
+struct GpuMatrixEntry {
+    coefficients: Vec2,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
 struct GpuState {
     levels: Vec4,
+    auxiliary: Vec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -591,7 +620,10 @@ fn receive_readback(
     if states[0].levels.w < 0.0 {
         return;
     }
-    if states.iter().any(|state| !state.levels.is_finite()) {
+    if states
+        .iter()
+        .any(|state| !state.levels.is_finite() || !state.auxiliary.is_finite())
+    {
         tag.stats.status.store(STATUS_ERROR, Ordering::Relaxed);
         return;
     }
@@ -602,11 +634,14 @@ fn receive_readback(
     display.completed_steps = states[0].levels.w.max(0.0) as u64;
     display.current.clear();
     display.previous.clear();
+    display.auxiliary.clear();
     display.current.reserve(states.len());
     display.previous.reserve(states.len());
+    display.auxiliary.reserve(states.len());
     for state in states {
         display.current.push(state.levels.y);
         display.previous.push(state.levels.x);
+        display.auxiliary.push(state.auxiliary.x);
     }
     display.readbacks = display.readbacks.saturating_add(1);
 }
@@ -663,7 +698,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<GpuPulse>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
-                storage_buffer_read_only::<Vec<f32>>(false),
+                storage_buffer_read_only::<Vec<GpuMatrixEntry>>(false),
                 storage_buffer_read_only::<Vec<GpuNode>>(false),
                 storage_buffer::<Vec<GpuState>>(false),
             ),
@@ -689,7 +724,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<GpuSource>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
-                storage_buffer_read_only::<Vec<f32>>(false),
+                storage_buffer_read_only::<Vec<GpuMatrixEntry>>(false),
                 storage_buffer_read_only::<Vec<GpuNode>>(false),
                 storage_buffer::<Vec<GpuState>>(false),
                 storage_buffer::<Vec<GpuTransferEntry>>(false),
@@ -705,7 +740,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<GpuSource>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
-                storage_buffer_read_only::<Vec<f32>>(false),
+                storage_buffer_read_only::<Vec<GpuMatrixEntry>>(false),
                 storage_buffer_read_only::<Vec<GpuNode>>(false),
                 storage_buffer::<Vec<GpuState>>(false),
                 storage_buffer_read_only::<Vec<GpuTransferEntry>>(false),

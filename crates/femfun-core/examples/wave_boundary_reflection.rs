@@ -17,10 +17,10 @@ struct Packet {
 }
 
 fn main() {
-    println!("First-order outer-boundary reflection benchmark");
+    println!("Outer-boundary reflection benchmark");
     println!("P2e finite Gaussian packets, wave speed 1, dt={TEMPORAL_FRACTION} dt_max");
     println!("Measured |R| is sqrt(outgoing residual energy / reflecting residual energy).");
-    println!("Ideal |R| is the continuous plane-wave first-order result.\n");
+    println!("Ideal |R| is the corresponding continuous plane-wave result.\n");
 
     for (wavelength, parent_edge, width) in [(0.4, 0.08, 0.24), (0.2, 0.04, 0.18)] {
         let start = Instant::now();
@@ -43,15 +43,21 @@ fn main() {
             OuterBoundaryCondition::Reflecting,
         )
         .unwrap();
-        let outgoing = QuadraticWaveOperator::assemble_with_boundary(
-            &mesh,
-            WaveCoefficients::default(),
+        let outgoing = [
             OuterBoundaryCondition::FirstOrderOutgoing,
-        )
-        .unwrap();
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        ]
+        .map(|boundary| {
+            QuadraticWaveOperator::assemble_with_boundary(
+                &mesh,
+                WaveCoefficients::default(),
+                boundary,
+            )
+            .unwrap()
+        });
         println!(
             "λ={wavelength:.2}, parent h≤{parent_edge:.2}: {} DOFs, {} triangles, mesh/operators {:.3} s",
-            outgoing.degrees_of_freedom(),
+            reflecting.degrees_of_freedom(),
             mesh.triangles.len(),
             start.elapsed().as_secs_f64()
         );
@@ -67,23 +73,32 @@ fn main() {
             let angle = angle_degrees.to_radians();
             let hit_time = 1.0 / angle.cos();
             let target_time = hit_time + 3.5 * width;
-            let measurement = measure(packet, target_time, &reflecting, &outgoing);
-            let ideal = ((angle.cos() - 1.0) / (angle.cos() + 1.0)).abs();
-            println!(
-                "  angle {angle_degrees:>4.0}°, t={:.3}: |R| measured {:.4}, ideal {:.4}; energy retained outgoing {:.3e}, reflecting {:.6}",
-                measurement.time,
-                measurement.reflection_amplitude,
-                ideal,
-                measurement.outgoing_energy_ratio,
-                measurement.reflecting_energy_ratio,
-            );
+            for operator in &outgoing {
+                let measurement = measure(packet, target_time, &reflecting, operator);
+                let cosine = angle.cos();
+                let impedance = match operator.outer_boundary() {
+                    OuterBoundaryCondition::FirstOrderOutgoing => 1.0,
+                    OuterBoundaryCondition::SecondOrderOutgoing => 1.0 - 0.5 * angle.sin().powi(2),
+                    OuterBoundaryCondition::Reflecting => unreachable!(),
+                };
+                let ideal = ((cosine - impedance) / (cosine + impedance)).abs();
+                println!(
+                    "  {:<22} angle {angle_degrees:>4.0}°, t={:.3}: |R| measured {:.4}, ideal {:.4}; energy {:.3e}, reflecting {:.6}",
+                    operator.outer_boundary().label(),
+                    measurement.time,
+                    measurement.reflection_amplitude,
+                    ideal,
+                    measurement.outgoing_energy_ratio,
+                    measurement.reflecting_energy_ratio,
+                );
+            }
         }
         println!();
     }
 
     let long_time = long_time_check();
     println!(
-        "Long-time normal packet at λ=.40, t={:.3}: outgoing energy ratio {:.3e}, finite {}",
+        "Long-time second-order normal packet at λ=.40, t={:.3}: energy ratio {:.3e}, finite {}",
         long_time.time, long_time.energy_ratio, long_time.finite
     );
 }
@@ -146,7 +161,7 @@ fn long_time_check() -> LongTimeMeasurement {
     let operator = QuadraticWaveOperator::assemble_with_boundary(
         &mesh,
         WaveCoefficients::default(),
-        OuterBoundaryCondition::FirstOrderOutgoing,
+        OuterBoundaryCondition::SecondOrderOutgoing,
     )
     .unwrap();
     let packet = Packet {

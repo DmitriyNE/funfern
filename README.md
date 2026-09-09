@@ -99,10 +99,12 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   substeps per display frame. Field colors use an adjustable symmetric gain.
   The panel reports DOFs, GPU buffer size, operator-derived timestep, simulated
   time, substeps, throughput, operator/map preparation time, and discrete energy.
-- **Outer boundary:** choose Reflecting or First-order outgoing. The outgoing
-  condition absorbs waves only on the fixed outer square; obstacle boundaries
+- **Outer boundary:** choose Reflecting, First-order outgoing, or Second-order
+  auxiliary. The second-order Engquist-Majda condition adds tangential propagation
+  along the fixed outer square and reduces oblique reflection. Obstacle boundaries
   remain reflecting. A change reuses the mesh and transactionally transfers the
-  live field to the replacement operator.
+  live field to the replacement operator. Boundary memory survives second-order
+  geometry edits and is cleared when entering or leaving that mode.
 - **Mesh changes:** simulation continues on the displayed committed mesh while a
   replacement mesh, operator, timestep, and transfer map are prepared. The GPU
   reconstructs velocity from both old displacement levels, interpolates field and
@@ -151,8 +153,9 @@ reflecting-box mode for P1 at h=0.04 and h=0.02 and enriched quadratic triangles
 at parent h=0.08 and h=0.04, with independent temporal refinement over one and
 five box-crossing times.
 `wave_boundary_reflection` sends finite Gaussian P2e packets at the outer box and
-reports residual-energy reflection at two angles and two wavelengths, alongside
-the ideal continuous plane-wave coefficient and a long-time finite-state check.
+compares first- and second-order residual-energy reflection at two angles and two
+wavelengths, alongside the ideal continuous plane-wave coefficients and a
+long-time finite-state check.
 Omit `--slices` for per-phase profiling.
 `mesh_edit_timing --paced` applies edits with 2 ms mesh slices at a simulated
 60 Hz schedule, excluding rendering. `--mesh-edit-benchmark` opens the real native
@@ -161,10 +164,12 @@ prints edit-to-ready and active/scheduling times plus exact element reuse, then
 exits. Interactive editor input is disabled during this scripted run. It does not
 read or overwrite scene files. The native benchmark includes
 editor validation and rendering load; mesh-ready means the atomic simulation commit.
-`--wave-gpu-check` runs the real compute pipeline for 128 steps, reads both time
-levels back, compares them to f64, reports solve-to-readback throughput, and exits.
-`--wave-transfer-check` injects a nonzero field, performs a real control-point edit,
-and compares both GPU-transferred levels to an independent f64 reconstruction.
+`--wave-gpu-check` runs the real second-order compute pipeline for 128 steps, reads
+both time levels and boundary memory back, compares them to f64, reports
+solve-to-readback throughput, and exits. `--wave-transfer-check` injects a nonzero
+field, performs a real control-point edit, verifies transfer of all three state
+components, then verifies that a lower-order boundary transaction clears the
+auxiliary state.
 The field view tessellates every quadratic parent triangle into six display
 triangles around its shared edge-midpoint and element bubble nodes. Native GPU
 startup and the wave kernel were exercised on Apple M1 Max / Metal. The user

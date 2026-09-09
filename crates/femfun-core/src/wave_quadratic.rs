@@ -14,6 +14,8 @@ pub struct QuadraticWaveOperator {
     row_offsets: Vec<u32>,
     columns: Vec<u32>,
     stiffness: Vec<f64>,
+    auxiliary_stiffness: Vec<f64>,
+    auxiliary_active: Vec<bool>,
     lumped_mass: Vec<f64>,
     lumped_damping: Vec<f64>,
     maximum_eigenvalue_bound: f64,
@@ -88,6 +90,8 @@ impl QuadraticWaveOperator {
 
         let count = node_points.len();
         let mut rows = vec![BTreeMap::<usize, f64>::new(); count];
+        let mut auxiliary_rows = vec![BTreeMap::<usize, f64>::new(); count];
+        let mut auxiliary_active = vec![false; count];
         let mut mass = vec![0.0; count];
         let mut damping = vec![0.0; count];
         for (triangle, indices) in mesh.triangles.iter().zip(&local_nodes) {
@@ -130,8 +134,14 @@ impl QuadraticWaveOperator {
                 }
             }
         }
-        if outer_boundary == OuterBoundaryCondition::FirstOrderOutgoing {
+        if matches!(
+            outer_boundary,
+            OuterBoundaryCondition::FirstOrderOutgoing
+                | OuterBoundaryCondition::SecondOrderOutgoing
+        ) {
             let impedance = (coefficients.mass_density * coefficients.stiffness).sqrt();
+            let wave_speed = (coefficients.stiffness / coefficients.mass_density).sqrt();
+            let auxiliary_scale = 0.5 * coefficients.stiffness * wave_speed;
             let mut visited = BTreeSet::new();
             for boundary in &mesh.boundary_edges {
                 if !matches!(boundary.label, BoundaryLabel::Outer(_)) {
@@ -162,6 +172,20 @@ impl QuadraticWaveOperator {
                 damping[a] += scale / 6.0;
                 damping[midpoint] += 2.0 * scale / 3.0;
                 damping[b] += scale / 6.0;
+                if outer_boundary == OuterBoundaryCondition::SecondOrderOutgoing {
+                    // P2 line-element stiffness in endpoint/endpoint/midpoint order.
+                    // Sharing vertex indices across incident sides supplies the
+                    // corner coupling in the assembled tangential operator.
+                    let nodes = [a, b, midpoint];
+                    let local = [[7.0, 1.0, -8.0], [1.0, 7.0, -8.0], [-8.0, -8.0, 16.0]];
+                    for i in 0..3 {
+                        auxiliary_active[nodes[i]] = true;
+                        for j in 0..3 {
+                            *auxiliary_rows[nodes[i]].entry(nodes[j]).or_default() +=
+                                auxiliary_scale * local[i][j] / (3.0 * length);
+                        }
+                    }
+                }
             }
         }
         if mass.iter().any(|value| !value.is_finite() || *value <= 0.0)
@@ -174,6 +198,11 @@ impl QuadraticWaveOperator {
             ));
         }
 
+        for (row, auxiliary) in rows.iter_mut().zip(&auxiliary_rows) {
+            for column in auxiliary.keys() {
+                row.entry(*column).or_default();
+            }
+        }
         let entries = rows.iter().map(BTreeMap::len).sum::<usize>();
         if entries > u32::MAX as usize {
             return Err(WaveError::InvalidMesh(
@@ -183,6 +212,7 @@ impl QuadraticWaveOperator {
         let mut row_offsets = Vec::with_capacity(count + 1);
         let mut columns = Vec::with_capacity(entries);
         let mut stiffness = Vec::with_capacity(entries);
+        let mut auxiliary_stiffness = Vec::with_capacity(entries);
         let mut maximum_eigenvalue_bound = 0.0_f64;
         row_offsets.push(0);
         for (row, values) in rows.into_iter().enumerate() {
@@ -194,6 +224,12 @@ impl QuadraticWaveOperator {
                 }
                 columns.push(column as u32);
                 stiffness.push(value);
+                auxiliary_stiffness.push(
+                    auxiliary_rows[row]
+                        .get(&column)
+                        .copied()
+                        .unwrap_or_default(),
+                );
             }
             row_offsets.push(columns.len() as u32);
         }
@@ -215,6 +251,8 @@ impl QuadraticWaveOperator {
             row_offsets,
             columns,
             stiffness,
+            auxiliary_stiffness,
+            auxiliary_active,
             lumped_mass: mass,
             lumped_damping: damping,
             maximum_eigenvalue_bound,
@@ -252,6 +290,14 @@ impl QuadraticWaveOperator {
 
     pub fn stiffness_values(&self) -> &[f64] {
         &self.stiffness
+    }
+
+    pub fn auxiliary_stiffness_values(&self) -> &[f64] {
+        &self.auxiliary_stiffness
+    }
+
+    pub fn auxiliary_active(&self) -> &[bool] {
+        &self.auxiliary_active
     }
 
     pub fn lumped_mass(&self) -> &[f64] {
@@ -293,6 +339,25 @@ impl QuadraticWaveOperator {
         Ok(result)
     }
 
+    pub fn apply_auxiliary_stiffness(&self, values: &[f64]) -> Result<Vec<f64>, WaveError> {
+        if values.len() != self.degrees_of_freedom() {
+            return Err(WaveError::SizeMismatch {
+                expected: self.degrees_of_freedom(),
+                actual: values.len(),
+            });
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(WaveError::InvalidState);
+        }
+        let mut result = vec![0.0; values.len()];
+        for (row, output) in result.iter_mut().enumerate() {
+            *output = (self.row_offsets[row] as usize..self.row_offsets[row + 1] as usize)
+                .map(|entry| self.auxiliary_stiffness[entry] * values[self.columns[entry] as usize])
+                .sum();
+        }
+        Ok(result)
+    }
+
     /// Values for the GPU gather kernel, normalized row-wise by lumped mass.
     pub fn normalized_stiffness_f32(&self) -> Result<Vec<f32>, WaveError> {
         let mut result = Vec::with_capacity(self.stiffness.len());
@@ -301,6 +366,22 @@ impl QuadraticWaveOperator {
                 let value = (self.stiffness[entry] / self.lumped_mass[row]) as f32;
                 if !value.is_finite() {
                     return Err(WaveError::InvalidMesh("the f32 GPU operator overflows"));
+                }
+                result.push(value);
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn normalized_auxiliary_stiffness_f32(&self) -> Result<Vec<f32>, WaveError> {
+        let mut result = Vec::with_capacity(self.auxiliary_stiffness.len());
+        for row in 0..self.degrees_of_freedom() {
+            for entry in self.row_offsets[row] as usize..self.row_offsets[row + 1] as usize {
+                let value = (self.auxiliary_stiffness[entry] / self.lumped_mass[row]) as f32;
+                if !value.is_finite() {
+                    return Err(WaveError::InvalidMesh(
+                        "the f32 GPU auxiliary operator overflows",
+                    ));
                 }
                 result.push(value);
             }
@@ -325,7 +406,7 @@ impl QuadraticWaveOperator {
     }
 
     pub fn estimated_gpu_bytes(&self) -> usize {
-        self.row_offsets.len() * 4 + self.columns.len() * 8 + self.degrees_of_freedom() * 32
+        self.row_offsets.len() * 4 + self.columns.len() * 12 + self.degrees_of_freedom() * 48
     }
 
     pub fn discrete_energy(
@@ -352,6 +433,28 @@ impl QuadraticWaveOperator {
                 .map(|(current, force)| current * force)
                 .sum::<f64>();
         let energy = kinetic + potential;
+        energy
+            .is_finite()
+            .then_some(energy)
+            .ok_or(WaveError::InvalidState)
+    }
+
+    pub fn discrete_energy_with_auxiliary(
+        &self,
+        current: &[f64],
+        previous: &[f64],
+        auxiliary: &[f64],
+        time_step: f64,
+    ) -> Result<f64, WaveError> {
+        let interior = self.discrete_energy(current, previous, time_step)?;
+        let auxiliary_force = self.apply_auxiliary_stiffness(auxiliary)?;
+        let boundary = 0.5
+            * auxiliary
+                .iter()
+                .zip(auxiliary_force)
+                .map(|(value, force)| value * force)
+                .sum::<f64>();
+        let energy = interior + boundary;
         energy
             .is_finite()
             .then_some(energy)
@@ -390,6 +493,7 @@ pub struct QuadraticWaveState {
     current: Vec<f64>,
     previous: Vec<f64>,
     scratch: Vec<f64>,
+    auxiliary: Vec<f64>,
     time_step: f64,
     steps: u64,
 }
@@ -401,18 +505,47 @@ impl QuadraticWaveState {
         displacement: Vec<f64>,
         velocity: Vec<f64>,
     ) -> Result<Self, WaveError> {
+        Self::new_with_auxiliary(
+            operator,
+            time_step,
+            displacement,
+            velocity,
+            vec![0.0; operator.degrees_of_freedom()],
+        )
+    }
+
+    pub fn new_with_auxiliary(
+        operator: &QuadraticWaveOperator,
+        time_step: f64,
+        displacement: Vec<f64>,
+        velocity: Vec<f64>,
+        auxiliary: Vec<f64>,
+    ) -> Result<Self, WaveError> {
         operator.validate_levels(&displacement, &velocity, time_step)?;
+        if auxiliary.len() != operator.degrees_of_freedom() {
+            return Err(WaveError::SizeMismatch {
+                expected: operator.degrees_of_freedom(),
+                actual: auxiliary.len(),
+            });
+        }
+        if auxiliary.iter().any(|value| !value.is_finite()) {
+            return Err(WaveError::InvalidState);
+        }
         let stiffness = operator.apply_stiffness(&displacement)?;
+        let auxiliary_force = operator.apply_auxiliary_stiffness(&auxiliary)?;
         let previous = displacement
             .iter()
             .zip(&velocity)
             .zip(stiffness)
+            .zip(auxiliary_force)
             .zip(&operator.lumped_mass)
             .zip(&operator.lumped_damping)
-            .map(|((((displacement, velocity), stiffness), mass), damping)| {
-                let acceleration = (-stiffness - damping * velocity) / mass;
-                displacement - time_step * velocity + 0.5 * time_step * time_step * acceleration
-            })
+            .map(
+                |(((((displacement, velocity), stiffness), auxiliary), mass), damping)| {
+                    let acceleration = (-stiffness - auxiliary - damping * velocity) / mass;
+                    displacement - time_step * velocity + 0.5 * time_step * time_step * acceleration
+                },
+            )
             .collect::<Vec<_>>();
         if previous.iter().any(|value| !value.is_finite()) {
             return Err(WaveError::InvalidState);
@@ -421,6 +554,7 @@ impl QuadraticWaveState {
             current: displacement,
             previous,
             scratch: vec![0.0; operator.degrees_of_freedom()],
+            auxiliary,
             time_step,
             steps: 0,
         })
@@ -443,6 +577,10 @@ impl QuadraticWaveState {
         &self.previous
     }
 
+    pub fn auxiliary(&self) -> &[f64] {
+        &self.auxiliary
+    }
+
     pub fn time_step(&self) -> f64 {
         self.time_step
     }
@@ -456,7 +594,12 @@ impl QuadraticWaveState {
     }
 
     pub fn energy(&self, operator: &QuadraticWaveOperator) -> Result<f64, WaveError> {
-        operator.discrete_energy(&self.current, &self.previous, self.time_step)
+        operator.discrete_energy_with_auxiliary(
+            &self.current,
+            &self.previous,
+            &self.auxiliary,
+            self.time_step,
+        )
     }
 
     pub fn step(
@@ -483,15 +626,29 @@ impl QuadraticWaveState {
                     operator.stiffness[entry] * self.current[operator.columns[entry] as usize]
                 })
                 .sum::<f64>();
+            let auxiliary = (operator.row_offsets[i] as usize
+                ..operator.row_offsets[i + 1] as usize)
+                .map(|entry| {
+                    operator.auxiliary_stiffness[entry]
+                        * self.auxiliary[operator.columns[entry] as usize]
+                })
+                .sum::<f64>();
             let gamma = operator.lumped_damping[i] / operator.lumped_mass[i];
             let source = acceleration.get(i).copied().unwrap_or(0.0);
             self.scratch[i] = (2.0 * self.current[i]
                 - (1.0 - 0.5 * gamma * dt) * self.previous[i]
-                - dt2 * stiffness / operator.lumped_mass[i]
+                - dt2 * (stiffness + auxiliary) / operator.lumped_mass[i]
                 + dt2 * source)
                 / (1.0 + 0.5 * gamma * dt);
             if !self.scratch[i].is_finite() {
                 return Err(WaveError::InvalidState);
+            }
+        }
+        for i in 0..self.auxiliary.len() {
+            if operator.auxiliary_active[i] {
+                self.auxiliary[i] += 0.5 * dt * (self.current[i] + self.scratch[i]);
+            } else {
+                self.auxiliary[i] = 0.0;
             }
         }
         std::mem::swap(&mut self.previous, &mut self.current);
@@ -692,20 +849,115 @@ mod tests {
         );
         assert_eq!(reflecting.stiffness_values(), outgoing.stiffness_values());
         assert_eq!(reflecting.lumped_mass(), outgoing.lumped_mass());
+        assert!(
+            outgoing
+                .auxiliary_stiffness_values()
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+
+        let second_order = QuadraticWaveOperator::assemble_with_boundary(
+            &mesh,
+            coefficients,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        assert_eq!(second_order.lumped_damping(), outgoing.lumped_damping());
+        assert_eq!(
+            second_order
+                .auxiliary_active()
+                .iter()
+                .filter(|active| **active)
+                .count(),
+            8
+        );
+        assert!(
+            second_order
+                .auxiliary_stiffness_values()
+                .iter()
+                .any(|value| value.abs() > 0.0)
+        );
+        for row in 0..second_order.degrees_of_freedom() {
+            let row_sum = (second_order.row_offsets[row] as usize
+                ..second_order.row_offsets[row + 1] as usize)
+                .map(|entry| second_order.auxiliary_stiffness[entry])
+                .sum::<f64>();
+            assert!(row_sum.abs() < 1.0e-13);
+            for entry in
+                second_order.row_offsets[row] as usize..second_order.row_offsets[row + 1] as usize
+            {
+                let column = second_order.columns[entry] as usize;
+                let reverse = (second_order.row_offsets[column] as usize
+                    ..second_order.row_offsets[column + 1] as usize)
+                    .find(|other| second_order.columns[*other] as usize == row)
+                    .unwrap();
+                assert!(
+                    (second_order.auxiliary_stiffness[entry]
+                        - second_order.auxiliary_stiffness[reverse])
+                        .abs()
+                        < 1.0e-13
+                );
+            }
+        }
+        // Corner zero couples to the midpoint on each of its incident sides.
+        let coupled_boundary_neighbors = (second_order.row_offsets[0] as usize
+            ..second_order.row_offsets[1] as usize)
+            .filter(|entry| {
+                second_order.columns[*entry] as usize != 0
+                    && second_order.auxiliary_stiffness[*entry].abs() > 0.0
+            })
+            .count();
+        assert_eq!(coupled_boundary_neighbors, 4);
+    }
+
+    #[test]
+    fn second_order_auxiliary_state_remains_bounded_and_loses_energy() {
+        let operator = QuadraticWaveOperator::assemble_with_boundary(
+            &square_with_outer_boundary(),
+            WaveCoefficients::default(),
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let dt = operator.recommended_time_step();
+        let initial = operator
+            .node_points()
+            .iter()
+            .map(|point| (-4.0 * (point.x * point.x + point.y * point.y)).exp())
+            .collect();
+        let mut state = QuadraticWaveState::new(
+            &operator,
+            dt,
+            initial,
+            vec![0.0; operator.degrees_of_freedom()],
+        )
+        .unwrap();
+        let initial_energy = state.energy(&operator).unwrap();
+        for _ in 0..10_000 {
+            state.step(&operator, &[]).unwrap();
+        }
+        let final_energy = state.energy(&operator).unwrap();
+        assert!(final_energy.is_finite());
+        assert!(final_energy < initial_energy * 1.0e-3);
+        assert!(state.auxiliary().iter().all(|value| value.is_finite()));
     }
 
     #[test]
     fn outgoing_boundary_rejects_malformed_edges() {
-        let mut mesh = square_with_outer_boundary();
-        mesh.boundary_edges[0].vertices = [0, 99];
-        assert!(matches!(
-            QuadraticWaveOperator::assemble_with_boundary(
-                &mesh,
-                WaveCoefficients::default(),
-                OuterBoundaryCondition::FirstOrderOutgoing,
-            ),
-            Err(WaveError::InvalidMesh(_))
-        ));
+        for boundary in [
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        ] {
+            let mut mesh = square_with_outer_boundary();
+            mesh.boundary_edges[0].vertices = [0, 99];
+            assert!(matches!(
+                QuadraticWaveOperator::assemble_with_boundary(
+                    &mesh,
+                    WaveCoefficients::default(),
+                    boundary,
+                ),
+                Err(WaveError::InvalidMesh(_))
+            ));
+        }
     }
 
     #[test]
@@ -880,6 +1132,20 @@ mod tests {
         invalid[0] = f64::NAN;
         assert!(matches!(
             operator.apply_stiffness(&invalid),
+            Err(WaveError::InvalidState)
+        ));
+        assert!(matches!(
+            QuadraticWaveState::new_with_auxiliary(
+                &operator,
+                operator.recommended_time_step(),
+                vec![0.0; operator.degrees_of_freedom()],
+                vec![0.0; operator.degrees_of_freedom()],
+                vec![0.0; operator.degrees_of_freedom() - 1],
+            ),
+            Err(WaveError::SizeMismatch { .. })
+        ));
+        assert!(matches!(
+            operator.apply_auxiliary_stiffness(&invalid),
             Err(WaveError::InvalidState)
         ));
     }

@@ -2,7 +2,9 @@
 
 The spline editor, constrained mesher, bounded coordinate-edit repair, enriched
 quadratic GPU wave solver, and geometry-edit simulation transactions are
-implemented. Broader adaptation and radiation boundaries remain work.
+implemented. The outer boundary has reflecting and first- and second-order
+radiation modes. Broader adaptation and assigned interior/span semantics remain
+work.
 
 ## Responsibilities and dependencies
 
@@ -447,12 +449,46 @@ energy. These measurements include finite-beam bandwidth, diffraction, spatial
 discretization, and time integration, so the plane-wave values are context rather
 than exact expected outputs.
 
-The higher-order auxiliary condition is the next solver milestone. Its first
-implementation attaches edge state to the four stable outer-side identities and
-couples their endpoints at the box corners rather than attaching state to transient
-mesh-edge indices. The later logical-span milestone generalizes those identities
-to selectable subspans and mixed conditions. Long-time stability remains an
-explicit work item. Keep the outer box fixed while the interior evolves.
+The implemented higher-order option is the second-order Engquist-Majda rational
+condition
+
+```text
+∂n u = -u_t/c + (c/2) ∂t^-1 ∂ss u,    ψ_t = u.
+```
+
+With material stiffness `k`, its semidiscrete weak equation is
+
+```text
+M u_tt + K u + CΓ u_t + (k c/2) KΓ ψ = f.
+```
+
+`KΓ` is the one-dimensional tangential stiffness assembled on the quadratic outer
+edges. In endpoint/endpoint/midpoint order its local matrix is
+`[[7,1,-8],[1,7,-8],[-8,-8,16]]/(3L)`. It is symmetric, positive semidefinite, and
+annihilates constants. The global outer-corner DOF is shared by both incident
+sides, so their tangential terms couple at the corner instead of evolving two
+unrelated endpoint states. The added stored energy is
+`ψᵀ (k c/2 KΓ) ψ / 2`.
+
+The centered displacement step reads `ψ[n]`; after predicting `u[n+1]`, a
+trapezoidal update advances `ψ` by `dt (u[n] + u[n+1]) / 2` on outer-boundary
+DOFs. CPU and WGSL use the same update. The GPU packs interior and boundary
+coefficients together, keeping a single CSR gather. At the production timestep,
+a 10,000-step regression remains finite and decays.
+
+A second-order-to-second-order geometry transaction interpolates `ψ` with the
+same quadratic map used for displacement and velocity. Entering second order
+starts `ψ` at zero; leaving it discards the auxiliary state. Same-mesh boundary
+changes still bypass spatial point location. The later logical-span milestone
+will restrict the tangential operator to assigned spans and define mixed-junction
+behavior.
+
+The rational form follows the [original Engquist-Majda absorbing-boundary
+construction](https://doi.org/10.1090/S0025-5718-1977-0436612-4). Further
+Hagstrom-Warburton orders remain candidates, but their finite-element realization
+must retain symmetric operators suitable for the explicit solver; see the
+[symmetric FEM formulation](https://doi.org/10.1016/j.cma.2024.117579) and the
+[complete radiation-condition hierarchy](https://doi.org/10.1137/090745477).
 
 IGA follows the interior-region, assigned-boundary, and expanded spline-editing
 product work. Start with an untrimmed single patch. Boundary splines alone do not

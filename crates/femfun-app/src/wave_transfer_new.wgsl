@@ -12,8 +12,13 @@ struct NodeData {
     position_damping: vec4<f32>,
 }
 
+struct MatrixEntry {
+    coefficients: vec2<f32>,
+}
+
 struct State {
     levels: vec4<f32>,
+    auxiliary: vec4<f32>,
 }
 
 struct TransferEntry {
@@ -29,7 +34,7 @@ struct TransferEntry {
 @group(0) @binding(1) var<storage, read> source: Source;
 @group(0) @binding(2) var<storage, read> row_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> columns: array<u32>;
-@group(0) @binding(4) var<storage, read> stiffness_over_mass: array<f32>;
+@group(0) @binding(4) var<storage, read> matrix_over_mass: array<MatrixEntry>;
 @group(0) @binding(5) var<storage, read> nodes: array<NodeData>;
 @group(0) @binding(6) var<storage, read_write> states: array<State>;
 @group(0) @binding(7) var<storage, read> transfers: array<TransferEntry>;
@@ -49,7 +54,10 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
         if entry >= end {
             break;
         }
-        ku += stiffness_over_mass[entry] * transfers[columns[entry]].mapped.y;
+        let column = columns[entry];
+        let coefficients = matrix_over_mass[entry].coefficients;
+        ku += coefficients.x * transfers[column].mapped.y
+            + coefficients.y * transfers[column].mapped.z;
         entry += 1u;
     }
     let time = transfers[0].auxiliary.x;
@@ -64,6 +72,12 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     let dt = parameters.time_data.x;
     let previous = current - dt * velocity + 0.5 * dt * dt * acceleration;
     states[i].levels = vec4<f32>(previous, current, current, 0.0);
+    states[i].auxiliary = vec4<f32>(
+        transfers[i].mapped.z * nodes[i].position_damping.w,
+        0.0,
+        0.0,
+        0.0,
+    );
     if i == 0u {
         parameters.time_data.z = time;
         parameters.time_data.w = 0.0;

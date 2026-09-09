@@ -692,7 +692,17 @@ impl Playground {
         {
             let current: Vec<_> = display.current.iter().map(|value| *value as f64).collect();
             let previous: Vec<_> = display.previous.iter().map(|value| *value as f64).collect();
-            match operator.discrete_energy(&current, &previous, self.wave_time_step) {
+            let auxiliary: Vec<_> = display
+                .auxiliary
+                .iter()
+                .map(|value| *value as f64)
+                .collect();
+            match operator.discrete_energy_with_auxiliary(
+                &current,
+                &previous,
+                &auxiliary,
+                self.wave_time_step,
+            ) {
                 Ok(energy) => {
                     self.wave_energy = Some(energy);
                     self.wave_energy_step = display.completed_steps;
@@ -979,19 +989,25 @@ impl Playground {
         ui.label("Wave simulation");
         let wave_available = self.wave_operator.is_some();
         ui.add_enabled_ui(wave_available, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Outer boundary");
-                ui.selectable_value(
-                    &mut self.wave_boundary,
-                    OuterBoundaryCondition::Reflecting,
-                    "Reflecting",
-                );
-                ui.selectable_value(
-                    &mut self.wave_boundary,
-                    OuterBoundaryCondition::FirstOrderOutgoing,
-                    "Outgoing",
-                );
-            });
+            egui::ComboBox::from_label("Outer boundary")
+                .selected_text(self.wave_boundary.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.wave_boundary,
+                        OuterBoundaryCondition::Reflecting,
+                        "Reflecting",
+                    );
+                    ui.selectable_value(
+                        &mut self.wave_boundary,
+                        OuterBoundaryCondition::FirstOrderOutgoing,
+                        "First-order outgoing",
+                    );
+                    ui.selectable_value(
+                        &mut self.wave_boundary,
+                        OuterBoundaryCondition::SecondOrderOutgoing,
+                        "Second-order auxiliary",
+                    );
+                });
             ui.horizontal(|ui| {
                 if ui
                     .button(if self.wave_running { "Pause" } else { "Run" })
@@ -1658,6 +1674,7 @@ pub struct WaveGpuBenchmark {
     generation: u64,
     expected_current: Vec<f64>,
     expected_previous: Vec<f64>,
+    expected_auxiliary: Vec<f64>,
     prepared: bool,
 }
 
@@ -1670,6 +1687,7 @@ impl Default for WaveGpuBenchmark {
             generation: 0,
             expected_current: Vec::new(),
             expected_previous: Vec::new(),
+            expected_auxiliary: Vec::new(),
             prepared: false,
         }
     }
@@ -1692,11 +1710,11 @@ pub fn wave_gpu_benchmark(
         return;
     }
     if !benchmark.prepared {
-        if state.wave_boundary != OuterBoundaryCondition::FirstOrderOutgoing {
-            state.wave_boundary = OuterBoundaryCondition::FirstOrderOutgoing;
+        if state.wave_boundary != OuterBoundaryCondition::SecondOrderOutgoing {
+            state.wave_boundary = OuterBoundaryCondition::SecondOrderOutgoing;
             return;
         }
-        if state.wave_boundary_committed != OuterBoundaryCondition::FirstOrderOutgoing
+        if state.wave_boundary_committed != OuterBoundaryCondition::SecondOrderOutgoing
             || state.simulation_candidate.is_some()
         {
             return;
@@ -1728,6 +1746,7 @@ pub fn wave_gpu_benchmark(
         }
         benchmark.expected_current = cpu.current().to_vec();
         benchmark.expected_previous = cpu.previous().to_vec();
+        benchmark.expected_auxiliary = cpu.auxiliary().to_vec();
         benchmark.generation = request.generation();
         benchmark.prepared = true;
         benchmark.solve_started = Some(Instant::now());
@@ -1743,6 +1762,7 @@ pub fn wave_gpu_benchmark(
         || display.completed_steps < 128
         || display.generation != benchmark.generation
         || display.current.len() != benchmark.expected_current.len()
+        || display.auxiliary.len() != benchmark.expected_auxiliary.len()
     {
         return;
     }
@@ -1765,6 +1785,7 @@ pub fn wave_gpu_benchmark(
     };
     let current_error = error_norm(&display.current, &benchmark.expected_current);
     let previous_error = error_norm(&display.previous, &benchmark.expected_previous);
+    let auxiliary_error = error_norm(&display.auxiliary, &benchmark.expected_auxiliary);
     let actual_peak = display
         .current
         .iter()
@@ -1781,6 +1802,7 @@ pub fn wave_gpu_benchmark(
     info!(
         current_relative_l2 = current_error,
         previous_relative_l2 = previous_error,
+        auxiliary_relative_l2 = auxiliary_error,
         actual_peak,
         expected_peak,
         elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
@@ -1788,7 +1810,7 @@ pub fn wave_gpu_benchmark(
         simulated_seconds_per_wall_second = 128.0 * state.wave_time_step / solve_seconds,
         "Wave GPU check complete"
     );
-    if current_error <= 2.0e-4 && previous_error <= 2.0e-4 {
+    if current_error <= 2.0e-4 && previous_error <= 2.0e-4 && auxiliary_error <= 2.0e-4 {
         exit.write(bevy::app::AppExit::Success);
     } else {
         error!("Wave GPU result differs from the CPU reference");
@@ -1804,8 +1826,10 @@ pub struct WaveTransferBenchmark {
     generation: u64,
     source_current: Vec<f64>,
     source_velocity: Vec<f64>,
+    source_auxiliary: Vec<f64>,
     expected_current: Vec<f64>,
     expected_previous: Vec<f64>,
+    expected_auxiliary: Vec<f64>,
     transfer_started: Option<Instant>,
     boundary_started: Option<Instant>,
 }
@@ -1819,8 +1843,10 @@ impl Default for WaveTransferBenchmark {
             generation: 0,
             source_current: vec![],
             source_velocity: vec![],
+            source_auxiliary: vec![],
             expected_current: vec![],
             expected_previous: vec![],
+            expected_auxiliary: vec![],
             transfer_started: None,
             boundary_started: None,
         }
@@ -1845,12 +1871,21 @@ pub fn wave_transfer_benchmark(
     }
     match benchmark.phase {
         0 => {
+            if state.wave_boundary != OuterBoundaryCondition::SecondOrderOutgoing {
+                state.wave_boundary = OuterBoundaryCondition::SecondOrderOutgoing;
+                return;
+            }
+            if state.wave_boundary_committed != OuterBoundaryCondition::SecondOrderOutgoing
+                || state.simulation_candidate.is_some()
+            {
+                return;
+            }
             if !request.ready() || state.wave_operator.is_none() {
                 return;
             }
             state.wave_source.enabled = false;
             if let Err(error) =
-                request.inject_pulse(&mut assets, Point2::new(-0.42, 0.11), 0.65, 0.06)
+                request.inject_pulse(&mut assets, Point2::new(-0.82, 0.11), 0.65, 0.06)
             {
                 error!("Wave transfer pulse setup failed: {error}");
                 exit.write(bevy::app::AppExit::error());
@@ -1872,6 +1907,11 @@ pub fn wave_transfer_benchmark(
                 return;
             }
             benchmark.source_current = display.current.iter().map(|value| *value as f64).collect();
+            benchmark.source_auxiliary = display
+                .auxiliary
+                .iter()
+                .map(|value| *value as f64)
+                .collect();
             if benchmark
                 .source_current
                 .iter()
@@ -1883,26 +1923,43 @@ pub fn wave_transfer_benchmark(
                 exit.write(bevy::app::AppExit::error());
                 return;
             }
+            if benchmark
+                .source_auxiliary
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max)
+                < 1.0e-6
+            {
+                error!("Second-order boundary memory is unexpectedly zero");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
             let source_previous: Vec<_> =
                 display.previous.iter().map(|value| *value as f64).collect();
             let stiffness = operator.apply_stiffness(&benchmark.source_current).unwrap();
+            let auxiliary = operator
+                .apply_auxiliary_stiffness(&benchmark.source_auxiliary)
+                .unwrap();
             benchmark.source_velocity = benchmark
                 .source_current
                 .iter()
                 .zip(&source_previous)
                 .zip(stiffness)
+                .zip(auxiliary)
                 .zip(operator.lumped_mass())
                 .zip(operator.lumped_damping())
-                .map(|((((current, previous), ku), mass), damping)| {
-                    centered_velocity(
-                        *previous,
-                        *current,
-                        -ku / mass,
-                        damping / mass,
-                        state.wave_time_step,
-                    )
-                    .unwrap()
-                })
+                .map(
+                    |(((((current, previous), ku), auxiliary), mass), damping)| {
+                        centered_velocity(
+                            *previous,
+                            *current,
+                            -(ku + auxiliary) / mass,
+                            damping / mass,
+                            state.wave_time_step,
+                        )
+                        .unwrap()
+                    },
+                )
                 .collect();
             let point = state.editor.document.accepted.obstacles[0]
                 .spline
@@ -1924,27 +1981,36 @@ pub fn wave_transfer_benchmark(
             };
             benchmark.expected_current = map.interpolate(&benchmark.source_current, 0.0).unwrap();
             let velocity = map.interpolate(&benchmark.source_velocity, 0.0).unwrap();
+            benchmark.expected_auxiliary =
+                map.interpolate(&benchmark.source_auxiliary, 0.0).unwrap();
             let stiffness = candidate
                 .operator
                 .apply_stiffness(&benchmark.expected_current)
+                .unwrap();
+            let auxiliary = candidate
+                .operator
+                .apply_auxiliary_stiffness(&benchmark.expected_auxiliary)
                 .unwrap();
             benchmark.expected_previous = benchmark
                 .expected_current
                 .iter()
                 .zip(velocity)
                 .zip(stiffness)
+                .zip(auxiliary)
                 .zip(candidate.operator.lumped_mass())
                 .zip(candidate.operator.lumped_damping())
-                .map(|((((current, velocity), ku), mass), damping)| {
-                    centered_previous(
-                        *current,
-                        velocity,
-                        -ku / mass,
-                        damping / mass,
-                        candidate.time_step,
-                    )
-                    .unwrap()
-                })
+                .map(
+                    |(((((current, velocity), ku), auxiliary), mass), damping)| {
+                        centered_previous(
+                            *current,
+                            velocity,
+                            -(ku + auxiliary) / mass,
+                            damping / mass,
+                            candidate.time_step,
+                        )
+                        .unwrap()
+                    },
+                )
                 .collect();
             benchmark.generation = generation;
             benchmark.transfer_started = Some(Instant::now());
@@ -1957,6 +2023,7 @@ pub fn wave_transfer_benchmark(
             if state.simulation_candidate.is_some()
                 || display.generation != benchmark.generation
                 || display.current.len() != benchmark.expected_current.len()
+                || display.auxiliary.len() != benchmark.expected_auxiliary.len()
             {
                 return;
             }
@@ -1976,9 +2043,11 @@ pub fn wave_transfer_benchmark(
             };
             let current_error = relative_error(&display.current, &benchmark.expected_current);
             let previous_error = relative_error(&display.previous, &benchmark.expected_previous);
+            let auxiliary_error = relative_error(&display.auxiliary, &benchmark.expected_auxiliary);
             info!(
                 current_relative_l2 = current_error,
                 previous_relative_l2 = previous_error,
+                auxiliary_relative_l2 = auxiliary_error,
                 elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
                 mesh_request_to_commit_ms = state.mesh_build_ms,
                 operator_map_ms = state.wave_prepare_ms,
@@ -1987,33 +2056,44 @@ pub fn wave_transfer_benchmark(
                     .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
                 "Geometry wave transfer check complete"
             );
-            if current_error > 3.0e-5 || previous_error > 3.0e-5 {
+            if current_error > 3.0e-5 || previous_error > 3.0e-5 || auxiliary_error > 3.0e-5 {
                 error!("Transferred GPU levels differ from the f64 reference");
                 exit.write(bevy::app::AppExit::error());
                 return;
             }
 
             benchmark.source_current = display.current.iter().map(|value| *value as f64).collect();
+            benchmark.source_auxiliary = display
+                .auxiliary
+                .iter()
+                .map(|value| *value as f64)
+                .collect();
             let source_previous: Vec<_> =
                 display.previous.iter().map(|value| *value as f64).collect();
             let stiffness = operator.apply_stiffness(&benchmark.source_current).unwrap();
+            let auxiliary = operator
+                .apply_auxiliary_stiffness(&benchmark.source_auxiliary)
+                .unwrap();
             benchmark.source_velocity = benchmark
                 .source_current
                 .iter()
                 .zip(&source_previous)
                 .zip(stiffness)
+                .zip(auxiliary)
                 .zip(operator.lumped_mass())
                 .zip(operator.lumped_damping())
-                .map(|((((current, previous), ku), mass), damping)| {
-                    centered_velocity(
-                        *previous,
-                        *current,
-                        -ku / mass,
-                        damping / mass,
-                        state.wave_time_step,
-                    )
-                    .unwrap()
-                })
+                .map(
+                    |(((((current, previous), ku), auxiliary), mass), damping)| {
+                        centered_velocity(
+                            *previous,
+                            *current,
+                            -(ku + auxiliary) / mass,
+                            damping / mass,
+                            state.wave_time_step,
+                        )
+                        .unwrap()
+                    },
+                )
                 .collect();
             state.wave_boundary = OuterBoundaryCondition::FirstOrderOutgoing;
             benchmark.boundary_started = Some(Instant::now());
@@ -2060,6 +2140,7 @@ pub fn wave_transfer_benchmark(
                     .unwrap()
                 })
                 .collect();
+            benchmark.expected_auxiliary = vec![0.0; candidate.operator.degrees_of_freedom()];
             benchmark.generation = generation;
             benchmark.phase = 5;
         }
@@ -2070,6 +2151,7 @@ pub fn wave_transfer_benchmark(
             if state.simulation_candidate.is_some()
                 || display.generation != benchmark.generation
                 || display.current.len() != benchmark.expected_current.len()
+                || display.auxiliary.len() != benchmark.expected_auxiliary.len()
             {
                 return;
             }
@@ -2089,9 +2171,16 @@ pub fn wave_transfer_benchmark(
             };
             let current_error = relative_error(&display.current, &benchmark.expected_current);
             let previous_error = relative_error(&display.previous, &benchmark.expected_previous);
+            let auxiliary_error = display
+                .auxiliary
+                .iter()
+                .zip(&benchmark.expected_auxiliary)
+                .map(|(actual, expected)| (*actual as f64 - expected).abs())
+                .fold(0.0_f64, f64::max);
             info!(
                 current_relative_l2 = current_error,
                 previous_relative_l2 = previous_error,
+                auxiliary_max_error = auxiliary_error,
                 boundary_transaction_ms = benchmark
                     .boundary_started
                     .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
@@ -2100,6 +2189,7 @@ pub fn wave_transfer_benchmark(
             );
             if current_error <= 3.0e-5
                 && previous_error <= 3.0e-5
+                && auxiliary_error <= 1.0e-7
                 && operator.outer_boundary() == OuterBoundaryCondition::FirstOrderOutgoing
             {
                 exit.write(bevy::app::AppExit::Success);
