@@ -510,7 +510,11 @@ fn decode_scene(
         Some(conditions) => OuterBoundaryConditions {
             sides: conditions.map(decode_outer_condition),
         },
-        None if !require_outer_boundaries => OuterBoundaryConditions::default(),
+        // Versions before 6 had implicit reflecting outer walls. Keep their
+        // physical meaning even though new documents now default to absorption.
+        None if !require_outer_boundaries => {
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting)
+        }
         None => return Err("Scene has no outer boundary conditions".into()),
     };
     let scene = Scene {

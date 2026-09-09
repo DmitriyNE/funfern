@@ -4340,7 +4340,7 @@ mod tests {
         assert_eq!(harness.state.internal_selection, None);
 
         let history = harness.state.editor.history_len().0;
-        harness.click_text("Reflecting");
+        harness.click_text("Second-order auxiliary");
         harness.click_text("First-order outgoing");
         harness.settle();
         assert_eq!(

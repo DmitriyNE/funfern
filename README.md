@@ -81,6 +81,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   A baffle span instead can use one conservative thin-gap law coupling both traces;
   this is mutually exclusive with independent face conditions, and increasing its
   stiffness can reduce the solver time step.
+  New scenes start with the second-order auxiliary condition on all four outer
+  edges.
 - **Geometry role:** choose Hole, Material interface, or Open baffle before
   creating. An interface retains its interior and shares its finite-element trace
   with the exterior. A baffle is an open curve with two independent coincident

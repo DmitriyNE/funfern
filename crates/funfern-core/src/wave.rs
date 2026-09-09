@@ -98,7 +98,7 @@ pub struct OuterBoundaryConditions {
 
 impl Default for OuterBoundaryConditions {
     fn default() -> Self {
-        Self::uniform(OuterBoundaryCondition::Reflecting)
+        Self::uniform(OuterBoundaryCondition::SecondOrderOutgoing)
     }
 }
 

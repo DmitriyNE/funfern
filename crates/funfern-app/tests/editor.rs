@@ -143,7 +143,7 @@ fn outer_side_conditions_are_undoable_and_round_trip_with_time_signals() {
     let migrated = decode(serde_json::to_string(&version_five).unwrap().as_bytes()).unwrap();
     assert_eq!(
         migrated.accepted.outer_boundaries,
-        OuterBoundaryConditions::default()
+        OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting)
     );
 
     editor.undo();
@@ -154,7 +154,7 @@ fn outer_side_conditions_are_undoable_and_round_trip_with_time_signals() {
             .accepted
             .outer_boundaries
             .get(OuterSide::Top),
-        OuterBoundaryCondition::Reflecting
+        OuterBoundaryCondition::SecondOrderOutgoing
     );
     editor.undo();
     settle(&mut editor);

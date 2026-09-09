@@ -38,6 +38,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## 2026-09-10 — Driven and absorbing internal faces
 
+- New scenes now start with second-order auxiliary absorption on all four outer
+  sides. Loading versions 1–5 still restores their historical implicit reflecting
+  walls, while version 6 and later retain the explicitly stored assignments.
 - Extended hole and baffle faces with harmonic prescribed Neumann flux and strong
   Dirichlet displacement, plus first- and second-order outgoing conditions. The
   second-order condition assembles boundary damping and the tangential auxiliary
