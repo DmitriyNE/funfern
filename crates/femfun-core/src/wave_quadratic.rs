@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Point2, TriMesh, WaveCoefficients, WaveError};
+use crate::{BoundaryLabel, OuterBoundaryCondition, Point2, TriMesh, WaveCoefficients, WaveError};
 
 /// Seven-node mass-lumped triangle: `P2` enriched by the cubic interior bubble.
 /// Vertex, edge-midpoint, and centroid masses use the positive degree-three nodal
@@ -8,6 +8,7 @@ use crate::{Point2, TriMesh, WaveCoefficients, WaveError};
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuadraticWaveOperator {
     geometry_revision: u64,
+    outer_boundary: OuterBoundaryCondition,
     node_points: Vec<Point2>,
     element_nodes: Vec<[u32; 7]>,
     row_offsets: Vec<u32>,
@@ -21,6 +22,14 @@ pub struct QuadraticWaveOperator {
 
 impl QuadraticWaveOperator {
     pub fn assemble(mesh: &TriMesh, coefficients: WaveCoefficients) -> Result<Self, WaveError> {
+        Self::assemble_with_boundary(mesh, coefficients, OuterBoundaryCondition::Reflecting)
+    }
+
+    pub fn assemble_with_boundary(
+        mesh: &TriMesh,
+        coefficients: WaveCoefficients,
+        outer_boundary: OuterBoundaryCondition,
+    ) -> Result<Self, WaveError> {
         validate_coefficients(coefficients)?;
         if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
             return Err(WaveError::InvalidMesh("the mesh is empty"));
@@ -121,6 +130,40 @@ impl QuadraticWaveOperator {
                 }
             }
         }
+        if outer_boundary == OuterBoundaryCondition::FirstOrderOutgoing {
+            let impedance = (coefficients.mass_density * coefficients.stiffness).sqrt();
+            let mut visited = BTreeSet::new();
+            for boundary in &mesh.boundary_edges {
+                if !matches!(boundary.label, BoundaryLabel::Outer(_)) {
+                    continue;
+                }
+                let [a, b] = boundary.vertices;
+                if a >= mesh.vertices.len() || b >= mesh.vertices.len() || a == b {
+                    return Err(WaveError::InvalidMesh(
+                        "an outer boundary edge has invalid vertex indices",
+                    ));
+                }
+                let key = if a < b { (a, b) } else { (b, a) };
+                if !visited.insert(key) {
+                    return Err(WaveError::InvalidMesh(
+                        "an outer boundary edge is duplicated",
+                    ));
+                }
+                let midpoint = *edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
+                    "an outer boundary edge does not belong to a triangle",
+                ))?;
+                let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
+                if !length.is_finite() || length <= 0.0 {
+                    return Err(WaveError::InvalidMesh(
+                        "an outer boundary edge has invalid length",
+                    ));
+                }
+                let scale = impedance * length;
+                damping[a] += scale / 6.0;
+                damping[midpoint] += 2.0 * scale / 3.0;
+                damping[b] += scale / 6.0;
+            }
+        }
         if mass.iter().any(|value| !value.is_finite() || *value <= 0.0)
             || damping
                 .iter()
@@ -166,6 +209,7 @@ impl QuadraticWaveOperator {
             .collect();
         Ok(Self {
             geometry_revision: mesh.geometry_revision,
+            outer_boundary,
             node_points,
             element_nodes,
             row_offsets,
@@ -180,6 +224,10 @@ impl QuadraticWaveOperator {
 
     pub fn geometry_revision(&self) -> u64 {
         self.geometry_revision
+    }
+
+    pub fn outer_boundary(&self) -> OuterBoundaryCondition {
+        self.outer_boundary
     }
 
     pub fn node_points(&self) -> &[Point2] {
@@ -536,7 +584,7 @@ fn stiffness_quadrature() -> [([f64; 3], f64); 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MeshQuality, MeshTriangle, MeshVertex};
+    use crate::{BoundaryEdge, MeshQuality, MeshTriangle, MeshVertex, OuterSide};
 
     fn square() -> TriMesh {
         TriMesh {
@@ -564,6 +612,23 @@ mod tests {
         }
     }
 
+    fn square_with_outer_boundary() -> TriMesh {
+        let mut mesh = square();
+        mesh.boundary_edges = [
+            ([0, 1], OuterSide::Bottom),
+            ([1, 2], OuterSide::Right),
+            ([2, 3], OuterSide::Top),
+            ([3, 0], OuterSide::Left),
+        ]
+        .map(|(vertices, side)| BoundaryEdge {
+            vertices,
+            label: BoundaryLabel::Outer(side),
+            parameters: [0.0, 1.0],
+        })
+        .to_vec();
+        mesh
+    }
+
     #[test]
     fn shares_edge_nodes_and_has_positive_exact_total_mass() {
         let operator = QuadraticWaveOperator::assemble(
@@ -583,6 +648,64 @@ mod tests {
         assert!(operator.lumped_mass().iter().all(|mass| *mass > 0.0));
         assert!((operator.lumped_mass().iter().sum::<f64>() - 2.5).abs() < 1.0e-13);
         assert_eq!(operator.geometry_revision(), 9);
+    }
+
+    #[test]
+    fn outgoing_boundary_adds_positive_exact_lumped_impedance() {
+        let mesh = square_with_outer_boundary();
+        let coefficients = WaveCoefficients {
+            mass_density: 4.0,
+            stiffness: 9.0,
+            damping: 0.0,
+        };
+        let reflecting = QuadraticWaveOperator::assemble(&mesh, coefficients).unwrap();
+        assert_eq!(
+            reflecting.outer_boundary(),
+            OuterBoundaryCondition::Reflecting
+        );
+        assert!(
+            reflecting
+                .lumped_damping()
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+
+        let outgoing = QuadraticWaveOperator::assemble_with_boundary(
+            &mesh,
+            coefficients,
+            OuterBoundaryCondition::FirstOrderOutgoing,
+        )
+        .unwrap();
+        assert_eq!(
+            outgoing.outer_boundary(),
+            OuterBoundaryCondition::FirstOrderOutgoing
+        );
+        // Impedance sqrt(rho*k) = 6 times perimeter 4.
+        assert!((outgoing.lumped_damping().iter().sum::<f64>() - 24.0).abs() < 1.0e-13);
+        assert_eq!(
+            outgoing
+                .lumped_damping()
+                .iter()
+                .filter(|value| **value > 0.0)
+                .count(),
+            8
+        );
+        assert_eq!(reflecting.stiffness_values(), outgoing.stiffness_values());
+        assert_eq!(reflecting.lumped_mass(), outgoing.lumped_mass());
+    }
+
+    #[test]
+    fn outgoing_boundary_rejects_malformed_edges() {
+        let mut mesh = square_with_outer_boundary();
+        mesh.boundary_edges[0].vertices = [0, 99];
+        assert!(matches!(
+            QuadraticWaveOperator::assemble_with_boundary(
+                &mesh,
+                WaveCoefficients::default(),
+                OuterBoundaryCondition::FirstOrderOutgoing,
+            ),
+            Err(WaveError::InvalidMesh(_))
+        ));
     }
 
     #[test]

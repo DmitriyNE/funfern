@@ -43,6 +43,7 @@ struct SimulationCandidate {
     max_edge: f64,
     low_quality: Vec<bool>,
     operator: Arc<QuadraticWaveOperator>,
+    boundary: OuterBoundaryCondition,
     time_step: f64,
     transfer: Option<QuadraticTransferMap>,
     generation: Option<u64>,
@@ -103,6 +104,8 @@ pub struct Playground {
     field_gain: f32,
     wave_mesh: Option<Arc<TriMesh>>,
     wave_operator: Option<Arc<QuadraticWaveOperator>>,
+    wave_boundary: OuterBoundaryCondition,
+    wave_boundary_committed: OuterBoundaryCondition,
     wave_time_step: f64,
     wave_time_offset: f64,
     wave_running: bool,
@@ -178,6 +181,8 @@ impl Default for Playground {
             field_gain: 2.0,
             wave_mesh: None,
             wave_operator: None,
+            wave_boundary: OuterBoundaryCondition::Reflecting,
+            wave_boundary_committed: OuterBoundaryCondition::Reflecting,
             wave_time_step: 0.0,
             wave_time_offset: 0.0,
             wave_running: false,
@@ -319,9 +324,9 @@ impl Playground {
             return;
         }
         let start = Instant::now();
-        if self.mesh_source != self.editor.document.accepted
-            || self.mesh_source_max_edge != self.mesh_max_edge
-        {
+        let geometry_changed = self.mesh_source != self.editor.document.accepted
+            || self.mesh_source_max_edge != self.mesh_max_edge;
+        if geometry_changed {
             self.mesh_started = Some(start);
             self.mesh_source = self.editor.document.accepted.clone();
             self.mesh_source_max_edge = self.mesh_max_edge;
@@ -380,7 +385,11 @@ impl Playground {
                         .map(|i| mesh.triangle_quality(i).unwrap().minimum_angle_degrees < 15.0)
                         .collect();
                     let prepare = Instant::now();
-                    match QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()) {
+                    match QuadraticWaveOperator::assemble_with_boundary(
+                        &mesh,
+                        WaveCoefficients::default(),
+                        self.wave_boundary,
+                    ) {
                         Ok(operator) => {
                             let transfer = self
                                 .wave_mesh
@@ -409,6 +418,7 @@ impl Playground {
                                         max_edge: self.mesh_source_max_edge,
                                         low_quality,
                                         operator: Arc::new(operator),
+                                        boundary: self.wave_boundary,
                                         time_step,
                                         transfer,
                                         generation: None,
@@ -428,6 +438,49 @@ impl Playground {
                 Err(error) => {
                     self.mesh_error = Some(error.to_string());
                 }
+            }
+        }
+        if !geometry_changed
+            && self.mesh_job.is_none()
+            && self.wave_boundary != self.wave_boundary_committed
+            && let (Some(mesh), Some(source_operator)) =
+                (self.wave_mesh.as_ref(), self.wave_operator.as_ref())
+        {
+            let prepare = Instant::now();
+            match QuadraticWaveOperator::assemble_with_boundary(
+                mesh,
+                WaveCoefficients::default(),
+                self.wave_boundary,
+            ) {
+                Ok(operator) => {
+                    match QuadraticTransferMap::identity_on_mesh(mesh, source_operator, &operator) {
+                        Ok(transfer) => {
+                            let time_step = operator.recommended_time_step();
+                            self.simulation_candidate = Some(SimulationCandidate {
+                                mesh: mesh.clone(),
+                                scene: self.mesh_committed_scene.clone(),
+                                max_edge: self.mesh_committed_max_edge,
+                                low_quality: self.mesh_low_quality.clone(),
+                                operator: Arc::new(operator),
+                                boundary: self.wave_boundary,
+                                time_step,
+                                exposed_nodes: transfer.exposed_nodes(),
+                                transfer: Some(transfer),
+                                generation: None,
+                                resume_running: self.wave_running,
+                                simulation_time: 0.0,
+                            });
+                            self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
+                            self.wave_error = None;
+                            self.message = format!(
+                                "Preparing {} outer-boundary transaction…",
+                                self.wave_boundary.label()
+                            );
+                        }
+                        Err(error) => self.wave_error = Some(error.to_string()),
+                    }
+                }
+                Err(error) => self.wave_error = Some(error.to_string()),
             }
         }
         if active {
@@ -528,7 +581,18 @@ impl Playground {
         });
         if candidate_ready {
             let candidate = self.simulation_candidate.take().unwrap();
-            let commit_message = if candidate.transfer.is_some() {
+            let boundary_only = self
+                .mesh
+                .as_ref()
+                .is_some_and(|mesh| Arc::ptr_eq(mesh, &candidate.mesh))
+                && candidate.scene == self.mesh_committed_scene
+                && candidate.max_edge == self.mesh_committed_max_edge;
+            let commit_message = if boundary_only {
+                format!(
+                    "{} outer boundary committed; live field preserved",
+                    candidate.boundary.label()
+                )
+            } else if candidate.transfer.is_some() {
                 format!(
                     "Simulation mesh committed · {} newly exposed solution nodes initialized to zero",
                     candidate.exposed_nodes
@@ -543,6 +607,7 @@ impl Playground {
             self.mesh_committed_max_edge = candidate.max_edge;
             self.wave_mesh = Some(candidate.mesh);
             self.wave_operator = Some(candidate.operator);
+            self.wave_boundary_committed = candidate.boundary;
             self.wave_time_step = candidate.time_step;
             self.wave_time_offset = candidate.simulation_time;
             self.wave_completed_steps = 0;
@@ -915,6 +980,19 @@ impl Playground {
         let wave_available = self.wave_operator.is_some();
         ui.add_enabled_ui(wave_available, |ui| {
             ui.horizontal(|ui| {
+                ui.label("Outer boundary");
+                ui.selectable_value(
+                    &mut self.wave_boundary,
+                    OuterBoundaryCondition::Reflecting,
+                    "Reflecting",
+                );
+                ui.selectable_value(
+                    &mut self.wave_boundary,
+                    OuterBoundaryCondition::FirstOrderOutgoing,
+                    "Outgoing",
+                );
+            });
+            ui.horizontal(|ui| {
                 if ui
                     .button(if self.wave_running { "Pause" } else { "Run" })
                     .clicked()
@@ -1015,7 +1093,10 @@ impl Playground {
         if let Some(error) = &self.wave_error {
             ui.colored_label(RED, error);
         }
-        ui.small("Reflecting boundaries · λ=0.4 source preset");
+        ui.small(format!(
+            "{} outer boundary · λ=0.4 source preset",
+            self.wave_boundary_committed.label()
+        ));
         ui.add_space(12.0);
         ui.small("Control points guide the spline; the curve does not pass through them.");
         ui.add_space(6.0);
@@ -1599,7 +1680,7 @@ impl Default for WaveGpuBenchmark {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn wave_gpu_benchmark(
     mut benchmark: ResMut<WaveGpuBenchmark>,
-    state: Res<Playground>,
+    mut state: ResMut<Playground>,
     mut request: ResMut<WaveGpuRequest>,
     display: Res<WaveDisplay>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
@@ -1611,6 +1692,15 @@ pub fn wave_gpu_benchmark(
         return;
     }
     if !benchmark.prepared {
+        if state.wave_boundary != OuterBoundaryCondition::FirstOrderOutgoing {
+            state.wave_boundary = OuterBoundaryCondition::FirstOrderOutgoing;
+            return;
+        }
+        if state.wave_boundary_committed != OuterBoundaryCondition::FirstOrderOutgoing
+            || state.simulation_candidate.is_some()
+        {
+            return;
+        }
         let Some(operator) = &state.wave_operator else {
             return;
         };
@@ -1717,6 +1807,7 @@ pub struct WaveTransferBenchmark {
     expected_current: Vec<f64>,
     expected_previous: Vec<f64>,
     transfer_started: Option<Instant>,
+    boundary_started: Option<Instant>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1731,6 +1822,7 @@ impl Default for WaveTransferBenchmark {
             expected_current: vec![],
             expected_previous: vec![],
             transfer_started: None,
+            boundary_started: None,
         }
     }
 }
@@ -1858,7 +1950,7 @@ pub fn wave_transfer_benchmark(
             benchmark.transfer_started = Some(Instant::now());
             benchmark.phase = 3;
         }
-        _ => {
+        3 => {
             let Some(operator) = &state.wave_operator else {
                 return;
             };
@@ -1893,12 +1985,126 @@ pub fn wave_transfer_benchmark(
                 transfer_to_readback_ms = benchmark
                     .transfer_started
                     .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
-                "Wave transfer check complete"
+                "Geometry wave transfer check complete"
             );
-            if current_error <= 3.0e-5 && previous_error <= 3.0e-5 {
+            if current_error > 3.0e-5 || previous_error > 3.0e-5 {
+                error!("Transferred GPU levels differ from the f64 reference");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+
+            benchmark.source_current = display.current.iter().map(|value| *value as f64).collect();
+            let source_previous: Vec<_> =
+                display.previous.iter().map(|value| *value as f64).collect();
+            let stiffness = operator.apply_stiffness(&benchmark.source_current).unwrap();
+            benchmark.source_velocity = benchmark
+                .source_current
+                .iter()
+                .zip(&source_previous)
+                .zip(stiffness)
+                .zip(operator.lumped_mass())
+                .zip(operator.lumped_damping())
+                .map(|((((current, previous), ku), mass), damping)| {
+                    centered_velocity(
+                        *previous,
+                        *current,
+                        -ku / mass,
+                        damping / mass,
+                        state.wave_time_step,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            state.wave_boundary = OuterBoundaryCondition::FirstOrderOutgoing;
+            benchmark.boundary_started = Some(Instant::now());
+            benchmark.phase = 4;
+        }
+        4 => {
+            let Some(candidate) = &state.simulation_candidate else {
+                return;
+            };
+            let (Some(map), Some(generation)) = (&candidate.transfer, candidate.generation) else {
+                return;
+            };
+            if candidate.boundary != OuterBoundaryCondition::FirstOrderOutgoing
+                || !state
+                    .wave_mesh
+                    .as_ref()
+                    .is_some_and(|mesh| Arc::ptr_eq(mesh, &candidate.mesh))
+            {
+                error!("Boundary transaction rebuilt or selected the wrong operator");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+            benchmark.expected_current = map.interpolate(&benchmark.source_current, 0.0).unwrap();
+            let velocity = map.interpolate(&benchmark.source_velocity, 0.0).unwrap();
+            let stiffness = candidate
+                .operator
+                .apply_stiffness(&benchmark.expected_current)
+                .unwrap();
+            benchmark.expected_previous = benchmark
+                .expected_current
+                .iter()
+                .zip(velocity)
+                .zip(stiffness)
+                .zip(candidate.operator.lumped_mass())
+                .zip(candidate.operator.lumped_damping())
+                .map(|((((current, velocity), ku), mass), damping)| {
+                    centered_previous(
+                        *current,
+                        velocity,
+                        -ku / mass,
+                        damping / mass,
+                        candidate.time_step,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            benchmark.generation = generation;
+            benchmark.phase = 5;
+        }
+        _ => {
+            let Some(operator) = &state.wave_operator else {
+                return;
+            };
+            if state.simulation_candidate.is_some()
+                || display.generation != benchmark.generation
+                || display.current.len() != benchmark.expected_current.len()
+            {
+                return;
+            }
+            let relative_error = |actual: &[f32], expected: &[f64]| {
+                let numerator = actual
+                    .iter()
+                    .zip(expected)
+                    .zip(operator.lumped_mass())
+                    .map(|((actual, expected), mass)| mass * (*actual as f64 - expected).powi(2))
+                    .sum::<f64>();
+                let denominator = expected
+                    .iter()
+                    .zip(operator.lumped_mass())
+                    .map(|(value, mass)| mass * value * value)
+                    .sum::<f64>();
+                (numerator / denominator.max(f64::MIN_POSITIVE)).sqrt()
+            };
+            let current_error = relative_error(&display.current, &benchmark.expected_current);
+            let previous_error = relative_error(&display.previous, &benchmark.expected_previous);
+            info!(
+                current_relative_l2 = current_error,
+                previous_relative_l2 = previous_error,
+                boundary_transaction_ms = benchmark
+                    .boundary_started
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                operator_map_ms = state.wave_prepare_ms,
+                "Boundary-condition wave transfer check complete"
+            );
+            if current_error <= 3.0e-5
+                && previous_error <= 3.0e-5
+                && operator.outer_boundary() == OuterBoundaryCondition::FirstOrderOutgoing
+            {
                 exit.write(bevy::app::AppExit::Success);
             } else {
-                error!("Transferred GPU levels differ from the f64 reference");
+                error!("Boundary-condition GPU transaction differs from the f64 reference");
                 exit.write(bevy::app::AppExit::error());
             }
         }
@@ -2172,6 +2378,7 @@ mod tests {
         state.mesh_committed_max_edge = candidate.max_edge;
         state.wave_mesh = Some(candidate.mesh);
         state.wave_operator = Some(candidate.operator);
+        state.wave_boundary_committed = candidate.boundary;
         state.wave_time_step = candidate.time_step;
     }
     #[test]
@@ -2470,6 +2677,38 @@ mod tests {
         assert!(preview.triangles.len() < mesh.triangles.len() / 2);
         assert_eq!(h.state.editor.document, document);
         assert_eq!(h.state.editor.history_len(), history);
+    }
+
+    #[test]
+    fn boundary_change_reuses_mesh_and_prepares_a_field_transfer() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let mesh = h.state.mesh.clone().expect("initial accepted mesh");
+
+        h.state.wave_boundary = OuterBoundaryCondition::FirstOrderOutgoing;
+        h.state.refresh_mesh();
+
+        let candidate = h
+            .state
+            .simulation_candidate
+            .as_ref()
+            .expect("boundary candidate");
+        assert!(Arc::ptr_eq(&candidate.mesh, &mesh));
+        assert!(h.state.mesh_job.is_none());
+        assert_eq!(
+            candidate.operator.outer_boundary(),
+            OuterBoundaryCondition::FirstOrderOutgoing
+        );
+        assert_eq!(candidate.exposed_nodes, 0);
+        assert!(candidate.transfer.is_some());
+
+        commit_mesh_without_gpu(&mut h.state);
+        assert_eq!(
+            h.state.wave_boundary_committed,
+            OuterBoundaryCondition::FirstOrderOutgoing
+        );
+        assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &mesh));
     }
 
     #[test]

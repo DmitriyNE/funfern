@@ -7,6 +7,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Select and implement the higher-order auxiliary-boundary formulation,
+  including corner coupling and transactional auxiliary-state transfer.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
   and local-repair cases. The user reports that the end-to-end handoff still feels
   slow even though the small scripted transfer case is much faster.
@@ -22,6 +24,47 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
   cooldown in a later adaptation pass.
+
+## 2026-09-09 — First-order outgoing outer boundary
+
+- Added the selectable first-order condition `∂n u = -u_t/c` on outer-square
+  edges. Its weak boundary impedance `sqrt(rho k)` is mass-lumped onto each P2e
+  endpoint/midpoint/endpoint triplet with positive Simpson weights. Obstacle edges
+  remain reflecting, and reflecting remains the startup default.
+- Boundary changes assemble only a new operator, reuse the exact committed mesh,
+  and pass through the existing GPU transaction. Displacement, reconstructed
+  velocity, simulation clock, and run state are retained; no nodes are newly
+  exposed and no mesh job starts.
+- Added exact assembly checks for impedance, positive damping, unchanged mass and
+  stiffness, malformed outer edges, and an editor regression for operator-only
+  transactions. The native transfer check now continues through a reflecting to
+  outgoing live-field handoff and compares both GPU levels with f64. A direct
+  identity map avoids spatial point location for same-mesh changes. On Apple M1
+  Max / Metal the final boundary transaction took 41.5 ms end to end, including
+  4.6 ms operator/map preparation. Current and previous relative mass-weighted L2
+  errors were 0 and 8.86e-10. The 128-step GPU check now runs the outgoing
+  operator so its nonzero damping path is exercised; it matched f64 to 2.09e-6
+  and 2.08e-6 for the two levels at 9.12 simulated seconds per wall second.
+- `wave_boundary_reflection` measures finite Gaussian packets with a timestep of
+  .225 of the conservative limit:
+
+  | wavelength | parent h | angle | measured energy-equivalent `|R|` | ideal plane-wave `|R|` | outgoing energy retained |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | .40 | .08 | 0° | .0257 | 0 | 6.594e-4 |
+  | .40 | .08 | 30° | .0981 | .0718 | 9.616e-3 |
+  | .20 | .04 | 0° | .0106 | 0 | 1.133e-4 |
+  | .20 | .04 | 30° | .0978 | .0718 | 9.562e-3 |
+
+  Reflecting reference energy stayed at 1.000000 in all four measurements. The
+  wavelength-.4 normal case stayed finite through t=10 and retained 4.799e-5 of
+  initial energy. The measured packet values include finite bandwidth, diffraction,
+  and discretization; they are not expected to equal the monochromatic plane-wave
+  coefficient exactly.
+- Higher-order auxiliary boundary dynamics and corner coupling remain the next
+  radiation milestone. All 74 tests, formatting, Clippy with warnings denied,
+  native release compilation, both native Metal GPU checks, and release Trunk WASM
+  packaging pass. Interactive browser verification remains deferred at the user's
+  request.
 
 ## 2026-09-09 — Production enriched-quadratic GPU solver
 

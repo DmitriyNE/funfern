@@ -195,6 +195,39 @@ pub struct QuadraticTransferMap {
 }
 
 impl QuadraticTransferMap {
+    /// Builds an exact nodal copy between two operators whose quadratic node
+    /// layouts come from the same parent mesh. This is used for coefficient or
+    /// boundary-condition transactions that do not change geometry.
+    pub fn identity_on_mesh(
+        mesh: &TriMesh,
+        source_operator: &QuadraticWaveOperator,
+        target_operator: &QuadraticWaveOperator,
+    ) -> Result<Self, TransferError> {
+        validate_quadratic_pair(mesh, source_operator, true)?;
+        validate_quadratic_pair(mesh, target_operator, false)?;
+        if source_operator.node_points() != target_operator.node_points()
+            || source_operator.element_nodes() != target_operator.element_nodes()
+            || source_operator.degrees_of_freedom() > u32::MAX as usize
+        {
+            return Err(TransferError::InvalidTarget);
+        }
+        let samples = (0..source_operator.degrees_of_freedom())
+            .map(|index| {
+                let mut nodes = [0; 7];
+                let mut weights = [0.0; 7];
+                nodes[0] = index as u32;
+                weights[0] = 1.0;
+                Some(QuadraticTransferSample { nodes, weights })
+            })
+            .collect();
+        Ok(Self {
+            source_revision: mesh.geometry_revision,
+            target_revision: mesh.geometry_revision,
+            source_dofs: source_operator.degrees_of_freedom(),
+            samples,
+        })
+    }
+
     /// Locates every target quadratic node in the source parent triangulation and
     /// evaluates the source element's enriched quadratic basis at that point.
     pub fn build(
@@ -536,6 +569,17 @@ mod tests {
         for (actual, expected) in copied.iter().zip(arbitrary) {
             assert!((actual - expected).abs() < 2.0e-13);
         }
+
+        let target_operator = QuadraticWaveOperator::assemble_with_boundary(
+            &source,
+            WaveCoefficients::default(),
+            crate::OuterBoundaryCondition::FirstOrderOutgoing,
+        )
+        .unwrap();
+        let identity =
+            QuadraticTransferMap::identity_on_mesh(&source, &source_operator, &target_operator)
+                .unwrap();
+        assert_eq!(identity.interpolate(&copied, 0.0).unwrap(), copied);
     }
 
     #[test]

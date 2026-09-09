@@ -404,10 +404,32 @@ as a fallback for large or troublesome edits.
 
 ## Radiation and IGA
 
-The target absorber lives on the one-dimensional outer boundary. Start with a
-first-order outgoing condition and investigate higher-order auxiliary-boundary
-conditions next. Corner coupling and long-time stability are explicit work items.
-Keep the outer box fixed while the interior evolves.
+The absorber lives on the one-dimensional outer boundary. The implemented
+first-order condition is `∂n u = -u_t/c`. In the weak equation it contributes the
+positive boundary damping `∫Γ sqrt(rho k) v u_t ds`. Each quadratic boundary edge
+uses the diagonal endpoint/midpoint/endpoint Simpson weights `L/6, 2L/3, L/6`, so
+the explicit solver retains a diagonal damping operation. Only edges labeled as
+the fixed outer square receive this term; obstacle edges stay reflecting. At a
+corner, the two incident edge integrals both contribute to the corner node.
+
+Reflecting remains the startup default. Switching modes assembles a replacement
+operator on the same mesh, constructs a direct identity quadratic transfer without
+spatial point location, then uses the normal GPU transaction to carry displacement
+and velocity into the new centered time levels. The operator and live field
+therefore change together without invoking the mesher.
+
+Finite Gaussian-packet measurements at parent h=.08 for wavelength .4 give
+energy-equivalent amplitude reflections .0257 at normal incidence and .0981 at
+30 degrees; the continuous first-order plane-wave values are 0 and .0718. At
+parent h=.04 and wavelength .2 the measured values are .0106 and .0978. The
+normal wavelength-.4 case remains finite through t=10 with 4.80e-5 of its initial
+energy. These measurements include finite-beam bandwidth, diffraction, spatial
+discretization, and time integration, so the plane-wave values are context rather
+than exact expected outputs.
+
+Investigate higher-order auxiliary-boundary conditions next. Corner coupling and
+long-time stability remain explicit work items. Keep the outer box fixed while the
+interior evolves.
 
 IGA is an intended experiment after triangles. Start with an untrimmed single
 patch. Boundary splines alone do not supply an interior parameterization. Evaluate

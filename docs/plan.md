@@ -125,7 +125,8 @@ preview mesh benchmarks do not establish wave-solver performance.
 Core geometry-edit transactions and GPU transfer are implemented. Candidate mesh
 construction is resumable; operator and transfer-map preparation still form a
 short synchronous tail and should be made resumable if larger discretizations make
-it visible. Material and boundary-condition transactions remain future work.
+it visible. Boundary-condition transactions reuse the current mesh and preserve
+the live field; material transactions remain future work.
 
 - Prepare candidate geometry, mesh, operators, boundary state policy, transfer map,
   and timestep while continuing to simulate on the accepted revision.
@@ -137,7 +138,8 @@ it visible. Material and boundary-condition transactions remain future work.
   satisfy the responsiveness requirement; use resumable work or a worker.
 - Validate candidates and preserve the accepted simulation when preparation fails.
 - Define initialization for newly exposed regions and treatment of boundary data.
-- Extend transactions to material coefficients and boundary-condition changes.
+- Extend transactions to material coefficients. Boundary-condition changes are
+  complete.
 
 **Completion:** sustained dragging and parameter edits remain responsive, commits
 never mix revisions, rejected candidates recover cleanly, and the transfer uses
@@ -167,7 +169,9 @@ across frames without starvation, and challenging edits respect the budgets.
 
 ## 6. Boundary-only radiation conditions
 
-- Add first-order outgoing conditions on the fixed outer box.
+- First-order outgoing conditions on the fixed outer box are implemented and
+  selectable at runtime. The P2e boundary mass uses positive diagonal Simpson
+  weights, and a CPU benchmark measures two angles and two wavelengths.
 - Select and implement a higher-order auxiliary-boundary formulation in the
   Hagstrom-Warburton direction, including corner coupling and state lifecycle.
 - Keep codimension-1 absorption as the intended design. A damping layer or PML is

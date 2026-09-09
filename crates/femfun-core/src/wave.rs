@@ -21,6 +21,22 @@ impl Default for WaveCoefficients {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OuterBoundaryCondition {
+    #[default]
+    Reflecting,
+    FirstOrderOutgoing,
+}
+
+impl OuterBoundaryCondition {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Reflecting => "Reflecting",
+            Self::FirstOrderOutgoing => "First-order outgoing",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum WaveError {
     InvalidCoefficients,

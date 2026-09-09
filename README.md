@@ -86,10 +86,9 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   progress, build/work time, longest mesh slice, and explicit construction
   failures. Meshing targets a soft 2 ms per frame. An invalid draft keeps the last
   accepted mesh.
-- **Resolution:** maximum edge 0.04 is the default; choose 0.02 for a finer mesh
-  or 0.16 for a quick preview. The finer settings produce roughly 12k and 46k
-  triangles in the benchmark scenes. Changing resolution rebuilds the accepted
-  mesh without changing geometry/history. Resolution is not stored in scene files.
+- **Resolution:** parent maximum edge 0.08 is the default for P2e; choose 0.04 for
+  a finer solve or 0.16 for a quick preview. Changing resolution rebuilds the
+  accepted mesh without changing geometry/history. Resolution is not stored in scene files.
   Full fine builds can take tens of seconds when spread across frames. Small
   control-point edits now reuse and repair a bounded region of the previous mesh.
   The panel reports unchanged elements and full-rebuild fallbacks; creation,
@@ -100,6 +99,10 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   substeps per display frame. Field colors use an adjustable symmetric gain.
   The panel reports DOFs, GPU buffer size, operator-derived timestep, simulated
   time, substeps, throughput, operator/map preparation time, and discrete energy.
+- **Outer boundary:** choose Reflecting or First-order outgoing. The outgoing
+  condition absorbs waves only on the fixed outer square; obstacle boundaries
+  remain reflecting. A change reuses the mesh and transactionally transfers the
+  live field to the replacement operator.
 - **Mesh changes:** simulation continues on the displayed committed mesh while a
   replacement mesh, operator, timestep, and transfer map are prepared. The GPU
   reconstructs velocity from both old displacement levels, interpolates field and
@@ -127,12 +130,13 @@ cargo run -p femfun-core --release --example mesh_timing -- --slices
 cargo run -p femfun-core --release --example mesh_timing -- --wave --slices
 cargo run -p femfun-core --release --example mesh_edit_timing -- --paced
 cargo run -p femfun-core --release --example wave_convergence
+cargo run -p femfun-core --release --example wave_boundary_reflection
 cargo run -p femfun-app --release --locked -- --mesh-edit-benchmark
 cargo run -p femfun-app --release --locked -- --wave-gpu-check
 cargo run -p femfun-app --release --locked -- --wave-transfer-check
 ```
 
-The 71 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
+The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, refinement limits, geometry
 rejection, draft/accepted history, scene files, and egui pointer/keyboard
 interactions, local Delaunay legality, incremental work, slice-independent output,
@@ -146,6 +150,9 @@ These are meshing timings. `wave_convergence` separately measures the analytic
 reflecting-box mode for P1 at h=0.04 and h=0.02 and enriched quadratic triangles
 at parent h=0.08 and h=0.04, with independent temporal refinement over one and
 five box-crossing times.
+`wave_boundary_reflection` sends finite Gaussian P2e packets at the outer box and
+reports residual-energy reflection at two angles and two wavelengths, alongside
+the ideal continuous plane-wave coefficient and a long-time finite-state check.
 Omit `--slices` for per-phase profiling.
 `mesh_edit_timing --paced` applies edits with 2 ms mesh slices at a simulated
 60 Hz schedule, excluding rendering. `--mesh-edit-benchmark` opens the real native
