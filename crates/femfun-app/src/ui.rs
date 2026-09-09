@@ -1,4 +1,6 @@
 use crate::files::{self, FileEvent};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::wave_gpu::forcing_weights;
 use crate::wave_gpu::{PulseSettings, SourceSettings, WaveDisplay, WaveGpuRequest, WaveTransfer};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -78,6 +80,8 @@ pub struct Playground {
     region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
     internal_selection: Option<(InternalBoundaryId, Option<usize>)>,
+    internal_span_selection: Option<(InternalBoundaryId, usize)>,
+    internal_face_selection: InternalBoundarySide,
     custom: Vec<Point2>,
     drag: Option<Drag>,
     internal_drag: Option<InternalDrag>,
@@ -163,6 +167,8 @@ impl Default for Playground {
             region_selection: BACKGROUND_REGION,
             selection: Some((ObstacleId(1), None)),
             internal_selection: None,
+            internal_span_selection: None,
+            internal_face_selection: InternalBoundarySide::Left,
             custom: vec![],
             drag: None,
             internal_drag: None,
@@ -254,6 +260,7 @@ impl Playground {
     fn clear_transient(&mut self) {
         self.selection = None;
         self.internal_selection = None;
+        self.internal_span_selection = None;
         self.region_selection = BACKGROUND_REGION;
         self.drag = None;
         self.internal_drag = None;
@@ -286,6 +293,7 @@ impl Playground {
             if let Some(id) = self.error(result) {
                 self.selection = None;
                 self.internal_selection = Some((id, None));
+                self.internal_span_selection = Some((id, 0));
                 self.custom.clear();
                 self.mode = Mode::Select;
             }
@@ -998,6 +1006,7 @@ impl Playground {
                     {
                         self.selection = Some((o.id, None));
                         self.internal_selection = None;
+                        self.internal_span_selection = None;
                     }
                 }
                 for boundary in &self.editor.document.draft.internal_boundaries {
@@ -1006,8 +1015,17 @@ impl Playground {
                             self.internal_selection
                                 .is_some_and(|selection| selection.0 == boundary.id),
                             format!(
-                                "Baffle {:02} · Reflecting · {} controls",
+                                "Baffle {:02} · {} · {} controls",
                                 boundary.id.0,
+                                if boundary
+                                    .span_laws
+                                    .iter()
+                                    .all(|law| *law == InternalBoundaryLaw::REFLECTING)
+                                {
+                                    "Reflecting"
+                                } else {
+                                    "Assigned laws"
+                                },
                                 boundary.spline.controls().len()
                             ),
                         )
@@ -1015,6 +1033,7 @@ impl Playground {
                     {
                         self.selection = None;
                         self.internal_selection = Some((boundary.id, None));
+                        self.internal_span_selection = Some((boundary.id, 0));
                     }
                 }
             });
@@ -1088,6 +1107,98 @@ impl Playground {
             if ui.button("Delete baffle").clicked() {
                 self.editor.delete_internal_boundary(id);
                 self.internal_selection = None;
+                self.internal_span_selection = None;
+            }
+            if let Some(boundary) = self.editor.internal_boundary(id) {
+                let span_count = boundary.span_laws.len();
+                let mut span = self
+                    .internal_span_selection
+                    .filter(|selection| selection.0 == id && selection.1 < span_count)
+                    .map_or(0, |selection| selection.1);
+                egui::ComboBox::from_id_salt(("baffle_span", id.0))
+                    .selected_text(format!("Span {} / {span_count}", span + 1))
+                    .show_ui(ui, |ui| {
+                        for candidate in 0..span_count {
+                            ui.selectable_value(
+                                &mut span,
+                                candidate,
+                                format!("Span {}", candidate + 1),
+                            );
+                        }
+                    });
+                self.internal_span_selection = Some((id, span));
+                ui.horizontal(|ui| {
+                    ui.label("Face");
+                    ui.selectable_value(
+                        &mut self.internal_face_selection,
+                        InternalBoundarySide::Left,
+                        "Left",
+                    );
+                    ui.selectable_value(
+                        &mut self.internal_face_selection,
+                        InternalBoundarySide::Right,
+                        "Right",
+                    );
+                });
+                ui.small("Left/right follow the spline start → end direction");
+                let mut law = boundary.span_laws[span];
+                let face = match self.internal_face_selection {
+                    InternalBoundarySide::Left => &mut law.left,
+                    InternalBoundarySide::Right => &mut law.right,
+                };
+                let mut impedance = matches!(face, FaceBoundaryCondition::Impedance { .. });
+                if ui
+                    .checkbox(&mut impedance, "Matched impedance face")
+                    .changed()
+                {
+                    *face = if impedance {
+                        FaceBoundaryCondition::Impedance { ratio: 1.0 }
+                    } else {
+                        FaceBoundaryCondition::Reflecting
+                    };
+                    let result = self.editor.set_internal_boundary_law(id, span, law);
+                    self.error(result);
+                } else if let FaceBoundaryCondition::Impedance { ratio } = face {
+                    let response = ui.add(
+                        egui::DragValue::new(ratio)
+                            .speed(0.02)
+                            .range(0.01..=100.0)
+                            .prefix("impedance ratio ")
+                            .update_while_editing(false),
+                    );
+                    if response.changed() {
+                        let result = self.editor.set_internal_boundary_law(id, span, law);
+                        self.error(result);
+                    }
+                    ui.small("1.0 matches the adjacent medium");
+                }
+                let mut thin_gap = matches!(law.coupling, InternalBoundaryCoupling::ThinGap { .. });
+                if ui.checkbox(&mut thin_gap, "Couple as thin gap").changed() {
+                    law.coupling = if thin_gap {
+                        InternalBoundaryCoupling::ThinGap {
+                            stiffness_ratio: 1.0,
+                        }
+                    } else {
+                        InternalBoundaryCoupling::Independent
+                    };
+                    let result = self.editor.set_internal_boundary_law(id, span, law);
+                    self.error(result);
+                } else if let InternalBoundaryCoupling::ThinGap { stiffness_ratio } =
+                    &mut law.coupling
+                {
+                    let response = ui.add(
+                        egui::DragValue::new(stiffness_ratio)
+                            .speed(0.02)
+                            .range(0.01..=100.0)
+                            .prefix("gap stiffness ")
+                            .update_while_editing(false),
+                    );
+                    if response.changed() {
+                        let result = self.editor.set_internal_boundary_law(id, span, law);
+                        self.error(result);
+                    }
+                    ui.small("Conservative paired-trace spring · tighter gaps reduce dt");
+                }
             }
             if let Some(index) = index
                 && let Some(boundary) = self.editor.internal_boundary(id)
@@ -1644,6 +1755,7 @@ impl Playground {
                     if let Some((id, index)) = self.hit_handle(p, r) {
                         self.selection = Some((id, Some(index)));
                         self.internal_selection = None;
+                        self.internal_span_selection = None;
                         self.editor.begin();
                         let point = self.editor.obstacle(id).unwrap().spline.controls()[index];
                         self.drag = Some(Drag {
@@ -1654,6 +1766,7 @@ impl Playground {
                     } else if let Some((id, index)) = self.hit_internal_handle(p, r) {
                         self.selection = None;
                         self.internal_selection = Some((id, Some(index)));
+                        self.internal_span_selection = None;
                         self.editor.begin();
                         let point =
                             self.editor.internal_boundary(id).unwrap().spline.controls()[index];
@@ -1664,11 +1777,18 @@ impl Playground {
                         });
                     } else {
                         self.selection = self.hit_curve(p, r).map(|(id, _)| (id, None));
-                        self.internal_selection = if self.selection.is_none() {
-                            self.hit_internal_curve(p, r).map(|(id, _)| (id, None))
+                        let internal_hit = if self.selection.is_none() {
+                            self.hit_internal_curve(p, r)
                         } else {
                             None
                         };
+                        self.internal_selection = internal_hit.map(|(id, _)| (id, None));
+                        self.internal_span_selection = internal_hit.and_then(|(id, parameter)| {
+                            self.editor
+                                .internal_boundary(id)
+                                .and_then(|boundary| boundary.spline.span_index(parameter))
+                                .map(|span| (id, span))
+                        });
                         if self.selection.is_none() && self.internal_selection.is_none() {
                             self.region_selection = self.region_at(self.world(p, r));
                         }
@@ -1709,12 +1829,14 @@ impl Playground {
                         if let Some(index) = self.error(result) {
                             self.selection = Some((id, Some(index)));
                             self.internal_selection = None;
+                            self.internal_span_selection = None;
                         }
                     } else if let Some((id, parameter)) = self.hit_internal_curve(p, r) {
                         let result = self.editor.insert_internal_boundary(id, parameter);
                         if let Some(index) = self.error(result) {
                             self.selection = None;
                             self.internal_selection = Some((id, Some(index)));
+                            self.internal_span_selection = None;
                         }
                     }
                 } else if response.clicked() && !space && !self.panning {
@@ -1735,6 +1857,7 @@ impl Playground {
                                 if let Some(id) = self.error(result) {
                                     self.selection = None;
                                     self.internal_selection = Some((id, None));
+                                    self.internal_span_selection = Some((id, 0));
                                     self.mode = Mode::Select;
                                 }
                             } else {
@@ -1745,6 +1868,7 @@ impl Playground {
                                 if let Some(id) = self.error(result) {
                                     self.selection = Some((id, None));
                                     self.internal_selection = None;
+                                    self.internal_span_selection = None;
                                     self.mode = Mode::Select;
                                 }
                             }
@@ -1924,6 +2048,18 @@ impl Playground {
         }
         for curve in &self.draft_internal_curves {
             self.draw_internal_curve(&painter, r, curve, color, 3.0);
+        }
+        if let Some((id, span)) = self.internal_span_selection
+            && let Some(curve) = self
+                .draft_internal_curves
+                .iter()
+                .find(|curve| curve.id == id)
+            && let Some(bounds) = self
+                .editor
+                .internal_boundary(id)
+                .and_then(|boundary| boundary.spline.span_bounds(span))
+        {
+            self.draw_internal_span_face(&painter, r, curve, bounds, self.internal_face_selection);
         }
         for o in &self.editor.document.draft.obstacles {
             let selected = self.selection.is_some_and(|s| s.0 == o.id);
@@ -2215,6 +2351,39 @@ impl Playground {
             ));
         }
     }
+
+    fn draw_internal_span_face(
+        &self,
+        painter: &egui::Painter,
+        r: Rect,
+        curve: &InternalCurve,
+        bounds: [f64; 2],
+        side: InternalBoundarySide,
+    ) {
+        for segment in curve.samples.windows(2) {
+            let parameter = 0.5 * (segment[0].t + segment[1].t);
+            if parameter < bounds[0] || parameter > bounds[1] {
+                continue;
+            }
+            let points = [
+                self.screen(segment[0].point, r),
+                self.screen(segment[1].point, r),
+            ];
+            let tangent = points[1] - points[0];
+            let length = tangent.length();
+            if length <= f32::EPSILON {
+                continue;
+            }
+            let mut normal = egui::vec2(tangent.y, -tangent.x) * (4.0 / length);
+            if side == InternalBoundarySide::Right {
+                normal = -normal;
+            }
+            painter.line_segment(
+                [points[0] + normal, points[1] + normal],
+                Stroke::new(3.0, Color32::WHITE),
+            );
+        }
+    }
 }
 fn field_color(value: f32, gain: f32) -> Color32 {
     let value = if value.is_finite() {
@@ -2349,7 +2518,24 @@ pub fn wave_gpu_check_scene() -> Playground {
                 interior: RegionId(2),
             },
         }],
-        internal_boundaries: vec![],
+        internal_boundaries: vec![InternalBoundary {
+            id: InternalBoundaryId(1),
+            spline: OpenCubicSpline::uniform(vec![
+                Point2::new(-0.841_274_799_6, -0.460_310_562_0),
+                Point2::new(-0.702_926_820_9, -0.393_873_880_9),
+                Point2::new(-0.564_578_842_4, -0.327_437_199_8),
+                Point2::new(-0.426_230_863_7, -0.261_000_518_7),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![InternalBoundaryLaw {
+                left: FaceBoundaryCondition::Impedance { ratio: 0.7 },
+                coupling: InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 2.0,
+                },
+                ..InternalBoundaryLaw::REFLECTING
+            }],
+        }],
         materials: vec![
             Material::default_medium(),
             Material {
@@ -2469,19 +2655,10 @@ pub fn wave_gpu_benchmark(
                 }
             }
         }
-        let pulse: Vec<_> = operator
-            .node_points()
-            .iter()
-            .zip(&benchmark.exterior_nodes)
-            .map(|(point, exterior)| {
-                let dx = point.x as f32 - position.x as f32;
-                let dy = point.y as f32 - position.y as f32;
-                if *exterior {
-                    (amplitude * (-0.5 * (dx * dx + dy * dy) / (width * width)).exp()) as f64
-                } else {
-                    0.0
-                }
-            })
+        let pulse: Vec<_> = forcing_weights(mesh, operator, position, width, BACKGROUND_REGION)
+            .unwrap()
+            .into_iter()
+            .map(|weight| (amplitude * weight) as f64)
             .collect();
         cpu.add_displacement(&pulse).unwrap();
         for _ in 0..128 {
@@ -3298,6 +3475,16 @@ mod tests {
             self.button(p, PointerButton::Primary, true);
             self.button(p, PointerButton::Primary, false);
         }
+        fn click_text(&mut self, text: &str) {
+            self.frame(vec![]);
+            let position = self
+                .texts
+                .iter()
+                .find(|(candidate, _)| candidate == text)
+                .map(|(_, rect)| rect.center())
+                .unwrap_or_else(|| panic!("missing UI text {text:?}"));
+            self.click(position);
+        }
         fn key(&mut self, key: Key, modifiers: Modifiers) {
             self.frame(vec![
                 Event::ModifiersChanged(modifiers),
@@ -3380,6 +3567,39 @@ mod tests {
         );
         let id = harness.state.editor.document.draft.internal_boundaries[0].id;
         assert_eq!(harness.state.internal_selection, Some((id, None)));
+        assert_eq!(harness.state.internal_span_selection, Some((id, 0)));
+
+        let history_before_laws = harness.state.editor.history_len().0;
+        harness.click_text("Matched impedance face");
+        harness.settle();
+        assert_eq!(
+            harness
+                .state
+                .editor
+                .internal_boundary(id)
+                .unwrap()
+                .span_laws[0]
+                .left,
+            FaceBoundaryCondition::Impedance { ratio: 1.0 }
+        );
+        harness.click_text("Couple as thin gap");
+        harness.settle();
+        assert!(matches!(
+            harness
+                .state
+                .editor
+                .internal_boundary(id)
+                .unwrap()
+                .span_laws[0]
+                .coupling,
+            InternalBoundaryCoupling::ThinGap {
+                stiffness_ratio: 1.0
+            }
+        ));
+        assert_eq!(
+            harness.state.editor.history_len().0,
+            history_before_laws + 2
+        );
 
         let before = harness.state.editor.history_len().0;
         let control = harness
@@ -3397,6 +3617,40 @@ mod tests {
         harness.settle();
         assert_eq!(harness.state.editor.history_len().0, before + 1);
         assert_eq!(harness.state.internal_selection, Some((id, Some(1))));
+    }
+
+    #[test]
+    fn open_curve_click_selects_its_logical_knot_span() {
+        let mut harness = Harness::new();
+        let id = harness
+            .state
+            .editor
+            .create_internal_boundary(
+                OpenCubicSpline::uniform(vec![
+                    Point2::new(-0.8, 0.58),
+                    Point2::new(-0.45, 0.72),
+                    Point2::new(0.0, 0.50),
+                    Point2::new(0.45, 0.70),
+                    Point2::new(0.8, 0.56),
+                ])
+                .unwrap(),
+                BACKGROUND_REGION,
+            )
+            .unwrap();
+        harness.settle();
+        harness.state.selection = None;
+        harness.state.internal_selection = None;
+        harness.state.internal_span_selection = None;
+        let point = harness
+            .state
+            .editor
+            .internal_boundary(id)
+            .unwrap()
+            .spline
+            .evaluate(1.5);
+        harness.click(harness.point(point));
+        assert_eq!(harness.state.internal_selection, Some((id, None)));
+        assert_eq!(harness.state.internal_span_selection, Some((id, 1)));
     }
 
     fn commit_mesh_without_gpu(state: &mut Playground) {
@@ -3741,6 +3995,65 @@ mod tests {
             OuterBoundaryCondition::FirstOrderOutgoing
         );
         assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &mesh));
+    }
+
+    #[test]
+    fn baffle_law_change_reuses_mesh_and_prepares_a_field_transfer() {
+        let mut h = Harness::new();
+        let id = h
+            .state
+            .editor
+            .create_internal_boundary(
+                OpenCubicSpline::uniform(vec![
+                    Point2::new(-0.7, 0.55),
+                    Point2::new(-0.25, 0.65),
+                    Point2::new(0.25, 0.52),
+                    Point2::new(0.7, 0.62),
+                ])
+                .unwrap(),
+                BACKGROUND_REGION,
+            )
+            .unwrap();
+        h.settle();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let mesh = h.state.mesh.clone().expect("baffle mesh");
+        let old_damping: f64 = h
+            .state
+            .wave_operator
+            .as_ref()
+            .unwrap()
+            .lumped_damping()
+            .iter()
+            .sum();
+
+        h.state
+            .editor
+            .set_internal_boundary_law(
+                id,
+                0,
+                InternalBoundaryLaw {
+                    left: FaceBoundaryCondition::Impedance { ratio: 1.0 },
+                    coupling: InternalBoundaryCoupling::ThinGap {
+                        stiffness_ratio: 2.0,
+                    },
+                    ..InternalBoundaryLaw::REFLECTING
+                },
+            )
+            .unwrap();
+        h.settle();
+        h.state.refresh_mesh();
+
+        let candidate = h
+            .state
+            .simulation_candidate
+            .as_ref()
+            .expect("baffle-law candidate");
+        assert!(Arc::ptr_eq(&candidate.mesh, &mesh));
+        assert!(h.state.mesh_job.is_none());
+        assert!(candidate.operator.lumped_damping().iter().sum::<f64>() > old_damping);
+        assert_eq!(candidate.exposed_nodes, 0);
+        assert!(candidate.transfer.is_some());
     }
 
     #[test]

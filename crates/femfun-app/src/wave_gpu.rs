@@ -1339,7 +1339,7 @@ mod tests {
             ])
             .unwrap(),
             region: BACKGROUND_REGION,
-            law: InternalBoundaryLaw::Reflecting,
+            span_laws: vec![InternalBoundaryLaw::REFLECTING],
         });
         let mesh = mesh_scene(
             &scene,

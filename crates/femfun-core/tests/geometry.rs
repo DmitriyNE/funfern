@@ -222,7 +222,7 @@ fn open_boundary(id: u64, y: f64) -> InternalBoundary {
         ])
         .unwrap(),
         region: BACKGROUND_REGION,
-        law: InternalBoundaryLaw::Reflecting,
+        span_laws: vec![InternalBoundaryLaw::REFLECTING],
     }
 }
 
@@ -243,7 +243,7 @@ fn open_boundary_validation_checks_ends_crossings_and_contacts() {
         ])
         .unwrap(),
         region: BACKGROUND_REGION,
-        law: InternalBoundaryLaw::Reflecting,
+        span_laws: vec![InternalBoundaryLaw::REFLECTING],
     });
     assert!(matches!(
         validate(&crossing).issue,
@@ -268,6 +268,27 @@ fn open_boundary_validation_checks_ends_crossings_and_contacts() {
         validate(&outside).issue,
         Some(ValidationIssue::BoundaryOutside(_))
     ));
+}
+
+#[test]
+fn internal_boundary_span_laws_match_knots_and_reject_bad_coefficients() {
+    let mut scene = Scene::default();
+    scene.internal_boundaries.push(open_boundary(1, 0.0));
+    assert!(scene.structure_valid());
+    scene.internal_boundaries[0].span_laws.clear();
+    assert!(!scene.structure_valid());
+    scene.internal_boundaries[0].span_laws = vec![InternalBoundaryLaw {
+        left: FaceBoundaryCondition::Impedance { ratio: f64::NAN },
+        ..InternalBoundaryLaw::REFLECTING
+    }];
+    assert!(!scene.structure_valid());
+    scene.internal_boundaries[0].span_laws = vec![InternalBoundaryLaw {
+        coupling: InternalBoundaryCoupling::ThinGap {
+            stiffness_ratio: 0.0,
+        },
+        ..InternalBoundaryLaw::REFLECTING
+    }];
+    assert!(!scene.structure_valid());
 }
 
 fn scene(loops: Vec<PeriodicCubicSpline>) -> Scene {

@@ -142,6 +142,32 @@ impl OpenCubicSpline {
         *self.knots.last().unwrap()
     }
 
+    /// Returns the nonempty knot span containing `parameter`. Interior knots
+    /// belong to the span on their right; the final endpoint belongs to the last
+    /// span.
+    pub fn span_index(&self, parameter: f64) -> Option<usize> {
+        if !parameter.is_finite() || parameter < 0.0 || parameter > self.period() {
+            return None;
+        }
+        if parameter == self.period() {
+            return Some(self.intervals.len() - 1);
+        }
+        self.intervals
+            .iter()
+            .scan(0.0, |start, interval| {
+                let bounds = (*start, *start + interval);
+                *start += interval;
+                Some(bounds)
+            })
+            .position(|(start, end)| start <= parameter && parameter < end)
+    }
+
+    pub fn span_bounds(&self, index: usize) -> Option<[f64; 2]> {
+        let interval = *self.intervals.get(index)?;
+        let start = self.intervals[..index].iter().sum::<f64>();
+        Some([start, start + interval])
+    }
+
     pub fn set_control(&mut self, index: usize, point: Point2) -> Result<(), SplineError> {
         if !point.finite() {
             return Err(SplineError::NonFinite);

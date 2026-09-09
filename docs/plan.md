@@ -190,15 +190,15 @@ modes.
 
 ## 7. Interior topology and material assignment
 
-Implemented for closed spline loops and open reflecting baffles. Stable regions
+Implemented for closed spline loops and open baffles. Stable regions
 and materials distinguish holes and conforming transmitting interfaces. Closed
 walls and open baffles have two finite-element traces; baffle traces reconnect at
 their free tips so waves can diffract around them. Nested
 ownership is validated, triangles carry regions, P2e assembly is piecewise, and
-coefficient edits use a same-mesh field-transfer transaction. Version 3 scene
-files preserve open splines and migrate version 1 holes. Multi-region coordinate
-edits currently take the full-mesh path; extending bounded repair across region
-topology remains adaptation work.
+coefficient edits use a same-mesh field-transfer transaction. Version 4 scene
+files preserve open splines and their assigned span laws and migrate version 1
+holes. Multi-region coordinate edits currently take the full-mesh path; extending
+bounded repair across region topology remains adaptation work.
 
 - Give regions, materials, interfaces, and internal walls stable semantic IDs
   independent of mesh vertices and element indices. Keep holes, transmitting
@@ -226,6 +226,12 @@ save/load and undo/redo, and coefficient edits preserve the running field withou
 remeshing.
 
 ## 8. Boundary spans and assigned conditions
+
+Open-baffle knot spans are implemented. A selected span exposes its left and right
+faces independently; each face can reflect or use a scaled matched impedance, and
+the pair can use a conservative thin-gap spring. Assignments survive resampling,
+knot insertion, undo/redo, and versioned persistence. Removal rejects a merge when
+the two affected spans disagree. Outer-side and closed-loop span assignment remain.
 
 - Represent selectable logical spans independently of sampled mesh edges. Outer
   sides and spline knot spans retain stable assignments through resampling and

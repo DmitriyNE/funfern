@@ -169,9 +169,9 @@ impl Editor {
             .internal_boundaries
             .push(InternalBoundary {
                 id,
+                span_laws: vec![InternalBoundaryLaw::REFLECTING; spline.intervals().len()],
                 spline,
                 region,
-                law: InternalBoundaryLaw::Reflecting,
             });
         self.changed();
         self.commit();
@@ -217,25 +217,31 @@ impl Editor {
         id: InternalBoundaryId,
         parameter: f64,
     ) -> Result<usize, String> {
-        let mut spline = self
+        let boundary = self
             .internal_boundary(id)
-            .ok_or("Missing internal boundary")?
-            .spline
-            .clone();
+            .ok_or("Missing internal boundary")?;
+        let mut spline = boundary.spline.clone();
+        let span = spline.span_index(parameter);
+        let mut span_laws = boundary.span_laws.clone();
         match spline
             .insert(parameter)
             .map_err(|error| error.to_string())?
         {
             Insertion::Existing(index) => Ok(index),
             Insertion::Inserted(index) => {
+                let span = span.ok_or("Inserted knot is outside the open spline")?;
+                let inherited = span_laws[span];
+                span_laws.insert(span + 1, inherited);
                 self.begin();
-                self.document
+                let boundary = self
+                    .document
                     .draft
                     .internal_boundaries
                     .iter_mut()
                     .find(|boundary| boundary.id == id)
-                    .unwrap()
-                    .spline = spline;
+                    .unwrap();
+                boundary.spline = spline;
+                boundary.span_laws = span_laws;
                 self.changed();
                 self.commit();
                 Ok(index)
@@ -248,20 +254,77 @@ impl Editor {
         id: InternalBoundaryId,
         index: usize,
     ) -> Result<(), String> {
-        let mut spline = self
+        let boundary = self
             .internal_boundary(id)
-            .ok_or("Missing internal boundary")?
-            .spline
-            .clone();
+            .ok_or("Missing internal boundary")?;
+        let mut spline = boundary.spline.clone();
+        let old_control_count = spline.controls().len();
+        if index >= old_control_count {
+            return Err("Missing internal-boundary control".into());
+        }
+        let mut span_laws = boundary.span_laws.clone();
+        if index <= 1 {
+            span_laws.remove(0);
+        } else if index + 2 >= old_control_count {
+            span_laws.pop();
+        } else {
+            let left = (index - 2).min(span_laws.len() - 2);
+            if span_laws[left] != span_laws[left + 1] {
+                return Err(
+                    "Removal would merge spans with different boundary laws; make them equal first"
+                        .into(),
+                );
+            }
+            span_laws.remove(left + 1);
+        }
         spline.remove(index).map_err(|error| error.to_string())?;
         self.begin();
-        self.document
+        let boundary = self
+            .document
             .draft
             .internal_boundaries
             .iter_mut()
             .find(|boundary| boundary.id == id)
-            .unwrap()
-            .spline = spline;
+            .unwrap();
+        boundary.spline = spline;
+        boundary.span_laws = span_laws;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_internal_boundary_law(
+        &mut self,
+        id: InternalBoundaryId,
+        span: usize,
+        law: InternalBoundaryLaw,
+    ) -> Result<(), String> {
+        if !law.valid() {
+            return Err("Boundary-law coefficients must be positive and finite".into());
+        }
+        let boundary = self
+            .document
+            .draft
+            .internal_boundaries
+            .iter()
+            .find(|boundary| boundary.id == id)
+            .ok_or("Missing internal boundary")?;
+        let current = *boundary
+            .span_laws
+            .get(span)
+            .ok_or("Missing internal-boundary span")?;
+        if current == law {
+            return Ok(());
+        }
+        self.begin();
+        let boundary = self
+            .document
+            .draft
+            .internal_boundaries
+            .iter_mut()
+            .find(|boundary| boundary.id == id)
+            .unwrap();
+        boundary.span_laws[span] = law;
         self.changed();
         self.commit();
         Ok(())

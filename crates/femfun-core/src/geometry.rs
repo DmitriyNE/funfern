@@ -108,8 +108,68 @@ pub struct Obstacle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum InternalBoundaryLaw {
+pub enum FaceBoundaryCondition {
     Reflecting,
+    /// Local absorbing condition scaled by the adjacent material's characteristic
+    /// impedance. A ratio of one is the matched first-order condition.
+    Impedance {
+        ratio: f64,
+    },
+}
+
+impl FaceBoundaryCondition {
+    pub fn valid(self) -> bool {
+        match self {
+            Self::Reflecting => true,
+            Self::Impedance { ratio } => ratio.is_finite() && ratio > 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InternalBoundaryCoupling {
+    Independent,
+    /// Conservative zero-thickness compliant layer. The coefficient is scaled
+    /// by the adjacent material stiffness and couples the two trace jumps.
+    ThinGap {
+        stiffness_ratio: f64,
+    },
+}
+
+impl InternalBoundaryCoupling {
+    pub fn valid(self) -> bool {
+        match self {
+            Self::Independent => true,
+            Self::ThinGap { stiffness_ratio } => {
+                stiffness_ratio.is_finite() && stiffness_ratio > 0.0
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InternalBoundaryLaw {
+    pub left: FaceBoundaryCondition,
+    pub right: FaceBoundaryCondition,
+    pub coupling: InternalBoundaryCoupling,
+}
+
+impl InternalBoundaryLaw {
+    pub const REFLECTING: Self = Self {
+        left: FaceBoundaryCondition::Reflecting,
+        right: FaceBoundaryCondition::Reflecting,
+        coupling: InternalBoundaryCoupling::Independent,
+    };
+
+    pub fn valid(self) -> bool {
+        self.left.valid() && self.right.valid() && self.coupling.valid()
+    }
+}
+
+impl Default for InternalBoundaryLaw {
+    fn default() -> Self {
+        Self::REFLECTING
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,7 +177,8 @@ pub struct InternalBoundary {
     pub id: InternalBoundaryId,
     pub spline: OpenCubicSpline,
     pub region: RegionId,
-    pub law: InternalBoundaryLaw,
+    /// One law for each nonempty spline knot span.
+    pub span_laws: Vec<InternalBoundaryLaw>,
 }
 impl Obstacle {
     pub fn hole(id: ObstacleId, spline: PeriodicCubicSpline) -> Self {
@@ -186,6 +247,8 @@ impl Scene {
                 .all(|(index, boundary)| {
                     boundary.id.0 > 0
                         && self.region(boundary.region).is_some()
+                        && boundary.span_laws.len() == boundary.spline.intervals().len()
+                        && boundary.span_laws.iter().all(|law| law.valid())
                         && !self.internal_boundaries[..index]
                             .iter()
                             .any(|previous| previous.id == boundary.id)
@@ -248,7 +311,17 @@ impl Scene {
     /// Geometry and topology equality excludes names, colors, coefficients, and
     /// region-to-material assignments so those edits can reuse the mesh.
     pub fn geometry_eq(&self, other: &Self) -> bool {
-        self.obstacles == other.obstacles && self.internal_boundaries == other.internal_boundaries
+        self.obstacles == other.obstacles
+            && self.internal_boundaries.len() == other.internal_boundaries.len()
+            && self
+                .internal_boundaries
+                .iter()
+                .zip(&other.internal_boundaries)
+                .all(|(left, right)| {
+                    left.id == right.id
+                        && left.spline == right.spline
+                        && left.region == right.region
+                })
     }
 }
 #[derive(Clone, Debug, PartialEq)]

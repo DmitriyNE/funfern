@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    BACKGROUND_REGION, BoundaryLabel, OuterBoundaryCondition, Point2, RegionId, Scene, TriMesh,
-    WaveCoefficients, WaveError,
+    BACKGROUND_REGION, BoundaryLabel, FaceBoundaryCondition, InternalBoundaryCoupling,
+    InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition, Point2, RegionId, Scene,
+    TriMesh, WaveCoefficients, WaveError,
 };
 
 /// Seven-node mass-lumped triangle: `P2` enriched by the cubic interior bubble.
@@ -40,6 +41,7 @@ impl QuadraticWaveOperator {
             BTreeMap::from([(BACKGROUND_REGION, coefficients)]),
             coefficients,
             outer_boundary,
+            None,
         )
     }
 
@@ -67,7 +69,7 @@ impl QuadraticWaveOperator {
         let outer = *coefficients
             .get(&BACKGROUND_REGION)
             .ok_or(WaveError::InvalidCoefficients)?;
-        Self::assemble_regions(mesh, coefficients, outer, outer_boundary)
+        Self::assemble_regions(mesh, coefficients, outer, outer_boundary, Some(scene))
     }
 
     fn assemble_regions(
@@ -75,6 +77,7 @@ impl QuadraticWaveOperator {
         coefficients_by_region: BTreeMap<RegionId, WaveCoefficients>,
         outer_coefficients: WaveCoefficients,
         outer_boundary: OuterBoundaryCondition,
+        scene: Option<&Scene>,
     ) -> Result<Self, WaveError> {
         validate_coefficients(outer_coefficients)?;
         if coefficients_by_region
@@ -242,6 +245,16 @@ impl QuadraticWaveOperator {
                     }
                 }
             }
+        }
+        if let Some(scene) = scene {
+            assemble_internal_boundary_laws(
+                mesh,
+                scene,
+                &coefficients_by_region,
+                &edge_nodes,
+                &mut rows,
+                &mut damping,
+            )?;
         }
         if mass.iter().any(|value| !value.is_finite() || *value <= 0.0)
             || damping
@@ -732,6 +745,138 @@ impl QuadraticWaveState {
     }
 }
 
+type TraceNodes = ([usize; 3], f64);
+
+fn assemble_internal_boundary_laws(
+    mesh: &TriMesh,
+    scene: &Scene,
+    coefficients_by_region: &BTreeMap<RegionId, WaveCoefficients>,
+    edge_nodes: &BTreeMap<(usize, usize), usize>,
+    rows: &mut [BTreeMap<usize, f64>],
+    damping: &mut [f64],
+) -> Result<(), WaveError> {
+    let mut traces = BTreeMap::<(InternalBoundaryId, u64, u64), [Option<TraceNodes>; 2]>::new();
+    for edge in &mesh.boundary_edges {
+        let BoundaryLabel::InternalBoundary { id, side } = edge.label else {
+            continue;
+        };
+        let boundary = scene
+            .internal_boundaries
+            .iter()
+            .find(|boundary| boundary.id == id)
+            .ok_or(WaveError::InvalidMesh(
+                "an internal-boundary edge has an unknown ID",
+            ))?;
+        let coefficients = *coefficients_by_region
+            .get(&boundary.region)
+            .ok_or(WaveError::InvalidCoefficients)?;
+        let [a, b] = edge.vertices;
+        if a >= mesh.vertices.len() || b >= mesh.vertices.len() || a == b {
+            return Err(WaveError::InvalidMesh(
+                "an internal-boundary edge has invalid vertex indices",
+            ));
+        }
+        let key = if a < b { (a, b) } else { (b, a) };
+        let midpoint = *edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
+            "an internal-boundary edge does not belong to a triangle",
+        ))?;
+        let [parameter_a, parameter_b] = edge.parameters;
+        if !parameter_a.is_finite() || !parameter_b.is_finite() || parameter_a == parameter_b {
+            return Err(WaveError::InvalidMesh(
+                "an internal-boundary edge has invalid parameters",
+            ));
+        }
+        let parameter = 0.5 * (parameter_a + parameter_b);
+        let span = boundary
+            .spline
+            .span_index(parameter)
+            .ok_or(WaveError::InvalidMesh(
+                "an internal-boundary edge is outside its spline parameter range",
+            ))?;
+        let law = boundary.span_laws[span];
+        let condition = match side {
+            InternalBoundarySide::Left => law.left,
+            InternalBoundarySide::Right => law.right,
+        };
+        let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
+        if !length.is_finite() || length <= 0.0 {
+            return Err(WaveError::InvalidMesh(
+                "an internal-boundary edge has invalid length",
+            ));
+        }
+        let nodes = if parameter_a < parameter_b {
+            [a, midpoint, b]
+        } else {
+            [b, midpoint, a]
+        };
+        if let FaceBoundaryCondition::Impedance { ratio } = condition {
+            let impedance = ratio * (coefficients.mass_density * coefficients.stiffness).sqrt();
+            for (node, weight) in nodes.into_iter().zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0]) {
+                damping[node] += impedance * length * weight;
+            }
+        }
+        let (start, end) = if parameter_a < parameter_b {
+            (parameter_a, parameter_b)
+        } else {
+            (parameter_b, parameter_a)
+        };
+        let pair = traces
+            .entry((id, start.to_bits(), end.to_bits()))
+            .or_default();
+        let slot = match side {
+            InternalBoundarySide::Left => 0,
+            InternalBoundarySide::Right => 1,
+        };
+        if pair[slot].replace((nodes, length)).is_some() {
+            return Err(WaveError::InvalidMesh(
+                "an internal-boundary trace edge is duplicated",
+            ));
+        }
+    }
+
+    for ((id, start, end), pair) in traces {
+        let [Some((left, left_length)), Some((right, right_length))] = pair else {
+            return Err(WaveError::InvalidMesh(
+                "an internal-boundary segment is missing one face",
+            ));
+        };
+        if (left_length - right_length).abs() > 1.0e-10 * left_length.max(right_length).max(1.0) {
+            return Err(WaveError::InvalidMesh(
+                "paired internal-boundary faces have different lengths",
+            ));
+        }
+        let boundary = scene
+            .internal_boundaries
+            .iter()
+            .find(|boundary| boundary.id == id)
+            .unwrap();
+        let parameter = 0.5 * (f64::from_bits(start) + f64::from_bits(end));
+        let span = boundary.spline.span_index(parameter).unwrap();
+        let InternalBoundaryCoupling::ThinGap { stiffness_ratio } =
+            boundary.span_laws[span].coupling
+        else {
+            continue;
+        };
+        let coefficients = coefficients_by_region[&boundary.region];
+        let spring = stiffness_ratio * coefficients.stiffness;
+        for ((left_node, right_node), weight) in
+            left.into_iter()
+                .zip(right)
+                .zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
+        {
+            if left_node == right_node {
+                continue;
+            }
+            let scale = spring * 0.5 * (left_length + right_length) * weight;
+            *rows[left_node].entry(left_node).or_default() += scale;
+            *rows[left_node].entry(right_node).or_default() -= scale;
+            *rows[right_node].entry(left_node).or_default() -= scale;
+            *rows[right_node].entry(right_node).or_default() += scale;
+        }
+    }
+    Ok(())
+}
+
 fn validate_coefficients(coefficients: WaveCoefficients) -> Result<(), WaveError> {
     if !coefficients.mass_density.is_finite()
         || coefficients.mass_density <= 0.0
@@ -797,9 +942,9 @@ fn stiffness_quadrature() -> [([f64; 3], f64); 6] {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, BoundaryEdge, Material, MaterialId, MeshQuality, MeshTriangle,
-        MeshVertex, MeshingOptions, Obstacle, ObstacleId, OuterSide, PeriodicCubicSpline, Region,
-        mesh_scene,
+        BACKGROUND_REGION, BoundaryEdge, InternalBoundary, InternalBoundaryLaw, Material,
+        MaterialId, MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, Obstacle, ObstacleId,
+        OpenCubicSpline, OuterSide, PeriodicCubicSpline, Region, mesh_scene,
     };
 
     fn two_material_scene() -> Scene {
@@ -887,6 +1032,93 @@ mod tests {
         })
         .to_vec();
         mesh
+    }
+
+    fn open_baffle_scene(law: InternalBoundaryLaw) -> (Scene, TriMesh) {
+        let mut scene = Scene::default();
+        scene.internal_boundaries.push(InternalBoundary {
+            id: InternalBoundaryId(1),
+            spline: OpenCubicSpline::uniform(vec![
+                Point2::new(-0.65, 0.0),
+                Point2::new(-0.2, 0.0),
+                Point2::new(0.2, 0.0),
+                Point2::new(0.65, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![law],
+        });
+        let mesh = mesh_scene(
+            &scene,
+            17,
+            MeshingOptions {
+                target_edge_length: 0.18,
+                minimum_angle_degrees: 14.0,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        (scene, mesh)
+    }
+
+    fn trace_edge_nodes(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        side: InternalBoundarySide,
+    ) -> [usize; 3] {
+        let edge = mesh
+            .boundary_edges
+            .iter()
+            .filter(|edge| {
+                matches!(
+                    edge.label,
+                    BoundaryLabel::InternalBoundary {
+                        id: InternalBoundaryId(1),
+                        side: candidate,
+                    } if candidate == side
+                )
+            })
+            .max_by(|left, right| {
+                let left_midpoint = 0.5 * (left.parameters[0] + left.parameters[1]);
+                let right_midpoint = 0.5 * (right.parameters[0] + right.parameters[1]);
+                (-(left_midpoint.abs())).total_cmp(&-right_midpoint.abs())
+            })
+            .unwrap();
+        boundary_edge_nodes(mesh, operator, edge)
+    }
+
+    fn boundary_edge_nodes(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        edge: &BoundaryEdge,
+    ) -> [usize; 3] {
+        let (triangle_index, triangle) = mesh
+            .triangles
+            .iter()
+            .enumerate()
+            .find(|(_, triangle)| edge.vertices.iter().all(|v| triangle.vertices.contains(v)))
+            .unwrap();
+        let a = triangle
+            .vertices
+            .iter()
+            .position(|vertex| *vertex == edge.vertices[0])
+            .unwrap();
+        let b = triangle
+            .vertices
+            .iter()
+            .position(|vertex| *vertex == edge.vertices[1])
+            .unwrap();
+        let midpoint_local = match (a.min(b), a.max(b)) {
+            (0, 1) => 3,
+            (1, 2) => 4,
+            (0, 2) => 5,
+            _ => unreachable!(),
+        };
+        [
+            edge.vertices[0],
+            operator.element_nodes()[triangle_index][midpoint_local] as usize,
+            edge.vertices[1],
+        ]
     }
 
     #[test]
@@ -1151,6 +1383,147 @@ mod tests {
                 Err(WaveError::InvalidMesh(_))
             ));
         }
+    }
+
+    #[test]
+    fn open_baffle_face_impedance_adds_only_selected_trace_damping() {
+        let (reflecting_scene, mesh) = open_baffle_scene(InternalBoundaryLaw::REFLECTING);
+        let reflecting = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &reflecting_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let law = InternalBoundaryLaw {
+            left: FaceBoundaryCondition::Impedance { ratio: 1.0 },
+            ..InternalBoundaryLaw::REFLECTING
+        };
+        let mut impedance_scene = reflecting_scene.clone();
+        impedance_scene.internal_boundaries[0].span_laws[0] = law;
+        let impedance = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &impedance_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let left = trace_edge_nodes(&mesh, &reflecting, InternalBoundarySide::Left);
+        let right = trace_edge_nodes(&mesh, &reflecting, InternalBoundarySide::Right);
+        assert!(impedance.lumped_damping()[left[1]] > reflecting.lumped_damping()[left[1]]);
+        assert_eq!(
+            impedance.lumped_damping()[right[1]],
+            reflecting.lumped_damping()[right[1]]
+        );
+    }
+
+    #[test]
+    fn open_baffle_knot_spans_keep_distinct_face_conditions_after_meshing() {
+        let mut scene = Scene::default();
+        scene.internal_boundaries.push(InternalBoundary {
+            id: InternalBoundaryId(1),
+            spline: OpenCubicSpline::uniform(vec![
+                Point2::new(-0.7, 0.0),
+                Point2::new(-0.35, 0.0),
+                Point2::new(0.0, 0.0),
+                Point2::new(0.35, 0.0),
+                Point2::new(0.7, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![
+                InternalBoundaryLaw {
+                    left: FaceBoundaryCondition::Impedance { ratio: 1.0 },
+                    ..InternalBoundaryLaw::REFLECTING
+                },
+                InternalBoundaryLaw::REFLECTING,
+            ],
+        });
+        let mesh = mesh_scene(
+            &scene,
+            18,
+            MeshingOptions {
+                target_edge_length: 0.18,
+                minimum_angle_degrees: 14.0,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let mut first_span = 0;
+        let mut second_span = 0;
+        for edge in &mesh.boundary_edges {
+            if edge.label
+                != (BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(1),
+                    side: InternalBoundarySide::Left,
+                })
+            {
+                continue;
+            }
+            let midpoint = boundary_edge_nodes(&mesh, &operator, edge)[1];
+            if 0.5 * (edge.parameters[0] + edge.parameters[1]) < 1.0 {
+                first_span += 1;
+                assert!(operator.lumped_damping()[midpoint] > 0.0);
+            } else {
+                second_span += 1;
+                assert_eq!(operator.lumped_damping()[midpoint], 0.0);
+            }
+        }
+        assert!(first_span > 0 && second_span > 0);
+    }
+
+    #[test]
+    fn thin_gap_is_symmetric_conservative_and_enters_the_time_step_bound() {
+        let (reflecting_scene, mesh) = open_baffle_scene(InternalBoundaryLaw::REFLECTING);
+        let reflecting = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &reflecting_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let law = InternalBoundaryLaw {
+            coupling: InternalBoundaryCoupling::ThinGap {
+                stiffness_ratio: 10_000.0,
+            },
+            ..InternalBoundaryLaw::REFLECTING
+        };
+        let mut gap_scene = reflecting_scene.clone();
+        gap_scene.internal_boundaries[0].span_laws[0] = law;
+        let gap = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &gap_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let left = trace_edge_nodes(&mesh, &gap, InternalBoundarySide::Left)[1];
+        let right = trace_edge_nodes(&mesh, &gap, InternalBoundarySide::Right)[1];
+        let mut jump = vec![0.0; gap.degrees_of_freedom()];
+        jump[left] = 1.0;
+        let reflecting_force = reflecting.apply_stiffness(&jump).unwrap();
+        let gap_force = gap.apply_stiffness(&jump).unwrap();
+        let added_left = gap_force[left] - reflecting_force[left];
+        let added_right = gap_force[right] - reflecting_force[right];
+        assert!(added_left > 0.0);
+        assert!((added_left + added_right).abs() < 1.0e-12);
+        assert!(gap.maximum_time_step() < reflecting.maximum_time_step());
+
+        let mut state = QuadraticWaveState::new(
+            &gap,
+            0.5 * gap.maximum_time_step(),
+            jump,
+            vec![0.0; gap.degrees_of_freedom()],
+        )
+        .unwrap();
+        let initial_energy = state.energy(&gap).unwrap();
+        for _ in 0..200 {
+            state.step(&gap, &[]).unwrap();
+        }
+        let drift = (state.energy(&gap).unwrap() - initial_energy).abs() / initial_energy;
+        assert!(drift < 1.0e-10, "energy drift {drift:e}");
     }
 
     #[test]

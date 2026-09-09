@@ -9,10 +9,12 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
-- [ ] Add stable selectable boundary spans and per-span conditions, then generalize
-  the completed outer-side auxiliary condition to mixed exterior spans and junctions.
-- [ ] Add per-face impedance and an energy-stable paired-trace thin-gap law to the
-  new open-baffle representation. Include coupling in the timestep estimate.
+- [ ] Extend assigned conditions from open-baffle knot spans to outer sides and
+  closed-loop spans, including mixed-condition junction behavior for the existing
+  second-order auxiliary radiation law.
+- [ ] Evaluate a dissipative relative dashpot for thin gaps. Keeping centered time
+  integration would require an off-diagonal damping solve; the implemented gap
+  spring is conservative.
 - [ ] Replace the temporary wave reset after open-baffle geometry edits with a
   side-aware transfer that preserves each moving trace without cross-wall sampling.
 - [ ] Expand product spline editing with multi-selection and transforms, direct
@@ -33,6 +35,34 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
   cooldown in a later adaptation pass.
+- [ ] Improve open-baffle crack-tip element quality. The assigned-law native check
+  currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
+  has small tip angles; this dominates the CFL bound and solver throughput.
+
+## 2026-09-09 — Assigned open-baffle span laws
+
+- Each nonempty open-spline knot span now owns independent left/right face
+  conditions and an optional paired-trace law. Clicking the curve selects its
+  stable parameter span; the panel selects a face, highlights it with a visible
+  offset, and assigns reflecting or scaled matched impedance behavior.
+- Matched face impedance adds positive lumped damping using the adjacent medium's
+  characteristic impedance. The thin-gap option adds a symmetric conservative
+  spring between matching P2e trace nodes. Its stiffness is included in the
+  spectral time-step bound, and a 200-step f64 regression conserves the discrete
+  energy.
+- Knot insertion copies the affected span law to both children. Removal rejects
+  an ambiguous merge until neighboring laws agree. Law edits are single history
+  actions, reuse the existing mesh, and use the same field-transfer transaction
+  as material and outer-boundary changes.
+- Scene JSON is version 4. It persists all face/coupling coefficients and migrates
+  version 3's whole-baffle reflecting law. Invalid counts and nonpositive or
+  nonfinite coefficients are rejected before replacing the document.
+- Final verification passes formatting, Clippy with warnings denied, all **102
+  tests**, native release compilation, and a release WASM/Trunk build. The native
+  Apple M1 Max / Metal run exercises both assigned laws and agrees with f64 to
+  `7.85e-6` relative L2 error after 128 steps; its wall-isolated peak remains
+  exactly `0.0`. The existing transfer regression also passes with geometry current
+  error `7.49e-16`. Interactive browser testing was skipped as previously requested.
 
 ## 2026-09-09 — Open reflecting baffles
 

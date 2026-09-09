@@ -147,7 +147,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..8 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 4.into(),
+            0 => value["version"] = 5.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -198,14 +198,97 @@ fn open_internal_boundary_round_trip_and_history() {
     editor.redo();
     assert_eq!(editor.document, created);
 
+    let law = InternalBoundaryLaw {
+        left: FaceBoundaryCondition::Impedance { ratio: 1.25 },
+        right: FaceBoundaryCondition::Reflecting,
+        coupling: InternalBoundaryCoupling::ThinGap {
+            stiffness_ratio: 0.5,
+        },
+    };
+    editor.set_internal_boundary_law(boundary, 0, law).unwrap();
+    settle(&mut editor);
+    editor.undo();
+    assert_eq!(
+        editor.internal_boundary(boundary).unwrap().span_laws,
+        [InternalBoundaryLaw::REFLECTING]
+    );
+    editor.redo();
+    settle(&mut editor);
+    assert_eq!(editor.internal_boundary(boundary).unwrap().span_laws, [law]);
+
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        3
+        4
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
     assert_eq!(decoded.draft.internal_boundaries[0].id, boundary);
+    assert_eq!(decoded.draft.internal_boundaries[0].span_laws, [law]);
+
+    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+    legacy["version"] = 3.into();
+    for scene in ["draft", "accepted"] {
+        let stored = &mut legacy[scene]["internal_boundaries"][0];
+        stored.as_object_mut().unwrap().remove("span_laws");
+        stored["law"] = serde_json::json!({ "kind": "reflecting" });
+    }
+    let migrated = decode(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();
+    assert_eq!(
+        migrated.draft.internal_boundaries[0].span_laws,
+        [InternalBoundaryLaw::REFLECTING]
+    );
+}
+
+#[test]
+fn baffle_span_laws_follow_insertion_and_guard_ambiguous_removal() {
+    let mut editor = Editor::default();
+    let id = editor
+        .create_internal_boundary(
+            OpenCubicSpline::uniform(vec![
+                Point2::new(-0.8, 0.55),
+                Point2::new(-0.4, 0.65),
+                Point2::new(0.0, 0.55),
+                Point2::new(0.4, 0.65),
+                Point2::new(0.8, 0.55),
+            ])
+            .unwrap(),
+            BACKGROUND_REGION,
+        )
+        .unwrap();
+    settle(&mut editor);
+    let assigned = InternalBoundaryLaw {
+        left: FaceBoundaryCondition::Impedance { ratio: 0.75 },
+        right: FaceBoundaryCondition::Reflecting,
+        coupling: InternalBoundaryCoupling::ThinGap {
+            stiffness_ratio: 2.0,
+        },
+    };
+    editor.set_internal_boundary_law(id, 0, assigned).unwrap();
+    settle(&mut editor);
+    let history_before_insert = editor.history_len().0;
+    editor.insert_internal_boundary(id, 0.5).unwrap();
+    settle(&mut editor);
+    let boundary = editor.internal_boundary(id).unwrap();
+    assert_eq!(
+        boundary.span_laws,
+        [assigned, assigned, InternalBoundaryLaw::REFLECTING]
+    );
+    assert_eq!(editor.history_len().0, history_before_insert + 1);
+
+    let before_rejected_remove = editor.document.clone();
+    let history_before_remove = editor.history_len();
+    assert!(editor.remove_internal_boundary_point(id, 3).is_err());
+    assert_eq!(editor.document, before_rejected_remove);
+    assert_eq!(editor.history_len(), history_before_remove);
+
+    editor.set_internal_boundary_law(id, 2, assigned).unwrap();
+    editor.remove_internal_boundary_point(id, 3).unwrap();
+    settle(&mut editor);
+    assert_eq!(
+        editor.internal_boundary(id).unwrap().span_laws,
+        [assigned, assigned]
+    );
 }
 #[test]
 fn insertion_and_removal_are_individual_actions() {

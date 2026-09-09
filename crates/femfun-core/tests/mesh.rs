@@ -635,7 +635,7 @@ fn open_reflecting_boundary_cuts_two_traces_and_reconnects_at_free_tips() {
         ])
         .unwrap(),
         region: BACKGROUND_REGION,
-        law: InternalBoundaryLaw::Reflecting,
+        span_laws: vec![InternalBoundaryLaw::REFLECTING; 2],
     });
     assert!(validate(&scene).valid());
     let mesh = mesh(&scene);
@@ -710,7 +710,7 @@ fn multiple_open_baffles_keep_independent_labeled_faces() {
             ])
             .unwrap(),
             region: BACKGROUND_REGION,
-            law: InternalBoundaryLaw::Reflecting,
+            span_laws: vec![InternalBoundaryLaw::REFLECTING],
         });
     }
     let mesh = mesh(&scene);

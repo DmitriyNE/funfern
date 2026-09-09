@@ -4,8 +4,9 @@ The spline editor, constrained mesher, bounded coordinate-edit repair, enriched
 quadratic GPU wave solver, and geometry-edit simulation transactions are
 implemented. The outer boundary has reflecting and first- and second-order
 radiation modes. Stable material regions, transmitting interfaces, closed
-two-sided walls, and open reflecting baffles are implemented. Broader adaptation,
-impedance/thin-layer laws, and assigned boundary-span semantics remain work.
+two-sided walls, and open baffles with assigned face impedance and compliant
+thin-gap spans are implemented. Broader adaptation and assigned conditions on
+outer and closed-loop spans remain work.
 
 ## Responsibilities and dependencies
 
@@ -68,6 +69,16 @@ Knot insertion can split an assignment exactly; removal, seam movement, and span
 merging need explicit inheritance rules and must reject ambiguous drafts. Junction
 nodes and higher-order auxiliary fields belong to this semantic boundary graph.
 
+Open splines now store one law per nonempty knot span. Each law has independent
+left and right face conditions plus an optional paired-trace coupling. Reflecting
+faces add no weak boundary term. A face impedance ratio multiplies the adjacent
+material's characteristic impedance `sqrt(rho * kappa)` and contributes positive
+lumped boundary damping. The thin-gap law adds a symmetric positive-semidefinite
+spring for the trace jump, scaled by the material stiffness. This conservative
+coupling enters the assembled spectral bound and can reduce the explicit time
+step. A dissipative relative dashpot is deferred because preserving the centered
+scheme would require an off-diagonal damping solve.
+
 The initial implementation handles obstacle loops in a fixed outer box. Outer
 editable boundaries and more involved topology are future extensions.
 
@@ -119,10 +130,10 @@ excludes selection and navigation. Stable obstacle IDs increase independently of
 undo, preventing reuse after undoing creation. Loading derives the next ID from
 both scenes and clears history.
 
-Version 3 JSON stores the fixed domain, loop roles, open baffles, materials,
-regions, controls, intervals, and both scenes. Version 2 remains compatible;
-version 1 loads by assigning its loops the background
-hole role and creating the default background material/region.
+Version 4 JSON stores the fixed domain, loop roles, open-baffle span/face laws,
+materials, regions, controls, intervals, and both scenes. Versions 2 and 3 remain
+compatible; version 1 loads by assigning its loops the background hole role and
+creating the default background material/region.
 Serde and rfd live only in the app crate. Round-trip f64 parsing preserves exact
 stored values. Files have a 2 MiB limit, strict fields/version/domain, finite
 values, and scene/control-count checks. A prospective load validates its accepted

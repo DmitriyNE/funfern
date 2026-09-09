@@ -58,6 +58,11 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
 - **Select:** left-click a handle or curve; drag handles to reshape. Double-click
   a curve to insert a knot without changing its shape. Clicking near an existing
   knot selects its associated control instead of adding a repeated knot.
+- **Baffle spans:** clicking an open curve selects its logical knot span. Choose
+  the highlighted left or right face in the panel, then leave it reflecting or
+  assign a first-order matched impedance with an adjustable ratio. A span can also
+  couple its coincident faces as a conservative thin-gap spring; increasing its
+  stiffness can reduce the solver time step.
 - **Geometry role:** choose Hole, Material interface, or Reflecting baffle before
   creating. An interface retains its interior and shares its finite-element trace
   with the exterior. A baffle is an open curve with two independent coincident
@@ -133,10 +138,10 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   candidate retains the previous simulation.
 
 Scenes allow 32 geometric features, 32 materials, and 128 controls per curve.
-Version 3 JSON stores open baffles plus draft and accepted material/region topology;
-version 1 files migrate their
-loops to background holes. JSON files are capped at 2 MiB and require finite
-coordinates. The editor uses a fixed
+Version 4 JSON stores open-baffle span and face laws plus draft and accepted
+material/region topology; versions 2 and 3 remain compatible, and version 1 files
+migrate their loops to background holes. JSON files are capped at 2 MiB and require
+finite coordinates. The editor uses a fixed
 world-space validation tolerance of `0.0002`, independent of zoom. The editor
 validator is deliberately conservative; final mesh topology uses adaptive exact
 orientation and incircle signs rather than geometric epsilons.
@@ -188,8 +193,9 @@ prints edit-to-ready and active/scheduling times plus exact element reuse, then
 exits. Interactive editor input is disabled during this scripted run. It does not
 read or overwrite scene files. The native benchmark includes
 editor validation and rendering load; mesh-ready means the atomic simulation commit.
-`--wave-gpu-check` runs the real second-order compute pipeline for 128 steps, reads
-both time levels and boundary memory back, compares them to f64, reports
+`--wave-gpu-check` runs the real second-order compute pipeline with a closed wall
+and an impedance/thin-gap baffle for 128 steps, reads both time levels and boundary
+memory back, compares them to f64, reports
 solve-to-readback throughput, and exits. `--wave-transfer-check` injects a nonzero
 field, performs a real control-point edit, verifies transfer of all three state
 components, then verifies that a lower-order boundary transaction clears the

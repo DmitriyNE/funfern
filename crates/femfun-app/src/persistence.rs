@@ -78,7 +78,10 @@ struct StoredLoop {
 struct StoredInternalBoundary {
     id: u64,
     region: u64,
-    law: StoredInternalBoundaryLaw,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    law: Option<StoredInternalBoundaryLaw>,
+    #[serde(default)]
+    span_laws: Vec<StoredSpanLaw>,
     controls: Vec<[f64; 2]>,
     intervals: Vec<f64>,
 }
@@ -87,6 +90,28 @@ struct StoredInternalBoundary {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StoredInternalBoundaryLaw {
     Reflecting,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSpanLaw {
+    left: StoredFaceCondition,
+    right: StoredFaceCondition,
+    coupling: StoredCoupling,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredFaceCondition {
+    Reflecting,
+    Impedance { ratio: f64 },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredCoupling {
+    Independent,
+    ThinGap { stiffness_ratio: f64 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -154,9 +179,21 @@ fn encode_scene(scene: &Scene) -> StoredScene {
             .map(|boundary| StoredInternalBoundary {
                 id: boundary.id.0,
                 region: boundary.region.0,
-                law: match boundary.law {
-                    InternalBoundaryLaw::Reflecting => StoredInternalBoundaryLaw::Reflecting,
-                },
+                law: None,
+                span_laws: boundary
+                    .span_laws
+                    .iter()
+                    .map(|law| StoredSpanLaw {
+                        left: encode_face_condition(law.left),
+                        right: encode_face_condition(law.right),
+                        coupling: match law.coupling {
+                            InternalBoundaryCoupling::Independent => StoredCoupling::Independent,
+                            InternalBoundaryCoupling::ThinGap { stiffness_ratio } => {
+                                StoredCoupling::ThinGap { stiffness_ratio }
+                            }
+                        },
+                    })
+                    .collect(),
                 controls: boundary
                     .spline
                     .controls()
@@ -166,6 +203,20 @@ fn encode_scene(scene: &Scene) -> StoredScene {
                 intervals: boundary.spline.intervals().to_vec(),
             })
             .collect(),
+    }
+}
+
+fn encode_face_condition(condition: FaceBoundaryCondition) -> StoredFaceCondition {
+    match condition {
+        FaceBoundaryCondition::Reflecting => StoredFaceCondition::Reflecting,
+        FaceBoundaryCondition::Impedance { ratio } => StoredFaceCondition::Impedance { ratio },
+    }
+}
+
+fn decode_face_condition(condition: StoredFaceCondition) -> FaceBoundaryCondition {
+    match condition {
+        StoredFaceCondition::Reflecting => FaceBoundaryCondition::Reflecting,
+        StoredFaceCondition::Impedance { ratio } => FaceBoundaryCondition::Impedance { ratio },
     }
 }
 
@@ -293,13 +344,38 @@ fn decode_scene(stored: StoredScene) -> Result<Scene, String> {
             if boundary.id == 0 || boundary.id == u64::MAX {
                 return Err("Internal-boundary ID is outside the supported range".into());
             }
+            if boundary.law.is_some() && !boundary.span_laws.is_empty() {
+                return Err("Internal boundary mixes legacy and span laws".into());
+            }
+            let spline = decode_open_spline(boundary.controls, boundary.intervals)?;
+            let span_laws = if boundary.span_laws.is_empty() {
+                match boundary.law {
+                    Some(StoredInternalBoundaryLaw::Reflecting) => {
+                        vec![InternalBoundaryLaw::REFLECTING; spline.intervals().len()]
+                    }
+                    None => return Err("Internal boundary has no span laws".into()),
+                }
+            } else {
+                boundary
+                    .span_laws
+                    .into_iter()
+                    .map(|law| InternalBoundaryLaw {
+                        left: decode_face_condition(law.left),
+                        right: decode_face_condition(law.right),
+                        coupling: match law.coupling {
+                            StoredCoupling::Independent => InternalBoundaryCoupling::Independent,
+                            StoredCoupling::ThinGap { stiffness_ratio } => {
+                                InternalBoundaryCoupling::ThinGap { stiffness_ratio }
+                            }
+                        },
+                    })
+                    .collect()
+            };
             Ok(InternalBoundary {
                 id: InternalBoundaryId(boundary.id),
-                spline: decode_open_spline(boundary.controls, boundary.intervals)?,
+                spline,
                 region: RegionId(boundary.region),
-                law: match boundary.law {
-                    StoredInternalBoundaryLaw::Reflecting => InternalBoundaryLaw::Reflecting,
-                },
+                span_laws,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -317,7 +393,7 @@ fn decode_scene(stored: StoredScene) -> Result<Scene, String> {
 
 pub fn save(document: &Document) -> Result<String, String> {
     serde_json::to_string_pretty(&FileV2 {
-        version: 3,
+        version: 4,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
@@ -342,7 +418,7 @@ pub fn parse(bytes: &[u8]) -> Result<LoadCandidate, String> {
                 accepted: decode_v1(file.accepted)?,
             }
         }
-        2 | 3 => {
+        2..=4 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
