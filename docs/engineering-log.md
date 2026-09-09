@@ -11,6 +11,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   whether higher auxiliary orders justify their state and compute cost.
 - [ ] Add stable selectable boundary spans and per-span conditions, then generalize
   the completed outer-side auxiliary condition to mixed exterior spans and junctions.
+- [ ] Add per-face impedance and an energy-stable paired-trace thin-gap law to the
+  new open-baffle representation. Include coupling in the timestep estimate.
+- [ ] Replace the temporary wave reset after open-baffle geometry edits with a
+  side-aware transfer that preserves each moving trace without cross-wall sampling.
 - [ ] Expand product spline editing with multi-selection and transforms, direct
   span selection, knot/seam controls, duplication, snapping, and safe topology
   workflows. Rational weights remain conditional on a demonstrated workflow need.
@@ -29,6 +33,39 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
   cooldown in a later adaptation pass.
+
+## 2026-09-09 — Open reflecting baffles
+
+- Replaced the closed-wall creation workflow with open reflecting baffles; legacy
+  closed-wall scenes remain load-compatible. Preset and custom creation, selection,
+  dragging, coordinates, shape-preserving insertion, reshaping removal, history,
+  invalid drafts, and deletion use the normal editor lifecycle.
+- Added dependency-free clamped nonuniform cubic B-splines with exact de Boor
+  evaluation, two derivatives, adaptive sampling, closest-parameter refinement,
+  and shape-preserving knot insertion. Version 3 JSON stores open boundaries and
+  version 1/2 scenes continue to load.
+- The mesher first refines the closed material domains, recovers each sampled open
+  curve through deterministic edge flips, duplicates interior trace vertices, and
+  rewires one triangle fan. Free tips remain shared, so the two reflecting faces
+  are uncoupled locally while the surrounding domain remains reachable around
+  either endpoint.
+- Pulse and continuous-source stencils use truncated shortest-path distances over
+  the P2e mesh when baffles are present. This prevents a Gaussian from appearing
+  directly across the coincident faces while allowing support to go around a tip.
+- Open-baffle movement currently performs a full rebuild and resets the wave field.
+  The existing region-component transfer cannot distinguish two faces belonging
+  to the same globally connected region; a side-aware transfer is required before
+  live field preservation can be enabled safely.
+- Final verification passes formatting, Clippy with warnings denied, all **95
+  tests**, native release compilation, and a release WASM/Trunk build. Tests cover
+  open-spline calculus and insertion, validation failures, multiple independent
+  baffles, paired trace labels, shared free tips, path-aware forcing, editor history,
+  and versioned scene round trips.
+- The native Apple M1 Max / Metal GPU regression completes with current-state
+  relative L2 error `1.48e-6`, an isolated-region peak of exactly `0.0`, and
+  `14.61` simulated seconds per wall second. Geometry, boundary-condition, and
+  material transfer regressions also pass; geometry-transfer current-state error
+  is `7.49e-16`. Interactive browser testing was skipped at the user's request.
 
 ## 2026-09-09 — Wall-isolated excitation and transfer
 

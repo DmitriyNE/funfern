@@ -147,7 +147,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..8 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 3.into(),
+            0 => value["version"] = 4.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -169,6 +169,43 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     }
     assert!(parse(&vec![b' '; MAX_FILE_BYTES + 1]).is_err());
     assert!(parse(b"NaN").is_err());
+}
+
+#[test]
+fn open_internal_boundary_round_trip_and_history() {
+    let mut editor = Editor::default();
+    let boundary = editor
+        .create_internal_boundary(
+            OpenCubicSpline::uniform(vec![
+                Point2::new(-0.7, 0.45),
+                Point2::new(-0.3, 0.60),
+                Point2::new(0.3, 0.42),
+                Point2::new(0.7, 0.55),
+            ])
+            .unwrap(),
+            BACKGROUND_REGION,
+        )
+        .unwrap();
+    settle(&mut editor);
+    assert!(
+        matches!(editor.acceptance, Acceptance::Valid),
+        "{:?}",
+        editor.acceptance
+    );
+    let created = editor.document.clone();
+    editor.undo();
+    assert!(editor.document.draft.internal_boundaries.is_empty());
+    editor.redo();
+    assert_eq!(editor.document, created);
+
+    let json = save(&editor.document).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
+        3
+    );
+    let decoded = decode(json.as_bytes()).unwrap();
+    assert_eq!(decoded, editor.document);
+    assert_eq!(decoded.draft.internal_boundaries[0].id, boundary);
 }
 #[test]
 fn insertion_and_removal_are_individual_actions() {

@@ -709,6 +709,7 @@ mod tests {
                     interior: RegionId(2),
                 },
             }],
+            internal_boundaries: vec![],
             materials: vec![
                 Material::default_medium(),
                 Material {

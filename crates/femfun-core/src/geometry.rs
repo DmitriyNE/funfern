@@ -1,13 +1,17 @@
 use crate::{
-    PeriodicCubicSpline, Point2, Sample, Sampler, SamplingOptions, point_segment_distance,
+    OpenCubicSpline, OpenSampler, PeriodicCubicSpline, Point2, Sample, Sampler, SamplingOptions,
+    point_segment_distance,
 };
 pub const MAX_OBSTACLES: usize = 32;
+pub const MAX_INTERNAL_BOUNDARIES: usize = 32;
 pub const MAX_MATERIALS: usize = 32;
 pub const WORLD_TOLERANCE: f64 = 2.0e-4;
 pub const BACKGROUND_REGION: RegionId = RegionId(1);
 pub const DEFAULT_MATERIAL: MaterialId = MaterialId(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ObstacleId(pub u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InternalBoundaryId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -102,6 +106,19 @@ pub struct Obstacle {
     pub spline: PeriodicCubicSpline,
     pub role: LoopRole,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InternalBoundaryLaw {
+    Reflecting,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InternalBoundary {
+    pub id: InternalBoundaryId,
+    pub spline: OpenCubicSpline,
+    pub region: RegionId,
+    pub law: InternalBoundaryLaw,
+}
 impl Obstacle {
     pub fn hole(id: ObstacleId, spline: PeriodicCubicSpline) -> Self {
         Self {
@@ -117,6 +134,7 @@ impl Obstacle {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Scene {
     pub obstacles: Vec<Obstacle>,
+    pub internal_boundaries: Vec<InternalBoundary>,
     pub materials: Vec<Material>,
     pub regions: Vec<Region>,
 }
@@ -125,6 +143,7 @@ impl Default for Scene {
     fn default() -> Self {
         Self {
             obstacles: vec![],
+            internal_boundaries: vec![],
             materials: vec![Material::default_medium()],
             regions: vec![Region {
                 id: BACKGROUND_REGION,
@@ -145,6 +164,8 @@ impl Scene {
     }
     pub fn structure_valid(&self) -> bool {
         if self.obstacles.len() > MAX_OBSTACLES
+            || self.internal_boundaries.len() > MAX_INTERNAL_BOUNDARIES
+            || self.obstacles.len() + self.internal_boundaries.len() > MAX_OBSTACLES
             || self.materials.is_empty()
             || self.materials.len() > MAX_MATERIALS
             || self.regions.is_empty()
@@ -158,6 +179,17 @@ impl Scene {
                     .iter()
                     .any(|previous| previous.id == o.id)
         });
+        let unique_boundaries =
+            self.internal_boundaries
+                .iter()
+                .enumerate()
+                .all(|(index, boundary)| {
+                    boundary.id.0 > 0
+                        && self.region(boundary.region).is_some()
+                        && !self.internal_boundaries[..index]
+                            .iter()
+                            .any(|previous| previous.id == boundary.id)
+                });
         let unique_materials = self.materials.iter().enumerate().all(|(i, material)| {
             material.valid()
                 && !self.materials[..i]
@@ -174,6 +206,7 @@ impl Scene {
         if !unique_obstacles
             || !unique_materials
             || !unique_regions
+            || !unique_boundaries
             || self.region(BACKGROUND_REGION).is_none()
         {
             return false;
@@ -215,7 +248,7 @@ impl Scene {
     /// Geometry and topology equality excludes names, colors, coefficients, and
     /// region-to-material assignments so those edits can reuse the mesh.
     pub fn geometry_eq(&self, other: &Self) -> bool {
-        self.obstacles == other.obstacles
+        self.obstacles == other.obstacles && self.internal_boundaries == other.internal_boundaries
     }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -228,6 +261,12 @@ pub enum ValidationIssue {
     ObstacleContact(ObstacleId, ObstacleId),
     Nested(ObstacleId, ObstacleId),
     RegionTopology(ObstacleId),
+    BoundarySubdivision(InternalBoundaryId),
+    BoundaryOutside(InternalBoundaryId),
+    BoundaryDegenerate(InternalBoundaryId),
+    BoundarySelfContact(InternalBoundaryId),
+    BoundaryContact(InternalBoundaryId),
+    BoundaryRegionTopology(InternalBoundaryId),
     WorkLimit,
 }
 impl std::fmt::Display for ValidationIssue {
@@ -260,6 +299,34 @@ impl std::fmt::Display for ValidationIssue {
                 "Loop {} has a region assignment inconsistent with its containment",
                 id.0
             ),
+            Self::BoundarySubdivision(id) => write!(
+                f,
+                "Internal boundary {}: sampling is exhausted or numerically ambiguous",
+                id.0
+            ),
+            Self::BoundaryOutside(id) => write!(
+                f,
+                "Internal boundary {} leaves or nearly touches the outer box",
+                id.0
+            ),
+            Self::BoundaryDegenerate(id) => {
+                write!(f, "Internal boundary {} is degenerate or too short", id.0)
+            }
+            Self::BoundarySelfContact(id) => write!(
+                f,
+                "Internal boundary {} crosses or nearly touches itself",
+                id.0
+            ),
+            Self::BoundaryContact(id) => write!(
+                f,
+                "Internal boundary {} intersects or nearly touches another boundary",
+                id.0
+            ),
+            Self::BoundaryRegionTopology(id) => write!(
+                f,
+                "Internal boundary {} has a region assignment inconsistent with its location",
+                id.0
+            ),
             Self::WorkLimit => write!(f, "Validation work limit reached; simplify the scene"),
         }
     }
@@ -278,7 +345,7 @@ impl ValidationResult {
 struct Segment {
     a: Point2,
     b: Point2,
-    obstacle: usize,
+    curve: usize,
     index: usize,
     arc_start: f64,
     arc_end: f64,
@@ -289,7 +356,9 @@ pub struct ValidationJob {
     scene: Scene,
     options: SamplingOptions,
     sampler: Option<Sampler>,
+    open_sampler: Option<OpenSampler>,
     loops: Vec<Vec<Sample>>,
+    open_boundaries: Vec<Vec<Sample>>,
     segments: Vec<Segment>,
     bounds: Vec<(Point2, Point2)>,
     perimeters: Vec<f64>,
@@ -325,7 +394,9 @@ impl ValidationJob {
             scene,
             options,
             sampler: None,
+            open_sampler: None,
             loops: vec![],
+            open_boundaries: vec![],
             segments: vec![],
             bounds: vec![],
             perimeters: vec![],
@@ -366,14 +437,34 @@ impl ValidationJob {
                 break;
             }
             if let Some(points) = &self.pending_points {
-                let obstacle = self.loops.len();
-                let id = self.scene.obstacles[obstacle].id;
+                let is_open = self.loops.len() == self.scene.obstacles.len();
+                let curve = if is_open {
+                    self.scene.obstacles.len() + self.open_boundaries.len()
+                } else {
+                    self.loops.len()
+                };
                 if self.build_index + 1 == points.len() {
-                    if self.area.abs() * 0.5 <= WORLD_TOLERANCE * WORLD_TOLERANCE {
-                        self.finish(Some(ValidationIssue::Degenerate(id)));
+                    let issue = if is_open {
+                        let boundary = &self.scene.internal_boundaries[self.open_boundaries.len()];
+                        (self.perimeter <= WORLD_TOLERANCE
+                            || (points.last().unwrap().point - points[0].point).norm()
+                                <= WORLD_TOLERANCE)
+                            .then_some(ValidationIssue::BoundaryDegenerate(boundary.id))
+                    } else {
+                        (self.area.abs() * 0.5 <= WORLD_TOLERANCE * WORLD_TOLERANCE).then_some(
+                            ValidationIssue::Degenerate(self.scene.obstacles[self.loops.len()].id),
+                        )
+                    };
+                    if issue.is_some() {
+                        self.finish(issue);
                         continue;
                     }
-                    self.loops.push(self.pending_points.take().unwrap());
+                    if is_open {
+                        self.open_boundaries
+                            .push(self.pending_points.take().unwrap());
+                    } else {
+                        self.loops.push(self.pending_points.take().unwrap());
+                    }
                     self.bounds.push((self.lower, self.upper));
                     self.perimeters.push(self.perimeter);
                     self.build_index = 0;
@@ -386,21 +477,35 @@ impl ValidationJob {
                 let a = points[self.build_index].point;
                 let b = points[self.build_index + 1].point;
                 let margin = WORLD_TOLERANCE + self.options.tolerance;
-                if a.x.abs() >= 1.0 - margin || a.y.abs() >= 1.0 - margin {
-                    self.finish(Some(ValidationIssue::Outside(id)));
+                if [a, b]
+                    .iter()
+                    .any(|point| point.x.abs() >= 1.0 - margin || point.y.abs() >= 1.0 - margin)
+                {
+                    let issue = if is_open {
+                        ValidationIssue::BoundaryOutside(
+                            self.scene.internal_boundaries[self.open_boundaries.len()].id,
+                        )
+                    } else {
+                        ValidationIssue::Outside(self.scene.obstacles[self.loops.len()].id)
+                    };
+                    self.finish(Some(issue));
                     continue;
                 }
                 self.lower.x = self.lower.x.min(a.x);
                 self.lower.y = self.lower.y.min(a.y);
                 self.upper.x = self.upper.x.max(a.x);
                 self.upper.y = self.upper.y.max(a.y);
+                self.lower.x = self.lower.x.min(b.x);
+                self.lower.y = self.lower.y.min(b.y);
+                self.upper.x = self.upper.x.max(b.x);
+                self.upper.y = self.upper.y.max(b.y);
                 self.area += a.cross(b);
                 let arc_start = self.perimeter;
                 self.perimeter += (b - a).norm();
                 self.segments.push(Segment {
                     a,
                     b,
-                    obstacle,
+                    curve,
                     index: self.build_index,
                     arc_start,
                     arc_end: self.perimeter,
@@ -418,6 +523,19 @@ impl ValidationJob {
                         Ok(points) => self.pending_points = Some(points),
                     }
                 }
+            } else if self.open_boundaries.len() < self.scene.internal_boundaries.len() {
+                let boundary = &self.scene.internal_boundaries[self.open_boundaries.len()];
+                let sampler = self
+                    .open_sampler
+                    .get_or_insert_with(|| OpenSampler::new(&boundary.spline, self.options));
+                if sampler.step() {
+                    match self.open_sampler.take().unwrap().finish() {
+                        Err(_) => {
+                            self.finish(Some(ValidationIssue::BoundarySubdivision(boundary.id)))
+                        }
+                        Ok(points) => self.pending_points = Some(points),
+                    }
+                }
             } else if self.i < self.segments.len() {
                 if self.j >= self.segments.len() {
                     self.i += 1;
@@ -429,27 +547,44 @@ impl ValidationJob {
                 self.j += 1;
                 let margin = WORLD_TOLERANCE + 2.0 * self.options.tolerance;
                 let mut local_neighbors = false;
-                if a.obstacle == b.obstacle {
-                    let n = self.loops[a.obstacle].len() - 1;
-                    if a.index.abs_diff(b.index) == 1 || a.index.abs_diff(b.index) == n - 1 {
+                if a.curve == b.curve {
+                    let closed = a.curve < self.loops.len();
+                    let points = if closed {
+                        &self.loops[a.curve]
+                    } else {
+                        &self.open_boundaries[a.curve - self.loops.len()]
+                    };
+                    let n = points.len() - 1;
+                    if a.index.abs_diff(b.index) == 1
+                        || (closed && a.index.abs_diff(b.index) == n - 1)
+                    {
                         continue;
                     }
                     // Knot insertion can introduce arbitrarily short spans on an
                     // unchanged smooth arc. Suppress only local proximity, never
                     // a crossing, using arc distance instead of segment indices.
-                    let gap = (b.arc_start - a.arc_end)
-                        .min(self.perimeters[a.obstacle] - b.arc_end + a.arc_start);
+                    let direct_gap = b.arc_start - a.arc_end;
+                    let gap = if closed {
+                        direct_gap.min(self.perimeters[a.curve] - b.arc_end + a.arc_start)
+                    } else {
+                        direct_gap
+                    };
                     local_neighbors = gap <= 4.0 * margin;
                 } else {
-                    let (amin, amax) = self.bounds[a.obstacle];
-                    let (bmin, bmax) = self.bounds[b.obstacle];
+                    let (amin, amax) = self.bounds[a.curve];
+                    let (bmin, bmax) = self.bounds[b.curve];
                     if amax.x + margin < bmin.x
                         || bmax.x + margin < amin.x
                         || amax.y + margin < bmin.y
                         || bmax.y + margin < amin.y
                     {
                         // Segments are grouped by obstacle: skip the entire loop.
-                        self.j += self.loops[b.obstacle].len() - 2 - b.index;
+                        let point_count = if b.curve < self.loops.len() {
+                            self.loops[b.curve].len()
+                        } else {
+                            self.open_boundaries[b.curve - self.loops.len()].len()
+                        };
+                        self.j += point_count - 2 - b.index;
                         continue;
                     }
                 }
@@ -460,12 +595,31 @@ impl ValidationJob {
                     b.b,
                     if local_neighbors { 0.0 } else { margin },
                 ) {
-                    let id = self.scene.obstacles[a.obstacle].id;
-                    self.finish(Some(if a.obstacle == b.obstacle {
-                        ValidationIssue::SelfContact(id)
+                    let issue = if a.curve == b.curve {
+                        if a.curve < self.scene.obstacles.len() {
+                            ValidationIssue::SelfContact(self.scene.obstacles[a.curve].id)
+                        } else {
+                            ValidationIssue::BoundarySelfContact(
+                                self.scene.internal_boundaries
+                                    [a.curve - self.scene.obstacles.len()]
+                                .id,
+                            )
+                        }
+                    } else if a.curve >= self.scene.obstacles.len() {
+                        ValidationIssue::BoundaryContact(
+                            self.scene.internal_boundaries[a.curve - self.scene.obstacles.len()].id,
+                        )
+                    } else if b.curve >= self.scene.obstacles.len() {
+                        ValidationIssue::BoundaryContact(
+                            self.scene.internal_boundaries[b.curve - self.scene.obstacles.len()].id,
+                        )
                     } else {
-                        ValidationIssue::ObstacleContact(id, self.scene.obstacles[b.obstacle].id)
-                    }));
+                        ValidationIssue::ObstacleContact(
+                            self.scene.obstacles[a.curve].id,
+                            self.scene.obstacles[b.curve].id,
+                        )
+                    };
+                    self.finish(Some(issue));
                 }
             } else if self.nest_a < self.loops.len() {
                 if self.nest_b >= self.loops.len() {
@@ -528,9 +682,45 @@ impl ValidationJob {
                 return Some(ValidationIssue::RegionTopology(obstacle.id));
             }
         }
+        for (boundary, samples) in self
+            .scene
+            .internal_boundaries
+            .iter()
+            .zip(&self.open_boundaries)
+        {
+            let point = samples[0].point;
+            let direct_container = self
+                .loops
+                .iter()
+                .enumerate()
+                .filter(|(_, polygon)| point_inside_samples(point, polygon))
+                .min_by(|(a, _), (b, _)| self.perimeters[*a].total_cmp(&self.perimeters[*b]));
+            let expected = match direct_container {
+                None => Some(BACKGROUND_REGION),
+                Some((index, _)) => self.scene.obstacles[index].role.interior(),
+            };
+            if expected != Some(boundary.region) {
+                return Some(ValidationIssue::BoundaryRegionTopology(boundary.id));
+            }
+        }
         None
     }
 }
+
+fn point_inside_samples(point: Point2, polygon: &[Sample]) -> bool {
+    let mut inside = false;
+    for edge in polygon.windows(2) {
+        let a = edge[0].point;
+        let b = edge[1].point;
+        if (a.y > point.y) != (b.y > point.y)
+            && point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x
+        {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
 fn segments_close(a: Point2, b: Point2, c: Point2, d: Point2, tol: f64) -> bool {
     if a.x.max(b.x) + tol < c.x.min(d.x)
         || c.x.max(d.x) + tol < a.x.min(b.x)

@@ -100,6 +100,176 @@ fn removal_and_malformed_inputs() {
     assert!(PeriodicCubicSpline::new(vec![Point2::default(); 4], vec![1.0; 5]).is_err());
     assert!(PeriodicCubicSpline::new(vec![Point2::default(); 4], vec![f64::INFINITY; 4]).is_err());
 }
+
+fn open_irregular() -> OpenCubicSpline {
+    OpenCubicSpline::new(
+        vec![
+            Point2::new(-0.8, -0.2),
+            Point2::new(-0.45, 0.5),
+            Point2::new(-0.05, -0.35),
+            Point2::new(0.35, 0.45),
+            Point2::new(0.8, 0.1),
+            Point2::new(0.9, -0.25),
+        ],
+        vec![0.7, 1.4, 0.9],
+    )
+    .unwrap()
+}
+
+#[test]
+fn open_spline_has_distinct_endpoints_and_correct_derivatives() {
+    let spline = open_irregular();
+    near(spline.evaluate(0.0), spline.controls()[0], 1.0e-14);
+    near(
+        spline.evaluate(spline.period()),
+        *spline.controls().last().unwrap(),
+        1.0e-14,
+    );
+    for index in 1..100 {
+        let parameter = index as f64 * spline.period() / 100.0;
+        for order in 1..=2 {
+            near(
+                spline.derivative(parameter, order),
+                (spline.derivative(parameter + 1.0e-6, order - 1)
+                    - spline.derivative(parameter - 1.0e-6, order - 1))
+                    / 2.0e-6,
+                2.0e-4,
+            );
+        }
+    }
+}
+
+#[test]
+fn open_spline_insertion_is_shape_preserving_and_affine_invariant() {
+    let original = open_irregular();
+    let affine = |point: Point2| {
+        Point2::new(
+            1.7 * point.x - 0.2 * point.y + 0.4,
+            0.3 * point.x + 0.9 * point.y - 0.1,
+        )
+    };
+    let transformed = OpenCubicSpline::new(
+        original.controls().iter().copied().map(affine).collect(),
+        original.intervals().to_vec(),
+    )
+    .unwrap();
+    for index in 0..=100 {
+        let parameter = index as f64 * original.period() / 100.0;
+        near(
+            transformed.evaluate(parameter),
+            affine(original.evaluate(parameter)),
+            2.0e-12,
+        );
+    }
+
+    let mut inserted = original.clone();
+    for parameter in [0.13, 2.85, 0.8, 1.75] {
+        assert!(matches!(
+            inserted.insert(parameter).unwrap(),
+            Insertion::Inserted(_)
+        ));
+        for index in 0..=300 {
+            let parameter = index as f64 * original.period() / 300.0;
+            for order in 0..=2 {
+                near(
+                    inserted.derivative(parameter, order),
+                    original.derivative(parameter, order),
+                    2.0e-9,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn open_spline_rejects_malformed_inputs() {
+    assert!(OpenCubicSpline::uniform(vec![Point2::default(); 3]).is_err());
+    assert!(OpenCubicSpline::new(vec![Point2::default(); 4], vec![1.0, 1.0]).is_err());
+    assert!(OpenCubicSpline::new(vec![Point2::default(); 4], vec![0.0]).is_err());
+    assert!(OpenCubicSpline::new(vec![Point2::new(f64::NAN, 0.0); 4], vec![1.0]).is_err());
+}
+
+#[test]
+fn open_spline_sampling_keeps_both_endpoints_and_parameter_search() {
+    let spline = open_irregular();
+    let samples = sample_open(&spline, SamplingOptions::default()).unwrap();
+    assert_eq!(samples.first().unwrap().t, 0.0);
+    assert_eq!(samples.last().unwrap().t, spline.period());
+    near(
+        samples.first().unwrap().point,
+        spline.controls()[0],
+        1.0e-14,
+    );
+    near(
+        samples.last().unwrap().point,
+        *spline.controls().last().unwrap(),
+        1.0e-14,
+    );
+    let expected = spline.period() * 0.37;
+    let point = spline.evaluate(expected);
+    let found = closest_open_parameter(&spline, &samples, point);
+    assert!((found - expected).abs() < 1.0e-5);
+}
+
+fn open_boundary(id: u64, y: f64) -> InternalBoundary {
+    InternalBoundary {
+        id: InternalBoundaryId(id),
+        spline: OpenCubicSpline::uniform(vec![
+            Point2::new(-0.65, y),
+            Point2::new(-0.2, y),
+            Point2::new(0.2, y),
+            Point2::new(0.65, y),
+        ])
+        .unwrap(),
+        region: BACKGROUND_REGION,
+        law: InternalBoundaryLaw::Reflecting,
+    }
+}
+
+#[test]
+fn open_boundary_validation_checks_ends_crossings_and_contacts() {
+    let mut valid = Scene::default();
+    valid.internal_boundaries.push(open_boundary(1, 0.0));
+    assert!(validate(&valid).valid());
+
+    let mut crossing = Scene::default();
+    crossing.internal_boundaries.push(InternalBoundary {
+        id: InternalBoundaryId(1),
+        spline: OpenCubicSpline::uniform(vec![
+            Point2::new(-0.7, -0.5),
+            Point2::new(0.7, 0.5),
+            Point2::new(-0.7, 0.5),
+            Point2::new(0.7, -0.5),
+        ])
+        .unwrap(),
+        region: BACKGROUND_REGION,
+        law: InternalBoundaryLaw::Reflecting,
+    });
+    assert!(matches!(
+        validate(&crossing).issue,
+        Some(ValidationIssue::BoundarySelfContact(_))
+    ));
+
+    let mut contact = valid.clone();
+    contact.internal_boundaries.push(open_boundary(2, 0.0001));
+    assert!(matches!(
+        validate(&contact).issue,
+        Some(ValidationIssue::BoundaryContact(_))
+    ));
+
+    let mut outside = Scene::default();
+    let mut boundary = open_boundary(1, 0.0);
+    boundary
+        .spline
+        .set_control(3, Point2::new(1.1, 0.0))
+        .unwrap();
+    outside.internal_boundaries.push(boundary);
+    assert!(matches!(
+        validate(&outside).issue,
+        Some(ValidationIssue::BoundaryOutside(_))
+    ));
+}
+
 fn scene(loops: Vec<PeriodicCubicSpline>) -> Scene {
     Scene {
         obstacles: loops

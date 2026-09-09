@@ -1,7 +1,7 @@
 # femfun
 
-A browser finite-element wave playground with editable periodic cubic spline
-loops, material regions, holes and closed walls, constrained triangle meshes,
+A browser finite-element wave playground with editable periodic and open cubic
+splines, material regions, holes and reflecting baffles, constrained triangle meshes,
 persistent invalid drafts, undo/redo, and versioned scene files.
 
 The production wave solver uses seven-node enriched quadratic, mass-lumped
@@ -58,15 +58,18 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
 - **Select:** left-click a handle or curve; drag handles to reshape. Double-click
   a curve to insert a knot without changing its shape. Clicking near an existing
   knot selects its associated control instead of adding a repeated knot.
-- **Loop role:** choose Hole, Material interface, or Two-sided wall before creating.
-  An interface retains its interior and shares its finite-element trace with the
-  exterior. A wall retains its interior with two independent, coincident traces.
-  Nested loops inherit the region under the creation point.
+- **Geometry role:** choose Hole, Material interface, or Reflecting baffle before
+  creating. An interface retains its interior and shares its finite-element trace
+  with the exterior. A baffle is an open curve with two independent coincident
+  traces; waves reflect from its faces and diffract around its free endpoints.
+  Nested loops and baffles inherit the region under the creation point. Closed
+  two-sided walls remain load-compatible but are no longer a primary creation tool.
 - **Rounded:** click to place eight controls on a radius `0.15` circle, then
   automatically return to selection. The spline lies inside its control polygon.
 - **Custom:** click control points; four points enable the live preview. Enter
-  or clicking the first handle closes the loop. Backspace removes the last point;
-  Escape cancels construction. These are control points, not interpolation points.
+  finishes an open baffle; Enter or clicking the first handle closes a loop.
+  Backspace removes the last point; Escape cancels construction. These are control
+  points, not interpolation points.
 - **Remove:** Delete or the panel action removes the selected control and its
   associated knot. This can reshape the curve. At least four controls must remain.
   Deleting an entire loop is a separate panel action.
@@ -90,7 +93,7 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   replacement. Successful loading clears history; malformed files leave the
   current document intact. Camera and selection are not saved.
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
-  constrained mesh and its labeled outer, hole, interface, and two-sided wall
+  constrained mesh and its labeled outer, hole, interface, closed-wall, and baffle
   edges. Elements below 15° are
   amber; the panel reports counts, minimum angle, maximum edge, refinement
   progress, build/work time, longest mesh slice, and explicit construction
@@ -102,24 +105,26 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   Full fine builds can take tens of seconds when spread across frames. Small
   hole control-point edits now reuse and repair a bounded region of the previous mesh.
   The panel reports unchanged elements and full-rebuild fallbacks; creation,
-  deletion, knot changes, interface/wall motion, and large/failed repairs still rebuild.
+  deletion, knot changes, interface/baffle motion, and large/failed repairs still rebuild.
 - **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
   Gaussian displacement with zero initial velocity. Move source positions the
   optional continuous sinusoidal source. Simulation speed is bounded to 16
   substeps per display frame. Field colors use an adjustable symmetric gain.
   Pulses and continuous sources act only in their containing wall-separated
-  region; their Gaussian support can pass through transmitting material interfaces.
+  region. With open baffles their Gaussian stencil uses mesh-path distance, so it
+  goes around a free endpoint instead of jumping through coincident faces.
   The panel reports DOFs, GPU buffer size, operator-derived timestep, simulated
   time, substeps, throughput, operator/map preparation time, and discrete energy.
 - **Outer boundary:** choose Reflecting, First-order outgoing, or Second-order
   auxiliary. The second-order Engquist-Majda condition adds tangential propagation
-  along the fixed outer square and reduces oblique reflection. Hole and wall
-  boundaries remain reflecting; material interfaces transmit. A change reuses the mesh and transactionally transfers the
+  along the fixed outer square and reduces oblique reflection. Hole, closed-wall,
+  and baffle boundaries remain reflecting; material interfaces transmit. A change reuses the mesh and transactionally transfers the
   live field to the replacement operator. Boundary memory survives second-order
   geometry edits and is cleared when entering or leaving that mode.
 - **Interior media:** every triangle carries a stable region ID. The P2e operator
   assembles piecewise mass, stiffness, and damping. Material interfaces use a
-  conforming shared trace; closed walls have separate solution DOFs on each side.
+  conforming shared trace. Closed walls and open baffles have separate solution
+  DOFs on their two faces; baffle tips reconnect to the surrounding domain.
 - **Mesh changes:** simulation continues on the displayed committed mesh while a
   replacement mesh, operator, timestep, and transfer map are prepared. The GPU
   reconstructs velocity from both old displacement levels, interpolates field and
@@ -127,8 +132,9 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   after a finite tagged readback. Newly exposed domain starts at zero. A failed
   candidate retains the previous simulation.
 
-Scenes allow 32 loops, 32 materials, and 128 controls per loop. Version 2 JSON
-stores draft and accepted material/region topology; version 1 files migrate their
+Scenes allow 32 geometric features, 32 materials, and 128 controls per curve.
+Version 3 JSON stores open baffles plus draft and accepted material/region topology;
+version 1 files migrate their
 loops to background holes. JSON files are capped at 2 MiB and require finite
 coordinates. The editor uses a fixed
 world-space validation tolerance of `0.0002`, independent of zoom. The editor

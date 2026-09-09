@@ -1,5 +1,5 @@
 use crate::files::{self, FileEvent};
-use crate::wave_gpu::{SourceSettings, WaveDisplay, WaveGpuRequest, WaveTransfer};
+use crate::wave_gpu::{PulseSettings, SourceSettings, WaveDisplay, WaveGpuRequest, WaveTransfer};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
@@ -33,15 +33,24 @@ enum CreationRole {
     #[default]
     Hole,
     MaterialInterface,
-    Wall,
+    InternalBoundary,
 }
 struct Drag {
     id: ObstacleId,
     index: usize,
     offset: Point2,
 }
+struct InternalDrag {
+    id: InternalBoundaryId,
+    index: usize,
+    offset: Point2,
+}
 struct Curve {
     id: ObstacleId,
+    samples: Vec<Sample>,
+}
+struct InternalCurve {
+    id: InternalBoundaryId,
     samples: Vec<Sample>,
 }
 struct SimulationCandidate {
@@ -68,8 +77,10 @@ pub struct Playground {
     material_selection: MaterialId,
     region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
+    internal_selection: Option<(InternalBoundaryId, Option<usize>)>,
     custom: Vec<Point2>,
     drag: Option<Drag>,
+    internal_drag: Option<InternalDrag>,
     panning: bool,
     center: Point2,
     scale: f64,
@@ -83,6 +94,8 @@ pub struct Playground {
     cache_accepted: Scene,
     draft_curves: Vec<Curve>,
     accepted_curves: Vec<Curve>,
+    draft_internal_curves: Vec<InternalCurve>,
+    accepted_internal_curves: Vec<InternalCurve>,
     sampling_warning: bool,
     message: String,
     sender: Sender<FileEvent>,
@@ -149,8 +162,10 @@ impl Default for Playground {
             material_selection: DEFAULT_MATERIAL,
             region_selection: BACKGROUND_REGION,
             selection: Some((ObstacleId(1), None)),
+            internal_selection: None,
             custom: vec![],
             drag: None,
+            internal_drag: None,
             panning: false,
             center: Point2::default(),
             scale: 300.0,
@@ -164,6 +179,8 @@ impl Default for Playground {
             cache_accepted: Scene::default(),
             draft_curves: vec![],
             accepted_curves: vec![],
+            draft_internal_curves: vec![],
+            accepted_internal_curves: vec![],
             sampling_warning: false,
             message: String::new(),
             sender,
@@ -236,8 +253,10 @@ impl Playground {
     }
     fn clear_transient(&mut self) {
         self.selection = None;
+        self.internal_selection = None;
         self.region_selection = BACKGROUND_REGION;
         self.drag = None;
+        self.internal_drag = None;
         self.panning = false;
         self.custom.clear();
         self.mode = Mode::Select;
@@ -256,7 +275,20 @@ impl Playground {
     }
     fn finish_custom(&mut self) {
         if self.custom.len() < 4 {
-            self.message = "A loop needs at least four control points".into();
+            self.message = "A cubic curve needs at least four control points".into();
+            return;
+        }
+        if self.creation_role == CreationRole::InternalBoundary {
+            let spline = OpenCubicSpline::uniform(self.custom.clone()).unwrap();
+            let anchor = spline.evaluate(spline.period() * 0.5);
+            let region = self.region_at(anchor);
+            let result = self.editor.create_internal_boundary(spline, region);
+            if let Some(id) = self.error(result) {
+                self.selection = None;
+                self.internal_selection = Some((id, None));
+                self.custom.clear();
+                self.mode = Mode::Select;
+            }
             return;
         }
         let spline = PeriodicCubicSpline::uniform(self.custom.clone()).unwrap();
@@ -286,10 +318,7 @@ impl Playground {
                 self.editor
                     .create_region_loop(spline, exterior, self.material_selection, false)
             }
-            CreationRole::Wall => {
-                self.editor
-                    .create_region_loop(spline, exterior, self.material_selection, true)
-            }
+            CreationRole::InternalBoundary => Err("Open boundaries use an open spline".into()),
         }
     }
 
@@ -346,24 +375,47 @@ impl Playground {
             max_depth: 14,
             max_points: 2048,
         };
-        let mut curves = |scene: &Scene| {
+        {
+            let mut curves = |scene: &Scene| {
+                scene
+                    .obstacles
+                    .iter()
+                    .map(|o| {
+                        let samples = match sample(&o.spline, options) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                self.sampling_warning = true;
+                                vec![]
+                            }
+                        };
+                        Curve { id: o.id, samples }
+                    })
+                    .collect()
+            };
+            self.draft_curves = curves(&self.editor.document.draft);
+            self.accepted_curves = curves(&self.editor.document.accepted);
+        }
+        let mut internal_curves = |scene: &Scene| {
             scene
-                .obstacles
+                .internal_boundaries
                 .iter()
-                .map(|o| {
-                    let samples = match sample(&o.spline, options) {
-                        Ok(s) => s,
+                .map(|boundary| {
+                    let samples = match sample_open(&boundary.spline, options) {
+                        Ok(samples) => samples,
                         Err(_) => {
                             self.sampling_warning = true;
                             vec![]
                         }
                     };
-                    Curve { id: o.id, samples }
+                    InternalCurve {
+                        id: boundary.id,
+                        samples,
+                    }
                 })
                 .collect()
         };
-        self.draft_curves = curves(&self.editor.document.draft);
-        self.accepted_curves = curves(&self.editor.document.accepted);
+        self.draft_internal_curves = internal_curves(&self.editor.document.draft);
+        self.accepted_internal_curves = internal_curves(&self.editor.document.accepted);
     }
 
     fn refresh_mesh(&mut self) {
@@ -440,19 +492,25 @@ impl Playground {
                         self.wave_boundary,
                     ) {
                         Ok(operator) => {
-                            let transfer = self
-                                .wave_mesh
-                                .as_ref()
-                                .zip(self.wave_operator.as_ref())
-                                .map(|(source_mesh, source_operator)| {
-                                    QuadraticTransferMap::build(
-                                        source_mesh,
-                                        source_operator,
-                                        &mesh,
-                                        &operator,
-                                    )
-                                })
-                                .transpose();
+                            let transfer =
+                                if self.mesh_committed_scene.internal_boundaries.is_empty()
+                                    && self.mesh_source.internal_boundaries.is_empty()
+                                {
+                                    self.wave_mesh
+                                        .as_ref()
+                                        .zip(self.wave_operator.as_ref())
+                                        .map(|(source_mesh, source_operator)| {
+                                            QuadraticTransferMap::build(
+                                                source_mesh,
+                                                source_operator,
+                                                &mesh,
+                                                &operator,
+                                            )
+                                        })
+                                        .transpose()
+                                } else {
+                                    Ok(None)
+                                };
                             match transfer {
                                 Ok(transfer) => {
                                     let exposed_nodes = transfer
@@ -702,7 +760,13 @@ impl Playground {
             self.simulation_candidate = None;
         }
         if self.wave_source_dirty && self.wave_operator.is_some() {
-            match request.update_source(assets, self.wave_source) {
+            let Some(mesh) = self.wave_mesh.as_deref() else {
+                return;
+            };
+            let Some(operator) = self.wave_operator.as_deref() else {
+                return;
+            };
+            match request.update_source(assets, mesh, operator, self.wave_source) {
                 Ok(()) => self.wave_source_dirty = false,
                 Err(error) => self.wave_error = Some(error),
             }
@@ -715,7 +779,23 @@ impl Playground {
                 .as_ref()
                 .and_then(|mesh| mesh_region_at(mesh, position))
                 .unwrap_or(RegionId(0));
-            match request.inject_pulse(assets, position, 0.65, 0.06, region) {
+            let Some(mesh) = self.wave_mesh.as_deref() else {
+                return;
+            };
+            let Some(operator) = self.wave_operator.as_deref() else {
+                return;
+            };
+            match request.inject_pulse(
+                assets,
+                mesh,
+                operator,
+                PulseSettings {
+                    position,
+                    amplitude: 0.65,
+                    width: 0.06,
+                    region,
+                },
+            ) {
                 Ok(()) => {
                     // Commit one level after injection so the readback marker
                     // and energy identify the pulse even while paused.
@@ -810,12 +890,12 @@ impl Playground {
                 .first()
                 .map_or(DEFAULT_MATERIAL, |material| material.id);
         }
-        ui.label("Create a closed loop");
+        ui.label("Create geometry");
         egui::ComboBox::from_id_salt("creation_role")
             .selected_text(match self.creation_role {
                 CreationRole::Hole => "Hole",
                 CreationRole::MaterialInterface => "Material interface",
-                CreationRole::Wall => "Two-sided wall",
+                CreationRole::InternalBoundary => "Reflecting baffle",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.creation_role, CreationRole::Hole, "Hole");
@@ -826,11 +906,11 @@ impl Playground {
                 );
                 ui.selectable_value(
                     &mut self.creation_role,
-                    CreationRole::Wall,
-                    "Two-sided wall",
+                    CreationRole::InternalBoundary,
+                    "Reflecting baffle",
                 );
             });
-        if self.creation_role != CreationRole::Hole {
+        if self.creation_role == CreationRole::MaterialInterface {
             let materials = self.editor.document.draft.materials.clone();
             egui::ComboBox::from_label("Interior material")
                 .selected_text(
@@ -875,7 +955,13 @@ impl Playground {
         });
         ui.small(match self.mode {
             Mode::Select => "Drag handles · double-click a curve to insert",
+            Mode::Preset if self.creation_role == CreationRole::InternalBoundary => {
+                "Click the viewport to place a length 0.5 reflecting baffle"
+            }
             Mode::Preset => "Click the viewport to place a radius 0.15 loop",
+            Mode::Custom if self.creation_role == CreationRole::InternalBoundary => {
+                "Click control points; Enter finishes the open curve"
+            }
             Mode::Custom => "Click control points; Enter or first point closes",
             Mode::Pulse => "Click the viewport to add a zero-velocity pulse",
             Mode::Source => "Click the viewport to move the continuous source",
@@ -889,8 +975,9 @@ impl Playground {
         ui.add_space(10.0);
         ui.separator();
         ui.label(format!(
-            "Loops  {} / 32",
+            "Features  {} / 32",
             self.editor.document.draft.obstacles.len()
+                + self.editor.document.draft.internal_boundaries.len()
         ));
         egui::ScrollArea::vertical()
             .id_salt("obstacles")
@@ -910,6 +997,24 @@ impl Playground {
                         .clicked()
                     {
                         self.selection = Some((o.id, None));
+                        self.internal_selection = None;
+                    }
+                }
+                for boundary in &self.editor.document.draft.internal_boundaries {
+                    if ui
+                        .selectable_label(
+                            self.internal_selection
+                                .is_some_and(|selection| selection.0 == boundary.id),
+                            format!(
+                                "Baffle {:02} · Reflecting · {} controls",
+                                boundary.id.0,
+                                boundary.spline.controls().len()
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.selection = None;
+                        self.internal_selection = Some((boundary.id, None));
                     }
                 }
             });
@@ -975,6 +1080,74 @@ impl Playground {
                     let result = self.editor.remove_point(id, index);
                     if self.error(result).is_some() {
                         self.selection = Some((id, None));
+                    }
+                }
+            }
+        }
+        if let Some((id, index)) = self.internal_selection {
+            if ui.button("Delete baffle").clicked() {
+                self.editor.delete_internal_boundary(id);
+                self.internal_selection = None;
+            }
+            if let Some(index) = index
+                && let Some(boundary) = self.editor.internal_boundary(id)
+                && let Some(point) = boundary.spline.controls().get(index).copied()
+            {
+                ui.add_space(8.0);
+                ui.label(format!("Baffle control {}", index + 1));
+                let mut point = point;
+                let responses = ui
+                    .push_id((id.0, index, "baffle_coordinates"), |ui| {
+                        ui.horizontal(|ui| {
+                            [
+                                ui.add(
+                                    egui::DragValue::new(&mut point.x)
+                                        .speed(0.002)
+                                        .range(-1e6..=1e6)
+                                        .prefix("x ")
+                                        .update_while_editing(false),
+                                ),
+                                ui.add(
+                                    egui::DragValue::new(&mut point.y)
+                                        .speed(0.002)
+                                        .range(-1e6..=1e6)
+                                        .prefix("y ")
+                                        .update_while_editing(false),
+                                ),
+                            ]
+                        })
+                        .inner
+                    })
+                    .inner;
+                if responses.iter().any(|response| {
+                    response.gained_focus() || response.drag_started() || response.changed()
+                }) {
+                    self.editor.begin();
+                }
+                if responses.iter().any(|response| response.changed()) {
+                    let result = self.editor.set_internal_boundary_point(id, index, point);
+                    self.error(result);
+                }
+                if responses
+                    .iter()
+                    .any(|response| response.lost_focus() || response.drag_stopped())
+                {
+                    self.editor.commit();
+                }
+                let can_remove = self
+                    .editor
+                    .internal_boundary(id)
+                    .is_some_and(|boundary| boundary.spline.controls().len() > 4);
+                if ui
+                    .add_enabled(
+                        can_remove,
+                        egui::Button::new("Remove control · reshapes curve"),
+                    )
+                    .clicked()
+                {
+                    let result = self.editor.remove_internal_boundary_point(id, index);
+                    if self.error(result).is_some() {
+                        self.internal_selection = Some((id, None));
                     }
                 }
             }
@@ -1380,7 +1553,10 @@ impl Playground {
         let enabled = !self.automated_benchmark && !self.file_busy && self.load.is_none();
         if enabled {
             if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                if self.drag.take().is_some() || self.editor.editing() {
+                if self.drag.take().is_some()
+                    || self.internal_drag.take().is_some()
+                    || self.editor.editing()
+                {
                     self.editor.cancel();
                 } else {
                     self.custom.clear();
@@ -1410,6 +1586,13 @@ impl Playground {
                     let result = self.editor.remove_point(id, index);
                     if self.error(result).is_some() {
                         self.selection = Some((id, None));
+                    }
+                } else if ctx.input(|i| i.key_pressed(egui::Key::Delete))
+                    && let Some((id, Some(index))) = self.internal_selection
+                {
+                    let result = self.editor.remove_internal_boundary_point(id, index);
+                    if self.error(result).is_some() {
+                        self.internal_selection = Some((id, None));
                     }
                 }
                 let p = pointer.unwrap();
@@ -1441,7 +1624,11 @@ impl Playground {
                         })
                         .sum::<f32>()
                 });
-                if wheel != 0.0 && self.drag.is_none() && !self.panning {
+                if wheel != 0.0
+                    && self.drag.is_none()
+                    && self.internal_drag.is_none()
+                    && !self.panning
+                {
                     let before = self.world(p, r);
                     self.scale = (self.scale * (wheel as f64 * 0.002).exp()).clamp(20.0, 20_000.0);
                     let after = self.world(p, r);
@@ -1456,6 +1643,7 @@ impl Playground {
                     self.refresh_curves();
                     if let Some((id, index)) = self.hit_handle(p, r) {
                         self.selection = Some((id, Some(index)));
+                        self.internal_selection = None;
                         self.editor.begin();
                         let point = self.editor.obstacle(id).unwrap().spline.controls()[index];
                         self.drag = Some(Drag {
@@ -1463,9 +1651,25 @@ impl Playground {
                             index,
                             offset: point - self.world(p, r),
                         });
+                    } else if let Some((id, index)) = self.hit_internal_handle(p, r) {
+                        self.selection = None;
+                        self.internal_selection = Some((id, Some(index)));
+                        self.editor.begin();
+                        let point =
+                            self.editor.internal_boundary(id).unwrap().spline.controls()[index];
+                        self.internal_drag = Some(InternalDrag {
+                            id,
+                            index,
+                            offset: point - self.world(p, r),
+                        });
                     } else {
                         self.selection = self.hit_curve(p, r).map(|(id, _)| (id, None));
-                        if self.selection.is_none() {
+                        self.internal_selection = if self.selection.is_none() {
+                            self.hit_internal_curve(p, r).map(|(id, _)| (id, None))
+                        } else {
+                            None
+                        };
+                        if self.selection.is_none() && self.internal_selection.is_none() {
                             self.region_selection = self.region_at(self.world(p, r));
                         }
                     }
@@ -1481,33 +1685,73 @@ impl Playground {
                         self.editor
                             .set_point(drag.id, drag.index, self.world(p, r) + drag.offset);
                     self.error(result);
+                } else if let Some(drag) = &self.internal_drag
+                    && response.dragged_by(egui::PointerButton::Primary)
+                {
+                    let result = self.editor.set_internal_boundary_point(
+                        drag.id,
+                        drag.index,
+                        self.world(p, r) + drag.offset,
+                    );
+                    self.error(result);
                 }
                 if response.double_clicked()
                     && self.mode == Mode::Select
                     && !space
                     && self.hit_handle(p, r).is_none()
+                    && self.hit_internal_handle(p, r).is_none()
                 {
                     self.editor.commit();
                     self.drag = None;
+                    self.internal_drag = None;
                     if let Some((id, t)) = self.hit_curve(p, r) {
                         let result = self.editor.insert(id, t);
                         if let Some(index) = self.error(result) {
                             self.selection = Some((id, Some(index)));
+                            self.internal_selection = None;
+                        }
+                    } else if let Some((id, parameter)) = self.hit_internal_curve(p, r) {
+                        let result = self.editor.insert_internal_boundary(id, parameter);
+                        if let Some(index) = self.error(result) {
+                            self.selection = None;
+                            self.internal_selection = Some((id, Some(index)));
                         }
                     }
                 } else if response.clicked() && !space && !self.panning {
                     match self.mode {
                         Mode::Preset => {
                             let center = self.world(p, r);
-                            let result = self
-                                .create_spline(PeriodicCubicSpline::rounded(center, 0.15), center);
-                            if let Some(id) = self.error(result) {
-                                self.selection = Some((id, None));
-                                self.mode = Mode::Select;
+                            if self.creation_role == CreationRole::InternalBoundary {
+                                let result = self.editor.create_internal_boundary(
+                                    OpenCubicSpline::uniform(vec![
+                                        center + Point2::new(-0.25, 0.0),
+                                        center + Point2::new(-0.08, 0.0),
+                                        center + Point2::new(0.08, 0.0),
+                                        center + Point2::new(0.25, 0.0),
+                                    ])
+                                    .unwrap(),
+                                    self.region_at(center),
+                                );
+                                if let Some(id) = self.error(result) {
+                                    self.selection = None;
+                                    self.internal_selection = Some((id, None));
+                                    self.mode = Mode::Select;
+                                }
+                            } else {
+                                let result = self.create_spline(
+                                    PeriodicCubicSpline::rounded(center, 0.15),
+                                    center,
+                                );
+                                if let Some(id) = self.error(result) {
+                                    self.selection = Some((id, None));
+                                    self.internal_selection = None;
+                                    self.mode = Mode::Select;
+                                }
                             }
                         }
                         Mode::Custom => {
-                            if self.custom.len() >= 4
+                            if self.creation_role != CreationRole::InternalBoundary
+                                && self.custom.len() >= 4
                                 && self.screen(self.custom[0], r).distance(p) < 10.0
                             {
                                 self.finish_custom();
@@ -1537,7 +1781,7 @@ impl Playground {
             }
         }
         if !ctx.input(|i| i.pointer.primary_down()) {
-            if self.drag.take().is_some() {
+            if self.drag.take().is_some() || self.internal_drag.take().is_some() {
                 self.editor.commit();
             }
             if !ctx.input(|i| i.pointer.button_down(egui::PointerButton::Middle)) {
@@ -1649,6 +1893,10 @@ impl Playground {
                             BoundarySide::Exterior => Color32::from_rgb(235, 132, 115),
                             BoundarySide::Interior => Color32::from_rgb(235, 183, 115),
                         },
+                        BoundaryLabel::InternalBoundary { side, .. } => match side {
+                            InternalBoundarySide::Left => Color32::from_rgb(235, 132, 115),
+                            InternalBoundarySide::Right => Color32::from_rgb(235, 183, 115),
+                        },
                     };
                     painter.line_segment(
                         edge.vertices
@@ -1662,6 +1910,9 @@ impl Playground {
             for curve in &self.accepted_curves {
                 self.draw_curve(&painter, r, curve, Color32::from_rgb(66, 100, 98), 3.0);
             }
+            for curve in &self.accepted_internal_curves {
+                self.draw_internal_curve(&painter, r, curve, Color32::from_rgb(85, 83, 70), 3.0);
+            }
         }
         let color = match self.editor.acceptance {
             Acceptance::Valid => TEAL,
@@ -1670,6 +1921,9 @@ impl Playground {
         };
         for curve in &self.draft_curves {
             self.draw_curve(&painter, r, curve, color, 2.0);
+        }
+        for curve in &self.draft_internal_curves {
+            self.draw_internal_curve(&painter, r, curve, color, 3.0);
         }
         for o in &self.editor.document.draft.obstacles {
             let selected = self.selection.is_some_and(|s| s.0 == o.id);
@@ -1717,6 +1971,45 @@ impl Playground {
                 }
             }
         }
+        for boundary in &self.editor.document.draft.internal_boundaries {
+            let selected = self
+                .internal_selection
+                .is_some_and(|selection| selection.0 == boundary.id);
+            let points = boundary.spline.controls();
+            if self.polygon {
+                painter.add(egui::Shape::line(
+                    points.iter().map(|point| self.screen(*point, r)).collect(),
+                    Stroke::new(
+                        1.0,
+                        if selected {
+                            Color32::from_rgb(120, 103, 82)
+                        } else {
+                            Color32::from_rgb(68, 60, 52)
+                        },
+                    ),
+                ));
+            }
+            if self.handles {
+                for (index, point) in points.iter().enumerate() {
+                    let position = self.screen(*point, r);
+                    let active = self.internal_selection == Some((boundary.id, Some(index)));
+                    painter.circle_filled(
+                        position,
+                        if active { 6.0 } else { 4.0 },
+                        if active {
+                            GOLD
+                        } else {
+                            Color32::from_rgb(23, 34, 44)
+                        },
+                    );
+                    painter.circle_stroke(
+                        position,
+                        if active { 6.0 } else { 4.0 },
+                        Stroke::new(1.5, if selected { color } else { GOLD }),
+                    );
+                }
+            }
+        }
         if !self.custom.is_empty() {
             let mut points = self.custom.clone();
             if over
@@ -1734,26 +2027,40 @@ impl Playground {
                     Stroke::new(1.5, GOLD),
                 );
             }
-            if self.custom.len() >= 4
-                && let Ok(spline) = PeriodicCubicSpline::uniform(self.custom.clone())
-                && let Ok(samples) = sample(
-                    &spline,
-                    SamplingOptions {
-                        tolerance: 0.6 / self.scale,
-                        ..Default::default()
-                    },
-                )
-            {
-                self.draw_curve(
-                    &painter,
-                    r,
-                    &Curve {
-                        id: ObstacleId(0),
-                        samples,
-                    },
-                    GOLD,
-                    2.0,
-                );
+            if self.custom.len() >= 4 {
+                let options = SamplingOptions {
+                    tolerance: 0.6 / self.scale,
+                    ..Default::default()
+                };
+                if self.creation_role == CreationRole::InternalBoundary {
+                    if let Ok(spline) = OpenCubicSpline::uniform(self.custom.clone())
+                        && let Ok(samples) = sample_open(&spline, options)
+                    {
+                        self.draw_internal_curve(
+                            &painter,
+                            r,
+                            &InternalCurve {
+                                id: InternalBoundaryId(0),
+                                samples,
+                            },
+                            GOLD,
+                            2.0,
+                        );
+                    }
+                } else if let Ok(spline) = PeriodicCubicSpline::uniform(self.custom.clone())
+                    && let Ok(samples) = sample(&spline, options)
+                {
+                    self.draw_curve(
+                        &painter,
+                        r,
+                        &Curve {
+                            id: ObstacleId(0),
+                            samples,
+                        },
+                        GOLD,
+                        2.0,
+                    );
+                }
             }
         }
         painter.text(
@@ -1794,6 +2101,29 @@ impl Playground {
             .min_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(id, i, _)| (id, i))
     }
+    fn hit_internal_handle(&self, p: Pos2, r: Rect) -> Option<(InternalBoundaryId, usize)> {
+        if !self.handles {
+            return None;
+        }
+        self.editor
+            .document
+            .draft
+            .internal_boundaries
+            .iter()
+            .flat_map(|boundary| {
+                boundary
+                    .spline
+                    .controls()
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, control)| {
+                        (boundary.id, index, self.screen(*control, r).distance(p))
+                    })
+            })
+            .filter(|candidate| candidate.2 <= 10.0)
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(id, index, _)| (id, index))
+    }
     fn hit_curve(&self, p: Pos2, r: Rect) -> Option<(ObstacleId, f64)> {
         let world = self.world(p, r);
         self.draft_curves
@@ -1823,6 +2153,30 @@ impl Playground {
             })
     }
 
+    fn hit_internal_curve(&self, p: Pos2, r: Rect) -> Option<(InternalBoundaryId, f64)> {
+        let world = self.world(p, r);
+        self.draft_internal_curves
+            .iter()
+            .filter_map(|curve| {
+                let distance = curve
+                    .samples
+                    .windows(2)
+                    .map(|samples| {
+                        point_segment_distance(world, samples[0].point, samples[1].point)
+                    })
+                    .fold(f64::INFINITY, f64::min);
+                (distance * self.scale <= 8.0).then_some((curve, distance))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(curve, _)| {
+                let spline = &self.editor.internal_boundary(curve.id).unwrap().spline;
+                (
+                    curve.id,
+                    closest_open_parameter(spline, &curve.samples, world),
+                )
+            })
+    }
+
     fn draw_curve(
         &self,
         painter: &egui::Painter,
@@ -1837,6 +2191,25 @@ impl Playground {
                     .samples
                     .iter()
                     .map(|s| self.screen(s.point, r))
+                    .collect(),
+                Stroke::new(width, color),
+            ));
+        }
+    }
+    fn draw_internal_curve(
+        &self,
+        painter: &egui::Painter,
+        r: Rect,
+        curve: &InternalCurve,
+        color: Color32,
+        width: f32,
+    ) {
+        if curve.samples.len() > 1 {
+            painter.add(egui::Shape::line(
+                curve
+                    .samples
+                    .iter()
+                    .map(|sample| self.screen(sample.point, r))
                     .collect(),
                 Stroke::new(width, color),
             ));
@@ -1976,6 +2349,7 @@ pub fn wave_gpu_check_scene() -> Playground {
                 interior: RegionId(2),
             },
         }],
+        internal_boundaries: vec![],
         materials: vec![
             Material::default_medium(),
             Material {
@@ -2071,9 +2445,17 @@ pub fn wave_gpu_benchmark(
         let position = Point2::new(-0.42, 0.11);
         let amplitude = 0.65_f32;
         let width = 0.06_f32;
-        if let Err(error) =
-            request.inject_pulse(&mut assets, position, amplitude, width, BACKGROUND_REGION)
-        {
+        if let Err(error) = request.inject_pulse(
+            &mut assets,
+            mesh,
+            operator,
+            PulseSettings {
+                position,
+                amplitude,
+                width,
+                region: BACKGROUND_REGION,
+            },
+        ) {
             error!("Wave GPU pulse setup failed: {error}");
             exit.write(bevy::app::AppExit::error());
             return;
@@ -2261,10 +2643,14 @@ pub fn wave_transfer_benchmark(
             state.wave_source.enabled = false;
             if let Err(error) = request.inject_pulse(
                 &mut assets,
-                Point2::new(-0.82, 0.11),
-                0.65,
-                0.06,
-                BACKGROUND_REGION,
+                state.wave_mesh.as_deref().unwrap(),
+                state.wave_operator.as_deref().unwrap(),
+                PulseSettings {
+                    position: Point2::new(-0.82, 0.11),
+                    amplitude: 0.65,
+                    width: 0.06,
+                    region: BACKGROUND_REGION,
+                },
             ) {
                 error!("Wave transfer pulse setup failed: {error}");
                 exit.write(bevy::app::AppExit::error());
@@ -2964,6 +3350,53 @@ mod tests {
             }
         }
         panic!("mesh candidate did not finish");
+    }
+
+    #[test]
+    fn custom_open_baffle_creation_and_handle_drag() {
+        let mut harness = Harness::new();
+        harness.state.creation_role = CreationRole::InternalBoundary;
+        harness.state.mode = Mode::Custom;
+        for point in [
+            Point2::new(-0.65, 0.48),
+            Point2::new(-0.25, 0.62),
+            Point2::new(0.25, 0.45),
+            Point2::new(0.65, 0.56),
+        ] {
+            harness.click(harness.point(point));
+        }
+        harness.key(Key::Enter, Modifiers::NONE);
+        harness.settle();
+        assert!(matches!(harness.state.editor.acceptance, Acceptance::Valid));
+        assert_eq!(
+            harness
+                .state
+                .editor
+                .document
+                .draft
+                .internal_boundaries
+                .len(),
+            1
+        );
+        let id = harness.state.editor.document.draft.internal_boundaries[0].id;
+        assert_eq!(harness.state.internal_selection, Some((id, None)));
+
+        let before = harness.state.editor.history_len().0;
+        let control = harness
+            .state
+            .editor
+            .internal_boundary(id)
+            .unwrap()
+            .spline
+            .controls()[1];
+        let start = harness.point(control);
+        harness.button(start, PointerButton::Primary, true);
+        let end = harness.point(control + Point2::new(0.04, 0.03));
+        harness.move_to(end);
+        harness.button(end, PointerButton::Primary, false);
+        harness.settle();
+        assert_eq!(harness.state.editor.history_len().0, before + 1);
+        assert_eq!(harness.state.internal_selection, Some((id, Some(1))));
     }
 
     fn commit_mesh_without_gpu(state: &mut Playground) {

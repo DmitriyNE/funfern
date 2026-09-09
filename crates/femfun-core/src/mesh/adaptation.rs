@@ -135,6 +135,8 @@ impl MeshUpdateJob {
                 .iter()
                 .chain(&result.scene.obstacles)
                 .all(|loop_| matches!(loop_.role, LoopRole::Hole { .. }))
+                && result.previous_scene.internal_boundaries.is_empty()
+                && result.scene.internal_boundaries.is_empty()
                 && result.previous_scene.obstacles.len() == result.scene.obstacles.len()
                 && result.scene.obstacles.iter().all(|new| {
                     result.previous_scene.obstacles.iter().any(|old| {
@@ -364,6 +366,7 @@ impl MeshUpdateJob {
                     BoundaryLabel::Obstacle(id) => id.0,
                     BoundaryLabel::MaterialInterface(id) => id.0,
                     BoundaryLabel::Wall { loop_id, .. } => loop_id.0,
+                    BoundaryLabel::InternalBoundary { id, .. } => id.0,
                 };
                 self.seeds.entry(label).or_insert(edge.vertices[0]);
                 self.builder.as_mut().unwrap().add_boundary_edge(edge);

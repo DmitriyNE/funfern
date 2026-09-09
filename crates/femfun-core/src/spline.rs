@@ -73,6 +73,239 @@ pub struct PeriodicCubicSpline {
     intervals: Vec<f64>,
     knots: Vec<f64>,
 }
+
+/// A clamped, nonuniform cubic B-spline. Unlike [`PeriodicCubicSpline`], its
+/// parameter interval has two distinct endpoints and its first and last control
+/// points lie on the curve.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenCubicSpline {
+    controls: Vec<Point2>,
+    intervals: Vec<f64>,
+    knots: Vec<f64>,
+}
+
+impl OpenCubicSpline {
+    /// `intervals` stores the positive lengths of the `controls.len() - 3`
+    /// nonempty knot spans. Endpoint knots have cubic multiplicity four.
+    pub fn new(controls: Vec<Point2>, intervals: Vec<f64>) -> Result<Self, SplineError> {
+        if controls.len() < 4 || controls.len() > 128 {
+            return Err(SplineError::ControlCount);
+        }
+        if intervals.len() != controls.len() - 3 {
+            return Err(SplineError::IntervalCount);
+        }
+        if controls.iter().any(|point| !point.finite()) {
+            return Err(SplineError::NonFinite);
+        }
+        if intervals
+            .iter()
+            .any(|interval| !interval.is_finite() || *interval <= 0.0)
+        {
+            return Err(SplineError::InvalidInterval);
+        }
+        let period: f64 = intervals.iter().sum();
+        if !period.is_finite() || intervals.iter().any(|value| value / period < 1.0e-12) {
+            return Err(SplineError::IllConditionedKnots);
+        }
+        let mut knots = vec![0.0; 4];
+        let mut knot = 0.0;
+        for interval in intervals.iter().take(intervals.len() - 1) {
+            knot += interval;
+            knots.push(knot);
+        }
+        knots.extend([period; 4]);
+        Ok(Self {
+            controls,
+            intervals,
+            knots,
+        })
+    }
+
+    pub fn uniform(controls: Vec<Point2>) -> Result<Self, SplineError> {
+        let intervals = vec![1.0; controls.len().saturating_sub(3)];
+        Self::new(controls, intervals)
+    }
+
+    pub fn controls(&self) -> &[Point2] {
+        &self.controls
+    }
+
+    pub fn intervals(&self) -> &[f64] {
+        &self.intervals
+    }
+
+    pub fn knots(&self) -> &[f64] {
+        &self.knots
+    }
+
+    pub fn period(&self) -> f64 {
+        *self.knots.last().unwrap()
+    }
+
+    pub fn set_control(&mut self, index: usize, point: Point2) -> Result<(), SplineError> {
+        if !point.finite() {
+            return Err(SplineError::NonFinite);
+        }
+        *self.controls.get_mut(index).ok_or(SplineError::Index)? = point;
+        Ok(())
+    }
+
+    pub fn evaluate(&self, parameter: f64) -> Point2 {
+        self.derivative(parameter, 0)
+    }
+
+    pub fn derivative(&self, parameter: f64, order: usize) -> Point2 {
+        assert!(order <= 2 && parameter.is_finite());
+        let mut controls = self.controls.clone();
+        let mut knots = self.knots.clone();
+        let mut degree = 3;
+        for _ in 0..order {
+            controls = controls
+                .windows(2)
+                .enumerate()
+                .map(|(index, pair)| {
+                    (pair[1] - pair[0])
+                        * (degree as f64 / (knots[index + degree + 1] - knots[index + 1]))
+                })
+                .collect();
+            knots = knots[1..knots.len() - 1].to_vec();
+            degree -= 1;
+        }
+        de_boor_open(
+            &controls,
+            &knots,
+            degree,
+            parameter.clamp(0.0, self.period()),
+        )
+    }
+
+    /// Inserts one interior knot without changing the curve.
+    pub fn insert(&mut self, parameter: f64) -> Result<Insertion, SplineError> {
+        if !parameter.is_finite() {
+            return Err(SplineError::NonFinite);
+        }
+        let end = self.period();
+        let tolerance = end * 1.0e-10;
+        if parameter <= tolerance {
+            return Ok(Insertion::Existing(0));
+        }
+        if parameter >= end - tolerance {
+            return Ok(Insertion::Existing(self.controls.len() - 1));
+        }
+        if self.controls.len() == 128 {
+            return Err(SplineError::ControlCount);
+        }
+        if let Some(knot) = self
+            .knots
+            .iter()
+            .position(|knot| (parameter - knot).abs() <= tolerance)
+        {
+            return Ok(Insertion::Existing(
+                knot.saturating_sub(2).min(self.controls.len() - 1),
+            ));
+        }
+
+        let degree = 3;
+        let last_control = self.controls.len() - 1;
+        let span = self
+            .knots
+            .windows(2)
+            .position(|pair| pair[0] <= parameter && parameter < pair[1])
+            .ok_or(SplineError::InvalidInterval)?;
+        let mut controls = vec![Point2::default(); self.controls.len() + 1];
+        controls[..=span - degree].copy_from_slice(&self.controls[..=span - degree]);
+        controls[span + 1..=last_control + 1].copy_from_slice(&self.controls[span..=last_control]);
+        for (index, control) in controls
+            .iter_mut()
+            .enumerate()
+            .take(span + 1)
+            .skip(span - degree + 1)
+        {
+            let alpha =
+                (parameter - self.knots[index]) / (self.knots[index + degree] - self.knots[index]);
+            *control = self.controls[index - 1].lerp(self.controls[index], alpha);
+        }
+        let mut intervals = self.intervals.clone();
+        let breakpoint = self
+            .knots
+            .iter()
+            .take(span + 1)
+            .copied()
+            .fold(0.0, f64::max);
+        let interval = self
+            .knots
+            .iter()
+            .skip(span + 1)
+            .copied()
+            .find(|knot| *knot > breakpoint)
+            .ok_or(SplineError::InvalidInterval)?;
+        let interval_index = self
+            .intervals
+            .iter()
+            .scan(0.0, |sum, value| {
+                let start = *sum;
+                *sum += value;
+                Some((start, *sum))
+            })
+            .position(|(start, finish)| start <= parameter && parameter < finish)
+            .ok_or(SplineError::InvalidInterval)?;
+        intervals[interval_index] = parameter - breakpoint;
+        intervals.insert(interval_index + 1, interval - parameter);
+        *self = Self::new(controls, intervals)?;
+        Ok(Insertion::Inserted(span - degree + 1))
+    }
+
+    /// Deletes one control and one nonempty knot span. This is an editing
+    /// operation and may reshape the curve.
+    pub fn remove(&mut self, index: usize) -> Result<(), SplineError> {
+        if self.controls.len() <= 4 {
+            return Err(SplineError::ControlCount);
+        }
+        if index >= self.controls.len() {
+            return Err(SplineError::Index);
+        }
+        let mut controls = self.controls.clone();
+        controls.remove(index);
+        let mut intervals = self.intervals.clone();
+        if index <= 1 {
+            intervals.remove(0);
+        } else if index + 2 >= self.controls.len() {
+            intervals.pop();
+        } else {
+            let left = (index - 2).min(intervals.len() - 2);
+            intervals[left] += intervals[left + 1];
+            intervals.remove(left + 1);
+        }
+        *self = Self::new(controls, intervals)?;
+        Ok(())
+    }
+}
+
+fn de_boor_open(controls: &[Point2], knots: &[f64], degree: usize, parameter: f64) -> Point2 {
+    let last_control = controls.len() - 1;
+    let span = if parameter == *knots.last().unwrap() {
+        last_control
+    } else {
+        knots
+            .windows(2)
+            .position(|pair| pair[0] <= parameter && parameter < pair[1])
+            .unwrap()
+            .clamp(degree, last_control)
+    };
+    let mut values = vec![Point2::default(); degree + 1];
+    for (local, value) in values.iter_mut().enumerate() {
+        *value = controls[span - degree + local];
+    }
+    for level in 1..=degree {
+        for local in (level..=degree).rev() {
+            let index = span - degree + local;
+            let alpha =
+                (parameter - knots[index]) / (knots[index + degree + 1 - level] - knots[index]);
+            values[local] = values[local - 1].lerp(values[local], alpha);
+        }
+    }
+    values[degree]
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Insertion {
     Inserted(usize),
@@ -373,6 +606,138 @@ pub fn sample(
     while !s.step() {}
     s.finish()
 }
+
+/// Resumable adaptive subdivision for a clamped open cubic spline.
+pub struct OpenSampler {
+    spline: OpenCubicSpline,
+    options: SamplingOptions,
+    stack: Vec<Span>,
+    samples: Vec<Sample>,
+    error: Option<SamplingError>,
+}
+
+impl OpenSampler {
+    pub fn new(spline: &OpenCubicSpline, options: SamplingOptions) -> Self {
+        let mut start = 0.0;
+        let mut spans = Vec::with_capacity(spline.intervals.len());
+        for interval in &spline.intervals {
+            spans.push(Span {
+                a: start,
+                b: start + interval,
+                depth: 0,
+            });
+            start += interval;
+        }
+        spans.reverse();
+        Self {
+            spline: spline.clone(),
+            options,
+            stack: spans,
+            samples: vec![Sample {
+                t: 0.0,
+                point: spline.evaluate(0.0),
+            }],
+            error: None,
+        }
+    }
+
+    pub fn step(&mut self) -> bool {
+        if self.error.is_some() {
+            return true;
+        }
+        let Some(span) = self.stack.pop() else {
+            return true;
+        };
+        let a = self.spline.evaluate(span.a);
+        let b = self.spline.evaluate(span.b);
+        let c = a + self.spline.derivative(span.a, 1) * ((span.b - span.a) / 3.0);
+        let d = b - self.spline.derivative(span.b, 1) * ((span.b - span.a) / 3.0);
+        if ![a, b, c, d].iter().all(|point| point.finite())
+            || !self.options.tolerance.is_finite()
+            || self.options.tolerance <= 0.0
+        {
+            self.error = Some(SamplingError::NonFinite);
+            return true;
+        }
+        let chord = b - a;
+        let roundoff = 32.0 * f64::EPSILON * chord.dot(chord);
+        let monotone = (c - a).dot(chord) >= -roundoff
+            && (d - c).dot(chord) >= -roundoff
+            && (b - d).dot(chord) >= -roundoff;
+        let flat = monotone
+            && point_segment_distance(c, a, b).max(point_segment_distance(d, a, b))
+                <= self.options.tolerance;
+        if flat {
+            if self.samples.len() >= self.options.max_points {
+                self.error = Some(SamplingError::Exhausted);
+                return true;
+            }
+            self.samples.push(Sample {
+                t: span.b,
+                point: b,
+            });
+        } else if span.depth >= self.options.max_depth
+            || self.samples.len() + self.stack.len() + 2 > self.options.max_points
+        {
+            self.error = Some(SamplingError::Exhausted);
+            return true;
+        } else {
+            let middle = (span.a + span.b) * 0.5;
+            self.stack.push(Span {
+                a: middle,
+                b: span.b,
+                depth: span.depth + 1,
+            });
+            self.stack.push(Span {
+                a: span.a,
+                b: middle,
+                depth: span.depth + 1,
+            });
+        }
+        self.stack.is_empty()
+    }
+
+    pub fn finish(self) -> Result<Vec<Sample>, SamplingError> {
+        if let Some(error) = self.error {
+            Err(error)
+        } else if !self.stack.is_empty() {
+            Err(SamplingError::Exhausted)
+        } else {
+            Ok(self.samples)
+        }
+    }
+}
+
+pub fn sample_open(
+    spline: &OpenCubicSpline,
+    options: SamplingOptions,
+) -> Result<Vec<Sample>, SamplingError> {
+    let mut sampler = OpenSampler::new(spline, options);
+    while !sampler.step() {}
+    sampler.finish()
+}
+
+pub fn closest_open_parameter(spline: &OpenCubicSpline, samples: &[Sample], point: Point2) -> f64 {
+    let Some(pair) = samples.windows(2).min_by(|a, b| {
+        point_segment_distance(point, a[0].point, a[1].point)
+            .total_cmp(&point_segment_distance(point, b[0].point, b[1].point))
+    }) else {
+        return 0.0;
+    };
+    let mut a = pair[0].t;
+    let mut b = pair[1].t;
+    for _ in 0..28 {
+        let left = (2.0 * a + b) / 3.0;
+        let right = (a + 2.0 * b) / 3.0;
+        if (spline.evaluate(left) - point).norm() < (spline.evaluate(right) - point).norm() {
+            b = right;
+        } else {
+            a = left;
+        }
+    }
+    (a + b) * 0.5
+}
+
 /// Closest sampled segment followed by bounded local minimization in parameter space.
 pub fn closest_parameter(spline: &PeriodicCubicSpline, samples: &[Sample], point: Point2) -> f64 {
     let Some(pair) = samples.windows(2).min_by(|a, b| {

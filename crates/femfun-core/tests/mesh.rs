@@ -194,7 +194,8 @@ fn several_holes_keep_labels_and_topology() {
             BoundaryLabel::Obstacle(id) => Some(id.0),
             BoundaryLabel::Outer(_)
             | BoundaryLabel::MaterialInterface(_)
-            | BoundaryLabel::Wall { .. } => None,
+            | BoundaryLabel::Wall { .. }
+            | BoundaryLabel::InternalBoundary { .. } => None,
         })
         .collect();
     assert_eq!(labels, BTreeSet::from([10, 11, 12]));
@@ -433,7 +434,8 @@ fn empty_domain_and_outer_side_labels_mesh() {
             BoundaryLabel::Outer(side) => Some(side as u8),
             BoundaryLabel::Obstacle(_)
             | BoundaryLabel::MaterialInterface(_)
-            | BoundaryLabel::Wall { .. } => None,
+            | BoundaryLabel::Wall { .. }
+            | BoundaryLabel::InternalBoundary { .. } => None,
         })
         .collect();
     assert_eq!(sides.len(), 4);
@@ -494,6 +496,7 @@ fn two_region_scene(role: impl FnOnce(RegionId, RegionId) -> LoopRole) -> Scene 
             spline: PeriodicCubicSpline::rounded(Point2::default(), 0.42),
             role: role(BACKGROUND_REGION, RegionId(2)),
         }],
+        internal_boundaries: vec![],
         materials: vec![
             Material::default_medium(),
             medium(2, "Inclusion", 2.5, [180, 90, 70]),
@@ -616,6 +619,128 @@ fn closed_wall_duplicates_the_two_traces_and_retains_its_interior() {
             .iter()
             .any(|triangle| triangle.region == RegionId(2))
     );
+}
+
+#[test]
+fn open_reflecting_boundary_cuts_two_traces_and_reconnects_at_free_tips() {
+    let mut scene = Scene::default();
+    scene.internal_boundaries.push(InternalBoundary {
+        id: InternalBoundaryId(7),
+        spline: OpenCubicSpline::uniform(vec![
+            Point2::new(-0.72, -0.12),
+            Point2::new(-0.35, 0.28),
+            Point2::new(0.05, -0.22),
+            Point2::new(0.42, 0.24),
+            Point2::new(0.73, 0.04),
+        ])
+        .unwrap(),
+        region: BACKGROUND_REGION,
+        law: InternalBoundaryLaw::Reflecting,
+    });
+    assert!(validate(&scene).valid());
+    let mesh = mesh(&scene);
+    assert_mesh_invariants(&mesh, 1);
+    let adjacency = edge_adjacency(&mesh);
+    let left = mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            edge.label
+                == BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(7),
+                    side: InternalBoundarySide::Left,
+                }
+        })
+        .collect::<Vec<_>>();
+    let right = mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            edge.label
+                == BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(7),
+                    side: InternalBoundarySide::Right,
+                }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(left.len(), right.len());
+    assert!(left.len() >= 2);
+    for edge in left.iter().chain(&right) {
+        assert_eq!(
+            adjacency[&edge_key(edge.vertices[0], edge.vertices[1])].len(),
+            1
+        );
+    }
+    for left_edge in &left {
+        let left_points = left_edge.vertices.map(|vertex| mesh.vertices[vertex].point);
+        assert!(right.iter().any(|right_edge| {
+            let right_points = right_edge
+                .vertices
+                .map(|vertex| mesh.vertices[vertex].point);
+            left_points[0] == right_points[1] && left_points[1] == right_points[0]
+        }));
+    }
+    let start = scene.internal_boundaries[0].spline.evaluate(0.0);
+    let end = scene.internal_boundaries[0]
+        .spline
+        .evaluate(scene.internal_boundaries[0].spline.period());
+    for tip in [start, end] {
+        assert_eq!(
+            mesh.vertices
+                .iter()
+                .filter(|vertex| vertex.point == tip)
+                .count(),
+            1,
+            "free tips must reconnect both traces"
+        );
+    }
+}
+
+#[test]
+fn multiple_open_baffles_keep_independent_labeled_faces() {
+    let mut scene = Scene::default();
+    for (id, y) in [(3, -0.38), (8, 0.42)] {
+        scene.internal_boundaries.push(InternalBoundary {
+            id: InternalBoundaryId(id),
+            spline: OpenCubicSpline::uniform(vec![
+                Point2::new(-0.62, y),
+                Point2::new(-0.2, y + 0.05),
+                Point2::new(0.2, y - 0.04),
+                Point2::new(0.62, y),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            law: InternalBoundaryLaw::Reflecting,
+        });
+    }
+    let mesh = mesh(&scene);
+    assert_mesh_invariants(&mesh, 2);
+    for id in [InternalBoundaryId(3), InternalBoundaryId(8)] {
+        let left = mesh
+            .boundary_edges
+            .iter()
+            .filter(|edge| {
+                edge.label
+                    == BoundaryLabel::InternalBoundary {
+                        id,
+                        side: InternalBoundarySide::Left,
+                    }
+            })
+            .count();
+        let right = mesh
+            .boundary_edges
+            .iter()
+            .filter(|edge| {
+                edge.label
+                    == BoundaryLabel::InternalBoundary {
+                        id,
+                        side: InternalBoundarySide::Right,
+                    }
+            })
+            .count();
+        assert_eq!(left, right);
+        assert!(left >= 2);
+    }
 }
 
 #[test]

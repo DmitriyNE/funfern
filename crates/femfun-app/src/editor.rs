@@ -28,6 +28,7 @@ pub struct Editor {
     before: Option<Document>,
     job: Option<ValidationJob>,
     next_obstacle_id: u64,
+    next_internal_boundary_id: u64,
     next_region_id: u64,
     next_material_id: u64,
 }
@@ -42,6 +43,7 @@ impl Default for Editor {
             before: None,
             job: None,
             next_obstacle_id: 2,
+            next_internal_boundary_id: 1,
             next_region_id: 2,
             next_material_id: 2,
         }
@@ -133,6 +135,136 @@ impl Editor {
     }
     pub fn obstacle(&self, id: ObstacleId) -> Option<&Obstacle> {
         self.document.draft.obstacles.iter().find(|o| o.id == id)
+    }
+
+    pub fn internal_boundary(&self, id: InternalBoundaryId) -> Option<&InternalBoundary> {
+        self.document
+            .draft
+            .internal_boundaries
+            .iter()
+            .find(|boundary| boundary.id == id)
+    }
+
+    pub fn create_internal_boundary(
+        &mut self,
+        spline: OpenCubicSpline,
+        region: RegionId,
+    ) -> Result<InternalBoundaryId, String> {
+        if self.document.draft.region(region).is_none() {
+            return Err("Missing containing region".into());
+        }
+        if self.document.draft.obstacles.len() + self.document.draft.internal_boundaries.len()
+            >= MAX_OBSTACLES
+        {
+            return Err("Maximum 32 geometric features".into());
+        }
+        let id = InternalBoundaryId(self.next_internal_boundary_id);
+        self.next_internal_boundary_id = self
+            .next_internal_boundary_id
+            .checked_add(1)
+            .ok_or("Internal-boundary IDs exhausted")?;
+        self.begin();
+        self.document
+            .draft
+            .internal_boundaries
+            .push(InternalBoundary {
+                id,
+                spline,
+                region,
+                law: InternalBoundaryLaw::Reflecting,
+            });
+        self.changed();
+        self.commit();
+        Ok(id)
+    }
+
+    pub fn set_internal_boundary_point(
+        &mut self,
+        id: InternalBoundaryId,
+        index: usize,
+        point: Point2,
+    ) -> Result<(), String> {
+        let boundary = self
+            .document
+            .draft
+            .internal_boundaries
+            .iter_mut()
+            .find(|boundary| boundary.id == id)
+            .ok_or("Missing internal boundary")?;
+        if boundary.spline.controls().get(index) == Some(&point) {
+            return Ok(());
+        }
+        boundary
+            .spline
+            .set_control(index, point)
+            .map_err(|error| error.to_string())?;
+        self.changed();
+        Ok(())
+    }
+
+    pub fn delete_internal_boundary(&mut self, id: InternalBoundaryId) {
+        self.begin();
+        self.document
+            .draft
+            .internal_boundaries
+            .retain(|boundary| boundary.id != id);
+        self.changed();
+        self.commit();
+    }
+
+    pub fn insert_internal_boundary(
+        &mut self,
+        id: InternalBoundaryId,
+        parameter: f64,
+    ) -> Result<usize, String> {
+        let mut spline = self
+            .internal_boundary(id)
+            .ok_or("Missing internal boundary")?
+            .spline
+            .clone();
+        match spline
+            .insert(parameter)
+            .map_err(|error| error.to_string())?
+        {
+            Insertion::Existing(index) => Ok(index),
+            Insertion::Inserted(index) => {
+                self.begin();
+                self.document
+                    .draft
+                    .internal_boundaries
+                    .iter_mut()
+                    .find(|boundary| boundary.id == id)
+                    .unwrap()
+                    .spline = spline;
+                self.changed();
+                self.commit();
+                Ok(index)
+            }
+        }
+    }
+
+    pub fn remove_internal_boundary_point(
+        &mut self,
+        id: InternalBoundaryId,
+        index: usize,
+    ) -> Result<(), String> {
+        let mut spline = self
+            .internal_boundary(id)
+            .ok_or("Missing internal boundary")?
+            .spline
+            .clone();
+        spline.remove(index).map_err(|error| error.to_string())?;
+        self.begin();
+        self.document
+            .draft
+            .internal_boundaries
+            .iter_mut()
+            .find(|boundary| boundary.id == id)
+            .unwrap()
+            .spline = spline;
+        self.changed();
+        self.commit();
+        Ok(())
     }
     pub fn set_point(&mut self, id: ObstacleId, index: usize, p: Point2) -> Result<(), String> {
         let o = self
@@ -260,6 +392,11 @@ impl Editor {
             let exterior = role.exterior();
             for child in &mut self.document.draft.obstacles {
                 child.role = replace_exterior(child.role, interior, exterior);
+            }
+            for boundary in &mut self.document.draft.internal_boundaries {
+                if boundary.region == interior {
+                    boundary.region = exterior;
+                }
             }
             self.document
                 .draft
@@ -433,6 +570,15 @@ impl Editor {
             .iter()
             .chain(&document.accepted.regions)
             .map(|region| region.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.next_internal_boundary_id = document
+            .draft
+            .internal_boundaries
+            .iter()
+            .chain(&document.accepted.internal_boundaries)
+            .map(|boundary| boundary.id.0)
             .max()
             .unwrap_or(0)
             .saturating_add(1);

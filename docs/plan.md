@@ -190,11 +190,13 @@ modes.
 
 ## 7. Interior topology and material assignment
 
-Implemented for closed spline loops. Stable regions and materials distinguish
-holes, conforming transmitting interfaces, and two-trace closed walls. Nested
+Implemented for closed spline loops and open reflecting baffles. Stable regions
+and materials distinguish holes and conforming transmitting interfaces. Closed
+walls and open baffles have two finite-element traces; baffle traces reconnect at
+their free tips so waves can diffract around them. Nested
 ownership is validated, triangles carry regions, P2e assembly is piecewise, and
-coefficient edits use a same-mesh field-transfer transaction. Version 2 scene
-files preserve the model and migrate version 1 holes. Multi-region coordinate
+coefficient edits use a same-mesh field-transfer transaction. Version 3 scene
+files preserve open splines and migrate version 1 holes. Multi-region coordinate
 edits currently take the full-mesh path; extending bounded repair across region
 topology remains adaptation work.
 
@@ -210,6 +212,9 @@ topology remains adaptation work.
 - Assemble piecewise P2e operators with conforming transmission across material
   interfaces. A true internal wall must separate the two traces; a constrained
   mesh edge alone does not create that separation.
+- Represent a free-ended internal boundary as a clamped nonuniform cubic spline.
+  Recover it as a constrained mesh chain, duplicate both faces away from shared
+  tips, and use mesh-path source stencils so excitation cannot jump through it.
 - Add viewport region selection, material creation/assignment, clear material
   colors and legends, and versioned scene persistence with migration from version 1.
 - Treat coefficient-only edits as same-mesh simulation transactions. Topology
@@ -228,6 +233,9 @@ remeshing.
 - Assign the existing reflecting, first-order outgoing, and second-order auxiliary conditions per span,
   with explicit defaults and visible viewport/panel labels. Add further fixed or
   prescribed conditions only with defined scalar-wave semantics.
+- Add per-face impedance laws for open baffles, followed by an energy-stable paired
+  trace law for thin gaps/layers. Include its coupling in the explicit timestep
+  bound and treat frequency-dependent laws as auxiliary boundary state.
 - Define how insertion, removal, seam changes, splitting, and merging inherit or
   combine span assignments. Ambiguous edits remain drafts until resolved.
 - Assemble mixed boundary conditions and handle junction nodes where neighboring

@@ -3,9 +3,9 @@
 The spline editor, constrained mesher, bounded coordinate-edit repair, enriched
 quadratic GPU wave solver, and geometry-edit simulation transactions are
 implemented. The outer boundary has reflecting and first- and second-order
-radiation modes. Stable material regions, transmitting interfaces, and closed
-two-sided walls are implemented. Broader adaptation and assigned boundary-span
-semantics remain work.
+radiation modes. Stable material regions, transmitting interfaces, closed
+two-sided walls, and open reflecting baffles are implemented. Broader adaptation,
+impedance/thin-layer laws, and assigned boundary-span semantics remain work.
 
 ## Responsibilities and dependencies
 
@@ -45,6 +45,8 @@ Keep these semantics distinct as they arrive:
   treatment.
 - A thin wall needs the correct separation of the two sides' degrees of freedom;
   a constrained edge alone is insufficient.
+- An open baffle has two traces but does not define separate material regions.
+  Its free endpoints reconnect the domain and admit diffraction around the tips.
 
 The topology model has stable `RegionId` and `MaterialId`; logical span identities
 arrive with assigned boundary conditions. A closed loop has
@@ -117,8 +119,9 @@ excludes selection and navigation. Stable obstacle IDs increase independently of
 undo, preventing reuse after undoing creation. Loading derives the next ID from
 both scenes and clears history.
 
-Version 2 JSON stores the fixed domain, loop roles, materials, regions, controls,
-intervals, and both scenes. Version 1 loads by assigning its loops the background
+Version 3 JSON stores the fixed domain, loop roles, open baffles, materials,
+regions, controls, intervals, and both scenes. Version 2 remains compatible;
+version 1 loads by assigning its loops the background
 hole role and creating the default background material/region.
 Serde and rfd live only in the app crate. Round-trip f64 parsing preserves exact
 stored values. Files have a 2 MiB limit, strict fields/version/domain, finite
@@ -156,6 +159,15 @@ using the robust incircle predicate, to produce a locally constrained-Delaunay
 mesh. Triangle centroids are checked against the sampled domain before a result
 is published.
 
+Open baffles are inserted after the closed-region mesh reaches its requested bulk
+resolution. Each sampled open curve is recovered as a constrained edge chain by
+deterministic diagonal flips. Interior chain vertices are duplicated and the
+triangle fan on one bank is rewired to the duplicate; the two free tips stay
+shared. Both banks are labeled independently. Minimum-angle refinement is completed
+before this cut because a zero-thickness crack tip is a reentrant singular point;
+the final mesh reports the resulting tip quality instead of repeatedly refining
+the coincident faces.
+
 Quality refinement selects the worst size or angle violation from an ordered
 queue. Persistent edge adjacency and triangle quality entries are updated only
 for changed triangles; removed/replaced entries leave no stale quality records.
@@ -174,7 +186,7 @@ are 50,000 vertices, 100,000 triangles, and 50,000 insertions. These limits do
 not promise either a particular wave accuracy or interactive rebuild latency.
 
 `TriMesh` stores f64 vertices, counter-clockwise triangle indices with stable
-region IDs, labeled outer/hole/interface/wall edges, stable loop IDs, continuous
+region IDs, labeled outer/hole/interface/wall/baffle edges, stable curve IDs, continuous
 boundary parameters, and aggregate quality. Boundary labels are independent of
 temporary vertex and triangle indices. Verification requires positive triangle
 orientation, manifold edge adjacency, two incident triangles for a transmitting
@@ -390,11 +402,14 @@ obstacle. Nodes newly exposed by a shrinking or moved obstacle start with zero
 displacement and velocity. Mild local smoothing is a possible response to
 edit-induced bursts, not a substitute for stable stepping.
 
-Transfer also respects topological connectivity. Regions joined through material
+Transfer for closed regions respects topological connectivity. Regions joined through material
 interfaces form one transferable component, while a two-sided wall separates its
-components even where old and new domains overlap geometrically. Pulse and
-continuous-source Gaussians use the same region membership: interface nodes can
-belong to both adjacent regions, but wall traces and interiors remain isolated.
+components even where old and new domains overlap geometrically. Closed-wall
+sources use the same region membership. When open baffles are present, source
+weights use shortest paths through the cut finite-element graph, so the stencil
+can reach the opposite bank only by travelling around a free tip. Moving an open
+baffle currently resets the wave state; side-aware transfer across a moving crack
+is deferred.
 
 The hard zero policy is intentionally temporary. When newly exposed nodes meet a
 nonzero retained field, it creates a steep artificial front and injects broadband

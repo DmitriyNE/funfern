@@ -812,6 +812,7 @@ mod tests {
                     interior: RegionId(2),
                 },
             }],
+            internal_boundaries: vec![],
             materials: vec![
                 Material {
                     id: MaterialId(1),

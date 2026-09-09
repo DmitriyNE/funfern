@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    BACKGROUND_REGION, LoopRole, ObstacleId, Point2, PredicateSign, RegionId, Sample, Sampler,
-    SamplingOptions, ValidationIssue, ValidationJob, incircle, orient2d,
+    BACKGROUND_REGION, InternalBoundaryId, LoopRole, ObstacleId, OpenSampler, Point2,
+    PredicateSign, RegionId, Sample, Sampler, SamplingOptions, ValidationIssue, ValidationJob,
+    incircle, orient2d,
 };
 use crate::{Scene, WORLD_TOLERANCE};
 mod adaptation;
@@ -25,12 +26,22 @@ pub enum BoundaryLabel {
         loop_id: ObstacleId,
         side: BoundarySide,
     },
+    InternalBoundary {
+        id: InternalBoundaryId,
+        side: InternalBoundarySide,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundarySide {
     Exterior,
     Interior,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InternalBoundarySide {
+    Left,
+    Right,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -189,6 +200,11 @@ struct MeshBuilder {
     interior_loops: Vec<Option<Polygon>>,
     loop_ids: Vec<ObstacleId>,
     loop_roles: Vec<LoopRole>,
+    internal_boundary_ids: Vec<InternalBoundaryId>,
+    internal_boundary_regions: Vec<RegionId>,
+    internal_samples: Vec<Vec<Sample>>,
+    internal_chains: Vec<Vec<(usize, f64)>>,
+    internal_trace_vertices: BTreeSet<usize>,
     domains: Vec<TriangulationDomain>,
     options: MeshingOptions,
     adjacency: BTreeMap<(usize, usize), Vec<(usize, usize)>>,
@@ -373,6 +389,11 @@ impl MeshBuilder {
             interior_loops: vec![],
             loop_ids: vec![],
             loop_roles: vec![],
+            internal_boundary_ids: vec![],
+            internal_boundary_regions: vec![],
+            internal_samples: vec![],
+            internal_chains: vec![],
+            internal_trace_vertices: BTreeSet::new(),
             domains: vec![],
             options,
             adjacency: BTreeMap::new(),
@@ -410,12 +431,21 @@ impl MeshBuilder {
         }
         let quality = self.triangle_quality(triangle);
         self.stats.quality_evaluations += 1;
-        if quality.maximum_edge_length > self.options.target_edge_length * 1.05
-            || quality.minimum_angle_degrees + 1.0e-9 < self.options.minimum_angle_degrees
-        {
+        let touches_trace = triangle
+            .vertices
+            .iter()
+            .any(|vertex| self.internal_trace_vertices.contains(vertex));
+        let long = quality.maximum_edge_length > self.options.target_edge_length * 1.05;
+        let narrow = !touches_trace
+            && quality.minimum_angle_degrees + 1.0e-9 < self.options.minimum_angle_degrees;
+        if long || narrow {
             // Nonnegative IEEE floats have the same ordering as their bit patterns.
             let score = (quality.maximum_edge_length / self.options.target_edge_length)
-                .max(self.options.minimum_angle_degrees / quality.minimum_angle_degrees)
+                .max(if touches_trace {
+                    0.0
+                } else {
+                    self.options.minimum_angle_degrees / quality.minimum_angle_degrees
+                })
                 .to_bits();
             self.scores[index] = Some(score);
             self.bad_triangles.insert((score, index));
@@ -783,6 +813,11 @@ impl MeshBuilder {
                     BoundarySide::Interior => role.interior() == Some(region),
                 })
             }
+            BoundaryLabel::InternalBoundary { id, .. } => self
+                .internal_boundary_ids
+                .iter()
+                .position(|candidate| *candidate == id)
+                .is_some_and(|index| self.internal_boundary_regions[index] == region),
         }
     }
 
@@ -907,13 +942,17 @@ impl MeshBuilder {
     }
 
     fn containing_triangle(&self, point: Point2) -> Option<(usize, PolygonLocation)> {
-        self.triangles
-            .iter()
-            .enumerate()
-            .find_map(|(index, triangle)| {
-                let location = point_in_triangle(point, self.triangle_points(*triangle));
-                (location != PolygonLocation::Outside).then_some((index, location))
-            })
+        let mut boundary = None;
+        for (index, triangle) in self.triangles.iter().enumerate() {
+            let location = point_in_triangle(point, self.triangle_points(*triangle));
+            if location == PolygonLocation::Inside {
+                return Some((index, location));
+            }
+            if location == PolygonLocation::Boundary && boundary.is_none() {
+                boundary = Some((index, location));
+            }
+        }
+        boundary
     }
 
     fn split_boundary(&mut self, edge_index: usize) -> Result<(), MeshError> {
@@ -976,18 +1015,21 @@ impl MeshBuilder {
     }
 
     fn insert_point(&mut self, point: Point2) -> Result<(), MeshError> {
-        if self
-            .vertices
-            .iter()
-            .any(|vertex| (vertex.point - point).norm() <= self.options.curve_tolerance * 0.1)
+        let (triangle_index, location) = self.containing_triangle(point).ok_or(
+            MeshError::Topology("refinement point is outside the domain"),
+        )?;
+        if location == PolygonLocation::Boundary
+            && self.triangles[triangle_index]
+                .vertices
+                .iter()
+                .any(|vertex| {
+                    (self.point(*vertex) - point).norm() <= self.options.curve_tolerance * 0.1
+                })
         {
             return Err(MeshError::Topology(
                 "refinement point duplicates an existing vertex",
             ));
         }
-        let (triangle_index, location) = self.containing_triangle(point).ok_or(
-            MeshError::Topology("refinement point is outside the domain"),
-        )?;
         let vertex = self.add_vertex(point, None)?;
         let triangle = self.triangles[triangle_index];
         if location == PolygonLocation::Boundary {
@@ -1034,6 +1076,302 @@ impl MeshBuilder {
         }
     }
 
+    fn insert_constraint_point(
+        &mut self,
+        boundary: usize,
+        point: Point2,
+    ) -> Result<usize, MeshError> {
+        if let Some((index, _)) =
+            self.vertices.iter().enumerate().find(|(_, vertex)| {
+                (vertex.point - point).norm() <= self.options.curve_tolerance * 0.1
+            })
+        {
+            return Ok(index);
+        }
+        let (triangle_index, location) = self.containing_triangle(point).ok_or(
+            MeshError::Topology("internal boundary leaves its material region"),
+        )?;
+        let triangle = self.triangles[triangle_index];
+        if triangle.region != self.internal_boundary_regions[boundary] {
+            return Err(MeshError::Topology(
+                "internal boundary has the wrong containing region",
+            ));
+        }
+        let vertex = self.add_vertex(point, None)?;
+        if location == PolygonLocation::Boundary {
+            let edge = (0..3)
+                .map(|index| [triangle.vertices[index], triangle.vertices[(index + 1) % 3]])
+                .find(|edge| on_segment(point, self.point(edge[0]), self.point(edge[1])))
+                .ok_or(MeshError::Topology(
+                    "could not locate internal-boundary edge",
+                ))?;
+            if self.boundary_keys.contains(&edge_key(edge[0], edge[1])) {
+                return Err(MeshError::Topology(
+                    "internal boundary touches an existing constrained boundary",
+                ));
+            }
+            self.split_edge(edge, vertex)?;
+        } else {
+            self.replace_triangle(
+                triangle_index,
+                self.ccw_triangle(
+                    [triangle.vertices[0], triangle.vertices[1], vertex],
+                    triangle.region,
+                )?,
+            );
+            self.push_triangle(self.ccw_triangle(
+                [triangle.vertices[1], triangle.vertices[2], vertex],
+                triangle.region,
+            )?)?;
+            self.push_triangle(self.ccw_triangle(
+                [triangle.vertices[2], triangle.vertices[0], vertex],
+                triangle.region,
+            )?)?;
+        }
+        Ok(vertex)
+    }
+
+    /// Recovers one constrained segment by flipping one intersecting diagonal.
+    /// Returns true once the requested edge exists.
+    fn recover_constraint_edge(&mut self, requested: [usize; 2]) -> Result<bool, MeshError> {
+        let requested_key = edge_key(requested[0], requested[1]);
+        if self.adjacency.contains_key(&requested_key) {
+            return Ok(true);
+        }
+        let a = self.point(requested[0]);
+        let b = self.point(requested[1]);
+        let crossing = self.adjacency.keys().copied().find(|edge| {
+            !self.boundary_keys.contains(edge)
+                && ![edge.0, edge.1]
+                    .iter()
+                    .any(|vertex| requested.contains(vertex))
+                && segment_relation(a, b, self.point(edge.0), self.point(edge.1))
+                    == SegmentRelation::ProperIntersection
+                && self.adjacency.get(edge).is_some_and(|sides| {
+                    if sides.len() != 2 {
+                        return false;
+                    }
+                    let c = self.point(sides[0].1);
+                    let d = self.point(sides[1].1);
+                    matches!(
+                        (
+                            orient2d(c, d, self.point(edge.0)),
+                            orient2d(c, d, self.point(edge.1))
+                        ),
+                        (PredicateSign::Positive, PredicateSign::Negative)
+                            | (PredicateSign::Negative, PredicateSign::Positive)
+                    ) && segment_relation(a, b, c, d) != SegmentRelation::ProperIntersection
+                })
+        });
+        let Some(edge) = crossing else {
+            return Err(MeshError::Topology(
+                "could not recover an internal-boundary segment",
+            ));
+        };
+        let sides = self
+            .adjacency
+            .get(&edge)
+            .cloned()
+            .ok_or(MeshError::Topology("missing intersecting-edge adjacency"))?;
+        if sides.len() != 2 {
+            return Err(MeshError::Topology(
+                "internal-boundary recovery reached a mesh boundary",
+            ));
+        }
+        let [(first_index, c), (second_index, d)] = [sides[0], sides[1]];
+        let first = self.triangles[first_index];
+        let second = self.triangles[second_index];
+        if first.region != second.region {
+            return Err(MeshError::Topology(
+                "internal boundary crosses a material interface",
+            ));
+        }
+        let pa = self.point(edge.0);
+        let pb = self.point(edge.1);
+        let pc = self.point(c);
+        let pd = self.point(d);
+        let opposite = |x, y| {
+            matches!(
+                (x, y),
+                (PredicateSign::Positive, PredicateSign::Negative)
+                    | (PredicateSign::Negative, PredicateSign::Positive)
+            )
+        };
+        if !opposite(orient2d(pc, pd, pa), orient2d(pc, pd, pb)) {
+            return Err(MeshError::Topology(
+                "internal-boundary recovery found a non-convex edge",
+            ));
+        }
+        let region = first.region;
+        let first_new = self.ccw_triangle([c, d, edge.0], region)?;
+        let second_new = self.ccw_triangle([d, c, edge.1], region)?;
+        self.replace_triangle(first_index, first_new);
+        self.replace_triangle(second_index, second_new);
+        self.stats.edge_flips += 1;
+        Ok(false)
+    }
+
+    fn cut_internal_boundary(&mut self, index: usize) -> Result<(), MeshError> {
+        let chain = self.internal_chains[index].clone();
+        if chain.len() < 3 {
+            return Err(MeshError::Topology(
+                "internal boundary needs at least two mesh segments",
+            ));
+        }
+        for pair in chain.windows(2) {
+            if self
+                .adjacency
+                .get(&edge_key(pair[0].0, pair[1].0))
+                .is_none_or(|sides| sides.len() != 2)
+            {
+                return Err(MeshError::Topology(
+                    "internal-boundary segment was not recovered",
+                ));
+            }
+        }
+        if self.vertices.len() + chain.len() - 2 > self.options.max_vertices {
+            return Err(self.capacity_error());
+        }
+        let id = self.internal_boundary_ids[index];
+        let left_label = BoundaryLabel::InternalBoundary {
+            id,
+            side: InternalBoundarySide::Left,
+        };
+        let right_label = BoundaryLabel::InternalBoundary {
+            id,
+            side: InternalBoundarySide::Right,
+        };
+        let mut duplicates = BTreeMap::new();
+        self.internal_trace_vertices
+            .extend(chain.iter().map(|(vertex, _)| *vertex));
+        self.vertices[chain[0].0].boundary = Some(BoundaryPoint {
+            label: left_label,
+            parameter: chain[0].1,
+        });
+        self.vertices[chain[chain.len() - 1].0].boundary = Some(BoundaryPoint {
+            label: left_label,
+            parameter: chain[chain.len() - 1].1,
+        });
+        for &(vertex, parameter) in &chain[1..chain.len() - 1] {
+            self.vertices[vertex].boundary = Some(BoundaryPoint {
+                label: left_label,
+                parameter,
+            });
+            let duplicate = self.add_vertex(
+                self.point(vertex),
+                Some(BoundaryPoint {
+                    label: right_label,
+                    parameter,
+                }),
+            )?;
+            duplicates.insert(vertex, duplicate);
+            self.internal_trace_vertices.insert(duplicate);
+        }
+
+        let mut replacements = BTreeMap::<usize, Vec<(usize, usize)>>::new();
+        for local in 1..chain.len() - 1 {
+            let vertex = chain[local].0;
+            let previous_edge = edge_key(chain[local - 1].0, vertex);
+            let next_edge = edge_key(vertex, chain[local + 1].0);
+            let seed = self
+                .adjacency
+                .get(&next_edge)
+                .and_then(|sides| {
+                    sides.iter().find_map(|(triangle, opposite)| {
+                        (orient2d(
+                            self.point(vertex),
+                            self.point(chain[local + 1].0),
+                            self.point(*opposite),
+                        ) == PredicateSign::Negative)
+                            .then_some(*triangle)
+                    })
+                })
+                .ok_or(MeshError::Topology(
+                    "internal-boundary trace has no right-side element",
+                ))?;
+            let mut sector = BTreeSet::from([seed]);
+            let mut pending = vec![seed];
+            while let Some(triangle_index) = pending.pop() {
+                let triangle = self.triangles[triangle_index];
+                for other in triangle
+                    .vertices
+                    .iter()
+                    .copied()
+                    .filter(|candidate| *candidate != vertex)
+                {
+                    let edge = edge_key(vertex, other);
+                    if edge == previous_edge || edge == next_edge {
+                        continue;
+                    }
+                    if let Some(sides) = self.adjacency.get(&edge) {
+                        for (neighbor, _) in sides {
+                            if *neighbor != triangle_index
+                                && self.triangles[*neighbor].vertices.contains(&vertex)
+                                && sector.insert(*neighbor)
+                            {
+                                pending.push(*neighbor);
+                            }
+                        }
+                    }
+                }
+            }
+            for triangle_index in sector {
+                replacements
+                    .entry(triangle_index)
+                    .or_default()
+                    .push((vertex, duplicates[&vertex]));
+            }
+        }
+        for (triangle_index, replacements) in replacements {
+            let mut triangle = self.triangles[triangle_index];
+            for vertex in &mut triangle.vertices {
+                if let Some((_, replacement)) = replacements
+                    .iter()
+                    .find(|(original, _)| *original == *vertex)
+                {
+                    *vertex = *replacement;
+                }
+            }
+            self.replace_triangle(triangle_index, triangle);
+        }
+
+        let right_vertex = |local: usize| {
+            let vertex = chain[local].0;
+            duplicates.get(&vertex).copied().unwrap_or(vertex)
+        };
+        for local in 0..chain.len() - 1 {
+            self.add_boundary_edge(BoundaryEdge {
+                vertices: [chain[local].0, chain[local + 1].0],
+                label: left_label,
+                parameters: [chain[local].1, chain[local + 1].1],
+            });
+            self.add_boundary_edge(BoundaryEdge {
+                vertices: [right_vertex(local + 1), right_vertex(local)],
+                label: right_label,
+                parameters: [chain[local + 1].1, chain[local].1],
+            });
+        }
+        let trace_triangles = chain
+            .into_iter()
+            .map(|(vertex, _)| vertex)
+            .chain(duplicates.values().copied())
+            .flat_map(|vertex| self.incident[vertex].iter().copied())
+            .collect::<BTreeSet<_>>();
+        for triangle in trace_triangles {
+            let unchanged = self.triangles[triangle];
+            self.replace_triangle(triangle, unchanged);
+        }
+        if self.triangles.iter().any(|triangle| {
+            let [a, b, c] = self.triangle_points(*triangle);
+            orient2d(a, b, c) != PredicateSign::Positive
+        }) {
+            return Err(MeshError::Topology(
+                "internal-boundary cut created a degenerate element",
+            ));
+        }
+        Ok(())
+    }
+
     /// Performs one bounded refinement insertion. Returns true when all quality
     /// targets are satisfied.
     fn refine_once(&mut self) -> Result<bool, MeshError> {
@@ -1071,7 +1409,32 @@ impl MeshBuilder {
         if self.region_at(candidate) != Some(triangle.region) {
             candidate = centroid;
         }
+        // Coincident two-faced traces are distinct topological vertices. A
+        // circumcenter can land exactly on the opposite trace even though it is
+        // unrelated to the element being refined; use the element centroid in
+        // that ambiguous geometric case.
+        for attempt in 0..8 {
+            if !self.vertices.iter().any(|vertex| {
+                (vertex.point - candidate).norm() <= self.options.curve_tolerance * 0.1
+            }) {
+                break;
+            }
+            candidate = centroid.lerp(points[attempt % 3], 0.01 * (attempt + 1) as f64);
+        }
+        if self
+            .vertices
+            .iter()
+            .any(|vertex| (vertex.point - candidate).norm() <= self.options.curve_tolerance * 0.1)
+        {
+            if let Some(score) = self.scores[triangle_index].take() {
+                self.bad_triangles.remove(&(score, triangle_index));
+            }
+            return Ok(false);
+        }
         if let Some(edge_index) = self.boundary_edges.iter().position(|edge| {
+            if matches!(edge.label, BoundaryLabel::InternalBoundary { .. }) {
+                return false;
+            }
             if !self.boundary_relevant_to_region(edge.label, triangle.region) {
                 return false;
             }
@@ -1094,6 +1457,43 @@ impl MeshBuilder {
         self.stats.refinement_insertions += 1;
         Ok(false)
     }
+}
+
+fn resample_internal_boundary(
+    samples: Vec<Sample>,
+    options: MeshingOptions,
+) -> Result<Vec<Sample>, MeshError> {
+    let mut result = Vec::new();
+    for span in samples.windows(2) {
+        let length = (span[1].point - span[0].point).norm();
+        let pieces = (length / options.target_edge_length).ceil().max(1.0) as usize;
+        if result.len() + pieces + 1 > options.max_vertices {
+            return Err(MeshError::Capacity {
+                vertices: result.len(),
+                triangles: 0,
+            });
+        }
+        for piece in 0..pieces {
+            let fraction = piece as f64 / pieces as f64;
+            result.push(Sample {
+                t: span[0].t + (span[1].t - span[0].t) * fraction,
+                point: span[0].point.lerp(span[1].point, fraction),
+            });
+        }
+    }
+    result.push(*samples.last().ok_or(MeshError::Topology(
+        "internal-boundary sampling produced no points",
+    ))?);
+    if result.len() == 2 {
+        result.insert(
+            1,
+            Sample {
+                t: (result[0].t + result[1].t) * 0.5,
+                point: result[0].point.lerp(result[1].point, 0.5),
+            },
+        );
+    }
+    Ok(result)
 }
 
 fn angle_from_sides(opposite: f64, adjacent_a: f64, adjacent_b: f64) -> f64 {
@@ -1166,8 +1566,28 @@ enum MeshingJobState {
         obstacle: usize,
         sampler: Option<Sampler>,
     },
+    SampleInternal {
+        boundary: usize,
+        sampler: Option<OpenSampler>,
+    },
     Bridge(BridgeSearch),
     Clip(EarSearch),
+    LegalizeInitial,
+    RefineBeforeInternalBoundaries,
+    LegalizeBeforeInternalBoundaries,
+    InsertInternalPoints {
+        boundary: usize,
+        sample: usize,
+    },
+    RecoverInternalEdges {
+        boundary: usize,
+        segment: usize,
+        attempts: usize,
+    },
+    CutInternalBoundary {
+        boundary: usize,
+    },
+    LegalizeInternalCut,
     Legalize,
     Refine,
     VerifyTriangles {
@@ -1215,10 +1635,19 @@ impl MeshingJob {
     pub fn phase(&self) -> &'static str {
         match self.state {
             MeshingJobState::Validate(_) => "Validating",
-            MeshingJobState::Outer | MeshingJobState::Sample { .. } => "Sampling boundaries",
+            MeshingJobState::Outer
+            | MeshingJobState::Sample { .. }
+            | MeshingJobState::SampleInternal { .. } => "Sampling boundaries",
             MeshingJobState::Bridge(_) => "Connecting holes",
             MeshingJobState::Clip(_) => "Triangulating",
-            MeshingJobState::Legalize => "Legalizing edges",
+            MeshingJobState::LegalizeInitial
+            | MeshingJobState::LegalizeBeforeInternalBoundaries
+            | MeshingJobState::LegalizeInternalCut
+            | MeshingJobState::Legalize => "Legalizing edges",
+            MeshingJobState::InsertInternalPoints { .. }
+            | MeshingJobState::RecoverInternalEdges { .. }
+            | MeshingJobState::CutInternalBoundary { .. } => "Cutting internal boundaries",
+            MeshingJobState::RefineBeforeInternalBoundaries => "Refining",
             MeshingJobState::Refine => "Refining",
             MeshingJobState::VerifyTriangles { .. } | MeshingJobState::VerifyBoundary { .. } => {
                 "Checking mesh"
@@ -1286,25 +1715,22 @@ impl MeshingJob {
             }
             MeshingJobState::Sample { obstacle, sampler } => {
                 if obstacle == self.scene.obstacles.len() {
-                    b.prepare_domains()?;
-                    let domain = b
-                        .domains
-                        .first()
-                        .ok_or(MeshError::Topology("no material domain to triangulate"))?
-                        .clone();
-                    MeshingJobState::Bridge(BridgeSearch {
-                        polygon: domain.outer,
-                        holes: domain.holes,
-                        hole: 0,
-                        domain: 0,
-                        region: domain.region,
-                        outer_index: 0,
-                        hole_index: 0,
-                        best: None,
-                        visibility: None,
-                        seeding: true,
-                        testing_seed: false,
-                    })
+                    b.internal_boundary_ids = self
+                        .scene
+                        .internal_boundaries
+                        .iter()
+                        .map(|boundary| boundary.id)
+                        .collect();
+                    b.internal_boundary_regions = self
+                        .scene
+                        .internal_boundaries
+                        .iter()
+                        .map(|boundary| boundary.region)
+                        .collect();
+                    MeshingJobState::SampleInternal {
+                        boundary: 0,
+                        sampler: None,
+                    }
                 } else {
                     let mut sampler = sampler.unwrap_or_else(|| {
                         Sampler::new(
@@ -1331,6 +1757,56 @@ impl MeshingJob {
                     } else {
                         MeshingJobState::Sample {
                             obstacle,
+                            sampler: Some(sampler),
+                        }
+                    }
+                }
+            }
+            MeshingJobState::SampleInternal { boundary, sampler } => {
+                if boundary == self.scene.internal_boundaries.len() {
+                    b.prepare_domains()?;
+                    let domain = b
+                        .domains
+                        .first()
+                        .ok_or(MeshError::Topology("no material domain to triangulate"))?
+                        .clone();
+                    MeshingJobState::Bridge(BridgeSearch {
+                        polygon: domain.outer,
+                        holes: domain.holes,
+                        hole: 0,
+                        domain: 0,
+                        region: domain.region,
+                        outer_index: 0,
+                        hole_index: 0,
+                        best: None,
+                        visibility: None,
+                        seeding: true,
+                        testing_seed: false,
+                    })
+                } else {
+                    let mut sampler = sampler.unwrap_or_else(|| {
+                        OpenSampler::new(
+                            &self.scene.internal_boundaries[boundary].spline,
+                            SamplingOptions {
+                                tolerance: b.options.curve_tolerance,
+                                max_depth: 18,
+                                max_points: 8192,
+                            },
+                        )
+                    });
+                    if sampler.step() {
+                        let samples = sampler.finish().map_err(|_| {
+                            MeshError::Topology("internal-boundary sampling failed")
+                        })?;
+                        b.internal_samples
+                            .push(resample_internal_boundary(samples, b.options)?);
+                        MeshingJobState::SampleInternal {
+                            boundary: boundary + 1,
+                            sampler: None,
+                        }
+                    } else {
+                        MeshingJobState::SampleInternal {
+                            boundary,
                             sampler: Some(sampler),
                         }
                     }
@@ -1488,7 +1964,7 @@ impl MeshingJob {
                             testing_seed: false,
                         })
                     } else {
-                        MeshingJobState::Legalize
+                        MeshingJobState::LegalizeInitial
                     }
                 } else if search.index == polygon.len() {
                     if search.degenerate_pass {
@@ -1574,6 +2050,163 @@ impl MeshingJob {
                     MeshingJobState::Clip(search)
                 }
             }
+            MeshingJobState::LegalizeInitial => {
+                if b.dirty_edges.is_empty() {
+                    self.legalization_work = 0;
+                    if b.internal_samples.is_empty() {
+                        MeshingJobState::Refine
+                    } else {
+                        MeshingJobState::RefineBeforeInternalBoundaries
+                    }
+                } else {
+                    self.legalization_work += 1;
+                    if self.legalization_work > b.options.max_triangles.saturating_mul(128) {
+                        return Err(MeshError::Topology("edge legalization work limit reached"));
+                    }
+                    b.legalize_one()?;
+                    MeshingJobState::LegalizeInitial
+                }
+            }
+            MeshingJobState::RefineBeforeInternalBoundaries => {
+                if !b.bad_triangles.is_empty()
+                    && b.stats.refinement_insertions >= b.options.max_refinement_steps
+                {
+                    return Err(MeshError::RefinementLimit(b.quality()));
+                }
+                if b.refine_once()? {
+                    b.internal_chains.push(Vec::new());
+                    MeshingJobState::InsertInternalPoints {
+                        boundary: 0,
+                        sample: 0,
+                    }
+                } else {
+                    MeshingJobState::LegalizeBeforeInternalBoundaries
+                }
+            }
+            MeshingJobState::LegalizeBeforeInternalBoundaries => {
+                if b.dirty_edges.is_empty() {
+                    self.legalization_work = 0;
+                    MeshingJobState::RefineBeforeInternalBoundaries
+                } else {
+                    self.legalization_work += 1;
+                    if self.legalization_work > b.options.max_triangles.saturating_mul(128) {
+                        return Err(MeshError::Topology("edge legalization work limit reached"));
+                    }
+                    b.legalize_one()?;
+                    MeshingJobState::LegalizeBeforeInternalBoundaries
+                }
+            }
+            MeshingJobState::InsertInternalPoints { boundary, sample } => {
+                if sample == b.internal_samples[boundary].len() {
+                    MeshingJobState::RecoverInternalEdges {
+                        boundary,
+                        segment: 0,
+                        attempts: 0,
+                    }
+                } else {
+                    let Sample { t, point } = b.internal_samples[boundary][sample];
+                    let vertex = b.insert_constraint_point(boundary, point)?;
+                    b.internal_chains[boundary].push((vertex, t));
+                    MeshingJobState::InsertInternalPoints {
+                        boundary,
+                        sample: sample + 1,
+                    }
+                }
+            }
+            MeshingJobState::RecoverInternalEdges {
+                boundary,
+                segment,
+                attempts,
+            } => {
+                if segment + 1 == b.internal_chains[boundary].len() {
+                    MeshingJobState::CutInternalBoundary { boundary }
+                } else {
+                    let requested = [
+                        b.internal_chains[boundary][segment].0,
+                        b.internal_chains[boundary][segment + 1].0,
+                    ];
+                    let requested_start = b.point(requested[0]);
+                    let requested_end = b.point(requested[1]);
+                    let requested_delta = requested_end - requested_start;
+                    if let Some((vertex, fraction)) = b
+                        .vertices
+                        .iter()
+                        .enumerate()
+                        .filter(|(vertex, _)| !requested.contains(vertex))
+                        .filter(|(_, candidate)| {
+                            orient2d(requested_start, requested_end, candidate.point)
+                                == PredicateSign::Zero
+                                && on_segment(candidate.point, requested_start, requested_end)
+                        })
+                        .map(|(vertex, candidate)| {
+                            let fraction = (candidate.point - requested_start).dot(requested_delta)
+                                / requested_delta.dot(requested_delta);
+                            (vertex, fraction)
+                        })
+                        .filter(|(_, fraction)| *fraction > 0.0 && *fraction < 1.0)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                    {
+                        let start = b.internal_chains[boundary][segment].1;
+                        let end = b.internal_chains[boundary][segment + 1].1;
+                        b.internal_chains[boundary]
+                            .insert(segment + 1, (vertex, start + (end - start) * fraction));
+                        MeshingJobState::RecoverInternalEdges {
+                            boundary,
+                            segment,
+                            attempts,
+                        }
+                    } else if b.recover_constraint_edge(requested)? {
+                        MeshingJobState::RecoverInternalEdges {
+                            boundary,
+                            segment: segment + 1,
+                            attempts: 0,
+                        }
+                    } else {
+                        let attempts = attempts + 1;
+                        if attempts > b.options.max_triangles.saturating_mul(4) {
+                            return Err(MeshError::Topology(
+                                "internal-boundary edge recovery work limit reached",
+                            ));
+                        }
+                        MeshingJobState::RecoverInternalEdges {
+                            boundary,
+                            segment,
+                            attempts,
+                        }
+                    }
+                }
+            }
+            MeshingJobState::CutInternalBoundary { boundary } => {
+                b.cut_internal_boundary(boundary)?;
+                if boundary + 1 == b.internal_samples.len() {
+                    self.legalization_work = 0;
+                    MeshingJobState::LegalizeInternalCut
+                } else {
+                    b.internal_chains.push(Vec::new());
+                    MeshingJobState::InsertInternalPoints {
+                        boundary: boundary + 1,
+                        sample: 0,
+                    }
+                }
+            }
+            MeshingJobState::LegalizeInternalCut => {
+                if b.dirty_edges.is_empty() {
+                    MeshingJobState::VerifyTriangles {
+                        index: 0,
+                        quality: MeshQuality {
+                            minimum_angle_degrees: 180.0,
+                            maximum_edge_length: 0.0,
+                        },
+                    }
+                } else {
+                    self.legalization_work += 1;
+                    if self.legalization_work > b.options.max_triangles.saturating_mul(128) {
+                        return Err(MeshError::Topology("edge legalization work limit reached"));
+                    }
+                    b.legalize_one()?;
+                    MeshingJobState::LegalizeInternalCut
+                }
+            }
             MeshingJobState::Legalize => {
                 if b.dirty_edges.is_empty() {
                     self.legalization_work = 0;
@@ -1642,7 +2275,8 @@ impl MeshingJob {
                                 BoundaryLabel::MaterialInterface(_) => 2,
                                 BoundaryLabel::Outer(_)
                                 | BoundaryLabel::Obstacle(_)
-                                | BoundaryLabel::Wall { .. } => 1,
+                                | BoundaryLabel::Wall { .. }
+                                | BoundaryLabel::InternalBoundary { .. } => 1,
                             });
                         if sides.len() != expected
                             || !sides.contains(&(index, triangle.vertices[opposite]))
@@ -1678,7 +2312,8 @@ impl MeshingJob {
                     BoundaryLabel::MaterialInterface(_) => 2,
                     BoundaryLabel::Outer(_)
                     | BoundaryLabel::Obstacle(_)
-                    | BoundaryLabel::Wall { .. } => 1,
+                    | BoundaryLabel::Wall { .. }
+                    | BoundaryLabel::InternalBoundary { .. } => 1,
                 };
                 if b.adjacency
                     .get(&edge_key(edge[0], edge[1]))

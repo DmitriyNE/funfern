@@ -1,5 +1,7 @@
 use std::{
     borrow::Cow,
+    cmp::Ordering as CmpOrdering,
+    collections::BinaryHeap,
     sync::{
         Arc,
         atomic::{AtomicU8, AtomicU64, Ordering},
@@ -39,6 +41,14 @@ pub struct SourceSettings {
     pub amplitude: f32,
     pub width: f32,
     pub frequency_hz: f32,
+    pub region: RegionId,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PulseSettings {
+    pub position: Point2,
+    pub amplitude: f32,
+    pub width: f32,
     pub region: RegionId,
 }
 
@@ -108,10 +118,12 @@ struct WaveBufferHandles {
     stiffness: Handle<ShaderBuffer>,
     nodes: Handle<ShaderBuffer>,
     state: Handle<ShaderBuffer>,
+    source_weights: Handle<ShaderBuffer>,
+    pulse_weights: Handle<ShaderBuffer>,
 }
 
 impl WaveBufferHandles {
-    fn all(&self) -> [&Handle<ShaderBuffer>; 8] {
+    fn all(&self) -> [&Handle<ShaderBuffer>; 10] {
         [
             &self.parameters,
             &self.source,
@@ -121,6 +133,8 @@ impl WaveBufferHandles {
             &self.stiffness,
             &self.nodes,
             &self.state,
+            &self.source_weights,
+            &self.pulse_weights,
         ]
     }
 }
@@ -409,6 +423,8 @@ impl WaveGpuRequest {
     pub fn update_source(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
         source: SourceSettings,
     ) -> Result<(), String> {
         let handles = self
@@ -418,6 +434,15 @@ impl WaveGpuRequest {
         let replacement = assets.add(ShaderBuffer::from(gpu_source(source)));
         let old = std::mem::replace(&mut handles.source, replacement);
         assets.remove(old.id());
+        let replacement = assets.add(ShaderBuffer::from(forcing_weights(
+            mesh,
+            operator,
+            source.position,
+            source.width,
+            source.region,
+        )?));
+        let old = std::mem::replace(&mut handles.source_weights, replacement);
+        assets.remove(old.id());
         self.buffer_revision = self.buffer_revision.wrapping_add(1);
         Ok(())
     }
@@ -425,10 +450,9 @@ impl WaveGpuRequest {
     pub fn inject_pulse(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
-        position: Point2,
-        amplitude: f32,
-        width: f32,
-        region: RegionId,
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        pulse_settings: PulseSettings,
     ) -> Result<(), String> {
         let handles = self
             .buffers
@@ -436,18 +460,27 @@ impl WaveGpuRequest {
             .ok_or("The wave solver is not initialized")?;
         let pulse = GpuPulse {
             position_width_amplitude: Vec4::new(
-                position.x as f32,
-                position.y as f32,
-                width * width,
-                amplitude,
+                pulse_settings.position.x as f32,
+                pulse_settings.position.y as f32,
+                pulse_settings.width * pulse_settings.width,
+                pulse_settings.amplitude,
             ),
-            region: gpu_region_pair(region, RegionId(0)),
+            region: gpu_region_pair(pulse_settings.region, RegionId(0)),
         };
-        if !pulse.position_width_amplitude.is_finite() || width <= 0.0 {
+        if !pulse.position_width_amplitude.is_finite() || pulse_settings.width <= 0.0 {
             return Err("Pulse parameters must be finite with positive width".into());
         }
         let replacement = assets.add(ShaderBuffer::from(pulse));
         let old = std::mem::replace(&mut handles.pulse, replacement);
+        assets.remove(old.id());
+        let replacement = assets.add(ShaderBuffer::from(forcing_weights(
+            mesh,
+            operator,
+            pulse_settings.position,
+            pulse_settings.width,
+            pulse_settings.region,
+        )?));
+        let old = std::mem::replace(&mut handles.pulse_weights, replacement);
         assets.remove(old.id());
         self.pulse_serial = self.pulse_serial.wrapping_add(1).max(1);
         self.buffer_revision = self.buffer_revision.wrapping_add(1);
@@ -517,6 +550,15 @@ fn create_buffers(
         position_width_amplitude: Vec4::new(0.0, 0.0, 0.06_f32.powi(2), 0.65),
         region: gpu_region_pair(femfun_core::BACKGROUND_REGION, RegionId(0)),
     };
+    let source_weights =
+        forcing_weights(mesh, operator, source.position, source.width, source.region)?;
+    let pulse_weights = forcing_weights(
+        mesh,
+        operator,
+        Point2::default(),
+        0.06,
+        femfun_core::BACKGROUND_REGION,
+    )?;
     Ok((
         WaveBufferHandles {
             parameters: assets.add(ShaderBuffer::from(parameters)),
@@ -530,6 +572,8 @@ fn create_buffers(
                 initial_state;
                 operator.degrees_of_freedom()
             ])),
+            source_weights: assets.add(ShaderBuffer::from(source_weights)),
+            pulse_weights: assets.add(ShaderBuffer::from(pulse_weights)),
         },
         dof_count,
     ))
@@ -577,6 +621,139 @@ fn node_regions(
         return Err("A wave node does not belong to a material region".into());
     }
     Ok(regions)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DistanceNode {
+    distance: f64,
+    node: usize,
+}
+
+impl Eq for DistanceNode {}
+
+impl Ord for DistanceNode {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        other
+            .distance
+            .total_cmp(&self.distance)
+            .then_with(|| other.node.cmp(&self.node))
+    }
+}
+
+impl PartialOrd for DistanceNode {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Builds a compact Gaussian stencil. With an open internal boundary, graph
+/// distance follows the actual cut mesh, so forcing reaches the opposite face
+/// only by going around a free endpoint.
+pub(crate) fn forcing_weights(
+    mesh: &TriMesh,
+    operator: &QuadraticWaveOperator,
+    position: Point2,
+    width: f32,
+    region: RegionId,
+) -> Result<Vec<f32>, String> {
+    if !position.finite() || !width.is_finite() || width <= 0.0 {
+        return Err("Source parameters must be finite with positive width".into());
+    }
+    WaveGpuRequest::validate_inputs(mesh, operator, operator.recommended_time_step())?;
+    let memberships = node_regions(mesh, operator)?;
+    let eligible = memberships
+        .iter()
+        .map(|regions| regions.contains(&region))
+        .collect::<Vec<_>>();
+    let width = width as f64;
+    if !mesh.boundary_edges.iter().any(|edge| {
+        matches!(
+            edge.label,
+            femfun_core::BoundaryLabel::InternalBoundary { .. }
+        )
+    }) {
+        return Ok(operator
+            .node_points()
+            .iter()
+            .zip(eligible)
+            .map(|(point, eligible)| {
+                if eligible {
+                    (-0.5 * (*point - position).dot(*point - position) / (width * width)).exp()
+                        as f32
+                } else {
+                    0.0
+                }
+            })
+            .collect());
+    }
+
+    let source_triangle = mesh
+        .triangles
+        .iter()
+        .enumerate()
+        .find_map(|(index, triangle)| {
+            if triangle.region != region {
+                return None;
+            }
+            let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+            ((b - a).cross(position - a) >= -1.0e-12
+                && (c - b).cross(position - b) >= -1.0e-12
+                && (a - c).cross(position - c) >= -1.0e-12)
+                .then_some(index)
+        });
+    let Some(source_triangle) = source_triangle else {
+        return Ok(vec![0.0; operator.degrees_of_freedom()]);
+    };
+    let mut adjacency = vec![Vec::<(usize, f64)>::new(); operator.degrees_of_freedom()];
+    for (triangle, nodes) in mesh.triangles.iter().zip(operator.element_nodes()) {
+        if triangle.region != region {
+            continue;
+        }
+        for first in 0..nodes.len() {
+            for second in first + 1..nodes.len() {
+                let a = nodes[first] as usize;
+                let b = nodes[second] as usize;
+                let distance = (operator.node_points()[a] - operator.node_points()[b]).norm();
+                adjacency[a].push((b, distance));
+                adjacency[b].push((a, distance));
+            }
+        }
+    }
+    let mut distances = vec![f64::INFINITY; operator.degrees_of_freedom()];
+    let mut pending = BinaryHeap::new();
+    for node in operator.element_nodes()[source_triangle] {
+        let node = node as usize;
+        let distance = (operator.node_points()[node] - position).norm();
+        distances[node] = distance;
+        pending.push(DistanceNode { distance, node });
+    }
+    let cutoff = 6.0 * width;
+    while let Some(DistanceNode { distance, node }) = pending.pop() {
+        if distance != distances[node] || distance > cutoff {
+            continue;
+        }
+        for &(neighbor, length) in &adjacency[node] {
+            let candidate = distance + length;
+            if candidate < distances[neighbor] && candidate <= cutoff {
+                distances[neighbor] = candidate;
+                pending.push(DistanceNode {
+                    distance: candidate,
+                    node: neighbor,
+                });
+            }
+        }
+    }
+    Ok(distances
+        .into_iter()
+        .zip(eligible)
+        .map(|(distance, eligible)| {
+            if eligible && distance.is_finite() {
+                (-0.5 * distance * distance / (width * width)).exp() as f32
+            } else {
+                0.0
+            }
+        })
+        .collect())
 }
 
 fn gpu_region_pair(first: RegionId, second: RegionId) -> UVec4 {
@@ -747,6 +924,8 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuMatrixEntry>>(false),
                 storage_buffer_read_only::<Vec<GpuNode>>(false),
                 storage_buffer::<Vec<GpuState>>(false),
+                storage_buffer_read_only::<Vec<f32>>(false),
+                storage_buffer_read_only::<Vec<f32>>(false),
             ),
         ),
     );
@@ -900,6 +1079,12 @@ fn prepare_bind_group(
     let Some(state) = gpu_buffers.get(&handles.state) else {
         return;
     };
+    let Some(source_weights) = gpu_buffers.get(&handles.source_weights) else {
+        return;
+    };
+    let Some(pulse_weights) = gpu_buffers.get(&handles.pulse_weights) else {
+        return;
+    };
     let bind_group = render_device.create_bind_group(
         Some("wave gather bind group"),
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
@@ -912,6 +1097,8 @@ fn prepare_bind_group(
             stiffness.buffer.as_entire_buffer_binding(),
             nodes.buffer.as_entire_buffer_binding(),
             state.buffer.as_entire_buffer_binding(),
+            source_weights.buffer.as_entire_buffer_binding(),
+            pulse_weights.buffer.as_entire_buffer_binding(),
         )),
     );
     if let Some(transfer) = &request.transfer {
@@ -1135,5 +1322,73 @@ mod tests {
         assert_eq!(source.position_width_amplitude.w, 7.0);
         assert!((source.frequency_enabled.x - 5.0 * std::f32::consts::PI).abs() < 1.0e-6);
         assert_eq!(source.frequency_enabled.y, 1.0);
+    }
+
+    #[test]
+    fn open_boundary_forcing_uses_mesh_path_distance() {
+        use femfun_core::*;
+
+        let mut scene = Scene::default();
+        scene.internal_boundaries.push(InternalBoundary {
+            id: InternalBoundaryId(4),
+            spline: OpenCubicSpline::uniform(vec![
+                Point2::new(-0.72, 0.0),
+                Point2::new(-0.25, 0.0),
+                Point2::new(0.25, 0.0),
+                Point2::new(0.72, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            law: InternalBoundaryLaw::Reflecting,
+        });
+        let mesh = mesh_scene(
+            &scene,
+            9,
+            MeshingOptions {
+                target_edge_length: 0.18,
+                minimum_angle_degrees: 10.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let weights = forcing_weights(
+            &mesh,
+            &operator,
+            Point2::new(0.0, 0.05),
+            0.06,
+            BACKGROUND_REGION,
+        )
+        .unwrap();
+        let closest = |side| {
+            mesh.vertices
+                .iter()
+                .enumerate()
+                .filter(|(_, vertex)| {
+                    matches!(
+                        vertex.boundary,
+                        Some(BoundaryPoint {
+                            label: BoundaryLabel::InternalBoundary {
+                                id: InternalBoundaryId(4),
+                                side: candidate,
+                            },
+                            ..
+                        }) if candidate == side
+                    )
+                })
+                .min_by(|(_, a), (_, b)| a.point.x.abs().total_cmp(&b.point.x.abs()))
+                .unwrap()
+                .0
+        };
+        let left = closest(InternalBoundarySide::Left);
+        let right = closest(InternalBoundarySide::Right);
+        assert!(weights[left] > 0.4);
+        assert_eq!(weights[right], 0.0);
+        assert_eq!(mesh.vertices[left].point, mesh.vertices[right].point);
     }
 }
