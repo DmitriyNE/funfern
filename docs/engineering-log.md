@@ -7,11 +7,13 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Implement the higher-order auxiliary radiation condition on stable outer
+  sides, including corner coupling, GPU evolution, transactional state, reflection
+  measurements, and long-time checks.
 - [ ] Add stable interior-region/material/interface/wall semantics, piecewise
   coefficients, assignment UI, persistence, meshing labels, and solver transactions.
-- [ ] Add stable selectable boundary spans and per-span conditions. Then implement
-  the higher-order auxiliary condition against those spans, including junction and
-  corner coupling plus transactional auxiliary-state transfer.
+- [ ] Add stable selectable boundary spans and per-span conditions, then generalize
+  the completed outer-side auxiliary condition to mixed exterior spans and junctions.
 - [ ] Expand product spline editing with multi-selection and transforms, direct
   span selection, knot/seam controls, duplication, snapping, and safe topology
   workflows. Rational weights remain conditional on a demonstrated workflow need.
@@ -38,8 +40,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Stable region/material/span identities are the shared foundation. Holes,
   transmitting material interfaces, and two-sided internal walls remain distinct
   semantics rather than modes inferred from loop winding.
-- Higher-order radiation follows span assignment so its auxiliary fields and
-  corner/junction state attach to stable logical spans from the first implementation.
+- Higher-order radiation remains the next milestone and initially attaches its
+  auxiliary state to the four stable outer-side identities. Per-span assignment
+  later generalizes that condition to selectable subspans and mixed junctions.
 
 ## 2026-09-09 — First-order outgoing outer boundary
 

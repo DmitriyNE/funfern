@@ -447,10 +447,12 @@ energy. These measurements include finite-beam bandwidth, diffraction, spatial
 discretization, and time integration, so the plane-wave values are context rather
 than exact expected outputs.
 
-The higher-order auxiliary condition will be built after logical span assignment,
-so its edge state and endpoint/corner coupling attach to stable semantic spans
-rather than transient mesh edges. Long-time stability remains an explicit work
-item. Keep the outer box fixed while the interior evolves.
+The higher-order auxiliary condition is the next solver milestone. Its first
+implementation attaches edge state to the four stable outer-side identities and
+couples their endpoints at the box corners rather than attaching state to transient
+mesh-edge indices. The later logical-span milestone generalizes those identities
+to selectable subspans and mixed conditions. Long-time stability remains an
+explicit work item. Keep the outer box fixed while the interior evolves.
 
 IGA follows the interior-region, assigned-boundary, and expanded spline-editing
 product work. Start with an untrimmed single patch. Boundary splines alone do not

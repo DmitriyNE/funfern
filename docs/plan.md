@@ -167,17 +167,22 @@ Persistent cooldown and broader adaptation remain pending.
 **Completion:** local edits normally preserve most of the mesh, adaptation advances
 across frames without starvation, and challenging edits respect the budgets.
 
-## 6. First-order boundary radiation
+## 6. Higher-order boundary radiation
 
 - First-order outgoing conditions on the fixed outer box are implemented and
   selectable at runtime. The P2e boundary mass uses positive diagonal Simpson
   weights, and a CPU benchmark measures two angles and two wavelengths.
+- Select and implement a higher-order auxiliary-boundary formulation in the
+  Hagstrom-Warburton direction on the four fixed outer sides, including corner
+  coupling and transactional auxiliary-state lifecycle.
+- Extend the reflection benchmark across more angles, frequencies, auxiliary
+  orders, and long runs. Compare cost and reflection with the first-order condition.
 - Keep codimension-1 absorption as the intended design. A damping layer or PML is
   only an optional intermediate experiment, not the target implementation.
 
-**Completion:** quantify pulse reflections versus angle and frequency and check
-long-time behavior. Imperfect absorption is acceptable; unexplained growing modes
-are not.
+**Completion:** the auxiliary condition outperforms first order over a documented
+angle/frequency range, its GPU and f64 implementations agree, corner coupling and
+transactions are covered, and long runs have no unexplained growing modes.
 
 ## 7. Interior topology and material assignment
 
@@ -215,9 +220,8 @@ remeshing.
   combine span assignments. Ambiguous edits remain drafts until resolved.
 - Assemble mixed boundary conditions and handle junction nodes where neighboring
   spans use different conditions.
-- Implement the higher-order auxiliary-boundary formulation on assigned exterior
-  spans, including endpoint/corner coupling and transactional auxiliary-state
-  transfer.
+- Generalize the completed higher-order outer-side condition to assigned exterior
+  spans, preserving its endpoint/corner coupling and auxiliary-state transactions.
 
 **Completion:** mixed conditions can be painted onto stable spans, survive all
 document operations, assemble consistently on remeshed edges, and pass reflection,
