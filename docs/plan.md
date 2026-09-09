@@ -79,9 +79,13 @@ and an ordered quality queue replace global refinement sweeps. Topology searches
 and verification are resumable, and the app targets 2 ms of meshing per frame.
 The engineering log records native timings. The first geometry-only part of
 milestone 5 has also been brought forward: bounded local repair for coordinate
-edits, with full rebuilding as a fallback. Static-domain waves remain next.
+edits, with full rebuilding as a fallback.
 
 ## 3. Static-domain GPU waves
+
+Implementation is present. The native Metal kernel agrees with the f64 reference,
+and the h=0.04/h=0.02 analytic-box study is recorded. A fresh interactive browser
+performance and long-run pass remains deferred at the user's request.
 
 - Implement linear triangular FEM, lumped mass, second-order explicit stepping,
   and conservative timestep selection. Start with reflecting boundaries.

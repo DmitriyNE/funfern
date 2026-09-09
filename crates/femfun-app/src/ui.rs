@@ -1,6 +1,8 @@
 use crate::files::{self, FileEvent};
+use crate::wave_gpu::{SourceSettings, WaveDisplay, WaveGpuRequest};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
+use bevy::render::storage::ShaderBuffer;
 use bevy_egui::{
     EguiContexts,
     egui::{self, Color32, Pos2, Rect, Stroke},
@@ -23,6 +25,8 @@ enum Mode {
     Select,
     Preset,
     Custom,
+    Pulse,
+    Source,
 }
 struct Drag {
     id: ObstacleId,
@@ -81,6 +85,28 @@ pub struct Playground {
     mesh_max_slice_ms: f64,
     show_mesh: bool,
     show_mesh_boundary: bool,
+    show_field: bool,
+    field_gain: f32,
+    wave_mesh: Option<Arc<TriMesh>>,
+    wave_operator: Option<Arc<WaveOperator>>,
+    wave_time_step: f64,
+    wave_running: bool,
+    wave_speed: f64,
+    wave_accumulator: f64,
+    wave_reset_requested: bool,
+    wave_step_requested: bool,
+    wave_pending_pulse: Option<Point2>,
+    wave_source: SourceSettings,
+    wave_source_dirty: bool,
+    wave_prepare_ms: f64,
+    wave_active_wall_seconds: f64,
+    wave_completed_steps: u64,
+    wave_dispatches: u64,
+    wave_substeps_last: u64,
+    wave_energy: Option<f64>,
+    wave_energy_step: u64,
+    wave_gpu_status: &'static str,
+    wave_error: Option<String>,
 }
 impl Default for Playground {
     fn default() -> Self {
@@ -132,6 +158,28 @@ impl Default for Playground {
             mesh_max_slice_ms: 0.0,
             show_mesh: false,
             show_mesh_boundary: true,
+            show_field: true,
+            field_gain: 2.0,
+            wave_mesh: None,
+            wave_operator: None,
+            wave_time_step: 0.0,
+            wave_running: false,
+            wave_speed: 1.0,
+            wave_accumulator: 0.0,
+            wave_reset_requested: false,
+            wave_step_requested: false,
+            wave_pending_pulse: None,
+            wave_source: SourceSettings::default(),
+            wave_source_dirty: false,
+            wave_prepare_ms: 0.0,
+            wave_active_wall_seconds: 0.0,
+            wave_completed_steps: 0,
+            wave_dispatches: 0,
+            wave_substeps_last: 0,
+            wave_energy: None,
+            wave_energy_step: 0,
+            wave_gpu_status: "loading",
+            wave_error: None,
         }
     }
 }
@@ -334,6 +382,130 @@ impl Playground {
                 .map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
         }
     }
+
+    fn refresh_wave(
+        &mut self,
+        request: &mut WaveGpuRequest,
+        display: &WaveDisplay,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        delta_seconds: f64,
+    ) {
+        let mesh_changed = match (&self.mesh, &self.wave_mesh) {
+            (Some(mesh), Some(wave_mesh)) => !Arc::ptr_eq(mesh, wave_mesh),
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if mesh_changed || self.wave_reset_requested {
+            self.wave_reset_requested = false;
+            self.wave_running = false;
+            self.wave_accumulator = 0.0;
+            self.wave_active_wall_seconds = 0.0;
+            self.wave_completed_steps = 0;
+            self.wave_dispatches = 0;
+            self.wave_substeps_last = 0;
+            self.wave_energy = None;
+            self.wave_energy_step = 0;
+            self.wave_error = None;
+            if let Some(mesh) = self.mesh.clone() {
+                let start = Instant::now();
+                match WaveOperator::assemble(&mesh, WaveCoefficients::default()) {
+                    Ok(operator) => {
+                        let time_step = operator.recommended_time_step();
+                        match request.replace(
+                            assets,
+                            commands,
+                            &mesh,
+                            &operator,
+                            time_step,
+                            self.wave_source,
+                        ) {
+                            Ok(()) => {
+                                self.wave_time_step = time_step;
+                                self.wave_operator = Some(Arc::new(operator));
+                                self.wave_mesh = Some(mesh);
+                                self.wave_source_dirty = false;
+                            }
+                            Err(error) => {
+                                self.wave_operator = None;
+                                self.wave_mesh = Some(mesh);
+                                self.wave_error = Some(error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.wave_operator = None;
+                        self.wave_mesh = Some(mesh);
+                        self.wave_error = Some(error.to_string());
+                    }
+                }
+                self.wave_prepare_ms = start.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
+        if self.wave_source_dirty && self.wave_operator.is_some() {
+            match request.update_source(assets, self.wave_source) {
+                Ok(()) => self.wave_source_dirty = false,
+                Err(error) => self.wave_error = Some(error),
+            }
+        }
+        if let Some(position) = self.wave_pending_pulse.take() {
+            match request.inject_pulse(assets, position, 0.65, 0.06) {
+                Ok(()) => {
+                    // Commit one level after injection so the readback marker
+                    // and energy identify the pulse even while paused.
+                    request.request_steps(1);
+                }
+                Err(error) => self.wave_error = Some(error),
+            }
+        }
+
+        self.wave_gpu_status = request.stats().status();
+        self.wave_completed_steps = request.stats().completed_steps();
+        self.wave_dispatches = request.stats().dispatches();
+        self.wave_substeps_last = 0;
+        if self.wave_operator.is_some() && request.ready() {
+            if self.wave_step_requested {
+                request.request_steps(1);
+                self.wave_substeps_last += 1;
+                self.wave_step_requested = false;
+            }
+            if self.wave_running {
+                let elapsed = delta_seconds.clamp(0.0, 0.1);
+                self.wave_active_wall_seconds += elapsed;
+                self.wave_accumulator += elapsed * self.wave_speed;
+                let requested = (self.wave_accumulator / self.wave_time_step).floor() as u64;
+                let requested = requested.min(16);
+                if requested > 0 {
+                    request.request_steps(requested);
+                    self.wave_accumulator -= requested as f64 * self.wave_time_step;
+                    self.wave_substeps_last += requested;
+                }
+                self.wave_accumulator = self.wave_accumulator.min(16.0 * self.wave_time_step);
+            }
+        }
+        if display.generation == request.generation()
+            && display.current.len()
+                == self
+                    .wave_operator
+                    .as_ref()
+                    .map_or(0, |operator| operator.degrees_of_freedom())
+            && display.completed_steps != self.wave_energy_step
+            && let Some(operator) = &self.wave_operator
+        {
+            let current: Vec<_> = display.current.iter().map(|value| *value as f64).collect();
+            let previous: Vec<_> = display.previous.iter().map(|value| *value as f64).collect();
+            match operator.discrete_energy(&current, &previous, self.wave_time_step) {
+                Ok(energy) => {
+                    self.wave_energy = Some(energy);
+                    self.wave_energy_step = display.completed_steps;
+                }
+                Err(error) => {
+                    self.wave_running = false;
+                    self.wave_error = Some(format!("GPU field validation failed: {error}"));
+                }
+            }
+        }
+    }
     fn panel(&mut self, ui: &mut egui::Ui) {
         if self.automated_benchmark {
             ui.label("Automated mesh benchmark");
@@ -375,6 +547,8 @@ impl Playground {
             Mode::Select => "Drag handles · double-click a curve to insert",
             Mode::Preset => "Click the viewport to place a radius 0.15 loop",
             Mode::Custom => "Click control points; Enter or first point closes",
+            Mode::Pulse => "Click the viewport to add a zero-velocity pulse",
+            Mode::Source => "Click the viewport to move the continuous source",
         });
         if self.mode == Mode::Custom {
             ui.small(format!(
@@ -594,14 +768,111 @@ impl Playground {
             ));
         }
         ui.add_space(8.0);
-        ui.label("Simulation · later milestone");
-        ui.add_enabled_ui(false, |ui| {
+        ui.label("Wave simulation");
+        let wave_available = self.wave_operator.is_some();
+        ui.add_enabled_ui(wave_available, |ui| {
             ui.horizontal(|ui| {
-                let _ = ui.button("Run");
-                let _ = ui.button("Step");
-                let _ = ui.button("Reset");
+                if ui
+                    .button(if self.wave_running { "Pause" } else { "Run" })
+                    .clicked()
+                {
+                    self.wave_running = !self.wave_running;
+                }
+                if ui.button("Step").clicked() {
+                    self.wave_step_requested = true;
+                }
+                if ui.button("Reset").clicked() {
+                    self.wave_reset_requested = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(self.mode == Mode::Pulse, "Place pulse")
+                    .clicked()
+                {
+                    self.mode = Mode::Pulse;
+                }
+                if ui
+                    .selectable_label(self.mode == Mode::Source, "Move source")
+                    .clicked()
+                {
+                    self.mode = Mode::Source;
+                }
+            });
+            ui.checkbox(&mut self.show_field, "Field colors");
+            ui.add(
+                egui::Slider::new(&mut self.field_gain, 0.25..=12.0)
+                    .logarithmic(true)
+                    .text("color gain"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.wave_speed, 0.1..=4.0)
+                    .logarithmic(true)
+                    .text("simulation speed"),
+            );
+            if ui
+                .checkbox(&mut self.wave_source.enabled, "Continuous source")
+                .changed()
+            {
+                self.wave_source_dirty = true;
+            }
+            ui.add_enabled_ui(self.wave_source.enabled, |ui| {
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.wave_source.frequency_hz, 0.25..=8.0)
+                            .logarithmic(true)
+                            .text("source frequency"),
+                    )
+                    .changed()
+                {
+                    self.wave_source_dirty = true;
+                }
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.wave_source.amplitude, 1.0..=50.0)
+                            .logarithmic(true)
+                            .text("source strength"),
+                    )
+                    .changed()
+                {
+                    self.wave_source_dirty = true;
+                }
             });
         });
+        if let Some(operator) = &self.wave_operator {
+            let simulated_time = self.wave_completed_steps as f64 * self.wave_time_step;
+            let throughput = if self.wave_active_wall_seconds > 0.0 {
+                simulated_time / self.wave_active_wall_seconds
+            } else {
+                0.0
+            };
+            let entries = operator.columns().len();
+            let gpu_bytes = (operator.row_offsets().len() * 4
+                + entries * 8
+                + operator.degrees_of_freedom() * 32) as f64;
+            ui.small(format!(
+                "GPU {} · {} DOFs · {:.2} MiB\ndt {:.6} · t {:.3} · {} substeps/frame\n{:.2} simulated s / wall s · assembly {:.1} ms",
+                self.wave_gpu_status,
+                operator.degrees_of_freedom(),
+                gpu_bytes / (1024.0 * 1024.0),
+                self.wave_time_step,
+                simulated_time,
+                self.wave_substeps_last,
+                throughput,
+                self.wave_prepare_ms,
+            ));
+            if let Some(energy) = self.wave_energy {
+                ui.small(format!("Discrete energy {energy:.6e}"));
+            }
+        } else if self.mesh.is_some() {
+            ui.small("Preparing wave operator…");
+        } else {
+            ui.small("Waiting for an accepted mesh…");
+        }
+        if let Some(error) = &self.wave_error {
+            ui.colored_label(RED, error);
+        }
+        ui.small("Reflecting boundaries · λ=0.4 source preset");
         ui.add_space(12.0);
         ui.small("Control points guide the spline; the curve does not pass through them.");
         ui.add_space(6.0);
@@ -611,7 +882,7 @@ impl Playground {
             ui.colored_label(GOLD, &self.message);
         }
     }
-    fn viewport(&mut self, ui: &mut egui::Ui) -> Rect {
+    fn viewport(&mut self, ui: &mut egui::Ui, wave_display: Option<&WaveDisplay>) -> Rect {
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let r = response.rect;
@@ -761,6 +1032,15 @@ impl Playground {
                                 self.message = "Maximum 128 control points".into();
                             }
                         }
+                        Mode::Pulse => {
+                            self.wave_pending_pulse = Some(self.world(p, r));
+                            self.mode = Mode::Select;
+                        }
+                        Mode::Source => {
+                            self.wave_source.position = self.world(p, r);
+                            self.wave_source_dirty = true;
+                            self.mode = Mode::Select;
+                        }
                         Mode::Select => {}
                     }
                 }
@@ -794,6 +1074,29 @@ impl Playground {
                     );
                 }
             }
+        }
+        if self.show_field
+            && let (Some(mesh), Some(display)) = (&self.wave_mesh, wave_display)
+            && display.generation > 0
+            && display.current.len() == mesh.vertices.len()
+        {
+            let mut field = egui::Mesh::default();
+            field.reserve_vertices(mesh.vertices.len());
+            field.reserve_triangles(mesh.triangles.len());
+            for (vertex, value) in mesh.vertices.iter().zip(&display.current) {
+                field.colored_vertex(
+                    self.screen(vertex.point, r),
+                    field_color(*value, self.field_gain),
+                );
+            }
+            for triangle in &mesh.triangles {
+                field.add_triangle(
+                    triangle.vertices[0] as u32,
+                    triangle.vertices[1] as u32,
+                    triangle.vertices[2] as u32,
+                );
+            }
+            painter.add(egui::Shape::mesh(field));
         }
         let domain = [
             Point2::new(-1.0, -1.0),
@@ -1025,7 +1328,36 @@ impl Playground {
         }
     }
 }
-pub fn frame(mut contexts: EguiContexts, mut state: ResMut<Playground>, time: Res<Time>) -> Result {
+fn field_color(value: f32, gain: f32) -> Color32 {
+    let value = if value.is_finite() {
+        (value * gain).tanh()
+    } else {
+        0.0
+    };
+    let neutral = [16.0, 23.0, 31.0];
+    let target = if value >= 0.0 {
+        [244.0, 105.0, 122.0]
+    } else {
+        [63.0, 144.0, 239.0]
+    };
+    let amount = value.abs();
+    Color32::from_rgba_unmultiplied(
+        (neutral[0] + amount * (target[0] - neutral[0])) as u8,
+        (neutral[1] + amount * (target[1] - neutral[1])) as u8,
+        (neutral[2] + amount * (target[2] - neutral[2])) as u8,
+        220,
+    )
+}
+
+pub fn frame(
+    mut contexts: EguiContexts,
+    mut state: ResMut<Playground>,
+    time: Res<Time>,
+    mut request: ResMut<WaveGpuRequest>,
+    display: Res<WaveDisplay>,
+    mut assets: ResMut<Assets<ShaderBuffer>>,
+    mut commands: Commands,
+) -> Result {
     let ctx = contexts.ctx_mut()?;
     if !state.ready {
         ctx.set_visuals(egui::Visuals::dark());
@@ -1048,9 +1380,16 @@ pub fn frame(mut contexts: EguiContexts, mut state: ResMut<Playground>, time: Re
             .layer_id(egui::LayerId::background())
             .max_rect(ctx.viewport_rect()),
     );
-    state.show(&mut root);
+    state.show(&mut root, Some(&display));
     state.editor.validate_frame(12_000);
     state.refresh_mesh();
+    state.refresh_wave(
+        &mut request,
+        &display,
+        &mut assets,
+        &mut commands,
+        time.delta_secs_f64(),
+    );
     Ok(())
 }
 
@@ -1090,6 +1429,131 @@ pub fn mesh_benchmark_scene() -> Playground {
             accepted: scene,
         });
     state
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource)]
+pub struct WaveGpuBenchmark {
+    started: Instant,
+    solve_started: Option<Instant>,
+    generation: u64,
+    expected_current: Vec<f64>,
+    expected_previous: Vec<f64>,
+    prepared: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for WaveGpuBenchmark {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            solve_started: None,
+            generation: 0,
+            expected_current: Vec::new(),
+            expected_previous: Vec::new(),
+            prepared: false,
+        }
+    }
+}
+
+/// Native opt-in validation of the actual WGSL gather kernel against the f64
+/// reference on the same assembled mesh and conservative timestep.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn wave_gpu_benchmark(
+    mut benchmark: ResMut<WaveGpuBenchmark>,
+    state: Res<Playground>,
+    mut request: ResMut<WaveGpuRequest>,
+    display: Res<WaveDisplay>,
+    mut assets: ResMut<Assets<ShaderBuffer>>,
+    mut exit: MessageWriter<bevy::app::AppExit>,
+) {
+    if benchmark.started.elapsed().as_secs_f64() > 60.0 {
+        error!("Wave GPU check timed out");
+        exit.write(bevy::app::AppExit::error());
+        return;
+    }
+    if !benchmark.prepared {
+        let (Some(mesh), Some(operator)) = (&state.wave_mesh, &state.wave_operator) else {
+            return;
+        };
+        let position = Point2::new(-0.42, 0.11);
+        let amplitude = 0.65_f32;
+        let width = 0.06_f32;
+        if let Err(error) = request.inject_pulse(&mut assets, position, amplitude, width) {
+            error!("Wave GPU pulse setup failed: {error}");
+            exit.write(bevy::app::AppExit::error());
+            return;
+        }
+        let mut cpu = WaveState::zero(operator, state.wave_time_step).unwrap();
+        let pulse: Vec<_> = mesh
+            .vertices
+            .iter()
+            .map(|vertex| {
+                let dx = vertex.point.x as f32 - position.x as f32;
+                let dy = vertex.point.y as f32 - position.y as f32;
+                (amplitude * (-0.5 * (dx * dx + dy * dy) / (width * width)).exp()) as f64
+            })
+            .collect();
+        cpu.add_displacement(&pulse).unwrap();
+        for _ in 0..128 {
+            cpu.step(operator, &[]).unwrap();
+        }
+        benchmark.expected_current = cpu.current().to_vec();
+        benchmark.expected_previous = cpu.previous().to_vec();
+        benchmark.generation = request.generation();
+        benchmark.prepared = true;
+        benchmark.solve_started = Some(Instant::now());
+        request.request_steps(128);
+        info!(
+            dofs = operator.degrees_of_freedom(),
+            dt = state.wave_time_step,
+            "Wave GPU check started"
+        );
+        return;
+    }
+    if request.stats().completed_steps() < 128
+        || display.completed_steps < 128
+        || display.generation != benchmark.generation
+        || display.current.len() != benchmark.expected_current.len()
+    {
+        return;
+    }
+    let Some(operator) = &state.wave_operator else {
+        return;
+    };
+    let error_norm = |actual: &[f32], expected: &[f64]| {
+        let numerator = actual
+            .iter()
+            .zip(expected)
+            .zip(operator.lumped_mass())
+            .map(|((actual, expected), mass)| mass * (*actual as f64 - expected).powi(2))
+            .sum::<f64>();
+        let denominator = expected
+            .iter()
+            .zip(operator.lumped_mass())
+            .map(|(expected, mass)| mass * expected * expected)
+            .sum::<f64>();
+        (numerator / denominator.max(f64::MIN_POSITIVE)).sqrt()
+    };
+    let current_error = error_norm(&display.current, &benchmark.expected_current);
+    let previous_error = error_norm(&display.previous, &benchmark.expected_previous);
+    let solve_seconds = benchmark
+        .solve_started
+        .map_or(0.0, |start| start.elapsed().as_secs_f64());
+    info!(
+        current_relative_l2 = current_error,
+        previous_relative_l2 = previous_error,
+        elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
+        solve_readback_ms = solve_seconds * 1000.0,
+        simulated_seconds_per_wall_second = 128.0 * state.wave_time_step / solve_seconds,
+        "Wave GPU check complete"
+    );
+    if current_error <= 2.0e-4 && previous_error <= 2.0e-4 {
+        exit.write(bevy::app::AppExit::Success);
+    } else {
+        error!("Wave GPU result differs from the CPU reference");
+        exit.write(bevy::app::AppExit::error());
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1164,7 +1628,7 @@ pub fn mesh_benchmark(
 }
 
 impl Playground {
-    fn show(&mut self, root: &mut egui::Ui) -> Rect {
+    fn show(&mut self, root: &mut egui::Ui, wave_display: Option<&WaveDisplay>) -> Rect {
         // Remember capture before panels can end a text edit this frame.
         self.keyboard_captured = root.ctx().text_edit_focused();
         let state = self;
@@ -1206,7 +1670,7 @@ impl Playground {
             });
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
-            .show(root, |ui| state.viewport(ui))
+            .show(root, |ui| state.viewport(ui, wave_display))
             .inner
     }
 }
@@ -1249,7 +1713,7 @@ mod tests {
                     focused: true,
                     ..Default::default()
                 },
-                |ui| self.rect = self.state.show(ui),
+                |ui| self.rect = self.state.show(ui, None),
             );
             self.texts.clear();
             fn collect(shape: &egui::Shape, texts: &mut Vec<(String, Rect)>) {
@@ -1570,6 +2034,30 @@ mod tests {
         assert!(h.state.custom.is_empty());
         assert_eq!(h.state.editor.document.draft.obstacles.len(), 2);
         assert_eq!(h.state.editor.history_len(), (1, 0));
+    }
+
+    #[test]
+    fn pulse_and_source_tools_only_change_transient_simulation_input() {
+        let mut h = Harness::new();
+        let document = h.state.editor.document.clone();
+        h.state.mode = Mode::Pulse;
+        let pulse = Point2::new(0.45, -0.3);
+        h.click(h.point(pulse));
+        assert!((h.state.wave_pending_pulse.unwrap() - pulse).norm() < 1.0e-6);
+        assert!(h.state.mode == Mode::Select);
+        h.state.mode = Mode::Source;
+        let source = Point2::new(-0.55, 0.25);
+        h.click(h.point(source));
+        assert!((h.state.wave_source.position - source).norm() < 1.0e-6);
+        assert!(h.state.wave_source_dirty);
+        assert_eq!(h.state.editor.document, document);
+        assert_eq!(h.state.editor.history_len(), (0, 0));
+
+        let positive = field_color(0.5, 2.0);
+        let negative = field_color(-0.5, 2.0);
+        assert!(positive.r() > positive.b());
+        assert!(negative.b() > negative.r());
+        assert_eq!(field_color(f32::NAN, 2.0), field_color(0.0, 2.0));
     }
 
     #[test]

@@ -1,12 +1,13 @@
 # femfun
 
-A browser geometry and meshing playground for a future 2D finite-element wave
-toy. Edit periodic cubic spline obstacles inside a fixed square, with persistent
-invalid drafts, constrained triangle meshes, undo/redo, and versioned scene files.
+A browser finite-element wave playground with editable periodic cubic spline
+obstacles, constrained triangle meshes, persistent invalid drafts, undo/redo,
+and versioned scene files.
 
-Milestones 1 and 2 are implemented. Native startup and automated checks pass;
-the user has exercised the Milestone 1 browser editor. The wave simulation is a
-later milestone, so simulation buttons remain disabled.
+The static-domain P1 wave solver is implemented on both an f64 CPU reference and
+an f32 WebGPU gather kernel. Native startup and automated checks pass; the user
+has exercised the earlier browser editor state. Interactive browser checks for
+the solver remain deferred.
 
 ## Run
 
@@ -90,8 +91,17 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   Full fine builds can take tens of seconds when spread across frames. Small
   control-point edits now reuse and repair a bounded region of the previous mesh.
   The panel reports unchanged elements and full-rebuild fallbacks; creation,
-  deletion, knot changes and large/failed repairs still rebuild. The wave solver
-  and its convergence checks are still pending.
+  deletion, knot changes and large/failed repairs still rebuild.
+- **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
+  Gaussian displacement with zero initial velocity. Move source positions the
+  optional continuous sinusoidal source. Simulation speed is bounded to 16
+  substeps per display frame. Field colors use an adjustable symmetric gain.
+  The panel reports DOFs, GPU buffer size, operator-derived timestep, simulated
+  time, substeps, throughput, assembly time, and discrete energy.
+- **Mesh changes:** simulation continues on the displayed committed mesh while a
+  replacement is prepared. Publishing a new mesh resets the field in this static
+  milestone. Transfer of both time levels belongs to the transactional editing
+  milestone.
 
 Scenes allow 32 obstacles and 128 controls per obstacle. JSON files are capped at
 2 MiB and require finite coordinates. The editor uses a fixed
@@ -112,18 +122,23 @@ trunk build --release
 cargo run -p femfun-core --release --example mesh_timing -- --slices
 cargo run -p femfun-core --release --example mesh_timing -- --wave --slices
 cargo run -p femfun-core --release --example mesh_edit_timing -- --paced
+cargo run -p femfun-core --release --example wave_convergence
 cargo run -p femfun-app --release --locked -- --mesh-edit-benchmark
+cargo run -p femfun-app --release --locked -- --wave-gpu-check
 ```
 
-The 49 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
+The 57 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, refinement limits, geometry
 rejection, draft/accepted history, scene files, and egui pointer/keyboard
 interactions, local Delaunay legality, incremental work, slice-independent output,
-and a 32-obstacle meshing regression. The timing example uses the app's mesh
+P1 assembly, stable centered stepping, energy/damping behavior, spatial mode
+convergence, GPU upload parameters, and a 32-obstacle meshing regression. The timing example uses the app's mesh
 settings and 2 ms scheduling policy. `--wave` tests maximum edges 0.04 and 0.02;
 without it, the example tests preview resolution. It reports P1 spatial DOFs,
 actual edge size, and resolution relative to a reference wavelength of 0.4.
-These are meshing timings; wave throughput and accuracy have not been measured.
+These are meshing timings. `wave_convergence` separately measures the analytic
+reflecting-box mode at h=0.04 and h=0.02, with independent temporal refinement,
+over one and five box-crossing times.
 Omit `--slices` for per-phase profiling.
 `mesh_edit_timing --paced` applies edits with 2 ms mesh slices at a simulated
 60 Hz schedule, excluding rendering. `--mesh-edit-benchmark` opens the real native
@@ -132,15 +147,17 @@ prints edit-to-ready and active/scheduling times plus exact element reuse, then
 exits. Interactive editor input is disabled during this scripted run. It does not
 read or overwrite scene files. The native benchmark includes
 editor validation and rendering load; mesh-ready means publication to app state.
-Native GPU startup was exercised on Apple M1 Max / Metal. The user
+`--wave-gpu-check` runs the real compute pipeline for 128 steps, reads both time
+levels back, compares them to f64, reports solve-to-readback throughput, and exits.
+Native GPU startup and the wave kernel were exercised on Apple M1 Max / Metal. The user
 reports completing the Milestone 1 browser interaction checks; browser metadata
 and Milestone 2 overlay performance have not been recorded.
 
 ## Layout
 
 ```text
-crates/femfun-core/       Dependency-free f64 geometry, exact predicates, triangle meshing
-crates/femfun-app/        Bevy/egui UI, document/history model, JSON and file dialogs
+crates/femfun-core/       Dependency-free f64 geometry, meshing, and CPU wave reference
+crates/femfun-app/        Bevy/egui editor, persistence, GPU waves, and field display
 examples/                Scene files for exercising the editor
 docs/plan.md             Milestones and completion criteria
 docs/architecture.md     Representation, draft model, and later solver design

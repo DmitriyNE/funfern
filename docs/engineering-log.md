@@ -7,11 +7,59 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Milestone 3: static-domain CPU reference and GPU wave evolution.
+- [ ] Exercise the static wave solver interactively in a WebGPU browser and record
+  display frame time and long-run behavior; the user deferred browser testing.
 - [ ] Record browser/GPU metadata and frame-time ranges when the mesh overlay is
   next exercised interactively; the user has deferred this pass.
-- [ ] Extend local mesh reuse beyond coordinate edits; add persistent connectivity
-  caching and cooldown as needed, and wave-state transfer when a solver exists.
+- [ ] Implement transactional transfer of both wave time levels when a new mesh is
+  committed. Extend fragile local repair/fallback behavior, persistent connectivity,
+  and cooldown in a later adaptation pass.
+
+## 2026-09-09 — Static P1 CPU/GPU wave solver
+
+- Added dependency-free f64 P1 assembly and reference evolution. The operator uses
+  CSR stiffness, lumped mass/damping, reflecting natural Neumann boundaries, and
+  a damped centered difference update. A Gershgorin bound on `M^-1 K` selects a
+  conservative timestep. Validation rejects invalid coefficients, topology,
+  masses, time steps, sizes, and non-finite states.
+- Added a Bevy render-world f32 compute kernel on the existing wgpu device. Each
+  DOF gathers its CSR row into uniquely owned output, followed by a level rotation;
+  there are no floating-point scatter atomics. GPU state stays resident. Bevy's
+  asynchronous buffer readback feeds interpolated egui triangle colors and CPU
+  energy diagnostics. GPU-written step markers reject stale readbacks.
+- Enabled Run/Pause, Step, Reset, Gaussian pulse placement, a movable continuous
+  sinusoidal source, simulation-speed and color-gain controls. Work is capped at
+  16 substeps per display frame. The panel reports DOFs, GPU memory, timestep,
+  simulated time, substeps, throughput, operator assembly, and discrete energy.
+  A newly published mesh resets state; transfer is milestone 4 work. The previous
+  committed solver continues during mesh preparation and invalid drafts.
+- Native `--wave-gpu-check`, Rust 1.96.0, Apple M1 Max / Metal: 6,240 DOFs,
+  dt=0.00742465, 128 steps. GPU versus f64 relative mass-weighted L2 error was
+  **1.223e-6** for current and **1.225e-6** for previous. Solve submission through
+  tagged readback took **44.92 ms**, equivalent to **21.16 simulated s/wall s**.
+  Startup/mesh preparation took 1.77 s and is excluded from that throughput.
+- `wave_convergence` uses an actual empty-domain mesh and the wavelength-0.4 mode
+  `cos(5π(x+1))`. At `0.225 dt_max`:
+
+  | h | DOFs | triangles | dt max | phase at t≈2 | phase at t≈10 | amplitude at t≈10 | L2 at t≈10 | CPU throughput at t≈10 |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | .04 | 6,328 | 12,394 | .0100807 | -.191 rad | -.959 rad | -.00461 | .426 | 24.5 sim s/wall s |
+  | .02 | 25,218 | 49,892 | .0050806 | -.0476 rad | -.238 rad | -.000114 | .0284 | 3.05 sim s/wall s |
+
+  Halving the temporal step changed long-time phase only from -.935 to -.959 rad
+  at h=.04 and -.232 to -.238 rad at h=.02, identifying spatial dispersion as the
+  dominant error. The h=.02 P1 mesh is a useful baseline, but still has roughly
+  13.6° phase error after five crossings; higher-order mass treatment should be
+  compared at equal error rather than adding a nominal degree knob.
+- Core tests cover symmetry/nullspace, stationary constants, 2,000-step discrete
+  energy conservation, damping, spatial convergence, and malformed inputs. The
+  native GPU check exercises shader compilation, storage layouts, both time levels,
+  and readback. All **57 tests**, formatting, Clippy with warnings denied, native
+  release compilation, and release Trunk packaging pass. WASM packaging used
+  `NO_COLOR=true trunk build --release --dist /private/tmp/femfun-wave-solver-dist`.
+  Interactive browser verification remains deferred as requested.
+- User feedback retained: local mesh repair still falls back often for small-ish
+  moves and is fragile. This solver change does not alter that repair policy.
 
 ## 2026-09-09 — Bounded mesh reuse across control edits
 

@@ -1,8 +1,8 @@
 # Architecture notes
 
-Milestone 1 implements the spline core, geometric editor validation, and Bevy/egui
-application described below. Meshing, simulation transactions, GPU evolution, and
-state transfer in later sections remain design directions.
+The spline editor, constrained mesher, bounded coordinate-edit repair, and static
+P1 GPU wave solver are implemented. Simulation transactions and state transfer in
+later sections remain design directions.
 
 ## Responsibilities and dependencies
 
@@ -231,9 +231,26 @@ m(x) u_tt + d(x) u_t - div(a(x) grad(u)) = f
 m > 0, a > 0, d >= 0
 ```
 
-Begin with linear triangular FEM, lumped mass, and second-order explicit time
-integration. Pick the damping treatment deliberately. GPU work should gather
-contributions into uniquely owned outputs, avoiding floating-point scatter atomics.
+The implemented operator uses linear triangular FEM with row-wise CSR stiffness,
+lumped mass, and lumped damping. Reflecting outer and obstacle boundaries are the
+natural Neumann condition, so all mesh vertices remain DOFs. The centered update is
+
+```text
+(M + dt D/2) u[n+1] = (2M - dt² K) u[n] - (M - dt D/2) u[n-1] + dt² f[n]
+```
+
+It is second order for zero damping and treats diagonal damping symmetrically. A
+Gershgorin bound on `M^-1 K` supplies `dt_max = 2/sqrt(bound)`; the app uses 90%
+of that bound. The f64 CPU implementation is the reference and conserves the
+scheme's discrete half-step energy to roundoff in the undamped test.
+
+The f32 GPU kernel stores both committed time levels and a scratch level in one
+storage buffer. Each vertex invocation gathers its CSR row and writes only its
+own scratch value; a second dispatch rotates levels. This avoids scatter atomics.
+The operator, state, source, and controls use Bevy's render-world buffers and its
+existing wgpu device. State remains GPU-resident; asynchronous readback supplies
+the egui field colors and energy diagnostic. Each readback carries a GPU-written
+step marker so stale asynchronous results cannot be mistaken for a newer level.
 
 The previous h≈0.16 overlay was an editor preview. Wave benchmarks start with
 h≤0.04 and h≤0.02, corresponding to 10 and 20 maximum-edge lengths per reference
@@ -246,7 +263,10 @@ frequency at c=1, and compare over one and five box crossing times. Vary timeste
 independently. Obstacle cases subsequently need a sufficiently refined reference
 and a stated source bandwidth.
 
-If the P1 convergence cost is excessive, compare p=2 or p=3 at equal measured
+The measured P1 baseline confirms material dispersion. At half of the conservative
+timestep, h=0.04 accumulates about 0.96 rad of phase error over five box crossings;
+h=0.02 accumulates about 0.24 rad. Temporal halving changes these figures only
+slightly, so spatial error dominates. Compare p=2 or p=3 at equal measured
 error, with mass treatment and timestep restrictions included in the cost. A
 concrete continuous-element candidate is enriched mass-lumped triangles with
 matching quadrature; see the [Firedrake higher-order wave example](https://www.firedrakeproject.org/demos/higher_order_mass_lumping.py.html).
@@ -256,14 +276,15 @@ without analysis. Large spectral order is not the assumed solution to a coarse
 mesh. Report mesh preparation, operator preparation, display time, and stepping
 throughput separately, with DOFs, memory, timestep, and phase/amplitude error.
 
-Choose a conservative timestep from the actual accepted operator, including
-relevant restrictions introduced by damping and later radiation conditions. Mesh
-quality, coefficient changes, and wave speed are part of timestep management.
-Bound the number of substeps per frame and report achieved simulation speed.
+The application requests at most 16 substeps per display frame and reports achieved
+simulation time per wall time. Pulse injection modifies both stored levels equally,
+giving zero added velocity. The continuous source is a Gaussian nodal acceleration
+with a sinusoidal time factor; its default frequency is 2.5 cycles per dimensionless
+time, corresponding to wavelength 0.4 at wave speed one.
 
-Use a CPU reference to check GPU kernels. Prefer f64 for geometry/assembly on the
-CPU and f32 GPU fields initially; normalize scales and validate uploaded values.
-Predicate robustness needs its own treatment rather than a universal epsilon.
+Publishing a new committed mesh currently resets GPU state. The old solver keeps
+running while the new mesh is prepared, but transfer is intentionally deferred to
+the transaction lifecycle below. Invalid drafts do not alter the active solver.
 
 ## Transaction lifecycle
 
