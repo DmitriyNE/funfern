@@ -53,6 +53,16 @@ setting. Keep `Cargo.lock` for reproducibility. The pinned integration is
 [bevy_egui 0.42.0](https://docs.rs/crate/bevy_egui/0.42.0).
 See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for tooling.
 
+Docker builds the release WASM bundle and serves it with nginx:
+
+```sh
+docker compose up --build
+```
+
+Open <http://localhost:8080/>. Set `FUNFERN_PORT` to use another host port,
+for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
+`docker compose down`.
+
 ## Edit
 
 - **Select:** left-click a handle or curve; drag handles to reshape. Double-click

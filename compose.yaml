@@ -1,0 +1,11 @@
+name: funfern
+
+services:
+  web:
+    image: funfern:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${FUNFERN_PORT:-8080}:80"
+    restart: unless-stopped

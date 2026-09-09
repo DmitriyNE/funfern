@@ -39,6 +39,19 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
 
+## 2026-09-09 — Containerized browser serving
+
+- Added a Docker Compose service that builds the locked release WASM application
+  with Rust 1.96 and Trunk 0.21.14, then serves only the static bundle from nginx.
+  The host port defaults to 8080 and can be changed with `FUNFERN_PORT`.
+- The nginx configuration supplies the WASM MIME type through the standard MIME
+  table, disables index caching, caches content-hashed JS/WASM assets, and exposes
+  a container health check. Build context excludes Git and local build artifacts.
+- `docker compose config` and a clean ARM64 `docker compose build` pass. The
+  running service becomes healthy on port 8080; probes return 200 with `text/html`
+  and `no-cache` for the index, and `application/wasm` with immutable caching for
+  the hashed 24.7 MiB WASM asset. The verification container was removed afterward.
+
 ## 2026-09-09 — Renamed project to funfern
 
 - Renamed the workspace packages and source directories to `funfern-core` and
