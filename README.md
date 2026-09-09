@@ -58,10 +58,11 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
 - **Select:** left-click a handle or curve; drag handles to reshape. Double-click
   a curve to insert a knot without changing its shape. Clicking near an existing
   knot selects its associated control instead of adding a repeated knot.
-- **Baffle spans:** clicking an open curve selects its logical knot span. Choose
-  the highlighted left or right face in the panel, then leave it reflecting or
-  assign a first-order matched impedance with an adjustable ratio. A span can also
-  couple its coincident faces as a conservative thin-gap spring; increasing its
+- **Boundary spans:** clicking a hole or open baffle selects its highlighted logical
+  knot span. A hole span can be reflecting or use a first-order matched impedance
+  with an adjustable ratio against its exterior medium. Baffles expose the same
+  choice independently on their highlighted left and right faces. A baffle span can
+  also couple its coincident faces as a conservative thin-gap spring; increasing its
   stiffness can reduce the solver time step.
 - **Geometry role:** choose Hole, Material interface, or Reflecting baffle before
   creating. An interface retains its interior and shares its finite-element trace
@@ -77,6 +78,8 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   points, not interpolation points.
 - **Remove:** Delete or the panel action removes the selected control and its
   associated knot. This can reshape the curve. At least four controls must remain.
+  A removal that would merge different span conditions is rejected until the two
+  assignments agree. Shape-preserving insertion copies the split span assignment.
   Deleting an entire loop is a separate panel action.
 - **Materials:** create materials under Regions and materials, edit positive mass
   density and stiffness plus nonnegative volume damping, and assign a material to
@@ -122,8 +125,9 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   time, substeps, throughput, operator/map preparation time, and discrete energy.
 - **Outer boundary:** choose Reflecting, First-order outgoing, or Second-order
   auxiliary. The second-order Engquist-Majda condition adds tangential propagation
-  along the fixed outer square and reduces oblique reflection. Hole, closed-wall,
-  and baffle boundaries remain reflecting; material interfaces transmit. A change reuses the mesh and transactionally transfers the
+  along the fixed outer square and reduces oblique reflection. Hole and baffle spans
+  support reflecting or local first-order impedance conditions; closed walls remain
+  reflecting and material interfaces transmit. A change reuses the mesh and transactionally transfers the
   live field to the replacement operator. Boundary memory survives second-order
   geometry edits and is cleared when entering or leaving that mode.
 - **Interior media:** every triangle carries a stable region ID. The P2e operator
@@ -138,8 +142,8 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   candidate retains the previous simulation.
 
 Scenes allow 32 geometric features, 32 materials, and 128 controls per curve.
-Version 4 JSON stores open-baffle span and face laws plus draft and accepted
-material/region topology; versions 2 and 3 remain compatible, and version 1 files
+Version 5 JSON stores hole-span conditions, open-baffle span and face laws, plus
+draft and accepted material/region topology; versions 2–4 remain compatible, and version 1 files
 migrate their loops to background holes. JSON files are capped at 2 MiB and require
 finite coordinates. The editor uses a fixed
 world-space validation tolerance of `0.0002`, independent of zoom. The editor
@@ -167,7 +171,8 @@ cargo run -p femfun-app --release --locked -- --wave-transfer-check
 ```
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
-constrained topology, concave and multiple holes, nested material inclusions,
+constrained topology, concave and multiple holes, per-span hole impedance,
+nested material inclusions,
 shared interface traces, separated wall traces, refinement limits, geometry
 rejection, draft/accepted history, scene files, and egui pointer/keyboard
 interactions, local Delaunay legality, incremental work, slice-independent output,

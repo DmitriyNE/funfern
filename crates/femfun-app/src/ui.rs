@@ -79,6 +79,7 @@ pub struct Playground {
     material_selection: MaterialId,
     region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
+    obstacle_span_selection: Option<(ObstacleId, usize)>,
     internal_selection: Option<(InternalBoundaryId, Option<usize>)>,
     internal_span_selection: Option<(InternalBoundaryId, usize)>,
     internal_face_selection: InternalBoundarySide,
@@ -166,6 +167,7 @@ impl Default for Playground {
             material_selection: DEFAULT_MATERIAL,
             region_selection: BACKGROUND_REGION,
             selection: Some((ObstacleId(1), None)),
+            obstacle_span_selection: Some((ObstacleId(1), 0)),
             internal_selection: None,
             internal_span_selection: None,
             internal_face_selection: InternalBoundarySide::Left,
@@ -259,6 +261,7 @@ impl Playground {
     }
     fn clear_transient(&mut self) {
         self.selection = None;
+        self.obstacle_span_selection = None;
         self.internal_selection = None;
         self.internal_span_selection = None;
         self.region_selection = BACKGROUND_REGION;
@@ -292,6 +295,7 @@ impl Playground {
             let result = self.editor.create_internal_boundary(spline, region);
             if let Some(id) = self.error(result) {
                 self.selection = None;
+                self.obstacle_span_selection = None;
                 self.internal_selection = Some((id, None));
                 self.internal_span_selection = Some((id, 0));
                 self.custom.clear();
@@ -309,6 +313,8 @@ impl Playground {
         let result = self.create_spline(spline, center);
         if let Some(id) = self.error(result) {
             self.selection = Some((id, None));
+            self.obstacle_span_selection =
+                (self.creation_role == CreationRole::Hole).then_some((id, 0));
             self.custom.clear();
             self.mode = Mode::Select;
         }
@@ -709,12 +715,12 @@ impl Playground {
                 .as_ref()
                 .is_some_and(|mesh| Arc::ptr_eq(mesh, &candidate.mesh))
                 && candidate.max_edge == self.mesh_committed_max_edge;
-            let material_changed = candidate.scene != self.mesh_committed_scene;
+            let scene_settings_changed = candidate.scene != self.mesh_committed_scene;
             let boundary_changed = candidate.boundary != self.wave_boundary_committed;
-            let commit_message = if same_mesh && material_changed && boundary_changed {
-                "Materials and outer boundary committed; live field preserved".into()
-            } else if same_mesh && material_changed {
-                "Materials committed; live field preserved".into()
+            let commit_message = if same_mesh && scene_settings_changed && boundary_changed {
+                "Scene settings and outer boundary committed; live field preserved".into()
+            } else if same_mesh && scene_settings_changed {
+                "Scene settings committed; live field preserved".into()
             } else if same_mesh && boundary_changed {
                 format!(
                     "{} outer boundary committed; live field preserved",
@@ -992,19 +998,34 @@ impl Playground {
             .max_height(135.0)
             .show(ui, |ui| {
                 for o in &self.editor.document.draft.obstacles {
+                    let assignment = if matches!(o.role, LoopRole::Hole { .. }) {
+                        if o.span_conditions
+                            .iter()
+                            .all(|condition| *condition == FaceBoundaryCondition::Reflecting)
+                        {
+                            " · Reflecting"
+                        } else {
+                            " · Assigned BCs"
+                        }
+                    } else {
+                        ""
+                    };
                     if ui
                         .selectable_label(
                             self.selection.is_some_and(|s| s.0 == o.id),
                             format!(
-                                "Loop {:02} · {} · {} controls",
+                                "Loop {:02} · {}{} · {} controls",
                                 o.id.0,
                                 o.role.label(),
+                                assignment,
                                 o.spline.controls().len()
                             ),
                         )
                         .clicked()
                     {
                         self.selection = Some((o.id, None));
+                        self.obstacle_span_selection =
+                            matches!(o.role, LoopRole::Hole { .. }).then_some((o.id, 0));
                         self.internal_selection = None;
                         self.internal_span_selection = None;
                     }
@@ -1032,6 +1053,7 @@ impl Playground {
                         .clicked()
                     {
                         self.selection = None;
+                        self.obstacle_span_selection = None;
                         self.internal_selection = Some((boundary.id, None));
                         self.internal_span_selection = Some((boundary.id, 0));
                     }
@@ -1041,6 +1063,60 @@ impl Playground {
             if ui.button("Delete loop").clicked() {
                 self.editor.delete_obstacle(id);
                 self.selection = None;
+                self.obstacle_span_selection = None;
+            }
+            if let Some(obstacle) = self.editor.obstacle(id)
+                && matches!(obstacle.role, LoopRole::Hole { .. })
+            {
+                let span_count = obstacle.span_conditions.len();
+                let mut span = self
+                    .obstacle_span_selection
+                    .filter(|selection| selection.0 == id && selection.1 < span_count)
+                    .map_or(0, |selection| selection.1);
+                egui::ComboBox::from_id_salt(("hole_span", id.0))
+                    .selected_text(format!("Span {} / {span_count}", span + 1))
+                    .show_ui(ui, |ui| {
+                        for candidate in 0..span_count {
+                            ui.selectable_value(
+                                &mut span,
+                                candidate,
+                                format!("Span {}", candidate + 1),
+                            );
+                        }
+                    });
+                self.obstacle_span_selection = Some((id, span));
+                ui.small("This face borders the hole's exterior medium");
+                let mut condition = obstacle.span_conditions[span];
+                let mut impedance = matches!(condition, FaceBoundaryCondition::Impedance { .. });
+                if ui
+                    .checkbox(&mut impedance, "Matched impedance boundary")
+                    .changed()
+                {
+                    condition = if impedance {
+                        FaceBoundaryCondition::Impedance { ratio: 1.0 }
+                    } else {
+                        FaceBoundaryCondition::Reflecting
+                    };
+                    let result = self
+                        .editor
+                        .set_obstacle_boundary_condition(id, span, condition);
+                    self.error(result);
+                } else if let FaceBoundaryCondition::Impedance { ratio } = &mut condition {
+                    let response = ui.add(
+                        egui::DragValue::new(ratio)
+                            .speed(0.02)
+                            .range(0.01..=100.0)
+                            .prefix("impedance ratio ")
+                            .update_while_editing(false),
+                    );
+                    if response.changed() {
+                        let result = self
+                            .editor
+                            .set_obstacle_boundary_condition(id, span, condition);
+                        self.error(result);
+                    }
+                    ui.small("1.0 matches the exterior medium");
+                }
             }
             if let Some(index) = index
                 && let Some(o) = self.editor.obstacle(id)
@@ -1754,6 +1830,11 @@ impl Playground {
                     self.refresh_curves();
                     if let Some((id, index)) = self.hit_handle(p, r) {
                         self.selection = Some((id, Some(index)));
+                        self.obstacle_span_selection = self
+                            .editor
+                            .obstacle(id)
+                            .filter(|obstacle| matches!(obstacle.role, LoopRole::Hole { .. }))
+                            .map(|_| (id, index));
                         self.internal_selection = None;
                         self.internal_span_selection = None;
                         self.editor.begin();
@@ -1765,6 +1846,7 @@ impl Playground {
                         });
                     } else if let Some((id, index)) = self.hit_internal_handle(p, r) {
                         self.selection = None;
+                        self.obstacle_span_selection = None;
                         self.internal_selection = Some((id, Some(index)));
                         self.internal_span_selection = None;
                         self.editor.begin();
@@ -1776,7 +1858,15 @@ impl Playground {
                             offset: point - self.world(p, r),
                         });
                     } else {
-                        self.selection = self.hit_curve(p, r).map(|(id, _)| (id, None));
+                        let obstacle_hit = self.hit_curve(p, r);
+                        self.selection = obstacle_hit.map(|(id, _)| (id, None));
+                        self.obstacle_span_selection = obstacle_hit.and_then(|(id, parameter)| {
+                            self.editor
+                                .obstacle(id)
+                                .filter(|obstacle| matches!(obstacle.role, LoopRole::Hole { .. }))
+                                .and_then(|obstacle| obstacle.spline.span_index(parameter))
+                                .map(|span| (id, span))
+                        });
                         let internal_hit = if self.selection.is_none() {
                             self.hit_internal_curve(p, r)
                         } else {
@@ -1828,6 +1918,11 @@ impl Playground {
                         let result = self.editor.insert(id, t);
                         if let Some(index) = self.error(result) {
                             self.selection = Some((id, Some(index)));
+                            self.obstacle_span_selection = self
+                                .editor
+                                .obstacle(id)
+                                .filter(|obstacle| matches!(obstacle.role, LoopRole::Hole { .. }))
+                                .map(|_| (id, index));
                             self.internal_selection = None;
                             self.internal_span_selection = None;
                         }
@@ -1835,6 +1930,7 @@ impl Playground {
                         let result = self.editor.insert_internal_boundary(id, parameter);
                         if let Some(index) = self.error(result) {
                             self.selection = None;
+                            self.obstacle_span_selection = None;
                             self.internal_selection = Some((id, Some(index)));
                             self.internal_span_selection = None;
                         }
@@ -1856,6 +1952,7 @@ impl Playground {
                                 );
                                 if let Some(id) = self.error(result) {
                                     self.selection = None;
+                                    self.obstacle_span_selection = None;
                                     self.internal_selection = Some((id, None));
                                     self.internal_span_selection = Some((id, 0));
                                     self.mode = Mode::Select;
@@ -1867,6 +1964,9 @@ impl Playground {
                                 );
                                 if let Some(id) = self.error(result) {
                                     self.selection = Some((id, None));
+                                    self.obstacle_span_selection = (self.creation_role
+                                        == CreationRole::Hole)
+                                        .then_some((id, 0));
                                     self.internal_selection = None;
                                     self.internal_span_selection = None;
                                     self.mode = Mode::Select;
@@ -2048,6 +2148,15 @@ impl Playground {
         }
         for curve in &self.draft_internal_curves {
             self.draw_internal_curve(&painter, r, curve, color, 3.0);
+        }
+        if let Some((id, span)) = self.obstacle_span_selection
+            && let Some(curve) = self.draft_curves.iter().find(|curve| curve.id == id)
+            && let Some(bounds) = self
+                .editor
+                .obstacle(id)
+                .and_then(|obstacle| obstacle.spline.span_bounds(span))
+        {
+            self.draw_curve_span(&painter, r, curve, bounds);
         }
         if let Some((id, span)) = self.internal_span_selection
             && let Some(curve) = self
@@ -2352,6 +2461,21 @@ impl Playground {
         }
     }
 
+    fn draw_curve_span(&self, painter: &egui::Painter, r: Rect, curve: &Curve, bounds: [f64; 2]) {
+        for segment in curve.samples.windows(2) {
+            let parameter = 0.5 * (segment[0].t + segment[1].t);
+            if parameter >= bounds[0] && parameter <= bounds[1] {
+                painter.line_segment(
+                    [
+                        self.screen(segment[0].point, r),
+                        self.screen(segment[1].point, r),
+                    ],
+                    Stroke::new(4.0, Color32::WHITE),
+                );
+            }
+        }
+    }
+
     fn draw_internal_span_face(
         &self,
         painter: &egui::Painter,
@@ -2510,14 +2634,14 @@ pub fn wave_gpu_check_scene() -> Playground {
         ..Default::default()
     };
     let scene = Scene {
-        obstacles: vec![Obstacle {
-            id: ObstacleId(1),
-            spline: PeriodicCubicSpline::rounded(Point2::default(), 0.30),
-            role: LoopRole::Wall {
+        obstacles: vec![Obstacle::with_role(
+            ObstacleId(1),
+            PeriodicCubicSpline::rounded(Point2::default(), 0.30),
+            LoopRole::Wall {
                 exterior: BACKGROUND_REGION,
                 interior: RegionId(2),
             },
-        }],
+        )],
         internal_boundaries: vec![InternalBoundary {
             id: InternalBoundaryId(1),
             spline: OpenCubicSpline::uniform(vec![
@@ -3620,6 +3744,37 @@ mod tests {
     }
 
     #[test]
+    fn hole_curve_selection_assigns_the_clicked_span_condition() {
+        let mut harness = Harness::new();
+        let point = harness
+            .state
+            .editor
+            .obstacle(ObstacleId(1))
+            .unwrap()
+            .spline
+            .evaluate(3.5);
+        harness.click(harness.point(point));
+        assert_eq!(
+            harness.state.obstacle_span_selection,
+            Some((ObstacleId(1), 3))
+        );
+
+        let history = harness.state.editor.history_len().0;
+        harness.click_text("Matched impedance boundary");
+        harness.settle();
+        assert_eq!(
+            harness
+                .state
+                .editor
+                .obstacle(ObstacleId(1))
+                .unwrap()
+                .span_conditions[3],
+            FaceBoundaryCondition::Impedance { ratio: 1.0 }
+        );
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
+    }
+
+    #[test]
     fn open_curve_click_selects_its_logical_knot_span() {
         let mut harness = Harness::new();
         let id = harness
@@ -4049,6 +4204,44 @@ mod tests {
             .simulation_candidate
             .as_ref()
             .expect("baffle-law candidate");
+        assert!(Arc::ptr_eq(&candidate.mesh, &mesh));
+        assert!(h.state.mesh_job.is_none());
+        assert!(candidate.operator.lumped_damping().iter().sum::<f64>() > old_damping);
+        assert_eq!(candidate.exposed_nodes, 0);
+        assert!(candidate.transfer.is_some());
+    }
+
+    #[test]
+    fn hole_law_change_reuses_mesh_and_prepares_a_field_transfer() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let mesh = h.state.mesh.clone().expect("initial accepted mesh");
+        let old_damping: f64 = h
+            .state
+            .wave_operator
+            .as_ref()
+            .unwrap()
+            .lumped_damping()
+            .iter()
+            .sum();
+
+        h.state
+            .editor
+            .set_obstacle_boundary_condition(
+                ObstacleId(1),
+                0,
+                FaceBoundaryCondition::Impedance { ratio: 1.0 },
+            )
+            .unwrap();
+        h.settle();
+        h.state.refresh_mesh();
+
+        let candidate = h
+            .state
+            .simulation_candidate
+            .as_ref()
+            .expect("hole-law candidate");
         assert!(Arc::ptr_eq(&candidate.mesh, &mesh));
         assert!(h.state.mesh_job.is_none());
         assert!(candidate.operator.lumped_damping().iter().sum::<f64>() > old_damping);

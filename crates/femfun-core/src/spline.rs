@@ -141,7 +141,6 @@ impl OpenCubicSpline {
     pub fn period(&self) -> f64 {
         *self.knots.last().unwrap()
     }
-
     /// Returns the nonempty knot span containing `parameter`. Interior knots
     /// belong to the span on their right; the final endpoint belongs to the last
     /// span.
@@ -391,6 +390,33 @@ impl PeriodicCubicSpline {
     }
     pub fn period(&self) -> f64 {
         *self.knots.last().unwrap()
+    }
+    /// Returns the periodic knot span containing `parameter`. Interior knots
+    /// belong to the span on their right. The exact end of the stored period
+    /// belongs to the last span; other out-of-period values wrap before lookup.
+    pub fn span_index(&self, parameter: f64) -> Option<usize> {
+        if !parameter.is_finite() {
+            return None;
+        }
+        let period = self.period();
+        let parameter = if parameter == period {
+            period
+        } else {
+            parameter.rem_euclid(period)
+        };
+        if parameter == period {
+            return Some(self.intervals.len() - 1);
+        }
+        Some(
+            self.knots
+                .partition_point(|knot| *knot <= parameter)
+                .saturating_sub(1)
+                .min(self.intervals.len() - 1),
+        )
+    }
+
+    pub fn span_bounds(&self, index: usize) -> Option<[f64; 2]> {
+        (index < self.intervals.len()).then(|| [self.knots[index], self.knots[index + 1]])
     }
     fn knot(&self, i: isize) -> f64 {
         let n = self.controls.len() as isize;

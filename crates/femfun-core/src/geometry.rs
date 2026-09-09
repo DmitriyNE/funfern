@@ -105,6 +105,10 @@ pub struct Obstacle {
     pub id: ObstacleId,
     pub spline: PeriodicCubicSpline,
     pub role: LoopRole,
+    /// One exterior-face condition for each periodic spline knot span.
+    /// Conditions are currently assembled for holes; retaining the vector on
+    /// every loop keeps spline edits and future closed-wall assignment uniform.
+    pub span_conditions: Vec<FaceBoundaryCondition>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -181,14 +185,24 @@ pub struct InternalBoundary {
     pub span_laws: Vec<InternalBoundaryLaw>,
 }
 impl Obstacle {
-    pub fn hole(id: ObstacleId, spline: PeriodicCubicSpline) -> Self {
+    pub fn with_role(id: ObstacleId, spline: PeriodicCubicSpline, role: LoopRole) -> Self {
+        let span_conditions = vec![FaceBoundaryCondition::Reflecting; spline.intervals().len()];
         Self {
             id,
             spline,
-            role: LoopRole::Hole {
+            role,
+            span_conditions,
+        }
+    }
+
+    pub fn hole(id: ObstacleId, spline: PeriodicCubicSpline) -> Self {
+        Self::with_role(
+            id,
+            spline,
+            LoopRole::Hole {
                 exterior: BACKGROUND_REGION,
             },
-        }
+        )
     }
 }
 
@@ -236,6 +250,8 @@ impl Scene {
         }
         let unique_obstacles = self.obstacles.iter().enumerate().all(|(i, o)| {
             o.id.0 > 0
+                && o.span_conditions.len() == o.spline.intervals().len()
+                && o.span_conditions.iter().all(|condition| condition.valid())
                 && !self.obstacles[..i]
                     .iter()
                     .any(|previous| previous.id == o.id)
@@ -311,7 +327,14 @@ impl Scene {
     /// Geometry and topology equality excludes names, colors, coefficients, and
     /// region-to-material assignments so those edits can reuse the mesh.
     pub fn geometry_eq(&self, other: &Self) -> bool {
-        self.obstacles == other.obstacles
+        self.obstacles.len() == other.obstacles.len()
+            && self
+                .obstacles
+                .iter()
+                .zip(&other.obstacles)
+                .all(|(left, right)| {
+                    left.id == right.id && left.spline == right.spline && left.role == right.role
+                })
             && self.internal_boundaries.len() == other.internal_boundaries.len()
             && self
                 .internal_boundaries

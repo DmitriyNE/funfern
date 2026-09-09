@@ -69,6 +69,8 @@ struct StoredRegion {
 struct StoredLoop {
     id: u64,
     role: StoredRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    span_conditions: Option<Vec<StoredFaceCondition>>,
     controls: Vec<[f64; 2]>,
     intervals: Vec<f64>,
 }
@@ -164,6 +166,14 @@ fn encode_scene(scene: &Scene) -> StoredScene {
                         interior: interior.0,
                     },
                 },
+                span_conditions: Some(
+                    loop_
+                        .span_conditions
+                        .iter()
+                        .copied()
+                        .map(encode_face_condition)
+                        .collect(),
+                ),
                 controls: loop_
                     .spline
                     .controls()
@@ -280,7 +290,7 @@ fn decode_v1(loops: Vec<StoredLoopV1>) -> Result<Scene, String> {
     Ok(scene)
 }
 
-fn decode_scene(stored: StoredScene) -> Result<Scene, String> {
+fn decode_scene(stored: StoredScene, require_loop_conditions: bool) -> Result<Scene, String> {
     if stored.loops.len() > MAX_OBSTACLES
         || stored.internal_boundaries.len() > MAX_INTERNAL_BOUNDARIES
         || stored.loops.len() + stored.internal_boundaries.len() > MAX_OBSTACLES
@@ -330,10 +340,19 @@ fn decode_scene(stored: StoredScene) -> Result<Scene, String> {
                     interior: RegionId(interior),
                 },
             };
+            let spline = decode_spline(loop_.controls, loop_.intervals)?;
+            let span_conditions = match loop_.span_conditions {
+                Some(conditions) => conditions.into_iter().map(decode_face_condition).collect(),
+                None if !require_loop_conditions => {
+                    vec![FaceBoundaryCondition::Reflecting; spline.intervals().len()]
+                }
+                None => return Err("Loop has no span boundary conditions".into()),
+            };
             Ok(Obstacle {
                 id: ObstacleId(loop_.id),
-                spline: decode_spline(loop_.controls, loop_.intervals)?,
+                spline,
                 role,
+                span_conditions,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -393,7 +412,7 @@ fn decode_scene(stored: StoredScene) -> Result<Scene, String> {
 
 pub fn save(document: &Document) -> Result<String, String> {
     serde_json::to_string_pretty(&FileV2 {
-        version: 4,
+        version: 5,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
@@ -418,14 +437,14 @@ pub fn parse(bytes: &[u8]) -> Result<LoadCandidate, String> {
                 accepted: decode_v1(file.accepted)?,
             }
         }
-        2..=4 => {
+        2..=5 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
             }
             Document {
-                draft: decode_scene(file.draft)?,
-                accepted: decode_scene(file.accepted)?,
+                draft: decode_scene(file.draft, header.version >= 5)?,
+                accepted: decode_scene(file.accepted, header.version >= 5)?,
             }
         }
         _ => return Err("Unsupported scene version".into()),

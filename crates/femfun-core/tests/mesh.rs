@@ -491,11 +491,11 @@ fn medium(id: u64, name: &str, stiffness: f64, color: [u8; 3]) -> Material {
 
 fn two_region_scene(role: impl FnOnce(RegionId, RegionId) -> LoopRole) -> Scene {
     Scene {
-        obstacles: vec![Obstacle {
-            id: ObstacleId(20),
-            spline: PeriodicCubicSpline::rounded(Point2::default(), 0.42),
-            role: role(BACKGROUND_REGION, RegionId(2)),
-        }],
+        obstacles: vec![Obstacle::with_role(
+            ObstacleId(20),
+            PeriodicCubicSpline::rounded(Point2::default(), 0.42),
+            role(BACKGROUND_REGION, RegionId(2)),
+        )],
         internal_boundaries: vec![],
         materials: vec![
             Material::default_medium(),
@@ -752,14 +752,14 @@ fn nested_material_regions_follow_explicit_region_ownership() {
         id: RegionId(3),
         material: MaterialId(3),
     });
-    scene.obstacles.push(Obstacle {
-        id: ObstacleId(21),
-        spline: PeriodicCubicSpline::rounded(Point2::default(), 0.18),
-        role: LoopRole::MaterialInterface {
+    scene.obstacles.push(Obstacle::with_role(
+        ObstacleId(21),
+        PeriodicCubicSpline::rounded(Point2::default(), 0.18),
+        LoopRole::MaterialInterface {
             exterior: RegionId(2),
             interior: RegionId(3),
         },
-    });
+    ));
     assert!(validate(&scene).valid());
     let mesh = mesh(&scene);
     assert_eq!(
@@ -891,7 +891,9 @@ fn adaptation_scheduling_and_fallback_are_explicit() {
 
     let mut cases = vec![Scene::default()];
     let mut inserted = scene.clone();
+    let inherited = inserted.obstacles[0].span_conditions[0];
     inserted.obstacles[0].spline.insert(0.2).unwrap();
+    inserted.obstacles[0].span_conditions.insert(1, inherited);
     cases.push(inserted);
     let mut shifted = scene.clone();
     for i in 0..8 {

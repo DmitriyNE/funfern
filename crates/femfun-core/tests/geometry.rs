@@ -291,6 +291,22 @@ fn internal_boundary_span_laws_match_knots_and_reject_bad_coefficients() {
     assert!(!scene.structure_valid());
 }
 
+#[test]
+fn hole_span_conditions_match_knots_validate_and_do_not_change_geometry() {
+    let scene = Scene::initial();
+    let mut changed = scene.clone();
+    changed.obstacles[0].span_conditions[0] = FaceBoundaryCondition::Impedance { ratio: 1.5 };
+    assert!(changed.structure_valid());
+    assert!(scene.geometry_eq(&changed));
+
+    changed.obstacles[0].span_conditions.pop();
+    assert!(!changed.structure_valid());
+    changed.obstacles[0].span_conditions =
+        vec![FaceBoundaryCondition::Reflecting; changed.obstacles[0].spline.intervals().len()];
+    changed.obstacles[0].span_conditions[0] = FaceBoundaryCondition::Impedance { ratio: 0.0 };
+    assert!(!changed.structure_valid());
+}
+
 fn scene(loops: Vec<PeriodicCubicSpline>) -> Scene {
     Scene {
         obstacles: loops
@@ -388,7 +404,16 @@ fn validation_is_incremental_and_independent_of_render_tolerance() {
 fn close_knot_insertions_do_not_create_false_self_contacts() {
     let mut scene = Scene::initial();
     for t in [0.00001, 0.00002, 7.99999, 0.99999, 1.00001] {
-        scene.obstacles[0].spline.insert(t).unwrap();
+        let span = scene.obstacles[0].spline.span_index(t).unwrap();
+        let inherited = scene.obstacles[0].span_conditions[span];
+        if matches!(
+            scene.obstacles[0].spline.insert(t).unwrap(),
+            Insertion::Inserted(_)
+        ) {
+            scene.obstacles[0]
+                .span_conditions
+                .insert(span + 1, inherited);
+        }
         assert!(validate(&scene).valid(), "{:?}", validate(&scene));
     }
 }

@@ -436,7 +436,7 @@ impl Editor {
         self.document
             .draft
             .obstacles
-            .push(Obstacle { id, spline, role });
+            .push(Obstacle::with_role(id, spline, role));
         Ok(id)
     }
     pub fn delete_obstacle(&mut self, id: ObstacleId) {
@@ -583,38 +583,91 @@ impl Editor {
         Ok(())
     }
     pub fn remove_point(&mut self, id: ObstacleId, index: usize) -> Result<(), String> {
-        let mut spline = self.obstacle(id).ok_or("Missing obstacle")?.spline.clone();
+        let obstacle = self.obstacle(id).ok_or("Missing obstacle")?;
+        let mut spline = obstacle.spline.clone();
+        let mut span_conditions = obstacle.span_conditions.clone();
+        if index >= span_conditions.len() {
+            return Err("Missing obstacle span".into());
+        }
+        let previous = (index + span_conditions.len() - 1) % span_conditions.len();
+        if span_conditions[previous] != span_conditions[index] {
+            return Err(
+                "Removal would merge spans with different boundary conditions; make them equal first"
+                    .into(),
+            );
+        }
         spline.remove(index).map_err(|e| e.to_string())?;
+        span_conditions.remove(index);
         self.begin();
-        self.document
+        let obstacle = self
+            .document
             .draft
             .obstacles
             .iter_mut()
             .find(|o| o.id == id)
-            .unwrap()
-            .spline = spline;
+            .unwrap();
+        obstacle.spline = spline;
+        obstacle.span_conditions = span_conditions;
         self.changed();
         self.commit();
         Ok(())
     }
     pub fn insert(&mut self, id: ObstacleId, t: f64) -> Result<usize, String> {
-        let mut spline = self.obstacle(id).ok_or("Missing obstacle")?.spline.clone();
+        let obstacle = self.obstacle(id).ok_or("Missing obstacle")?;
+        let mut spline = obstacle.spline.clone();
+        let span = spline.span_index(t).ok_or("Invalid spline parameter")?;
+        let inherited = obstacle.span_conditions[span];
         match spline.insert(t).map_err(|e| e.to_string())? {
             Insertion::Existing(i) => Ok(i),
             Insertion::Inserted(i) => {
                 self.begin();
-                self.document
+                let obstacle = self
+                    .document
                     .draft
                     .obstacles
                     .iter_mut()
                     .find(|o| o.id == id)
-                    .unwrap()
-                    .spline = spline;
+                    .unwrap();
+                obstacle.spline = spline;
+                obstacle.span_conditions.insert(span + 1, inherited);
                 self.changed();
                 self.commit();
                 Ok(i)
             }
         }
+    }
+
+    pub fn set_obstacle_boundary_condition(
+        &mut self,
+        id: ObstacleId,
+        span: usize,
+        condition: FaceBoundaryCondition,
+    ) -> Result<(), String> {
+        if !condition.valid() {
+            return Err("Boundary impedance must be positive and finite".into());
+        }
+        let obstacle = self.obstacle(id).ok_or("Missing obstacle")?;
+        if !matches!(obstacle.role, LoopRole::Hole { .. }) {
+            return Err("Boundary conditions can currently be assigned only to holes".into());
+        }
+        let current = *obstacle
+            .span_conditions
+            .get(span)
+            .ok_or("Missing obstacle span")?;
+        if current == condition {
+            return Ok(());
+        }
+        self.begin();
+        self.document
+            .draft
+            .obstacles
+            .iter_mut()
+            .find(|obstacle| obstacle.id == id)
+            .unwrap()
+            .span_conditions[span] = condition;
+        self.changed();
+        self.commit();
+        Ok(())
     }
     /// Caller must validate the accepted scene before replacement.
     pub fn replace_validated(&mut self, document: Document) {

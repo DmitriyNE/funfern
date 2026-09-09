@@ -79,6 +79,14 @@ coupling enters the assembled spectral bound and can reduce the explicit time
 step. A dissipative relative dashpot is deferred because preserving the centered
 scheme would require an off-diagonal damping solve.
 
+Periodic loops likewise store one exterior-face condition per knot interval.
+Hole spans currently assemble reflecting or scaled matched-impedance behavior
+against the material in the hole's exterior region. Periodic knot insertion copies
+the split condition to both child spans, including across the stored seam. Removal
+merges the deleted interval into its predecessor and is rejected when those two
+conditions differ. Boundary-law edits are excluded from geometry equality, so an
+accepted condition change rebuilds the operator on the existing mesh.
+
 The initial implementation handles obstacle loops in a fixed outer box. Outer
 editable boundaries and more involved topology are future extensions.
 
@@ -130,10 +138,11 @@ excludes selection and navigation. Stable obstacle IDs increase independently of
 undo, preventing reuse after undoing creation. Loading derives the next ID from
 both scenes and clears history.
 
-Version 4 JSON stores the fixed domain, loop roles, open-baffle span/face laws,
-materials, regions, controls, intervals, and both scenes. Versions 2 and 3 remain
+Version 5 JSON stores the fixed domain, loop roles, hole-span conditions,
+open-baffle span/face laws, materials, regions, controls, intervals, and both scenes. Versions 2–4 remain
 compatible; version 1 loads by assigning its loops the background hole role and
-creating the default background material/region.
+creating the default background material/region. Older loop records migrate to a
+reflecting condition on every periodic span.
 Serde and rfd live only in the app crate. Round-trip f64 parsing preserves exact
 stored values. Files have a 2 MiB limit, strict fields/version/domain, finite
 values, and scene/control-count checks. A prospective load validates its accepted

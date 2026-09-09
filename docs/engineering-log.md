@@ -9,8 +9,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
-- [ ] Extend assigned conditions from open-baffle knot spans to outer sides and
-  closed-loop spans, including mixed-condition junction behavior for the existing
+- [ ] Extend assigned conditions from hole/open-baffle knot spans to outer sides and
+  closed-wall faces, including mixed-condition junction behavior for the existing
   second-order auxiliary radiation law.
 - [ ] Evaluate a dissipative relative dashpot for thin gaps. Keeping centered time
   integration would require an off-diagonal damping solve; the implemented gap
@@ -38,6 +38,29 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Improve open-baffle crack-tip element quality. The assigned-law native check
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
+
+## 2026-09-09 — Assigned hole-span conditions
+
+- Periodic loops now carry one exterior-face condition per knot interval. Clicking
+  a hole curve selects and highlights its logical span; the panel assigns reflecting
+  or scaled matched impedance behavior against the exterior material.
+- Hole impedance is assembled on every labeled P2e edge belonging to the selected
+  spline span with positive lumped boundary weights. A condition-only edit is
+  excluded from geometry equality, so it rebuilds the operator on the same mesh
+  and preserves the live field through the existing transaction.
+- Shape-preserving insertion copies the split span condition, including at the
+  periodic seam. Removal refuses to merge unequal neighboring conditions. Both
+  actions and condition assignment retain their existing one-entry history rules.
+- Scene JSON is version 5 and requires hole-span conditions in new files. Versions
+  2–4 migrate periodic loops to reflecting spans; version 1 retains its existing
+  background-hole migration. Invalid lengths and impedance coefficients are
+  rejected before document replacement.
+- Final verification passes formatting, Clippy with warnings denied, all **107
+  tests**, native release compilation, and a release WASM/Trunk build. The Apple
+  M1 Max / Metal solver regression remains within `7.85e-6` current-state relative
+  L2 error with an isolated-region peak of exactly `0.0`; the transfer regression
+  reports `7.49e-16` geometry current-state error and zero boundary/material
+  current-state error. Interactive browser testing was skipped as requested.
 
 ## 2026-09-09 — Assigned open-baffle span laws
 

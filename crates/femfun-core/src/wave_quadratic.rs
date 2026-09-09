@@ -247,6 +247,13 @@ impl QuadraticWaveOperator {
             }
         }
         if let Some(scene) = scene {
+            assemble_hole_boundary_conditions(
+                mesh,
+                scene,
+                &coefficients_by_region,
+                &edge_nodes,
+                &mut damping,
+            )?;
             assemble_internal_boundary_laws(
                 mesh,
                 scene,
@@ -747,6 +754,74 @@ impl QuadraticWaveState {
 
 type TraceNodes = ([usize; 3], f64);
 
+fn assemble_hole_boundary_conditions(
+    mesh: &TriMesh,
+    scene: &Scene,
+    coefficients_by_region: &BTreeMap<RegionId, WaveCoefficients>,
+    edge_nodes: &BTreeMap<(usize, usize), usize>,
+    damping: &mut [f64],
+) -> Result<(), WaveError> {
+    for edge in &mesh.boundary_edges {
+        let BoundaryLabel::Obstacle(id) = edge.label else {
+            continue;
+        };
+        let obstacle = scene
+            .obstacles
+            .iter()
+            .find(|obstacle| obstacle.id == id)
+            .ok_or(WaveError::InvalidMesh(
+                "a hole boundary edge has an unknown ID",
+            ))?;
+        let crate::LoopRole::Hole { exterior } = obstacle.role else {
+            return Err(WaveError::InvalidMesh(
+                "a hole boundary edge references a non-hole loop",
+            ));
+        };
+        let [a, b] = edge.vertices;
+        if a >= mesh.vertices.len() || b >= mesh.vertices.len() || a == b {
+            return Err(WaveError::InvalidMesh(
+                "a hole boundary edge has invalid vertex indices",
+            ));
+        }
+        let key = if a < b { (a, b) } else { (b, a) };
+        let midpoint = *edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
+            "a hole boundary edge does not belong to a triangle",
+        ))?;
+        let [parameter_a, parameter_b] = edge.parameters;
+        if !parameter_a.is_finite() || !parameter_b.is_finite() || parameter_a == parameter_b {
+            return Err(WaveError::InvalidMesh(
+                "a hole boundary edge has invalid parameters",
+            ));
+        }
+        let span = obstacle
+            .spline
+            .span_index(0.5 * (parameter_a + parameter_b))
+            .ok_or(WaveError::InvalidMesh(
+                "a hole boundary edge has an invalid spline parameter",
+            ))?;
+        let FaceBoundaryCondition::Impedance { ratio } = obstacle.span_conditions[span] else {
+            continue;
+        };
+        let coefficients = *coefficients_by_region
+            .get(&exterior)
+            .ok_or(WaveError::InvalidCoefficients)?;
+        let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
+        if !length.is_finite() || length <= 0.0 {
+            return Err(WaveError::InvalidMesh(
+                "a hole boundary edge has invalid length",
+            ));
+        }
+        let impedance = ratio * (coefficients.mass_density * coefficients.stiffness).sqrt();
+        for (node, weight) in [a, midpoint, b]
+            .into_iter()
+            .zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
+        {
+            damping[node] += impedance * length * weight;
+        }
+    }
+    Ok(())
+}
+
 fn assemble_internal_boundary_laws(
     mesh: &TriMesh,
     scene: &Scene,
@@ -949,14 +1024,14 @@ mod tests {
 
     fn two_material_scene() -> Scene {
         Scene {
-            obstacles: vec![Obstacle {
-                id: ObstacleId(1),
-                spline: PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.2),
-                role: crate::LoopRole::MaterialInterface {
+            obstacles: vec![Obstacle::with_role(
+                ObstacleId(1),
+                PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.2),
+                crate::LoopRole::MaterialInterface {
                     exterior: BACKGROUND_REGION,
                     interior: RegionId(2),
                 },
-            }],
+            )],
             internal_boundaries: vec![],
             materials: vec![
                 Material {
@@ -1413,6 +1488,52 @@ mod tests {
             impedance.lumped_damping()[right[1]],
             reflecting.lumped_damping()[right[1]]
         );
+    }
+
+    #[test]
+    fn hole_impedance_adds_damping_only_on_assigned_knot_span() {
+        let reflecting_scene = Scene::initial();
+        let mesh = mesh_scene(&reflecting_scene, 12, MeshingOptions::default()).unwrap();
+        let reflecting = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &reflecting_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let mut impedance_scene = reflecting_scene.clone();
+        impedance_scene.obstacles[0].span_conditions[0] =
+            FaceBoundaryCondition::Impedance { ratio: 1.0 };
+        let impedance = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &impedance_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+
+        let mut assigned_edges = 0;
+        let mut reflecting_edges = 0;
+        for edge in &mesh.boundary_edges {
+            if edge.label != BoundaryLabel::Obstacle(ObstacleId(1)) {
+                continue;
+            }
+            let span = impedance_scene.obstacles[0]
+                .spline
+                .span_index(0.5 * (edge.parameters[0] + edge.parameters[1]))
+                .unwrap();
+            let midpoint = boundary_edge_nodes(&mesh, &impedance, edge)[1];
+            if span == 0 {
+                assigned_edges += 1;
+                assert!(impedance.lumped_damping()[midpoint] > 0.0);
+            } else {
+                reflecting_edges += 1;
+                assert_eq!(
+                    impedance.lumped_damping()[midpoint],
+                    reflecting.lumped_damping()[midpoint]
+                );
+            }
+        }
+        assert!(assigned_edges > 0);
+        assert!(reflecting_edges > 0);
     }
 
     #[test]

@@ -144,10 +144,10 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     let original = e.document.clone();
     let json = save(&original).unwrap();
     let base: serde_json::Value = serde_json::from_str(&json).unwrap();
-    for mutation in 0..8 {
+    for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 5.into(),
+            0 => value["version"] = 6.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -159,7 +159,13 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
                 let o = value["draft"]["loops"][0].clone();
                 value["draft"]["loops"].as_array_mut().unwrap().push(o);
             }
-            _ => value["draft"]["loops"][0]["unknown"] = true.into(),
+            7 => value["draft"]["loops"][0]["unknown"] = true.into(),
+            _ => {
+                value["draft"]["loops"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("span_conditions");
+            }
         };
         assert!(
             decode(serde_json::to_string(&value).unwrap().as_bytes()).is_err(),
@@ -219,7 +225,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        4
+        5
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -290,6 +296,65 @@ fn baffle_span_laws_follow_insertion_and_guard_ambiguous_removal() {
         [assigned, assigned]
     );
 }
+
+#[test]
+fn hole_span_conditions_round_trip_follow_seam_insertion_and_guard_removal() {
+    let mut editor = Editor::default();
+    let id = ObstacleId(1);
+    let assigned = FaceBoundaryCondition::Impedance { ratio: 0.75 };
+    editor
+        .set_obstacle_boundary_condition(id, 7, assigned)
+        .unwrap();
+    settle(&mut editor);
+    assert_eq!(
+        editor.document.accepted.obstacles[0].span_conditions[7],
+        assigned
+    );
+
+    let history_before_insert = editor.history_len().0;
+    editor.insert(id, 7.5).unwrap();
+    settle(&mut editor);
+    assert_eq!(
+        &editor.obstacle(id).unwrap().span_conditions[7..],
+        &[assigned, assigned]
+    );
+    assert_eq!(editor.history_len().0, history_before_insert + 1);
+
+    let before_rejected_remove = editor.document.clone();
+    let history_before_remove = editor.history_len();
+    assert!(editor.remove_point(id, 0).is_err());
+    assert_eq!(editor.document, before_rejected_remove);
+    assert_eq!(editor.history_len(), history_before_remove);
+
+    editor
+        .set_obstacle_boundary_condition(id, 0, assigned)
+        .unwrap();
+    editor.remove_point(id, 0).unwrap();
+    settle(&mut editor);
+    assert_eq!(editor.obstacle(id).unwrap().span_conditions.len(), 8);
+    assert_eq!(editor.obstacle(id).unwrap().span_conditions[7], assigned);
+
+    let json = save(&editor.document).unwrap();
+    let decoded = decode(json.as_bytes()).unwrap();
+    assert_eq!(decoded, editor.document);
+
+    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+    legacy["version"] = 4.into();
+    for scene in ["draft", "accepted"] {
+        legacy[scene]["loops"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("span_conditions");
+    }
+    let migrated = decode(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();
+    assert!(
+        migrated.draft.obstacles[0]
+            .span_conditions
+            .iter()
+            .all(|condition| *condition == FaceBoundaryCondition::Reflecting)
+    );
+}
+
 #[test]
 fn insertion_and_removal_are_individual_actions() {
     let mut e = Editor::default();

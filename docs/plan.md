@@ -196,8 +196,8 @@ walls and open baffles have two finite-element traces; baffle traces reconnect a
 their free tips so waves can diffract around them. Nested
 ownership is validated, triangles carry regions, P2e assembly is piecewise, and
 coefficient edits use a same-mesh field-transfer transaction. Version 4 scene
-files preserve open splines and their assigned span laws and migrate version 1
-holes. Multi-region coordinate edits currently take the full-mesh path; extending
+files introduced open-spline span laws; version 5 also preserves periodic hole-span
+conditions. Older loops migrate to reflecting spans. Multi-region coordinate edits currently take the full-mesh path; extending
 bounded repair across region topology remains adaptation work.
 
 - Give regions, materials, interfaces, and internal walls stable semantic IDs

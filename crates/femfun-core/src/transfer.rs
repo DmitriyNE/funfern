@@ -701,14 +701,14 @@ mod tests {
         let mut target = source.clone();
         target.geometry_revision = 8;
         let scene = Scene {
-            obstacles: vec![Obstacle {
-                id: ObstacleId(1),
-                spline: PeriodicCubicSpline::rounded(Point2::new(0.2, 0.2), 0.1),
-                role: LoopRole::Wall {
+            obstacles: vec![Obstacle::with_role(
+                ObstacleId(1),
+                PeriodicCubicSpline::rounded(Point2::new(0.2, 0.2), 0.1),
+                LoopRole::Wall {
                     exterior: BACKGROUND_REGION,
                     interior: RegionId(2),
                 },
-            }],
+            )],
             internal_boundaries: vec![],
             materials: vec![
                 Material::default_medium(),
