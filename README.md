@@ -83,6 +83,12 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   progress, build/work time, longest mesh slice, and explicit construction
   failures. Meshing targets a soft 2 ms per frame. An invalid draft keeps the last
   accepted mesh.
+- **Resolution:** maximum edge 0.04 is the default; choose 0.02 for a finer mesh
+  or 0.16 for a quick preview. The finer settings produce roughly 12k and 46k
+  triangles in the benchmark scenes. Changing resolution rebuilds the accepted
+  mesh without changing geometry/history. Resolution is not stored in scene files.
+  Fine builds can take tens of seconds when spread across frames. The wave solver
+  and its convergence checks are still pending.
 
 Scenes allow 32 obstacles and 128 controls per obstacle. JSON files are capped at
 2 MiB and require finite coordinates. The editor uses a fixed
@@ -101,6 +107,7 @@ cargo test --workspace --locked
 cargo build -p femfun-app --locked
 trunk build --release
 cargo run -p femfun-core --release --example mesh_timing -- --slices
+cargo run -p femfun-core --release --example mesh_timing -- --wave --slices
 ```
 
 The 43 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
@@ -108,7 +115,11 @@ constrained topology, concave and multiple holes, refinement limits, geometry
 rejection, draft/accepted history, scene files, and egui pointer/keyboard
 interactions, local Delaunay legality, incremental work, slice-independent output,
 and a 32-obstacle meshing regression. The timing example uses the app's mesh
-settings and 2 ms scheduling policy; omit `--slices` for per-phase profiling.
+settings and 2 ms scheduling policy. `--wave` tests maximum edges 0.04 and 0.02;
+without it, the example tests preview resolution. It reports P1 spatial DOFs,
+actual edge size, and resolution relative to a reference wavelength of 0.4.
+These are meshing timings; wave throughput and accuracy have not been measured.
+Omit `--slices` for per-phase profiling.
 Native GPU startup was exercised on Apple M1 Max / Metal. The user
 reports completing the Milestone 1 browser interaction checks; browser metadata
 and Milestone 2 overlay performance have not been recorded.

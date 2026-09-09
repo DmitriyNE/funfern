@@ -12,6 +12,57 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   next exercised interactively; the user has deferred this pass.
 - [ ] Reuse unaffected mesh regions across edits during milestone 5.
 
+## 2026-09-09 — Wave-resolution meshes and honest performance baselines
+
+- User feedback: the h≈0.16 preview mesh does not represent a useful P1 wave
+  workload, and iterative reconstruction is still spatially non-local. Keep the
+  local-update optimization, but do not infer wave throughput from its timings.
+- Default app maximum edge is now 0.04, with 0.02 fine and 0.16 preview choices.
+  Compensate for the refiner's 5% slack, scale curve tolerance as min(.0015,h/50),
+  and raise application limits to 50k vertices / 100k triangles / 50k insertions.
+  Resolution joins the mesh request identity, without entering document history
+  or scene files. Cache per-triangle quality flags at mesh completion to avoid
+  repeating trigonometric quality calculations in every overlay frame.
+- Added `--wave` to the timing example. It tests h≤0.04 and h≤0.02 on 1/8/32
+  obstacle scenes, prints spatial P1 DOFs, achieved edge/angle extrema, and a
+  reference wavelength / h ratio, and reports failures with a failing exit code.
+  Mesh construction is the only measured operation; there is no wave solve yet.
+- Command: `cargo run -p femfun-core --release --example mesh_timing -- --wave --slices`.
+  Rust 1.96.0, release native CPU, same previously identified Apple M1 Max host.
+  Final run after our build commands completed:
+
+  | Maximum h | Obstacles | P1 spatial DOFs | Triangles | Active meshing | Largest slice | Slices |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | .04 | 1 | 6,240 | 12,150 | 236.22 ms | 2.045 ms | 118 |
+  | .04 | 8 | 6,043 | 11,569 | 249.08 ms | 2.052 ms | 125 |
+  | .04 | 32 | 6,295 | 11,371 | 495.68 ms | 2.056 ms | 247 |
+  | .02 | 1 | 24,756 | 48,908 | 2,497.12 ms | 2.276 ms | 1,218 |
+  | .02 | 8 | 23,602 | 46,179 | 2,534.28 ms | 2.267 ms | 1,239 |
+  | .02 | 32 | 23,699 | 45,401 | 3,285.20 ms | 2.513 ms | 1,610 |
+
+- The 2 ms budget implies about 2–4 seconds of completion latency for h=.04
+  and 20–27 seconds for h=.02 at one slice per 60 Hz frame, before other work.
+  These are inferred latencies, not measured browser frame rates. An earlier
+  run while development/build activity was ongoing reached 4.89 s total and a
+  61.653 ms maximum slice; no hard deadline or realtime claim is made. Overlay,
+  operator assembly, GPU stepping, and render cost are excluded from this table.
+- Reference wavelength .4 means five wavelengths across the box and 10/20
+  maximum-edge lengths per wavelength. This is a starting convergence pair;
+  shorter waves or longer propagation may need further refinement or another
+  basis. Milestone 3 now explicitly requires analytic-box phase/amplitude error,
+  independent temporal refinement, and throughput reported at measured error.
+  Documented p=2/p=3 mass-lumped or DG alternatives if P1 proves too expensive,
+  with a primary-source reference for appropriate higher-order mass treatment.
+- Rebuilds still search/select globally and can propagate beyond a local region;
+  every accepted edit starts a new construction. No mesh-reuse implementation
+  was added in this change.
+- Verification: 43 workspace tests passed, plus the expanded UI regression for
+  the finer default, cached quality, resolution changes, and preservation of
+  invalid drafts/history. Formatting, Clippy with warnings denied, native build,
+  and release Trunk packaging to `/private/tmp/femfun-wave-resolution-dist` pass.
+  All six wave-resolution benchmark cases meet their requested edge bounds.
+  Interactive browser testing remains deferred by user request.
+
 ## 2026-09-09 — Local refinement and resumable mesh preparation
 
 - Replaced whole-mesh adjacency reconstruction and quality scans during refinement

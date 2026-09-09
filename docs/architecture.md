@@ -138,10 +138,13 @@ circumcenter when that point remains in the meshed domain and otherwise uses the
 triangle centroid. A candidate that encroaches a constrained edge splits that
 edge and carries its label and continuous parameter range to both children.
 Interior insertions split their containing triangle or edge, followed by robust
-legalization. The defaults target an 18° minimum angle and 0.18 maximum edge;
-the interactive overlay uses 12°, 0.16, and a coarser 0.0015 curve tolerance for
-responsive diagnostics. Both are explicit choices rather than solver accuracy
-claims.
+legalization. Core defaults target an 18° minimum angle and 0.18 edge length.
+The application uses 12° and offers maximum-edge settings 0.16 (preview), 0.04
+(default), and 0.02 (fine). Its internal target is requested maximum / 1.05,
+compensating for the refiner's 5% slack. Curve tolerance is min(0.0015, h/50),
+so finer meshes also resolve the curved boundary more closely. App capacities
+are 50,000 vertices, 100,000 triangles, and 50,000 insertions. These limits do
+not promise either a particular wave accuracy or interactive rebuild latency.
 
 `TriMesh` stores f64 vertices, counter-clockwise triangle indices, labeled outer
 and obstacle edges, stable obstacle IDs, continuous boundary parameters, and
@@ -172,6 +175,12 @@ Jobs run after an edit transaction ends and are replaced when a newer accepted
 scene arrives. The previous accepted mesh remains available during preparation
 and invalid drafts. Each accepted geometry edit still starts a full construction;
 local reuse across edits remains a later adaptation task.
+Even within a build, local edge updates can propagate, and candidate point
+location, encroachment tests, and global quality selection are not spatially
+localized. The implementation does not restrict adaptation to a neighborhood of
+the geometry edit. Mesh resolution is part of a job's request identity; changing
+it rebuilds even if the accepted document is unchanged. Resolution remains an
+application preference, excluded from geometry files and undo history.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a
@@ -192,6 +201,27 @@ m > 0, a > 0, d >= 0
 Begin with linear triangular FEM, lumped mass, and second-order explicit time
 integration. Pick the damping treatment deliberately. GPU work should gather
 contributions into uniquely owned outputs, avoiding floating-point scatter atomics.
+
+The previous h≈0.16 overlay was an editor preview. Wave benchmarks start with
+h≤0.04 and h≤0.02, corresponding to 10 and 20 maximum-edge lengths per reference
+wavelength 0.4 (five wavelengths across the box). P1 has one scalar spatial DOF
+per vertex before essential boundary elimination; reflecting Neumann boundaries
+retain all vertices. Resolution relative to wavelength is only a starting point:
+phase error accumulates with propagation distance and must be measured. Use
+analytic reflecting-box modes, e.g. cos(10π(x+1)/2) with the matching temporal
+frequency at c=1, and compare over one and five box crossing times. Vary timestep
+independently. Obstacle cases subsequently need a sufficiently refined reference
+and a stated source bandwidth.
+
+If the P1 convergence cost is excessive, compare p=2 or p=3 at equal measured
+error, with mass treatment and timestep restrictions included in the cost. A
+concrete continuous-element candidate is enriched mass-lumped triangles with
+matching quadrature; see the [Firedrake higher-order wave example](https://www.firedrakeproject.org/demos/higher_order_mass_lumping.py.html).
+An element-local DG inverse is another candidate. Neither is implemented yet,
+and ordinary higher-degree triangular Lagrange bases must not inherit P1 lumping
+without analysis. Large spectral order is not the assumed solution to a coarse
+mesh. Report mesh preparation, operator preparation, display time, and stepping
+throughput separately, with DOFs, memory, timestep, and phase/amplitude error.
 
 Choose a conservative timestep from the actual accepted operator, including
 relevant restrictions introduced by damping and later radiation conditions. Mesh

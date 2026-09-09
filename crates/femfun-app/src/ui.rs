@@ -65,6 +65,9 @@ pub struct Playground {
     mesh: Option<TriMesh>,
     mesh_job: Option<MeshingJob>,
     mesh_source: Scene,
+    mesh_max_edge: f64,
+    mesh_source_max_edge: f64,
+    mesh_low_quality: Vec<bool>,
     mesh_error: Option<String>,
     mesh_started: Option<Instant>,
     mesh_build_ms: f64,
@@ -107,6 +110,9 @@ impl Default for Playground {
             mesh: None,
             mesh_job: None,
             mesh_source: Scene::default(),
+            mesh_max_edge: 0.04,
+            mesh_source_max_edge: 0.0,
+            mesh_low_quality: vec![],
             mesh_error: None,
             mesh_started: None,
             mesh_build_ms: 0.0,
@@ -235,18 +241,21 @@ impl Playground {
         if self.editor.editing() {
             return;
         }
-        if self.mesh_source != self.editor.document.accepted {
+        if self.mesh_source != self.editor.document.accepted
+            || self.mesh_source_max_edge != self.mesh_max_edge
+        {
             self.mesh_source = self.editor.document.accepted.clone();
+            self.mesh_source_max_edge = self.mesh_max_edge;
             self.mesh_job = Some(MeshingJob::new(
                 self.mesh_source.clone(),
                 self.editor.revision,
                 MeshingOptions {
-                    curve_tolerance: 1.5e-3,
-                    target_edge_length: 0.16,
+                    curve_tolerance: (self.mesh_max_edge * 0.02).min(1.5e-3),
+                    target_edge_length: self.mesh_max_edge / 1.05,
                     minimum_angle_degrees: 12.0,
-                    max_vertices: 8_000,
-                    max_triangles: 16_000,
-                    max_refinement_steps: 5_000,
+                    max_vertices: 50_000,
+                    max_triangles: 100_000,
+                    max_refinement_steps: 50_000,
                 },
             ));
             self.mesh_error = None;
@@ -272,11 +281,15 @@ impl Playground {
             self.mesh_job = None;
             match result {
                 Ok(mesh) => {
+                    self.mesh_low_quality = (0..mesh.triangles.len())
+                        .map(|i| mesh.triangle_quality(i).unwrap().minimum_angle_degrees < 15.0)
+                        .collect();
                     self.mesh = Some(mesh);
                     self.mesh_error = None;
                 }
                 Err(error) => {
                     self.mesh = None;
+                    self.mesh_low_quality.clear();
                     self.mesh_error = Some(error.to_string());
                 }
             }
@@ -491,12 +504,20 @@ impl Playground {
         ui.add_space(8.0);
         ui.separator();
         ui.label("Accepted mesh");
+        egui::ComboBox::from_id_salt("mesh_resolution")
+            .selected_text(format!("Max edge {:.2}", self.mesh_max_edge))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.mesh_max_edge, 0.16, "Preview · h ≤ 0.16");
+                ui.selectable_value(&mut self.mesh_max_edge, 0.04, "Finer · h ≤ 0.04");
+                ui.selectable_value(&mut self.mesh_max_edge, 0.02, "Fine · h ≤ 0.02");
+            });
+        ui.small("Wave accuracy still requires a convergence check.");
         if self.editor.editing() && self.mesh_source != self.editor.document.accepted {
             ui.small("Waiting for edit to finish…");
         } else if let Some(job) = &self.mesh_job {
             ui.small(format!("{}…", job.phase()));
         } else if let Some(mesh) = &self.mesh {
-            let low_quality = mesh.poor_triangles(15.0).len();
+            let low_quality = self.mesh_low_quality.iter().filter(|poor| **poor).count();
             ui.small(format!(
                 "{} vertices · {} triangles\nmin angle {:.1}° · max edge {:.3}\n{} elements below 15°",
                 mesh.vertices.len(),
@@ -733,9 +754,7 @@ impl Playground {
             && let Some(mesh) = &self.mesh
         {
             for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
-                let low_quality = mesh
-                    .triangle_quality(triangle_index)
-                    .is_some_and(|quality| quality.minimum_angle_degrees < 15.0);
+                let low_quality = self.mesh_low_quality[triangle_index];
                 let mesh_stroke = Stroke::new(
                     if low_quality { 1.1 } else { 0.65 },
                     if low_quality {
@@ -1399,7 +1418,9 @@ mod tests {
         }
         let mesh = h.state.mesh.clone().expect("initial accepted mesh");
         assert_eq!(mesh.geometry_revision, 0);
-        assert!(!mesh.triangles.is_empty());
+        assert!(mesh.triangles.len() > 10_000);
+        assert!(mesh.quality.maximum_edge_length <= 0.04);
+        assert_eq!(h.state.mesh_low_quality.len(), mesh.triangles.len());
 
         h.state.editor.begin();
         h.state
@@ -1412,5 +1433,23 @@ mod tests {
         h.state.refresh_mesh();
         assert_eq!(h.state.mesh.as_ref().unwrap(), &mesh);
         assert!(h.state.mesh_job.is_none());
+
+        // Resolution is part of the mesh request even when the accepted scene
+        // and document revision stay unchanged. It does not enter edit history.
+        let document = h.state.editor.document.clone();
+        let history = h.state.editor.history_len();
+        h.state.mesh_max_edge = 0.16;
+        for _ in 0..5_000 {
+            h.state.refresh_mesh();
+            if h.state.mesh_job.is_none() {
+                break;
+            }
+        }
+        assert_eq!(h.state.mesh_source_max_edge, 0.16);
+        let preview = h.state.mesh.as_ref().unwrap();
+        assert!(preview.quality.maximum_edge_length <= 0.16);
+        assert!(preview.triangles.len() < mesh.triangles.len() / 4);
+        assert_eq!(h.state.editor.document, document);
+        assert_eq!(h.state.editor.history_len(), history);
     }
 }

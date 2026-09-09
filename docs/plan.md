@@ -89,11 +89,26 @@ remains in milestone 5; the next milestone is still static-domain waves.
 - Render the field; add pulse placement, continuous sources, run/pause, reset,
   single-step, simulation speed, and basic diagnostics.
 - Expose mesh size, timestep, substeps, simulation speed, and energy diagnostics.
+- Establish a wavelength-based P1 baseline before claiming solver performance:
+  use a reference wavelength of 0.4 in the width-2 box, with maximum edges 0.04
+  and 0.02 (10 and 20 edge lengths per wavelength), then refine further if error
+  requires it. These are starting resolutions, not accuracy guarantees. For
+  broadband sources, document the frequency cutoff used for shortest wavelength.
+- Measure spatial dispersion against analytic reflecting-box modes over one and
+  five crossing times. Reduce the timestep independently to separate temporal
+  error from spatial error. Report phase/amplitude error, DOFs, memory, stable
+  timestep, and achieved simulated time per wall-clock second together.
+- If P1 refinement cannot meet the measured accuracy/throughput target, compare
+  modest-order triangular elements (p=2 or p=3) with an explicitly chosen mass
+  treatment at equal error. Enriched mass-lumped triangles or an element-local
+  DG mass inverse are candidates; a polynomial-degree knob alone is insufficient.
 
 **Completion:** GPU and CPU results agree to an appropriate tolerance; propagation
 and fixed-domain energy behavior are sensible; long runs stay bounded. Record
 performance versus mesh size and substeps on named hardware/browser versions.
-Treat display rate and simulated-time throughput as separate measurements.
+Treat display rate, mesh preparation, and simulated-time throughput as separate
+measurements. Include a wave-resolution convergence study; the earlier editor
+preview mesh benchmarks do not establish wave-solver performance.
 
 ## 4. Transactional live editing with full remeshing
 
