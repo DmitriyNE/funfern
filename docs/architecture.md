@@ -1,8 +1,9 @@
 # Architecture notes
 
 The spline editor, constrained mesher, bounded coordinate-edit repair, P1 GPU wave
-solver, and geometry-edit simulation transactions are implemented. Higher-order
-discretizations and broader adaptation remain design directions.
+solver, and geometry-edit simulation transactions are implemented. An enriched
+quadratic mass-lumped CPU reference now establishes the next production solver;
+its GPU evolution, display, and transfer path and broader adaptation remain work.
 
 ## Responsibilities and dependencies
 
@@ -263,17 +264,34 @@ frequency at c=1, and compare over one and five box crossing times. Vary timeste
 independently. Obstacle cases subsequently need a sufficiently refined reference
 and a stated source bandwidth.
 
-The measured P1 baseline confirms material dispersion. At half of the conservative
-timestep, h=0.04 accumulates about 0.96 rad of phase error over five box crossings;
-h=0.02 accumulates about 0.24 rad. Temporal halving changes these figures only
-slightly, so spatial error dominates. Compare p=2 or p=3 at equal measured
-error, with mass treatment and timestep restrictions included in the cost. A
-concrete continuous-element candidate is enriched mass-lumped triangles with
-matching quadrature; see the [Firedrake higher-order wave example](https://www.firedrakeproject.org/demos/higher_order_mass_lumping.py.html).
-An element-local DG inverse is another candidate. Neither is implemented yet,
-and ordinary higher-degree triangular Lagrange bases must not inherit P1 lumping
-without analysis. Large spectral order is not the assumed solution to a coarse
-mesh. Report mesh preparation, operator preparation, display time, and stepping
+The measured P1 baseline confirms material dispersion. At 0.225 of the
+conservative timestep, h=0.04 accumulates about 0.96 rad of phase error over five
+box crossings; h=0.02 accumulates about 0.24 rad. Temporal halving changes these
+figures only slightly, so spatial error dominates.
+
+The selected higher-order candidate is the seven-node enriched quadratic triangle
+`P2 + span(27 λ0 λ1 λ2)`. Vertex, edge-midpoint, and centroid quadrature weights are
+respectively 1/20, 2/15, and 9/20 of element area, producing a positive diagonal
+mass. Shared edge nodes remain conforming and each element owns its centroid node.
+The formulation and positive nodal quadrature follow the [TUM analysis of
+higher-order mass-lumped triangular elements](https://mediatum.ub.tum.de/doc/1452928/376222.pdf).
+The stiffness uses a separate symmetric six-point rule exact through degree four,
+which exactly integrates products of the enriched basis gradients.
+
+At parent h=0.08, this reference has 9,215 DOFs and accumulates 0.00519 rad phase
+error at t≈10, compared with 0.238 rad for 25,218-DOF P1 at h=0.02. Estimated GPU
+buffers are 1.15 MiB versus 2.20 MiB; measured f64 CPU throughput is 8.61 versus
+3.61 simulated seconds per wall second on Apple M1 Max. Halving the timestep moves
+the quadratic phase error to 0.00818 rad, exposing some cancellation between
+spatial and temporal dispersion at the larger step. Keep both refinements in
+comparisons. The finer parent-h=0.04 quadratic case reaches roughly 0.0005 rad
+phase error, but its 37,443 DOFs, 4.70 MiB estimate, smaller timestep, and dense
+element rows reduce CPU throughput to about one simulated second per wall second.
+
+The production application remains P1 until quadratic GPU evolution, field
+evaluation, and transaction transfer are implemented and checked against this f64
+reference. Ordinary higher-degree triangular Lagrange bases must not inherit P1
+lumping. Report mesh preparation, operator preparation, display time, and stepping
 throughput separately, with DOFs, memory, timestep, and phase/amplitude error.
 
 The application requests at most 16 substeps per display frame and reports achieved

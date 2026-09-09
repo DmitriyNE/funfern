@@ -22,6 +22,36 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
   cooldown in a later adaptation pass.
+- [ ] Integrate the selected enriched-quadratic operator with GPU evolution,
+  quadratic field display, and geometry-edit state transfer; compare native GPU
+  results with the new f64 reference before changing the application default.
+
+## 2026-09-09 — Enriched quadratic wave reference and P1 comparison
+
+- Added a dependency-free seven-node `P2` plus cubic-bubble triangular operator.
+  Edge midpoint DOFs are shared, bubble DOFs are element-local, the positive nodal
+  mass weights are 1/20 at vertices, 2/15 at edge midpoints, and 9/20 at the
+  centroid, and stiffness uses a symmetric degree-four-exact quadrature rule.
+- Tests cover nodal cardinality, affine reproduction and exact affine energy,
+  quadrature moments through degree four, shared-edge numbering, positive/exact
+  total mass, matrix symmetry/nullspace, 2,000-step energy conservation, stationary
+  constants, and malformed inputs.
+- Extended `wave_convergence` to compare P1 and enriched quadratic (`P2e`) with
+  temporal refinement. At `0.225 dt_max`, t≈10 on Apple M1 Max:
+
+  | element | parent h | DOFs | dt max | buffers | phase | amplitude | L2 | CPU throughput |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | P1 | .04 | 6,328 | .0100807 | .55 MiB | -.959 rad | -.00461 | .426 | 21.57 sim s/wall s |
+  | P1 | .02 | 25,218 | .0050806 | 2.20 MiB | -.238 rad | -.000114 | .0284 | 3.61 sim s/wall s |
+  | P2e | .08 | 9,215 | .0069839 | 1.15 MiB | -.00519 rad | -4.08e-6 | .00237 | 8.61 sim s/wall s |
+  | P2e | .04 | 37,443 | .0034506 | 4.70 MiB | +.000505 rad | -2.44e-8 | .000188 | .99 sim s/wall s |
+
+  At lower cost than the fine P1 case, parent-h=.08 P2e cuts long-time phase error
+  by about 46× and L2 error by about 12×. At `0.1125 dt_max`, its phase error is
+  -.00818 rad; the larger step partly cancels spatial phase error, so both timestep
+  levels remain in the benchmark. The result supports P2e as the next GPU element,
+  but these are f64 CPU timings and do not claim browser or GPU throughput.
+- Interactive browser testing remains deferred at the user's request.
 
 ## 2026-09-09 — Transactional geometry edits and GPU state transfer
 

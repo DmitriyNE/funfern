@@ -83,9 +83,11 @@ edits, with full rebuilding as a fallback.
 
 ## 3. Static-domain GPU waves
 
-Implementation is present. The native Metal kernel agrees with the f64 reference,
-and the h=0.04/h=0.02 analytic-box study is recorded. A fresh interactive browser
-performance and long-run pass remains deferred at the user's request.
+The P1 implementation is present and its native Metal kernel agrees with the f64
+reference. The h=0.04/h=0.02 P1 study and a mass-lumped enriched-quadratic CPU
+comparison are recorded. The latter is selected for production GPU integration.
+A fresh interactive browser performance and long-run pass remains deferred at the
+user's request.
 
 - Implement linear triangular FEM, lumped mass, second-order explicit stepping,
   and conservative timestep selection. Start with reflecting boundaries.
@@ -107,6 +109,9 @@ performance and long-run pass remains deferred at the user's request.
   modest-order triangular elements (p=2 or p=3) with an explicitly chosen mass
   treatment at equal error. Enriched mass-lumped triangles or an element-local
   DG mass inverse are candidates; a polynomial-degree knob alone is insufficient.
+  The p=2 enriched mass-lumped comparison is complete and substantially improves
+  phase error at lower DOF than the fine P1 baseline. Integrate it with GPU
+  evolution, field display, and transaction transfer next.
 
 **Completion:** GPU and CPU results agree to an appropriate tolerance; propagation
 and fixed-domain energy behavior are sensible; long runs stay bounded. Record

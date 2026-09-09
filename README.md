@@ -4,11 +4,13 @@ A browser finite-element wave playground with editable periodic cubic spline
 obstacles, constrained triangle meshes, persistent invalid drafts, undo/redo,
 and versioned scene files.
 
-The P1 wave solver is implemented on both an f64 CPU reference and an f32 WebGPU
-gather kernel. Geometry edits commit transactionally: the previous mesh continues
-to run during candidate construction, then both wave time levels transfer on the
-GPU before the new mesh becomes visible. Native automated checks pass; interactive
-browser checks for the solver remain deferred.
+The production P1 wave solver is implemented on both an f64 CPU reference and an
+f32 WebGPU gather kernel. The core also contains an enriched quadratic,
+mass-lumped CPU reference and an equal-error convergence benchmark. Geometry edits
+commit transactionally: the previous mesh continues to run during candidate
+construction, then both wave time levels transfer on the GPU before the new mesh
+becomes visible. Native automated checks pass; interactive browser checks for the
+solver remain deferred.
 
 ## Run
 
@@ -131,18 +133,20 @@ cargo run -p femfun-app --release --locked -- --wave-gpu-check
 cargo run -p femfun-app --release --locked -- --wave-transfer-check
 ```
 
-The 61 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
+The 69 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, refinement limits, geometry
 rejection, draft/accepted history, scene files, and egui pointer/keyboard
 interactions, local Delaunay legality, incremental work, slice-independent output,
-P1 assembly, stable centered stepping, energy/damping behavior, spatial mode
+P1 and enriched-quadratic assembly, positive mass lumping, degree-four stiffness
+quadrature, stable centered stepping, energy/damping behavior, spatial mode
 convergence, GPU upload parameters, and a 32-obstacle meshing regression. The timing example uses the app's mesh
 settings and 2 ms scheduling policy. `--wave` tests maximum edges 0.04 and 0.02;
 without it, the example tests preview resolution. It reports P1 spatial DOFs,
 actual edge size, and resolution relative to a reference wavelength of 0.4.
 These are meshing timings. `wave_convergence` separately measures the analytic
-reflecting-box mode at h=0.04 and h=0.02, with independent temporal refinement,
-over one and five box-crossing times.
+reflecting-box mode for P1 at h=0.04 and h=0.02 and enriched quadratic triangles
+at parent h=0.08 and h=0.04, with independent temporal refinement over one and
+five box-crossing times.
 Omit `--slices` for per-phase profiling.
 `mesh_edit_timing --paced` applies edits with 2 ms mesh slices at a simulated
 60 Hz schedule, excluding rendering. `--mesh-edit-benchmark` opens the real native
