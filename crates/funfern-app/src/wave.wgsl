@@ -50,7 +50,7 @@ fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
 }
 
 @compute @workgroup_size(128)
-fn step(@builtin(global_invocation_id) id: vec3<u32>) {
+fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if i >= parameters.count_data.x {
         return;

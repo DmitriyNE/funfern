@@ -1,3 +1,5 @@
 /target/
 /dist/
+/.playwright-mcp/
+/funfern-fixed.png
 .DS_Store

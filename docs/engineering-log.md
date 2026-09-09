@@ -27,8 +27,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   transition/blur pass. A hard jump against the retained field produces artificial
   wideband excitation when an obstacle boundary moves inward. Measure added spectral
   energy and keep established regions outside the transition band unchanged.
-- [ ] Repeat the browser interaction checklist after the storage-binding fix and
-  record browser/GPU metadata, display frame time, and long-run behavior.
+- [ ] Run a longer browser soak with a representative multi-obstacle scene and
+  record solver throughput and memory behavior over time.
 - [ ] Make operator assembly and transfer-map construction resumable if their
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
@@ -36,6 +36,27 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Improve open-baffle crack-tip element quality. The assigned-law native check
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
+
+## 2026-09-09 — Live browser loop restored
+
+- Playwright reproduced the reported frozen first frame in Chromium 152 on the
+  Apple Metal 3 WebGPU adapter. The browser created the shader module but rejected
+  the compute pipeline because its requested `step` entry point did not exist.
+- Bevy 0.19's browser shader path reparses WGSL with Naga and emits WGSL again.
+  `step` is also a WGSL built-in, so Naga renamed the user function while Bevy's
+  pipeline descriptor retained the original name. Renamed the compute entry point
+  to `advance_wave`; the pipeline now initializes and the browser event loop remains
+  live.
+- Post-fix browser checks confirm WebGPU startup with 9,664 DOFs, Run/Pause input,
+  and a resize from 1200×800 to 1000×650 with the canvas backing store updating
+  from 2400×1600 to 2000×1300. The user independently confirmed that controls and
+  resizing work. The observed display frame time was about 11.5 ms in the initial
+  one-obstacle scene. A longer multi-obstacle soak remains outstanding.
+- Final verification passes formatting, Clippy with warnings denied, all **107
+  tests**, native release compilation, the Apple M1 Max / Metal GPU reference
+  check, and a release Trunk build. A clean Compose image rebuild completes, its
+  nginx service reports healthy, and the exact rebuilt image starts in Chromium
+  with no console errors.
 
 ## 2026-09-09 — Portable WebGPU wave bindings
 
@@ -51,8 +72,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - All 33 application/editor tests and Clippy with warnings denied pass. The native
   release GPU check passes at 9,720 DOFs with current/previous/auxiliary relative
   L2 errors of `7.85e-6`, `7.80e-6`, and `7.39e-6`. A clean release Trunk build
-  passes and its WASM contains the eight-binding shader. Integrated browser control
-  was unavailable in this environment, so the post-fix interaction pass is pending.
+  passes and its WASM contains the eight-binding shader. Subsequent Playwright
+  verification exposed the separate entry-point issue documented above.
 
 ## 2026-09-09 — Containerized browser serving
 

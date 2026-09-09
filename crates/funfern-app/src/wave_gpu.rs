@@ -987,7 +987,7 @@ fn init_pipeline(
         entry_point: Some(Cow::Borrowed(entry)),
         ..default()
     };
-    let step = pipeline_cache.queue_compute_pipeline(pipeline("step"));
+    let step = pipeline_cache.queue_compute_pipeline(pipeline("advance_wave"));
     let rotate = pipeline_cache.queue_compute_pipeline(pipeline("rotate"));
     let inject = pipeline_cache.queue_compute_pipeline(pipeline("inject"));
     let transfer_old_layout = BindGroupLayoutDescriptor::new(
