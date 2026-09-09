@@ -3,8 +3,9 @@
 The spline editor, constrained mesher, bounded coordinate-edit repair, enriched
 quadratic GPU wave solver, and geometry-edit simulation transactions are
 implemented. The outer boundary has reflecting and first- and second-order
-radiation modes. Broader adaptation and assigned interior/span semantics remain
-work.
+radiation modes. Stable material regions, transmitting interfaces, and closed
+two-sided walls are implemented. Broader adaptation and assigned boundary-span
+semantics remain work.
 
 ## Responsibilities and dependencies
 
@@ -29,7 +30,7 @@ viewport rectangle with the camera and editor.
 
 ## Geometry and discretization
 
-Geometry owns curves, loops, boundary labels, and eventually material regions.
+Geometry owns curves, loops, boundary labels, materials, and regions.
 Discretization owns basis coefficients, operators, evaluation, and state transfer.
 Do not expose all solution coefficients as geometric vertex values: that works for
 linear triangles but not generally for a spline basis.
@@ -45,8 +46,8 @@ Keep these semantics distinct as they arrive:
 - A thin wall needs the correct separation of the two sides' degrees of freedom;
   a constrained edge alone is insufficient.
 
-The product topology model will add stable `RegionId`, `MaterialId`, and logical
-boundary/span identities before adding more solver conditions. A closed loop has
+The topology model has stable `RegionId` and `MaterialId`; logical span identities
+arrive with assigned boundary conditions. A closed loop has
 an explicit role; its winding or containment must not silently decide whether it
 is a hole, a transmitting material interface, or a two-sided wall. Regions form a
 validated containment graph. Mesh triangles carry their owning region/material ID,
@@ -116,7 +117,9 @@ excludes selection and navigation. Stable obstacle IDs increase independently of
 undo, preventing reuse after undoing creation. Loading derives the next ID from
 both scenes and clears history.
 
-Version 1 JSON stores the fixed domain, IDs, controls, intervals, and both scenes.
+Version 2 JSON stores the fixed domain, loop roles, materials, regions, controls,
+intervals, and both scenes. Version 1 loads by assigning its loops the background
+hole role and creating the default background material/region.
 Serde and rfd live only in the app crate. Round-trip f64 parsing preserves exact
 stored values. Files have a 2 MiB limit, strict fields/version/domain, finite
 values, and scene/control-count checks. A prospective load validates its accepted
@@ -142,9 +145,11 @@ The editor's proximity tolerance remains separate: exact predicate signs answer
 topology questions, while the editor tolerance decides whether near-contact is
 acceptable input.
 
-Mesh construction samples the fixed outer square and every accepted spline. The
-outer loop is counter-clockwise and obstacle loops are clockwise. A visibility
-bridge turns each hole into one weakly-simple polygon; exact-sign ear clipping
+Mesh construction samples the fixed outer square and every accepted spline. It
+builds one polygonal domain per retained region. A material interface reuses one
+vertex trace for its exterior and interior domains; a wall duplicates the trace
+so the two sides have independent DOFs. A visibility bridge turns each domain and
+its direct child holes into one weakly-simple polygon; exact-sign ear clipping
 creates the initial constrained triangulation. Boundary segments are authoritative
 constraints. Queued edge legalization flips only unconstrained convex diagonals,
 using the robust incircle predicate, to produce a locally constrained-Delaunay
@@ -168,12 +173,13 @@ so finer meshes also resolve the curved boundary more closely. App capacities
 are 50,000 vertices, 100,000 triangles, and 50,000 insertions. These limits do
 not promise either a particular wave accuracy or interactive rebuild latency.
 
-`TriMesh` stores f64 vertices, counter-clockwise triangle indices, labeled outer
-and obstacle edges, stable obstacle IDs, continuous boundary parameters, and
-aggregate quality. Boundary labels are independent of temporary vertex and
-triangle indices. Verification requires positive triangle orientation, manifold
-edge adjacency, exactly one incident triangle for every boundary edge, domain
-classification of every centroid, and configured size/angle targets.
+`TriMesh` stores f64 vertices, counter-clockwise triangle indices with stable
+region IDs, labeled outer/hole/interface/wall edges, stable loop IDs, continuous
+boundary parameters, and aggregate quality. Boundary labels are independent of
+temporary vertex and triangle indices. Verification requires positive triangle
+orientation, manifold edge adjacency, two incident triangles for a transmitting
+interface and one for each other boundary trace, region classification of every
+centroid, and configured size/angle targets.
 
 `MeshingJob` snapshots an accepted geometry revision. Validation, adaptive sampling,
 bridge visibility, ear clipping, legalization, and output verification resume
@@ -202,8 +208,9 @@ mesh has its own committed scene and resolution, separate from the latest reques
 Superseding a job always starts from that committed pair, so a half-finished
 candidate cannot become the source of a later edit.
 
-`MeshUpdateJob` attempts reuse for control-coordinate edits with unchanged obstacle
-IDs and knot intervals at the same resolution. It imports the accepted mesh and
+`MeshUpdateJob` attempts reuse for hole control-coordinate edits with unchanged
+loop IDs, roles, and knot intervals at the same resolution. Interface and wall
+motion currently uses the full region-aware mesher. The local path imports the accepted mesh and
 connectivity in resumable linear passes. Boundary vertices whose spline parameter
 positions changed move to the new spline; unchanged boundary vertices remain fixed.
 Interior displacement uses 24 Jacobi averaging sweeps with fixed boundary values

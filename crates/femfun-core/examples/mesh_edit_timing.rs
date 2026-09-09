@@ -19,14 +19,17 @@ fn main() {
         };
         let mut scene = Scene {
             obstacles: (0..8)
-                .map(|i| Obstacle {
-                    id: ObstacleId(i + 1),
-                    spline: PeriodicCubicSpline::rounded(
-                        Point2::new(-0.66 + (i % 4) as f64 * 0.44, -0.4 + (i / 4) as f64 * 0.8),
-                        0.12,
-                    ),
+                .map(|i| {
+                    Obstacle::hole(
+                        ObstacleId(i + 1),
+                        PeriodicCubicSpline::rounded(
+                            Point2::new(-0.66 + (i % 4) as f64 * 0.44, -0.4 + (i / 4) as f64 * 0.8),
+                            0.12,
+                        ),
+                    )
                 })
                 .collect(),
+            ..Scene::default()
         };
         let start = Instant::now();
         let mut mesh = Arc::new(mesh_scene(&scene, 0, options).unwrap());

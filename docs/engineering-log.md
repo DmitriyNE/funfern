@@ -9,8 +9,6 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
-- [ ] Add stable interior-region/material/interface/wall semantics, piecewise
-  coefficients, assignment UI, persistence, meshing labels, and solver transactions.
 - [ ] Add stable selectable boundary spans and per-span conditions, then generalize
   the completed outer-side auxiliary condition to mixed exterior spans and junctions.
 - [ ] Expand product spline editing with multi-selection and transforms, direct
@@ -31,6 +29,40 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
   cooldown in a later adaptation pass.
+
+## 2026-09-09 — Interior regions and assigned materials
+
+- Added stable region and material IDs plus explicit Hole, Material interface,
+  and Closed wall loop roles. Validation now accepts consistent nested inclusions,
+  rejects ownership that disagrees with containment, and retains invalid drafts.
+- The mesher triangulates every retained region. Interface sides share constrained
+  vertices and P2e trace DOFs; wall sides use coincident geometry with distinct
+  vertices and DOFs. Triangles carry region IDs and final verification checks the
+  expected one- or two-sided adjacency.
+- P2e assembly reads density, stiffness, and volume damping per triangle region.
+  Material edits reassemble the operator on the existing mesh and use the normal
+  GPU field-transfer transaction. Geometry comparison excludes coefficients, so
+  these edits never start a mesh job.
+- The panel creates all three loop roles, assigns materials to the background or
+  retained interiors, edits coefficients, selects regions from the viewport, and
+  draws material fills. Multi-region geometry motion intentionally falls back to
+  the full mesher; the current local repair algorithm is restricted to holes.
+- Scene JSON is version 2 and stores materials, regions, roles, and both document
+  scenes. Version 1 files migrate to default-medium background holes. Load remains
+  atomic and permits structurally valid invalid draft geometry.
+- Automated coverage includes nested ownership, shared and duplicated traces,
+  piecewise mass/stiffness/damping, unknown-region rejection, material history,
+  v1 migration/v2 round trips, and same-mesh material transactions. Interactive
+  browser testing remains deferred by the user.
+- The native Apple M1 Max / Metal transfer check now includes a density/stiffness/
+  damping change after its geometry and boundary transactions. The material edit
+  reused the mesh, matched the f64 expected current exactly and the previous level
+  to relative mass-weighted L2 error `3.01e-8`, and completed in 15.4 ms including
+  5.13 ms operator/map preparation. The existing Metal bindless and shutdown
+  readback warnings remain unchanged.
+- Formatting, Clippy with warnings denied, all 84 tests, native release compilation,
+  release Trunk packaging, the 128-step GPU reference check, and the expanded
+  native transfer check pass. Interactive browser testing remains deferred.
 
 ## 2026-09-09 — Second-order auxiliary radiation
 

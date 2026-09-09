@@ -2,34 +2,220 @@ use crate::{
     PeriodicCubicSpline, Point2, Sample, Sampler, SamplingOptions, point_segment_distance,
 };
 pub const MAX_OBSTACLES: usize = 32;
+pub const MAX_MATERIALS: usize = 32;
 pub const WORLD_TOLERANCE: f64 = 2.0e-4;
+pub const BACKGROUND_REGION: RegionId = RegionId(1);
+pub const DEFAULT_MATERIAL: MaterialId = MaterialId(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ObstacleId(pub u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RegionId(pub u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MaterialId(pub u64);
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Material {
+    pub id: MaterialId,
+    pub name: String,
+    pub mass_density: f64,
+    pub stiffness: f64,
+    pub damping: f64,
+    pub color: [u8; 3],
+}
+
+impl Material {
+    pub fn default_medium() -> Self {
+        Self {
+            id: DEFAULT_MATERIAL,
+            name: "Background".into(),
+            mass_density: 1.0,
+            stiffness: 1.0,
+            damping: 0.0,
+            color: [47, 73, 88],
+        }
+    }
+
+    pub fn valid(&self) -> bool {
+        self.id.0 > 0
+            && !self.name.trim().is_empty()
+            && self.name.len() <= 64
+            && self.mass_density.is_finite()
+            && self.mass_density > 0.0
+            && self.stiffness.is_finite()
+            && self.stiffness > 0.0
+            && self.damping.is_finite()
+            && self.damping >= 0.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Region {
+    pub id: RegionId,
+    pub material: MaterialId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopRole {
+    Hole {
+        exterior: RegionId,
+    },
+    MaterialInterface {
+        exterior: RegionId,
+        interior: RegionId,
+    },
+    Wall {
+        exterior: RegionId,
+        interior: RegionId,
+    },
+}
+
+impl LoopRole {
+    pub fn exterior(self) -> RegionId {
+        match self {
+            Self::Hole { exterior }
+            | Self::MaterialInterface { exterior, .. }
+            | Self::Wall { exterior, .. } => exterior,
+        }
+    }
+
+    pub fn interior(self) -> Option<RegionId> {
+        match self {
+            Self::Hole { .. } => None,
+            Self::MaterialInterface { interior, .. } | Self::Wall { interior, .. } => {
+                Some(interior)
+            }
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hole { .. } => "Hole",
+            Self::MaterialInterface { .. } => "Material interface",
+            Self::Wall { .. } => "Closed wall",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Obstacle {
     pub id: ObstacleId,
     pub spline: PeriodicCubicSpline,
+    pub role: LoopRole,
 }
-#[derive(Clone, Debug, Default, PartialEq)]
+impl Obstacle {
+    pub fn hole(id: ObstacleId, spline: PeriodicCubicSpline) -> Self {
+        Self {
+            id,
+            spline,
+            role: LoopRole::Hole {
+                exterior: BACKGROUND_REGION,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Scene {
     pub obstacles: Vec<Obstacle>,
+    pub materials: Vec<Material>,
+    pub regions: Vec<Region>,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            obstacles: vec![],
+            materials: vec![Material::default_medium()],
+            regions: vec![Region {
+                id: BACKGROUND_REGION,
+                material: DEFAULT_MATERIAL,
+            }],
+        }
+    }
 }
 impl Scene {
     pub fn initial() -> Self {
         Self {
-            obstacles: vec![Obstacle {
-                id: ObstacleId(1),
-                spline: PeriodicCubicSpline::rounded(Point2::default(), 0.15),
-            }],
+            obstacles: vec![Obstacle::hole(
+                ObstacleId(1),
+                PeriodicCubicSpline::rounded(Point2::default(), 0.15),
+            )],
+            ..Self::default()
         }
     }
     pub fn structure_valid(&self) -> bool {
-        self.obstacles.len() <= MAX_OBSTACLES
-            && self
-                .obstacles
-                .iter()
-                .enumerate()
-                .all(|(i, o)| o.id.0 > 0 && !self.obstacles[..i].iter().any(|p| p.id == o.id))
+        if self.obstacles.len() > MAX_OBSTACLES
+            || self.materials.is_empty()
+            || self.materials.len() > MAX_MATERIALS
+            || self.regions.is_empty()
+            || self.regions.len() > MAX_OBSTACLES + 1
+        {
+            return false;
+        }
+        let unique_obstacles = self.obstacles.iter().enumerate().all(|(i, o)| {
+            o.id.0 > 0
+                && !self.obstacles[..i]
+                    .iter()
+                    .any(|previous| previous.id == o.id)
+        });
+        let unique_materials = self.materials.iter().enumerate().all(|(i, material)| {
+            material.valid()
+                && !self.materials[..i]
+                    .iter()
+                    .any(|previous| previous.id == material.id)
+        });
+        let unique_regions = self.regions.iter().enumerate().all(|(i, region)| {
+            region.id.0 > 0
+                && self.material(region.material).is_some()
+                && !self.regions[..i]
+                    .iter()
+                    .any(|previous| previous.id == region.id)
+        });
+        if !unique_obstacles
+            || !unique_materials
+            || !unique_regions
+            || self.region(BACKGROUND_REGION).is_none()
+        {
+            return false;
+        }
+        let mut interiors = Vec::new();
+        for obstacle in &self.obstacles {
+            if self.region(obstacle.role.exterior()).is_none() {
+                return false;
+            }
+            if let Some(interior) = obstacle.role.interior() {
+                if interior == BACKGROUND_REGION
+                    || interior == obstacle.role.exterior()
+                    || self.region(interior).is_none()
+                    || interiors.contains(&interior)
+                {
+                    return false;
+                }
+                interiors.push(interior);
+            }
+        }
+        self.regions
+            .iter()
+            .all(|region| region.id == BACKGROUND_REGION || interiors.contains(&region.id))
+    }
+
+    pub fn material(&self, id: MaterialId) -> Option<&Material> {
+        self.materials.iter().find(|material| material.id == id)
+    }
+
+    pub fn region(&self, id: RegionId) -> Option<&Region> {
+        self.regions.iter().find(|region| region.id == id)
+    }
+
+    pub fn region_material(&self, id: RegionId) -> Option<&Material> {
+        self.region(id)
+            .and_then(|region| self.material(region.material))
+    }
+
+    /// Geometry and topology equality excludes names, colors, coefficients, and
+    /// region-to-material assignments so those edits can reuse the mesh.
+    pub fn geometry_eq(&self, other: &Self) -> bool {
+        self.obstacles == other.obstacles
     }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -41,30 +227,39 @@ pub enum ValidationIssue {
     SelfContact(ObstacleId),
     ObstacleContact(ObstacleId, ObstacleId),
     Nested(ObstacleId, ObstacleId),
+    RegionTopology(ObstacleId),
     WorkLimit,
 }
 impl std::fmt::Display for ValidationIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Structure => write!(f, "Scene has duplicate/invalid IDs or exceeds 32 obstacles"),
+            Self::Structure => write!(
+                f,
+                "Scene has invalid IDs, materials, regions, or too many loops"
+            ),
             Self::Subdivision(id) => write!(
                 f,
-                "Obstacle {}: sampling is exhausted or numerically ambiguous",
+                "Loop {}: sampling is exhausted or numerically ambiguous",
                 id.0
             ),
-            Self::Outside(id) => write!(
-                f,
-                "Obstacle {} leaves or nearly touches the outer box",
-                id.0
-            ),
-            Self::Degenerate(id) => write!(f, "Obstacle {} is degenerate or too small", id.0),
+            Self::Outside(id) => write!(f, "Loop {} leaves or nearly touches the outer box", id.0),
+            Self::Degenerate(id) => write!(f, "Loop {} is degenerate or too small", id.0),
             Self::SelfContact(id) => {
-                write!(f, "Obstacle {} crosses or nearly touches itself", id.0)
+                write!(f, "Loop {} crosses or nearly touches itself", id.0)
             }
             Self::ObstacleContact(a, b) => {
-                write!(f, "Obstacles {} and {} intersect or nearly touch", a.0, b.0)
+                write!(f, "Loops {} and {} intersect or nearly touch", a.0, b.0)
             }
-            Self::Nested(a, b) => write!(f, "Obstacles {} and {} are nested", a.0, b.0),
+            Self::Nested(a, b) => write!(
+                f,
+                "Loops {} and {} have incompatible nesting roles",
+                a.0, b.0
+            ),
+            Self::RegionTopology(id) => write!(
+                f,
+                "Loop {} has a region assignment inconsistent with its containment",
+                id.0
+            ),
             Self::WorkLimit => write!(f, "Validation work limit reached; simplify the scene"),
         }
     }
@@ -110,6 +305,7 @@ pub struct ValidationJob {
     nest_b: usize,
     nest_edge: usize,
     inside: bool,
+    containment: Vec<Vec<bool>>,
     work: usize,
     result: Option<ValidationResult>,
 }
@@ -118,6 +314,7 @@ impl ValidationJob {
         Self::with_options(scene, revision, SamplingOptions::default())
     }
     pub fn with_options(scene: Scene, revision: u64, options: SamplingOptions) -> Self {
+        let loop_count = scene.obstacles.len();
         let issue = if scene.structure_valid() {
             None
         } else {
@@ -144,6 +341,7 @@ impl ValidationJob {
             nest_b: 1,
             nest_edge: 0,
             inside: false,
+            containment: vec![vec![false; loop_count]; loop_count],
             work: 0,
             result: issue.map(|v| ValidationResult {
                 revision,
@@ -288,10 +486,7 @@ impl ValidationJob {
                 let polygon = &self.loops[self.nest_b];
                 if self.nest_edge + 1 >= polygon.len() {
                     if self.inside {
-                        self.finish(Some(ValidationIssue::Nested(
-                            self.scene.obstacles[self.nest_a].id,
-                            self.scene.obstacles[self.nest_b].id,
-                        )));
+                        self.containment[self.nest_a][self.nest_b] = true;
                     }
                     self.nest_b += 1;
                     self.nest_edge = 0;
@@ -306,10 +501,34 @@ impl ValidationJob {
                     self.inside = !self.inside;
                 }
             } else {
-                self.finish(None)
+                self.finish(self.region_topology_issue())
             }
         }
         self.result.clone()
+    }
+
+    fn region_topology_issue(&self) -> Option<ValidationIssue> {
+        for (index, obstacle) in self.scene.obstacles.iter().enumerate() {
+            let direct_container = (0..self.scene.obstacles.len())
+                .filter(|container| self.containment[index][*container])
+                .min_by(|a, b| self.perimeters[*a].total_cmp(&self.perimeters[*b]));
+            let expected_exterior = match direct_container {
+                None => BACKGROUND_REGION,
+                Some(container) => match self.scene.obstacles[container].role.interior() {
+                    Some(region) => region,
+                    None => {
+                        return Some(ValidationIssue::Nested(
+                            obstacle.id,
+                            self.scene.obstacles[container].id,
+                        ));
+                    }
+                },
+            };
+            if obstacle.role.exterior() != expected_exterior {
+                return Some(ValidationIssue::RegionTopology(obstacle.id));
+            }
+        }
+        None
     }
 }
 fn segments_close(a: Point2, b: Point2, c: Point2, d: Point2, tol: f64) -> bool {

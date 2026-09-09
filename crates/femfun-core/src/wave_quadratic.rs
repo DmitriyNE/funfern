@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{BoundaryLabel, OuterBoundaryCondition, Point2, TriMesh, WaveCoefficients, WaveError};
+use crate::{
+    BACKGROUND_REGION, BoundaryLabel, OuterBoundaryCondition, Point2, RegionId, Scene, TriMesh,
+    WaveCoefficients, WaveError,
+};
 
 /// Seven-node mass-lumped triangle: `P2` enriched by the cubic interior bubble.
 /// Vertex, edge-midpoint, and centroid masses use the positive degree-three nodal
@@ -32,7 +35,55 @@ impl QuadraticWaveOperator {
         coefficients: WaveCoefficients,
         outer_boundary: OuterBoundaryCondition,
     ) -> Result<Self, WaveError> {
-        validate_coefficients(coefficients)?;
+        Self::assemble_regions(
+            mesh,
+            BTreeMap::from([(BACKGROUND_REGION, coefficients)]),
+            coefficients,
+            outer_boundary,
+        )
+    }
+
+    pub fn assemble_scene(
+        mesh: &TriMesh,
+        scene: &Scene,
+        outer_boundary: OuterBoundaryCondition,
+    ) -> Result<Self, WaveError> {
+        if !scene.structure_valid() {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        let mut coefficients = BTreeMap::new();
+        for region in &scene.regions {
+            let material = scene
+                .material(region.material)
+                .ok_or(WaveError::InvalidCoefficients)?;
+            let values = WaveCoefficients {
+                mass_density: material.mass_density,
+                stiffness: material.stiffness,
+                damping: material.damping,
+            };
+            validate_coefficients(values)?;
+            coefficients.insert(region.id, values);
+        }
+        let outer = *coefficients
+            .get(&BACKGROUND_REGION)
+            .ok_or(WaveError::InvalidCoefficients)?;
+        Self::assemble_regions(mesh, coefficients, outer, outer_boundary)
+    }
+
+    fn assemble_regions(
+        mesh: &TriMesh,
+        coefficients_by_region: BTreeMap<RegionId, WaveCoefficients>,
+        outer_coefficients: WaveCoefficients,
+        outer_boundary: OuterBoundaryCondition,
+    ) -> Result<Self, WaveError> {
+        validate_coefficients(outer_coefficients)?;
+        if coefficients_by_region
+            .values()
+            .copied()
+            .any(|coefficients| validate_coefficients(coefficients).is_err())
+        {
+            return Err(WaveError::InvalidCoefficients);
+        }
         if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
             return Err(WaveError::InvalidMesh("the mesh is empty"));
         }
@@ -95,6 +146,9 @@ impl QuadraticWaveOperator {
         let mut mass = vec![0.0; count];
         let mut damping = vec![0.0; count];
         for (triangle, indices) in mesh.triangles.iter().zip(&local_nodes) {
+            let coefficients = *coefficients_by_region
+                .get(&triangle.region)
+                .ok_or(WaveError::InvalidMesh("a triangle has an unknown region"))?;
             let points = triangle.vertices.map(|index| mesh.vertices[index].point);
             let twice_area = (points[1] - points[0]).cross(points[2] - points[0]);
             let area = 0.5 * twice_area;
@@ -139,9 +193,10 @@ impl QuadraticWaveOperator {
             OuterBoundaryCondition::FirstOrderOutgoing
                 | OuterBoundaryCondition::SecondOrderOutgoing
         ) {
-            let impedance = (coefficients.mass_density * coefficients.stiffness).sqrt();
-            let wave_speed = (coefficients.stiffness / coefficients.mass_density).sqrt();
-            let auxiliary_scale = 0.5 * coefficients.stiffness * wave_speed;
+            let impedance = (outer_coefficients.mass_density * outer_coefficients.stiffness).sqrt();
+            let wave_speed =
+                (outer_coefficients.stiffness / outer_coefficients.mass_density).sqrt();
+            let auxiliary_scale = 0.5 * outer_coefficients.stiffness * wave_speed;
             let mut visited = BTreeSet::new();
             for boundary in &mesh.boundary_edges {
                 if !matches!(boundary.label, BoundaryLabel::Outer(_)) {
@@ -741,7 +796,51 @@ fn stiffness_quadrature() -> [([f64; 3], f64); 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BoundaryEdge, MeshQuality, MeshTriangle, MeshVertex, OuterSide};
+    use crate::{
+        BACKGROUND_REGION, BoundaryEdge, Material, MaterialId, MeshQuality, MeshTriangle,
+        MeshVertex, Obstacle, ObstacleId, OuterSide, PeriodicCubicSpline, Region,
+    };
+
+    fn two_material_scene() -> Scene {
+        Scene {
+            obstacles: vec![Obstacle {
+                id: ObstacleId(1),
+                spline: PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.2),
+                role: crate::LoopRole::MaterialInterface {
+                    exterior: BACKGROUND_REGION,
+                    interior: RegionId(2),
+                },
+            }],
+            materials: vec![
+                Material {
+                    id: MaterialId(1),
+                    name: "Left".into(),
+                    mass_density: 2.0,
+                    stiffness: 3.0,
+                    damping: 0.5,
+                    color: [1, 2, 3],
+                },
+                Material {
+                    id: MaterialId(2),
+                    name: "Right".into(),
+                    mass_density: 4.0,
+                    stiffness: 7.0,
+                    damping: 1.5,
+                    color: [4, 5, 6],
+                },
+            ],
+            regions: vec![
+                Region {
+                    id: BACKGROUND_REGION,
+                    material: MaterialId(1),
+                },
+                Region {
+                    id: RegionId(2),
+                    material: MaterialId(2),
+                },
+            ],
+        }
+    }
 
     fn square() -> TriMesh {
         TriMesh {
@@ -756,9 +855,11 @@ mod tests {
             triangles: vec![
                 MeshTriangle {
                     vertices: [0, 1, 2],
+                    region: BACKGROUND_REGION,
                 },
                 MeshTriangle {
                     vertices: [0, 2, 3],
+                    region: BACKGROUND_REGION,
                 },
             ],
             boundary_edges: vec![],
@@ -805,6 +906,54 @@ mod tests {
         assert!(operator.lumped_mass().iter().all(|mass| *mass > 0.0));
         assert!((operator.lumped_mass().iter().sum::<f64>() - 2.5).abs() < 1.0e-13);
         assert_eq!(operator.geometry_revision(), 9);
+    }
+
+    #[test]
+    fn scene_assembly_uses_piecewise_material_coefficients() {
+        let mut mesh = square();
+        mesh.triangles[1].region = RegionId(2);
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &two_material_scene(),
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+
+        assert!((operator.lumped_mass().iter().sum::<f64>() - 3.0).abs() < 1.0e-13);
+        assert!((operator.lumped_damping().iter().sum::<f64>() - 1.0).abs() < 1.0e-13);
+        let x = operator
+            .node_points()
+            .iter()
+            .map(|point| point.x)
+            .collect::<Vec<_>>();
+        let applied = operator.apply_stiffness(&x).unwrap();
+        let energy = x.iter().zip(applied).map(|(x, kx)| x * kx).sum::<f64>();
+        assert!((energy - 5.0).abs() < 2.0e-12);
+        let constant = operator
+            .apply_stiffness(&vec![1.0; operator.degrees_of_freedom()])
+            .unwrap();
+        assert!(constant.iter().all(|value| value.abs() < 5.0e-12));
+
+        // Both elements use the same midpoint degree of freedom on their
+        // shared interface, which enforces displacement continuity.
+        assert_eq!(
+            operator.element_nodes()[0][5],
+            operator.element_nodes()[1][3]
+        );
+    }
+
+    #[test]
+    fn scene_assembly_rejects_an_unknown_triangle_region() {
+        let mut mesh = square();
+        mesh.triangles[0].region = RegionId(99);
+        assert!(matches!(
+            QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &two_material_scene(),
+                OuterBoundaryCondition::Reflecting,
+            ),
+            Err(WaveError::InvalidMesh("a triangle has an unknown region"))
+        ));
     }
 
     #[test]

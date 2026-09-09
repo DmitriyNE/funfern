@@ -1,8 +1,8 @@
 # femfun
 
 A browser finite-element wave playground with editable periodic cubic spline
-obstacles, constrained triangle meshes, persistent invalid drafts, undo/redo,
-and versioned scene files.
+loops, material regions, holes and closed walls, constrained triangle meshes,
+persistent invalid drafts, undo/redo, and versioned scene files.
 
 The production wave solver uses seven-node enriched quadratic, mass-lumped
 triangles on both an f64 CPU reference and an f32 WebGPU gather kernel. Geometry
@@ -58,6 +58,10 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
 - **Select:** left-click a handle or curve; drag handles to reshape. Double-click
   a curve to insert a knot without changing its shape. Clicking near an existing
   knot selects its associated control instead of adding a repeated knot.
+- **Loop role:** choose Hole, Material interface, or Closed wall before creating.
+  An interface retains its interior and shares its finite-element trace with the
+  exterior. A wall retains its interior with two independent, coincident traces.
+  Nested loops inherit the region under the creation point.
 - **Rounded:** click to place eight controls on a radius `0.15` circle, then
   automatically return to selection. The spline lies inside its control polygon.
 - **Custom:** click control points; four points enable the live preview. Enter
@@ -65,7 +69,12 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   Escape cancels construction. These are control points, not interpolation points.
 - **Remove:** Delete or the panel action removes the selected control and its
   associated knot. This can reshape the curve. At least four controls must remain.
-  Deleting an entire obstacle is a separate panel action.
+  Deleting an entire loop is a separate panel action.
+- **Materials:** create materials under Regions and materials, edit positive mass
+  density and stiffness plus nonnegative volume damping, and assign a material to
+  the background or a retained loop interior. Clicking a filled region in the
+  viewport selects and highlights it. Material changes preserve the live field
+  and reuse the committed mesh.
 - **Navigate:** middle-drag or Space + left-drag pans. Wheel zoom stays centered
   on the cursor. Fit View frames the fixed square. Panel scrolling and text
   editing do not manipulate the viewport.
@@ -81,7 +90,8 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   replacement. Successful loading clears history; malformed files leave the
   current document intact. Camera and selection are not saved.
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
-  constrained mesh and its labeled outer/obstacle edges. Elements below 15° are
+  constrained mesh and its labeled outer, hole, interface, and two-sided wall
+  edges. Elements below 15° are
   amber; the panel reports counts, minimum angle, maximum edge, refinement
   progress, build/work time, longest mesh slice, and explicit construction
   failures. Meshing targets a soft 2 ms per frame. An invalid draft keeps the last
@@ -90,9 +100,9 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   a finer solve or 0.16 for a quick preview. Changing resolution rebuilds the
   accepted mesh without changing geometry/history. Resolution is not stored in scene files.
   Full fine builds can take tens of seconds when spread across frames. Small
-  control-point edits now reuse and repair a bounded region of the previous mesh.
+  hole control-point edits now reuse and repair a bounded region of the previous mesh.
   The panel reports unchanged elements and full-rebuild fallbacks; creation,
-  deletion, knot changes and large/failed repairs still rebuild.
+  deletion, knot changes, interface/wall motion, and large/failed repairs still rebuild.
 - **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
   Gaussian displacement with zero initial velocity. Move source positions the
   optional continuous sinusoidal source. Simulation speed is bounded to 16
@@ -101,10 +111,13 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   time, substeps, throughput, operator/map preparation time, and discrete energy.
 - **Outer boundary:** choose Reflecting, First-order outgoing, or Second-order
   auxiliary. The second-order Engquist-Majda condition adds tangential propagation
-  along the fixed outer square and reduces oblique reflection. Obstacle boundaries
-  remain reflecting. A change reuses the mesh and transactionally transfers the
+  along the fixed outer square and reduces oblique reflection. Hole and wall
+  boundaries remain reflecting; material interfaces transmit. A change reuses the mesh and transactionally transfers the
   live field to the replacement operator. Boundary memory survives second-order
   geometry edits and is cleared when entering or leaving that mode.
+- **Interior media:** every triangle carries a stable region ID. The P2e operator
+  assembles piecewise mass, stiffness, and damping. Material interfaces use a
+  conforming shared trace; closed walls have separate solution DOFs on each side.
 - **Mesh changes:** simulation continues on the displayed committed mesh while a
   replacement mesh, operator, timestep, and transfer map are prepared. The GPU
   reconstructs velocity from both old displacement levels, interpolates field and
@@ -112,8 +125,10 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
   after a finite tagged readback. Newly exposed domain starts at zero. A failed
   candidate retains the previous simulation.
 
-Scenes allow 32 obstacles and 128 controls per obstacle. JSON files are capped at
-2 MiB and require finite coordinates. The editor uses a fixed
+Scenes allow 32 loops, 32 materials, and 128 controls per loop. Version 2 JSON
+stores draft and accepted material/region topology; version 1 files migrate their
+loops to background holes. JSON files are capped at 2 MiB and require finite
+coordinates. The editor uses a fixed
 world-space validation tolerance of `0.0002`, independent of zoom. The editor
 validator is deliberately conservative; final mesh topology uses adaptive exact
 orientation and incircle signs rather than geometric epsilons.
@@ -139,10 +154,11 @@ cargo run -p femfun-app --release --locked -- --wave-transfer-check
 ```
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
-constrained topology, concave and multiple holes, refinement limits, geometry
+constrained topology, concave and multiple holes, nested material inclusions,
+shared interface traces, separated wall traces, refinement limits, geometry
 rejection, draft/accepted history, scene files, and egui pointer/keyboard
 interactions, local Delaunay legality, incremental work, slice-independent output,
-P1 and enriched-quadratic assembly, positive mass lumping, degree-four stiffness
+P1 and piecewise enriched-quadratic assembly, positive mass lumping, degree-four stiffness
 quadrature, stable centered stepping, energy/damping behavior, spatial mode
 convergence, GPU upload parameters, and a 32-obstacle meshing regression. The timing example uses the app's mesh
 settings and 2 ms scheduling policy. `--wave` tests maximum edges 0.04 and 0.02;
@@ -169,7 +185,8 @@ both time levels and boundary memory back, compares them to f64, reports
 solve-to-readback throughput, and exits. `--wave-transfer-check` injects a nonzero
 field, performs a real control-point edit, verifies transfer of all three state
 components, then verifies that a lower-order boundary transaction clears the
-auxiliary state.
+auxiliary state, and finally checks a same-mesh material-coefficient transaction
+against f64.
 The field view tessellates every quadratic parent triangle into six display
 triangles around its shared edge-midpoint and element bubble nodes. Native GPU
 startup and the wave kernel were exercised on Apple M1 Max / Metal. The user

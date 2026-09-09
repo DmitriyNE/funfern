@@ -176,11 +176,14 @@ fn several_holes_keep_labels_and_topology() {
         obstacles: [(-0.55, -0.35), (0.45, -0.35), (-0.35, 0.48)]
             .into_iter()
             .enumerate()
-            .map(|(index, (x, y))| Obstacle {
-                id: ObstacleId(index as u64 + 10),
-                spline: PeriodicCubicSpline::rounded(Point2::new(x, y), 0.13),
+            .map(|(index, (x, y))| {
+                Obstacle::hole(
+                    ObstacleId(index as u64 + 10),
+                    PeriodicCubicSpline::rounded(Point2::new(x, y), 0.13),
+                )
             })
             .collect(),
+        ..Scene::default()
     };
     let mesh = mesh(&scene);
     assert_mesh_invariants(&mesh, 3);
@@ -189,7 +192,9 @@ fn several_holes_keep_labels_and_topology() {
         .iter()
         .filter_map(|edge| match edge.label {
             BoundaryLabel::Obstacle(id) => Some(id.0),
-            BoundaryLabel::Outer(_) => None,
+            BoundaryLabel::Outer(_)
+            | BoundaryLabel::MaterialInterface(_)
+            | BoundaryLabel::Wall { .. } => None,
         })
         .collect();
     assert_eq!(labels, BTreeSet::from([10, 11, 12]));
@@ -205,10 +210,11 @@ fn concave_obstacle_meshes_without_filling_the_hole() {
         })
         .collect();
     let scene = Scene {
-        obstacles: vec![Obstacle {
-            id: ObstacleId(91),
-            spline: PeriodicCubicSpline::uniform(controls).unwrap(),
-        }],
+        obstacles: vec![Obstacle::hole(
+            ObstacleId(91),
+            PeriodicCubicSpline::uniform(controls).unwrap(),
+        )],
+        ..Scene::default()
     };
     assert!(validate(&scene).valid());
     let mesh = mesh(&scene);
@@ -221,10 +227,11 @@ fn concave_obstacle_meshes_without_filling_the_hole() {
 #[test]
 fn invalid_geometry_options_and_capacity_fail_explicitly() {
     let invalid = Scene {
-        obstacles: vec![Obstacle {
-            id: ObstacleId(1),
-            spline: PeriodicCubicSpline::rounded(Point2::new(0.96, 0.0), 0.2),
-        }],
+        obstacles: vec![Obstacle::hole(
+            ObstacleId(1),
+            PeriodicCubicSpline::rounded(Point2::new(0.96, 0.0), 0.2),
+        )],
+        ..Scene::default()
     };
     assert!(matches!(
         mesh_scene(&invalid, 0, MeshingOptions::default()),
@@ -366,17 +373,20 @@ fn limits_terminate_once_and_obsolete_jobs_can_be_replaced() {
 fn maximum_obstacle_scene_stays_within_work_and_quality_limits() {
     let scene = Scene {
         obstacles: (0..32)
-            .map(|i| Obstacle {
-                id: ObstacleId(i + 1),
-                spline: PeriodicCubicSpline::rounded(
-                    Point2::new(
-                        -0.85 + 1.7 * (i % 8) as f64 / 7.0,
-                        -0.65 + 1.3 * (i / 8) as f64 / 3.0,
+            .map(|i| {
+                Obstacle::hole(
+                    ObstacleId(i + 1),
+                    PeriodicCubicSpline::rounded(
+                        Point2::new(
+                            -0.85 + 1.7 * (i % 8) as f64 / 7.0,
+                            -0.65 + 1.3 * (i / 8) as f64 / 3.0,
+                        ),
+                        0.07,
                     ),
-                    0.07,
-                ),
+                )
             })
             .collect(),
+        ..Scene::default()
     };
     let mut job = MeshingJob::new(
         scene,
@@ -421,7 +431,9 @@ fn empty_domain_and_outer_side_labels_mesh() {
         .iter()
         .filter_map(|edge| match edge.label {
             BoundaryLabel::Outer(side) => Some(side as u8),
-            BoundaryLabel::Obstacle(_) => None,
+            BoundaryLabel::Obstacle(_)
+            | BoundaryLabel::MaterialInterface(_)
+            | BoundaryLabel::Wall { .. } => None,
         })
         .collect();
     assert_eq!(sides.len(), 4);
@@ -431,17 +443,20 @@ fn empty_domain_and_outer_side_labels_mesh() {
 fn representative_eight_obstacle_scene_meshes_within_limits() {
     let scene = Scene {
         obstacles: (0..8)
-            .map(|index| Obstacle {
-                id: ObstacleId(index + 1),
-                spline: PeriodicCubicSpline::rounded(
-                    Point2::new(
-                        -0.66 + (index % 4) as f64 * 0.44,
-                        -0.4 + (index / 4) as f64 * 0.8,
+            .map(|index| {
+                Obstacle::hole(
+                    ObstacleId(index + 1),
+                    PeriodicCubicSpline::rounded(
+                        Point2::new(
+                            -0.66 + (index % 4) as f64 * 0.44,
+                            -0.4 + (index / 4) as f64 * 0.8,
+                        ),
+                        0.12,
                     ),
-                    0.12,
-                ),
+                )
             })
             .collect(),
+        ..Scene::default()
     };
     let mesh = mesh_scene(
         &scene,
@@ -459,6 +474,185 @@ fn representative_eight_obstacle_scene_meshes_within_limits() {
     assert_mesh_invariants(&mesh, 8);
     assert!(mesh.vertices.len() < 5_000);
     assert!(mesh.triangles.len() < 10_000);
+}
+
+fn medium(id: u64, name: &str, stiffness: f64, color: [u8; 3]) -> Material {
+    Material {
+        id: MaterialId(id),
+        name: name.into(),
+        mass_density: 1.0,
+        stiffness,
+        damping: 0.0,
+        color,
+    }
+}
+
+fn two_region_scene(role: impl FnOnce(RegionId, RegionId) -> LoopRole) -> Scene {
+    Scene {
+        obstacles: vec![Obstacle {
+            id: ObstacleId(20),
+            spline: PeriodicCubicSpline::rounded(Point2::default(), 0.42),
+            role: role(BACKGROUND_REGION, RegionId(2)),
+        }],
+        materials: vec![
+            Material::default_medium(),
+            medium(2, "Inclusion", 2.5, [180, 90, 70]),
+        ],
+        regions: vec![
+            Region {
+                id: BACKGROUND_REGION,
+                material: DEFAULT_MATERIAL,
+            },
+            Region {
+                id: RegionId(2),
+                material: MaterialId(2),
+            },
+        ],
+    }
+}
+
+fn edge_adjacency(mesh: &TriMesh) -> BTreeMap<(usize, usize), Vec<usize>> {
+    let mut adjacency = BTreeMap::<_, Vec<_>>::new();
+    for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+        for edge in [
+            edge_key(triangle.vertices[0], triangle.vertices[1]),
+            edge_key(triangle.vertices[1], triangle.vertices[2]),
+            edge_key(triangle.vertices[2], triangle.vertices[0]),
+        ] {
+            adjacency.entry(edge).or_default().push(triangle_index);
+        }
+    }
+    adjacency
+}
+
+#[test]
+fn material_interface_retains_both_regions_with_a_shared_trace() {
+    let scene =
+        two_region_scene(|exterior, interior| LoopRole::MaterialInterface { exterior, interior });
+    assert!(validate(&scene).valid());
+    let mesh = mesh(&scene);
+    let regions = mesh
+        .triangles
+        .iter()
+        .map(|triangle| triangle.region)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(regions, BTreeSet::from([BACKGROUND_REGION, RegionId(2)]));
+    let adjacency = edge_adjacency(&mesh);
+    let interfaces = mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| matches!(edge.label, BoundaryLabel::MaterialInterface(ObstacleId(20))))
+        .collect::<Vec<_>>();
+    assert!(!interfaces.is_empty());
+    for edge in interfaces {
+        let sides = &adjacency[&edge_key(edge.vertices[0], edge.vertices[1])];
+        assert_eq!(sides.len(), 2);
+        assert_ne!(
+            mesh.triangles[sides[0]].region,
+            mesh.triangles[sides[1]].region
+        );
+    }
+    let area = mesh
+        .triangles
+        .iter()
+        .map(|triangle| {
+            let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
+            0.5 * (b - a).cross(c - a)
+        })
+        .sum::<f64>();
+    assert!((area - 4.0).abs() < 1.0e-10);
+}
+
+#[test]
+fn closed_wall_duplicates_the_two_traces_and_retains_its_interior() {
+    let scene = two_region_scene(|exterior, interior| LoopRole::Wall { exterior, interior });
+    assert!(validate(&scene).valid());
+    let mesh = mesh(&scene);
+    let adjacency = edge_adjacency(&mesh);
+    let exterior = mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            edge.label
+                == BoundaryLabel::Wall {
+                    loop_id: ObstacleId(20),
+                    side: BoundarySide::Exterior,
+                }
+        })
+        .collect::<Vec<_>>();
+    let interior = mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            edge.label
+                == BoundaryLabel::Wall {
+                    loop_id: ObstacleId(20),
+                    side: BoundarySide::Interior,
+                }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(exterior.len(), interior.len());
+    assert!(!exterior.is_empty());
+    for edge in exterior.iter().chain(&interior) {
+        assert_eq!(
+            adjacency[&edge_key(edge.vertices[0], edge.vertices[1])].len(),
+            1
+        );
+    }
+    assert!(exterior.iter().all(|outside| interior.iter().any(|inside| {
+        outside
+            .vertices
+            .map(|index| mesh.vertices[index].point)
+            .into_iter()
+            .all(|point| {
+                inside
+                    .vertices
+                    .map(|index| mesh.vertices[index].point)
+                    .contains(&point)
+            })
+    })));
+    assert!(
+        mesh.triangles
+            .iter()
+            .any(|triangle| triangle.region == RegionId(2))
+    );
+}
+
+#[test]
+fn nested_material_regions_follow_explicit_region_ownership() {
+    let mut scene =
+        two_region_scene(|exterior, interior| LoopRole::MaterialInterface { exterior, interior });
+    scene.materials.push(medium(3, "Core", 0.6, [80, 130, 190]));
+    scene.regions.push(Region {
+        id: RegionId(3),
+        material: MaterialId(3),
+    });
+    scene.obstacles.push(Obstacle {
+        id: ObstacleId(21),
+        spline: PeriodicCubicSpline::rounded(Point2::default(), 0.18),
+        role: LoopRole::MaterialInterface {
+            exterior: RegionId(2),
+            interior: RegionId(3),
+        },
+    });
+    assert!(validate(&scene).valid());
+    let mesh = mesh(&scene);
+    assert_eq!(
+        mesh.triangles
+            .iter()
+            .map(|triangle| triangle.region)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([BACKGROUND_REGION, RegionId(2), RegionId(3)])
+    );
+
+    scene.obstacles[1].role = LoopRole::MaterialInterface {
+        exterior: BACKGROUND_REGION,
+        interior: RegionId(3),
+    };
+    assert!(matches!(
+        validate(&scene).issue,
+        Some(ValidationIssue::RegionTopology(ObstacleId(21)))
+    ));
 }
 
 fn finish_update(mut job: MeshUpdateJob, budget: usize) -> MeshUpdateResult {

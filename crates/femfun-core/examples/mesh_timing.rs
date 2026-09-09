@@ -26,17 +26,20 @@ fn main() -> std::process::ExitCode {
                 let rows = count / columns;
                 Scene {
                     obstacles: (0..count)
-                        .map(|i| Obstacle {
-                            id: ObstacleId(i as u64 + 1),
-                            spline: PeriodicCubicSpline::rounded(
-                                Point2::new(
-                                    -0.85 + 1.7 * (i % columns) as f64 / (columns - 1) as f64,
-                                    -0.65 + 1.3 * (i / columns) as f64 / (rows - 1) as f64,
+                        .map(|i| {
+                            Obstacle::hole(
+                                ObstacleId(i as u64 + 1),
+                                PeriodicCubicSpline::rounded(
+                                    Point2::new(
+                                        -0.85 + 1.7 * (i % columns) as f64 / (columns - 1) as f64,
+                                        -0.65 + 1.3 * (i / columns) as f64 / (rows - 1) as f64,
+                                    ),
+                                    if count == 8 { 0.12 } else { 0.07 },
                                 ),
-                                if count == 8 { 0.12 } else { 0.07 },
-                            ),
+                            )
                         })
                         .collect(),
+                    ..Scene::default()
                 }
             };
             let options = MeshingOptions {

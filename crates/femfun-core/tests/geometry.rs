@@ -105,11 +105,9 @@ fn scene(loops: Vec<PeriodicCubicSpline>) -> Scene {
         obstacles: loops
             .into_iter()
             .enumerate()
-            .map(|(i, spline)| Obstacle {
-                id: ObstacleId(i as u64 + 1),
-                spline,
-            })
+            .map(|(i, spline)| Obstacle::hole(ObstacleId(i as u64 + 1), spline))
             .collect(),
+        ..Scene::default()
     }
 }
 #[test]

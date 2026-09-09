@@ -147,17 +147,19 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..8 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 2.into(),
+            0 => value["version"] = 3.into(),
             1 => value["domain"][0] = 0.into(),
-            2 => value["draft"][0]["intervals"][0] = 0.into(),
-            3 => value["draft"][0]["controls"] = serde_json::json!([[0, 0], [0, 0], [0, 0]]),
-            4 => value["accepted"][0]["controls"][0][0] = 100.into(),
-            5 => value["draft"][0]["id"] = 0.into(),
-            6 => {
-                let o = value["draft"][0].clone();
-                value["draft"].as_array_mut().unwrap().push(o);
+            2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
+            3 => {
+                value["draft"]["loops"][0]["controls"] = serde_json::json!([[0, 0], [0, 0], [0, 0]])
             }
-            _ => value["draft"][0]["unknown"] = true.into(),
+            4 => value["accepted"]["loops"][0]["controls"][0][0] = 100.into(),
+            5 => value["draft"]["loops"][0]["id"] = 0.into(),
+            6 => {
+                let o = value["draft"]["loops"][0].clone();
+                value["draft"]["loops"].as_array_mut().unwrap().push(o);
+            }
+            _ => value["draft"]["loops"][0]["unknown"] = true.into(),
         };
         assert!(
             decode(serde_json::to_string(&value).unwrap().as_bytes()).is_err(),
@@ -192,8 +194,88 @@ fn representative_example_loads_and_extreme_finite_draft_remains_editable() {
     let document = decode(include_bytes!("../../../examples/eight-obstacles.json")).unwrap();
     assert_eq!(document.draft.obstacles.len(), 8);
     let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
-    value["draft"][0]["controls"][0][0] = serde_json::json!(1e100);
+    value["draft"]["loops"][0]["controls"][0][0] = serde_json::json!(1e100);
     let loaded = decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
     assert_eq!(loaded.accepted, document.accepted);
     assert_eq!(loaded.draft.obstacles[0].spline.controls()[0].x, 1e100);
+}
+
+#[test]
+fn material_regions_round_trip_and_version_one_migrates_to_holes() {
+    let mut editor = Editor::default();
+    let material = editor.add_material().unwrap();
+    let id = editor
+        .create_region_loop(
+            PeriodicCubicSpline::rounded(Point2::new(0.5, 0.0), 0.15),
+            BACKGROUND_REGION,
+            material,
+            false,
+        )
+        .unwrap();
+    settle(&mut editor);
+    let mut values = editor.document.draft.material(material).unwrap().clone();
+    values.mass_density = 2.5;
+    values.stiffness = 6.0;
+    values.damping = 0.1;
+    editor.update_material(values).unwrap();
+    settle(&mut editor);
+    let document = decode(save(&editor.document).unwrap().as_bytes()).unwrap();
+    assert_eq!(document, editor.document);
+    assert!(matches!(
+        document
+            .draft
+            .obstacles
+            .iter()
+            .find(|loop_| loop_.id == id)
+            .unwrap()
+            .role,
+        LoopRole::MaterialInterface { .. }
+    ));
+
+    let legacy = br#"{
+      "version": 1,
+      "domain": [-1.0, 1.0, -1.0, 1.0],
+      "draft": [{"id": 9, "controls": [[-0.2,0.0],[0.0,0.2],[0.2,0.0],[0.0,-0.2]], "intervals": [1.0,1.0,1.0,1.0]}],
+      "accepted": [{"id": 9, "controls": [[-0.2,0.0],[0.0,0.2],[0.2,0.0],[0.0,-0.2]], "intervals": [1.0,1.0,1.0,1.0]}]
+    }"#;
+    let migrated = decode(legacy).unwrap();
+    assert_eq!(migrated.draft.materials, Scene::default().materials);
+    assert!(matches!(
+        migrated.draft.obstacles[0].role,
+        LoopRole::Hole {
+            exterior: BACKGROUND_REGION
+        }
+    ));
+}
+
+#[test]
+fn material_edits_and_region_assignments_are_undoable() {
+    let mut editor = Editor::default();
+    let material = editor.add_material().unwrap();
+    let after_add = editor.document.clone();
+    editor
+        .set_region_material(BACKGROUND_REGION, material)
+        .unwrap();
+    assert_eq!(
+        editor
+            .document
+            .draft
+            .region(BACKGROUND_REGION)
+            .unwrap()
+            .material,
+        material
+    );
+    editor.undo();
+    assert_eq!(editor.document, after_add);
+    editor.redo();
+    assert_eq!(
+        editor
+            .document
+            .draft
+            .region(BACKGROUND_REGION)
+            .unwrap()
+            .material,
+        material
+    );
+    assert!(editor.delete_material(material).is_err());
 }

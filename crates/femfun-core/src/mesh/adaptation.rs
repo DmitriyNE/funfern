@@ -129,18 +129,39 @@ impl MeshUpdateJob {
         if let Some(mesh) = &result.previous {
             result.report.local_attempted = true;
             result.report.original_triangles = mesh.triangles.len();
-            let compatible = result.previous_scene.obstacles.len() == result.scene.obstacles.len()
+            let compatible = result
+                .previous_scene
+                .obstacles
+                .iter()
+                .chain(&result.scene.obstacles)
+                .all(|loop_| matches!(loop_.role, LoopRole::Hole { .. }))
+                && result.previous_scene.obstacles.len() == result.scene.obstacles.len()
                 && result.scene.obstacles.iter().all(|new| {
                     result.previous_scene.obstacles.iter().any(|old| {
-                        old.id == new.id && old.spline.intervals() == new.spline.intervals()
+                        old.id == new.id
+                            && old.role == new.role
+                            && old.spline.intervals() == new.spline.intervals()
                     })
                 });
             if compatible {
-                result.builder = Some(MeshBuilder::new(options));
+                let mut builder = MeshBuilder::new(options);
+                builder.loop_ids = result
+                    .scene
+                    .obstacles
+                    .iter()
+                    .map(|loop_| loop_.id)
+                    .collect();
+                builder.loop_roles = result
+                    .scene
+                    .obstacles
+                    .iter()
+                    .map(|loop_| loop_.role)
+                    .collect();
+                result.builder = Some(builder);
                 result.phase =
                     Phase::Validate(Box::new(ValidationJob::new(result.scene.clone(), revision)));
             } else {
-                result.fallback("obstacle set or knot vector changed".into());
+                result.fallback("loop topology, role, or knot vector changed".into());
             }
         } else {
             result.full();
@@ -341,6 +362,8 @@ impl MeshUpdateJob {
                 let label = match edge.label {
                     BoundaryLabel::Outer(_) => 0,
                     BoundaryLabel::Obstacle(id) => id.0,
+                    BoundaryLabel::MaterialInterface(id) => id.0,
+                    BoundaryLabel::Wall { loop_id, .. } => loop_id.0,
                 };
                 self.seeds.entry(label).or_insert(edge.vertices[0]);
                 self.builder.as_mut().unwrap().add_boundary_edge(edge);
@@ -721,6 +744,7 @@ fn collapse(b: &mut MeshBuilder, remove: usize, keep: usize) -> Result<bool, Mes
             vertices: triangle
                 .vertices
                 .map(|v| if v == remove { keep } else { v }),
+            region: triangle.region,
         };
         let [a, c, d] = b.triangle_points(triangle);
         if orient2d(a, c, d) != PredicateSign::Positive {
@@ -777,8 +801,11 @@ mod tests {
             b.add_vertex(p, None).unwrap();
         }
         for i in 0..4 {
-            b.push_triangle(b.ccw_triangle([i, (i + 1) % 4, 4]).unwrap())
-                .unwrap();
+            b.push_triangle(
+                b.ccw_triangle([i, (i + 1) % 4, 4], BACKGROUND_REGION)
+                    .unwrap(),
+            )
+            .unwrap();
         }
         let original: BTreeSet<_> = b.triangles.iter().map(|t| key(t.vertices)).collect();
         b.repair_region = Some(vec![true; 5]);
@@ -824,8 +851,11 @@ mod tests {
             b.add_vertex(p, None).unwrap();
         }
         for i in 0..4 {
-            b.push_triangle(b.ccw_triangle([i, (i + 1) % 4, 4]).unwrap())
-                .unwrap();
+            b.push_triangle(
+                b.ccw_triangle([i, (i + 1) % 4, 4], BACKGROUND_REGION)
+                    .unwrap(),
+            )
+            .unwrap();
         }
         b.insert_point(Point2::new(0.0, -0.1)).unwrap();
         b.repair_region = Some(vec![false, false, true, true, true, true]);

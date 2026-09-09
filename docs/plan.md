@@ -126,7 +126,8 @@ Core geometry-edit transactions and GPU transfer are implemented. Candidate mesh
 construction is resumable; operator and transfer-map preparation still form a
 short synchronous tail and should be made resumable if larger discretizations make
 it visible. Boundary-condition transactions reuse the current mesh and preserve
-the live field; material transactions remain future work.
+the live field. Material-coefficient transactions also reuse the current mesh and
+preserve the live field.
 
 - Prepare candidate geometry, mesh, operators, boundary state policy, transfer map,
   and timestep while continuing to simulate on the accepted revision.
@@ -138,8 +139,7 @@ the live field; material transactions remain future work.
   satisfy the responsiveness requirement; use resumable work or a worker.
 - Validate candidates and preserve the accepted simulation when preparation fails.
 - Define initialization for newly exposed regions and treatment of boundary data.
-- Extend transactions to material coefficients. Boundary-condition changes are
-  complete.
+- Boundary-condition and material-coefficient transactions are complete.
 
 **Completion:** sustained dragging and parameter edits remain responsive, commits
 never mix revisions, rejected candidates recover cleanly, and the transfer uses
@@ -190,6 +190,14 @@ modes.
 
 ## 7. Interior topology and material assignment
 
+Implemented for closed spline loops. Stable regions and materials distinguish
+holes, conforming transmitting interfaces, and two-trace closed walls. Nested
+ownership is validated, triangles carry regions, P2e assembly is piecewise, and
+coefficient edits use a same-mesh field-transfer transaction. Version 2 scene
+files preserve the model and migrate version 1 holes. Multi-region coordinate
+edits currently take the full-mesh path; extending bounded repair across region
+topology remains adaptation work.
+
 - Give regions, materials, interfaces, and internal walls stable semantic IDs
   independent of mesh vertices and element indices. Keep holes, transmitting
   material interfaces, and two-sided walls distinct.
@@ -207,7 +215,7 @@ modes.
 - Treat coefficient-only edits as same-mesh simulation transactions. Topology
   changes use the normal remesh and field-transfer path.
 
-**Completion:** nested material inclusions and internal boundaries mesh with stable
+**Completion achieved:** nested material inclusions and internal boundaries mesh with stable
 labels, piecewise coefficients reach both CPU and GPU solvers, assignments survive
 save/load and undo/redo, and coefficient edits preserve the running field without
 remeshing.

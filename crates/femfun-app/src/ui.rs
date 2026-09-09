@@ -28,6 +28,13 @@ enum Mode {
     Pulse,
     Source,
 }
+#[derive(Clone, Copy, Default, PartialEq)]
+enum CreationRole {
+    #[default]
+    Hole,
+    MaterialInterface,
+    Wall,
+}
 struct Drag {
     id: ObstacleId,
     index: usize,
@@ -56,6 +63,9 @@ pub struct Playground {
     automated_benchmark: bool,
     editor: Editor,
     mode: Mode,
+    creation_role: CreationRole,
+    material_selection: MaterialId,
+    region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
     custom: Vec<Point2>,
     drag: Option<Drag>,
@@ -100,6 +110,7 @@ pub struct Playground {
     mesh_max_slice_ms: f64,
     show_mesh: bool,
     show_mesh_boundary: bool,
+    show_materials: bool,
     show_field: bool,
     field_gain: f32,
     wave_mesh: Option<Arc<TriMesh>>,
@@ -133,6 +144,9 @@ impl Default for Playground {
             automated_benchmark: false,
             editor: Editor::default(),
             mode: Mode::Select,
+            creation_role: CreationRole::Hole,
+            material_selection: DEFAULT_MATERIAL,
+            region_selection: BACKGROUND_REGION,
             selection: Some((ObstacleId(1), None)),
             custom: vec![],
             drag: None,
@@ -177,6 +191,7 @@ impl Default for Playground {
             mesh_max_slice_ms: 0.0,
             show_mesh: false,
             show_mesh_boundary: true,
+            show_materials: true,
             show_field: true,
             field_gain: 2.0,
             wave_mesh: None,
@@ -220,6 +235,7 @@ impl Playground {
     }
     fn clear_transient(&mut self) {
         self.selection = None;
+        self.region_selection = BACKGROUND_REGION;
         self.drag = None;
         self.panning = false;
         self.custom.clear();
@@ -243,12 +259,54 @@ impl Playground {
             return;
         }
         let spline = PeriodicCubicSpline::uniform(self.custom.clone()).unwrap();
-        let result = self.editor.create(spline);
+        let center = self
+            .custom
+            .iter()
+            .copied()
+            .fold(Point2::default(), |sum, point| sum + point)
+            / self.custom.len() as f64;
+        let result = self.create_spline(spline, center);
         if let Some(id) = self.error(result) {
             self.selection = Some((id, None));
             self.custom.clear();
             self.mode = Mode::Select;
         }
+    }
+
+    fn create_spline(
+        &mut self,
+        spline: PeriodicCubicSpline,
+        anchor: Point2,
+    ) -> Result<ObstacleId, String> {
+        let exterior = self.region_at(anchor);
+        match self.creation_role {
+            CreationRole::Hole => self.editor.create_loop(spline, LoopRole::Hole { exterior }),
+            CreationRole::MaterialInterface => {
+                self.editor
+                    .create_region_loop(spline, exterior, self.material_selection, false)
+            }
+            CreationRole::Wall => {
+                self.editor
+                    .create_region_loop(spline, exterior, self.material_selection, true)
+            }
+        }
+    }
+
+    fn region_at(&self, point: Point2) -> RegionId {
+        self.mesh
+            .as_ref()
+            .and_then(|mesh| {
+                mesh.triangles.iter().find_map(|triangle| {
+                    let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
+                    let orientation = (b - a).cross(c - a);
+                    let inside = orientation > 0.0
+                        && (b - a).cross(point - a) >= -1.0e-12
+                        && (c - b).cross(point - b) >= -1.0e-12
+                        && (a - c).cross(point - c) >= -1.0e-12;
+                    inside.then_some(triangle.region)
+                })
+            })
+            .unwrap_or(BACKGROUND_REGION)
     }
     fn update_files(&mut self) {
         let events: Vec<_> = self.receiver.lock().unwrap().try_iter().collect();
@@ -324,7 +382,7 @@ impl Playground {
             return;
         }
         let start = Instant::now();
-        let geometry_changed = self.mesh_source != self.editor.document.accepted
+        let geometry_changed = !self.mesh_source.geometry_eq(&self.editor.document.accepted)
             || self.mesh_source_max_edge != self.mesh_max_edge;
         if geometry_changed {
             self.mesh_started = Some(start);
@@ -385,9 +443,9 @@ impl Playground {
                         .map(|i| mesh.triangle_quality(i).unwrap().minimum_angle_degrees < 15.0)
                         .collect();
                     let prepare = Instant::now();
-                    match QuadraticWaveOperator::assemble_with_boundary(
+                    match QuadraticWaveOperator::assemble_scene(
                         &mesh,
-                        WaveCoefficients::default(),
+                        &self.mesh_source,
                         self.wave_boundary,
                     ) {
                         Ok(operator) => {
@@ -442,14 +500,16 @@ impl Playground {
         }
         if !geometry_changed
             && self.mesh_job.is_none()
-            && self.wave_boundary != self.wave_boundary_committed
+            && self.simulation_candidate.is_none()
+            && (self.wave_boundary != self.wave_boundary_committed
+                || self.editor.document.accepted != self.mesh_committed_scene)
             && let (Some(mesh), Some(source_operator)) =
                 (self.wave_mesh.as_ref(), self.wave_operator.as_ref())
         {
             let prepare = Instant::now();
-            match QuadraticWaveOperator::assemble_with_boundary(
+            match QuadraticWaveOperator::assemble_scene(
                 mesh,
-                WaveCoefficients::default(),
+                &self.editor.document.accepted,
                 self.wave_boundary,
             ) {
                 Ok(operator) => {
@@ -458,7 +518,7 @@ impl Playground {
                             let time_step = operator.recommended_time_step();
                             self.simulation_candidate = Some(SimulationCandidate {
                                 mesh: mesh.clone(),
-                                scene: self.mesh_committed_scene.clone(),
+                                scene: self.editor.document.accepted.clone(),
                                 max_edge: self.mesh_committed_max_edge,
                                 low_quality: self.mesh_low_quality.clone(),
                                 operator: Arc::new(operator),
@@ -472,10 +532,7 @@ impl Playground {
                             });
                             self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
                             self.wave_error = None;
-                            self.message = format!(
-                                "Preparing {} outer-boundary transaction…",
-                                self.wave_boundary.label()
-                            );
+                            self.message = "Preparing material/boundary transaction…".into();
                         }
                         Err(error) => self.wave_error = Some(error.to_string()),
                     }
@@ -581,13 +638,18 @@ impl Playground {
         });
         if candidate_ready {
             let candidate = self.simulation_candidate.take().unwrap();
-            let boundary_only = self
+            let same_mesh = self
                 .mesh
                 .as_ref()
                 .is_some_and(|mesh| Arc::ptr_eq(mesh, &candidate.mesh))
-                && candidate.scene == self.mesh_committed_scene
                 && candidate.max_edge == self.mesh_committed_max_edge;
-            let commit_message = if boundary_only {
+            let material_changed = candidate.scene != self.mesh_committed_scene;
+            let boundary_changed = candidate.boundary != self.wave_boundary_committed;
+            let commit_message = if same_mesh && material_changed && boundary_changed {
+                "Materials and outer boundary committed; live field preserved".into()
+            } else if same_mesh && material_changed {
+                "Materials committed; live field preserved".into()
+            } else if same_mesh && boundary_changed {
                 format!(
                     "{} outer boundary committed; live field preserved",
                     candidate.boundary.label()
@@ -727,7 +789,57 @@ impl Playground {
                 .color(Color32::GRAY),
         );
         ui.add_space(14.0);
-        ui.label("Create an obstacle");
+        if self
+            .editor
+            .document
+            .draft
+            .material(self.material_selection)
+            .is_none()
+        {
+            self.material_selection = self
+                .editor
+                .document
+                .draft
+                .materials
+                .first()
+                .map_or(DEFAULT_MATERIAL, |material| material.id);
+        }
+        ui.label("Create a closed loop");
+        egui::ComboBox::from_id_salt("creation_role")
+            .selected_text(match self.creation_role {
+                CreationRole::Hole => "Hole",
+                CreationRole::MaterialInterface => "Material interface",
+                CreationRole::Wall => "Closed wall",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.creation_role, CreationRole::Hole, "Hole");
+                ui.selectable_value(
+                    &mut self.creation_role,
+                    CreationRole::MaterialInterface,
+                    "Material interface",
+                );
+                ui.selectable_value(&mut self.creation_role, CreationRole::Wall, "Closed wall");
+            });
+        if self.creation_role != CreationRole::Hole {
+            let materials = self.editor.document.draft.materials.clone();
+            egui::ComboBox::from_label("Interior material")
+                .selected_text(
+                    self.editor
+                        .document
+                        .draft
+                        .material(self.material_selection)
+                        .map_or("Missing", |material| material.name.as_str()),
+                )
+                .show_ui(ui, |ui| {
+                    for material in materials {
+                        ui.selectable_value(
+                            &mut self.material_selection,
+                            material.id,
+                            material.name,
+                        );
+                    }
+                });
+        }
         ui.horizontal(|ui| {
             if ui
                 .selectable_label(self.mode == Mode::Select, "Select")
@@ -767,7 +879,7 @@ impl Playground {
         ui.add_space(10.0);
         ui.separator();
         ui.label(format!(
-            "Obstacles  {} / 32",
+            "Loops  {} / 32",
             self.editor.document.draft.obstacles.len()
         ));
         egui::ScrollArea::vertical()
@@ -779,8 +891,9 @@ impl Playground {
                         .selectable_label(
                             self.selection.is_some_and(|s| s.0 == o.id),
                             format!(
-                                "Loop {:02}     {} controls",
+                                "Loop {:02} · {} · {} controls",
                                 o.id.0,
+                                o.role.label(),
                                 o.spline.controls().len()
                             ),
                         )
@@ -791,7 +904,7 @@ impl Playground {
                 }
             });
         if let Some((id, index)) = self.selection {
-            if ui.button("Delete obstacle").clicked() {
+            if ui.button("Delete loop").clicked() {
                 self.editor.delete_obstacle(id);
                 self.selection = None;
             }
@@ -857,6 +970,124 @@ impl Playground {
             }
         }
         ui.add_space(8.0);
+        ui.collapsing("Regions and materials", |ui| {
+            let materials = self.editor.document.draft.materials.clone();
+            let regions = self.editor.document.draft.regions.clone();
+            for region in regions {
+                let label = if region.id == BACKGROUND_REGION {
+                    "Background".into()
+                } else {
+                    self.editor
+                        .document
+                        .draft
+                        .obstacles
+                        .iter()
+                        .find(|loop_| loop_.role.interior() == Some(region.id))
+                        .map_or_else(
+                            || format!("Region {}", region.id.0),
+                            |loop_| format!("Loop {} interior", loop_.id.0),
+                        )
+                };
+                let mut selected = region.material;
+                if ui
+                    .selectable_label(self.region_selection == region.id, label)
+                    .clicked()
+                {
+                    self.region_selection = region.id;
+                }
+                egui::ComboBox::from_id_salt(("region_material", region.id.0))
+                    .selected_text(
+                        materials
+                            .iter()
+                            .find(|material| material.id == selected)
+                            .map_or("Missing", |material| material.name.as_str()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for material in &materials {
+                            ui.selectable_value(&mut selected, material.id, &material.name);
+                        }
+                    });
+                if selected != region.material {
+                    let result = self.editor.set_region_material(region.id, selected);
+                    self.error(result);
+                }
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Material");
+                if ui.small_button("+").clicked() {
+                    let result = self.editor.add_material();
+                    if let Some(id) = self.error(result) {
+                        self.material_selection = id;
+                    }
+                }
+            });
+            egui::ComboBox::from_id_salt("material_editor")
+                .selected_text(
+                    materials
+                        .iter()
+                        .find(|material| material.id == self.material_selection)
+                        .map_or("Missing", |material| material.name.as_str()),
+                )
+                .show_ui(ui, |ui| {
+                    for material in &materials {
+                        ui.selectable_value(
+                            &mut self.material_selection,
+                            material.id,
+                            &material.name,
+                        );
+                    }
+                });
+            if let Some(mut material) = self
+                .editor
+                .document
+                .draft
+                .material(self.material_selection)
+                .cloned()
+            {
+                let responses = [
+                    ui.add(
+                        egui::DragValue::new(&mut material.mass_density)
+                            .speed(0.01)
+                            .range(1.0e-6..=1.0e6)
+                            .prefix("density ")
+                            .update_while_editing(false),
+                    ),
+                    ui.add(
+                        egui::DragValue::new(&mut material.stiffness)
+                            .speed(0.01)
+                            .range(1.0e-6..=1.0e6)
+                            .prefix("stiffness ")
+                            .update_while_editing(false),
+                    ),
+                    ui.add(
+                        egui::DragValue::new(&mut material.damping)
+                            .speed(0.005)
+                            .range(0.0..=1.0e6)
+                            .prefix("damping ")
+                            .update_while_editing(false),
+                    ),
+                ];
+                if responses.iter().any(egui::Response::changed) {
+                    let result = self.editor.update_material(material.clone());
+                    self.error(result);
+                }
+                ui.small(format!(
+                    "wave speed {:.3}",
+                    (material.stiffness / material.mass_density).sqrt()
+                ));
+                if self.material_selection != DEFAULT_MATERIAL
+                    && ui.small_button("Delete unused material").clicked()
+                {
+                    let result = self.editor.delete_material(self.material_selection);
+                    if self.error(result).is_some() {
+                        self.material_selection = DEFAULT_MATERIAL;
+                    }
+                }
+            }
+            ui.small("Interfaces share a trace; closed walls keep separate traces.");
+        });
+        ui.add_space(8.0);
         ui.separator();
         ui.horizontal(|ui| {
             let (undo, redo) = self.editor.history_len();
@@ -912,6 +1143,7 @@ impl Playground {
             ui.checkbox(&mut self.polygon, "Control polygons");
             ui.checkbox(&mut self.handles, "Handles");
             ui.checkbox(&mut self.reference, "Accepted reference");
+            ui.checkbox(&mut self.show_materials, "Material regions");
             ui.checkbox(&mut self.show_mesh, "Accepted triangle mesh");
             ui.add_enabled_ui(self.show_mesh, |ui| {
                 ui.checkbox(&mut self.show_mesh_boundary, "Mesh boundary labels");
@@ -1223,6 +1455,9 @@ impl Playground {
                         });
                     } else {
                         self.selection = self.hit_curve(p, r).map(|(id, _)| (id, None));
+                        if self.selection.is_none() {
+                            self.region_selection = self.region_at(self.world(p, r));
+                        }
                     }
                 }
                 if self.panning {
@@ -1253,9 +1488,9 @@ impl Playground {
                 } else if response.clicked() && !space && !self.panning {
                     match self.mode {
                         Mode::Preset => {
+                            let center = self.world(p, r);
                             let result = self
-                                .editor
-                                .create(PeriodicCubicSpline::rounded(self.world(p, r), 0.15));
+                                .create_spline(PeriodicCubicSpline::rounded(center, 0.15), center);
                             if let Some(id) = self.error(result) {
                                 self.selection = Some((id, None));
                                 self.mode = Mode::Select;
@@ -1315,6 +1550,31 @@ impl Playground {
                 }
             }
         }
+        if self.show_materials
+            && let Some(mesh) = &self.mesh
+        {
+            let mut regions = egui::Mesh::default();
+            regions.reserve_vertices(mesh.triangles.len() * 3);
+            regions.reserve_triangles(mesh.triangles.len());
+            for triangle in &mesh.triangles {
+                let color = self
+                    .mesh_committed_scene
+                    .region_material(triangle.region)
+                    .map_or([70, 85, 96], |material| material.color);
+                let alpha = if triangle.region == self.region_selection {
+                    145
+                } else {
+                    85
+                };
+                let color = Color32::from_rgba_unmultiplied(color[0], color[1], color[2], alpha);
+                let base = regions.vertices.len() as u32;
+                for index in triangle.vertices {
+                    regions.colored_vertex(self.screen(mesh.vertices[index].point, r), color);
+                }
+                regions.add_triangle(base, base + 1, base + 2);
+            }
+            painter.add(egui::Shape::mesh(regions));
+        }
         if self.show_field
             && let (Some(operator), Some(display)) = (&self.wave_operator, wave_display)
             && display.generation > 0
@@ -1369,6 +1629,11 @@ impl Playground {
                     let color = match edge.label {
                         BoundaryLabel::Outer(_) => Color32::from_rgb(142, 161, 175),
                         BoundaryLabel::Obstacle(_) => Color32::from_rgb(119, 155, 255),
+                        BoundaryLabel::MaterialInterface(_) => Color32::from_rgb(102, 210, 178),
+                        BoundaryLabel::Wall { side, .. } => match side {
+                            BoundarySide::Exterior => Color32::from_rgb(235, 132, 115),
+                            BoundarySide::Interior => Color32::from_rgb(235, 183, 115),
+                        },
                     };
                     painter.line_segment(
                         edge.vertices
@@ -1648,14 +1913,17 @@ pub fn mesh_benchmark_scene() -> Playground {
     };
     let scene = Scene {
         obstacles: (0..8)
-            .map(|i| Obstacle {
-                id: ObstacleId(i + 1),
-                spline: PeriodicCubicSpline::rounded(
-                    Point2::new(-0.66 + (i % 4) as f64 * 0.44, -0.4 + (i / 4) as f64 * 0.8),
-                    0.12,
-                ),
+            .map(|i| {
+                Obstacle::hole(
+                    ObstacleId(i + 1),
+                    PeriodicCubicSpline::rounded(
+                        Point2::new(-0.66 + (i % 4) as f64 * 0.44, -0.4 + (i / 4) as f64 * 0.8),
+                        0.12,
+                    ),
+                )
             })
             .collect(),
+        ..Scene::default()
     };
     state
         .editor
@@ -1832,6 +2100,7 @@ pub struct WaveTransferBenchmark {
     expected_auxiliary: Vec<f64>,
     transfer_started: Option<Instant>,
     boundary_started: Option<Instant>,
+    material_started: Option<Instant>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1849,6 +2118,7 @@ impl Default for WaveTransferBenchmark {
             expected_auxiliary: vec![],
             transfer_started: None,
             boundary_started: None,
+            material_started: None,
         }
     }
 }
@@ -2144,7 +2414,7 @@ pub fn wave_transfer_benchmark(
             benchmark.generation = generation;
             benchmark.phase = 5;
         }
-        _ => {
+        5 => {
             let Some(operator) = &state.wave_operator else {
                 return;
             };
@@ -2187,14 +2457,144 @@ pub fn wave_transfer_benchmark(
                 operator_map_ms = state.wave_prepare_ms,
                 "Boundary-condition wave transfer check complete"
             );
+            if current_error > 3.0e-5
+                || previous_error > 3.0e-5
+                || auxiliary_error > 1.0e-7
+                || operator.outer_boundary() != OuterBoundaryCondition::FirstOrderOutgoing
+            {
+                error!("Boundary-condition GPU transaction differs from the f64 reference");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+
+            benchmark.source_current = display.current.iter().map(|value| *value as f64).collect();
+            let source_previous: Vec<_> =
+                display.previous.iter().map(|value| *value as f64).collect();
+            let stiffness = operator.apply_stiffness(&benchmark.source_current).unwrap();
+            benchmark.source_velocity = benchmark
+                .source_current
+                .iter()
+                .zip(source_previous)
+                .zip(stiffness)
+                .zip(operator.lumped_mass())
+                .zip(operator.lumped_damping())
+                .map(|((((current, previous), ku), mass), damping)| {
+                    centered_velocity(
+                        previous,
+                        *current,
+                        -ku / mass,
+                        damping / mass,
+                        state.wave_time_step,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let material = state.editor.add_material().unwrap();
+            let mut values = state
+                .editor
+                .document
+                .draft
+                .material(material)
+                .unwrap()
+                .clone();
+            values.mass_density = 1.7;
+            values.stiffness = 0.8;
+            values.damping = 0.05;
+            state.editor.update_material(values).unwrap();
+            state
+                .editor
+                .set_region_material(BACKGROUND_REGION, material)
+                .unwrap();
+            benchmark.material_started = Some(Instant::now());
+            benchmark.phase = 6;
+        }
+        6 => {
+            let Some(candidate) = &state.simulation_candidate else {
+                return;
+            };
+            let (Some(map), Some(generation)) = (&candidate.transfer, candidate.generation) else {
+                return;
+            };
+            if state.mesh_job.is_some()
+                || !state
+                    .wave_mesh
+                    .as_ref()
+                    .is_some_and(|mesh| Arc::ptr_eq(mesh, &candidate.mesh))
+            {
+                error!("Material transaction rebuilt the mesh");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+            benchmark.expected_current = map.interpolate(&benchmark.source_current, 0.0).unwrap();
+            let velocity = map.interpolate(&benchmark.source_velocity, 0.0).unwrap();
+            let stiffness = candidate
+                .operator
+                .apply_stiffness(&benchmark.expected_current)
+                .unwrap();
+            benchmark.expected_previous = benchmark
+                .expected_current
+                .iter()
+                .zip(velocity)
+                .zip(stiffness)
+                .zip(candidate.operator.lumped_mass())
+                .zip(candidate.operator.lumped_damping())
+                .map(|((((current, velocity), ku), mass), damping)| {
+                    centered_previous(
+                        *current,
+                        velocity,
+                        -ku / mass,
+                        damping / mass,
+                        candidate.time_step,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            benchmark.expected_auxiliary = vec![0.0; candidate.operator.degrees_of_freedom()];
+            benchmark.generation = generation;
+            benchmark.phase = 7;
+        }
+        _ => {
+            let Some(operator) = &state.wave_operator else {
+                return;
+            };
+            if state.simulation_candidate.is_some()
+                || display.generation != benchmark.generation
+                || display.current.len() != benchmark.expected_current.len()
+            {
+                return;
+            }
+            let relative_error = |actual: &[f32], expected: &[f64]| {
+                let numerator = actual
+                    .iter()
+                    .zip(expected)
+                    .zip(operator.lumped_mass())
+                    .map(|((actual, expected), mass)| mass * (*actual as f64 - expected).powi(2))
+                    .sum::<f64>();
+                let denominator = expected
+                    .iter()
+                    .zip(operator.lumped_mass())
+                    .map(|(value, mass)| mass * value * value)
+                    .sum::<f64>();
+                (numerator / denominator.max(f64::MIN_POSITIVE)).sqrt()
+            };
+            let current_error = relative_error(&display.current, &benchmark.expected_current);
+            let previous_error = relative_error(&display.previous, &benchmark.expected_previous);
+            info!(
+                current_relative_l2 = current_error,
+                previous_relative_l2 = previous_error,
+                material_transaction_ms = benchmark
+                    .material_started
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                operator_map_ms = state.wave_prepare_ms,
+                "Material wave transfer check complete"
+            );
             if current_error <= 3.0e-5
                 && previous_error <= 3.0e-5
-                && auxiliary_error <= 1.0e-7
                 && operator.outer_boundary() == OuterBoundaryCondition::FirstOrderOutgoing
             {
                 exit.write(bevy::app::AppExit::Success);
             } else {
-                error!("Boundary-condition GPU transaction differs from the f64 reference");
+                error!("Material GPU transaction differs from the f64 reference");
                 exit.write(bevy::app::AppExit::error());
             }
         }
@@ -2799,6 +3199,52 @@ mod tests {
             OuterBoundaryCondition::FirstOrderOutgoing
         );
         assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &mesh));
+    }
+
+    #[test]
+    fn material_change_reuses_mesh_and_prepares_a_field_transfer() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let mesh = h.state.mesh.clone().expect("initial accepted mesh");
+        let old_mass: f64 = h
+            .state
+            .wave_operator
+            .as_ref()
+            .unwrap()
+            .lumped_mass()
+            .iter()
+            .sum();
+
+        let material = h.state.editor.add_material().unwrap();
+        let mut values = h
+            .state
+            .editor
+            .document
+            .draft
+            .material(material)
+            .unwrap()
+            .clone();
+        values.mass_density = 2.0;
+        h.state.editor.update_material(values).unwrap();
+        h.state
+            .editor
+            .set_region_material(BACKGROUND_REGION, material)
+            .unwrap();
+        h.settle();
+        h.state.refresh_mesh();
+
+        let candidate = h
+            .state
+            .simulation_candidate
+            .as_ref()
+            .expect("material candidate");
+        assert!(Arc::ptr_eq(&candidate.mesh, &mesh));
+        assert!(h.state.mesh_job.is_none());
+        assert_eq!(candidate.scene, h.state.editor.document.accepted);
+        assert!(candidate.transfer.is_some());
+        let new_mass: f64 = candidate.operator.lumped_mass().iter().sum();
+        assert!((new_mass - 2.0 * old_mass).abs() < 1.0e-10);
     }
 
     #[test]

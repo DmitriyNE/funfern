@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    ObstacleId, Point2, PredicateSign, Sample, Sampler, SamplingOptions, ValidationIssue,
-    ValidationJob, incircle, orient2d,
+    BACKGROUND_REGION, LoopRole, ObstacleId, Point2, PredicateSign, RegionId, Sample, Sampler,
+    SamplingOptions, ValidationIssue, ValidationJob, incircle, orient2d,
 };
 use crate::{Scene, WORLD_TOLERANCE};
 mod adaptation;
@@ -20,6 +20,17 @@ pub enum OuterSide {
 pub enum BoundaryLabel {
     Outer(OuterSide),
     Obstacle(ObstacleId),
+    MaterialInterface(ObstacleId),
+    Wall {
+        loop_id: ObstacleId,
+        side: BoundarySide,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundarySide {
+    Exterior,
+    Interior,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,6 +50,7 @@ pub struct MeshVertex {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MeshTriangle {
     pub vertices: [usize; 3],
+    pub region: RegionId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -161,12 +173,23 @@ struct Polygon {
     vertices: Vec<usize>,
 }
 
+#[derive(Clone)]
+struct TriangulationDomain {
+    region: RegionId,
+    outer: Vec<usize>,
+    holes: Vec<Vec<usize>>,
+}
+
 struct MeshBuilder {
     vertices: Vec<MeshVertex>,
     triangles: Vec<MeshTriangle>,
     boundary_edges: Vec<BoundaryEdge>,
     boundary_keys: BTreeSet<(usize, usize)>,
     domain_loops: Vec<Polygon>,
+    interior_loops: Vec<Option<Polygon>>,
+    loop_ids: Vec<ObstacleId>,
+    loop_roles: Vec<LoopRole>,
+    domains: Vec<TriangulationDomain>,
     options: MeshingOptions,
     adjacency: BTreeMap<(usize, usize), Vec<(usize, usize)>>,
     dirty_edges: VecDeque<(usize, usize)>,
@@ -347,6 +370,10 @@ impl MeshBuilder {
             boundary_edges: vec![],
             boundary_keys: BTreeSet::new(),
             domain_loops: vec![],
+            interior_loops: vec![],
+            loop_ids: vec![],
+            loop_roles: vec![],
+            domains: vec![],
             options,
             adjacency: BTreeMap::new(),
             dirty_edges: VecDeque::new(),
@@ -467,15 +494,20 @@ impl MeshBuilder {
         self.vertices[index].point
     }
 
-    fn ccw_triangle(&self, vertices: [usize; 3]) -> Result<MeshTriangle, MeshError> {
+    fn ccw_triangle(
+        &self,
+        vertices: [usize; 3],
+        region: RegionId,
+    ) -> Result<MeshTriangle, MeshError> {
         match orient2d(
             self.point(vertices[0]),
             self.point(vertices[1]),
             self.point(vertices[2]),
         ) {
-            PredicateSign::Positive => Ok(MeshTriangle { vertices }),
+            PredicateSign::Positive => Ok(MeshTriangle { vertices, region }),
             PredicateSign::Negative => Ok(MeshTriangle {
                 vertices: [vertices[0], vertices[2], vertices[1]],
+                region,
             }),
             PredicateSign::Zero => Err(MeshError::Topology("zero-area triangle")),
         }
@@ -544,7 +576,7 @@ impl MeshBuilder {
         &mut self,
         obstacle: &crate::Obstacle,
         sampled: Vec<Sample>,
-    ) -> Result<Polygon, MeshError> {
+    ) -> Result<(Polygon, Option<Polygon>), MeshError> {
         let mut points = Vec::new();
         for span in sampled.windows(2) {
             let length = (span[1].point - span[0].point).norm();
@@ -573,7 +605,14 @@ impl MeshBuilder {
         if polygon_area(points.iter().map(|(point, _)| *point)) > 0.0 {
             points.reverse();
         }
-        let label = BoundaryLabel::Obstacle(obstacle.id);
+        let label = match obstacle.role {
+            LoopRole::Hole { .. } => BoundaryLabel::Obstacle(obstacle.id),
+            LoopRole::MaterialInterface { .. } => BoundaryLabel::MaterialInterface(obstacle.id),
+            LoopRole::Wall { .. } => BoundaryLabel::Wall {
+                loop_id: obstacle.id,
+                side: BoundarySide::Exterior,
+            },
+        };
         let mut vertices = vec![];
         for (point, parameter) in &points {
             vertices.push(self.add_vertex(
@@ -600,12 +639,105 @@ impl MeshBuilder {
                 parameters: [start, end],
             });
         }
-        Ok(Polygon { vertices })
+        let exterior = Polygon {
+            vertices: vertices.clone(),
+        };
+        let interior = if matches!(obstacle.role, LoopRole::Wall { .. }) {
+            let interior_label = BoundaryLabel::Wall {
+                loop_id: obstacle.id,
+                side: BoundarySide::Interior,
+            };
+            let mut interior_vertices = Vec::with_capacity(points.len());
+            for (point, parameter) in points.iter().rev() {
+                interior_vertices.push(self.add_vertex(
+                    *point,
+                    Some(BoundaryPoint {
+                        label: interior_label,
+                        parameter: *parameter,
+                    }),
+                )?);
+            }
+            for index in 0..interior_vertices.len() {
+                let next = (index + 1) % interior_vertices.len();
+                let start = self.vertices[interior_vertices[index]]
+                    .boundary
+                    .unwrap()
+                    .parameter;
+                let mut end = self.vertices[interior_vertices[next]]
+                    .boundary
+                    .unwrap()
+                    .parameter;
+                let period = obstacle.spline.period();
+                if end - start > period * 0.5 {
+                    end -= period;
+                } else if end - start < -period * 0.5 {
+                    end += period;
+                }
+                self.add_boundary_edge(BoundaryEdge {
+                    vertices: [interior_vertices[index], interior_vertices[next]],
+                    label: interior_label,
+                    parameters: [start, end],
+                });
+            }
+            Some(Polygon {
+                vertices: interior_vertices,
+            })
+        } else {
+            None
+        };
+        Ok((exterior, interior))
     }
 
-    fn in_domain(&self, point: Point2) -> bool {
+    fn prepare_domains(&mut self) -> Result<(), MeshError> {
+        self.domains.clear();
+        let outer = self
+            .domain_loops
+            .first()
+            .ok_or(MeshError::Topology("outer boundary is missing"))?
+            .vertices
+            .clone();
+        let holes_for = |region: RegionId, loops: &[Polygon], roles: &[LoopRole]| {
+            roles
+                .iter()
+                .enumerate()
+                .filter(|(_, role)| role.exterior() == region)
+                .map(|(index, _)| loops[index + 1].vertices.clone())
+                .collect::<Vec<_>>()
+        };
+        self.domains.push(TriangulationDomain {
+            region: BACKGROUND_REGION,
+            outer,
+            holes: holes_for(BACKGROUND_REGION, &self.domain_loops, &self.loop_roles),
+        });
+        for (index, role) in self.loop_roles.iter().copied().enumerate() {
+            let Some(region) = role.interior() else {
+                continue;
+            };
+            let outer = match role {
+                LoopRole::MaterialInterface { .. } => {
+                    let mut vertices = self.domain_loops[index + 1].vertices.clone();
+                    vertices.reverse();
+                    vertices
+                }
+                LoopRole::Wall { .. } => self.interior_loops[index]
+                    .as_ref()
+                    .ok_or(MeshError::Topology("wall interior trace is missing"))?
+                    .vertices
+                    .clone(),
+                LoopRole::Hole { .. } => unreachable!(),
+            };
+            self.domains.push(TriangulationDomain {
+                region,
+                outer,
+                holes: holes_for(region, &self.domain_loops, &self.loop_roles),
+            });
+        }
+        Ok(())
+    }
+
+    fn region_at(&self, point: Point2) -> Option<RegionId> {
         if self.domain_loops.is_empty() {
-            return false;
+            return None;
         }
         let points = |polygon: &Polygon| {
             polygon
@@ -615,11 +747,50 @@ impl MeshBuilder {
                 .collect::<Vec<_>>()
         };
         if locate_in_polygon(point, &points(&self.domain_loops[0])) == PolygonLocation::Outside {
-            return false;
+            return None;
         }
-        self.domain_loops[1..]
+        let mut containing = None::<(f64, LoopRole)>;
+        for (polygon, role) in self.domain_loops[1..].iter().zip(&self.loop_roles) {
+            if locate_in_polygon(point, &points(polygon)) != PolygonLocation::Outside {
+                let area =
+                    polygon_area(polygon.vertices.iter().map(|index| self.point(*index))).abs();
+                if containing.is_none_or(|current| area < current.0) {
+                    containing = Some((area, *role));
+                }
+            }
+        }
+        match containing.map(|(_, role)| role) {
+            None => Some(BACKGROUND_REGION),
+            Some(LoopRole::Hole { .. }) => None,
+            Some(
+                LoopRole::MaterialInterface { interior, .. } | LoopRole::Wall { interior, .. },
+            ) => Some(interior),
+        }
+    }
+
+    fn boundary_relevant_to_region(&self, label: BoundaryLabel, region: RegionId) -> bool {
+        match label {
+            BoundaryLabel::Outer(_) => region == BACKGROUND_REGION,
+            BoundaryLabel::Obstacle(id) => self
+                .loop_role(id)
+                .is_some_and(|role| role.exterior() == region),
+            BoundaryLabel::MaterialInterface(id) => self
+                .loop_role(id)
+                .is_some_and(|role| role.exterior() == region || role.interior() == Some(region)),
+            BoundaryLabel::Wall { loop_id, side } => {
+                self.loop_role(loop_id).is_some_and(|role| match side {
+                    BoundarySide::Exterior => role.exterior() == region,
+                    BoundarySide::Interior => role.interior() == Some(region),
+                })
+            }
+        }
+    }
+
+    fn loop_role(&self, id: ObstacleId) -> Option<LoopRole> {
+        self.loop_ids
             .iter()
-            .all(|hole| locate_in_polygon(point, &points(hole)) == PolygonLocation::Outside)
+            .position(|candidate| *candidate == id)
+            .map(|index| self.loop_roles[index])
     }
 
     /// Test one queued edge, updating only the two incident triangles after a flip.
@@ -636,6 +807,12 @@ impl MeshBuilder {
             return Ok(());
         }
         let [(left_index, c), (right_index, d)] = [sides[0], sides[1]];
+        let region = self.triangles[left_index].region;
+        if self.triangles[right_index].region != region {
+            return Err(MeshError::Topology(
+                "an unconstrained edge crosses a material interface",
+            ));
+        }
         let [pa, pb, pc, pd] = [a, b, c, d].map(|v| self.point(v));
         // Both diagonals must lie inside a strictly convex quadrilateral.
         let opposite = |x, y| {
@@ -663,8 +840,8 @@ impl MeshBuilder {
                 "edge legalization reached the fixed patch boundary",
             ));
         }
-        let left = self.ccw_triangle([c, d, a])?;
-        let right = self.ccw_triangle([d, c, b])?;
+        let left = self.ccw_triangle([c, d, a], region)?;
+        let right = self.ccw_triangle([d, c, b], region)?;
         self.replace_triangle(left_index, left);
         self.replace_triangle(right_index, right);
         self.stats.edge_flips += 1;
@@ -788,8 +965,12 @@ impl MeshBuilder {
             ));
         }
         for (index, opposite) in adjacent.into_iter().rev() {
-            self.replace_triangle(index, self.ccw_triangle([edge[0], vertex, opposite])?);
-            self.push_triangle(self.ccw_triangle([vertex, edge[1], opposite])?)?;
+            let region = self.triangles[index].region;
+            self.replace_triangle(
+                index,
+                self.ccw_triangle([edge[0], vertex, opposite], region)?,
+            );
+            self.push_triangle(self.ccw_triangle([vertex, edge[1], opposite], region)?)?;
         }
         Ok(())
     }
@@ -836,18 +1017,19 @@ impl MeshBuilder {
         } else {
             self.replace_triangle(
                 triangle_index,
-                self.ccw_triangle([triangle.vertices[0], triangle.vertices[1], vertex])?,
+                self.ccw_triangle(
+                    [triangle.vertices[0], triangle.vertices[1], vertex],
+                    triangle.region,
+                )?,
             );
-            self.push_triangle(self.ccw_triangle([
-                triangle.vertices[1],
-                triangle.vertices[2],
-                vertex,
-            ])?)?;
-            self.push_triangle(self.ccw_triangle([
-                triangle.vertices[2],
-                triangle.vertices[0],
-                vertex,
-            ])?)?;
+            self.push_triangle(self.ccw_triangle(
+                [triangle.vertices[1], triangle.vertices[2], vertex],
+                triangle.region,
+            )?)?;
+            self.push_triangle(self.ccw_triangle(
+                [triangle.vertices[2], triangle.vertices[0], vertex],
+                triangle.region,
+            )?)?;
             Ok(())
         }
     }
@@ -879,16 +1061,20 @@ impl MeshBuilder {
             .circumcenter(triangle)
             .filter(|point| {
                 self.containing_triangle(*point).is_some_and(|(index, _)| {
-                    self.repair_region.as_ref().is_none_or(|region| {
-                        self.triangles[index].vertices.iter().all(|v| region[*v])
-                    })
+                    self.triangles[index].region == triangle.region
+                        && self.repair_region.as_ref().is_none_or(|region| {
+                            self.triangles[index].vertices.iter().all(|v| region[*v])
+                        })
                 })
             })
             .unwrap_or(centroid);
-        if !self.in_domain(candidate) {
+        if self.region_at(candidate) != Some(triangle.region) {
             candidate = centroid;
         }
         if let Some(edge_index) = self.boundary_edges.iter().position(|edge| {
+            if !self.boundary_relevant_to_region(edge.label, triangle.region) {
+                return false;
+            }
             let a = self.point(edge.vertices[0]);
             let b = self.point(edge.vertices[1]);
             (candidate - a).dot(candidate - b) < 0.0
@@ -946,7 +1132,10 @@ pub fn mesh_scene(
 
 struct BridgeSearch {
     polygon: Vec<usize>,
+    holes: Vec<Vec<usize>>,
     hole: usize,
+    domain: usize,
+    region: RegionId,
     outer_index: usize,
     hole_index: usize,
     best: Option<(f64, usize, usize)>,
@@ -957,6 +1146,8 @@ struct BridgeSearch {
 
 struct EarSearch {
     polygon: Vec<usize>,
+    domain: usize,
+    region: RegionId,
     index: usize,
     degenerate_pass: bool,
     stage: EarStage,
@@ -1081,6 +1272,13 @@ impl MeshingJob {
             MeshingJobState::Outer => {
                 let outer = b.add_outer()?;
                 b.domain_loops.push(outer);
+                b.loop_ids = self.scene.obstacles.iter().map(|loop_| loop_.id).collect();
+                b.loop_roles = self
+                    .scene
+                    .obstacles
+                    .iter()
+                    .map(|loop_| loop_.role)
+                    .collect();
                 MeshingJobState::Sample {
                     obstacle: 0,
                     sampler: None,
@@ -1088,9 +1286,18 @@ impl MeshingJob {
             }
             MeshingJobState::Sample { obstacle, sampler } => {
                 if obstacle == self.scene.obstacles.len() {
+                    b.prepare_domains()?;
+                    let domain = b
+                        .domains
+                        .first()
+                        .ok_or(MeshError::Topology("no material domain to triangulate"))?
+                        .clone();
                     MeshingJobState::Bridge(BridgeSearch {
-                        polygon: b.domain_loops[0].vertices.clone(),
-                        hole: 1,
+                        polygon: domain.outer,
+                        holes: domain.holes,
+                        hole: 0,
+                        domain: 0,
+                        region: domain.region,
                         outer_index: 0,
                         hole_index: 0,
                         best: None,
@@ -1113,8 +1320,10 @@ impl MeshingJob {
                         let samples = sampler
                             .finish()
                             .map_err(|_| MeshError::Sampling(self.scene.obstacles[obstacle].id))?;
-                        let polygon = b.add_obstacle(&self.scene.obstacles[obstacle], samples)?;
+                        let (polygon, interior) =
+                            b.add_obstacle(&self.scene.obstacles[obstacle], samples)?;
                         b.domain_loops.push(polygon);
+                        b.interior_loops.push(interior);
                         MeshingJobState::Sample {
                             obstacle: obstacle + 1,
                             sampler: None,
@@ -1128,15 +1337,17 @@ impl MeshingJob {
                 }
             }
             MeshingJobState::Bridge(mut search) => {
-                if search.hole == b.domain_loops.len() {
+                if search.hole == search.holes.len() {
                     MeshingJobState::Clip(EarSearch {
                         polygon: search.polygon,
+                        domain: search.domain,
+                        region: search.region,
                         index: 0,
                         degenerate_pass: false,
                         stage: EarStage::Start,
                     })
                 } else {
-                    let hole = &b.domain_loops[search.hole].vertices;
+                    let hole = &search.holes[search.hole];
                     if search.seeding {
                         // Try the globally shortest pair first. If it is visible
                         // no other bridge can improve it; otherwise use the full
@@ -1190,7 +1401,13 @@ impl MeshingJob {
                         let mut next_candidate = false;
                         if let Some((stage, index, length)) = search.visibility {
                             let edge = if stage == 0 {
-                                b.boundary_edges.get(index).map(|edge| edge.vertices)
+                                b.boundary_edges.get(index).map(|edge| {
+                                    if b.boundary_relevant_to_region(edge.label, search.region) {
+                                        edge.vertices
+                                    } else {
+                                        [a_index, v_index]
+                                    }
+                                })
                             } else if index < search.polygon.len() {
                                 Some([
                                     search.polygon[index],
@@ -1213,7 +1430,7 @@ impl MeshingJob {
                             } else if stage == 0 {
                                 search.visibility = Some((1, 0, length));
                             } else {
-                                if b.in_domain(a.lerp(v, 0.5)) {
+                                if b.region_at(a.lerp(v, 0.5)) == Some(search.region) {
                                     search.best =
                                         Some((length, search.outer_index, search.hole_index));
                                 }
@@ -1252,8 +1469,27 @@ impl MeshingJob {
             MeshingJobState::Clip(mut search) => {
                 let polygon = &mut search.polygon;
                 if polygon.len() == 3 {
-                    b.push_triangle(b.ccw_triangle([polygon[0], polygon[1], polygon[2]])?)?;
-                    MeshingJobState::Legalize
+                    b.push_triangle(
+                        b.ccw_triangle([polygon[0], polygon[1], polygon[2]], search.region)?,
+                    )?;
+                    let next_domain = search.domain + 1;
+                    if let Some(domain) = b.domains.get(next_domain).cloned() {
+                        MeshingJobState::Bridge(BridgeSearch {
+                            polygon: domain.outer,
+                            holes: domain.holes,
+                            hole: 0,
+                            domain: next_domain,
+                            region: domain.region,
+                            outer_index: 0,
+                            hole_index: 0,
+                            best: None,
+                            visibility: None,
+                            seeding: true,
+                            testing_seed: false,
+                        })
+                    } else {
+                        MeshingJobState::Legalize
+                    }
                 } else if search.index == polygon.len() {
                     if search.degenerate_pass {
                         return Err(MeshError::Topology("ear clipping stalled"));
@@ -1324,6 +1560,7 @@ impl MeshingJob {
                         if !search.degenerate_pass {
                             b.push_triangle(MeshTriangle {
                                 vertices: [a, v, c],
+                                region: search.region,
                             })?;
                         }
                         polygon.remove(index);
@@ -1381,9 +1618,9 @@ impl MeshingJob {
                         .repair_region
                         .as_ref()
                         .is_none_or(|region| triangle.vertices.iter().any(|v| region[*v]));
-                    if changed_region && !b.in_domain((a + v + c) / 3.0) {
+                    if changed_region && b.region_at((a + v + c) / 3.0) != Some(triangle.region) {
                         return Err(MeshError::Topology(
-                            "triangle was classified outside the domain",
+                            "triangle has the wrong material-region label",
                         ));
                     }
                     for opposite in 0..3 {
@@ -1395,11 +1632,18 @@ impl MeshingJob {
                             .adjacency
                             .get(&edge)
                             .ok_or(MeshError::Topology("missing adjacency"))?;
-                        let expected = if b.boundary_keys.contains(&edge) {
-                            1
-                        } else {
-                            2
-                        };
+                        let expected = b
+                            .boundary_edges
+                            .iter()
+                            .find(|boundary| {
+                                edge_key(boundary.vertices[0], boundary.vertices[1]) == edge
+                            })
+                            .map_or(2, |boundary| match boundary.label {
+                                BoundaryLabel::MaterialInterface(_) => 2,
+                                BoundaryLabel::Outer(_)
+                                | BoundaryLabel::Obstacle(_)
+                                | BoundaryLabel::Wall { .. } => 1,
+                            });
                         if sides.len() != expected
                             || !sides.contains(&(index, triangle.vertices[opposite]))
                         {
@@ -1430,12 +1674,18 @@ impl MeshingJob {
                     }));
                 }
                 let edge = b.boundary_edges[index].vertices;
+                let expected = match b.boundary_edges[index].label {
+                    BoundaryLabel::MaterialInterface(_) => 2,
+                    BoundaryLabel::Outer(_)
+                    | BoundaryLabel::Obstacle(_)
+                    | BoundaryLabel::Wall { .. } => 1,
+                };
                 if b.adjacency
                     .get(&edge_key(edge[0], edge[1]))
-                    .is_none_or(|sides| sides.len() != 1)
+                    .is_none_or(|sides| sides.len() != expected)
                 {
                     return Err(MeshError::Topology(
-                        "boundary edge is not represented exactly once",
+                        "constrained edge has incorrect adjacency",
                     ));
                 }
                 MeshingJobState::VerifyBoundary {

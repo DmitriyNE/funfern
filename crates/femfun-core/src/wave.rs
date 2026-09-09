@@ -485,7 +485,7 @@ impl WaveState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MeshQuality, MeshTriangle, MeshVertex};
+    use crate::{BACKGROUND_REGION, MeshQuality, MeshTriangle, MeshVertex};
 
     fn grid(n: usize) -> TriMesh {
         let mut vertices = Vec::new();
@@ -511,16 +511,20 @@ mod tests {
                 if (x + y) % 2 == 0 {
                     triangles.push(MeshTriangle {
                         vertices: [a, b, d],
+                        region: BACKGROUND_REGION,
                     });
                     triangles.push(MeshTriangle {
                         vertices: [a, d, c],
+                        region: BACKGROUND_REGION,
                     });
                 } else {
                     triangles.push(MeshTriangle {
                         vertices: [a, b, c],
+                        region: BACKGROUND_REGION,
                     });
                     triangles.push(MeshTriangle {
                         vertices: [b, d, c],
+                        region: BACKGROUND_REGION,
                     });
                 }
             }

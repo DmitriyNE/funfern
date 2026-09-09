@@ -43,11 +43,22 @@ impl TransferMap {
     /// Locates every target vertex in the source triangulation. Vertices outside
     /// the old domain are deliberately left unmapped and initialize to zero.
     pub fn build(source: &TriMesh, target: &TriMesh) -> Result<Self, TransferError> {
+        Self::build_restricted(source, target, &vec![None; target.vertices.len()])
+    }
+
+    fn build_restricted(
+        source: &TriMesh,
+        target: &TriMesh,
+        target_regions: &[Option<crate::RegionId>],
+    ) -> Result<Self, TransferError> {
         if source.triangles.is_empty() {
             return Err(TransferError::EmptySource);
         }
         validate_mesh(source, true)?;
         validate_mesh(target, false)?;
+        if target_regions.len() != target.vertices.len() {
+            return Err(TransferError::InvalidTarget);
+        }
 
         let mut minimum = Point2::new(f64::INFINITY, f64::INFINITY);
         let mut maximum = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
@@ -87,7 +98,7 @@ impl TransferMap {
         }
 
         let mut samples = Vec::with_capacity(target.vertices.len());
-        for vertex in &target.vertices {
+        for (vertex, target_region) in target.vertices.iter().zip(target_regions) {
             let point = vertex.point;
             if point.x < minimum.x
                 || point.x > maximum.x
@@ -101,6 +112,9 @@ impl TransferMap {
             let mut found = None;
             for &triangle_index in &bins[y * dimension + x] {
                 let triangle = source.triangles[triangle_index as usize];
+                if target_region.is_some_and(|region| triangle.region != region) {
+                    continue;
+                }
                 let points = triangle.vertices.map(|i| source.vertices[i].point);
                 if let Some(weights) = barycentric(point, points) {
                     found = Some(TransferSample {
@@ -250,7 +264,49 @@ impl QuadraticTransferMap {
                 boundary: None,
             })
             .collect();
-        let located = TransferMap::build(source_mesh, &expanded_target)?;
+        let mut target_regions = vec![None; target_operator.degrees_of_freedom()];
+        let mut edge_nodes = std::collections::BTreeMap::new();
+        for (triangle, nodes) in target_mesh
+            .triangles
+            .iter()
+            .zip(target_operator.element_nodes())
+        {
+            for ([a, b], midpoint) in [
+                ([triangle.vertices[0], triangle.vertices[1]], nodes[3]),
+                ([triangle.vertices[1], triangle.vertices[2]], nodes[4]),
+                ([triangle.vertices[2], triangle.vertices[0]], nodes[5]),
+            ] {
+                edge_nodes.insert(edge_key(a, b), midpoint as usize);
+            }
+        }
+        for boundary in &target_mesh.boundary_edges {
+            if !matches!(boundary.label, crate::BoundaryLabel::Wall { .. }) {
+                continue;
+            }
+            let adjacent = target_mesh
+                .triangles
+                .iter()
+                .filter(|triangle| {
+                    triangle.vertices.contains(&boundary.vertices[0])
+                        && triangle.vertices.contains(&boundary.vertices[1])
+                })
+                .collect::<Vec<_>>();
+            if adjacent.len() != 1 {
+                return Err(TransferError::InvalidTarget);
+            }
+            let region = adjacent[0].region;
+            let midpoint = *edge_nodes
+                .get(&edge_key(boundary.vertices[0], boundary.vertices[1]))
+                .ok_or(TransferError::InvalidTarget)?;
+            for node in [boundary.vertices[0], boundary.vertices[1], midpoint] {
+                if target_regions[node].is_some_and(|assigned| assigned != region) {
+                    return Err(TransferError::InvalidTarget);
+                }
+                target_regions[node] = Some(region);
+            }
+        }
+        let located =
+            TransferMap::build_restricted(source_mesh, &expanded_target, &target_regions)?;
 
         let elements = source_mesh
             .triangles
@@ -454,6 +510,10 @@ fn bin_index(point: Point2, minimum: Point2, cell: Point2, dimension: usize) -> 
     ]
 }
 
+fn edge_key(a: usize, b: usize) -> (usize, usize) {
+    if a < b { (a, b) } else { (b, a) }
+}
+
 fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
     let [a, b, c] = triangle;
     let denominator = (b - a).cross(c - a);
@@ -477,7 +537,11 @@ fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MeshQuality, MeshTriangle, MeshVertex, WaveCoefficients};
+    use crate::{
+        BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, BoundarySide, LoopRole, Material,
+        MaterialId, MeshQuality, MeshTriangle, MeshVertex, Obstacle, ObstacleId,
+        OuterBoundaryCondition, PeriodicCubicSpline, Region, RegionId, Scene, WaveCoefficients,
+    };
 
     fn mesh(revision: u64, points: &[[f64; 2]], triangles: &[[usize; 3]]) -> TriMesh {
         TriMesh {
@@ -493,6 +557,7 @@ mod tests {
                 .iter()
                 .map(|vertices| MeshTriangle {
                     vertices: *vertices,
+                    region: BACKGROUND_REGION,
                 })
                 .collect(),
             boundary_edges: vec![],
@@ -580,6 +645,101 @@ mod tests {
             QuadraticTransferMap::identity_on_mesh(&source, &source_operator, &target_operator)
                 .unwrap();
         assert_eq!(identity.interpolate(&copied, 0.0).unwrap(), copied);
+    }
+
+    #[test]
+    fn quadratic_transfer_keeps_coincident_wall_traces_on_their_own_regions() {
+        let points = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ];
+        let mut source = mesh(3, &points, &[[0, 1, 2], [3, 4, 5]]);
+        source.triangles[1].region = RegionId(2);
+        source.boundary_edges = vec![
+            BoundaryEdge {
+                vertices: [0, 1],
+                label: BoundaryLabel::Wall {
+                    loop_id: ObstacleId(1),
+                    side: BoundarySide::Exterior,
+                },
+                parameters: [0.0, 1.0],
+            },
+            BoundaryEdge {
+                vertices: [3, 4],
+                label: BoundaryLabel::Wall {
+                    loop_id: ObstacleId(1),
+                    side: BoundarySide::Interior,
+                },
+                parameters: [0.0, 1.0],
+            },
+        ];
+        let mut target = source.clone();
+        target.geometry_revision = 8;
+        let scene = Scene {
+            obstacles: vec![Obstacle {
+                id: ObstacleId(1),
+                spline: PeriodicCubicSpline::rounded(Point2::new(0.2, 0.2), 0.1),
+                role: LoopRole::Wall {
+                    exterior: BACKGROUND_REGION,
+                    interior: RegionId(2),
+                },
+            }],
+            materials: vec![
+                Material::default_medium(),
+                Material {
+                    id: MaterialId(2),
+                    name: "Inside".into(),
+                    mass_density: 1.0,
+                    stiffness: 1.0,
+                    damping: 0.0,
+                    color: [1, 2, 3],
+                },
+            ],
+            regions: vec![
+                Region {
+                    id: BACKGROUND_REGION,
+                    material: MaterialId(1),
+                },
+                Region {
+                    id: RegionId(2),
+                    material: MaterialId(2),
+                },
+            ],
+        };
+        let source_operator = QuadraticWaveOperator::assemble_scene(
+            &source,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let target_operator = QuadraticWaveOperator::assemble_scene(
+            &target,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
+            .unwrap();
+        let mut values = vec![0.0; source_operator.degrees_of_freedom()];
+        for node in source_operator.element_nodes()[0] {
+            values[node as usize] = 1.0;
+        }
+        for node in source_operator.element_nodes()[1] {
+            values[node as usize] = 9.0;
+        }
+        let transferred = map.interpolate(&values, -1.0).unwrap();
+        for local in [0, 1, 3] {
+            let node = target_operator.element_nodes()[0][local];
+            assert_eq!(transferred[node as usize], 1.0);
+        }
+        for local in [0, 1, 3] {
+            let node = target_operator.element_nodes()[1][local];
+            assert_eq!(transferred[node as usize], 9.0);
+        }
     }
 
     #[test]
