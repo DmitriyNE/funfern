@@ -21,9 +21,19 @@ fn edge_key(a: usize, b: usize) -> (usize, usize) {
 
 fn assert_mesh_invariants(mesh: &TriMesh, holes: usize) {
     let mut adjacency: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+    let mut opposites: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
     for triangle in &mesh.triangles {
         let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
         assert_eq!(orient2d(a, b, c), PredicateSign::Positive);
+        for i in 0..3 {
+            opposites
+                .entry(edge_key(
+                    triangle.vertices[(i + 1) % 3],
+                    triangle.vertices[(i + 2) % 3],
+                ))
+                .or_default()
+                .push(triangle.vertices[i]);
+        }
         for edge in [
             edge_key(triangle.vertices[0], triangle.vertices[1]),
             edge_key(triangle.vertices[1], triangle.vertices[2]),
@@ -40,6 +50,23 @@ fn assert_mesh_invariants(mesh: &TriMesh, holes: usize) {
     assert_eq!(boundary.len(), mesh.boundary_edges.len());
     for (edge, count) in &adjacency {
         assert_eq!(*count, if boundary.contains(edge) { 1 } else { 2 });
+        if !boundary.contains(edge) {
+            let (a, b) = *edge;
+            let [c, d] = [opposites[edge][0], opposites[edge][1]];
+            let [mut a, mut b, c, d] = [a, b, c, d].map(|i| mesh.vertices[i].point);
+            let ca = orient2d(c, d, a);
+            let cb = orient2d(c, d, b);
+            if ca != cb && ca != PredicateSign::Zero && cb != PredicateSign::Zero {
+                if orient2d(a, b, c) == PredicateSign::Negative {
+                    std::mem::swap(&mut a, &mut b);
+                }
+                assert_ne!(
+                    incircle(a, b, c, d),
+                    PredicateSign::Positive,
+                    "convex unconstrained edge must be locally Delaunay"
+                );
+            }
+        }
     }
     let euler =
         mesh.vertices.len() as isize - adjacency.len() as isize + mesh.triangles.len() as isize;
@@ -250,15 +277,128 @@ fn cooperative_job_advances_refinement_in_bounded_units() {
     let expected = mesh_scene(&Scene::initial(), 44, options).unwrap();
     let mut job = MeshingJob::new(Scene::initial(), 44, options);
     assert!(job.advance(0).is_none());
-    // The first unit prepares topology but performs no quality insertion.
+    // Even validation/preparation can yield; no unit performs a whole rebuild.
     assert!(job.advance(1).is_none());
-    for _ in 0..options.max_refinement_steps + 1 {
+    let mut phases = BTreeMap::new();
+    for _ in 0..2_000_000 {
+        *phases.entry(job.phase()).or_insert(0) += 1;
+        let before = job.stats();
         if let Some(result) = job.advance(1) {
             assert_eq!(result.unwrap(), expected);
+            assert!(job.advance(1).is_none());
+            for phase in [
+                "Validating",
+                "Sampling boundaries",
+                "Connecting holes",
+                "Triangulating",
+                "Legalizing edges",
+                "Checking mesh",
+            ] {
+                assert!(phases[phase] > 1, "{phase} must be resumable");
+            }
+            return;
+        }
+        let after = job.stats();
+        assert_eq!(after.work_units, before.work_units + 1);
+        assert!(after.edge_tests - before.edge_tests <= 1);
+        assert!(after.edge_flips - before.edge_flips <= 1);
+        assert!(after.refinement_insertions - before.refinement_insertions <= 1);
+        assert!(
+            after.quality_evaluations - before.quality_evaluations <= 4,
+            "only the changed triangles should have their quality recomputed"
+        );
+    }
+    panic!("cooperative meshing job did not terminate within its stated budget");
+}
+
+#[test]
+fn mesh_output_is_independent_of_work_slice_size() {
+    let options = MeshingOptions {
+        target_edge_length: 0.3,
+        minimum_angle_degrees: 10.0,
+        ..Default::default()
+    };
+    let expected = mesh_scene(&Scene::initial(), 123, options).unwrap();
+    for budget in [7, 257, 10_000] {
+        let mut job = MeshingJob::new(Scene::initial(), 123, options);
+        loop {
+            if let Some(result) = job.advance(budget) {
+                assert_eq!(result.unwrap(), expected);
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn limits_terminate_once_and_obsolete_jobs_can_be_replaced() {
+    let mut job = MeshingJob::new(
+        Scene::initial(),
+        1,
+        MeshingOptions {
+            max_refinement_steps: 1,
+            ..Default::default()
+        },
+    );
+    loop {
+        if let Some(result) = job.advance(1000) {
+            assert!(matches!(result, Err(MeshError::RefinementLimit(_))));
+            assert_eq!(job.stats().refinement_insertions, 1);
+            assert!(job.advance(1000).is_none());
+            break;
+        }
+    }
+    let mut job = MeshingJob::new(Scene::initial(), 9, MeshingOptions::default());
+    assert!(job.advance(100).is_none());
+    job = MeshingJob::new(Scene::default(), 10, MeshingOptions::default());
+    loop {
+        if let Some(result) = job.advance(1000) {
+            let mesh = result.unwrap();
+            assert_eq!(mesh.geometry_revision, 10);
+            assert_mesh_invariants(&mesh, 0);
+            break;
+        }
+    }
+}
+
+#[test]
+fn maximum_obstacle_scene_stays_within_work_and_quality_limits() {
+    let scene = Scene {
+        obstacles: (0..32)
+            .map(|i| Obstacle {
+                id: ObstacleId(i + 1),
+                spline: PeriodicCubicSpline::rounded(
+                    Point2::new(
+                        -0.85 + 1.7 * (i % 8) as f64 / 7.0,
+                        -0.65 + 1.3 * (i / 8) as f64 / 3.0,
+                    ),
+                    0.07,
+                ),
+            })
+            .collect(),
+    };
+    let mut job = MeshingJob::new(
+        scene,
+        32,
+        MeshingOptions {
+            curve_tolerance: 0.0015,
+            target_edge_length: 0.16,
+            minimum_angle_degrees: 12.0,
+            max_vertices: 8000,
+            max_triangles: 16000,
+            max_refinement_steps: 5000,
+        },
+    );
+    for _ in 0..500 {
+        if let Some(result) = job.advance(10_000) {
+            let mesh = result.unwrap();
+            assert_mesh_invariants(&mesh, 32);
+            assert!(mesh.quality.maximum_edge_length <= 0.16 * 1.05);
+            assert!(mesh.quality.minimum_angle_degrees >= 12.0 - 1e-9);
             return;
         }
     }
-    panic!("cooperative meshing job did not terminate within its stated budget");
+    panic!("representative maximum scene exceeded five million elementary units");
 }
 
 #[test]

@@ -80,7 +80,8 @@ See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for toolin
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
   constrained mesh and its labeled outer/obstacle edges. Elements below 15° are
   amber; the panel reports counts, minimum angle, maximum edge, refinement
-  progress, and explicit construction failures. An invalid draft keeps the last
+  progress, build/work time, longest mesh slice, and explicit construction
+  failures. Meshing targets a soft 2 ms per frame. An invalid draft keeps the last
   accepted mesh.
 
 Scenes allow 32 obstacles and 128 controls per obstacle. JSON files are capped at
@@ -99,12 +100,16 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo build -p femfun-app --locked
 trunk build --release
+cargo run -p femfun-core --release --example mesh_timing -- --slices
 ```
 
-The 40 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
+The 43 tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, refinement limits, geometry
 rejection, draft/accepted history, scene files, and egui pointer/keyboard
-interactions. Native GPU startup was exercised on Apple M1 Max / Metal. The user
+interactions, local Delaunay legality, incremental work, slice-independent output,
+and a 32-obstacle meshing regression. The timing example uses the app's mesh
+settings and 2 ms scheduling policy; omit `--slices` for per-phase profiling.
+Native GPU startup was exercised on Apple M1 Max / Metal. The user
 reports completing the Milestone 1 browser interaction checks; browser metadata
 and Milestone 2 overlay performance have not been recorded.
 

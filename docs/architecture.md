@@ -124,12 +124,16 @@ Mesh construction samples the fixed outer square and every accepted spline. The
 outer loop is counter-clockwise and obstacle loops are clockwise. A visibility
 bridge turns each hole into one weakly-simple polygon; exact-sign ear clipping
 creates the initial constrained triangulation. Boundary segments are authoritative
-constraints. Global edge legalization flips only unconstrained convex diagonals,
+constraints. Queued edge legalization flips only unconstrained convex diagonals,
 using the robust incircle predicate, to produce a locally constrained-Delaunay
 mesh. Triangle centroids are checked against the sampled domain before a result
 is published.
 
-Quality refinement selects the worst size or angle violation. It inserts a
+Quality refinement selects the worst size or angle violation from an ordered
+queue. Persistent edge adjacency and triangle quality entries are updated only
+for changed triangles; removed/replaced entries leave no stale quality records.
+An edge queue with duplicate suppression revisits the neighborhood of each split
+or flip, rather than rebuilding connectivity and sweeping all edges. It inserts a
 circumcenter when that point remains in the meshed domain and otherwise uses the
 triangle centroid. A candidate that encroaches a constrained edge splits that
 edge and carries its label and continuous parameter range to both children.
@@ -146,15 +150,28 @@ triangle indices. Verification requires positive triangle orientation, manifold
 edge adjacency, exactly one incident triangle for every boundary edge, domain
 classification of every centroid, and configured size/angle targets.
 
-`MeshingJob` snapshots an accepted geometry revision. Its topology-preparation
-phase is bounded by sampling and mesh capacities; each later `advance` unit makes
-at most one refinement insertion plus legalization. The application advances two
-units per frame after an edit transaction ends and replaces obsolete jobs when a
-new accepted scene arrives. It keeps the previous accepted mesh throughout an
-invalid draft. Current topology preparation is a single phase rather than fully
-time-sliced; a complex valid scene can therefore still cause one longer frame.
-Later transaction machinery can split or move that phase if measurements require
-it.
+`MeshingJob` snapshots an accepted geometry revision. Validation, adaptive sampling,
+bridge visibility, ear clipping, legalization, and output verification resume
+across calls. Bridge and ear searches yield between segment/vertex tests. The
+bridge search tries the shortest pair first and falls back to a complete visible
+bridge search if it is blocked. Each legalization unit checks at most one edge;
+one insertion changes at most four triangles. The synchronous `mesh_scene` drives
+the same state machine, so slice sizes do not change results.
+
+The application checks a portable monotonic clock between units, targeting 2 ms
+of meshing per frame, with a ceiling of 100,000 units. This is a soft deadline:
+boundary assembly, point location, insertion checks, and domain classification
+still use linear capacity-bounded scans, and OS scheduling can delay a call.
+There is also a 50-million-unit job ceiling, a per-legalization work ceiling, and
+the existing refinement/vertex/triangle limits. Deterministic counters report
+quality evaluations, edge tests/flips, and insertions. The UI reports elapsed
+build time, accumulated active work, and the longest mesh slice, separately from
+its existing display frame-time indicator.
+
+Jobs run after an edit transaction ends and are replaced when a newer accepted
+scene arrives. The previous accepted mesh remains available during preparation
+and invalid drafts. Each accepted geometry edit still starts a full construction;
+local reuse across edits remains a later adaptation task.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a

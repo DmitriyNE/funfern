@@ -74,6 +74,12 @@ fresh interactive browser pass for the mesh overlay.
 limits; difficult or invalid inputs fail without disrupting the editor. Predicate
 and topology tests include degeneracies and near-degeneracies.
 
+**Performance follow-up implemented:** persistent adjacency, a local edge queue,
+and an ordered quality queue replace global refinement sweeps. Topology searches
+and verification are resumable, and the app targets 2 ms of meshing per frame.
+The engineering log records native timings. Reusing a mesh across geometry edits
+remains in milestone 5; the next milestone is still static-domain waves.
+
 ## 3. Static-domain GPU waves
 
 - Implement linear triangular FEM, lumped mass, second-order explicit stepping,

@@ -1,4 +1,5 @@
 use crate::files::{self, FileEvent};
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::{
     EguiContexts,
@@ -65,6 +66,10 @@ pub struct Playground {
     mesh_job: Option<MeshingJob>,
     mesh_source: Scene,
     mesh_error: Option<String>,
+    mesh_started: Option<Instant>,
+    mesh_build_ms: f64,
+    mesh_work_ms: f64,
+    mesh_max_slice_ms: f64,
     show_mesh: bool,
     show_mesh_boundary: bool,
 }
@@ -103,6 +108,10 @@ impl Default for Playground {
             mesh_job: None,
             mesh_source: Scene::default(),
             mesh_error: None,
+            mesh_started: None,
+            mesh_build_ms: 0.0,
+            mesh_work_ms: 0.0,
+            mesh_max_slice_ms: 0.0,
             show_mesh: false,
             show_mesh_boundary: true,
         }
@@ -241,8 +250,24 @@ impl Playground {
                 },
             ));
             self.mesh_error = None;
+            self.mesh_started = Some(Instant::now());
+            self.mesh_build_ms = 0.0;
+            self.mesh_work_ms = 0.0;
+            self.mesh_max_slice_ms = 0.0;
         }
-        let result = self.mesh_job.as_mut().and_then(|job| job.advance(2));
+        // A soft 2 ms deadline plus an operation ceiling. Check between units,
+        // including topology preparation and individual edge flips.
+        let start = Instant::now();
+        let mut result = None;
+        let active = self.mesh_job.is_some();
+        if let Some(job) = &mut self.mesh_job {
+            for _ in 0..100_000 {
+                result = job.advance(1);
+                if result.is_some() || start.elapsed().as_secs_f64() >= 0.002 {
+                    break;
+                }
+            }
+        }
         if let Some(result) = result {
             self.mesh_job = None;
             match result {
@@ -255,6 +280,15 @@ impl Playground {
                     self.mesh_error = Some(error.to_string());
                 }
             }
+        }
+        if active {
+            // Include completed-job cleanup and mesh replacement in the slice.
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            self.mesh_work_ms += elapsed;
+            self.mesh_max_slice_ms = self.mesh_max_slice_ms.max(elapsed);
+            self.mesh_build_ms = self
+                .mesh_started
+                .map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
         }
     }
     fn panel(&mut self, ui: &mut egui::Ui) {
@@ -459,8 +493,8 @@ impl Playground {
         ui.label("Accepted mesh");
         if self.editor.editing() && self.mesh_source != self.editor.document.accepted {
             ui.small("Waiting for edit to finish…");
-        } else if self.mesh_job.is_some() {
-            ui.small("Refining across frames…");
+        } else if let Some(job) = &self.mesh_job {
+            ui.small(format!("{}…", job.phase()));
         } else if let Some(mesh) = &self.mesh {
             let low_quality = mesh.poor_triangles(15.0).len();
             ui.small(format!(
@@ -475,6 +509,12 @@ impl Playground {
             ui.colored_label(RED, error);
         } else {
             ui.small("Preparing…");
+        }
+        if self.mesh_started.is_some() {
+            ui.small(format!(
+                "Build {:.0} ms · work {:.1} ms\nlongest mesh slice {:.2} ms (2 ms target)",
+                self.mesh_build_ms, self.mesh_work_ms, self.mesh_max_slice_ms
+            ));
         }
         ui.add_space(8.0);
         ui.label("Simulation · later milestone");
