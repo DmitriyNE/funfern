@@ -338,6 +338,14 @@ an excluded obstacle. Vertices newly exposed by a shrinking or moved obstacle st
 with zero displacement and velocity. Mild local smoothing is a possible response to
 edit-induced bursts, not a substitute for stable stepping.
 
+The hard zero policy is intentionally temporary. When newly exposed vertices meet a
+nonzero retained field, it creates a steep artificial front and injects broadband
+wave content. A future commit pass should construct a narrow transition band around
+the exposed region and smooth or taper both displacement and velocity there while
+leaving established vertices outside that band unchanged. The pass needs a bounded
+work budget and diagnostics for its energy and spectral effect; it must not silently
+renormalize the whole field.
+
 For the centered two-level scheme, the first GPU transfer dispatch reconstructs
 the current velocity from the old previous/current displacements, old operator,
 damping, forcing, and timestep. It barycentrically maps current displacement and

@@ -7,6 +7,13 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Profile the complete geometry-edit handoff on representative full-rebuild
+  and local-repair cases. The user reports that the end-to-end handoff still feels
+  slow even though the small scripted transfer case is much faster.
+- [ ] Replace the sharp zero initialization at newly exposed domain with a localized
+  transition/blur pass. A hard jump against the retained field produces artificial
+  wideband excitation when an obstacle boundary moves inward. Measure added spectral
+  energy and keep established regions outside the transition band unchanged.
 - [ ] Exercise the static wave solver interactively in a WebGPU browser and record
   display frame time and long-run behavior; the user deferred browser testing.
 - [ ] Record browser/GPU metadata and frame-time ranges when the mesh overlay is
@@ -46,6 +53,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Operator assembly plus transfer-map construction is still a synchronous tail when
   a mesh job finishes. Browser interaction and long-run verification remain deferred
   at the user's request.
+- User feedback after exercising the implementation: the full geometry-movement
+  handoff is still somewhat slow. Zero initialization of newly exposed regions also
+  creates a sharp field profile and artificial broadband excitation; add a localized
+  smoothing policy in a future pass.
 
 ## 2026-09-09 — Static P1 CPU/GPU wave solver
 
