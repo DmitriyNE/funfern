@@ -561,7 +561,8 @@ mod tests {
     use crate::{
         BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, BoundarySide, LoopRole, Material,
         MaterialId, MeshQuality, MeshTriangle, MeshVertex, Obstacle, ObstacleId,
-        OuterBoundaryCondition, PeriodicCubicSpline, Region, RegionId, Scene, WaveCoefficients,
+        OuterBoundaryCondition, OuterBoundaryConditions, PeriodicCubicSpline, Region, RegionId,
+        Scene, WaveCoefficients,
     };
 
     fn mesh(revision: u64, points: &[[f64; 2]], triangles: &[[usize; 3]]) -> TriMesh {
@@ -731,6 +732,7 @@ mod tests {
                     material: MaterialId(2),
                 },
             ],
+            outer_boundaries: OuterBoundaryConditions::default(),
         };
         let source_operator = QuadraticWaveOperator::assemble_scene(
             &source,

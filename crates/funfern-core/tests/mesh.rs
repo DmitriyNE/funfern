@@ -511,6 +511,7 @@ fn two_region_scene(role: impl FnOnce(RegionId, RegionId) -> LoopRole) -> Scene 
                 material: MaterialId(2),
             },
         ],
+        outer_boundaries: OuterBoundaryConditions::default(),
     }
 }
 

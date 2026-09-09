@@ -212,6 +212,7 @@ pub struct Scene {
     pub internal_boundaries: Vec<InternalBoundary>,
     pub materials: Vec<Material>,
     pub regions: Vec<Region>,
+    pub outer_boundaries: crate::OuterBoundaryConditions,
 }
 
 impl Default for Scene {
@@ -224,6 +225,7 @@ impl Default for Scene {
                 id: BACKGROUND_REGION,
                 material: DEFAULT_MATERIAL,
             }],
+            outer_boundaries: crate::OuterBoundaryConditions::default(),
         }
     }
 }
@@ -245,6 +247,7 @@ impl Scene {
             || self.materials.len() > MAX_MATERIALS
             || self.regions.is_empty()
             || self.regions.len() > MAX_OBSTACLES + 1
+            || !self.outer_boundaries.valid()
         {
             return false;
         }
@@ -289,6 +292,18 @@ impl Scene {
             || self.region(BACKGROUND_REGION).is_none()
         {
             return false;
+        }
+        for [first, second] in [[0, 1], [1, 2], [2, 3], [3, 0]] {
+            if let (
+                crate::OuterBoundaryCondition::Dirichlet { signal: first },
+                crate::OuterBoundaryCondition::Dirichlet { signal: second },
+            ) = (
+                self.outer_boundaries.sides[first],
+                self.outer_boundaries.sides[second],
+            ) && first != second
+            {
+                return false;
+            }
         }
         let mut interiors = Vec::new();
         for obstacle in &self.obstacles {

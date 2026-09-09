@@ -135,13 +135,15 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   goes around a free endpoint instead of jumping through coincident faces.
   The panel reports DOFs, GPU buffer size, operator-derived timestep, simulated
   time, substeps, throughput, operator/map preparation time, and discrete energy.
-- **Outer boundary:** choose Reflecting, First-order outgoing, or Second-order
-  auxiliary. The second-order Engquist-Majda condition adds tangential propagation
-  along the fixed outer square and reduces oblique reflection. Hole and baffle spans
-  support reflecting or local first-order impedance conditions; closed walls remain
-  reflecting and material interfaces transmit. A change reuses the mesh and transactionally transfers the
-  live field to the replacement operator. Boundary memory survives second-order
-  geometry edits and is cleared when entering or leaving that mode.
+- **Outer boundary:** select each box side independently and assign zero Neumann
+  (reflecting), prescribed Neumann flux, prescribed Dirichlet displacement,
+  first-order outgoing, or second-order auxiliary behavior. Prescribed data uses
+  `offset + amplitude · sin(2π f t + phase)`; zero amplitude gives a constant.
+  Adjacent Dirichlet sides must agree at their shared corner. The second-order
+  Engquist-Majda condition adds tangential propagation and reduces oblique
+  reflection. Hole and baffle spans support reflecting or local first-order
+  impedance conditions; closed walls remain reflecting and material interfaces
+  transmit. Changes reuse the mesh and transactionally transfer the live field.
 - **Interior media:** every triangle carries a stable region ID. The P2e operator
   assembles piecewise mass, stiffness, and damping. Material interfaces use a
   conforming shared trace. Closed walls and open baffles have separate solution
@@ -210,8 +212,9 @@ prints edit-to-ready and active/scheduling times plus exact element reuse, then
 exits. Interactive editor input is disabled during this scripted run. It does not
 read or overwrite scene files. The native benchmark includes
 editor validation and rendering load; mesh-ready means the atomic simulation commit.
-`--wave-gpu-check` runs the real second-order compute pipeline with a closed wall
-and an impedance/thin-gap baffle for 128 steps, reads both time levels and boundary
+`--wave-gpu-check` runs a mixed outer-boundary configuration with harmonic
+Dirichlet and Neumann data, both outgoing orders, a closed wall, and an
+impedance/thin-gap baffle for 128 steps. It reads both time levels and boundary
 memory back, compares them to f64, reports
 solve-to-readback throughput, and exits. `--wave-transfer-check` injects a nonzero
 field, performs a real control-point edit, verifies transfer of all three state

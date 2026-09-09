@@ -98,6 +98,72 @@ fn stale_validation_cannot_accept_new_draft() {
     settle(&mut e);
     assert!(matches!(e.acceptance, Acceptance::Invalid(_)));
 }
+
+#[test]
+fn outer_side_conditions_are_undoable_and_round_trip_with_time_signals() {
+    let mut editor = Editor::default();
+    let original = editor.document.clone();
+    let signal = BoundarySignal {
+        offset: 0.25,
+        amplitude: 0.8,
+        frequency_hz: 3.5,
+        phase_radians: -0.2,
+    };
+    editor
+        .set_outer_boundary_condition(
+            OuterSide::Bottom,
+            OuterBoundaryCondition::Dirichlet { signal },
+        )
+        .unwrap();
+    settle(&mut editor);
+    editor
+        .set_outer_boundary_condition(OuterSide::Top, OuterBoundaryCondition::Neumann { signal })
+        .unwrap();
+    settle(&mut editor);
+    assert_eq!(editor.history_len(), (2, 0));
+    assert_eq!(
+        editor
+            .document
+            .accepted
+            .outer_boundaries
+            .get(OuterSide::Bottom),
+        OuterBoundaryCondition::Dirichlet { signal }
+    );
+    let json = save(&editor.document).unwrap();
+    assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
+
+    let mut version_five: serde_json::Value = serde_json::from_str(&json).unwrap();
+    version_five["version"] = 5.into();
+    for scene in ["draft", "accepted"] {
+        version_five[scene]
+            .as_object_mut()
+            .unwrap()
+            .remove("outer_boundaries");
+    }
+    let migrated = decode(serde_json::to_string(&version_five).unwrap().as_bytes()).unwrap();
+    assert_eq!(
+        migrated.accepted.outer_boundaries,
+        OuterBoundaryConditions::default()
+    );
+
+    editor.undo();
+    settle(&mut editor);
+    assert_eq!(
+        editor
+            .document
+            .accepted
+            .outer_boundaries
+            .get(OuterSide::Top),
+        OuterBoundaryCondition::Reflecting
+    );
+    editor.undo();
+    settle(&mut editor);
+    assert_eq!(editor.document, original);
+
+    let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    malformed["accepted"]["outer_boundaries"][0]["signal"]["frequency_hz"] = (-1.0).into();
+    assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
+}
 #[test]
 fn history_bound_and_stable_ids() {
     let mut e = Editor::default();
@@ -147,7 +213,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 6.into(),
+            0 => value["version"] = 7.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -225,7 +291,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        5
+        6
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);

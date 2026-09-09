@@ -14,14 +14,21 @@ struct Pulse {
     region: vec4<u32>,
 }
 
+struct BoundarySignal {
+    values: vec4<f32>,
+}
+
 struct Forcing {
     source: Source,
     pulse: Pulse,
+    outer: array<BoundarySignal, 4>,
 }
 
 struct NodeData {
     position_damping: vec4<f32>,
     regions: vec4<u32>,
+    boundary: vec4<u32>,
+    neumann_weights: vec4<f32>,
 }
 
 struct MatrixEntry {
@@ -58,6 +65,19 @@ fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
     return select(0.0, 1.0, first || second);
 }
 
+fn boundary_value(side: u32, time: f32) -> f32 {
+    let signal = forcing.outer[side].values;
+    return signal.x + signal.y * sin(signal.z * time + signal.w);
+}
+
+fn neumann_acceleration(i: u32, time: f32) -> f32 {
+    var value = 0.0;
+    for (var side = 0u; side < 4u; side += 1u) {
+        value += nodes[i].neumann_weights[side] * boundary_value(side, time);
+    }
+    return value;
+}
+
 fn source_acceleration(i: u32) -> f32 {
     let delta = nodes[i].position_damping.xy - forcing.source.position_width_amplitude.xy;
     let gaussian = exp(-0.5 * dot(delta, delta) / forcing.source.position_width_amplitude.z);
@@ -69,6 +89,13 @@ fn source_acceleration(i: u32) -> f32 {
 }
 
 fn compute_velocity(i: u32) -> f32 {
+    let dt = parameters.time_data.x;
+    let dirichlet = nodes[i].boundary.x;
+    if dirichlet != 0u {
+        let side = dirichlet - 1u;
+        return (boundary_value(side, parameters.time_data.z + dt)
+            - boundary_value(side, parameters.time_data.z - dt)) / (2.0 * dt);
+    }
     var ku = 0.0;
     var entry = row_offsets[i];
     let end = row_offsets[i + 1u];
@@ -82,11 +109,11 @@ fn compute_velocity(i: u32) -> f32 {
             + coefficients.y * states[column].auxiliary.x;
         entry += 1u;
     }
-    let dt = parameters.time_data.x;
     let current = states[i].levels.y;
     let previous = states[i].levels.x;
     let gamma = nodes[i].position_damping.z;
-    let q = source_acceleration(i) - ku;
+    let q = source_acceleration(i)
+        + neumann_acceleration(i, parameters.time_data.z) - ku;
     return ((current - previous) / dt + 0.5 * dt * q) / (1.0 + 0.5 * gamma * dt);
 }
 

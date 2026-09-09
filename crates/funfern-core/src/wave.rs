@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{Point2, TriMesh};
+use crate::{OuterSide, Point2, TriMesh};
 
 /// Constant material coefficients for the scalar wave model
 /// `mass_density * u_tt + damping * u_t - div(stiffness * grad(u)) = f`.
@@ -21,7 +21,40 @@ impl Default for WaveCoefficients {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// A boundary value that is constant in space along one outer side and harmonic
+/// in time. Setting `amplitude` to zero gives a constant value.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BoundarySignal {
+    pub offset: f64,
+    pub amplitude: f64,
+    pub frequency_hz: f64,
+    pub phase_radians: f64,
+}
+
+impl BoundarySignal {
+    pub const ZERO: Self = Self {
+        offset: 0.0,
+        amplitude: 0.0,
+        frequency_hz: 1.0,
+        phase_radians: 0.0,
+    };
+
+    pub fn valid(self) -> bool {
+        self.offset.is_finite()
+            && self.amplitude.is_finite()
+            && self.frequency_hz.is_finite()
+            && self.frequency_hz >= 0.0
+            && self.phase_radians.is_finite()
+    }
+
+    pub fn value(self, time: f64) -> f64 {
+        self.offset
+            + self.amplitude
+                * (std::f64::consts::TAU * self.frequency_hz * time + self.phase_radians).sin()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum OuterBoundaryCondition {
     #[default]
     Reflecting,
@@ -29,6 +62,10 @@ pub enum OuterBoundaryCondition {
     FirstOrderOutgoing,
     /// Second-order Engquist-Majda condition using boundary memory `psi_t = u`.
     SecondOrderOutgoing,
+    /// Prescribed outward flux `stiffness * partial_n u = value(t)`.
+    Neumann { signal: BoundarySignal },
+    /// Strongly prescribed displacement `u = value(t)`.
+    Dirichlet { signal: BoundarySignal },
 }
 
 impl OuterBoundaryCondition {
@@ -37,6 +74,57 @@ impl OuterBoundaryCondition {
             Self::Reflecting => "Reflecting",
             Self::FirstOrderOutgoing => "First-order outgoing",
             Self::SecondOrderOutgoing => "Second-order auxiliary",
+            Self::Neumann { .. } => "Prescribed Neumann",
+            Self::Dirichlet { .. } => "Prescribed Dirichlet",
+        }
+    }
+
+    pub fn signal(self) -> Option<BoundarySignal> {
+        match self {
+            Self::Neumann { signal } | Self::Dirichlet { signal } => Some(signal),
+            _ => None,
+        }
+    }
+
+    pub fn valid(self) -> bool {
+        self.signal().is_none_or(BoundarySignal::valid)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OuterBoundaryConditions {
+    pub sides: [OuterBoundaryCondition; 4],
+}
+
+impl Default for OuterBoundaryConditions {
+    fn default() -> Self {
+        Self::uniform(OuterBoundaryCondition::Reflecting)
+    }
+}
+
+impl OuterBoundaryConditions {
+    pub const fn uniform(condition: OuterBoundaryCondition) -> Self {
+        Self {
+            sides: [condition; 4],
+        }
+    }
+
+    pub const fn get(self, side: OuterSide) -> OuterBoundaryCondition {
+        self.sides[side.index()]
+    }
+
+    pub fn valid(self) -> bool {
+        self.sides.into_iter().all(OuterBoundaryCondition::valid)
+    }
+
+    pub fn label(self) -> &'static str {
+        if self.sides[1..]
+            .iter()
+            .all(|condition| *condition == self.sides[0])
+        {
+            self.sides[0].label()
+        } else {
+            "Mixed"
         }
     }
 }

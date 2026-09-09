@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     BACKGROUND_REGION, BoundaryLabel, FaceBoundaryCondition, InternalBoundaryCoupling,
-    InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition, Point2, RegionId, Scene,
-    TriMesh, WaveCoefficients, WaveError,
+    InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition, OuterBoundaryConditions,
+    OuterSide, Point2, RegionId, Scene, TriMesh, WaveCoefficients, WaveError,
 };
 
 /// Seven-node mass-lumped triangle: `P2` enriched by the cubic interior bubble.
@@ -12,7 +12,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuadraticWaveOperator {
     geometry_revision: u64,
-    outer_boundary: OuterBoundaryCondition,
+    outer_boundaries: OuterBoundaryConditions,
     node_points: Vec<Point2>,
     element_nodes: Vec<[u32; 7]>,
     row_offsets: Vec<u32>,
@@ -20,6 +20,8 @@ pub struct QuadraticWaveOperator {
     stiffness: Vec<f64>,
     auxiliary_stiffness: Vec<f64>,
     auxiliary_active: Vec<bool>,
+    dirichlet_sides: Vec<Option<OuterSide>>,
+    normalized_neumann_weights: Vec<[f64; 4]>,
     lumped_mass: Vec<f64>,
     lumped_damping: Vec<f64>,
     maximum_eigenvalue_bound: f64,
@@ -40,7 +42,7 @@ impl QuadraticWaveOperator {
             mesh,
             BTreeMap::from([(BACKGROUND_REGION, coefficients)]),
             coefficients,
-            outer_boundary,
+            OuterBoundaryConditions::uniform(outer_boundary),
             None,
         )
     }
@@ -49,6 +51,18 @@ impl QuadraticWaveOperator {
         mesh: &TriMesh,
         scene: &Scene,
         outer_boundary: OuterBoundaryCondition,
+    ) -> Result<Self, WaveError> {
+        Self::assemble_scene_with_boundaries(
+            mesh,
+            scene,
+            OuterBoundaryConditions::uniform(outer_boundary),
+        )
+    }
+
+    pub fn assemble_scene_with_boundaries(
+        mesh: &TriMesh,
+        scene: &Scene,
+        outer_boundaries: OuterBoundaryConditions,
     ) -> Result<Self, WaveError> {
         if !scene.structure_valid() {
             return Err(WaveError::InvalidCoefficients);
@@ -69,17 +83,20 @@ impl QuadraticWaveOperator {
         let outer = *coefficients
             .get(&BACKGROUND_REGION)
             .ok_or(WaveError::InvalidCoefficients)?;
-        Self::assemble_regions(mesh, coefficients, outer, outer_boundary, Some(scene))
+        Self::assemble_regions(mesh, coefficients, outer, outer_boundaries, Some(scene))
     }
 
     fn assemble_regions(
         mesh: &TriMesh,
         coefficients_by_region: BTreeMap<RegionId, WaveCoefficients>,
         outer_coefficients: WaveCoefficients,
-        outer_boundary: OuterBoundaryCondition,
+        outer_boundaries: OuterBoundaryConditions,
         scene: Option<&Scene>,
     ) -> Result<Self, WaveError> {
         validate_coefficients(outer_coefficients)?;
+        if !outer_boundaries.valid() {
+            return Err(WaveError::InvalidCoefficients);
+        }
         if coefficients_by_region
             .values()
             .copied()
@@ -146,6 +163,8 @@ impl QuadraticWaveOperator {
         let mut rows = vec![BTreeMap::<usize, f64>::new(); count];
         let mut auxiliary_rows = vec![BTreeMap::<usize, f64>::new(); count];
         let mut auxiliary_active = vec![false; count];
+        let mut dirichlet_sides = vec![None; count];
+        let mut neumann_weights = vec![[0.0; 4]; count];
         let mut mass = vec![0.0; count];
         let mut damping = vec![0.0; count];
         for (triangle, indices) in mesh.triangles.iter().zip(&local_nodes) {
@@ -191,57 +210,75 @@ impl QuadraticWaveOperator {
                 }
             }
         }
-        if matches!(
-            outer_boundary,
-            OuterBoundaryCondition::FirstOrderOutgoing
-                | OuterBoundaryCondition::SecondOrderOutgoing
-        ) {
-            let impedance = (outer_coefficients.mass_density * outer_coefficients.stiffness).sqrt();
-            let wave_speed =
-                (outer_coefficients.stiffness / outer_coefficients.mass_density).sqrt();
-            let auxiliary_scale = 0.5 * outer_coefficients.stiffness * wave_speed;
-            let mut visited = BTreeSet::new();
-            for boundary in &mesh.boundary_edges {
-                if !matches!(boundary.label, BoundaryLabel::Outer(_)) {
-                    continue;
+        let impedance = (outer_coefficients.mass_density * outer_coefficients.stiffness).sqrt();
+        let wave_speed = (outer_coefficients.stiffness / outer_coefficients.mass_density).sqrt();
+        let auxiliary_scale = 0.5 * outer_coefficients.stiffness * wave_speed;
+        let mut visited = BTreeSet::new();
+        for boundary in &mesh.boundary_edges {
+            let BoundaryLabel::Outer(side) = boundary.label else {
+                continue;
+            };
+            let condition = outer_boundaries.get(side);
+            let [a, b] = boundary.vertices;
+            if a >= mesh.vertices.len() || b >= mesh.vertices.len() || a == b {
+                return Err(WaveError::InvalidMesh(
+                    "an outer boundary edge has invalid vertex indices",
+                ));
+            }
+            let key = if a < b { (a, b) } else { (b, a) };
+            if !visited.insert(key) {
+                return Err(WaveError::InvalidMesh(
+                    "an outer boundary edge is duplicated",
+                ));
+            }
+            let midpoint = *edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
+                "an outer boundary edge does not belong to a triangle",
+            ))?;
+            let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
+            if !length.is_finite() || length <= 0.0 {
+                return Err(WaveError::InvalidMesh(
+                    "an outer boundary edge has invalid length",
+                ));
+            }
+            let nodes = [a, b, midpoint];
+            let line_weights = [length / 6.0, length / 6.0, 2.0 * length / 3.0];
+            match condition {
+                OuterBoundaryCondition::Reflecting => {}
+                OuterBoundaryCondition::Neumann { .. } => {
+                    for (node, weight) in nodes.into_iter().zip(line_weights) {
+                        neumann_weights[node][side.index()] += weight;
+                    }
                 }
-                let [a, b] = boundary.vertices;
-                if a >= mesh.vertices.len() || b >= mesh.vertices.len() || a == b {
-                    return Err(WaveError::InvalidMesh(
-                        "an outer boundary edge has invalid vertex indices",
-                    ));
-                }
-                let key = if a < b { (a, b) } else { (b, a) };
-                if !visited.insert(key) {
-                    return Err(WaveError::InvalidMesh(
-                        "an outer boundary edge is duplicated",
-                    ));
-                }
-                let midpoint = *edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
-                    "an outer boundary edge does not belong to a triangle",
-                ))?;
-                let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
-                if !length.is_finite() || length <= 0.0 {
-                    return Err(WaveError::InvalidMesh(
-                        "an outer boundary edge has invalid length",
-                    ));
-                }
-                let scale = impedance * length;
-                damping[a] += scale / 6.0;
-                damping[midpoint] += 2.0 * scale / 3.0;
-                damping[b] += scale / 6.0;
-                if outer_boundary == OuterBoundaryCondition::SecondOrderOutgoing {
-                    // P2 line-element stiffness in endpoint/endpoint/midpoint order.
-                    // Sharing vertex indices across incident sides supplies the
-                    // corner coupling in the assembled tangential operator.
-                    let nodes = [a, b, midpoint];
-                    let local = [[7.0, 1.0, -8.0], [1.0, 7.0, -8.0], [-8.0, -8.0, 16.0]];
-                    for i in 0..3 {
-                        auxiliary_active[nodes[i]] = true;
-                        for j in 0..3 {
-                            *auxiliary_rows[nodes[i]].entry(nodes[j]).or_default() +=
-                                auxiliary_scale * local[i][j] / (3.0 * length);
+                OuterBoundaryCondition::Dirichlet { signal } => {
+                    for node in nodes {
+                        if let Some(previous_side) = dirichlet_sides[node]
+                            && outer_boundaries.get(previous_side).signal() != Some(signal)
+                        {
+                            return Err(WaveError::InvalidMesh(
+                                "adjacent Dirichlet sides disagree at their shared corner",
+                            ));
                         }
+                        dirichlet_sides[node] = Some(side);
+                    }
+                }
+                OuterBoundaryCondition::FirstOrderOutgoing
+                | OuterBoundaryCondition::SecondOrderOutgoing => {
+                    let scale = impedance * length;
+                    damping[a] += scale / 6.0;
+                    damping[midpoint] += 2.0 * scale / 3.0;
+                    damping[b] += scale / 6.0;
+                }
+            }
+            if condition == OuterBoundaryCondition::SecondOrderOutgoing {
+                // P2 line-element stiffness in endpoint/endpoint/midpoint order.
+                // Sharing vertex indices across incident sides supplies the
+                // corner coupling in the assembled tangential operator.
+                let local = [[7.0, 1.0, -8.0], [1.0, 7.0, -8.0], [-8.0, -8.0, 16.0]];
+                for i in 0..3 {
+                    auxiliary_active[nodes[i]] = true;
+                    for j in 0..3 {
+                        *auxiliary_rows[nodes[i]].entry(nodes[j]).or_default() +=
+                            auxiliary_scale * local[i][j] / (3.0 * length);
                     }
                 }
             }
@@ -271,6 +308,11 @@ impl QuadraticWaveOperator {
             return Err(WaveError::InvalidMesh(
                 "a quadratic node has invalid lumped mass",
             ));
+        }
+        for (weights, mass) in neumann_weights.iter_mut().zip(&mass) {
+            for weight in weights {
+                *weight /= *mass;
+            }
         }
 
         for (row, auxiliary) in rows.iter_mut().zip(&auxiliary_rows) {
@@ -320,7 +362,7 @@ impl QuadraticWaveOperator {
             .collect();
         Ok(Self {
             geometry_revision: mesh.geometry_revision,
-            outer_boundary,
+            outer_boundaries,
             node_points,
             element_nodes,
             row_offsets,
@@ -328,6 +370,8 @@ impl QuadraticWaveOperator {
             stiffness,
             auxiliary_stiffness,
             auxiliary_active,
+            dirichlet_sides,
+            normalized_neumann_weights: neumann_weights,
             lumped_mass: mass,
             lumped_damping: damping,
             maximum_eigenvalue_bound,
@@ -339,8 +383,51 @@ impl QuadraticWaveOperator {
         self.geometry_revision
     }
 
+    pub fn outer_boundaries(&self) -> OuterBoundaryConditions {
+        self.outer_boundaries
+    }
+
+    /// Returns the common condition for operators assembled through the legacy
+    /// uniform-boundary API.
     pub fn outer_boundary(&self) -> OuterBoundaryCondition {
-        self.outer_boundary
+        debug_assert!(
+            self.outer_boundaries.sides[1..]
+                .iter()
+                .all(|condition| *condition == self.outer_boundaries.sides[0])
+        );
+        self.outer_boundaries.sides[0]
+    }
+
+    pub fn dirichlet_sides(&self) -> &[Option<OuterSide>] {
+        &self.dirichlet_sides
+    }
+
+    pub fn normalized_neumann_weights(&self) -> &[[f64; 4]] {
+        &self.normalized_neumann_weights
+    }
+
+    pub fn prescribed_value(&self, node: usize, time: f64) -> Option<f64> {
+        let side = *self.dirichlet_sides.get(node)?;
+        match self.outer_boundaries.get(side?) {
+            OuterBoundaryCondition::Dirichlet { signal } => Some(signal.value(time)),
+            _ => None,
+        }
+    }
+
+    pub fn neumann_acceleration(&self, node: usize, time: f64) -> f64 {
+        self.normalized_neumann_weights
+            .get(node)
+            .map(|weights| {
+                OuterSide::ALL
+                    .into_iter()
+                    .zip(weights)
+                    .map(|(side, weight)| match self.outer_boundaries.get(side) {
+                        OuterBoundaryCondition::Neumann { signal } => weight * signal.value(time),
+                        _ => 0.0,
+                    })
+                    .sum()
+            })
+            .unwrap_or(0.0)
     }
 
     pub fn node_points(&self) -> &[Point2] {
@@ -481,7 +568,7 @@ impl QuadraticWaveOperator {
     }
 
     pub fn estimated_gpu_bytes(&self) -> usize {
-        self.row_offsets.len() * 4 + self.columns.len() * 12 + self.degrees_of_freedom() * 48
+        self.row_offsets.len() * 4 + self.columns.len() * 12 + self.degrees_of_freedom() * 96
     }
 
     pub fn discrete_energy(
@@ -592,7 +679,7 @@ impl QuadraticWaveState {
     pub fn new_with_auxiliary(
         operator: &QuadraticWaveOperator,
         time_step: f64,
-        displacement: Vec<f64>,
+        mut displacement: Vec<f64>,
         velocity: Vec<f64>,
         auxiliary: Vec<f64>,
     ) -> Result<Self, WaveError> {
@@ -606,6 +693,11 @@ impl QuadraticWaveState {
         if auxiliary.iter().any(|value| !value.is_finite()) {
             return Err(WaveError::InvalidState);
         }
+        for (node, value) in displacement.iter_mut().enumerate() {
+            if let Some(prescribed) = operator.prescribed_value(node, 0.0) {
+                *value = prescribed;
+            }
+        }
         let stiffness = operator.apply_stiffness(&displacement)?;
         let auxiliary_force = operator.apply_auxiliary_stiffness(&auxiliary)?;
         let previous = displacement
@@ -615,10 +707,17 @@ impl QuadraticWaveState {
             .zip(auxiliary_force)
             .zip(&operator.lumped_mass)
             .zip(&operator.lumped_damping)
+            .enumerate()
             .map(
-                |(((((displacement, velocity), stiffness), auxiliary), mass), damping)| {
-                    let acceleration = (-stiffness - auxiliary - damping * velocity) / mass;
-                    displacement - time_step * velocity + 0.5 * time_step * time_step * acceleration
+                |(node, (((((displacement, velocity), stiffness), auxiliary), mass), damping))| {
+                    if let Some(prescribed) = operator.prescribed_value(node, -time_step) {
+                        prescribed
+                    } else {
+                        let acceleration = (-stiffness - auxiliary - damping * velocity) / mass
+                            + operator.neumann_acceleration(node, 0.0);
+                        displacement - time_step * velocity
+                            + 0.5 * time_step * time_step * acceleration
+                    }
                 },
             )
             .collect::<Vec<_>>();
@@ -694,7 +793,12 @@ impl QuadraticWaveState {
         }
         let dt = self.time_step;
         let dt2 = dt * dt;
+        let time = self.time();
         for i in 0..self.current.len() {
+            if let Some(prescribed) = operator.prescribed_value(i, time + dt) {
+                self.scratch[i] = prescribed;
+                continue;
+            }
             let stiffness = (operator.row_offsets[i] as usize
                 ..operator.row_offsets[i + 1] as usize)
                 .map(|entry| {
@@ -709,7 +813,8 @@ impl QuadraticWaveState {
                 })
                 .sum::<f64>();
             let gamma = operator.lumped_damping[i] / operator.lumped_mass[i];
-            let source = acceleration.get(i).copied().unwrap_or(0.0);
+            let source = acceleration.get(i).copied().unwrap_or(0.0)
+                + operator.neumann_acceleration(i, time);
             self.scratch[i] = (2.0 * self.current[i]
                 - (1.0 - 0.5 * gamma * dt) * self.previous[i]
                 - dt2 * (stiffness + auxiliary) / operator.lumped_mass[i]
@@ -720,7 +825,7 @@ impl QuadraticWaveState {
             }
         }
         for i in 0..self.auxiliary.len() {
-            if operator.auxiliary_active[i] {
+            if operator.auxiliary_active[i] && operator.dirichlet_sides[i].is_none() {
                 self.auxiliary[i] += 0.5 * dt * (self.current[i] + self.scratch[i]);
             } else {
                 self.auxiliary[i] = 0.0;
@@ -1061,6 +1166,7 @@ mod tests {
                     material: MaterialId(2),
                 },
             ],
+            outer_boundaries: OuterBoundaryConditions::default(),
         }
     }
 
@@ -1408,6 +1514,74 @@ mod tests {
             })
             .count();
         assert_eq!(coupled_boundary_neighbors, 4);
+    }
+
+    #[test]
+    fn mixed_outer_sides_apply_time_varying_dirichlet_and_neumann_data() {
+        let mesh = square_with_outer_boundary();
+        let dirichlet = crate::BoundarySignal {
+            offset: 0.2,
+            amplitude: 0.3,
+            frequency_hz: 1.25,
+            phase_radians: 0.4,
+        };
+        let neumann = crate::BoundarySignal {
+            offset: 0.7,
+            ..crate::BoundarySignal::ZERO
+        };
+        let mut boundaries = OuterBoundaryConditions::default();
+        boundaries.sides[OuterSide::Bottom.index()] =
+            OuterBoundaryCondition::Dirichlet { signal: dirichlet };
+        boundaries.sides[OuterSide::Top.index()] =
+            OuterBoundaryCondition::Neumann { signal: neumann };
+        boundaries.sides[OuterSide::Right.index()] = OuterBoundaryCondition::FirstOrderOutgoing;
+        boundaries.sides[OuterSide::Left.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
+        let operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
+            &mesh,
+            &Scene::default(),
+            boundaries,
+        )
+        .unwrap();
+
+        for (node, point) in operator.node_points().iter().enumerate() {
+            if point.y == 0.0 {
+                assert_eq!(operator.dirichlet_sides()[node], Some(OuterSide::Bottom));
+            }
+            if point.y == 1.0 && point.x > 0.0 && point.x < 1.0 {
+                assert!(operator.normalized_neumann_weights()[node][OuterSide::Top.index()] > 0.0);
+            }
+        }
+
+        let dt = 0.25 * operator.maximum_time_step();
+        let mut state = QuadraticWaveState::zero(&operator, dt).unwrap();
+        for (node, point) in operator.node_points().iter().enumerate() {
+            if point.y == 0.0 {
+                assert!((state.current()[node] - dirichlet.value(0.0)).abs() < 1.0e-14);
+            }
+        }
+        state.step(&operator, &[]).unwrap();
+        for (node, point) in operator.node_points().iter().enumerate() {
+            if point.y == 0.0 {
+                assert!((state.current()[node] - dirichlet.value(dt)).abs() < 1.0e-13);
+            }
+        }
+        assert!(state.current().iter().any(|value| *value != 0.0));
+
+        let mut contradictory = boundaries;
+        contradictory.sides[OuterSide::Right.index()] = OuterBoundaryCondition::Dirichlet {
+            signal: crate::BoundarySignal {
+                offset: 9.0,
+                ..crate::BoundarySignal::ZERO
+            },
+        };
+        assert!(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &Scene::default(),
+                contradictory,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -9,9 +9,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
-- [ ] Extend assigned conditions from hole/open-baffle knot spans to outer sides and
-  closed-wall faces, including mixed-condition junction behavior for the existing
-  second-order auxiliary radiation law.
+- [ ] Decide whether the load-compatible closed-wall role still warrants assigned
+  face conditions now that holes and open baffles cover the primary workflows.
 - [ ] Evaluate a dissipative relative dashpot for thin gaps. Keeping centered time
   integration would require an off-diagonal damping solve; the implemented gap
   spring is conservative.
@@ -56,6 +55,35 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   tests**, native release compilation, the Apple M1 Max / Metal GPU reference
   check, and a release Trunk build. A clean Compose image rebuild completes, its
   nginx service reports healthy, and the exact rebuilt image starts in Chromium
+  with no console errors.
+
+## 2026-09-09 — Assigned outer-side Dirichlet and Neumann data
+
+- Replaced the global outer-boundary mode with four independently assigned box
+  sides. Each side supports homogeneous Neumann/reflecting, prescribed Neumann
+  flux, prescribed Dirichlet displacement, first-order outgoing, or second-order
+  auxiliary behavior. The selected side is highlighted in the viewport.
+- Prescribed data is constant along its side and uses the analytic time law
+  `offset + amplitude sin(2π f t + phase)`. Neumann data is assembled as a
+  quadratic boundary load. Dirichlet values are imposed strongly at initialization,
+  every centered step, and field-transfer commits. Different Dirichlet signals on
+  adjacent sides are rejected as a persistent invalid draft because their corner
+  value would be contradictory.
+- The GPU keeps the eight portable storage bindings by packing four signals into
+  the forcing buffer and per-side Neumann weights plus a Dirichlet side index into
+  each node record. Transfer gained a bounded preparation dispatch so target
+  Dirichlet values participate in the reconstructed previous level. Auxiliary
+  radiation memory is suppressed where an essential condition owns a mixed corner.
+- Scene JSON is now version 6 and stores outer-side laws in both draft and accepted
+  scenes. Versions 1–5 migrate to four reflecting sides. Boundary edits participate
+  in document history and reuse the existing mesh through the operator transaction.
+- The expanded CPU/editor suite has **109 tests**. The native mixed-condition GPU
+  check exercises both prescribed laws and both outgoing orders at 9,720 DOFs; its
+  current, previous, and auxiliary relative L2 errors against f64 are respectively
+  `7.51e-6`, `7.49e-6`, and `1.37e-5`.
+- Formatting, Clippy with warnings denied, native release compilation, the existing
+  geometry/boundary/material GPU transfer check, and release Trunk packaging pass.
+  A clean Compose image rebuild is healthy, and Chromium starts that exact image
   with no console errors.
 
 ## 2026-09-09 — Portable WebGPU wave bindings

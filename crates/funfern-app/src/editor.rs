@@ -50,6 +50,24 @@ impl Default for Editor {
     }
 }
 impl Editor {
+    pub fn set_outer_boundary_condition(
+        &mut self,
+        side: OuterSide,
+        condition: OuterBoundaryCondition,
+    ) -> Result<(), String> {
+        if !condition.valid() {
+            return Err("Boundary signal values must be finite and frequency nonnegative".into());
+        }
+        if self.document.draft.outer_boundaries.get(side) == condition {
+            return Ok(());
+        }
+        self.begin();
+        self.document.draft.outer_boundaries.sides[side.index()] = condition;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
     pub fn begin(&mut self) {
         if self.before.is_none() {
             self.before = Some(self.document.clone())

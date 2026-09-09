@@ -61,7 +61,7 @@ struct SimulationCandidate {
     max_edge: f64,
     low_quality: Vec<bool>,
     operator: Arc<QuadraticWaveOperator>,
-    boundary: OuterBoundaryCondition,
+    boundary: OuterBoundaryConditions,
     time_step: f64,
     transfer: Option<QuadraticTransferMap>,
     generation: Option<u64>,
@@ -83,6 +83,7 @@ pub struct Playground {
     internal_selection: Option<(InternalBoundaryId, Option<usize>)>,
     internal_span_selection: Option<(InternalBoundaryId, usize)>,
     internal_face_selection: InternalBoundarySide,
+    outer_side_selection: OuterSide,
     custom: Vec<Point2>,
     drag: Option<Drag>,
     internal_drag: Option<InternalDrag>,
@@ -134,8 +135,7 @@ pub struct Playground {
     field_gain: f32,
     wave_mesh: Option<Arc<TriMesh>>,
     wave_operator: Option<Arc<QuadraticWaveOperator>>,
-    wave_boundary: OuterBoundaryCondition,
-    wave_boundary_committed: OuterBoundaryCondition,
+    wave_boundary_committed: OuterBoundaryConditions,
     wave_time_step: f64,
     wave_time_offset: f64,
     wave_running: bool,
@@ -171,6 +171,7 @@ impl Default for Playground {
             internal_selection: None,
             internal_span_selection: None,
             internal_face_selection: InternalBoundarySide::Left,
+            outer_side_selection: OuterSide::Bottom,
             custom: vec![],
             drag: None,
             internal_drag: None,
@@ -222,8 +223,7 @@ impl Default for Playground {
             field_gain: 2.0,
             wave_mesh: None,
             wave_operator: None,
-            wave_boundary: OuterBoundaryCondition::Reflecting,
-            wave_boundary_committed: OuterBoundaryCondition::Reflecting,
+            wave_boundary_committed: OuterBoundaryConditions::default(),
             wave_time_step: 0.0,
             wave_time_offset: 0.0,
             wave_running: false,
@@ -500,10 +500,10 @@ impl Playground {
                         .map(|i| mesh.triangle_quality(i).unwrap().minimum_angle_degrees < 15.0)
                         .collect();
                     let prepare = Instant::now();
-                    match QuadraticWaveOperator::assemble_scene(
+                    match QuadraticWaveOperator::assemble_scene_with_boundaries(
                         &mesh,
                         &self.mesh_source,
-                        self.wave_boundary,
+                        self.mesh_source.outer_boundaries,
                     ) {
                         Ok(operator) => {
                             let transfer =
@@ -544,7 +544,7 @@ impl Playground {
                                         max_edge: self.mesh_source_max_edge,
                                         low_quality,
                                         operator: Arc::new(operator),
-                                        boundary: self.wave_boundary,
+                                        boundary: self.mesh_source.outer_boundaries,
                                         time_step,
                                         transfer,
                                         generation: None,
@@ -569,16 +569,15 @@ impl Playground {
         if !geometry_changed
             && self.mesh_job.is_none()
             && self.simulation_candidate.is_none()
-            && (self.wave_boundary != self.wave_boundary_committed
-                || self.editor.document.accepted != self.mesh_committed_scene)
+            && self.editor.document.accepted != self.mesh_committed_scene
             && let (Some(mesh), Some(source_operator)) =
                 (self.wave_mesh.as_ref(), self.wave_operator.as_ref())
         {
             let prepare = Instant::now();
-            match QuadraticWaveOperator::assemble_scene(
+            match QuadraticWaveOperator::assemble_scene_with_boundaries(
                 mesh,
                 &self.editor.document.accepted,
-                self.wave_boundary,
+                self.editor.document.accepted.outer_boundaries,
             ) {
                 Ok(operator) => {
                     match QuadraticTransferMap::identity_on_mesh(mesh, source_operator, &operator) {
@@ -592,7 +591,7 @@ impl Playground {
                                 max_edge: self.mesh_committed_max_edge,
                                 low_quality: self.mesh_low_quality.clone(),
                                 operator: Arc::new(operator),
-                                boundary: self.wave_boundary,
+                                boundary: self.editor.document.accepted.outer_boundaries,
                                 time_step,
                                 exposed_nodes: transfer.exposed_nodes(),
                                 transfer: Some(transfer),
@@ -1591,25 +1590,93 @@ impl Playground {
         ui.label("Wave simulation");
         let wave_available = self.wave_operator.is_some();
         ui.add_enabled_ui(wave_available, |ui| {
-            egui::ComboBox::from_label("Outer boundary")
-                .selected_text(self.wave_boundary.label())
+            ui.horizontal(|ui| {
+                ui.label("Outer side");
+                for side in OuterSide::ALL {
+                    ui.selectable_value(&mut self.outer_side_selection, side, side.label());
+                }
+            });
+            let side = self.outer_side_selection;
+            let mut condition = self.editor.document.draft.outer_boundaries.get(side);
+            let previous = condition;
+            egui::ComboBox::from_label("Boundary condition")
+                .selected_text(condition.label())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
-                        &mut self.wave_boundary,
+                        &mut condition,
                         OuterBoundaryCondition::Reflecting,
-                        "Reflecting",
+                        "Neumann · zero / reflecting",
+                    );
+                    let signal = previous.signal().unwrap_or(BoundarySignal::ZERO);
+                    ui.selectable_value(
+                        &mut condition,
+                        OuterBoundaryCondition::Neumann { signal },
+                        "Neumann · prescribed flux",
                     );
                     ui.selectable_value(
-                        &mut self.wave_boundary,
+                        &mut condition,
+                        OuterBoundaryCondition::Dirichlet { signal },
+                        "Dirichlet · prescribed value",
+                    );
+                    ui.selectable_value(
+                        &mut condition,
                         OuterBoundaryCondition::FirstOrderOutgoing,
                         "First-order outgoing",
                     );
                     ui.selectable_value(
-                        &mut self.wave_boundary,
+                        &mut condition,
                         OuterBoundaryCondition::SecondOrderOutgoing,
                         "Second-order auxiliary",
                     );
                 });
+            if condition != previous {
+                let result = self.editor.set_outer_boundary_condition(side, condition);
+                self.error(result);
+            }
+            if let Some(mut signal) = condition.signal() {
+                ui.small("value(t) = offset + amplitude · sin(2π f t + phase)");
+                let responses = [
+                    ui.add(
+                        egui::DragValue::new(&mut signal.offset)
+                            .speed(0.01)
+                            .prefix("offset ")
+                            .update_while_editing(false),
+                    ),
+                    ui.add(
+                        egui::DragValue::new(&mut signal.amplitude)
+                            .speed(0.01)
+                            .prefix("amplitude ")
+                            .update_while_editing(false),
+                    ),
+                    ui.add(
+                        egui::DragValue::new(&mut signal.frequency_hz)
+                            .speed(0.05)
+                            .range(0.0..=1.0e6)
+                            .suffix(" Hz")
+                            .update_while_editing(false),
+                    ),
+                    ui.add(
+                        egui::DragValue::new(&mut signal.phase_radians)
+                            .speed(0.05)
+                            .prefix("phase ")
+                            .suffix(" rad")
+                            .update_while_editing(false),
+                    ),
+                ];
+                if responses.iter().any(egui::Response::changed) {
+                    condition = match condition {
+                        OuterBoundaryCondition::Neumann { .. } => {
+                            OuterBoundaryCondition::Neumann { signal }
+                        }
+                        OuterBoundaryCondition::Dirichlet { .. } => {
+                            OuterBoundaryCondition::Dirichlet { signal }
+                        }
+                        _ => unreachable!(),
+                    };
+                    let result = self.editor.set_outer_boundary_condition(side, condition);
+                    self.error(result);
+                }
+            }
             ui.horizontal(|ui| {
                 if ui
                     .button(if self.wave_running { "Pause" } else { "Run" })
@@ -2087,6 +2154,16 @@ impl Playground {
             domain.map(|p| self.screen(p, r)).to_vec(),
             Stroke::new(1.5, Color32::from_rgb(100, 123, 140)),
         ));
+        let selected_outer = match self.outer_side_selection {
+            OuterSide::Bottom => [domain[0], domain[1]],
+            OuterSide::Right => [domain[1], domain[2]],
+            OuterSide::Top => [domain[2], domain[3]],
+            OuterSide::Left => [domain[3], domain[4]],
+        };
+        painter.line_segment(
+            selected_outer.map(|point| self.screen(point, r)),
+            Stroke::new(3.0, TEAL),
+        );
         if self.show_mesh
             && let Some(mesh) = &self.mesh
         {
@@ -2681,6 +2758,7 @@ pub fn wave_gpu_check_scene() -> Playground {
                 material: MaterialId(2),
             },
         ],
+        outer_boundaries: OuterBoundaryConditions::default(),
     };
     state
         .editor
@@ -2737,13 +2815,30 @@ pub fn wave_gpu_benchmark(
         return;
     }
     if !benchmark.prepared {
-        if state.wave_boundary != OuterBoundaryCondition::SecondOrderOutgoing {
-            state.wave_boundary = OuterBoundaryCondition::SecondOrderOutgoing;
+        let mut target = OuterBoundaryConditions::default();
+        target.sides[OuterSide::Bottom.index()] = OuterBoundaryCondition::Dirichlet {
+            signal: BoundarySignal {
+                offset: 0.02,
+                amplitude: 0.04,
+                frequency_hz: 2.0,
+                phase_radians: 0.1,
+            },
+        };
+        target.sides[OuterSide::Top.index()] = OuterBoundaryCondition::Neumann {
+            signal: BoundarySignal {
+                amplitude: 0.3,
+                frequency_hz: 1.5,
+                ..BoundarySignal::ZERO
+            },
+        };
+        target.sides[OuterSide::Left.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
+        target.sides[OuterSide::Right.index()] = OuterBoundaryCondition::FirstOrderOutgoing;
+        if state.editor.document.accepted.outer_boundaries != target {
+            state.editor.document.draft.outer_boundaries = target;
+            state.editor.document.accepted.outer_boundaries = target;
             return;
         }
-        if state.wave_boundary_committed != OuterBoundaryCondition::SecondOrderOutgoing
-            || state.simulation_candidate.is_some()
-        {
+        if state.wave_boundary_committed != target || state.simulation_candidate.is_some() {
             return;
         }
         let Some(operator) = &state.wave_operator else {
@@ -2830,6 +2925,26 @@ pub fn wave_gpu_benchmark(
     let current_error = error_norm(&display.current, &benchmark.expected_current);
     let previous_error = error_norm(&display.previous, &benchmark.expected_previous);
     let auxiliary_error = error_norm(&display.auxiliary, &benchmark.expected_auxiliary);
+    let max_difference = display
+        .current
+        .iter()
+        .zip(&benchmark.expected_current)
+        .enumerate()
+        .max_by(|(_, (actual_a, expected_a)), (_, (actual_b, expected_b))| {
+            (**actual_a as f64 - **expected_a)
+                .abs()
+                .total_cmp(&(**actual_b as f64 - **expected_b).abs())
+        })
+        .map(|(node, (actual, expected))| {
+            (
+                node,
+                *actual,
+                *expected,
+                operator.node_points()[node],
+                operator.dirichlet_sides()[node],
+                operator.normalized_neumann_weights()[node],
+            )
+        });
     let actual_peak = display
         .current
         .iter()
@@ -2862,6 +2977,18 @@ pub fn wave_gpu_benchmark(
         simulated_seconds_per_wall_second = 128.0 * state.wave_time_step / solve_seconds,
         "Wave GPU check complete"
     );
+    if let Some((node, actual, expected, point, dirichlet, neumann)) = max_difference {
+        info!(
+            node,
+            actual,
+            expected,
+            x = point.x,
+            y = point.y,
+            ?dirichlet,
+            ?neumann,
+            "Wave GPU maximum pointwise difference"
+        );
+    }
     if current_error <= 2.0e-4
         && previous_error <= 2.0e-4
         && auxiliary_error <= 2.0e-4
@@ -2929,13 +3056,14 @@ pub fn wave_transfer_benchmark(
     }
     match benchmark.phase {
         0 => {
-            if state.wave_boundary != OuterBoundaryCondition::SecondOrderOutgoing {
-                state.wave_boundary = OuterBoundaryCondition::SecondOrderOutgoing;
+            let target =
+                OuterBoundaryConditions::uniform(OuterBoundaryCondition::SecondOrderOutgoing);
+            if state.editor.document.accepted.outer_boundaries != target {
+                state.editor.document.draft.outer_boundaries = target;
+                state.editor.document.accepted.outer_boundaries = target;
                 return;
             }
-            if state.wave_boundary_committed != OuterBoundaryCondition::SecondOrderOutgoing
-                || state.simulation_candidate.is_some()
-            {
+            if state.wave_boundary_committed != target || state.simulation_candidate.is_some() {
                 return;
             }
             if !request.ready() || state.wave_operator.is_none() {
@@ -3161,7 +3289,10 @@ pub fn wave_transfer_benchmark(
                     },
                 )
                 .collect();
-            state.wave_boundary = OuterBoundaryCondition::FirstOrderOutgoing;
+            let target =
+                OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
+            state.editor.document.draft.outer_boundaries = target;
+            state.editor.document.accepted.outer_boundaries = target;
             benchmark.boundary_started = Some(Instant::now());
             benchmark.phase = 4;
         }
@@ -3172,7 +3303,8 @@ pub fn wave_transfer_benchmark(
             let (Some(map), Some(generation)) = (&candidate.transfer, candidate.generation) else {
                 return;
             };
-            if candidate.boundary != OuterBoundaryCondition::FirstOrderOutgoing
+            if candidate.boundary
+                != OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing)
                 || !state
                     .wave_mesh
                     .as_ref()
@@ -4127,7 +4259,9 @@ mod tests {
         commit_mesh_without_gpu(&mut h.state);
         let mesh = h.state.mesh.clone().expect("initial accepted mesh");
 
-        h.state.wave_boundary = OuterBoundaryCondition::FirstOrderOutgoing;
+        let target = OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
+        h.state.editor.document.draft.outer_boundaries = target;
+        h.state.editor.document.accepted.outer_boundaries = target;
         h.state.refresh_mesh();
 
         let candidate = h
@@ -4137,18 +4271,12 @@ mod tests {
             .expect("boundary candidate");
         assert!(Arc::ptr_eq(&candidate.mesh, &mesh));
         assert!(h.state.mesh_job.is_none());
-        assert_eq!(
-            candidate.operator.outer_boundary(),
-            OuterBoundaryCondition::FirstOrderOutgoing
-        );
+        assert_eq!(candidate.operator.outer_boundaries(), target);
         assert_eq!(candidate.exposed_nodes, 0);
         assert!(candidate.transfer.is_some());
 
         commit_mesh_without_gpu(&mut h.state);
-        assert_eq!(
-            h.state.wave_boundary_committed,
-            OuterBoundaryCondition::FirstOrderOutgoing
-        );
+        assert_eq!(h.state.wave_boundary_committed, target);
         assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &mesh));
     }
 

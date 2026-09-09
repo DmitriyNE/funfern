@@ -2,11 +2,12 @@
 
 The spline editor, constrained mesher, bounded coordinate-edit repair, enriched
 quadratic GPU wave solver, and geometry-edit simulation transactions are
-implemented. The outer boundary has reflecting and first- and second-order
-radiation modes. Stable material regions, transmitting interfaces, closed
+implemented. Each outer side independently supports reflecting or prescribed
+Neumann data, prescribed Dirichlet data, and first- or second-order radiation.
+Stable material regions, transmitting interfaces, closed
 two-sided walls, and open baffles with assigned face impedance and compliant
 thin-gap spans are implemented. Broader adaptation and assigned conditions on
-outer and closed-loop spans remain work.
+closed-loop spans remain work.
 
 ## Responsibilities and dependencies
 
@@ -482,7 +483,18 @@ the explicit solver retains a diagonal damping operation. Only edges labeled as
 the fixed outer square receive this term; obstacle edges stay reflecting. At a
 corner, the two incident edge integrals both contribute to the corner node.
 
-Reflecting remains the startup default. Switching modes assembles a replacement
+Reflecting remains the startup default. Each fixed-box side is one logical span.
+Its prescribed Neumann value is the outward flux `k ∂n u = q(t)` and contributes
+`∫Γ N_i q(t) ds` with the same quadratic Simpson weights used for impedance.
+Dirichlet data strongly sets every boundary time level to `g(t)`, including
+initialization and operator-transfer commits. Both use
+`offset + amplitude sin(2π f t + phase)`, so constants need no separate mode.
+Adjacent Dirichlet sides must carry identical signals at their shared corner;
+contradictory assignments remain an invalid editable draft. At a mixed
+Dirichlet/second-order corner, the essential value wins and auxiliary memory is
+disabled on that node.
+
+Switching modes assembles a replacement
 operator on the same mesh, constructs a direct identity quadratic transfer without
 spatial point location, then uses the normal GPU transaction to carry displacement
 and velocity into the new centered time levels. The operator and live field
@@ -524,12 +536,11 @@ DOFs. CPU and WGSL use the same update. The GPU packs interior and boundary
 coefficients together, keeping a single CSR gather. At the production timestep,
 a 10,000-step regression remains finite and decays.
 
-A second-order-to-second-order geometry transaction interpolates `ψ` with the
-same quadratic map used for displacement and velocity. Entering second order
-starts `ψ` at zero; leaving it discards the auxiliary state. Same-mesh boundary
-changes still bypass spatial point location. The later logical-span milestone
-will restrict the tangential operator to assigned spans and define mixed-junction
-behavior.
+A transaction with unchanged outer-side laws interpolates `ψ` with the same
+quadratic map used for displacement and velocity. A boundary-law change clears
+auxiliary memory conservatively; unchanged same-mesh settings still bypass spatial
+point location. The tangential operator is assembled only on sides assigned the
+second-order law, and essential values take precedence at mixed junctions.
 
 The rational form follows the [original Engquist-Majda absorbing-boundary
 construction](https://doi.org/10.1090/S0025-5718-1977-0436612-4). Further

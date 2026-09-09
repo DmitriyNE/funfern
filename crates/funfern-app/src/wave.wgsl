@@ -14,14 +14,21 @@ struct Pulse {
     region: vec4<u32>,
 }
 
+struct BoundarySignal {
+    values: vec4<f32>,
+}
+
 struct Forcing {
     source: Source,
     pulse: Pulse,
+    outer: array<BoundarySignal, 4>,
 }
 
 struct NodeData {
     position_damping: vec4<f32>,
     regions: vec4<u32>,
+    boundary: vec4<u32>,
+    neumann_weights: vec4<f32>,
 }
 
 struct MatrixEntry {
@@ -49,10 +56,30 @@ fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
     return select(0.0, 1.0, first || second);
 }
 
+fn boundary_value(side: u32, time: f32) -> f32 {
+    let signal = forcing.outer[side].values;
+    return signal.x + signal.y * sin(signal.z * time + signal.w);
+}
+
+fn neumann_acceleration(i: u32, time: f32) -> f32 {
+    var value = 0.0;
+    for (var side = 0u; side < 4u; side += 1u) {
+        value += nodes[i].neumann_weights[side] * boundary_value(side, time);
+    }
+    return value;
+}
+
 @compute @workgroup_size(128)
 fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if i >= parameters.count_data.x {
+        return;
+    }
+    let dt = parameters.time_data.x;
+    let dirichlet = nodes[i].boundary.x;
+    if dirichlet != 0u {
+        states[i].levels.z = boundary_value(dirichlet - 1u, parameters.time_data.z + dt);
+        states[i].levels.w = parameters.time_data.w + 1.0;
         return;
     }
     var ku = 0.0;
@@ -68,14 +95,14 @@ fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
             + coefficients.y * states[column].auxiliary.x;
         entry += 1u;
     }
-    let dt = parameters.time_data.x;
     let dt2 = parameters.time_data.y;
     let gamma = nodes[i].position_damping.z;
     let acceleration = forcing.source.frequency_enabled.y
         * region_match(nodes[i].regions, forcing.source.region)
         * forcing.source.position_width_amplitude.w
         * forcing_weights[i].x
-        * sin(forcing.source.frequency_enabled.x * parameters.time_data.z);
+        * sin(forcing.source.frequency_enabled.x * parameters.time_data.z)
+        + neumann_acceleration(i, parameters.time_data.z);
     let previous = states[i].levels.x;
     let current = states[i].levels.y;
     states[i].levels.z = (
@@ -96,7 +123,7 @@ fn rotate(@builtin(global_invocation_id) id: vec3<u32>) {
     if i >= parameters.count_data.x {
         return;
     }
-    if nodes[i].position_damping.w > 0.5 {
+    if nodes[i].position_damping.w > 0.5 && nodes[i].boundary.x == 0u {
         states[i].auxiliary.x += 0.5 * parameters.time_data.x
             * (states[i].levels.y + states[i].levels.z);
     } else {

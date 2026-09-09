@@ -79,7 +79,9 @@ fn main() {
                 let impedance = match operator.outer_boundary() {
                     OuterBoundaryCondition::FirstOrderOutgoing => 1.0,
                     OuterBoundaryCondition::SecondOrderOutgoing => 1.0 - 0.5 * angle.sin().powi(2),
-                    OuterBoundaryCondition::Reflecting => unreachable!(),
+                    OuterBoundaryCondition::Reflecting
+                    | OuterBoundaryCondition::Neumann { .. }
+                    | OuterBoundaryCondition::Dirichlet { .. } => unreachable!(),
                 };
                 let ideal = ((cosine - impedance) / (cosine + impedance)).abs();
                 println!(

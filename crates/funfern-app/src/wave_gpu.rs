@@ -27,7 +27,10 @@ use bevy::{
         storage::{GpuShaderBuffer, ShaderBuffer},
     },
 };
-use funfern_core::{Point2, QuadraticTransferMap, QuadraticWaveOperator, RegionId, TriMesh};
+use funfern_core::{
+    BoundarySignal, OuterBoundaryConditions, Point2, QuadraticTransferMap, QuadraticWaveOperator,
+    QuadraticWaveState, RegionId, TriMesh,
+};
 
 const WORKGROUP_SIZE: u32 = 128;
 const WAVE_STORAGE_BINDINGS: usize = 8;
@@ -238,10 +241,8 @@ impl WaveGpuRequest {
         {
             return Err("The transfer map does not match the active and candidate meshes".into());
         }
-        let preserve_auxiliary = source_operator.outer_boundary()
-            == funfern_core::OuterBoundaryCondition::SecondOrderOutgoing
-            && target_operator.outer_boundary()
-                == funfern_core::OuterBoundaryCondition::SecondOrderOutgoing;
+        let preserve_auxiliary =
+            source_operator.outer_boundaries() == target_operator.outer_boundaries();
         let entries = map
             .samples()
             .iter()
@@ -440,7 +441,11 @@ impl WaveGpuRequest {
             .ok_or("The wave solver is not initialized")?;
         let source_weights =
             forcing_weights(mesh, operator, source.position, source.width, source.region)?;
-        let forcing = assets.add(ShaderBuffer::from(gpu_forcing(source, handles.pulse)));
+        let forcing = assets.add(ShaderBuffer::from(gpu_forcing(
+            source,
+            handles.pulse,
+            operator.outer_boundaries(),
+        )?));
         let weights = assets.add(ShaderBuffer::from(zip_forcing_weights(
             &source_weights,
             &handles.pulse_weights,
@@ -480,7 +485,8 @@ impl WaveGpuRequest {
         let forcing = assets.add(ShaderBuffer::from(gpu_forcing(
             handles.source,
             pulse_settings,
-        )));
+            operator.outer_boundaries(),
+        )?));
         let weights = assets.add(ShaderBuffer::from(zip_forcing_weights(
             &handles.source_weights,
             &pulse_weights,
@@ -530,16 +536,32 @@ fn create_buffers(
         .iter()
         .zip(damping)
         .zip(operator.auxiliary_active())
+        .zip(operator.dirichlet_sides())
+        .zip(operator.normalized_neumann_weights())
         .zip(node_regions(mesh, operator)?)
-        .map(|(((point, damping), auxiliary_active), regions)| GpuNode {
-            position_damping: Vec4::new(
-                point.x as f32,
-                point.y as f32,
-                damping,
-                if *auxiliary_active { 1.0 } else { 0.0 },
-            ),
-            regions: gpu_region_pair(regions[0], regions[1]),
-        })
+        .map(
+            |(
+                ((((point, damping), auxiliary_active), dirichlet_side), neumann_weights),
+                regions,
+            )| {
+                GpuNode {
+                    position_damping: Vec4::new(
+                        point.x as f32,
+                        point.y as f32,
+                        damping,
+                        if *auxiliary_active { 1.0 } else { 0.0 },
+                    ),
+                    regions: gpu_region_pair(regions[0], regions[1]),
+                    boundary: UVec4::new(
+                        dirichlet_side.map_or(0, |side| side.index() as u32 + 1),
+                        0,
+                        0,
+                        0,
+                    ),
+                    neumann_weights: Vec4::from_array(neumann_weights.map(|value| value as f32)),
+                }
+            },
+        )
         .collect();
     if nodes
         .iter()
@@ -547,10 +569,6 @@ fn create_buffers(
     {
         return Err("Mesh coordinates cannot be represented on the GPU".into());
     }
-    let initial_state = GpuState {
-        levels: Vec4::new(0.0, 0.0, 0.0, if awaits_transfer { -1.0 } else { 0.0 }),
-        auxiliary: Vec4::ZERO,
-    };
     let parameters = GpuParameters {
         time_data: Vec4::new(dt, dt * dt, 0.0, 0.0),
         count_data: UVec4::new(dof_count, 0, 0, 0),
@@ -570,18 +588,36 @@ fn create_buffers(
         0.06,
         funfern_core::BACKGROUND_REGION,
     )?;
+    let initial =
+        QuadraticWaveState::zero(operator, time_step).map_err(|error| error.to_string())?;
+    let initial_states = initial
+        .current()
+        .iter()
+        .zip(initial.previous())
+        .zip(initial.auxiliary())
+        .map(|((current, previous), auxiliary)| GpuState {
+            levels: Vec4::new(
+                *previous as f32,
+                *current as f32,
+                *current as f32,
+                if awaits_transfer { -1.0 } else { 0.0 },
+            ),
+            auxiliary: Vec4::new(*auxiliary as f32, 0.0, 0.0, 0.0),
+        })
+        .collect::<Vec<_>>();
     Ok((
         WaveBufferHandles {
             parameters: assets.add(ShaderBuffer::from(parameters)),
-            forcing: assets.add(ShaderBuffer::from(gpu_forcing(source, pulse))),
+            forcing: assets.add(ShaderBuffer::from(gpu_forcing(
+                source,
+                pulse,
+                operator.outer_boundaries(),
+            )?)),
             row_offsets: assets.add(ShaderBuffer::from(operator.row_offsets().to_vec())),
             columns: assets.add(ShaderBuffer::from(operator.columns().to_vec())),
             stiffness: assets.add(ShaderBuffer::from(matrix)),
             nodes: assets.add(ShaderBuffer::from(nodes)),
-            state: assets.add(ShaderBuffer::from(vec![
-                initial_state;
-                operator.degrees_of_freedom()
-            ])),
+            state: assets.add(ShaderBuffer::from(initial_states)),
             forcing_weights: assets.add(ShaderBuffer::from(zip_forcing_weights(
                 &source_weights,
                 &pulse_weights,
@@ -625,11 +661,31 @@ fn gpu_pulse(pulse: PulseSettings) -> GpuPulse {
     }
 }
 
-fn gpu_forcing(source: SourceSettings, pulse: PulseSettings) -> GpuForcing {
-    GpuForcing {
+fn gpu_forcing(
+    source: SourceSettings,
+    pulse: PulseSettings,
+    boundaries: OuterBoundaryConditions,
+) -> Result<GpuForcing, String> {
+    let signals = boundaries
+        .sides
+        .map(|condition| gpu_boundary_signal(condition.signal().unwrap_or(BoundarySignal::ZERO)));
+    if signals.iter().any(|values| !values.is_finite()) {
+        return Err("Boundary signal values cannot be represented on the GPU".into());
+    }
+    Ok(GpuForcing {
         source: gpu_source(source),
         pulse: gpu_pulse(pulse),
-    }
+        outer: signals.map(|values| GpuBoundarySignal { values }),
+    })
+}
+
+fn gpu_boundary_signal(signal: BoundarySignal) -> Vec4 {
+    Vec4::new(
+        signal.offset as f32,
+        signal.amplitude as f32,
+        (std::f64::consts::TAU * signal.frequency_hz) as f32,
+        signal.phase_radians as f32,
+    )
 }
 
 fn zip_forcing_weights(source: &[f32], pulse: &[f32]) -> Result<Vec<Vec2>, String> {
@@ -848,15 +904,23 @@ struct GpuPulse {
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
+struct GpuBoundarySignal {
+    values: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
 struct GpuForcing {
     source: GpuSource,
     pulse: GpuPulse,
+    outer: [GpuBoundarySignal; 4],
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuNode {
     position_damping: Vec4,
     regions: UVec4,
+    boundary: UVec4,
+    neumann_weights: Vec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -955,6 +1019,7 @@ struct WavePipeline {
     inject: CachedComputePipelineId,
     transfer_velocity: CachedComputePipelineId,
     transfer_old: CachedComputePipelineId,
+    transfer_boundary: CachedComputePipelineId,
     transfer_new: CachedComputePipelineId,
 }
 
@@ -1018,7 +1083,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuMatrixEntry>>(false),
                 storage_buffer_read_only::<Vec<GpuNode>>(false),
                 storage_buffer::<Vec<GpuState>>(false),
-                storage_buffer_read_only::<Vec<GpuTransferEntry>>(false),
+                storage_buffer::<Vec<GpuTransferEntry>>(false),
             ),
         ),
     );
@@ -1048,11 +1113,18 @@ fn init_pipeline(
         transfer_old_layout.clone(),
         old_transfer_shader,
     ));
+    let new_transfer_shader = load_embedded_asset!(asset_server.as_ref(), "wave_transfer_new.wgsl");
+    let transfer_boundary = pipeline_cache.queue_compute_pipeline(transfer_pipeline(
+        "wave transfer prescribed boundary",
+        "prepare_boundary",
+        transfer_new_layout.clone(),
+        new_transfer_shader.clone(),
+    ));
     let transfer_new = pipeline_cache.queue_compute_pipeline(transfer_pipeline(
         "wave transfer new",
         "transfer",
         transfer_new_layout.clone(),
-        load_embedded_asset!(asset_server.as_ref(), "wave_transfer_new.wgsl"),
+        new_transfer_shader,
     ));
     commands.insert_resource(WavePipeline {
         layout,
@@ -1063,6 +1135,7 @@ fn init_pipeline(
         inject,
         transfer_velocity,
         transfer_old,
+        transfer_boundary,
         transfer_new,
     });
 }
@@ -1241,6 +1314,7 @@ fn compute_wave(
         pipeline.inject,
         pipeline.transfer_velocity,
         pipeline.transfer_old,
+        pipeline.transfer_boundary,
         pipeline.transfer_new,
     ];
     if pipelines.iter().any(|id| {
@@ -1272,11 +1346,18 @@ fn compute_wave(
         let Some(transfer) = &request.transfer else {
             return;
         };
-        let (Some(transfer_velocity), Some(transfer_old), Some(transfer_new)) = (
+        let (
+            Some(transfer_velocity),
+            Some(transfer_old),
+            Some(transfer_boundary),
+            Some(transfer_new),
+        ) = (
             pipeline_cache.get_compute_pipeline(pipeline.transfer_velocity),
             pipeline_cache.get_compute_pipeline(pipeline.transfer_old),
+            pipeline_cache.get_compute_pipeline(pipeline.transfer_boundary),
             pipeline_cache.get_compute_pipeline(pipeline.transfer_new),
-        ) else {
+        )
+        else {
             return;
         };
         let mut pass =
@@ -1291,8 +1372,10 @@ fn compute_wave(
         pass.dispatch_workgroups(transfer.old_dof_count.div_ceil(WORKGROUP_SIZE), 1, 1);
         pass.set_pipeline(transfer_old);
         pass.dispatch_workgroups(workgroups, 1, 1);
-        pass.set_pipeline(transfer_new);
         pass.set_bind_group(0, &transfer_groups.new, &[]);
+        pass.set_pipeline(transfer_boundary);
+        pass.dispatch_workgroups(workgroups, 1, 1);
+        pass.set_pipeline(transfer_new);
         pass.dispatch_workgroups(workgroups, 1, 1);
         drop(pass);
         group.initialized = true;
@@ -1300,7 +1383,7 @@ fn compute_wave(
             .stats
             .status
             .store(STATUS_TRANSFERRING, Ordering::Relaxed);
-        request.stats.dispatches.fetch_add(3, Ordering::Relaxed);
+        request.stats.dispatches.fetch_add(4, Ordering::Relaxed);
         return;
     }
     if request.transfer.is_none() {

@@ -17,6 +17,28 @@ pub enum OuterSide {
     Left,
 }
 
+impl OuterSide {
+    pub const ALL: [Self; 4] = [Self::Bottom, Self::Right, Self::Top, Self::Left];
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Bottom => 0,
+            Self::Right => 1,
+            Self::Top => 2,
+            Self::Left => 3,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Bottom => "Bottom",
+            Self::Right => "Right",
+            Self::Top => "Top",
+            Self::Left => "Left",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundaryLabel {
     Outer(OuterSide),

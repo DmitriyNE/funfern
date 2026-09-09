@@ -44,6 +44,8 @@ struct StoredScene {
     loops: Vec<StoredLoop>,
     #[serde(default)]
     internal_boundaries: Vec<StoredInternalBoundary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outer_boundaries: Option<[StoredOuterBoundaryCondition; 4]>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -107,6 +109,25 @@ struct StoredSpanLaw {
 enum StoredFaceCondition {
     Reflecting,
     Impedance { ratio: f64 },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredOuterBoundaryCondition {
+    Reflecting,
+    FirstOrderOutgoing,
+    SecondOrderOutgoing,
+    Neumann { signal: StoredBoundarySignal },
+    Dirichlet { signal: StoredBoundarySignal },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredBoundarySignal {
+    offset: f64,
+    amplitude: f64,
+    frequency_hz: f64,
+    phase_radians: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -213,6 +234,61 @@ fn encode_scene(scene: &Scene) -> StoredScene {
                 intervals: boundary.spline.intervals().to_vec(),
             })
             .collect(),
+        outer_boundaries: Some(scene.outer_boundaries.sides.map(encode_outer_condition)),
+    }
+}
+
+fn encode_signal(signal: BoundarySignal) -> StoredBoundarySignal {
+    StoredBoundarySignal {
+        offset: signal.offset,
+        amplitude: signal.amplitude,
+        frequency_hz: signal.frequency_hz,
+        phase_radians: signal.phase_radians,
+    }
+}
+
+fn decode_signal(signal: StoredBoundarySignal) -> BoundarySignal {
+    BoundarySignal {
+        offset: signal.offset,
+        amplitude: signal.amplitude,
+        frequency_hz: signal.frequency_hz,
+        phase_radians: signal.phase_radians,
+    }
+}
+
+fn encode_outer_condition(condition: OuterBoundaryCondition) -> StoredOuterBoundaryCondition {
+    match condition {
+        OuterBoundaryCondition::Reflecting => StoredOuterBoundaryCondition::Reflecting,
+        OuterBoundaryCondition::FirstOrderOutgoing => {
+            StoredOuterBoundaryCondition::FirstOrderOutgoing
+        }
+        OuterBoundaryCondition::SecondOrderOutgoing => {
+            StoredOuterBoundaryCondition::SecondOrderOutgoing
+        }
+        OuterBoundaryCondition::Neumann { signal } => StoredOuterBoundaryCondition::Neumann {
+            signal: encode_signal(signal),
+        },
+        OuterBoundaryCondition::Dirichlet { signal } => StoredOuterBoundaryCondition::Dirichlet {
+            signal: encode_signal(signal),
+        },
+    }
+}
+
+fn decode_outer_condition(condition: StoredOuterBoundaryCondition) -> OuterBoundaryCondition {
+    match condition {
+        StoredOuterBoundaryCondition::Reflecting => OuterBoundaryCondition::Reflecting,
+        StoredOuterBoundaryCondition::FirstOrderOutgoing => {
+            OuterBoundaryCondition::FirstOrderOutgoing
+        }
+        StoredOuterBoundaryCondition::SecondOrderOutgoing => {
+            OuterBoundaryCondition::SecondOrderOutgoing
+        }
+        StoredOuterBoundaryCondition::Neumann { signal } => OuterBoundaryCondition::Neumann {
+            signal: decode_signal(signal),
+        },
+        StoredOuterBoundaryCondition::Dirichlet { signal } => OuterBoundaryCondition::Dirichlet {
+            signal: decode_signal(signal),
+        },
     }
 }
 
@@ -290,7 +366,11 @@ fn decode_v1(loops: Vec<StoredLoopV1>) -> Result<Scene, String> {
     Ok(scene)
 }
 
-fn decode_scene(stored: StoredScene, require_loop_conditions: bool) -> Result<Scene, String> {
+fn decode_scene(
+    stored: StoredScene,
+    require_loop_conditions: bool,
+    require_outer_boundaries: bool,
+) -> Result<Scene, String> {
     if stored.loops.len() > MAX_OBSTACLES
         || stored.internal_boundaries.len() > MAX_INTERNAL_BOUNDARIES
         || stored.loops.len() + stored.internal_boundaries.len() > MAX_OBSTACLES
@@ -398,11 +478,19 @@ fn decode_scene(stored: StoredScene, require_loop_conditions: bool) -> Result<Sc
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let outer_boundaries = match stored.outer_boundaries {
+        Some(conditions) => OuterBoundaryConditions {
+            sides: conditions.map(decode_outer_condition),
+        },
+        None if !require_outer_boundaries => OuterBoundaryConditions::default(),
+        None => return Err("Scene has no outer boundary conditions".into()),
+    };
     let scene = Scene {
         obstacles,
         internal_boundaries,
         materials,
         regions,
+        outer_boundaries,
     };
     if !scene.structure_valid() {
         return Err("Scene contains invalid IDs, materials, or region references".into());
@@ -412,7 +500,7 @@ fn decode_scene(stored: StoredScene, require_loop_conditions: bool) -> Result<Sc
 
 pub fn save(document: &Document) -> Result<String, String> {
     serde_json::to_string_pretty(&FileV2 {
-        version: 5,
+        version: 6,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
@@ -437,14 +525,14 @@ pub fn parse(bytes: &[u8]) -> Result<LoadCandidate, String> {
                 accepted: decode_v1(file.accepted)?,
             }
         }
-        2..=5 => {
+        2..=6 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
             }
             Document {
-                draft: decode_scene(file.draft, header.version >= 5)?,
-                accepted: decode_scene(file.accepted, header.version >= 5)?,
+                draft: decode_scene(file.draft, header.version >= 5, header.version >= 6)?,
+                accepted: decode_scene(file.accepted, header.version >= 5, header.version >= 6)?,
             }
         }
         _ => return Err("Unsupported scene version".into()),
