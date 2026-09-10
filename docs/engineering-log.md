@@ -48,6 +48,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Wave playback now starts in the running state, with Run/Pause, Step, and Reset
   grouped on the right side of the top bar while solver tuning remains in the
   Simulation inspector.
+- Regrouped the inspector into hideable Edit, View, Simulation, and Materials
+  panels. Panel switches and Add geometry now live in the top bar; removing all
+  panel selection expands the viewport.
 - Added egui coverage for tool-rail/popover discovery, diagnostics opening, and the
   compact metric summary. Formatting, Clippy, all 138 workspace tests, native
   release compilation, and the release Trunk/WASM build pass. Interactive browser

@@ -48,15 +48,23 @@ enum ActiveTool {
     Materials,
     Simulation,
 }
-impl ActiveTool {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum InspectorPanel {
+    #[default]
+    Edit,
+    View,
+    Simulation,
+    Materials,
+}
+impl InspectorPanel {
+    const ALL: [Self; 4] = [Self::Edit, Self::View, Self::Simulation, Self::Materials];
+
     const fn label(self) -> &'static str {
         match self {
-            Self::Select => "Select",
-            Self::AddGeometry => "Add geometry",
-            Self::Transform => "Transform",
-            Self::Boundary => "Boundary",
-            Self::Materials => "Materials",
+            Self::Edit => "Edit",
+            Self::View => "View",
             Self::Simulation => "Simulation",
+            Self::Materials => "Materials",
         }
     }
 }
@@ -149,6 +157,7 @@ pub struct Playground {
     automated_benchmark: bool,
     editor: Editor,
     active_tool: ActiveTool,
+    inspector_panel: Option<InspectorPanel>,
     add_geometry_open: bool,
     performance_open: bool,
     performance_history: VecDeque<f32>,
@@ -249,6 +258,7 @@ impl Default for Playground {
             automated_benchmark: false,
             editor: Editor::default(),
             active_tool: ActiveTool::Select,
+            inspector_panel: Some(InspectorPanel::Edit),
             add_geometry_open: false,
             performance_open: false,
             performance_history: VecDeque::with_capacity(90),
@@ -1603,15 +1613,24 @@ impl Playground {
             }
         }
     }
-    fn activate_tool(&mut self, tool: ActiveTool) {
-        self.active_tool = tool;
-        match tool {
-            ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary => {
-                self.mode = Mode::Select;
-                self.custom.clear();
+    fn select_inspector_panel(&mut self, panel: InspectorPanel) {
+        if self.inspector_panel == Some(panel) {
+            self.inspector_panel = None;
+            return;
+        }
+        self.inspector_panel = Some(panel);
+        match panel {
+            InspectorPanel::Edit => {
+                if !matches!(
+                    self.active_tool,
+                    ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary
+                ) {
+                    self.active_tool = ActiveTool::Select;
+                }
             }
-            ActiveTool::AddGeometry => {}
-            ActiveTool::Materials | ActiveTool::Simulation => {}
+            InspectorPanel::View => self.active_tool = ActiveTool::Select,
+            InspectorPanel::Simulation => self.active_tool = ActiveTool::Simulation,
+            InspectorPanel::Materials => self.active_tool = ActiveTool::Materials,
         }
     }
 
@@ -1660,6 +1679,20 @@ impl Playground {
             if ui.button("Fit view").clicked() {
                 self.fit = true;
             }
+            ui.separator();
+            for panel in InspectorPanel::ALL {
+                if ui
+                    .selectable_label(self.inspector_panel == Some(panel), panel.label())
+                    .clicked()
+                {
+                    self.select_inspector_panel(panel);
+                }
+            }
+            if ui.button("+ Add").clicked() {
+                self.inspector_panel = Some(InspectorPanel::Edit);
+                self.active_tool = ActiveTool::AddGeometry;
+                self.add_geometry_open = true;
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let wave_available = self.wave_operator.is_some();
                 ui.add_enabled_ui(wave_available, |ui| {
@@ -1681,33 +1714,6 @@ impl Playground {
         });
     }
 
-    fn tool_rail(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new("TOOLS").small().color(Color32::GRAY));
-            ui.add_space(8.0);
-            for (tool, label) in [
-                (ActiveTool::Select, "Select"),
-                (ActiveTool::AddGeometry, "+ Add"),
-                (ActiveTool::Transform, "Move"),
-                (ActiveTool::Boundary, "BC"),
-                (ActiveTool::Materials, "Material"),
-                (ActiveTool::Simulation, "Run"),
-            ] {
-                if ui
-                    .selectable_label(self.active_tool == tool, label)
-                    .clicked()
-                {
-                    self.activate_tool(tool);
-                    if tool == ActiveTool::AddGeometry {
-                        self.add_geometry_open = true;
-                    }
-                }
-            }
-            ui.add_space(12.0);
-        });
-    }
-
     fn add_geometry_popover(&mut self, ctx: &egui::Context) {
         if !self.add_geometry_open {
             return;
@@ -1726,7 +1732,7 @@ impl Playground {
                     for (role, label) in [
                         (CreationRole::Hole, "Hole"),
                         (CreationRole::MaterialInterface, "Interface"),
-                        (CreationRole::InternalBoundary, "Open baffle"),
+                        (CreationRole::InternalBoundary, "Straight"),
                     ] {
                         ui.selectable_value(&mut self.creation_role, role, label);
                     }
@@ -1949,15 +1955,307 @@ impl Playground {
             ui.label("Automated mesh benchmark");
             ui.disable();
         }
+        match self.inspector_panel {
+            Some(InspectorPanel::View) => self.view_panel(ui),
+            Some(InspectorPanel::Simulation) => self.simulation_panel(ui),
+            Some(InspectorPanel::Materials) => self.materials_panel(ui),
+            Some(InspectorPanel::Edit) | None => self.edit_panel(ui),
+        }
+    }
+
+    fn view_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.heading(self.active_tool.label());
-        ui.small(match self.active_tool {
-            ActiveTool::Select => "Select controls, spans, or filled regions in the viewport.",
-            ActiveTool::AddGeometry => "Choose a role and primitive from + Add.",
-            ActiveTool::Transform => "Move, rotate, scale, align, or straighten the selection.",
-            ActiveTool::Boundary => "Apply one boundary law to every compatible selected span.",
-            ActiveTool::Materials => "Assign materials to the background and interior regions.",
-            ActiveTool::Simulation => "Run the accepted mesh and inspect the live field.",
+        ui.heading("View");
+        ui.small("Control overlays, field rendering, and viewport appearance.");
+        ui.separator();
+        ui.collapsing("Display", |ui| {
+            ui.checkbox(&mut self.grid, "Grid");
+            ui.checkbox(&mut self.polygon, "Control polygons");
+            ui.checkbox(&mut self.handles, "Handles");
+            ui.checkbox(&mut self.reference, "Accepted reference");
+            ui.checkbox(&mut self.show_materials, "Material regions");
+            ui.checkbox(&mut self.show_mesh, "Accepted triangle mesh");
+            ui.add_enabled_ui(self.show_mesh, |ui| {
+                ui.checkbox(&mut self.show_mesh_boundary, "Mesh boundary labels");
+            });
+            ui.checkbox(&mut self.show_field, "Field colors");
+            ui.add(
+                egui::Slider::new(&mut self.field_gain, 0.25..=12.0)
+                    .logarithmic(true)
+                    .text("field intensity"),
+            );
+        });
+    }
+
+    fn materials_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.heading("Materials");
+        ui.small("Assign region materials and edit the material library.");
+        if self.active_tool == ActiveTool::Materials {
+            ui.add_space(8.0);
+            ui.collapsing("Regions and materials", |ui| {
+                let materials = self.editor.document.draft.materials.clone();
+                let regions = self.editor.document.draft.regions.clone();
+                for region in regions {
+                    let label = if region.id == BACKGROUND_REGION {
+                        "Background".into()
+                    } else {
+                        self.editor
+                            .document
+                            .draft
+                            .obstacles
+                            .iter()
+                            .find(|loop_| loop_.role.interior() == Some(region.id))
+                            .map_or_else(
+                                || format!("Region {}", region.id.0),
+                                |loop_| format!("Loop {} interior", loop_.id.0),
+                            )
+                    };
+                    let mut selected = region.material;
+                    if ui
+                        .selectable_label(self.region_selection == region.id, label)
+                        .clicked()
+                    {
+                        self.region_selection = region.id;
+                    }
+                    egui::ComboBox::from_id_salt(("region_material", region.id.0))
+                        .selected_text(
+                            materials
+                                .iter()
+                                .find(|material| material.id == selected)
+                                .map_or("Missing", |material| material.name.as_str()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for material in &materials {
+                                ui.selectable_value(&mut selected, material.id, &material.name);
+                            }
+                        });
+                    if selected != region.material {
+                        let result = self.editor.set_region_material(region.id, selected);
+                        self.error(result);
+                    }
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Material");
+                    if ui.small_button("+").clicked() {
+                        let result = self.editor.add_material();
+                        if let Some(id) = self.error(result) {
+                            self.material_selection = id;
+                        }
+                    }
+                });
+                egui::ComboBox::from_id_salt("material_editor")
+                    .selected_text(
+                        materials
+                            .iter()
+                            .find(|material| material.id == self.material_selection)
+                            .map_or("Missing", |material| material.name.as_str()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for material in &materials {
+                            ui.selectable_value(
+                                &mut self.material_selection,
+                                material.id,
+                                &material.name,
+                            );
+                        }
+                    });
+                if let Some(mut material) = self
+                    .editor
+                    .document
+                    .draft
+                    .material(self.material_selection)
+                    .cloned()
+                {
+                    let responses = [
+                        ui.add(
+                            egui::DragValue::new(&mut material.mass_density)
+                                .speed(0.01)
+                                .range(1.0e-6..=1.0e6)
+                                .prefix("density ")
+                                .update_while_editing(false),
+                        ),
+                        ui.add(
+                            egui::DragValue::new(&mut material.stiffness)
+                                .speed(0.01)
+                                .range(1.0e-6..=1.0e6)
+                                .prefix("stiffness ")
+                                .update_while_editing(false),
+                        ),
+                        ui.add(
+                            egui::DragValue::new(&mut material.damping)
+                                .speed(0.005)
+                                .range(0.0..=1.0e6)
+                                .prefix("damping ")
+                                .update_while_editing(false),
+                        ),
+                    ];
+                    if responses.iter().any(egui::Response::changed) {
+                        let result = self.editor.update_material(material.clone());
+                        self.error(result);
+                    }
+                    ui.small(format!(
+                        "wave speed {:.3}",
+                        (material.stiffness / material.mass_density).sqrt()
+                    ));
+                    if self.material_selection != DEFAULT_MATERIAL
+                        && ui.small_button("Delete unused material").clicked()
+                    {
+                        let result = self.editor.delete_material(self.material_selection);
+                        if self.error(result).is_some() {
+                            self.material_selection = DEFAULT_MATERIAL;
+                        }
+                    }
+                }
+                ui.small("Interfaces share a trace; closed walls keep separate traces.");
+            });
+        }
+    }
+
+    fn simulation_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.heading("Simulation");
+        ui.small("Configure the mesh and inspect the live wave solver.");
+        ui.add_space(8.0);
+        ui.separator();
+        if self.active_tool == ActiveTool::Simulation {
+            ui.label("Accepted mesh");
+            egui::ComboBox::from_id_salt("mesh_resolution")
+                .selected_text(format!("Max edge {:.2}", self.mesh_max_edge))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.mesh_max_edge,
+                        0.16,
+                        "Coarse P2e · parent h ≤ 0.16",
+                    );
+                    ui.selectable_value(&mut self.mesh_max_edge, 0.08, "P2e · parent h ≤ 0.08");
+                    ui.selectable_value(
+                        &mut self.mesh_max_edge,
+                        0.04,
+                        "Fine P2e · parent h ≤ 0.04",
+                    );
+                });
+            ui.small("Seven-node enriched quadratic wave basis.");
+            if self.editor.editing() && self.mesh_source != self.editor.document.accepted {
+                ui.small("Waiting for edit to finish…");
+            } else if let Some(job) = &self.mesh_job {
+                ui.small(format!("{}…", job.phase()));
+            } else if let Some(error) = &self.mesh_error {
+                ui.colored_label(RED, error);
+                ui.small("Previous mesh retained.");
+            } else if let Some(mesh) = &self.mesh {
+                let low_quality = self.mesh_low_quality.iter().filter(|poor| **poor).count();
+                ui.small(format!(
+                "{} vertices · {} triangles\nmin angle {:.1}° · max edge {:.3}\n{} elements below 15°",
+                mesh.vertices.len(),
+                mesh.triangles.len(),
+                mesh.quality.minimum_angle_degrees,
+                mesh.quality.maximum_edge_length,
+                low_quality
+            ));
+            } else {
+                ui.small("Preparing…");
+            }
+            if self.mesh_started.is_some() || self.mesh_job.is_some() {
+                ui.small(
+                    "Detailed build, repair, and fallback timing is available in Performance.",
+                );
+            }
+            let wave_available = self.wave_operator.is_some();
+            ui.add_enabled_ui(wave_available, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(self.mode == Mode::Pulse, "Place pulse")
+                        .clicked()
+                    {
+                        self.mode = Mode::Pulse;
+                    }
+                    if ui
+                        .selectable_label(self.mode == Mode::Source, "Move source")
+                        .clicked()
+                    {
+                        self.mode = Mode::Source;
+                    }
+                });
+                ui.add(
+                    egui::Slider::new(&mut self.wave_speed, 0.1..=4.0)
+                        .logarithmic(true)
+                        .text("simulation speed"),
+                );
+                if ui
+                    .checkbox(&mut self.wave_source.enabled, "Continuous source")
+                    .changed()
+                {
+                    self.wave_source_dirty = true;
+                }
+                ui.add_enabled_ui(self.wave_source.enabled, |ui| {
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.wave_source.frequency_hz, 0.25..=8.0)
+                                .logarithmic(true)
+                                .text("source frequency"),
+                        )
+                        .changed()
+                    {
+                        self.wave_source_dirty = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.wave_source.amplitude, 1.0..=50.0)
+                                .logarithmic(true)
+                                .text("source strength"),
+                        )
+                        .changed()
+                    {
+                        self.wave_source_dirty = true;
+                    }
+                });
+            });
+            if let Some(operator) = &self.wave_operator {
+                ui.small(format!(
+                    "GPU {} · {} DOFs · dt {:.6}",
+                    self.wave_gpu_status,
+                    operator.degrees_of_freedom(),
+                    self.wave_time_step,
+                ));
+                ui.small("Throughput, memory, handoff timing, and energy are in Performance.");
+            } else if self.mesh.is_some() {
+                ui.small("Preparing wave operator…");
+            } else if self.simulation_candidate.is_some() {
+                ui.small("Preparing initial wave state…");
+            } else {
+                ui.small("Waiting for an accepted mesh…");
+            }
+            if let Some(error) = &self.wave_error {
+                ui.colored_label(RED, error);
+            }
+            ui.small(format!(
+                "{} outer boundary · λ=0.4 source preset",
+                self.wave_boundary_committed.label()
+            ));
+        }
+    }
+
+    fn edit_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.heading("Edit");
+        ui.small("Select, transform, and configure geometry boundaries.");
+        ui.horizontal_wrapped(|ui| {
+            for (tool, label) in [
+                (ActiveTool::Select, "Select"),
+                (ActiveTool::Transform, "Transform"),
+                (ActiveTool::Boundary, "Boundary"),
+            ] {
+                if ui
+                    .selectable_label(self.active_tool == tool, label)
+                    .clicked()
+                {
+                    self.active_tool = tool;
+                    self.mode = Mode::Select;
+                    self.custom.clear();
+                }
+            }
         });
         if self
             .editor
@@ -2406,263 +2704,6 @@ impl Playground {
         ) {
             self.topology_inspector(ui);
             self.boundary_inspector(ui);
-        }
-        if self.active_tool == ActiveTool::Materials {
-            ui.add_space(8.0);
-            ui.collapsing("Regions and materials", |ui| {
-                let materials = self.editor.document.draft.materials.clone();
-                let regions = self.editor.document.draft.regions.clone();
-                for region in regions {
-                    let label = if region.id == BACKGROUND_REGION {
-                        "Background".into()
-                    } else {
-                        self.editor
-                            .document
-                            .draft
-                            .obstacles
-                            .iter()
-                            .find(|loop_| loop_.role.interior() == Some(region.id))
-                            .map_or_else(
-                                || format!("Region {}", region.id.0),
-                                |loop_| format!("Loop {} interior", loop_.id.0),
-                            )
-                    };
-                    let mut selected = region.material;
-                    if ui
-                        .selectable_label(self.region_selection == region.id, label)
-                        .clicked()
-                    {
-                        self.region_selection = region.id;
-                    }
-                    egui::ComboBox::from_id_salt(("region_material", region.id.0))
-                        .selected_text(
-                            materials
-                                .iter()
-                                .find(|material| material.id == selected)
-                                .map_or("Missing", |material| material.name.as_str()),
-                        )
-                        .show_ui(ui, |ui| {
-                            for material in &materials {
-                                ui.selectable_value(&mut selected, material.id, &material.name);
-                            }
-                        });
-                    if selected != region.material {
-                        let result = self.editor.set_region_material(region.id, selected);
-                        self.error(result);
-                    }
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Material");
-                    if ui.small_button("+").clicked() {
-                        let result = self.editor.add_material();
-                        if let Some(id) = self.error(result) {
-                            self.material_selection = id;
-                        }
-                    }
-                });
-                egui::ComboBox::from_id_salt("material_editor")
-                    .selected_text(
-                        materials
-                            .iter()
-                            .find(|material| material.id == self.material_selection)
-                            .map_or("Missing", |material| material.name.as_str()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for material in &materials {
-                            ui.selectable_value(
-                                &mut self.material_selection,
-                                material.id,
-                                &material.name,
-                            );
-                        }
-                    });
-                if let Some(mut material) = self
-                    .editor
-                    .document
-                    .draft
-                    .material(self.material_selection)
-                    .cloned()
-                {
-                    let responses = [
-                        ui.add(
-                            egui::DragValue::new(&mut material.mass_density)
-                                .speed(0.01)
-                                .range(1.0e-6..=1.0e6)
-                                .prefix("density ")
-                                .update_while_editing(false),
-                        ),
-                        ui.add(
-                            egui::DragValue::new(&mut material.stiffness)
-                                .speed(0.01)
-                                .range(1.0e-6..=1.0e6)
-                                .prefix("stiffness ")
-                                .update_while_editing(false),
-                        ),
-                        ui.add(
-                            egui::DragValue::new(&mut material.damping)
-                                .speed(0.005)
-                                .range(0.0..=1.0e6)
-                                .prefix("damping ")
-                                .update_while_editing(false),
-                        ),
-                    ];
-                    if responses.iter().any(egui::Response::changed) {
-                        let result = self.editor.update_material(material.clone());
-                        self.error(result);
-                    }
-                    ui.small(format!(
-                        "wave speed {:.3}",
-                        (material.stiffness / material.mass_density).sqrt()
-                    ));
-                    if self.material_selection != DEFAULT_MATERIAL
-                        && ui.small_button("Delete unused material").clicked()
-                    {
-                        let result = self.editor.delete_material(self.material_selection);
-                        if self.error(result).is_some() {
-                            self.material_selection = DEFAULT_MATERIAL;
-                        }
-                    }
-                }
-                ui.small("Interfaces share a trace; closed walls keep separate traces.");
-            });
-        }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.collapsing("Display", |ui| {
-            ui.checkbox(&mut self.grid, "Grid");
-            ui.checkbox(&mut self.polygon, "Control polygons");
-            ui.checkbox(&mut self.handles, "Handles");
-            ui.checkbox(&mut self.reference, "Accepted reference");
-            ui.checkbox(&mut self.show_materials, "Material regions");
-            ui.checkbox(&mut self.show_mesh, "Accepted triangle mesh");
-            ui.add_enabled_ui(self.show_mesh, |ui| {
-                ui.checkbox(&mut self.show_mesh_boundary, "Mesh boundary labels");
-            });
-        });
-        ui.add_space(8.0);
-        ui.separator();
-        if self.active_tool == ActiveTool::Simulation {
-            ui.label("Accepted mesh");
-            egui::ComboBox::from_id_salt("mesh_resolution")
-                .selected_text(format!("Max edge {:.2}", self.mesh_max_edge))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.mesh_max_edge,
-                        0.16,
-                        "Coarse P2e · parent h ≤ 0.16",
-                    );
-                    ui.selectable_value(&mut self.mesh_max_edge, 0.08, "P2e · parent h ≤ 0.08");
-                    ui.selectable_value(
-                        &mut self.mesh_max_edge,
-                        0.04,
-                        "Fine P2e · parent h ≤ 0.04",
-                    );
-                });
-            ui.small("Seven-node enriched quadratic wave basis.");
-            if self.editor.editing() && self.mesh_source != self.editor.document.accepted {
-                ui.small("Waiting for edit to finish…");
-            } else if let Some(job) = &self.mesh_job {
-                ui.small(format!("{}…", job.phase()));
-            } else if let Some(error) = &self.mesh_error {
-                ui.colored_label(RED, error);
-                ui.small("Previous mesh retained.");
-            } else if let Some(mesh) = &self.mesh {
-                let low_quality = self.mesh_low_quality.iter().filter(|poor| **poor).count();
-                ui.small(format!(
-                "{} vertices · {} triangles\nmin angle {:.1}° · max edge {:.3}\n{} elements below 15°",
-                mesh.vertices.len(),
-                mesh.triangles.len(),
-                mesh.quality.minimum_angle_degrees,
-                mesh.quality.maximum_edge_length,
-                low_quality
-            ));
-            } else {
-                ui.small("Preparing…");
-            }
-            if self.mesh_started.is_some() || self.mesh_job.is_some() {
-                ui.small(
-                    "Detailed build, repair, and fallback timing is available in Performance.",
-                );
-            }
-            let wave_available = self.wave_operator.is_some();
-            ui.add_enabled_ui(wave_available, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(self.mode == Mode::Pulse, "Place pulse")
-                        .clicked()
-                    {
-                        self.mode = Mode::Pulse;
-                    }
-                    if ui
-                        .selectable_label(self.mode == Mode::Source, "Move source")
-                        .clicked()
-                    {
-                        self.mode = Mode::Source;
-                    }
-                });
-                ui.checkbox(&mut self.show_field, "Field colors");
-                ui.add(
-                    egui::Slider::new(&mut self.field_gain, 0.25..=12.0)
-                        .logarithmic(true)
-                        .text("color gain"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.wave_speed, 0.1..=4.0)
-                        .logarithmic(true)
-                        .text("simulation speed"),
-                );
-                if ui
-                    .checkbox(&mut self.wave_source.enabled, "Continuous source")
-                    .changed()
-                {
-                    self.wave_source_dirty = true;
-                }
-                ui.add_enabled_ui(self.wave_source.enabled, |ui| {
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut self.wave_source.frequency_hz, 0.25..=8.0)
-                                .logarithmic(true)
-                                .text("source frequency"),
-                        )
-                        .changed()
-                    {
-                        self.wave_source_dirty = true;
-                    }
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut self.wave_source.amplitude, 1.0..=50.0)
-                                .logarithmic(true)
-                                .text("source strength"),
-                        )
-                        .changed()
-                    {
-                        self.wave_source_dirty = true;
-                    }
-                });
-            });
-            if let Some(operator) = &self.wave_operator {
-                ui.small(format!(
-                    "GPU {} · {} DOFs · dt {:.6}",
-                    self.wave_gpu_status,
-                    operator.degrees_of_freedom(),
-                    self.wave_time_step,
-                ));
-                ui.small("Throughput, memory, handoff timing, and energy are in Performance.");
-            } else if self.mesh.is_some() {
-                ui.small("Preparing wave operator…");
-            } else if self.simulation_candidate.is_some() {
-                ui.small("Preparing initial wave state…");
-            } else {
-                ui.small("Waiting for an accepted mesh…");
-            }
-            if let Some(error) = &self.wave_error {
-                ui.colored_label(RED, error);
-            }
-            ui.small(format!(
-                "{} outer boundary · λ=0.4 source preset",
-                self.wave_boundary_committed.label()
-            ));
         }
         ui.add_space(12.0);
         ui.small("Control points guide the spline; the curve does not pass through them.");
@@ -5639,20 +5680,18 @@ impl Playground {
                     });
                 });
             });
-        egui::Panel::left("tools")
-            .exact_size(78.0)
-            .resizable(false)
-            .show(root, |ui| state.tool_rail(ui));
-        egui::Panel::right("inspector")
-            .default_size(340.0)
-            .min_size(280.0)
-            .max_size(430.0)
-            .show(root, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let enabled = !state.file_busy && state.load.is_none();
-                    ui.add_enabled_ui(enabled, |ui| state.panel(ui));
+        if state.inspector_panel.is_some() {
+            egui::Panel::right("inspector")
+                .default_size(340.0)
+                .min_size(280.0)
+                .max_size(430.0)
+                .show(root, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        let enabled = !state.file_busy && state.load.is_none();
+                        ui.add_enabled_ui(enabled, |ui| state.panel(ui));
+                    });
                 });
-            });
+        }
         state.add_geometry_popover(root.ctx());
         state.performance_window(root.ctx());
         egui::CentralPanel::default()
@@ -6573,7 +6612,7 @@ mod tests {
     #[test]
     fn contextual_shell_exposes_tools_and_add_geometry_popover() {
         let mut h = Harness::new();
-        for label in ["Select", "+ Add", "Move", "BC", "Material", "Run"] {
+        for label in ["Edit", "View", "Simulation", "Materials", "+ Add"] {
             assert!(
                 h.texts.iter().any(|(text, _)| text == label),
                 "missing {label}"
@@ -6587,6 +6626,26 @@ mod tests {
         assert!(h.texts.iter().any(|(text, _)| text == "Add geometry"));
         assert!(h.texts.iter().any(|(text, _)| text == "Rounded loop"));
         assert!(h.texts.iter().any(|(text, _)| text == "Custom"));
+    }
+
+    #[test]
+    fn inspector_panel_switches_can_hide_and_restore_the_right_panel() {
+        let mut h = Harness::new();
+        h.click_text("Edit");
+        assert_eq!(h.state.inspector_panel, None);
+        h.click_text("Edit");
+        assert_eq!(h.state.inspector_panel, Some(InspectorPanel::Edit));
+    }
+
+    #[test]
+    fn inspector_panel_switches_show_their_content() {
+        let mut h = Harness::new();
+        h.click_text("View");
+        assert_eq!(h.state.inspector_panel, Some(InspectorPanel::View));
+        h.click_text("Simulation");
+        assert_eq!(h.state.inspector_panel, Some(InspectorPanel::Simulation));
+        h.click_text("Materials");
+        assert_eq!(h.state.inspector_panel, Some(InspectorPanel::Materials));
     }
 
     #[test]

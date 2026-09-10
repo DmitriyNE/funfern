@@ -69,14 +69,14 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 
 ## Edit
 
-- **UI shell:** the top bar keeps Undo/Redo, scene files, Fit View, and wave
-  playback controls visible; the solver starts running once its initial mesh is
-  ready. The left tool rail switches between Select, Add geometry, Transform,
-  Boundary, Materials, and Simulation; the right inspector follows the active
-  task and current selection. The lower-right status control shows FPS, solver
-  steps per second, DOFs, mesh size, and solver dt; clicking it opens the full
-  frame, mesh, handoff, and solver diagnostics, which surface automatically for
-  mesh or solver errors.
+- **UI shell:** the top bar keeps Undo/Redo, scene files, Fit View, four
+  hideable inspector panels, Add geometry, and wave playback controls visible;
+  the solver starts running once its initial mesh is ready. Edit contains
+  selection, transforms, topology, and boundary tools; View contains visual
+  overlays and field intensity; Simulation contains mesh and solver settings;
+  Materials contains the material library. The lower-right status control shows
+  FPS, solver steps per second, DOFs, mesh size, and solver dt; clicking it opens
+  the full frame, mesh, handoff, and solver diagnostics.
 - **Select:** clicking a handle selects that one control for local reshaping.
   Clicking a curve selects its knot span; Shift-click toggles spans, and
   Ctrl/Cmd-click selects the complete curve. Double-click inserts a knot without
