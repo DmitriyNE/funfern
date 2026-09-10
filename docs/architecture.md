@@ -38,8 +38,9 @@ extensible primitive catalog. The lower-right status strip carries a compact
 performance summary (FPS, solver steps per second, DOFs, mesh size, and timestep).
 Detailed performance measurements are UI-only diagnostics in one draggable,
 scrollable popover with Frame, Mesh, Handoff, and Solver sections. A short rolling
-frame history is kept in memory, and mesh/solver warnings open the diagnostics
-popover without changing document history or scene files.
+frame history is kept in memory, and mesh/solver errors open the diagnostics
+popover without changing document history or scene files. Normal rebuild progress
+uses the separate status indicator and does not present as an error.
 
 ## Geometry and discretization
 

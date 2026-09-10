@@ -75,7 +75,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   active task and current selection. The lower-right status control shows FPS,
   solver steps per second, DOFs, mesh size, and solver dt; clicking it opens the
   full frame, mesh, handoff, and solver diagnostics, which surface automatically
-  for warnings.
+  for mesh or solver errors.
 - **Select:** clicking a handle selects that one control for local reshaping.
   Clicking a curve selects its knot span; Shift-click toggles spans, and
   Ctrl/Cmd-click selects the complete curve. Double-click inserts a knot without

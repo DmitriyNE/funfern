@@ -42,8 +42,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Moved detailed frame, mesh, handoff, and solver measurements into one draggable
   Performance diagnostics window with collapsible sections. The lower-right status
   control now summarizes FPS, solver steps per second, DOFs, mesh size, and dt.
-  Slow mesh work and solver errors open the diagnostics window automatically;
-  metrics remain transient and are not serialized.
+  Solver or mesh errors open the diagnostics window automatically; normal mesh
+  rebuilds use the progress indicator and do not light the error badge. Metrics
+  remain transient and are not serialized.
 - Added egui coverage for tool-rail/popover discovery, diagnostics opening, and the
   compact metric summary. Formatting, Clippy, all 138 workspace tests, native
   release compilation, and the release Trunk/WASM build pass. Interactive browser

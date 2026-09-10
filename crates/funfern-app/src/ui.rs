@@ -1526,13 +1526,8 @@ impl Playground {
         self.wave_gpu_status = request.stats().status();
         let completed_steps = request.stats().completed_steps();
         let completed_delta = completed_steps.saturating_sub(self.wave_rate_previous_completed);
-        let instantaneous_rate = if delta_seconds > 1.0e-6 {
+        let completed_rate = if delta_seconds > 1.0e-6 {
             completed_delta as f64 / delta_seconds
-        } else {
-            0.0
-        };
-        self.wave_steps_per_second = if self.wave_running {
-            0.85 * self.wave_steps_per_second + 0.15 * instantaneous_rate
         } else {
             0.0
         };
@@ -1560,6 +1555,21 @@ impl Playground {
                 self.wave_accumulator = self.wave_accumulator.min(16.0 * self.wave_time_step);
             }
         }
+        let scheduled_rate = if delta_seconds > 1.0e-6 {
+            self.wave_substeps_last as f64 / delta_seconds
+        } else {
+            0.0
+        };
+        let observed_rate = if completed_delta > 0 {
+            completed_rate
+        } else {
+            scheduled_rate
+        };
+        // Measure solver work itself rather than the UI's Run flag.  A GPU
+        // request can finish after a handoff pauses scheduling, and a single
+        // manually requested step should still be visible in diagnostics.
+        // With no work the exponential smoothing decays the value to zero.
+        self.wave_steps_per_second = 0.85 * self.wave_steps_per_second + 0.15 * observed_rate;
         if display.generation == request.generation()
             && display.current.len()
                 == self
@@ -1760,10 +1770,7 @@ impl Playground {
     }
 
     fn performance_warning(&self) -> bool {
-        self.mesh_error.is_some()
-            || self.wave_error.is_some()
-            || ((self.mesh_job.is_some() || self.simulation_candidate.is_some())
-                && self.mesh_max_slice_ms > 8.0)
+        self.mesh_error.is_some() || self.wave_error.is_some()
     }
 
     fn performance_summary(&self) -> String {
