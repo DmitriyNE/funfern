@@ -2678,10 +2678,6 @@ impl Playground {
         ui.small("Control points guide the spline; the curve does not pass through them.");
         ui.add_space(6.0);
         ui.small("Pan: middle drag / Space + drag\nZoom: wheel over viewport\nUndo: Ctrl/Cmd + Z · Shift for redo");
-        if !self.message.is_empty() {
-            ui.add_space(8.0);
-            ui.colored_label(GOLD, &self.message);
-        }
     }
 
     fn selected_boundary_targets(&self) -> Option<Vec<BoundaryFaceTarget>> {
@@ -5639,6 +5635,9 @@ impl Playground {
                     } else if state.mesh_error.is_some() || state.wave_error.is_some() {
                         ui.colored_label(RED, "Attention required");
                     }
+                    if !state.message.is_empty() {
+                        ui.colored_label(GOLD, &state.message);
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let warning = state.performance_warning();
                         let summary = state.performance_summary();
@@ -6631,6 +6630,19 @@ mod tests {
                 .iter()
                 .any(|(text, _)| text.starts_with("Committing candidate"))
         );
+    }
+
+    #[test]
+    fn transient_commit_message_is_rendered_in_status_bar() {
+        let mut h = Harness::new();
+        h.state.message = "Simulation mesh committed".into();
+        h.frame(vec![]);
+        let (_, rect) = h
+            .texts
+            .iter()
+            .find(|(text, _)| text == "Simulation mesh committed")
+            .expect("commit message should be visible");
+        assert!(rect.center().y > h.size.y - 50.0);
     }
 
     #[test]
