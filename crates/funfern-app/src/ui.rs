@@ -2630,65 +2630,64 @@ impl Playground {
             if let Some(groups) = transformable {
                 let piece_count = groups.len();
                 let noun = if piece_count == 1 { "piece" } else { "pieces" };
-                ui.collapsing(format!("Transform · {piece_count} {noun}"), |ui| {
-                    if let Some(pivot) = self.selection_pivot() {
-                        ui.small(format!("Pivot  x {:.4}  y {:.4}", pivot.x, pivot.y));
+                ui.label(format!("Transform · {piece_count} {noun}"));
+                if let Some(pivot) = self.selection_pivot() {
+                    ui.small(format!("Pivot  x {:.4}  y {:.4}", pivot.x, pivot.y));
+                }
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.transform_translation.x)
+                            .speed(0.005)
+                            .prefix("dx "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut self.transform_translation.y)
+                            .speed(0.005)
+                            .prefix("dy "),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.transform_rotation_degrees)
+                            .speed(0.5)
+                            .prefix("rotate ")
+                            .suffix("°"),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut self.transform_scale)
+                            .speed(0.01)
+                            .range(1.0e-4..=1.0e4)
+                            .prefix("scale "),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.snap_to_grid, "Snap");
+                    ui.add_enabled(
+                        self.snap_to_grid,
+                        egui::DragValue::new(&mut self.snap_step)
+                            .speed(0.005)
+                            .range(1.0e-6..=2.0)
+                            .prefix("step "),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Apply transform").clicked() {
+                        self.apply_selection_transform();
                     }
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut self.transform_translation.x)
-                                .speed(0.005)
-                                .prefix("dx "),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.transform_translation.y)
-                                .speed(0.005)
-                                .prefix("dy "),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut self.transform_rotation_degrees)
-                                .speed(0.5)
-                                .prefix("rotate ")
-                                .suffix("°"),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut self.transform_scale)
-                                .speed(0.01)
-                                .range(1.0e-4..=1.0e4)
-                                .prefix("scale "),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.snap_to_grid, "Snap");
-                        ui.add_enabled(
-                            self.snap_to_grid,
-                            egui::DragValue::new(&mut self.snap_step)
-                                .speed(0.005)
-                                .range(1.0e-6..=2.0)
-                                .prefix("step "),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Apply transform").clicked() {
-                            self.apply_selection_transform();
-                        }
-                        if ui
-                            .add_enabled(self.snap_to_grid, egui::Button::new("Snap now"))
-                            .clicked()
-                        {
-                            self.snap_selection_now();
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Align horizontal").clicked() {
-                            self.align_selection(true);
-                        }
-                        if ui.button("Align vertical").clicked() {
-                            self.align_selection(false);
-                        }
-                    });
+                    if ui
+                        .add_enabled(self.snap_to_grid, egui::Button::new("Snap now"))
+                        .clicked()
+                    {
+                        self.snap_selection_now();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Align horizontal").clicked() {
+                        self.align_selection(true);
+                    }
+                    if ui.button("Align vertical").clicked() {
+                        self.align_selection(false);
+                    }
                 });
             }
         }
