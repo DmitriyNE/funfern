@@ -1968,7 +1968,6 @@ impl Playground {
     fn view_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.heading("View");
-        ui.small("Control overlays, field rendering, and viewport appearance.");
         ui.separator();
         ui.checkbox(&mut self.grid, "Grid");
         ui.checkbox(&mut self.polygon, "Control polygons");
@@ -2162,7 +2161,6 @@ impl Playground {
     fn simulation_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.heading("Simulation");
-        ui.small("Configure the mesh and inspect the live wave solver.");
         ui.add_space(8.0);
         ui.separator();
         if self.active_tool == ActiveTool::Simulation {
@@ -2286,7 +2284,6 @@ impl Playground {
     fn edit_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.heading("Edit");
-        ui.small("Select, transform, and configure geometry boundaries.");
         ui.horizontal_wrapped(|ui| {
             for (tool, label) in [
                 (ActiveTool::Select, "Select"),
