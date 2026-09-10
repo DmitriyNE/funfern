@@ -1619,8 +1619,6 @@ impl Playground {
         ui.horizontal(|ui| {
             ui.heading(egui::RichText::new("funfern").size(20.0).color(TEAL));
             ui.separator();
-            ui.small(self.active_tool.label());
-            ui.separator();
             let (undo, redo) = self.editor.history_len();
             if ui
                 .add_enabled(undo > 0, egui::Button::new("Undo"))
@@ -1689,7 +1687,6 @@ impl Playground {
                     }
                 });
                 ui.separator();
-                ui.small("Wave");
             });
         });
     }
@@ -1718,7 +1715,6 @@ impl Playground {
                 }
             }
             ui.add_space(12.0);
-            ui.small("?");
         });
     }
 
