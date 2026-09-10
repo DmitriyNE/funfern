@@ -698,6 +698,57 @@ fn open_reflecting_boundary_cuts_two_traces_and_reconnects_at_free_tips() {
 }
 
 #[test]
+fn baffle_insertion_avoids_accidental_cfl_slivers() {
+    let mut scene = Scene::default();
+    scene.obstacles.push(Obstacle::with_role(
+        ObstacleId(1),
+        PeriodicCubicSpline::rounded(Point2::default(), 0.30),
+        LoopRole::Wall {
+            exterior: BACKGROUND_REGION,
+            interior: RegionId(2),
+        },
+    ));
+    scene.internal_boundaries.push(InternalBoundary {
+        id: InternalBoundaryId(1),
+        spline: OpenCubicSpline::uniform(vec![
+            Point2::new(-0.841_274_799_6, -0.460_310_562_0),
+            Point2::new(-0.702_926_820_9, -0.393_873_880_9),
+            Point2::new(-0.564_578_842_4, -0.327_437_199_8),
+            Point2::new(-0.426_230_863_7, -0.261_000_518_7),
+        ])
+        .unwrap(),
+        region: BACKGROUND_REGION,
+        span_laws: vec![InternalBoundaryLaw::REFLECTING],
+    });
+    scene
+        .materials
+        .push(medium(2, "Inside", 1.0, [77, 121, 164]));
+    scene.regions.push(Region {
+        id: RegionId(2),
+        material: MaterialId(2),
+    });
+    let mesh = mesh_scene(
+        &scene,
+        23,
+        MeshingOptions {
+            curve_tolerance: 0.0015,
+            target_edge_length: 0.08 / 1.05,
+            minimum_angle_degrees: 18.0,
+            ..MeshingOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(mesh.quality.minimum_angle_degrees > 15.0);
+    let operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
+        &mesh,
+        &scene,
+        scene.outer_boundaries,
+    )
+    .unwrap();
+    assert!(operator.recommended_time_step() > 0.002);
+}
+
+#[test]
 fn multiple_open_baffles_keep_independent_labeled_faces() {
     let mut scene = Scene::default();
     for (id, y) in [(3, -0.38), (8, 0.42)] {

@@ -14,8 +14,6 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Evaluate a dissipative relative dashpot for thin gaps. Keeping centered time
   integration would require an off-diagonal damping solve; the implemented gap
   spring is conservative.
-- [ ] Replace the temporary wave reset after open-baffle geometry edits with a
-  side-aware transfer that preserves each moving trace without cross-wall sampling.
 - [ ] Add box selection and selection filters for dense scenes. Rational weights
   remain conditional on a demonstrated workflow need.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
@@ -31,9 +29,27 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
   cooldown in a later adaptation pass.
-- [ ] Improve open-baffle crack-tip element quality. The assigned-law native check
-  currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
-  has small tip angles; this dominates the CFL bound and solver throughput.
+
+## 2026-09-10 — Baffle timestep and geometry handoff repair
+
+- Internal-constraint insertion now relocates a nearby unconstrained bulk vertex
+  onto the exact curve sample when its complete triangle fan remains valid. This
+  avoids accidental slivers without moving the baffle or changing its paired cut.
+- On Apple M1 Max / Metal, the assigned-law `--wave-gpu-check` at parent h=0.08
+  improved from `dt=5.4207e-4`, a `2.81°` minimum angle, and about `2.10` simulated
+  seconds per wall second to `dt=2.3337e-3`, `17.25°`, and `6.58–9.77` across two
+  runs. DOFs changed only from 9,720 to 9,690. The check still agrees with the f64
+  solver to `1.64e-6` relative L2 error after 128 steps.
+- Quadratic state transfer tags baffle vertices and edge nodes by stable boundary
+  ID and face. Coincident points prefer an old element on the same face; moved
+  trace points fall back to the containing bulk element. Geometry edits with a
+  baffle now prepare the normal transactional GPU handoff instead of resetting
+  the field.
+- Added regressions for the former CFL-sliver scene, preservation of distinct
+  coincident face values, and a real editor remesh with zero exposed target nodes.
+- Formatting, Clippy with warnings denied, all 132 workspace tests, native release
+  compilation, the native GPU check, and the release Trunk/WASM build pass.
+  Interactive browser testing was skipped as requested.
 
 ## 2026-09-10 — CI and GitHub Pages
 

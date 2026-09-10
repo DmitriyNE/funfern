@@ -161,6 +161,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   hole control-point edits now reuse and repair a bounded region of the previous mesh.
   The panel reports unchanged elements and full-rebuild fallbacks; creation,
   deletion, knot changes, interface/baffle motion, and large/failed repairs still rebuild.
+  Open-curve insertion reuses safe nearby bulk vertices at the exact curve position
+  to avoid tiny CFL-limiting elements around baffles.
 - **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
   Gaussian displacement with zero initial velocity. Move source positions the
   optional continuous sinusoidal source. Simulation speed is bounded to 16
@@ -188,7 +190,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   reconstructs velocity from both old displacement levels, interpolates field and
   velocity, initializes the new staggered level for its new timestep, and commits
   after a finite tagged readback. Newly exposed domain starts at zero. A failed
-  candidate retains the previous simulation.
+  candidate retains the previous simulation. Baffle trace nodes prefer the same
+  stable boundary ID and left/right face on the old mesh during transfer.
 
 Scenes allow 32 geometric features, 32 materials, and 128 controls per curve.
 Version 7 JSON stores the complete outer, hole-span, and open-baffle laws together

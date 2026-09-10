@@ -1,4 +1,33 @@
-use crate::{MeshVertex, Point2, QuadraticWaveOperator, TriMesh, enriched_quadratic_basis};
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::{
+    BoundaryLabel, InternalBoundaryId, InternalBoundarySide, MeshVertex, Point2,
+    QuadraticWaveOperator, TriMesh, enriched_quadratic_basis,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct InternalTraceKey {
+    id: InternalBoundaryId,
+    right: bool,
+}
+
+impl InternalTraceKey {
+    fn from_label(label: BoundaryLabel) -> Option<Self> {
+        let BoundaryLabel::InternalBoundary { id, side } = label else {
+            return None;
+        };
+        Some(Self {
+            id,
+            right: side == InternalBoundarySide::Right,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TraceRestrictions<'a> {
+    target: &'a [Option<InternalTraceKey>],
+    source: &'a BTreeMap<InternalTraceKey, BTreeSet<u32>>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TransferSample {
@@ -43,14 +72,21 @@ impl TransferMap {
     /// Locates every target vertex in the source triangulation. Vertices outside
     /// the old domain are deliberately left unmapped and initialize to zero.
     pub fn build(source: &TriMesh, target: &TriMesh) -> Result<Self, TransferError> {
-        Self::build_restricted(source, target, &vec![None; target.vertices.len()], None)
+        Self::build_restricted(
+            source,
+            target,
+            &vec![None; target.vertices.len()],
+            None,
+            None,
+        )
     }
 
     fn build_restricted(
         source: &TriMesh,
         target: &TriMesh,
         target_groups: &[Option<crate::RegionId>],
-        region_groups: Option<&std::collections::BTreeMap<crate::RegionId, crate::RegionId>>,
+        region_groups: Option<&BTreeMap<crate::RegionId, crate::RegionId>>,
+        trace_restrictions: Option<TraceRestrictions<'_>>,
     ) -> Result<Self, TransferError> {
         if source.triangles.is_empty() {
             return Err(TransferError::EmptySource);
@@ -58,6 +94,9 @@ impl TransferMap {
         validate_mesh(source, true)?;
         validate_mesh(target, false)?;
         if target_groups.len() != target.vertices.len() {
+            return Err(TransferError::InvalidTarget);
+        }
+        if trace_restrictions.is_some_and(|traces| traces.target.len() != target.vertices.len()) {
             return Err(TransferError::InvalidTarget);
         }
 
@@ -99,7 +138,9 @@ impl TransferMap {
         }
 
         let mut samples = Vec::with_capacity(target.vertices.len());
-        for (vertex, target_group) in target.vertices.iter().zip(target_groups) {
+        for (target_index, (vertex, target_group)) in
+            target.vertices.iter().zip(target_groups).enumerate()
+        {
             let point = vertex.point;
             if point.x < minimum.x
                 || point.x > maximum.x
@@ -111,23 +152,39 @@ impl TransferMap {
             }
             let [x, y] = bin_index(point, minimum, cell, dimension);
             let mut found = None;
-            for &triangle_index in &bins[y * dimension + x] {
-                let triangle = source.triangles[triangle_index as usize];
-                if let Some(target_group) = target_group {
-                    let source_group = region_groups
-                        .and_then(|groups| groups.get(&triangle.region))
-                        .copied()
-                        .unwrap_or(triangle.region);
-                    if source_group != *target_group {
+            let preferred = trace_restrictions.and_then(|traces| {
+                traces.target[target_index].and_then(|trace| traces.source.get(&trace))
+            });
+            for require_preferred in [true, false] {
+                if require_preferred && preferred.is_none() {
+                    continue;
+                }
+                for &triangle_index in &bins[y * dimension + x] {
+                    if require_preferred
+                        && preferred.is_some_and(|triangles| !triangles.contains(&triangle_index))
+                    {
                         continue;
                     }
+                    let triangle = source.triangles[triangle_index as usize];
+                    if let Some(target_group) = target_group {
+                        let source_group = region_groups
+                            .and_then(|groups| groups.get(&triangle.region))
+                            .copied()
+                            .unwrap_or(triangle.region);
+                        if source_group != *target_group {
+                            continue;
+                        }
+                    }
+                    let points = triangle.vertices.map(|i| source.vertices[i].point);
+                    if let Some(weights) = barycentric(point, points) {
+                        found = Some(TransferSample {
+                            vertices: triangle.vertices.map(|i| i as u32),
+                            weights,
+                        });
+                        break;
+                    }
                 }
-                let points = triangle.vertices.map(|i| source.vertices[i].point);
-                if let Some(weights) = barycentric(point, points) {
-                    found = Some(TransferSample {
-                        vertices: triangle.vertices.map(|i| i as u32),
-                        weights,
-                    });
+                if found.is_some() {
                     break;
                 }
             }
@@ -289,11 +346,17 @@ impl QuadraticTransferMap {
                 *assigned = Some(group);
             }
         }
+        let target_traces = quadratic_trace_nodes(target_mesh, target_operator)?;
+        let source_traces = source_trace_triangles(source_mesh)?;
         let located = TransferMap::build_restricted(
             source_mesh,
             &expanded_target,
             &target_groups,
             Some(&region_groups),
+            Some(TraceRestrictions {
+                target: &target_traces,
+                source: &source_traces,
+            }),
         )?;
 
         let elements = source_mesh
@@ -387,6 +450,83 @@ impl QuadraticTransferMap {
             })
             .collect())
     }
+}
+
+fn quadratic_trace_nodes(
+    mesh: &TriMesh,
+    operator: &QuadraticWaveOperator,
+) -> Result<Vec<Option<InternalTraceKey>>, TransferError> {
+    let mut traces = vec![None; operator.degrees_of_freedom()];
+    for (vertex_index, vertex) in mesh.vertices.iter().enumerate() {
+        if let Some(trace) = vertex
+            .boundary
+            .and_then(|boundary| InternalTraceKey::from_label(boundary.label))
+        {
+            traces[vertex_index] = Some(trace);
+        }
+    }
+    let owners = triangle_edge_owners(mesh);
+    for edge in &mesh.boundary_edges {
+        let Some(trace) = InternalTraceKey::from_label(edge.label) else {
+            continue;
+        };
+        let Some([(triangle_index, local_midpoint)]) = owners
+            .get(&transfer_edge_key(edge.vertices))
+            .map(Vec::as_slice)
+        else {
+            return Err(TransferError::InvalidTarget);
+        };
+        let node = operator.element_nodes()[*triangle_index][*local_midpoint] as usize;
+        if traces[node].is_some_and(|assigned| assigned != trace) {
+            return Err(TransferError::InvalidTarget);
+        }
+        traces[node] = Some(trace);
+    }
+    Ok(traces)
+}
+
+fn source_trace_triangles(
+    mesh: &TriMesh,
+) -> Result<BTreeMap<InternalTraceKey, BTreeSet<u32>>, TransferError> {
+    let mut traces = BTreeMap::<InternalTraceKey, BTreeSet<u32>>::new();
+    let owners = triangle_edge_owners(mesh);
+    for edge in &mesh.boundary_edges {
+        let Some(trace) = InternalTraceKey::from_label(edge.label) else {
+            continue;
+        };
+        let Some([(triangle, _)]) = owners
+            .get(&transfer_edge_key(edge.vertices))
+            .map(Vec::as_slice)
+        else {
+            return Err(TransferError::InvalidSource);
+        };
+        traces
+            .entry(trace)
+            .or_default()
+            .insert(u32::try_from(*triangle).map_err(|_| TransferError::InvalidSource)?);
+    }
+    Ok(traces)
+}
+
+fn transfer_edge_key(vertices: [usize; 2]) -> (usize, usize) {
+    (vertices[0].min(vertices[1]), vertices[0].max(vertices[1]))
+}
+
+fn triangle_edge_owners(mesh: &TriMesh) -> BTreeMap<(usize, usize), Vec<(usize, usize)>> {
+    let mut owners = BTreeMap::<_, Vec<_>>::new();
+    for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+        for (vertices, local_midpoint) in [
+            ([triangle.vertices[0], triangle.vertices[1]], 3),
+            ([triangle.vertices[1], triangle.vertices[2]], 4),
+            ([triangle.vertices[0], triangle.vertices[2]], 5),
+        ] {
+            owners
+                .entry(transfer_edge_key(vertices))
+                .or_default()
+                .push((triangle_index, local_midpoint));
+        }
+    }
+    owners
 }
 
 fn validate_quadratic_pair(
@@ -762,6 +902,55 @@ mod tests {
         for node in target_operator.element_nodes()[1] {
             assert!((transferred[node as usize] - 9.0).abs() < 1.0e-12);
         }
+    }
+
+    #[test]
+    fn quadratic_transfer_keeps_coincident_baffle_faces_separate() {
+        let points = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ];
+        let mut source = mesh(3, &points, &[[0, 1, 2], [3, 4, 5]]);
+        source.boundary_edges = vec![
+            BoundaryEdge {
+                vertices: [0, 1],
+                label: BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(4),
+                    side: InternalBoundarySide::Left,
+                },
+                parameters: [0.0, 1.0],
+            },
+            BoundaryEdge {
+                vertices: [4, 3],
+                label: BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(4),
+                    side: InternalBoundarySide::Right,
+                },
+                parameters: [1.0, 0.0],
+            },
+        ];
+        let mut target = source.clone();
+        target.geometry_revision = 8;
+        let source_operator =
+            QuadraticWaveOperator::assemble(&source, WaveCoefficients::default()).unwrap();
+        let target_operator =
+            QuadraticWaveOperator::assemble(&target, WaveCoefficients::default()).unwrap();
+        let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
+            .unwrap();
+        let left = source_operator.element_nodes()[0][3] as usize;
+        let right = source_operator.element_nodes()[1][3] as usize;
+        let target_left = target_operator.element_nodes()[0][3] as usize;
+        let target_right = target_operator.element_nodes()[1][3] as usize;
+        let mut values = vec![0.0; source_operator.degrees_of_freedom()];
+        values[left] = 1.0;
+        values[right] = 9.0;
+        let transferred = map.interpolate(&values, -1.0).unwrap();
+        assert!((transferred[target_left] - 1.0).abs() < 1.0e-12);
+        assert!((transferred[target_right] - 9.0).abs() < 1.0e-12);
     }
 
     #[test]

@@ -1110,6 +1110,58 @@ impl MeshBuilder {
         {
             return Ok(index);
         }
+        // Inserting a constraint point just beside a free bulk vertex creates a
+        // tiny element and can collapse an explicit solver's CFL timestep. Move
+        // the free vertex onto the exact curve sample when its complete triangle
+        // fan remains oriented and belongs to this material region. Constraint
+        // vertices and points already used by another open chain stay fixed.
+        let protected = self
+            .internal_chains
+            .iter()
+            .flat_map(|chain| chain.iter().map(|(vertex, _)| *vertex))
+            .chain(self.internal_trace_vertices.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let target_region = self.internal_boundary_regions[boundary];
+        let snap_distance = self.options.target_edge_length * 0.3;
+        let relocatable = self
+            .vertices
+            .iter()
+            .enumerate()
+            .filter(|(index, vertex)| {
+                vertex.boundary.is_none()
+                    && !protected.contains(index)
+                    && (vertex.point - point).norm() <= snap_distance
+                    && !self.incident[*index].is_empty()
+                    && self.incident[*index].iter().all(|triangle_index| {
+                        let triangle = self.triangles[*triangle_index];
+                        if triangle.region != target_region {
+                            return false;
+                        }
+                        let points = triangle.vertices.map(|vertex| {
+                            if vertex == *index {
+                                point
+                            } else {
+                                self.point(vertex)
+                            }
+                        });
+                        orient2d(points[0], points[1], points[2]) == PredicateSign::Positive
+                    })
+            })
+            .min_by(|(_, left), (_, right)| {
+                (left.point - point)
+                    .norm()
+                    .total_cmp(&(right.point - point).norm())
+            })
+            .map(|(index, _)| index);
+        if let Some(vertex) = relocatable {
+            let incident = self.incident[vertex].iter().copied().collect::<Vec<_>>();
+            self.vertices[vertex].point = point;
+            for triangle in incident {
+                let unchanged = self.triangles[triangle];
+                self.replace_triangle(triangle, unchanged);
+            }
+            return Ok(vertex);
+        }
         let (triangle_index, location) = self.containing_triangle(point).ok_or(
             MeshError::Topology("internal boundary leaves its material region"),
         )?;

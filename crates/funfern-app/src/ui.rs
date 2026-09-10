@@ -993,25 +993,19 @@ impl Playground {
                         self.mesh_source.outer_boundaries,
                     ) {
                         Ok(operator) => {
-                            let transfer =
-                                if self.mesh_committed_scene.internal_boundaries.is_empty()
-                                    && self.mesh_source.internal_boundaries.is_empty()
-                                {
-                                    self.wave_mesh
-                                        .as_ref()
-                                        .zip(self.wave_operator.as_ref())
-                                        .map(|(source_mesh, source_operator)| {
-                                            QuadraticTransferMap::build(
-                                                source_mesh,
-                                                source_operator,
-                                                &mesh,
-                                                &operator,
-                                            )
-                                        })
-                                        .transpose()
-                                } else {
-                                    Ok(None)
-                                };
+                            let transfer = self
+                                .wave_mesh
+                                .as_ref()
+                                .zip(self.wave_operator.as_ref())
+                                .map(|(source_mesh, source_operator)| {
+                                    QuadraticTransferMap::build(
+                                        source_mesh,
+                                        source_operator,
+                                        &mesh,
+                                        &operator,
+                                    )
+                                })
+                                .transpose();
                             match transfer {
                                 Ok(transfer) => {
                                     let exposed_nodes = transfer
@@ -4081,9 +4075,23 @@ pub fn wave_gpu_benchmark(
         benchmark.prepared = true;
         benchmark.solve_started = Some(Instant::now());
         request.request_steps(128);
+        let minimum_edge = mesh
+            .triangles
+            .iter()
+            .flat_map(|triangle| {
+                let points = triangle.vertices.map(|index| mesh.vertices[index].point);
+                [
+                    (points[1] - points[0]).norm(),
+                    (points[2] - points[1]).norm(),
+                    (points[0] - points[2]).norm(),
+                ]
+            })
+            .fold(f64::INFINITY, f64::min);
         info!(
             dofs = operator.degrees_of_freedom(),
             dt = state.wave_time_step,
+            min_edge = minimum_edge,
+            min_angle = mesh.quality.minimum_angle_degrees,
             "Wave GPU check started"
         );
         return;
@@ -6121,6 +6129,54 @@ mod tests {
         assert!(candidate.operator.lumped_damping().iter().sum::<f64>() > old_damping);
         assert_eq!(candidate.exposed_nodes, 0);
         assert!(candidate.transfer.is_some());
+    }
+
+    #[test]
+    fn moved_baffle_rebuild_prepares_a_face_aware_field_transfer() {
+        let mut h = Harness::new();
+        let id = h
+            .state
+            .editor
+            .create_internal_boundary(
+                OpenCubicSpline::uniform(vec![
+                    Point2::new(-0.7, 0.55),
+                    Point2::new(-0.25, 0.65),
+                    Point2::new(0.25, 0.52),
+                    Point2::new(0.7, 0.62),
+                ])
+                .unwrap(),
+                BACKGROUND_REGION,
+            )
+            .unwrap();
+        h.settle();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let old_revision = h.state.wave_mesh.as_ref().unwrap().geometry_revision;
+
+        let point = h
+            .state
+            .editor
+            .internal_boundary(id)
+            .unwrap()
+            .spline
+            .controls()[1];
+        h.state.editor.begin();
+        h.state
+            .editor
+            .set_internal_boundary_point(id, 1, point + Point2::new(0.015, -0.01))
+            .unwrap();
+        h.state.editor.commit();
+        h.settle();
+        build_mesh_candidate(&mut h.state);
+
+        let candidate = h
+            .state
+            .simulation_candidate
+            .as_ref()
+            .expect("moved-baffle candidate");
+        assert_ne!(candidate.mesh.geometry_revision, old_revision);
+        assert!(candidate.transfer.is_some());
+        assert_eq!(candidate.exposed_nodes, 0);
     }
 
     #[test]

@@ -236,10 +236,13 @@ Open baffles are inserted after the closed-region mesh reaches its requested bul
 resolution. Each sampled open curve is recovered as a constrained edge chain by
 deterministic diagonal flips. Interior chain vertices are duplicated and the
 triangle fan on one bank is rewired to the duplicate; the two free tips stay
-shared. Both banks are labeled independently. Minimum-angle refinement is completed
-before this cut because a zero-thickness crack tip is a reentrant singular point;
-the final mesh reports the resulting tip quality instead of repeatedly refining
-the coincident faces.
+shared. Both banks are labeled independently. Before insertion, a nearby free bulk
+vertex may be relocated onto the exact curve sample when every triangle in its fan
+remains positively oriented and in the assigned region. This prevents short edges
+caused by nearly coincident free and constrained vertices. Minimum-angle refinement
+is completed before the cut because a zero-thickness crack tip is a reentrant
+singular point; the final mesh reports the resulting tip quality instead of
+repeatedly refining the coincident faces.
 
 Quality refinement selects the worst size or angle violation from an ordered
 queue. Persistent edge adjacency and triangle quality entries are updated only
@@ -475,14 +478,17 @@ obstacle. Nodes newly exposed by a shrinking or moved obstacle start with zero
 displacement and velocity. Mild local smoothing is a possible response to
 edit-induced bursts, not a substitute for stable stepping.
 
-Transfer for closed regions respects topological connectivity. Regions joined through material
-interfaces form one transferable component, while a two-sided wall separates its
-components even where old and new domains overlap geometrically. Closed-wall
-sources use the same region membership. When open baffles are present, source
-weights use shortest paths through the cut finite-element graph, so the stencil
-can reach the opposite bank only by travelling around a free tip. Moving an open
-baffle currently resets the wave state; side-aware transfer across a moving crack
-is deferred.
+Transfer for closed regions respects topological connectivity. Regions joined
+through material interfaces form one transferable component, while a two-sided
+wall separates its components even where old and new domains overlap geometrically.
+Closed-wall sources use the same region membership. Quadratic nodes on an open
+baffle carry its stable boundary ID and face. At a coincident location, the locator
+prefers a source element adjacent to the same face; when a moved trace no longer
+overlaps an old face element, it falls back to the containing bulk element. Thus a
+stationary jump across the baffle is not mixed during handoff, while newly moved
+faces receive the field from their former physical location. Pulse and continuous
+source stencils separately use shortest paths through the cut finite-element graph,
+so they can reach the opposite bank only by travelling around a free tip.
 
 The hard zero policy is intentionally temporary. When newly exposed nodes meet a
 nonzero retained field, it creates a steep artificial front and injects broadband
