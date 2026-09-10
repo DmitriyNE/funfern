@@ -2574,12 +2574,6 @@ impl Playground {
                 ui.small("Waiting for edit to finish…");
             } else if let Some(job) = &self.mesh_job {
                 ui.small(format!("{}…", job.phase()));
-            } else if let Some(candidate) = &self.simulation_candidate {
-                ui.small(format!(
-                    "Committing candidate · {} vertices · {} triangles",
-                    candidate.mesh.vertices.len(),
-                    candidate.mesh.triangles.len()
-                ));
             } else if let Some(error) = &self.mesh_error {
                 ui.colored_label(RED, error);
                 ui.small("Previous mesh retained.");
@@ -5596,8 +5590,17 @@ impl Playground {
                         }
                     };
                     ui.colored_label(color, text);
-                    if state.mesh_job.is_some() || state.simulation_candidate.is_some() {
+                    if state.mesh_job.is_some() {
                         ui.colored_label(GOLD, "Mesh work in progress");
+                    } else if let Some(candidate) = &state.simulation_candidate {
+                        ui.colored_label(
+                            GOLD,
+                            format!(
+                                "Handoff in progress · {} vertices · {} triangles",
+                                candidate.mesh.vertices.len(),
+                                candidate.mesh.triangles.len()
+                            ),
+                        );
                     } else if state.mesh_error.is_some() || state.wave_error.is_some() {
                         ui.colored_label(RED, "Attention required");
                     }
@@ -6575,6 +6578,24 @@ mod tests {
         assert!(h.texts.iter().any(|(text, _)| text == "Pause"));
         assert!(h.texts.iter().any(|(text, _)| text == "Step"));
         assert!(h.texts.iter().any(|(text, _)| text == "Reset"));
+    }
+
+    #[test]
+    fn handoff_status_is_shown_in_status_bar() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        h.state.active_tool = ActiveTool::Simulation;
+        h.frame(vec![]);
+        assert!(
+            h.texts
+                .iter()
+                .any(|(text, _)| text.starts_with("Handoff in progress"))
+        );
+        assert!(
+            !h.texts
+                .iter()
+                .any(|(text, _)| text.starts_with("Committing candidate"))
+        );
     }
 
     #[test]
