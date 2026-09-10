@@ -2307,7 +2307,10 @@ impl Playground {
                 .first()
                 .map_or(DEFAULT_MATERIAL, |material| material.id);
         }
-        if self.active_tool == ActiveTool::Select {
+        if matches!(
+            self.active_tool,
+            ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary
+        ) {
             ui.horizontal(|ui| {
                 ui.label("Span filter");
                 egui::ComboBox::from_id_salt("span_selection_filter")
@@ -2338,7 +2341,6 @@ impl Playground {
                     self.set_span_selection(vec![]);
                 }
             });
-            ui.small("Ctrl/Cmd-click selects a curve · Alt-drag subtracts");
         }
         if self.active_tool == ActiveTool::AddGeometry && self.mode == Mode::Custom {
             ui.small(format!(
@@ -2479,7 +2481,6 @@ impl Playground {
                         self.select_loop(id);
                     }
                 }
-                ui.small("Changing to a hole requires an empty interior region.");
             }
             if let Some(index) = index
                 && let Some(o) = self.editor.obstacle(id)
@@ -2717,10 +2718,7 @@ impl Playground {
                             self.align_selection(false);
                         }
                     });
-                    ui.small("Drag selected spans to move · ring rotates · center moves pivot");
                 });
-            } else {
-                ui.small("Partial selections need C0 knots at their exposed ends.");
             }
         }
         if self.active_tool == ActiveTool::Transform {
@@ -2730,7 +2728,6 @@ impl Playground {
             self.boundary_inspector(ui);
         }
         ui.add_space(12.0);
-        ui.small("Control points guide the spline; the curve does not pass through them.");
         ui.add_space(6.0);
         ui.small("Pan: middle drag / Space + drag\nZoom: wheel over viewport\nUndo: Ctrl/Cmd + Z · Shift for redo");
     }
@@ -2762,7 +2759,6 @@ impl Playground {
         ui.add_space(8.0);
         ui.separator();
         ui.label("Spline topology");
-        ui.small("Continuity applies at the end knot of one selected span.");
 
         if self.selected_spans.len() == 1 {
             match self.selected_spans[0] {
@@ -2826,17 +2822,11 @@ impl Playground {
                                     self.set_span_selection(spans);
                                 }
                             }
-                        } else {
-                            ui.small("The selected span ends at the baffle tip.");
                         }
                     }
                 }
-                GeometrySpan::Outer(_) => {
-                    ui.small("The fixed box has no editable spline topology.");
-                }
+                GeometrySpan::Outer(_) => {}
             }
-        } else {
-            ui.small("Select one span to edit its end knot.");
         }
 
         if let Some((loop_breakpoints, baffle_breakpoints)) = self.exposed_selection_breakpoints()
@@ -2867,7 +2857,6 @@ impl Playground {
                     self.gizmo_pivot = None;
                 }
             }
-            ui.small("Isolation inserts exact corner knots at every exposed end, enabling rigid piece transforms.");
         }
 
         let mut baffles = Vec::new();
@@ -2932,9 +2921,7 @@ impl Playground {
                 self.select_baffle(id);
             }
         }
-        if baffles.len() == 2 && !two_complete_baffles {
-            ui.small("Select every span of exactly two baffles to merge them.");
-        } else if let Some(distance) = nearest_tip_distance {
+        if let Some(distance) = nearest_tip_distance {
             if can_merge {
                 ui.small(format!(
                     "Nearest tips are {:.4} apart; merge tolerance is {:.4}. Side laws follow the arrows.",
@@ -2950,7 +2937,6 @@ impl Playground {
                 );
             }
         }
-        ui.small("Sharpening is exact. Smoothing uses exact removal when possible, otherwise a minimum-change reshape.");
     }
 
     fn exposed_selection_breakpoints(&self) -> Option<ExposedBreakpoints> {
@@ -3033,7 +3019,6 @@ impl Playground {
                 ui.selectable_value(&mut self.baffle_face, InternalBoundarySide::Left, "Left");
                 ui.selectable_value(&mut self.baffle_face, InternalBoundarySide::Right, "Right");
             });
-            ui.small("Left/right follow each baffle's start → end arrows.");
         }
 
         if let Some(spans) = self.selected_baffle_spans() {
@@ -3274,16 +3259,20 @@ impl Playground {
                     if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
                         self.custom.pop();
                     }
-                } else if self.active_tool == ActiveTool::Select
-                    && ctx.input(|i| i.key_pressed(egui::Key::Delete))
+                } else if matches!(
+                    self.active_tool,
+                    ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary
+                ) && ctx.input(|i| i.key_pressed(egui::Key::Delete))
                     && let Some((id, Some(index))) = self.selection
                 {
                     let result = self.editor.remove_point(id, index);
                     if self.error(result).is_some() {
                         self.select_loop(id);
                     }
-                } else if self.active_tool == ActiveTool::Select
-                    && ctx.input(|i| i.key_pressed(egui::Key::Delete))
+                } else if matches!(
+                    self.active_tool,
+                    ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary
+                ) && ctx.input(|i| i.key_pressed(egui::Key::Delete))
                     && let Some((id, Some(index))) = self.internal_selection
                 {
                     let result = self.editor.remove_internal_boundary_point(id, index);
@@ -3340,9 +3329,7 @@ impl Playground {
                 {
                     self.refresh_curves();
                     let modifiers = ctx.input(|input| input.modifiers);
-                    if self.active_tool == ActiveTool::Select
-                        && let Some((id, index)) = self.hit_handle(p, r)
-                    {
+                    if let Some((id, index)) = self.hit_handle(p, r) {
                         let control = GeometryControl::Loop(id, index);
                         self.select_control(control);
                         if let Some(point) = self.editor.control_point(control) {
@@ -3355,9 +3342,7 @@ impl Playground {
                                 moved: false,
                             });
                         }
-                    } else if self.active_tool == ActiveTool::Select
-                        && let Some((id, index)) = self.hit_internal_handle(p, r)
-                    {
+                    } else if let Some((id, index)) = self.hit_internal_handle(p, r) {
                         let control = GeometryControl::Baffle(id, index);
                         self.select_control(control);
                         if let Some(point) = self.editor.control_point(control) {
