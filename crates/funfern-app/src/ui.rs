@@ -14,6 +14,7 @@ use funfern_app::{
     persistence::{self, LoadCandidate},
 };
 use funfern_core::*;
+use std::collections::BTreeSet;
 use std::sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, Sender},
@@ -37,6 +38,30 @@ enum CreationRole {
     MaterialInterface,
     InternalBoundary,
 }
+#[derive(Clone, Copy, Default, PartialEq)]
+enum SpanSelectionFilter {
+    #[default]
+    All,
+    Outer,
+    Loops,
+    Baffles,
+}
+impl SpanSelectionFilter {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All spans",
+            Self::Outer => "Outer edges",
+            Self::Loops => "Loops",
+            Self::Baffles => "Baffles",
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum MarqueeOperation {
+    Replace,
+    Add,
+    Subtract,
+}
 enum Drag {
     Translate {
         anchor: Point2,
@@ -54,6 +79,12 @@ enum Drag {
     Pivot {
         start: Option<Point2>,
         offset: Point2,
+    },
+    Marquee {
+        anchor: Pos2,
+        current: Pos2,
+        base: Vec<GeometrySpan>,
+        operation: MarqueeOperation,
     },
 }
 #[derive(Clone, Copy)]
@@ -102,6 +133,7 @@ pub struct Playground {
     selection: Option<(ObstacleId, Option<usize>)>,
     internal_selection: Option<(InternalBoundaryId, Option<usize>)>,
     selected_spans: Vec<GeometrySpan>,
+    span_selection_filter: SpanSelectionFilter,
     baffle_face: InternalBoundarySide,
     gizmo_pivot: Option<Point2>,
     pending_span_collapse: Option<GeometrySpan>,
@@ -196,6 +228,7 @@ impl Default for Playground {
             selected_spans: (0..8)
                 .map(|span| GeometrySpan::Loop(ObstacleId(1), span))
                 .collect(),
+            span_selection_filter: SpanSelectionFilter::All,
             baffle_face: InternalBoundarySide::Left,
             gizmo_pivot: None,
             pending_span_collapse: None,
@@ -367,8 +400,9 @@ impl Playground {
 
     fn set_span_selection(&mut self, spans: Vec<GeometrySpan>) {
         self.selected_spans.clear();
+        let mut seen = BTreeSet::new();
         for span in spans {
-            if self.span_valid(span) && !self.selected_spans.contains(&span) {
+            if self.span_valid(span) && seen.insert(geometry_span_key(span)) {
                 self.selected_spans.push(span);
             }
         }
@@ -402,6 +436,156 @@ impl Playground {
                 .internal_boundary(id)
                 .is_some_and(|boundary| span < boundary.spline.intervals().len()),
         }
+    }
+
+    fn span_matches_filter(&self, span: GeometrySpan) -> bool {
+        matches!(self.span_selection_filter, SpanSelectionFilter::All)
+            || matches!(
+                (self.span_selection_filter, span),
+                (SpanSelectionFilter::Outer, GeometrySpan::Outer(_))
+                    | (SpanSelectionFilter::Loops, GeometrySpan::Loop(_, _))
+                    | (SpanSelectionFilter::Baffles, GeometrySpan::Baffle(_, _))
+            )
+    }
+
+    fn filtered_spans(&self) -> Vec<GeometrySpan> {
+        let mut spans = Vec::new();
+        for side in OuterSide::ALL {
+            let span = GeometrySpan::Outer(side);
+            if self.span_matches_filter(span) {
+                spans.push(span);
+            }
+        }
+        for obstacle in &self.editor.document.draft.obstacles {
+            for index in 0..obstacle.spline.intervals().len() {
+                let span = GeometrySpan::Loop(obstacle.id, index);
+                if self.span_matches_filter(span) {
+                    spans.push(span);
+                }
+            }
+        }
+        for boundary in &self.editor.document.draft.internal_boundaries {
+            for index in 0..boundary.spline.intervals().len() {
+                let span = GeometrySpan::Baffle(boundary.id, index);
+                if self.span_matches_filter(span) {
+                    spans.push(span);
+                }
+            }
+        }
+        spans
+    }
+
+    fn select_filtered(&mut self) {
+        let spans = self.filtered_spans();
+        self.set_span_selection(spans);
+    }
+
+    fn invert_filtered_selection(&mut self) {
+        let filtered = self.filtered_spans();
+        let selected = self
+            .selected_spans
+            .iter()
+            .copied()
+            .map(geometry_span_key)
+            .collect::<BTreeSet<_>>();
+        let mut spans = self
+            .selected_spans
+            .iter()
+            .copied()
+            .filter(|span| !self.span_matches_filter(*span))
+            .collect::<Vec<_>>();
+        spans.extend(
+            filtered
+                .into_iter()
+                .filter(|span| !selected.contains(&geometry_span_key(*span))),
+        );
+        self.set_span_selection(spans);
+    }
+
+    fn apply_marquee_selection(
+        &mut self,
+        base: &[GeometrySpan],
+        hits: Vec<GeometrySpan>,
+        operation: MarqueeOperation,
+    ) {
+        let mut spans = match operation {
+            MarqueeOperation::Replace => Vec::new(),
+            MarqueeOperation::Add | MarqueeOperation::Subtract => base.to_vec(),
+        };
+        match operation {
+            MarqueeOperation::Replace | MarqueeOperation::Add => {
+                let mut selected = spans
+                    .iter()
+                    .copied()
+                    .map(geometry_span_key)
+                    .collect::<BTreeSet<_>>();
+                for hit in hits {
+                    if selected.insert(geometry_span_key(hit)) {
+                        spans.push(hit);
+                    }
+                }
+            }
+            MarqueeOperation::Subtract => {
+                let hits = hits
+                    .into_iter()
+                    .map(geometry_span_key)
+                    .collect::<BTreeSet<_>>();
+                spans.retain(|span| !hits.contains(&geometry_span_key(*span)));
+            }
+        }
+        self.set_span_selection(spans);
+    }
+
+    fn spans_in_marquee(&self, marquee: Rect, viewport: Rect) -> Vec<GeometrySpan> {
+        let mut spans = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut add = |span| {
+            if self.span_matches_filter(span) && seen.insert(geometry_span_key(span)) {
+                spans.push(span);
+            }
+        };
+        for side in OuterSide::ALL {
+            let [a, b] = outer_side_points(side);
+            if segment_intersects_rect(self.screen(a, viewport), self.screen(b, viewport), marquee)
+            {
+                add(GeometrySpan::Outer(side));
+            }
+        }
+        for curve in &self.draft_curves {
+            let Some(obstacle) = self.editor.obstacle(curve.id) else {
+                continue;
+            };
+            for segment in curve.samples.windows(2) {
+                if segment_intersects_rect(
+                    self.screen(segment[0].point, viewport),
+                    self.screen(segment[1].point, viewport),
+                    marquee,
+                ) && let Some(span) = obstacle
+                    .spline
+                    .span_index(0.5 * (segment[0].t + segment[1].t))
+                {
+                    add(GeometrySpan::Loop(curve.id, span));
+                }
+            }
+        }
+        for curve in &self.draft_internal_curves {
+            let Some(boundary) = self.editor.internal_boundary(curve.id) else {
+                continue;
+            };
+            for segment in curve.samples.windows(2) {
+                if segment_intersects_rect(
+                    self.screen(segment[0].point, viewport),
+                    self.screen(segment[1].point, viewport),
+                    marquee,
+                ) && let Some(span) = boundary
+                    .spline
+                    .span_index(0.5 * (segment[0].t + segment[1].t))
+                {
+                    add(GeometrySpan::Baffle(curve.id, span));
+                }
+            }
+        }
+        spans
     }
 
     fn toggle_span(&mut self, span: GeometrySpan) {
@@ -1449,7 +1633,7 @@ impl Playground {
             }
         });
         ui.small(match self.mode {
-            Mode::Select => "Click spans · Shift adds · Ctrl/Cmd selects a curve",
+            Mode::Select => "Click spans · drag empty space for a box · Shift adds",
             Mode::Preset if self.creation_role == CreationRole::InternalBoundary => {
                 "Click the viewport to place a length 0.5 reflecting baffle"
             }
@@ -1461,6 +1645,39 @@ impl Playground {
             Mode::Pulse => "Click the viewport to add a zero-velocity pulse",
             Mode::Source => "Click the viewport to move the continuous source",
         });
+        if self.mode == Mode::Select {
+            ui.horizontal(|ui| {
+                ui.label("Span filter");
+                egui::ComboBox::from_id_salt("span_selection_filter")
+                    .selected_text(self.span_selection_filter.label())
+                    .show_ui(ui, |ui| {
+                        for filter in [
+                            SpanSelectionFilter::All,
+                            SpanSelectionFilter::Outer,
+                            SpanSelectionFilter::Loops,
+                            SpanSelectionFilter::Baffles,
+                        ] {
+                            ui.selectable_value(
+                                &mut self.span_selection_filter,
+                                filter,
+                                filter.label(),
+                            );
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                if ui.small_button("Select filtered").clicked() {
+                    self.select_filtered();
+                }
+                if ui.small_button("Invert").clicked() {
+                    self.invert_filtered_selection();
+                }
+                if ui.small_button("Clear").clicked() {
+                    self.set_span_selection(vec![]);
+                }
+            });
+            ui.small("Ctrl/Cmd-click selects a curve · Alt-drag subtracts");
+        }
         if self.mode == Mode::Custom {
             ui.small(format!(
                 "{} / 128 points · Backspace removes · Esc cancels",
@@ -2678,6 +2895,9 @@ impl Playground {
                         self.gizmo_pivot = *gizmo_before;
                     }
                     Some(Drag::Pivot { start, .. }) => self.gizmo_pivot = *start,
+                    Some(Drag::Marquee { base, .. }) => {
+                        self.set_span_selection(base.clone());
+                    }
                     _ => {}
                 }
                 if drag.is_some() || self.editor.editing() {
@@ -2697,6 +2917,11 @@ impl Playground {
                 self.clear_transient();
             }
             if over && !typing {
+                if self.mode == Mode::Select
+                    && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
+                {
+                    self.select_filtered();
+                }
                 if self.mode == Mode::Custom {
                     if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                         self.finish_custom();
@@ -2829,7 +3054,8 @@ impl Playground {
                                         .map(|span| GeometrySpan::Baffle(id, span))
                                 })
                             })
-                            .or_else(|| self.hit_outer_boundary(p, r).map(GeometrySpan::Outer));
+                            .or_else(|| self.hit_outer_boundary(p, r).map(GeometrySpan::Outer))
+                            .filter(|span| self.span_matches_filter(*span));
                         if let Some(span) = hit {
                             let curve_spans = self.curve_spans(span);
                             if modifiers.command && modifiers.shift {
@@ -2857,9 +3083,20 @@ impl Playground {
                                     moved: false,
                                 });
                             }
-                        } else if !modifiers.shift && !modifiers.command {
-                            self.set_span_selection(vec![]);
-                            self.region_selection = self.region_at(self.world(p, r));
+                        } else {
+                            self.pending_span_collapse = None;
+                            self.drag = Some(Drag::Marquee {
+                                anchor: p,
+                                current: p,
+                                base: self.selected_spans.clone(),
+                                operation: if modifiers.alt {
+                                    MarqueeOperation::Subtract
+                                } else if modifiers.shift {
+                                    MarqueeOperation::Add
+                                } else {
+                                    MarqueeOperation::Replace
+                                },
+                            });
                         }
                     }
                 }
@@ -2882,6 +3119,7 @@ impl Playground {
                         }
                     };
                     let mut pivot_after = None;
+                    let mut marquee_update = None;
                     let updates = match self.drag.as_mut() {
                         Some(Drag::Translate {
                             anchor,
@@ -2936,6 +3174,16 @@ impl Playground {
                             self.gizmo_pivot = Some(world + *offset);
                             None
                         }
+                        Some(Drag::Marquee {
+                            anchor,
+                            current,
+                            base,
+                            operation,
+                        }) => {
+                            *current = p;
+                            marquee_update = Some((*anchor, *current, base.clone(), *operation));
+                            None
+                        }
                         None => None,
                     };
                     if let Some(updates) = updates {
@@ -2944,6 +3192,10 @@ impl Playground {
                         if !self.selected_spans.is_empty() {
                             self.gizmo_pivot = pivot_after.or(self.gizmo_pivot);
                         }
+                    }
+                    if let Some((anchor, current, base, operation)) = marquee_update {
+                        let hits = self.spans_in_marquee(Rect::from_two_pos(anchor, current), r);
+                        self.apply_marquee_selection(&base, hits, operation);
                     }
                 }
                 if response.double_clicked()
@@ -3034,6 +3286,24 @@ impl Playground {
             );
             if matches!(&drag, Some(Drag::Translate { .. } | Drag::Rotate { .. })) {
                 self.editor.commit();
+            }
+            if let Some(Drag::Marquee {
+                anchor,
+                current,
+                base,
+                operation,
+            }) = &drag
+            {
+                if anchor.distance(*current) >= 4.0 {
+                    let hits = self.spans_in_marquee(Rect::from_two_pos(*anchor, *current), r);
+                    self.apply_marquee_selection(base, hits, *operation);
+                } else {
+                    self.set_span_selection(base.clone());
+                    if matches!(operation, MarqueeOperation::Replace) {
+                        self.set_span_selection(vec![]);
+                        self.region_selection = self.region_at(self.world(*anchor, r));
+                    }
+                }
             }
             if !moved && let Some(span) = self.pending_span_collapse.take() {
                 self.set_span_selection(vec![span]);
@@ -3452,6 +3722,31 @@ impl Playground {
                 }
             }
         }
+        if let Some(Drag::Marquee {
+            anchor,
+            current,
+            operation,
+            ..
+        }) = &self.drag
+        {
+            let marquee = Rect::from_two_pos(*anchor, *current).intersect(r);
+            let color = match operation {
+                MarqueeOperation::Replace => TEAL,
+                MarqueeOperation::Add => GOLD,
+                MarqueeOperation::Subtract => RED,
+            };
+            painter.rect_filled(
+                marquee,
+                0.0,
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24),
+            );
+            painter.rect_stroke(
+                marquee,
+                0.0,
+                Stroke::new(1.0, color),
+                egui::StrokeKind::Inside,
+            );
+        }
         painter.text(
             r.left_top() + egui::vec2(18.0, 16.0),
             egui::Align2::LEFT_TOP,
@@ -3760,6 +4055,56 @@ impl Playground {
         }
     }
 }
+
+fn outer_side_points(side: OuterSide) -> [Point2; 2] {
+    match side {
+        OuterSide::Bottom => [Point2::new(-1.0, -1.0), Point2::new(1.0, -1.0)],
+        OuterSide::Right => [Point2::new(1.0, -1.0), Point2::new(1.0, 1.0)],
+        OuterSide::Top => [Point2::new(1.0, 1.0), Point2::new(-1.0, 1.0)],
+        OuterSide::Left => [Point2::new(-1.0, 1.0), Point2::new(-1.0, -1.0)],
+    }
+}
+
+fn geometry_span_key(span: GeometrySpan) -> (u8, u64, usize) {
+    match span {
+        GeometrySpan::Outer(side) => (0, 0, side.index()),
+        GeometrySpan::Loop(id, index) => (1, id.0, index),
+        GeometrySpan::Baffle(id, index) => (2, id.0, index),
+    }
+}
+
+fn segment_intersects_rect(a: Pos2, b: Pos2, rect: Rect) -> bool {
+    if rect.contains(a) || rect.contains(b) {
+        return true;
+    }
+    let delta = b - a;
+    let mut minimum = 0.0_f32;
+    let mut maximum = 1.0_f32;
+    for (direction, distance) in [
+        (-delta.x, a.x - rect.min.x),
+        (delta.x, rect.max.x - a.x),
+        (-delta.y, a.y - rect.min.y),
+        (delta.y, rect.max.y - a.y),
+    ] {
+        if direction.abs() <= f32::EPSILON {
+            if distance < 0.0 {
+                return false;
+            }
+            continue;
+        }
+        let parameter = distance / direction;
+        if direction < 0.0 {
+            minimum = minimum.max(parameter);
+        } else {
+            maximum = maximum.min(parameter);
+        }
+        if minimum > maximum {
+            return false;
+        }
+    }
+    true
+}
+
 fn field_color(value: f32, gain: f32) -> Color32 {
     let value = if value.is_finite() {
         (value * gain).tanh()
@@ -5116,6 +5461,28 @@ mod tests {
                 Event::ModifiersChanged(Modifiers::NONE),
             ]);
         }
+        fn drag_with_modifiers(&mut self, start: Pos2, end: Pos2, modifiers: Modifiers) {
+            self.frame(vec![
+                Event::ModifiersChanged(modifiers),
+                Event::PointerMoved(start),
+                Event::PointerButton {
+                    pos: start,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers,
+                },
+            ]);
+            self.frame(vec![Event::PointerMoved(end)]);
+            self.frame(vec![
+                Event::PointerButton {
+                    pos: end,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers,
+                },
+                Event::ModifiersChanged(Modifiers::NONE),
+            ]);
+        }
         fn click_text(&mut self, text: &str) {
             self.frame(vec![]);
             let position = self
@@ -5521,6 +5888,65 @@ mod tests {
         harness.click_with_modifiers(first, Modifiers::COMMAND);
         assert_eq!(harness.state.selected_spans.len(), 8);
         assert!(harness.state.transformable_curve_controls().is_some());
+    }
+
+    #[test]
+    fn marquee_filter_selects_and_subtracts_baffle_spans_without_history() {
+        let mut harness = Harness::new();
+        let id = harness
+            .state
+            .editor
+            .create_internal_boundary(
+                OpenCubicSpline::uniform(vec![
+                    Point2::new(-0.8, 0.6),
+                    Point2::new(-0.4, 0.7),
+                    Point2::new(0.0, 0.55),
+                    Point2::new(0.4, 0.7),
+                    Point2::new(0.8, 0.6),
+                ])
+                .unwrap(),
+                BACKGROUND_REGION,
+            )
+            .unwrap();
+        harness.settle();
+        harness.state.span_selection_filter = SpanSelectionFilter::Baffles;
+        harness.state.set_span_selection(vec![]);
+        harness.frame(vec![]);
+        let history = harness.state.editor.history_len();
+        let start = harness.point(Point2::new(-0.9, 0.43));
+        let end = harness.point(Point2::new(0.9, 0.78));
+        harness.drag_with_modifiers(start, end, Modifiers::NONE);
+        assert_eq!(
+            harness.state.selected_spans,
+            vec![GeometrySpan::Baffle(id, 0), GeometrySpan::Baffle(id, 1)]
+        );
+        assert_eq!(harness.state.editor.history_len(), history);
+
+        harness.drag_with_modifiers(start, end, Modifiers::ALT);
+        assert!(harness.state.selected_spans.is_empty());
+        assert_eq!(harness.state.editor.history_len(), history);
+
+        harness.move_to(harness.rect.center());
+        harness.key(Key::A, Modifiers::COMMAND);
+        assert_eq!(
+            harness.state.selected_spans,
+            vec![GeometrySpan::Baffle(id, 0), GeometrySpan::Baffle(id, 1)]
+        );
+    }
+
+    #[test]
+    fn marquee_escape_restores_the_previous_span_selection() {
+        let mut harness = Harness::new();
+        let previous = vec![GeometrySpan::Loop(ObstacleId(1), 2)];
+        harness.state.set_span_selection(previous.clone());
+        let start = harness.point(Point2::new(-0.8, 0.7));
+        let end = harness.point(Point2::new(0.8, -0.7));
+        harness.button(start, PointerButton::Primary, true);
+        harness.move_to(end);
+        harness.key(Key::Escape, Modifiers::NONE);
+        harness.button(end, PointerButton::Primary, false);
+        assert_eq!(harness.state.selected_spans, previous);
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
     }
 
     #[test]

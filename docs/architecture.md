@@ -150,9 +150,13 @@ both scenes and clears history.
 Selection is either one spline control or a transient set of topological spans.
 Handles always select one control for local deformation; spans support bulk
 boundary assignment, while a set containing every span of movable curves also
-supports exact affine transforms. Repeated-knot multiplicity is stored separately
-from positive knot intervals, so C2, C1, and C0 joins do not create empty
-boundary-condition spans. Raising multiplicity uses exact knot insertion and
+supports exact affine transforms. A screen-space marquee selects every curve or
+outer span touched by its rectangle. Its geometry-kind filter can restrict the
+operation to loops, baffles, or outer edges; replacement, additive, and subtractive
+operations all produce the same transient span set used by click selection.
+Repeated-knot multiplicity is stored separately from positive knot intervals, so
+C2, C1, and C0 joins do not create empty boundary-condition spans. Raising
+multiplicity uses exact knot insertion and
 leaves geometry and span assignments unchanged, including at the periodic seam.
 Complete curves are always transformable. A partial selection is transformable
 when every exposed end is a C0 knot or an open-curve endpoint. The union of the

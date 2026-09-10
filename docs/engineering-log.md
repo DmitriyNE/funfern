@@ -14,8 +14,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Evaluate a dissipative relative dashpot for thin gaps. Keeping centered time
   integration would require an off-diagonal damping solve; the implemented gap
   spring is conservative.
-- [ ] Add box selection and selection filters for dense scenes. Rational weights
-  remain conditional on a demonstrated workflow need.
+- [ ] Redesign the UI around the active task and selection context. Reduce the
+  current long vertical scan, make modes and selection state clearer, and use
+  progressive disclosure for advanced geometry, boundary, and solver settings.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
   and local-repair cases. The user reports that the end-to-end handoff still feels
   slow even though the small scripted transfer case is much faster.
@@ -27,8 +28,26 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   record solver throughput and memory behavior over time.
 - [ ] Make operator assembly and transfer-map construction resumable if their
   synchronous post-mesh tail becomes visible on larger discretizations.
-- [ ] Extend fragile local repair/fallback behavior, persistent connectivity, and
-  cooldown in a later adaptation pass.
+- [ ] Extend fragile local repair/fallback behavior, especially for moderate loop,
+  interface, and baffle motion. Record concrete fallback triggers; small edits still
+  enter the full rebuild path too easily.
+
+## 2026-09-10 — Dense-scene span selection
+
+- Added screen-space box selection for boundary spans. Dragging empty viewport
+  space replaces the selection, Shift-drag adds, and Alt-drag subtracts; Escape
+  restores the pre-drag selection.
+- Added outer-edge, loop, baffle, and all-span filters plus Select filtered,
+  Invert, Clear, and Ctrl/Cmd+A. Filters affect span picking and bulk operations;
+  control handles remain an explicit single-control selection path.
+- The live marquee and filter operations are transient and create no geometry or
+  history transaction. Baffle face choice remains coherent across every selected
+  baffle span.
+- Automated egui tests exercise filtered baffle selection, subtraction, select-all,
+  Escape restoration, and unchanged history.
+- Formatting, Clippy with warnings denied, all 134 workspace tests, native release
+  compilation, and the release Trunk/WASM build pass. Interactive browser testing
+  was skipped as requested.
 
 ## 2026-09-10 — Baffle timestep and geometry handoff repair
 

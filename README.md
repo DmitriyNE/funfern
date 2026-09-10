@@ -72,7 +72,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **Select:** clicking a handle selects that one control for local reshaping.
   Clicking a curve selects its knot span; Shift-click toggles spans, and
   Ctrl/Cmd-click selects the complete curve. Double-click inserts a knot without
-  changing the curve and selects its control.
+  changing the curve and selects its control. Drag from empty viewport space to
+  box-select every touched span; Shift-drag adds and Alt-drag subtracts. The span
+  filter limits box selection and Ctrl/Cmd+A to outer edges, loops, baffles, or all
+  geometry. Select filtered, Invert, and Clear provide the same bulk operations in
+  the panel. Selection and its filter do not enter document history.
 - **Transform:** complete curves and partial selections bounded by C0 knots can
   be dragged, translated, rotated, uniformly scaled, snapped, or aligned as one
   undoable action. **Isolate selection at C0** inserts every missing boundary
