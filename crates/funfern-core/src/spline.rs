@@ -447,6 +447,19 @@ impl OpenCubicSpline {
         Ok(())
     }
 
+    /// Removes one knot by least-squares projection when exact removal is not
+    /// possible. Returns a convex-hull upper bound on curve displacement.
+    pub fn decrease_multiplicity_approximate(
+        &mut self,
+        breakpoint: usize,
+    ) -> Result<f64, SplineError> {
+        let original = self.clone();
+        self.decrease_multiplicity(breakpoint, f64::MAX)?;
+        let mut refined = self.clone();
+        refined.increase_multiplicity(breakpoint)?;
+        Ok(max_control_distance(&refined.controls, &original.controls))
+    }
+
     /// Splits at an interior breakpoint. The curve is first refined to C0, so
     /// the two returned clamped curves reproduce it exactly.
     pub fn split(mut self, breakpoint: usize) -> Result<(Self, Self), SplineError> {
@@ -909,6 +922,19 @@ impl PeriodicCubicSpline {
         *self = candidate;
         Ok(())
     }
+
+    /// Removes one periodic knot by least-squares projection. Returns a
+    /// convex-hull upper bound on the resulting curve displacement.
+    pub fn decrease_multiplicity_approximate(
+        &mut self,
+        breakpoint: usize,
+    ) -> Result<f64, SplineError> {
+        let original = self.clone();
+        self.decrease_multiplicity(breakpoint, f64::MAX)?;
+        let mut refined = self.clone();
+        refined.increase_multiplicity(breakpoint)?;
+        Ok(max_control_distance(&refined.controls, &original.controls))
+    }
     /// Deletes P_i and t_i, merging the intervals on either side. Reshapes the curve.
     pub fn remove(&mut self, i: usize) -> Result<(), SplineError> {
         if self.controls.len() <= 4 {
@@ -999,6 +1025,14 @@ fn controls_close(left: &[Point2], right: &[Point2], tolerance: f64) -> bool {
             .iter()
             .zip(right)
             .all(|(left, right)| (*left - *right).norm() <= tolerance * scale)
+}
+
+fn max_control_distance(left: &[Point2], right: &[Point2]) -> f64 {
+    debug_assert_eq!(left.len(), right.len());
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| (*left - *right).norm())
+        .fold(0.0, f64::max)
 }
 
 pub fn point_segment_distance(p: Point2, a: Point2, b: Point2) -> f64 {

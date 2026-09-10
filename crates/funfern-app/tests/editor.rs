@@ -472,7 +472,7 @@ fn continuity_split_merge_and_orientation_are_atomic_and_round_trip() {
 }
 
 #[test]
-fn continuity_smoothing_is_exact_or_leaves_the_document_untouched() {
+fn continuity_smoothing_is_exact_or_an_undoable_reshape() {
     let mut editor = Editor::default();
     let id = editor
         .create_internal_boundary(
@@ -489,7 +489,8 @@ fn continuity_smoothing_is_exact_or_leaves_the_document_untouched() {
         .unwrap();
     let original = editor.internal_boundary(id).unwrap().spline.clone();
     editor.set_internal_boundary_continuity(id, 1, 0).unwrap();
-    editor.set_internal_boundary_continuity(id, 1, 2).unwrap();
+    let exact_displacement = editor.set_internal_boundary_continuity(id, 1, 2).unwrap();
+    assert_eq!(exact_displacement, 0.0);
     let smoothed = &editor.internal_boundary(id).unwrap().spline;
     assert_eq!(smoothed.multiplicities(), original.multiplicities());
     for index in 0..=100 {
@@ -513,9 +514,16 @@ fn continuity_smoothing_is_exact_or_leaves_the_document_untouched() {
     editor.commit();
     let before = editor.document.clone();
     let history = editor.history_len();
-    assert!(editor.set_internal_boundary_continuity(id, 1, 1).is_err());
+    let displacement = editor.set_internal_boundary_continuity(id, 1, 1).unwrap();
+    assert!(displacement > 0.0);
+    assert_eq!(
+        editor.internal_boundary(id).unwrap().spline.continuity(1),
+        Some(1)
+    );
+    assert_ne!(editor.document, before);
+    assert_eq!(editor.history_len().0, history.0 + 1);
+    editor.undo();
     assert_eq!(editor.document, before);
-    assert_eq!(editor.history_len(), history);
 }
 
 #[test]

@@ -81,9 +81,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   A selected span exposes the continuity at its end knot. **C1 tangent** and
   **C0 corner** refine the cubic exactly; gold diamonds on the curve are
   repeated knots, separate from circular control handles. **C2 smooth** and
-  **C1 tangent** remove knots only when the current curve can be represented
-  exactly at the requested continuity; an edited incompatible corner is left
-  untouched with a specific message.
+  **C1 tangent** first try exact knot removal, then use a least-squares reshape
+  when the edited corner cannot be represented at the requested continuity.
+  The status strip reports an upper bound on the curve displacement.
   Whole loops and baffles can also be duplicated with their span assignments;
   selected baffles can be straightened between their endpoints.
 - **Baffle topology:** select one baffle span to split at its end knot. Select

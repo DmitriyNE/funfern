@@ -724,14 +724,15 @@ impl Editor {
         }
     }
 
-    /// Refines an existing baffle breakpoint to the requested continuity. This
-    /// only inserts knots, so the represented curve and span laws are unchanged.
+    /// Changes the continuity at a baffle breakpoint. Sharpening is exact;
+    /// smoothing falls back to a least-squares reshape when exact knot removal
+    /// is impossible. The returned value bounds the resulting displacement.
     pub fn set_internal_boundary_continuity(
         &mut self,
         id: InternalBoundaryId,
         breakpoint: usize,
         continuity: u8,
-    ) -> Result<(), String> {
+    ) -> Result<f64, String> {
         if continuity > 2 {
             return Err("Cubic continuity must be C0, C1, or C2".into());
         }
@@ -743,23 +744,25 @@ impl Editor {
             .continuity(breakpoint)
             .ok_or("Choose an interior baffle knot")?;
         if continuity == current {
-            return Ok(());
+            return Ok(0.0);
         }
         let mut spline = boundary.spline.clone();
+        let mut displacement_bound = 0.0;
         while spline.continuity(breakpoint).unwrap() > continuity {
             spline
                 .increase_multiplicity(breakpoint)
                 .map_err(|error| error.to_string())?;
         }
         while spline.continuity(breakpoint).unwrap() < continuity {
-            spline
-                .decrease_multiplicity(breakpoint, 1.0e-10)
-                .map_err(|error| match error {
-                    SplineError::NotRemovable => {
-                        "This edited corner cannot be smoothed exactly".to_string()
-                    }
-                    _ => error.to_string(),
-                })?;
+            match spline.decrease_multiplicity(breakpoint, 1.0e-10) {
+                Ok(()) => {}
+                Err(SplineError::NotRemovable) => {
+                    displacement_bound += spline
+                        .decrease_multiplicity_approximate(breakpoint)
+                        .map_err(|error| error.to_string())?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
         }
         self.begin();
         self.document
@@ -771,7 +774,7 @@ impl Editor {
             .spline = spline;
         self.changed();
         self.commit();
-        Ok(())
+        Ok(displacement_bound)
     }
 
     /// Splits a baffle at an existing interior breakpoint. The original ID is
@@ -1391,14 +1394,16 @@ impl Editor {
         }
     }
 
-    /// Refines a loop breakpoint to C1 or C0 without changing its shape or its
-    /// per-span assignments. Breakpoint zero is the editable periodic seam.
+    /// Changes a loop breakpoint's continuity. Sharpening is exact; smoothing
+    /// falls back to a least-squares reshape when exact removal is impossible.
+    /// Breakpoint zero is the editable periodic seam. The returned value bounds
+    /// the resulting displacement.
     pub fn set_obstacle_continuity(
         &mut self,
         id: ObstacleId,
         breakpoint: usize,
         continuity: u8,
-    ) -> Result<(), String> {
+    ) -> Result<f64, String> {
         if continuity > 2 {
             return Err("Cubic continuity must be C0, C1, or C2".into());
         }
@@ -1408,23 +1413,25 @@ impl Editor {
             .continuity(breakpoint)
             .ok_or("Missing loop knot")?;
         if continuity == current {
-            return Ok(());
+            return Ok(0.0);
         }
         let mut spline = obstacle.spline.clone();
+        let mut displacement_bound = 0.0;
         while spline.continuity(breakpoint).unwrap() > continuity {
             spline
                 .increase_multiplicity(breakpoint)
                 .map_err(|error| error.to_string())?;
         }
         while spline.continuity(breakpoint).unwrap() < continuity {
-            spline
-                .decrease_multiplicity(breakpoint, 1.0e-10)
-                .map_err(|error| match error {
-                    SplineError::NotRemovable => {
-                        "This edited corner cannot be smoothed exactly".to_string()
-                    }
-                    _ => error.to_string(),
-                })?;
+            match spline.decrease_multiplicity(breakpoint, 1.0e-10) {
+                Ok(()) => {}
+                Err(SplineError::NotRemovable) => {
+                    displacement_bound += spline
+                        .decrease_multiplicity_approximate(breakpoint)
+                        .map_err(|error| error.to_string())?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
         }
         self.begin();
         self.document
@@ -1436,7 +1443,7 @@ impl Editor {
             .spline = spline;
         self.changed();
         self.commit();
-        Ok(())
+        Ok(displacement_bound)
     }
 
     /// Refines several loop and baffle breakpoints to C0 as one exact history

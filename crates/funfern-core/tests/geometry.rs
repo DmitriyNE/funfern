@@ -243,7 +243,7 @@ fn repeated_knots_preserve_open_and_periodic_curves_and_split_exactly() {
 }
 
 #[test]
-fn exact_knot_removal_smooths_only_unmodified_corners() {
+fn knot_removal_is_exact_when_possible_and_reports_approximation_error() {
     let open = open_irregular();
     let mut refined = open.clone();
     refined.increase_multiplicity(1).unwrap();
@@ -290,6 +290,47 @@ fn exact_knot_removal_smooths_only_unmodified_corners() {
         Err(SplineError::NotRemovable)
     );
     assert_eq!(edited, before);
+
+    let displacement_bound = edited.decrease_multiplicity_approximate(1).unwrap();
+    assert!(displacement_bound > 0.0);
+    assert_eq!(edited.continuity(1), Some(1));
+    let maximum_sampled_displacement = (0..=500)
+        .map(|index| {
+            let parameter = index as f64 * before.period() / 500.0;
+            (edited.evaluate(parameter) - before.evaluate(parameter)).norm()
+        })
+        .fold(0.0_f64, f64::max);
+    assert!(maximum_sampled_displacement <= displacement_bound * (1.0 + 1.0e-12));
+
+    let second_bound = edited.decrease_multiplicity_approximate(1).unwrap();
+    assert!(second_bound > 0.0);
+    assert_eq!(edited.continuity(1), Some(2));
+
+    let mut edited_periodic = periodic.clone();
+    edited_periodic.increase_multiplicity(0).unwrap();
+    edited_periodic.increase_multiplicity(0).unwrap();
+    let seam_control = edited_periodic
+        .span_control_indices(edited_periodic.intervals().len() - 1)
+        .unwrap()[3];
+    let moved = edited_periodic.controls()[seam_control] + Point2::new(-0.015, 0.025);
+    edited_periodic.set_control(seam_control, moved).unwrap();
+    let before_periodic = edited_periodic.clone();
+    assert_eq!(
+        edited_periodic.decrease_multiplicity(0, 1.0e-10),
+        Err(SplineError::NotRemovable)
+    );
+    let seam_bound = edited_periodic
+        .decrease_multiplicity_approximate(0)
+        .unwrap();
+    assert!(seam_bound > 0.0);
+    assert_eq!(edited_periodic.continuity(0), Some(1));
+    let seam_sampled_displacement = (0..500)
+        .map(|index| {
+            let parameter = index as f64 * before_periodic.period() / 500.0;
+            (edited_periodic.evaluate(parameter) - before_periodic.evaluate(parameter)).norm()
+        })
+        .fold(0.0_f64, f64::max);
+    assert!(seam_sampled_displacement <= seam_bound * (1.0 + 1.0e-12));
 }
 
 #[test]

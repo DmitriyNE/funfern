@@ -37,19 +37,22 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## 2026-09-10 — Safe smoothing and loop role conversion
 
-- Added verified repeated-knot removal for open and periodic cubics, including the
-  seam. It reconstructs the lower-multiplicity control space, reinserts the knot,
-  and commits only within a scale-aware residual tolerance. Edited incompatible
-  corners fail without changing the document or history.
+- Added repeated-knot removal for open and periodic cubics, including the seam.
+  It reconstructs the lower-multiplicity control space and reinserts the knot to
+  test exactness. Edited incompatible corners now fall back to a least-squares
+  reshape, so C0 can always be promoted back to C1 or C2. The UI reports a
+  convex-hull upper bound on displacement and the edit remains one undo step.
 - Replaced one-way continuity buttons with explicit C2/C1/C0 choices. Exact
-  sharpening and smoothing share one inspector and retain span assignments.
+  sharpening and exact-first smoothing share one inspector and retain span
+  assignments.
 - Added loop conversion between hole, material interface, and two-sided closed
   wall. Hole conversion allocates an owned region using the selected material;
   interface/wall conversion retains it. Converting to a hole removes an empty
   region and rejects child geometry atomically.
-- Core tests cover round-trip removal at open and periodic knots and rejection
-  after corner deformation. Editor tests cover smoothing history, role ownership,
-  undo, persistence, validation, and nonempty-interior rejection.
+- Core tests cover round-trip removal at open and periodic knots, approximate
+  smoothing after corner deformation, and the reported displacement bound.
+  Editor tests cover exact smoothing, undoable reshaping, role ownership,
+  persistence, validation, and nonempty-interior rejection.
 - Verification passes formatting, Clippy with warnings denied, all **129 workspace
   tests**, native release compilation, and the optimized Trunk/WebGPU build.
 

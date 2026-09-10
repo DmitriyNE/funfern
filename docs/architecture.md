@@ -172,9 +172,10 @@ tips in the same region are valid topology junctions. Merging chooses the neares
 pair of tips; any parameter reversal also reverses span-law order and exchanges
 left/right face assignments. Smoothing removes one repeated knot by solving for
 the lower-multiplicity controls and reinserting the knot as a verification step.
-The edit commits only when that reconstruction matches within a scale-aware
-tolerance; incompatible corner edits remain untouched rather than being silently
-approximated.
+An exact reconstruction is used when it matches within a scale-aware tolerance.
+Otherwise the least-squares lower-multiplicity projection is committed as an
+explicit reshape; the maximum refined-control residual provides a convex-hull
+upper bound on curve displacement. Each continuity change is one undoable action.
 
 Loop role conversion preserves the stable obstacle ID and span assignments.
 Changing a hole to a material interface or closed wall allocates a new owned

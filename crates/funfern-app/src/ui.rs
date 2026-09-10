@@ -2259,7 +2259,13 @@ impl Playground {
                                 {
                                     let result =
                                         self.editor.set_obstacle_continuity(id, breakpoint, target);
-                                    self.error(result);
+                                    if let Some(displacement) = self.error(result)
+                                        && displacement > 0.0
+                                    {
+                                        self.message = format!(
+                                            "Continuity upgraded; curve reshaped by at most {displacement:.3e}"
+                                        );
+                                    }
                                 }
                             }
                         });
@@ -2281,7 +2287,13 @@ impl Playground {
                                         let result = self.editor.set_internal_boundary_continuity(
                                             id, breakpoint, target,
                                         );
-                                        self.error(result);
+                                        if let Some(displacement) = self.error(result)
+                                            && displacement > 0.0
+                                        {
+                                            self.message = format!(
+                                                "Continuity upgraded; curve reshaped by at most {displacement:.3e}"
+                                            );
+                                        }
                                     }
                                 }
                             });
@@ -2382,9 +2394,7 @@ impl Playground {
         } else if two_complete_baffles {
             ui.small("Tips must coincide within the snap step (0.02 without snapping). Side laws follow the arrows.");
         }
-        ui.small(
-            "Sharpening is exact. Smoothing succeeds only when exact knot removal is possible.",
-        );
+        ui.small("Sharpening is exact. Smoothing uses exact removal when possible, otherwise a minimum-change reshape.");
     }
 
     fn exposed_selection_breakpoints(&self) -> Option<ExposedBreakpoints> {
