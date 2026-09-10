@@ -151,10 +151,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **Drafts:** green curves are accepted, amber curves are being checked, red
   curves are invalid. The last accepted scene stays as a subdued reference.
   Invalid edits remain after release. Escape during a drag restores its starting
-  document; Revert Draft restores the accepted scene.
+  document; Undo can restore earlier accepted snapshots.
 - **History:** Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes outside text editing.
-  Each drag, coordinate edit, insertion, removal, creation, deletion, or revert
-  is one action. History keeps up to 100 actions, including invalid drafts.
+  Each drag, coordinate edit, insertion, removal, creation, or deletion is one
+  action. History keeps up to 100 actions, including invalid drafts.
 - **Files:** Save scene downloads JSON in the browser or opens a native save
   dialog. Load scene uses file upload/native selection and validates before
   replacement. Successful loading clears history; malformed files leave the

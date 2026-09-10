@@ -1660,16 +1660,6 @@ impl Playground {
             if ui.button("Fit view").clicked() {
                 self.fit = true;
             }
-            if ui
-                .add_enabled(
-                    self.editor.document.draft != self.editor.document.accepted,
-                    egui::Button::new("Revert draft"),
-                )
-                .clicked()
-            {
-                self.editor.revert();
-                self.clear_transient();
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let wave_available = self.wave_operator.is_some();
                 ui.add_enabled_ui(wave_available, |ui| {
@@ -6589,6 +6579,7 @@ mod tests {
                 "missing {label}"
             );
         }
+        assert!(!h.texts.iter().any(|(text, _)| text == "Revert draft"));
         h.click_text("+ Add");
         assert_eq!(h.state.active_tool, ActiveTool::AddGeometry);
         assert!(h.state.add_geometry_open);

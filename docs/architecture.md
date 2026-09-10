@@ -153,7 +153,7 @@ monotonic revision and invalidates outstanding draft validation. At the end of
 each frame, validation advances for the latest draft. Only a matching valid
 revision promotes the complete draft. Invalid drafts remain editable and preserve
 the accepted reference; release never silently rolls them back. Escape restores
-the pre-drag document. Revert Draft is an explicit undoable action.
+the pre-drag document, and Undo restores earlier document snapshots.
 
 History stores both scenes in document snapshots, grouping drags and numeric
 edits into transactions. It retains 100 actions, clears redo on a new edit, and

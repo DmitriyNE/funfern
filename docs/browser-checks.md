@@ -15,7 +15,8 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   Backspace, and Escape.
 - [ ] Drag a handle outside the square. The invalid draft persists after release,
   is red, and shows a specific reason and the accepted reference. Drag it back
-  to recover. Escape during a drag restores both scenes. Revert Draft works.
+  to recover. Escape during a drag restores both scenes. Undo restores the prior
+  document snapshot.
 - [ ] Double-click a curve to insert, including near the seam. The shape stays
   fixed. Double-click the same knot again: select its control without insertion.
   Delete removes a control, down to four. Delete obstacle is separate.
