@@ -1729,7 +1729,7 @@ impl Playground {
                     for (role, label) in [
                         (CreationRole::Hole, "Hole"),
                         (CreationRole::MaterialInterface, "Interface"),
-                        (CreationRole::InternalBoundary, "Straight"),
+                        (CreationRole::InternalBoundary, "Baffle"),
                     ] {
                         ui.selectable_value(&mut self.creation_role, role, label);
                     }
@@ -1757,7 +1757,12 @@ impl Playground {
                 ui.separator();
                 ui.label("Primitive");
                 ui.horizontal(|ui| {
-                    if ui.button("Rounded loop").clicked() {
+                    let primitive_label = if self.creation_role == CreationRole::InternalBoundary {
+                        "Straight"
+                    } else {
+                        "Rounded loop"
+                    };
+                    if ui.button(primitive_label).clicked() {
                         self.mode = Mode::Preset;
                         self.active_tool = ActiveTool::AddGeometry;
                         close = true;
@@ -6599,6 +6604,13 @@ mod tests {
         assert!(h.texts.iter().any(|(text, _)| text == "Add geometry"));
         assert!(h.texts.iter().any(|(text, _)| text == "Rounded loop"));
         assert!(h.texts.iter().any(|(text, _)| text == "Custom"));
+        h.click_text("Baffle");
+        assert!(matches!(
+            h.state.creation_role,
+            CreationRole::InternalBoundary
+        ));
+        assert!(h.texts.iter().any(|(text, _)| text == "Straight"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Rounded loop"));
     }
 
     #[test]
