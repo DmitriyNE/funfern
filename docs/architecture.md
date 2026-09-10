@@ -170,9 +170,18 @@ Open baffles split at an existing breakpoint after exact refinement to C0. The
 start half retains its stable ID and the end half receives a new one. Exact shared
 tips in the same region are valid topology junctions. Merging chooses the nearest
 pair of tips; any parameter reversal also reverses span-law order and exchanges
-left/right face assignments. Smoothing a corner after local control edits is not
-generally shape preserving and is currently available through Undo rather than an
-implicit approximation.
+left/right face assignments. Smoothing removes one repeated knot by solving for
+the lower-multiplicity controls and reinserting the knot as a verification step.
+The edit commits only when that reconstruction matches within a scale-aware
+tolerance; incompatible corner edits remain untouched rather than being silently
+approximated.
+
+Loop role conversion preserves the stable obstacle ID and span assignments.
+Changing a hole to a material interface or closed wall allocates a new owned
+region with the selected material. Interface/wall conversion retains the region.
+Changing either to a hole removes an empty interior region; direct child loops or
+baffles make the conversion fail atomically because they cannot remain inside a
+void.
 
 Duplication creates new stable geometry IDs, copies knot intervals,
 multiplicities, and span laws, and gives duplicated material-interface or wall

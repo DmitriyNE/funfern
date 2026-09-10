@@ -16,10 +16,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   spring is conservative.
 - [ ] Replace the temporary wave reset after open-baffle geometry edits with a
   side-aware transfer that preserves each moving trace without cross-wall sampling.
-- [ ] Continue stage-two spline topology editing with loop role/topology changes
-  and safe smoothing. Box selection and selection filters remain useful follow-ups
-  for dense scenes. Rational weights remain conditional on a demonstrated
-  workflow need.
+- [ ] Add box selection and selection filters for dense scenes. Rational weights
+  remain conditional on a demonstrated workflow need.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
   and local-repair cases. The user reports that the end-to-end handoff still feels
   slow even though the small scripted transfer case is much faster.
@@ -36,6 +34,24 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Improve open-baffle crack-tip element quality. The assigned-law native check
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
+
+## 2026-09-10 — Safe smoothing and loop role conversion
+
+- Added verified repeated-knot removal for open and periodic cubics, including the
+  seam. It reconstructs the lower-multiplicity control space, reinserts the knot,
+  and commits only within a scale-aware residual tolerance. Edited incompatible
+  corners fail without changing the document or history.
+- Replaced one-way continuity buttons with explicit C2/C1/C0 choices. Exact
+  sharpening and smoothing share one inspector and retain span assignments.
+- Added loop conversion between hole, material interface, and two-sided closed
+  wall. Hole conversion allocates an owned region using the selected material;
+  interface/wall conversion retains it. Converting to a hole removes an empty
+  region and rejects child geometry atomically.
+- Core tests cover round-trip removal at open and periodic knots and rejection
+  after corner deformation. Editor tests cover smoothing history, role ownership,
+  undo, persistence, validation, and nonempty-interior rejection.
+- Verification passes formatting, Clippy with warnings denied, all **129 workspace
+  tests**, native release compilation, and the optimized Trunk/WebGPU build.
 
 ## 2026-09-10 — Rigid partial-span transforms
 

@@ -264,8 +264,10 @@ viewport rotation gizmo. Duplication and exact baffle straightening retain span
 assignments. Repeated knots now expose C1/C0 refinement on loops and baffles;
 open baffles split and merge without losing span laws or oriented face semantics.
 Contiguous and disjoint partial-span selections can be isolated at their exposed
-C0 knots and transformed rigidly, including across a periodic seam. Loop topology
-role changes remain the next slice.
+C0 knots and transformed rigidly, including across a periodic seam. Exact
+smoothing removes repeated knots only when reconstruction succeeds, and selected
+loops can convert between hole, material-interface, and closed-wall roles with
+explicit region ownership.
 
 - Keep complete-curve translate/rotate/scale, duplication, snapping, and alignment
   predictable under span selection.

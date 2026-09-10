@@ -57,6 +57,7 @@ pub enum SplineError {
     NonFinite,
     InvalidInterval,
     IllConditionedKnots,
+    NotRemovable,
     Index,
 }
 impl std::fmt::Display for SplineError {
@@ -377,6 +378,72 @@ impl OpenCubicSpline {
         let mut multiplicities = self.multiplicities.clone();
         multiplicities[slot] += 1;
         *self = Self::new_with_multiplicities(controls, self.intervals.clone(), multiplicities)?;
+        Ok(())
+    }
+
+    /// Removes one copy of an interior knot only when the current controls lie
+    /// on the lower-multiplicity spline space within `tolerance`.
+    pub fn decrease_multiplicity(
+        &mut self,
+        breakpoint: usize,
+        tolerance: f64,
+    ) -> Result<(), SplineError> {
+        if breakpoint == 0 || breakpoint >= self.intervals.len() {
+            return Err(SplineError::Index);
+        }
+        if !tolerance.is_finite() || tolerance <= 0.0 {
+            return Err(SplineError::InvalidInterval);
+        }
+        let slot = breakpoint - 1;
+        if self.multiplicities[slot] <= 1 {
+            return Err(SplineError::NotRemovable);
+        }
+        let mut multiplicities = self.multiplicities.clone();
+        multiplicities[slot] -= 1;
+        let target_count = self.controls.len() - 1;
+        let mut columns = Vec::with_capacity(target_count);
+        for column in 0..target_count {
+            let mut basis = vec![Point2::default(); target_count];
+            basis[column].x = 1.0;
+            let mut spline = Self::new_with_multiplicities(
+                basis,
+                self.intervals.clone(),
+                multiplicities.clone(),
+            )?;
+            spline.increase_multiplicity(breakpoint)?;
+            columns.push(spline.controls.iter().map(|point| point.x).collect());
+        }
+        let x = least_squares(
+            &columns,
+            &self
+                .controls
+                .iter()
+                .map(|point| point.x)
+                .collect::<Vec<_>>(),
+        )
+        .ok_or(SplineError::NotRemovable)?;
+        let y = least_squares(
+            &columns,
+            &self
+                .controls
+                .iter()
+                .map(|point| point.y)
+                .collect::<Vec<_>>(),
+        )
+        .ok_or(SplineError::NotRemovable)?;
+        let controls = x
+            .into_iter()
+            .zip(y)
+            .map(|(x, y)| Point2::new(x, y))
+            .collect();
+        let candidate =
+            Self::new_with_multiplicities(controls, self.intervals.clone(), multiplicities)?;
+        let mut refined = candidate.clone();
+        refined.increase_multiplicity(breakpoint)?;
+        if !controls_close(&refined.controls, &self.controls, tolerance) {
+            return Err(SplineError::NotRemovable);
+        }
+        *self = candidate;
         Ok(())
     }
 
@@ -777,6 +844,71 @@ impl PeriodicCubicSpline {
         *self = Self::new_with_multiplicities(controls, self.intervals.clone(), multiplicities)?;
         Ok(())
     }
+
+    /// Removes one periodic knot copy only when doing so reproduces the current
+    /// controls within `tolerance`.
+    pub fn decrease_multiplicity(
+        &mut self,
+        breakpoint: usize,
+        tolerance: f64,
+    ) -> Result<(), SplineError> {
+        if breakpoint >= self.intervals.len() {
+            return Err(SplineError::Index);
+        }
+        if !tolerance.is_finite() || tolerance <= 0.0 {
+            return Err(SplineError::InvalidInterval);
+        }
+        if self.multiplicities[breakpoint] <= 1 || self.controls.len() <= 4 {
+            return Err(SplineError::NotRemovable);
+        }
+        let mut multiplicities = self.multiplicities.clone();
+        multiplicities[breakpoint] -= 1;
+        let target_count = self.controls.len() - 1;
+        let mut columns = Vec::with_capacity(target_count);
+        for column in 0..target_count {
+            let mut basis = vec![Point2::default(); target_count];
+            basis[column].x = 1.0;
+            let mut spline = Self::new_with_multiplicities(
+                basis,
+                self.intervals.clone(),
+                multiplicities.clone(),
+            )?;
+            spline.increase_multiplicity(breakpoint)?;
+            columns.push(spline.controls.iter().map(|point| point.x).collect());
+        }
+        let x = least_squares(
+            &columns,
+            &self
+                .controls
+                .iter()
+                .map(|point| point.x)
+                .collect::<Vec<_>>(),
+        )
+        .ok_or(SplineError::NotRemovable)?;
+        let y = least_squares(
+            &columns,
+            &self
+                .controls
+                .iter()
+                .map(|point| point.y)
+                .collect::<Vec<_>>(),
+        )
+        .ok_or(SplineError::NotRemovable)?;
+        let controls = x
+            .into_iter()
+            .zip(y)
+            .map(|(x, y)| Point2::new(x, y))
+            .collect();
+        let candidate =
+            Self::new_with_multiplicities(controls, self.intervals.clone(), multiplicities)?;
+        let mut refined = candidate.clone();
+        refined.increase_multiplicity(breakpoint)?;
+        if !controls_close(&refined.controls, &self.controls, tolerance) {
+            return Err(SplineError::NotRemovable);
+        }
+        *self = candidate;
+        Ok(())
+    }
     /// Deletes P_i and t_i, merging the intervals on either side. Reshapes the curve.
     pub fn remove(&mut self, i: usize) -> Result<(), SplineError> {
         if self.controls.len() <= 4 {
@@ -797,6 +929,76 @@ impl PeriodicCubicSpline {
         *self = Self::new(controls, intervals)?;
         Ok(())
     }
+}
+
+fn least_squares(columns: &[Vec<f64>], values: &[f64]) -> Option<Vec<f64>> {
+    let column_count = columns.len();
+    let row_count = values.len();
+    if column_count == 0 || columns.iter().any(|column| column.len() != row_count) {
+        return None;
+    }
+    let mut orthonormal = Vec::<Vec<f64>>::with_capacity(column_count);
+    let mut upper = vec![vec![0.0; column_count]; column_count];
+    for column in 0..column_count {
+        let mut vector = columns[column].clone();
+        // A second orthogonalization pass keeps the knot-removal residual useful
+        // for highly nonuniform, but still admissible, intervals.
+        for _ in 0..2 {
+            for previous in 0..column {
+                let projection = orthonormal[previous]
+                    .iter()
+                    .zip(&vector)
+                    .map(|(left, right)| left * right)
+                    .sum::<f64>();
+                upper[previous][column] += projection;
+                for (value, basis) in vector.iter_mut().zip(&orthonormal[previous]) {
+                    *value -= projection * basis;
+                }
+            }
+        }
+        let norm = vector.iter().map(|value| value * value).sum::<f64>().sqrt();
+        if !norm.is_finite() || norm <= 1.0e-13 {
+            return None;
+        }
+        upper[column][column] = norm;
+        for value in &mut vector {
+            *value /= norm;
+        }
+        orthonormal.push(vector);
+    }
+    let mut result = orthonormal
+        .iter()
+        .map(|column| {
+            column
+                .iter()
+                .zip(values)
+                .map(|(left, right)| left * right)
+                .sum::<f64>()
+        })
+        .collect::<Vec<_>>();
+    for row in (0..column_count).rev() {
+        for column in row + 1..column_count {
+            result[row] -= upper[row][column] * result[column];
+        }
+        result[row] /= upper[row][row];
+    }
+    result
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(result)
+}
+
+fn controls_close(left: &[Point2], right: &[Point2], tolerance: f64) -> bool {
+    let scale = left
+        .iter()
+        .chain(right)
+        .map(|point| point.norm())
+        .fold(1.0_f64, f64::max);
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| (*left - *right).norm() <= tolerance * scale)
 }
 
 pub fn point_segment_distance(p: Point2, a: Point2, b: Point2) -> f64 {

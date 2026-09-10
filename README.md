@@ -78,11 +78,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   spans follow only through their shared corner point. Snapping moves the selected
   arc-length centroid. Drag the viewport ring to rotate and its center marker to
   reposition the temporary pivot. Seam-wrapped loop selections are supported.
-  A selected span exposes the continuity at its end knot. **Make C1** and
-  **Make corner C0** refine the cubic exactly; gold diamonds on the curve are
-  repeated knots, separate from circular control handles. Smoothing a corner
-  after its controls have moved is deliberately left to Undo because it cannot
-  generally preserve the edited shape.
+  A selected span exposes the continuity at its end knot. **C1 tangent** and
+  **C0 corner** refine the cubic exactly; gold diamonds on the curve are
+  repeated knots, separate from circular control handles. **C2 smooth** and
+  **C1 tangent** remove knots only when the current curve can be represented
+  exactly at the requested continuity; an edited incompatible corner is left
+  untouched with a specific message.
   Whole loops and baffles can also be duplicated with their span assignments;
   selected baffles can be straightened between their endpoints.
 - **Baffle topology:** select one baffle span to split at its end knot. Select
@@ -91,6 +92,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   per-span laws, undo history, and start-to-end face orientation; reversing a
   piece exchanges its left/right assignments. Coincident split tips remain a
   valid mesh junction.
+- **Loop roles:** the selected loop can switch between a hole, material
+  interface, and two-sided closed wall. Creating an interior region uses the
+  chosen material. Converting to a hole removes that region and is allowed only
+  when it contains no child loops or baffles.
 - **Boundaries:** one Boundary inspector applies conditions to every compatible
   selected span and reports mixed assignments. Outer edges support reflecting,
   prescribed

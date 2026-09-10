@@ -10,7 +10,7 @@ use bevy_egui::{
     egui::{self, Color32, Pos2, Rect, Stroke},
 };
 use funfern_app::{
-    editor::{Acceptance, BoundaryFaceTarget, Editor, GeometryControl},
+    editor::{Acceptance, BoundaryFaceTarget, Editor, GeometryControl, LoopKind},
     persistence::{self, LoadCandidate},
 };
 use funfern_core::*;
@@ -1557,6 +1557,55 @@ impl Playground {
                     self.select_loop(id);
                 }
             }
+            if index.is_none()
+                && let Some(current_kind) = self.editor.loop_kind(id)
+            {
+                ui.add_space(6.0);
+                ui.label("Loop role");
+                let mut kind = current_kind;
+                egui::ComboBox::from_id_salt(("loop_kind", id.0))
+                    .selected_text(match current_kind {
+                        LoopKind::Hole => "Hole",
+                        LoopKind::MaterialInterface => "Material interface",
+                        LoopKind::Wall => "Two-sided closed wall",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut kind, LoopKind::Hole, "Hole");
+                        ui.selectable_value(
+                            &mut kind,
+                            LoopKind::MaterialInterface,
+                            "Material interface",
+                        );
+                        ui.selectable_value(&mut kind, LoopKind::Wall, "Two-sided closed wall");
+                    });
+                if current_kind == LoopKind::Hole {
+                    let materials = self.editor.document.draft.materials.clone();
+                    egui::ComboBox::from_label("New interior material")
+                        .selected_text(
+                            self.editor
+                                .document
+                                .draft
+                                .material(self.material_selection)
+                                .map_or("Missing", |material| material.name.as_str()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for material in materials {
+                                ui.selectable_value(
+                                    &mut self.material_selection,
+                                    material.id,
+                                    material.name,
+                                );
+                            }
+                        });
+                }
+                if kind != current_kind {
+                    let result = self.editor.set_loop_kind(id, kind, self.material_selection);
+                    if self.error(result).is_some() {
+                        self.select_loop(id);
+                    }
+                }
+                ui.small("Changing to a hole requires an empty interior region.");
+            }
             if let Some(index) = index
                 && let Some(o) = self.editor.obstacle(id)
                 && let Some(p) = o.spline.controls().get(index).copied()
@@ -2200,21 +2249,18 @@ impl Playground {
                     if let Some(obstacle) = self.editor.obstacle(id) {
                         let breakpoint = (span + 1) % obstacle.spline.intervals().len();
                         let continuity = obstacle.spline.continuity(breakpoint).unwrap();
+                        ui.label(format!("End knot · C{continuity}"));
                         ui.horizontal(|ui| {
-                            ui.label(format!("End knot · C{continuity}"));
-                            if ui
-                                .add_enabled(continuity > 1, egui::Button::new("Make C1"))
-                                .clicked()
+                            for (target, label) in
+                                [(2, "C2 smooth"), (1, "C1 tangent"), (0, "C0 corner")]
                             {
-                                let result = self.editor.set_obstacle_continuity(id, breakpoint, 1);
-                                self.error(result);
-                            }
-                            if ui
-                                .add_enabled(continuity > 0, egui::Button::new("Make corner C0"))
-                                .clicked()
-                            {
-                                let result = self.editor.set_obstacle_continuity(id, breakpoint, 0);
-                                self.error(result);
+                                if ui.selectable_label(continuity == target, label).clicked()
+                                    && continuity != target
+                                {
+                                    let result =
+                                        self.editor.set_obstacle_continuity(id, breakpoint, target);
+                                    self.error(result);
+                                }
                             }
                         });
                     }
@@ -2224,28 +2270,19 @@ impl Playground {
                         let breakpoint = span + 1;
                         if breakpoint < boundary.spline.intervals().len() {
                             let continuity = boundary.spline.continuity(breakpoint).unwrap();
+                            ui.label(format!("End knot · C{continuity}"));
                             ui.horizontal(|ui| {
-                                ui.label(format!("End knot · C{continuity}"));
-                                if ui
-                                    .add_enabled(continuity > 1, egui::Button::new("Make C1"))
-                                    .clicked()
+                                for (target, label) in
+                                    [(2, "C2 smooth"), (1, "C1 tangent"), (0, "C0 corner")]
                                 {
-                                    let result = self
-                                        .editor
-                                        .set_internal_boundary_continuity(id, breakpoint, 1);
-                                    self.error(result);
-                                }
-                                if ui
-                                    .add_enabled(
-                                        continuity > 0,
-                                        egui::Button::new("Make corner C0"),
-                                    )
-                                    .clicked()
-                                {
-                                    let result = self
-                                        .editor
-                                        .set_internal_boundary_continuity(id, breakpoint, 0);
-                                    self.error(result);
+                                    if ui.selectable_label(continuity == target, label).clicked()
+                                        && continuity != target
+                                    {
+                                        let result = self.editor.set_internal_boundary_continuity(
+                                            id, breakpoint, target,
+                                        );
+                                        self.error(result);
+                                    }
                                 }
                             });
                             if ui.button("Split baffle at end knot").clicked() {
@@ -2345,7 +2382,9 @@ impl Playground {
         } else if two_complete_baffles {
             ui.small("Tips must coincide within the snap step (0.02 without snapping). Side laws follow the arrows.");
         }
-        ui.small("Sharpening is exact. Smoothing a subsequently edited corner uses Undo.");
+        ui.small(
+            "Sharpening is exact. Smoothing succeeds only when exact knot removal is possible.",
+        );
     }
 
     fn exposed_selection_breakpoints(&self) -> Option<ExposedBreakpoints> {

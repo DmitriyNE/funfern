@@ -243,6 +243,56 @@ fn repeated_knots_preserve_open_and_periodic_curves_and_split_exactly() {
 }
 
 #[test]
+fn exact_knot_removal_smooths_only_unmodified_corners() {
+    let open = open_irregular();
+    let mut refined = open.clone();
+    refined.increase_multiplicity(1).unwrap();
+    refined.increase_multiplicity(1).unwrap();
+    refined.decrease_multiplicity(1, 1.0e-10).unwrap();
+    refined.decrease_multiplicity(1, 1.0e-10).unwrap();
+    assert_eq!(refined.multiplicities(), open.multiplicities());
+    for index in 0..=200 {
+        let parameter = index as f64 * open.period() / 200.0;
+        near(
+            refined.evaluate(parameter),
+            open.evaluate(parameter),
+            2.0e-10,
+        );
+    }
+
+    let periodic = irregular();
+    for breakpoint in [0, 3] {
+        let mut refined = periodic.clone();
+        refined.increase_multiplicity(breakpoint).unwrap();
+        refined.increase_multiplicity(breakpoint).unwrap();
+        refined.decrease_multiplicity(breakpoint, 1.0e-10).unwrap();
+        refined.decrease_multiplicity(breakpoint, 1.0e-10).unwrap();
+        assert_eq!(refined.multiplicities(), periodic.multiplicities());
+        for index in 0..200 {
+            let parameter = index as f64 * periodic.period() / 200.0;
+            near(
+                refined.evaluate(parameter),
+                periodic.evaluate(parameter),
+                3.0e-10,
+            );
+        }
+    }
+
+    let mut edited = open.clone();
+    edited.increase_multiplicity(1).unwrap();
+    edited.increase_multiplicity(1).unwrap();
+    let corner_control = edited.span_control_indices(0).unwrap()[3];
+    let moved = edited.controls()[corner_control] + Point2::new(0.03, -0.02);
+    edited.set_control(corner_control, moved).unwrap();
+    let before = edited.clone();
+    assert_eq!(
+        edited.decrease_multiplicity(1, 1.0e-10),
+        Err(SplineError::NotRemovable)
+    );
+    assert_eq!(edited, before);
+}
+
+#[test]
 fn open_spline_rejects_malformed_inputs() {
     assert!(OpenCubicSpline::uniform(vec![Point2::default(); 3]).is_err());
     assert!(OpenCubicSpline::new(vec![Point2::default(); 4], vec![1.0, 1.0]).is_err());

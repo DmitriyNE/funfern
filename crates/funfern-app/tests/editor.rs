@@ -472,6 +472,102 @@ fn continuity_split_merge_and_orientation_are_atomic_and_round_trip() {
 }
 
 #[test]
+fn continuity_smoothing_is_exact_or_leaves_the_document_untouched() {
+    let mut editor = Editor::default();
+    let id = editor
+        .create_internal_boundary(
+            OpenCubicSpline::uniform(vec![
+                Point2::new(-0.7, 0.55),
+                Point2::new(-0.35, 0.7),
+                Point2::new(0.0, 0.5),
+                Point2::new(0.35, 0.68),
+                Point2::new(0.7, 0.55),
+            ])
+            .unwrap(),
+            BACKGROUND_REGION,
+        )
+        .unwrap();
+    let original = editor.internal_boundary(id).unwrap().spline.clone();
+    editor.set_internal_boundary_continuity(id, 1, 0).unwrap();
+    editor.set_internal_boundary_continuity(id, 1, 2).unwrap();
+    let smoothed = &editor.internal_boundary(id).unwrap().spline;
+    assert_eq!(smoothed.multiplicities(), original.multiplicities());
+    for index in 0..=100 {
+        let parameter = index as f64 * original.period() / 100.0;
+        assert!((smoothed.evaluate(parameter) - original.evaluate(parameter)).norm() < 1.0e-10);
+    }
+
+    editor.set_internal_boundary_continuity(id, 1, 0).unwrap();
+    let corner = editor
+        .internal_boundary(id)
+        .unwrap()
+        .spline
+        .span_control_indices(0)
+        .unwrap()[3];
+    editor.begin();
+    let moved =
+        editor.internal_boundary(id).unwrap().spline.controls()[corner] + Point2::new(0.02, -0.01);
+    editor
+        .set_internal_boundary_point(id, corner, moved)
+        .unwrap();
+    editor.commit();
+    let before = editor.document.clone();
+    let history = editor.history_len();
+    assert!(editor.set_internal_boundary_continuity(id, 1, 1).is_err());
+    assert_eq!(editor.document, before);
+    assert_eq!(editor.history_len(), history);
+}
+
+#[test]
+fn loop_role_conversion_owns_regions_and_rejects_nonempty_holes() {
+    let mut editor = Editor::default();
+    let material = editor.add_material().unwrap();
+    let id = ObstacleId(1);
+    let history = editor.history_len().0;
+    editor
+        .set_loop_kind(id, LoopKind::MaterialInterface, material)
+        .unwrap();
+    let interior = editor.obstacle(id).unwrap().role.interior().unwrap();
+    assert_eq!(
+        editor.document.draft.region(interior).unwrap().material,
+        material
+    );
+    assert_eq!(editor.history_len().0, history + 1);
+    settle(&mut editor);
+    assert_eq!(editor.acceptance, Acceptance::Valid);
+
+    editor.set_loop_kind(id, LoopKind::Wall, material).unwrap();
+    assert_eq!(editor.obstacle(id).unwrap().role.interior(), Some(interior));
+    assert_eq!(editor.loop_kind(id), Some(LoopKind::Wall));
+    editor.set_loop_kind(id, LoopKind::Hole, material).unwrap();
+    assert_eq!(editor.loop_kind(id), Some(LoopKind::Hole));
+    assert!(editor.document.draft.region(interior).is_none());
+    settle(&mut editor);
+    assert_eq!(editor.acceptance, Acceptance::Valid);
+    editor.undo();
+    assert_eq!(editor.loop_kind(id), Some(LoopKind::Wall));
+    assert!(editor.document.draft.region(interior).is_some());
+
+    let child = editor
+        .create_loop(
+            PeriodicCubicSpline::rounded(Point2::default(), 0.04),
+            LoopRole::Hole { exterior: interior },
+        )
+        .unwrap();
+    settle(&mut editor);
+    assert_eq!(editor.acceptance, Acceptance::Valid);
+    let before = editor.document.clone();
+    let history = editor.history_len();
+    assert!(editor.set_loop_kind(id, LoopKind::Hole, material).is_err());
+    assert_eq!(editor.document, before);
+    assert_eq!(editor.history_len(), history);
+    assert_eq!(editor.obstacle(child).unwrap().role.exterior(), interior);
+
+    let decoded = decode(save(&editor.document).unwrap().as_bytes()).unwrap();
+    assert_eq!(decoded, editor.document);
+}
+
+#[test]
 fn hole_span_conditions_round_trip_follow_seam_insertion_and_guard_removal() {
     let mut editor = Editor::default();
     let id = ObstacleId(1);

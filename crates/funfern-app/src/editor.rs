@@ -7,6 +7,13 @@ pub enum GeometryControl {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopKind {
+    Hole,
+    MaterialInterface,
+    Wall,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundaryFaceTarget {
     Outer(OuterSide),
     Hole(ObstacleId, usize),
@@ -74,6 +81,112 @@ impl Default for Editor {
     }
 }
 impl Editor {
+    pub fn loop_kind(&self, id: ObstacleId) -> Option<LoopKind> {
+        self.obstacle(id).map(|obstacle| match obstacle.role {
+            LoopRole::Hole { .. } => LoopKind::Hole,
+            LoopRole::MaterialInterface { .. } => LoopKind::MaterialInterface,
+            LoopRole::Wall { .. } => LoopKind::Wall,
+        })
+    }
+
+    /// Converts a closed loop between a hole, material interface, and two-sided
+    /// wall. Region creation/removal is atomic; a nonempty interior cannot be
+    /// converted to a hole because its dependent geometry would become invalid.
+    pub fn set_loop_kind(
+        &mut self,
+        id: ObstacleId,
+        kind: LoopKind,
+        new_region_material: MaterialId,
+    ) -> Result<(), String> {
+        let obstacle = self.obstacle(id).ok_or("Missing obstacle")?;
+        let current = match obstacle.role {
+            LoopRole::Hole { .. } => LoopKind::Hole,
+            LoopRole::MaterialInterface { .. } => LoopKind::MaterialInterface,
+            LoopRole::Wall { .. } => LoopKind::Wall,
+        };
+        if current == kind {
+            return Ok(());
+        }
+        let old_role = obstacle.role;
+        let exterior = old_role.exterior();
+        if matches!(old_role, LoopRole::Hole { .. }) && kind != LoopKind::Hole {
+            if self.document.draft.material(new_region_material).is_none() {
+                return Err("Choose an existing interior material".into());
+            }
+            let interior = RegionId(self.next_region_id);
+            self.next_region_id = self
+                .next_region_id
+                .checked_add(1)
+                .ok_or("Region IDs exhausted")?;
+            let role = match kind {
+                LoopKind::MaterialInterface => LoopRole::MaterialInterface { exterior, interior },
+                LoopKind::Wall => LoopRole::Wall { exterior, interior },
+                LoopKind::Hole => unreachable!(),
+            };
+            self.begin();
+            self.document.draft.regions.push(Region {
+                id: interior,
+                material: new_region_material,
+            });
+            self.document
+                .draft
+                .obstacles
+                .iter_mut()
+                .find(|obstacle| obstacle.id == id)
+                .unwrap()
+                .role = role;
+            self.changed();
+            self.commit();
+            return Ok(());
+        }
+        let interior = old_role.interior().ok_or("Loop has no interior region")?;
+        if kind == LoopKind::Hole
+            && (self
+                .document
+                .draft
+                .obstacles
+                .iter()
+                .any(|child| child.id != id && child.role.exterior() == interior)
+                || self
+                    .document
+                    .draft
+                    .internal_boundaries
+                    .iter()
+                    .any(|boundary| boundary.region == interior))
+        {
+            return Err("Move or delete geometry inside this loop before making it a hole".into());
+        }
+        self.begin();
+        if kind == LoopKind::Hole {
+            self.document
+                .draft
+                .regions
+                .retain(|region| region.id != interior);
+            self.document
+                .draft
+                .obstacles
+                .iter_mut()
+                .find(|obstacle| obstacle.id == id)
+                .unwrap()
+                .role = LoopRole::Hole { exterior };
+        } else {
+            self.document
+                .draft
+                .obstacles
+                .iter_mut()
+                .find(|obstacle| obstacle.id == id)
+                .unwrap()
+                .role = match kind {
+                LoopKind::MaterialInterface => LoopRole::MaterialInterface { exterior, interior },
+                LoopKind::Wall => LoopRole::Wall { exterior, interior },
+                LoopKind::Hole => unreachable!(),
+            };
+        }
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
     pub fn boundary_face_condition(
         &self,
         target: BoundaryFaceTarget,
@@ -629,9 +742,6 @@ impl Editor {
             .spline
             .continuity(breakpoint)
             .ok_or("Choose an interior baffle knot")?;
-        if continuity > current {
-            return Err("Smoothing an edited corner is not shape preserving; use Undo".into());
-        }
         if continuity == current {
             return Ok(());
         }
@@ -640,6 +750,16 @@ impl Editor {
             spline
                 .increase_multiplicity(breakpoint)
                 .map_err(|error| error.to_string())?;
+        }
+        while spline.continuity(breakpoint).unwrap() < continuity {
+            spline
+                .decrease_multiplicity(breakpoint, 1.0e-10)
+                .map_err(|error| match error {
+                    SplineError::NotRemovable => {
+                        "This edited corner cannot be smoothed exactly".to_string()
+                    }
+                    _ => error.to_string(),
+                })?;
         }
         self.begin();
         self.document
@@ -1287,9 +1407,6 @@ impl Editor {
             .spline
             .continuity(breakpoint)
             .ok_or("Missing loop knot")?;
-        if continuity > current {
-            return Err("Smoothing an edited corner is not shape preserving; use Undo".into());
-        }
         if continuity == current {
             return Ok(());
         }
@@ -1298,6 +1415,16 @@ impl Editor {
             spline
                 .increase_multiplicity(breakpoint)
                 .map_err(|error| error.to_string())?;
+        }
+        while spline.continuity(breakpoint).unwrap() < continuity {
+            spline
+                .decrease_multiplicity(breakpoint, 1.0e-10)
+                .map_err(|error| match error {
+                    SplineError::NotRemovable => {
+                        "This edited corner cannot be smoothed exactly".to_string()
+                    }
+                    _ => error.to_string(),
+                })?;
         }
         self.begin();
         self.document
