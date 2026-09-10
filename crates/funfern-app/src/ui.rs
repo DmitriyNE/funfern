@@ -1968,23 +1968,21 @@ impl Playground {
         ui.heading("View");
         ui.small("Control overlays, field rendering, and viewport appearance.");
         ui.separator();
-        ui.collapsing("Display", |ui| {
-            ui.checkbox(&mut self.grid, "Grid");
-            ui.checkbox(&mut self.polygon, "Control polygons");
-            ui.checkbox(&mut self.handles, "Handles");
-            ui.checkbox(&mut self.reference, "Accepted reference");
-            ui.checkbox(&mut self.show_materials, "Material regions");
-            ui.checkbox(&mut self.show_mesh, "Accepted triangle mesh");
-            ui.add_enabled_ui(self.show_mesh, |ui| {
-                ui.checkbox(&mut self.show_mesh_boundary, "Mesh boundary labels");
-            });
-            ui.checkbox(&mut self.show_field, "Field colors");
-            ui.add(
-                egui::Slider::new(&mut self.field_gain, 0.25..=12.0)
-                    .logarithmic(true)
-                    .text("field intensity"),
-            );
+        ui.checkbox(&mut self.grid, "Grid");
+        ui.checkbox(&mut self.polygon, "Control polygons");
+        ui.checkbox(&mut self.handles, "Handles");
+        ui.checkbox(&mut self.reference, "Accepted reference");
+        ui.checkbox(&mut self.show_materials, "Material regions");
+        ui.checkbox(&mut self.show_mesh, "Accepted triangle mesh");
+        ui.add_enabled_ui(self.show_mesh, |ui| {
+            ui.checkbox(&mut self.show_mesh_boundary, "Mesh boundary labels");
         });
+        ui.checkbox(&mut self.show_field, "Field colors");
+        ui.add(
+            egui::Slider::new(&mut self.field_gain, 0.25..=12.0)
+                .logarithmic(true)
+                .text("field intensity"),
+        );
     }
 
     fn materials_panel(&mut self, ui: &mut egui::Ui) {
