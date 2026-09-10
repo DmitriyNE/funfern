@@ -2197,9 +2197,7 @@ impl Playground {
                 ui.small("Preparing…");
             }
             if self.mesh_started.is_some() || self.mesh_job.is_some() {
-                ui.small(
-                    "Detailed build, repair, and fallback timing is available in Performance.",
-                );
+                ui.small("Mesh build in progress…");
             }
             let wave_available = self.wave_operator.is_some();
             ui.add_enabled_ui(wave_available, |ui| {
@@ -2261,7 +2259,6 @@ impl Playground {
                 if let Some(energy) = self.wave_energy {
                     ui.small(format!("Discrete energy {energy:.6e}"));
                 }
-                ui.small("Throughput, memory, and handoff timing are in Performance.");
             } else if self.mesh.is_some() {
                 ui.small("Preparing wave operator…");
             } else if self.simulation_candidate.is_some() {
