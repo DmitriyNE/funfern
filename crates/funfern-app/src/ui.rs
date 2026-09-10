@@ -2187,7 +2187,7 @@ impl Playground {
             if self.editor.editing() && self.mesh_source != self.editor.document.accepted {
                 ui.small("Waiting for edit to finish…");
             } else if let Some(job) = &self.mesh_job {
-                ui.small(format!("{}…", job.phase()));
+                ui.small(format!("Mesh rebuilding: {}…", job.phase()));
             } else if let Some(error) = &self.mesh_error {
                 ui.colored_label(RED, error);
                 ui.small("Previous mesh retained.");
@@ -2195,9 +2195,6 @@ impl Playground {
                 ui.small("Mesh ready.");
             } else {
                 ui.small("Preparing…");
-            }
-            if self.mesh_job.is_some() {
-                ui.small("Mesh build in progress…");
             }
             let wave_available = self.wave_operator.is_some();
             ui.add_enabled_ui(wave_available, |ui| {
