@@ -2135,12 +2135,25 @@ impl Playground {
                 "wave speed {:.3}",
                 (material.stiffness / material.mass_density).sqrt()
             ));
-            if self.material_selection != DEFAULT_MATERIAL
-                && ui.small_button("Delete unused material").clicked()
-            {
-                let result = self.editor.delete_material(self.material_selection);
-                if self.error(result).is_some() {
-                    self.material_selection = DEFAULT_MATERIAL;
+            if self.material_selection != DEFAULT_MATERIAL {
+                let material_in_use = self
+                    .editor
+                    .document
+                    .draft
+                    .regions
+                    .iter()
+                    .any(|region| region.material == self.material_selection);
+                let response =
+                    ui.add_enabled(!material_in_use, egui::Button::new("Delete material"));
+                if response.clicked() {
+                    let result = self.editor.delete_material(self.material_selection);
+                    if self.error(result).is_some() {
+                        self.material_selection = DEFAULT_MATERIAL;
+                        self.material_name_edit = None;
+                    }
+                }
+                if material_in_use {
+                    response.on_hover_text("Material is assigned to a subdomain");
                 }
             }
         }
