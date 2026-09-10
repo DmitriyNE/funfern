@@ -2202,13 +2202,21 @@ impl Playground {
                         .add(egui::Button::new("Place pulse").selected(self.mode == Mode::Pulse))
                         .clicked()
                     {
-                        self.mode = Mode::Pulse;
+                        self.mode = if self.mode == Mode::Pulse {
+                            Mode::Select
+                        } else {
+                            Mode::Pulse
+                        };
                     }
                     if ui
                         .add(egui::Button::new("Move source").selected(self.mode == Mode::Source))
                         .clicked()
                     {
-                        self.mode = Mode::Source;
+                        self.mode = if self.mode == Mode::Source {
+                            Mode::Select
+                        } else {
+                            Mode::Source
+                        };
                     }
                 });
                 ui.add(
@@ -6852,6 +6860,18 @@ mod tests {
     #[test]
     fn pulse_and_source_tools_only_change_transient_simulation_input() {
         let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        h.click_text("Simulation");
+        h.click_text("Place pulse");
+        assert!(h.state.mode == Mode::Pulse);
+        h.click_text("Place pulse");
+        assert!(h.state.mode == Mode::Select);
+        h.click_text("Move source");
+        assert!(h.state.mode == Mode::Source);
+        h.click_text("Move source");
+        assert!(h.state.mode == Mode::Select);
+
         let document = h.state.editor.document.clone();
         h.state.mode = Mode::Pulse;
         let pulse = Point2::new(0.45, -0.3);
