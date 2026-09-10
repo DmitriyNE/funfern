@@ -75,6 +75,8 @@ struct StoredLoop {
     span_conditions: Option<Vec<StoredFaceCondition>>,
     controls: Vec<[f64; 2]>,
     intervals: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    multiplicities: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -88,6 +90,8 @@ struct StoredInternalBoundary {
     span_laws: Vec<StoredSpanLaw>,
     controls: Vec<[f64; 2]>,
     intervals: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    multiplicities: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -205,6 +209,7 @@ fn encode_scene(scene: &Scene) -> StoredScene {
                     .map(|point| [point.x, point.y])
                     .collect(),
                 intervals: loop_.spline.intervals().to_vec(),
+                multiplicities: loop_.spline.multiplicities().to_vec(),
             })
             .collect(),
         internal_boundaries: scene
@@ -235,6 +240,7 @@ fn encode_scene(scene: &Scene) -> StoredScene {
                     .map(|point| [point.x, point.y])
                     .collect(),
                 intervals: boundary.spline.intervals().to_vec(),
+                multiplicities: boundary.spline.multiplicities().to_vec(),
             })
             .collect(),
         outer_boundaries: Some(scene.outer_boundaries.sides.map(encode_outer_condition)),
@@ -326,34 +332,40 @@ fn decode_face_condition(condition: StoredFaceCondition) -> FaceBoundaryConditio
 fn decode_spline(
     controls: Vec<[f64; 2]>,
     intervals: Vec<f64>,
+    multiplicities: Vec<u8>,
 ) -> Result<PeriodicCubicSpline, String> {
     if controls.iter().flatten().any(|value| !value.is_finite()) {
         return Err("Coordinates must be finite".into());
     }
-    PeriodicCubicSpline::new(
-        controls
-            .into_iter()
-            .map(|[x, y]| Point2::new(x, y))
-            .collect(),
-        intervals,
-    )
+    let controls = controls
+        .into_iter()
+        .map(|[x, y]| Point2::new(x, y))
+        .collect();
+    if multiplicities.is_empty() {
+        PeriodicCubicSpline::new(controls, intervals)
+    } else {
+        PeriodicCubicSpline::new_with_multiplicities(controls, intervals, multiplicities)
+    }
     .map_err(|error| error.to_string())
 }
 
 fn decode_open_spline(
     controls: Vec<[f64; 2]>,
     intervals: Vec<f64>,
+    multiplicities: Vec<u8>,
 ) -> Result<OpenCubicSpline, String> {
     if controls.iter().flatten().any(|value| !value.is_finite()) {
         return Err("Coordinates must be finite".into());
     }
-    OpenCubicSpline::new(
-        controls
-            .into_iter()
-            .map(|[x, y]| Point2::new(x, y))
-            .collect(),
-        intervals,
-    )
+    let controls = controls
+        .into_iter()
+        .map(|[x, y]| Point2::new(x, y))
+        .collect();
+    if multiplicities.is_empty() {
+        OpenCubicSpline::new(controls, intervals)
+    } else {
+        OpenCubicSpline::new_with_multiplicities(controls, intervals, multiplicities)
+    }
     .map_err(|error| error.to_string())
 }
 
@@ -369,7 +381,7 @@ fn decode_v1(loops: Vec<StoredLoopV1>) -> Result<Scene, String> {
             }
             Ok(Obstacle::hole(
                 ObstacleId(loop_.id),
-                decode_spline(loop_.controls, loop_.intervals)?,
+                decode_spline(loop_.controls, loop_.intervals, vec![])?,
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -438,7 +450,7 @@ fn decode_scene(
                     interior: RegionId(interior),
                 },
             };
-            let spline = decode_spline(loop_.controls, loop_.intervals)?;
+            let spline = decode_spline(loop_.controls, loop_.intervals, loop_.multiplicities)?;
             let span_conditions = match loop_.span_conditions {
                 Some(conditions) => conditions.into_iter().map(decode_face_condition).collect(),
                 None if !require_loop_conditions => {
@@ -464,7 +476,11 @@ fn decode_scene(
             if boundary.law.is_some() && !boundary.span_laws.is_empty() {
                 return Err("Internal boundary mixes legacy and span laws".into());
             }
-            let spline = decode_open_spline(boundary.controls, boundary.intervals)?;
+            let spline = decode_open_spline(
+                boundary.controls,
+                boundary.intervals,
+                boundary.multiplicities,
+            )?;
             let span_laws = if boundary.span_laws.is_empty() {
                 match boundary.law {
                     Some(StoredInternalBoundaryLaw::Reflecting) => {
@@ -532,7 +548,7 @@ fn decode_scene(
 
 pub fn save(document: &Document) -> Result<String, String> {
     serde_json::to_string_pretty(&FileV2 {
-        version: 7,
+        version: 8,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
@@ -557,7 +573,7 @@ pub fn parse(bytes: &[u8]) -> Result<LoadCandidate, String> {
                 accepted: decode_v1(file.accepted)?,
             }
         }
-        2..=7 => {
+        2..=8 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());

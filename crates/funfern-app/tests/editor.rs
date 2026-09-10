@@ -213,7 +213,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 8.into(),
+            0 => value["version"] = 9.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -290,7 +290,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        7
+        8
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -366,6 +366,109 @@ fn baffle_span_laws_follow_insertion_and_guard_ambiguous_removal() {
         editor.internal_boundary(id).unwrap().span_laws,
         [assigned, assigned]
     );
+}
+
+#[test]
+fn continuity_split_merge_and_orientation_are_atomic_and_round_trip() {
+    let mut editor = Editor::default();
+    let spline = OpenCubicSpline::new(
+        vec![
+            Point2::new(-0.8, 0.55),
+            Point2::new(-0.55, 0.75),
+            Point2::new(-0.15, 0.45),
+            Point2::new(0.2, 0.7),
+            Point2::new(0.55, 0.45),
+            Point2::new(0.8, 0.6),
+        ],
+        vec![0.7, 1.2, 0.9],
+    )
+    .unwrap();
+    let original = spline.clone();
+    let id = editor
+        .create_internal_boundary(spline, BACKGROUND_REGION)
+        .unwrap();
+    let law = InternalBoundaryLaw {
+        left: FaceBoundaryCondition::Dirichlet {
+            signal: BoundarySignal::ZERO,
+        },
+        right: FaceBoundaryCondition::SecondOrderOutgoing,
+        coupling: InternalBoundaryCoupling::Independent,
+    };
+    editor.set_internal_boundary_law(id, 0, law).unwrap();
+    let history = editor.history_len().0;
+    editor.set_internal_boundary_continuity(id, 1, 0).unwrap();
+    assert_eq!(editor.history_len().0, history + 1);
+    assert_eq!(
+        editor.internal_boundary(id).unwrap().spline.continuity(1),
+        Some(0)
+    );
+    assert_eq!(editor.internal_boundary(id).unwrap().span_laws[0], law);
+    for index in 0..=200 {
+        let parameter = index as f64 * original.period() / 200.0;
+        assert!(
+            (editor
+                .internal_boundary(id)
+                .unwrap()
+                .spline
+                .evaluate(parameter)
+                - original.evaluate(parameter))
+            .norm()
+                < 1.0e-10
+        );
+    }
+
+    let history = editor.history_len().0;
+    let second = editor.split_internal_boundary(id, 1).unwrap();
+    assert_eq!(editor.history_len().0, history + 1);
+    assert_eq!(editor.internal_boundary(id).unwrap().span_laws, [law]);
+    assert_eq!(editor.internal_boundary(second).unwrap().span_laws.len(), 2);
+    settle(&mut editor);
+    assert_eq!(editor.acceptance, Acceptance::Valid);
+    let mesh = mesh_scene(
+        &editor.document.draft,
+        editor.revision,
+        MeshingOptions {
+            target_edge_length: 0.25,
+            minimum_angle_degrees: 10.0,
+            ..Default::default()
+        },
+    )
+    .expect("a split baffle junction must remain meshable");
+    QuadraticWaveOperator::assemble_scene(
+        &mesh,
+        &editor.document.draft,
+        OuterBoundaryCondition::Reflecting,
+    )
+    .expect("a split baffle junction must assemble into the wave operator");
+
+    // Merge with the second ID first, forcing orientation reversal. Face laws
+    // must still follow the displayed start-to-end arrows.
+    let history = editor.history_len().0;
+    let kept = editor
+        .merge_internal_boundaries(second, id, 1.0e-12)
+        .unwrap();
+    assert_eq!(kept, second);
+    assert_eq!(editor.history_len().0, history + 1);
+    assert!(editor.internal_boundary(id).is_none());
+    let merged = editor.internal_boundary(kept).unwrap();
+    assert_eq!(merged.spline.intervals().len(), 3);
+    assert_eq!(merged.spline.multiplicities(), &[1, 3]);
+    let reversed_law = merged.span_laws[2];
+    assert_eq!(reversed_law.left, law.right);
+    assert_eq!(reversed_law.right, law.left);
+    settle(&mut editor);
+    assert_eq!(editor.acceptance, Acceptance::Valid);
+
+    let json = save(&editor.document).unwrap();
+    let decoded = decode(json.as_bytes()).unwrap();
+    assert_eq!(decoded, editor.document);
+    assert_eq!(
+        decoded.draft.internal_boundaries[0].spline.multiplicities(),
+        &[1, 3]
+    );
+    editor.undo();
+    assert!(editor.internal_boundary(id).is_some());
+    assert!(editor.internal_boundary(second).is_some());
 }
 
 #[test]

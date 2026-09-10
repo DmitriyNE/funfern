@@ -1507,10 +1507,10 @@ impl Playground {
                 if responses.iter().any(|r| r.lost_focus() || r.drag_stopped()) {
                     self.editor.commit();
                 }
-                let can_remove = self
-                    .editor
-                    .obstacle(id)
-                    .is_some_and(|o| o.spline.controls().len() > 4);
+                let can_remove = self.editor.obstacle(id).is_some_and(|o| {
+                    o.spline.controls().len() > 4
+                        && o.spline.multiplicities().iter().all(|value| *value == 1)
+                });
                 if ui
                     .add_enabled(
                         can_remove,
@@ -1589,10 +1589,14 @@ impl Playground {
                 {
                     self.editor.commit();
                 }
-                let can_remove = self
-                    .editor
-                    .internal_boundary(id)
-                    .is_some_and(|boundary| boundary.spline.controls().len() > 4);
+                let can_remove = self.editor.internal_boundary(id).is_some_and(|boundary| {
+                    boundary.spline.controls().len() > 4
+                        && boundary
+                            .spline
+                            .multiplicities()
+                            .iter()
+                            .all(|value| *value == 1)
+                });
                 if ui
                     .add_enabled(
                         can_remove,
@@ -1699,6 +1703,7 @@ impl Playground {
                 ui.small("Select every span of movable curves to transform geometry.");
             }
         }
+        self.topology_inspector(ui);
         self.boundary_inspector(ui);
         ui.add_space(8.0);
         ui.collapsing("Regions and materials", |ui| {
@@ -2085,6 +2090,138 @@ impl Playground {
                 }
             })
             .collect()
+    }
+
+    fn topology_inspector(&mut self, ui: &mut egui::Ui) {
+        if self.selected_spans.is_empty() {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label("Spline topology");
+        ui.small("Continuity applies at the end knot of one selected span.");
+
+        if self.selected_spans.len() == 1 {
+            match self.selected_spans[0] {
+                GeometrySpan::Loop(id, span) => {
+                    if let Some(obstacle) = self.editor.obstacle(id) {
+                        let breakpoint = (span + 1) % obstacle.spline.intervals().len();
+                        let continuity = obstacle.spline.continuity(breakpoint).unwrap();
+                        ui.horizontal(|ui| {
+                            ui.label(format!("End knot · C{continuity}"));
+                            if ui
+                                .add_enabled(continuity > 1, egui::Button::new("Make C1"))
+                                .clicked()
+                            {
+                                let result = self.editor.set_obstacle_continuity(id, breakpoint, 1);
+                                self.error(result);
+                            }
+                            if ui
+                                .add_enabled(continuity > 0, egui::Button::new("Make corner C0"))
+                                .clicked()
+                            {
+                                let result = self.editor.set_obstacle_continuity(id, breakpoint, 0);
+                                self.error(result);
+                            }
+                        });
+                    }
+                }
+                GeometrySpan::Baffle(id, span) => {
+                    if let Some(boundary) = self.editor.internal_boundary(id) {
+                        let breakpoint = span + 1;
+                        if breakpoint < boundary.spline.intervals().len() {
+                            let continuity = boundary.spline.continuity(breakpoint).unwrap();
+                            ui.horizontal(|ui| {
+                                ui.label(format!("End knot · C{continuity}"));
+                                if ui
+                                    .add_enabled(continuity > 1, egui::Button::new("Make C1"))
+                                    .clicked()
+                                {
+                                    let result = self
+                                        .editor
+                                        .set_internal_boundary_continuity(id, breakpoint, 1);
+                                    self.error(result);
+                                }
+                                if ui
+                                    .add_enabled(
+                                        continuity > 0,
+                                        egui::Button::new("Make corner C0"),
+                                    )
+                                    .clicked()
+                                {
+                                    let result = self
+                                        .editor
+                                        .set_internal_boundary_continuity(id, breakpoint, 0);
+                                    self.error(result);
+                                }
+                            });
+                            if ui.button("Split baffle at end knot").clicked() {
+                                let result = self.editor.split_internal_boundary(id, breakpoint);
+                                if let Some(new_id) = self.error(result) {
+                                    let mut spans = self.curve_spans(GeometrySpan::Baffle(id, 0));
+                                    spans.extend(self.curve_spans(GeometrySpan::Baffle(new_id, 0)));
+                                    self.set_span_selection(spans);
+                                }
+                            }
+                        } else {
+                            ui.small("The selected span ends at the baffle tip.");
+                        }
+                    }
+                }
+                GeometrySpan::Outer(_) => {
+                    ui.small("The fixed box has no editable spline topology.");
+                }
+            }
+        } else {
+            ui.small("Select one span to edit its end knot.");
+        }
+
+        let mut baffles = Vec::new();
+        for selected in &self.selected_spans {
+            if let GeometrySpan::Baffle(id, _) = *selected
+                && !baffles.contains(&id)
+            {
+                baffles.push(id);
+            }
+        }
+        let two_complete_baffles = baffles.len() == 2
+            && self
+                .selected_spans
+                .iter()
+                .all(|span| matches!(span, GeometrySpan::Baffle(_, _)))
+            && baffles.iter().all(|id| {
+                self.editor.internal_boundary(*id).is_some_and(|boundary| {
+                    (0..boundary.spline.intervals().len()).all(|span| {
+                        self.selected_spans
+                            .contains(&GeometrySpan::Baffle(*id, span))
+                    })
+                })
+            });
+        if ui
+            .add_enabled(
+                two_complete_baffles,
+                egui::Button::new("Merge nearest baffle tips"),
+            )
+            .clicked()
+        {
+            let tolerance = if self.snap_to_grid {
+                self.snap_step.max(2.0e-4)
+            } else {
+                0.02
+            };
+            let result = self
+                .editor
+                .merge_internal_boundaries(baffles[0], baffles[1], tolerance);
+            if let Some(id) = self.error(result) {
+                self.select_baffle(id);
+            }
+        }
+        if baffles.len() == 2 && !two_complete_baffles {
+            ui.small("Select every span of exactly two baffles to merge them.");
+        } else if two_complete_baffles {
+            ui.small("Tips must coincide within the snap step (0.02 without snapping). Side laws follow the arrows.");
+        }
+        ui.small("Sharpening is exact. Smoothing a subsequently edited corner uses Undo.");
     }
 
     fn selected_baffle_spans(&self) -> Option<Vec<(InternalBoundaryId, usize)>> {
@@ -2868,6 +3005,66 @@ impl Playground {
                     }
                 }
                 GeometrySpan::Outer(_) => {}
+            }
+        }
+        // Repeated knots are curve points rather than spline controls. Show
+        // them independently so C1 joins and C0 corners cannot be mistaken for
+        // the circular control handles.
+        if self.handles {
+            for obstacle in &self.editor.document.draft.obstacles {
+                for (breakpoint, multiplicity) in
+                    obstacle.spline.multiplicities().iter().copied().enumerate()
+                {
+                    if multiplicity <= 1 {
+                        continue;
+                    }
+                    let parameter = obstacle.spline.knots()[breakpoint];
+                    let center = self.screen(obstacle.spline.evaluate(parameter), r);
+                    let radius = if multiplicity == 3 { 5.0 } else { 4.0 };
+                    let points = [
+                        center + egui::vec2(0.0, -radius),
+                        center + egui::vec2(radius, 0.0),
+                        center + egui::vec2(0.0, radius),
+                        center + egui::vec2(-radius, 0.0),
+                    ];
+                    painter.add(egui::Shape::convex_polygon(
+                        points.to_vec(),
+                        if multiplicity == 3 {
+                            GOLD
+                        } else {
+                            Color32::from_rgb(23, 34, 44)
+                        },
+                        Stroke::new(1.5, GOLD),
+                    ));
+                }
+            }
+            for boundary in &self.editor.document.draft.internal_boundaries {
+                for (slot, multiplicity) in
+                    boundary.spline.multiplicities().iter().copied().enumerate()
+                {
+                    if multiplicity <= 1 {
+                        continue;
+                    }
+                    let breakpoint = slot + 1;
+                    let parameter = boundary.spline.breakpoint(breakpoint).unwrap();
+                    let center = self.screen(boundary.spline.evaluate(parameter), r);
+                    let radius = if multiplicity == 3 { 5.0 } else { 4.0 };
+                    let points = [
+                        center + egui::vec2(0.0, -radius),
+                        center + egui::vec2(radius, 0.0),
+                        center + egui::vec2(0.0, radius),
+                        center + egui::vec2(-radius, 0.0),
+                    ];
+                    painter.add(egui::Shape::convex_polygon(
+                        points.to_vec(),
+                        if multiplicity == 3 {
+                            GOLD
+                        } else {
+                            Color32::from_rgb(23, 34, 44)
+                        },
+                        Stroke::new(1.5, GOLD),
+                    ));
+                }
             }
         }
         for o in &self.editor.document.draft.obstacles {

@@ -71,7 +71,9 @@ impl std::error::Error for SplineError {}
 pub struct PeriodicCubicSpline {
     controls: Vec<Point2>,
     intervals: Vec<f64>,
+    multiplicities: Vec<u8>,
     knots: Vec<f64>,
+    expanded_knots: Vec<f64>,
 }
 
 /// A clamped, nonuniform cubic B-spline. Unlike [`PeriodicCubicSpline`], its
@@ -81,17 +83,38 @@ pub struct PeriodicCubicSpline {
 pub struct OpenCubicSpline {
     controls: Vec<Point2>,
     intervals: Vec<f64>,
+    multiplicities: Vec<u8>,
     knots: Vec<f64>,
 }
 
 impl OpenCubicSpline {
-    /// `intervals` stores the positive lengths of the `controls.len() - 3`
-    /// nonempty knot spans. Endpoint knots have cubic multiplicity four.
+    /// `intervals` stores the positive lengths of the nonempty knot spans.
+    /// This compatibility constructor makes every interior breakpoint simple;
+    /// endpoint knots have cubic multiplicity four.
     pub fn new(controls: Vec<Point2>, intervals: Vec<f64>) -> Result<Self, SplineError> {
+        let multiplicities = vec![1; intervals.len().saturating_sub(1)];
+        Self::new_with_multiplicities(controls, intervals, multiplicities)
+    }
+
+    /// Builds a clamped cubic with one multiplicity for each interior
+    /// breakpoint. Multiplicity 1, 2, and 3 give C2, C1, and C0 continuity.
+    pub fn new_with_multiplicities(
+        controls: Vec<Point2>,
+        intervals: Vec<f64>,
+        multiplicities: Vec<u8>,
+    ) -> Result<Self, SplineError> {
         if controls.len() < 4 || controls.len() > 128 {
             return Err(SplineError::ControlCount);
         }
-        if intervals.len() != controls.len() - 3 {
+        if intervals.is_empty()
+            || multiplicities.len() + 1 != intervals.len()
+            || multiplicities.iter().any(|value| !(1..=3).contains(value))
+            || controls.len()
+                != 4 + multiplicities
+                    .iter()
+                    .map(|value| *value as usize)
+                    .sum::<usize>()
+        {
             return Err(SplineError::IntervalCount);
         }
         if controls.iter().any(|point| !point.finite()) {
@@ -109,14 +132,19 @@ impl OpenCubicSpline {
         }
         let mut knots = vec![0.0; 4];
         let mut knot = 0.0;
-        for interval in intervals.iter().take(intervals.len() - 1) {
+        for (interval, multiplicity) in intervals
+            .iter()
+            .take(intervals.len() - 1)
+            .zip(&multiplicities)
+        {
             knot += interval;
-            knots.push(knot);
+            knots.extend(std::iter::repeat_n(knot, *multiplicity as usize));
         }
         knots.extend([period; 4]);
         Ok(Self {
             controls,
             intervals,
+            multiplicities,
             knots,
         })
     }
@@ -132,6 +160,20 @@ impl OpenCubicSpline {
 
     pub fn intervals(&self) -> &[f64] {
         &self.intervals
+    }
+
+    pub fn multiplicities(&self) -> &[u8] {
+        &self.multiplicities
+    }
+
+    pub fn breakpoint(&self, index: usize) -> Option<f64> {
+        (index <= self.intervals.len()).then(|| self.intervals[..index].iter().sum())
+    }
+
+    pub fn continuity(&self, breakpoint: usize) -> Option<u8> {
+        self.multiplicities
+            .get(breakpoint.checked_sub(1)?)
+            .map(|multiplicity| 3 - multiplicity)
     }
 
     pub fn knots(&self) -> &[f64] {
@@ -180,6 +222,14 @@ impl OpenCubicSpline {
     }
 
     pub fn derivative(&self, parameter: f64, order: usize) -> Point2 {
+        self.derivative_with_side(parameter, order, false)
+    }
+
+    fn derivative_left(&self, parameter: f64, order: usize) -> Point2 {
+        self.derivative_with_side(parameter, order, true)
+    }
+
+    fn derivative_with_side(&self, parameter: f64, order: usize, from_left: bool) -> Point2 {
         assert!(order <= 2 && parameter.is_finite());
         let mut controls = self.controls.clone();
         let mut knots = self.knots.clone();
@@ -201,6 +251,7 @@ impl OpenCubicSpline {
             &knots,
             degree,
             parameter.clamp(0.0, self.period()),
+            from_left,
         )
     }
 
@@ -220,14 +271,14 @@ impl OpenCubicSpline {
         if self.controls.len() == 128 {
             return Err(SplineError::ControlCount);
         }
-        if let Some(knot) = self
-            .knots
-            .iter()
-            .position(|knot| (parameter - knot).abs() <= tolerance)
+        if let Some(breakpoint) = (1..self.intervals.len())
+            .find(|index| (parameter - self.breakpoint(*index).unwrap()).abs() <= tolerance)
         {
-            return Ok(Insertion::Existing(
-                knot.saturating_sub(2).min(self.controls.len() - 1),
-            ));
+            let control = 1 + self.multiplicities[..breakpoint - 1]
+                .iter()
+                .map(|value| *value as usize)
+                .sum::<usize>();
+            return Ok(Insertion::Existing(control));
         }
 
         let degree = 3;
@@ -276,8 +327,107 @@ impl OpenCubicSpline {
             .ok_or(SplineError::InvalidInterval)?;
         intervals[interval_index] = parameter - breakpoint;
         intervals.insert(interval_index + 1, interval - parameter);
-        *self = Self::new(controls, intervals)?;
+        let mut multiplicities = self.multiplicities.clone();
+        multiplicities.insert(interval_index, 1);
+        *self = Self::new_with_multiplicities(controls, intervals, multiplicities)?;
         Ok(Insertion::Inserted(span - degree + 1))
+    }
+
+    /// Raises an interior knot's multiplicity by one without changing the curve.
+    pub fn increase_multiplicity(&mut self, breakpoint: usize) -> Result<(), SplineError> {
+        if breakpoint == 0 || breakpoint >= self.intervals.len() {
+            return Err(SplineError::Index);
+        }
+        let slot = breakpoint - 1;
+        if self.multiplicities[slot] >= 3 || self.controls.len() == 128 {
+            return Err(SplineError::ControlCount);
+        }
+        let parameter = self.breakpoint(breakpoint).unwrap();
+        let span = self.knots.partition_point(|knot| *knot <= parameter) - 1;
+        let degree = 3;
+        let last_control = self.controls.len() - 1;
+        let mut controls = vec![Point2::default(); self.controls.len() + 1];
+        controls[..=span - degree].copy_from_slice(&self.controls[..=span - degree]);
+        controls[span + 1..=last_control + 1].copy_from_slice(&self.controls[span..=last_control]);
+        for (index, control) in controls
+            .iter_mut()
+            .enumerate()
+            .take(span + 1)
+            .skip(span - degree + 1)
+        {
+            let denominator = self.knots[index + degree] - self.knots[index];
+            let alpha = if denominator == 0.0 {
+                0.0
+            } else {
+                (parameter - self.knots[index]) / denominator
+            };
+            *control = self.controls[index - 1].lerp(self.controls[index], alpha);
+        }
+        let mut multiplicities = self.multiplicities.clone();
+        multiplicities[slot] += 1;
+        *self = Self::new_with_multiplicities(controls, self.intervals.clone(), multiplicities)?;
+        Ok(())
+    }
+
+    /// Splits at an interior breakpoint. The curve is first refined to C0, so
+    /// the two returned clamped curves reproduce it exactly.
+    pub fn split(mut self, breakpoint: usize) -> Result<(Self, Self), SplineError> {
+        if breakpoint == 0 || breakpoint >= self.intervals.len() {
+            return Err(SplineError::Index);
+        }
+        while self.multiplicities[breakpoint - 1] < 3 {
+            self.increase_multiplicity(breakpoint)?;
+        }
+        let left_multiplicities = self.multiplicities[..breakpoint - 1].to_vec();
+        let right_multiplicities = self.multiplicities[breakpoint..].to_vec();
+        let left_count = 4 + left_multiplicities
+            .iter()
+            .map(|value| *value as usize)
+            .sum::<usize>();
+        let left = Self::new_with_multiplicities(
+            self.controls[..left_count].to_vec(),
+            self.intervals[..breakpoint].to_vec(),
+            left_multiplicities,
+        )?;
+        let right = Self::new_with_multiplicities(
+            self.controls[left_count - 1..].to_vec(),
+            self.intervals[breakpoint..].to_vec(),
+            right_multiplicities,
+        )?;
+        Ok((left, right))
+    }
+
+    /// Joins two clamped curves at a shared endpoint with C0 continuity.
+    pub fn join(self, other: Self, tolerance: f64) -> Result<Self, SplineError> {
+        if !tolerance.is_finite()
+            || tolerance < 0.0
+            || (self.evaluate(self.period()) - other.evaluate(0.0)).norm() > tolerance
+        {
+            return Err(SplineError::InvalidInterval);
+        }
+        if self.controls.len() + other.controls.len() - 1 > 128 {
+            return Err(SplineError::ControlCount);
+        }
+        let mut controls = self.controls;
+        let join = controls.len() - 1;
+        controls[join] = controls[join].lerp(other.controls[0], 0.5);
+        controls.extend_from_slice(&other.controls[1..]);
+        let mut intervals = self.intervals;
+        intervals.extend(other.intervals);
+        let mut multiplicities = self.multiplicities;
+        multiplicities.push(3);
+        multiplicities.extend(other.multiplicities);
+        Self::new_with_multiplicities(controls, intervals, multiplicities)
+    }
+
+    pub fn reversed(&self) -> Self {
+        let mut controls = self.controls.clone();
+        let mut intervals = self.intervals.clone();
+        let mut multiplicities = self.multiplicities.clone();
+        controls.reverse();
+        intervals.reverse();
+        multiplicities.reverse();
+        Self::new_with_multiplicities(controls, intervals, multiplicities).unwrap()
     }
 
     /// Deletes one control and one nonempty knot span. This is an editing
@@ -301,15 +451,32 @@ impl OpenCubicSpline {
             intervals[left] += intervals[left + 1];
             intervals.remove(left + 1);
         }
+        // Point deletion remains a simple-knot editing operation. Repeated-knot
+        // curves use explicit topology tools instead of this reshaping shortcut.
+        if self.multiplicities.iter().any(|value| *value != 1) {
+            return Err(SplineError::Index);
+        }
         *self = Self::new(controls, intervals)?;
         Ok(())
     }
 }
 
-fn de_boor_open(controls: &[Point2], knots: &[f64], degree: usize, parameter: f64) -> Point2 {
+fn de_boor_open(
+    controls: &[Point2],
+    knots: &[f64],
+    degree: usize,
+    parameter: f64,
+    from_left: bool,
+) -> Point2 {
     let last_control = controls.len() - 1;
     let span = if parameter == *knots.last().unwrap() {
         last_control
+    } else if from_left {
+        knots
+            .windows(2)
+            .rposition(|pair| pair[0] < parameter && parameter <= pair[1])
+            .unwrap()
+            .clamp(degree, last_control)
     } else {
         knots
             .windows(2)
@@ -338,10 +505,29 @@ pub enum Insertion {
 }
 impl PeriodicCubicSpline {
     pub fn new(controls: Vec<Point2>, intervals: Vec<f64>) -> Result<Self, SplineError> {
+        let multiplicities = vec![1; intervals.len()];
+        Self::new_with_multiplicities(controls, intervals, multiplicities)
+    }
+
+    /// Builds a periodic cubic with a multiplicity at every periodic
+    /// breakpoint. Multiplicity 1, 2, and 3 give C2, C1, and C0 continuity.
+    pub fn new_with_multiplicities(
+        controls: Vec<Point2>,
+        intervals: Vec<f64>,
+        multiplicities: Vec<u8>,
+    ) -> Result<Self, SplineError> {
         if controls.len() < 4 || controls.len() > 128 {
             return Err(SplineError::ControlCount);
         }
-        if intervals.len() != controls.len() {
+        if intervals.len() != multiplicities.len()
+            || intervals.is_empty()
+            || multiplicities.iter().any(|value| !(1..=3).contains(value))
+            || controls.len()
+                != multiplicities
+                    .iter()
+                    .map(|value| *value as usize)
+                    .sum::<usize>()
+        {
             return Err(SplineError::IntervalCount);
         }
         if controls.iter().any(|p| !p.finite()) {
@@ -358,10 +544,16 @@ impl PeriodicCubicSpline {
         for v in &intervals {
             knots.push(knots.last().unwrap() + v);
         }
+        let mut expanded_knots = Vec::with_capacity(controls.len());
+        for (knot, multiplicity) in knots.iter().zip(&multiplicities) {
+            expanded_knots.extend(std::iter::repeat_n(*knot, *multiplicity as usize));
+        }
         Ok(Self {
             controls,
             intervals,
+            multiplicities,
             knots,
+            expanded_knots,
         })
     }
     pub fn uniform(controls: Vec<Point2>) -> Result<Self, SplineError> {
@@ -384,6 +576,14 @@ impl PeriodicCubicSpline {
     }
     pub fn intervals(&self) -> &[f64] {
         &self.intervals
+    }
+    pub fn multiplicities(&self) -> &[u8] {
+        &self.multiplicities
+    }
+    pub fn continuity(&self, breakpoint: usize) -> Option<u8> {
+        self.multiplicities
+            .get(breakpoint)
+            .map(|multiplicity| 3 - multiplicity)
     }
     pub fn knots(&self) -> &[f64] {
         &self.knots
@@ -420,7 +620,7 @@ impl PeriodicCubicSpline {
     }
     fn knot(&self, i: isize) -> f64 {
         let n = self.controls.len() as isize;
-        self.knots[i.rem_euclid(n) as usize] + i.div_euclid(n) as f64 * self.period()
+        self.expanded_knots[i.rem_euclid(n) as usize] + i.div_euclid(n) as f64 * self.period()
     }
     fn control(&self, i: isize) -> Point2 {
         self.controls[i.rem_euclid(self.controls.len() as isize) as usize]
@@ -441,9 +641,25 @@ impl PeriodicCubicSpline {
     }
     /// Periodic de Boor, including the differentiated knot/control sequences.
     pub fn derivative(&self, t: f64, order: usize) -> Point2 {
+        self.derivative_with_side(t, order, false)
+    }
+
+    fn derivative_left(&self, t: f64, order: usize) -> Point2 {
+        self.derivative_with_side(t, order, true)
+    }
+
+    fn derivative_with_side(&self, t: f64, order: usize, from_left: bool) -> Point2 {
         assert!(order <= 2 && t.is_finite());
-        let t = t.rem_euclid(self.period());
-        let span = self.knots.partition_point(|k| *k <= t).saturating_sub(1) as isize;
+        let period = self.period();
+        let mut t = t.rem_euclid(period);
+        if from_left && t == 0.0 {
+            t = period;
+        }
+        let span = if from_left {
+            self.expanded_knots.partition_point(|knot| *knot < t) as isize - 1
+        } else {
+            self.expanded_knots.partition_point(|knot| *knot <= t) as isize - 1
+        };
         let degree = 3 - order;
         let k = span - order as isize;
         let mut d = [Point2::default(); 4];
@@ -470,13 +686,18 @@ impl PeriodicCubicSpline {
         let t = t.rem_euclid(self.period());
         for (i, k) in self.knots.iter().enumerate() {
             if (t - k).abs() <= self.period() * 1e-10 {
-                return Ok(Insertion::Existing(i % self.controls.len()));
+                let control = self.multiplicities[..i]
+                    .iter()
+                    .map(|value| *value as usize)
+                    .sum();
+                return Ok(Insertion::Existing(control));
             }
         }
         if self.controls.len() == 128 {
             return Err(SplineError::ControlCount);
         }
-        let k = self.knots.partition_point(|v| *v < t) - 1;
+        let span_index = self.knots.partition_point(|v| *v < t) - 1;
+        let k = self.expanded_knots.partition_point(|v| *v < t) - 1;
         let n = self.controls.len() + 1;
         let mut controls = vec![Point2::default(); n];
         // Choose a full period whose first three controls straddle the insertion.
@@ -490,10 +711,43 @@ impl PeriodicCubicSpline {
             };
         }
         let mut intervals = self.intervals.clone();
-        intervals[k] = t - self.knots[k];
-        intervals.insert(k + 1, self.knots[k + 1] - t);
-        *self = Self::new(controls, intervals)?;
+        intervals[span_index] = t - self.knots[span_index];
+        intervals.insert(span_index + 1, self.knots[span_index + 1] - t);
+        let mut multiplicities = self.multiplicities.clone();
+        multiplicities.insert(span_index + 1, 1);
+        *self = Self::new_with_multiplicities(controls, intervals, multiplicities)?;
         Ok(Insertion::Inserted(k + 1))
+    }
+
+    /// Raises a periodic breakpoint's multiplicity without changing the curve.
+    pub fn increase_multiplicity(&mut self, breakpoint: usize) -> Result<(), SplineError> {
+        if breakpoint >= self.intervals.len() {
+            return Err(SplineError::Index);
+        }
+        if self.multiplicities[breakpoint] >= 3 || self.controls.len() == 128 {
+            return Err(SplineError::ControlCount);
+        }
+        let t = self.knots[breakpoint];
+        let k = self.expanded_knots.partition_point(|value| *value <= t) - 1;
+        let n = self.controls.len() + 1;
+        let mut controls = vec![Point2::default(); n];
+        for j in (k as isize - 2)..(k as isize - 2 + n as isize) {
+            controls[j.rem_euclid(n as isize) as usize] = if j <= k as isize {
+                let denominator = self.knot(j + 3) - self.knot(j);
+                let alpha = if denominator == 0.0 {
+                    0.0
+                } else {
+                    (t - self.knot(j)) / denominator
+                };
+                self.control(j - 1).lerp(self.control(j), alpha)
+            } else {
+                self.control(j - 1)
+            };
+        }
+        let mut multiplicities = self.multiplicities.clone();
+        multiplicities[breakpoint] += 1;
+        *self = Self::new_with_multiplicities(controls, self.intervals.clone(), multiplicities)?;
+        Ok(())
     }
     /// Deletes P_i and t_i, merging the intervals on either side. Reshapes the curve.
     pub fn remove(&mut self, i: usize) -> Result<(), SplineError> {
@@ -501,6 +755,9 @@ impl PeriodicCubicSpline {
             return Err(SplineError::ControlCount);
         }
         if i >= self.controls.len() {
+            return Err(SplineError::Index);
+        }
+        if self.multiplicities.iter().any(|value| *value != 1) {
             return Err(SplineError::Index);
         }
         let mut controls = self.controls.clone();
@@ -596,7 +853,7 @@ impl Sampler {
         let a = self.spline.evaluate(s.a);
         let b = self.spline.evaluate(s.b);
         let c = a + self.spline.derivative(s.a, 1) * ((s.b - s.a) / 3.0);
-        let d = b - self.spline.derivative(s.b, 1) * ((s.b - s.a) / 3.0);
+        let d = b - self.spline.derivative_left(s.b, 1) * ((s.b - s.a) / 3.0);
         if ![a, b, c, d].iter().all(|p| p.finite())
             || !self.options.tolerance.is_finite()
             || self.options.tolerance <= 0.0
@@ -703,7 +960,7 @@ impl OpenSampler {
         let a = self.spline.evaluate(span.a);
         let b = self.spline.evaluate(span.b);
         let c = a + self.spline.derivative(span.a, 1) * ((span.b - span.a) / 3.0);
-        let d = b - self.spline.derivative(span.b, 1) * ((span.b - span.a) / 3.0);
+        let d = b - self.spline.derivative_left(span.b, 1) * ((span.b - span.a) / 3.0);
         if ![a, b, c, d].iter().all(|point| point.finite())
             || !self.options.tolerance.is_finite()
             || self.options.tolerance <= 0.0

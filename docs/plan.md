@@ -261,9 +261,10 @@ The transform slice is implemented with exclusive single-control editing and
 multi-span selection. Selected spans support bulk boundary assignment; complete
 curves support rigid pivot-snapped dragging, numeric affine transforms, and a
 viewport rotation gizmo. Duplication and exact baffle straightening retain span
-assignments. The next slice must extend the spline representation for explicit
-corners and continuity before enabling partial-span transforms and split/merge
-topology operations.
+assignments. Repeated knots now expose C1/C0 refinement on loops and baffles;
+open baffles split and merge without losing span laws or oriented face semantics.
+Loop topology changes and transforms of attached partial curves remain the next
+slice.
 
 - Keep complete-curve translate/rotate/scale, duplication, snapping, and alignment
   predictable under span selection.

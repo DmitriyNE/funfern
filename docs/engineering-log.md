@@ -16,10 +16,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   spring is conservative.
 - [ ] Replace the temporary wave reset after open-baffle geometry edits with a
   side-aware transfer that preserves each moving trace without cross-wall sampling.
-- [ ] Add stage-two spline topology editing: explicit corner/continuity controls,
-  repeated-knot and seam editing, and safe split/merge workflows. Box selection
-  and selection filters remain useful follow-ups for dense scenes. Rational
-  weights remain conditional on a demonstrated workflow need.
+- [ ] Continue stage-two spline topology editing with loop role/topology changes,
+  safe smoothing, and transforms of isolated partial curves. Box selection and
+  selection filters remain useful follow-ups for dense scenes. Rational weights
+  remain conditional on a demonstrated workflow need.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
   and local-repair cases. The user reports that the end-to-end handoff still feels
   slow even though the small scripted transfer case is much faster.
@@ -36,6 +36,24 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Improve open-baffle crack-tip element quality. The assigned-law native check
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
+
+## 2026-09-10 — Explicit corners and baffle topology
+
+- Separated cubic knot multiplicity from positive knot spans. Periodic and open
+  splines now support exact C2→C1→C0 refinement, including the periodic seam,
+  without changing geometry or per-span boundary assignments.
+- Added a topology inspector at the end knot of a selected span and distinct gold
+  diamond markers for repeated knots. The editor avoids an implicit approximate
+  smoothing operation after corner controls have moved; Undo retains exactness.
+- Added shape-preserving baffle split and endpoint merge. Split retains the start
+  half's stable ID, merge reconciles parameter direction and left/right laws, and
+  coincident same-region tips validate and mesh as junctions.
+- Scene JSON version 8 stores knot multiplicities. Versions 1–7 continue to load
+  as smooth splines. Split, merge, continuity changes, and round trips have direct
+  core/editor coverage.
+- Verification passes formatting, Clippy with warnings denied, all **124 workspace
+  tests**, native release compilation, and the optimized Trunk/WebGPU build. The
+  split test also meshes the shared tip and assembles the quadratic wave operator.
 
 ## 2026-09-10 — Span selection, bulk boundary editing, and transform gizmo
 

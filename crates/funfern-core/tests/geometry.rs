@@ -182,6 +182,67 @@ fn open_spline_insertion_is_shape_preserving_and_affine_invariant() {
 }
 
 #[test]
+fn repeated_knots_preserve_open_and_periodic_curves_and_split_exactly() {
+    let original = open_irregular();
+    let mut refined = original.clone();
+    refined.increase_multiplicity(1).unwrap();
+    refined.increase_multiplicity(1).unwrap();
+    assert_eq!(refined.continuity(1), Some(0));
+    assert_eq!(refined.intervals(), original.intervals());
+    for index in 0..=400 {
+        let parameter = index as f64 * original.period() / 400.0;
+        near(
+            refined.evaluate(parameter),
+            original.evaluate(parameter),
+            2.0e-11,
+        );
+    }
+    let (left, right) = refined.split(1).unwrap();
+    for index in 0..=200 {
+        let parameter = index as f64 * left.period() / 200.0;
+        near(
+            left.evaluate(parameter),
+            original.evaluate(parameter),
+            2.0e-11,
+        );
+    }
+    for index in 0..=200 {
+        let parameter = index as f64 * right.period() / 200.0;
+        near(
+            right.evaluate(parameter),
+            original.evaluate(parameter + left.period()),
+            2.0e-11,
+        );
+    }
+    let joined = left.join(right, 1.0e-12).unwrap();
+    for index in 0..=400 {
+        let parameter = index as f64 * original.period() / 400.0;
+        near(
+            joined.evaluate(parameter),
+            original.evaluate(parameter),
+            2.0e-11,
+        );
+    }
+
+    let periodic = irregular();
+    for breakpoint in [0, 2] {
+        let mut cornered = periodic.clone();
+        cornered.increase_multiplicity(breakpoint).unwrap();
+        cornered.increase_multiplicity(breakpoint).unwrap();
+        assert_eq!(cornered.continuity(breakpoint), Some(0));
+        assert_eq!(cornered.intervals(), periodic.intervals());
+        for index in 0..500 {
+            let parameter = index as f64 * periodic.period() / 500.0;
+            near(
+                cornered.evaluate(parameter),
+                periodic.evaluate(parameter),
+                3.0e-10,
+            );
+        }
+    }
+}
+
+#[test]
 fn open_spline_rejects_malformed_inputs() {
     assert!(OpenCubicSpline::uniform(vec![Point2::default(); 3]).is_err());
     assert!(OpenCubicSpline::new(vec![Point2::default(); 4], vec![1.0, 1.0]).is_err());

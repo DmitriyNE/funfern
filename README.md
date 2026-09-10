@@ -75,9 +75,19 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   rotated, uniformly scaled, snapped, or aligned as one undoable action. Snapping
   moves their shared arc-length centroid, preserving the curves' shape. Drag the
   viewport ring to rotate and its center marker to reposition the temporary pivot.
-  Partial-span geometry transforms await explicit spline continuity controls.
+  A selected span exposes the continuity at its end knot. **Make C1** and
+  **Make corner C0** refine the cubic exactly; gold diamonds on the curve are
+  repeated knots, separate from circular control handles. Smoothing a corner
+  after its controls have moved is deliberately left to Undo because it cannot
+  generally preserve the edited shape.
   Whole loops and baffles can also be duplicated with their span assignments;
   selected baffles can be straightened between their endpoints.
+- **Baffle topology:** select one baffle span to split at its end knot. Select
+  every span of two baffles to merge their nearest tips. Split preserves the curve
+  exactly; merge snaps sufficiently close tips to their midpoint. Both retain
+  per-span laws, undo history, and start-to-end face orientation; reversing a
+  piece exchanges its left/right assignments. Coincident split tips remain a
+  valid mesh junction.
 - **Boundaries:** one Boundary inspector applies conditions to every compatible
   selected span and reports mixed assignments. Outer edges support reflecting,
   prescribed

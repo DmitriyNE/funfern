@@ -150,20 +150,31 @@ both scenes and clears history.
 Selection is either one spline control or a transient set of topological spans.
 Handles always select one control for local deformation; spans support bulk
 boundary assignment, while a set containing every span of movable curves also
-supports exact affine transforms. Partial-span transforms wait for explicit
-continuity boundaries because cubic spans share control support. Rigid dragging
-and snapping apply one displacement derived from the selection's arc-length
-centroid. The rotation pivot is transient, as are selection, transform inputs, and
+supports exact affine transforms. Repeated-knot multiplicity is stored separately
+from positive knot intervals, so C2, C1, and C0 joins do not create empty
+boundary-condition spans. Raising multiplicity uses exact knot insertion and
+leaves geometry and span assignments unchanged, including at the periodic seam.
+Rigid dragging and snapping apply one displacement derived from the selection's
+arc-length centroid. The rotation pivot is transient, as are selection, transform inputs, and
 snapping preferences. Bulk boundary edits validate all outer, hole, and oriented
 baffle-face targets before one revision and history transaction. Baffle left/right
 always follows increasing spline parameter.
 
-Duplication creates new stable geometry IDs, copies knot intervals and span laws,
-and gives duplicated material-interface or wall loops their own interior region
-with the same material.
+Open baffles split at an existing breakpoint after exact refinement to C0. The
+start half retains its stable ID and the end half receives a new one. Exact shared
+tips in the same region are valid topology junctions. Merging chooses the nearest
+pair of tips; any parameter reversal also reverses span-law order and exchanges
+left/right face assignments. Smoothing a corner after local control edits is not
+generally shape preserving and is currently available through Undo rather than an
+implicit approximation.
 
-Version 7 JSON stores the fixed domain, loop roles, all assigned boundary laws,
-materials, regions, controls, intervals, and both scenes. Versions 2–6 remain
+Duplication creates new stable geometry IDs, copies knot intervals,
+multiplicities, and span laws, and gives duplicated material-interface or wall
+loops their own interior region with the same material.
+
+Version 8 JSON stores the fixed domain, loop roles, all assigned boundary laws,
+materials, regions, controls, intervals, knot multiplicities, and both scenes.
+Versions 2–7 remain
 compatible; version 1 loads by assigning its loops the background hole role and
 creating the default background material/region. Older loop records migrate to a
 reflecting condition on every periodic span. Version-6 baffles that combined a

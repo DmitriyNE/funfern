@@ -514,8 +514,12 @@ impl Editor {
             .iter()
             .map(|point| *point + offset)
             .collect();
-        let spline = OpenCubicSpline::new(controls, source.spline.intervals().to_vec())
-            .map_err(|error| error.to_string())?;
+        let spline = OpenCubicSpline::new_with_multiplicities(
+            controls,
+            source.spline.intervals().to_vec(),
+            source.spline.multiplicities().to_vec(),
+        )
+        .map_err(|error| error.to_string())?;
         let new_id = InternalBoundaryId(self.next_internal_boundary_id);
         self.next_internal_boundary_id = self
             .next_internal_boundary_id
@@ -546,11 +550,12 @@ impl Editor {
         if (end - start).norm() <= f64::EPSILON {
             return Err("A straight baffle needs distinct endpoints".into());
         }
-        let spline = OpenCubicSpline::new(
+        let spline = OpenCubicSpline::new_with_multiplicities(
             (0..count)
                 .map(|index| start.lerp(end, index as f64 / (count - 1) as f64))
                 .collect(),
             boundary.spline.intervals().to_vec(),
+            boundary.spline.multiplicities().to_vec(),
         )
         .map_err(|error| error.to_string())?;
         if spline == boundary.spline {
@@ -606,6 +611,186 @@ impl Editor {
         }
     }
 
+    /// Refines an existing baffle breakpoint to the requested continuity. This
+    /// only inserts knots, so the represented curve and span laws are unchanged.
+    pub fn set_internal_boundary_continuity(
+        &mut self,
+        id: InternalBoundaryId,
+        breakpoint: usize,
+        continuity: u8,
+    ) -> Result<(), String> {
+        if continuity > 2 {
+            return Err("Cubic continuity must be C0, C1, or C2".into());
+        }
+        let boundary = self
+            .internal_boundary(id)
+            .ok_or("Missing internal boundary")?;
+        let current = boundary
+            .spline
+            .continuity(breakpoint)
+            .ok_or("Choose an interior baffle knot")?;
+        if continuity > current {
+            return Err("Smoothing an edited corner is not shape preserving; use Undo".into());
+        }
+        if continuity == current {
+            return Ok(());
+        }
+        let mut spline = boundary.spline.clone();
+        while spline.continuity(breakpoint).unwrap() > continuity {
+            spline
+                .increase_multiplicity(breakpoint)
+                .map_err(|error| error.to_string())?;
+        }
+        self.begin();
+        self.document
+            .draft
+            .internal_boundaries
+            .iter_mut()
+            .find(|boundary| boundary.id == id)
+            .unwrap()
+            .spline = spline;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    /// Splits a baffle at an existing interior breakpoint. The original ID is
+    /// retained by the start half and the end half receives a fresh stable ID.
+    pub fn split_internal_boundary(
+        &mut self,
+        id: InternalBoundaryId,
+        breakpoint: usize,
+    ) -> Result<InternalBoundaryId, String> {
+        if self.document.draft.obstacles.len() + self.document.draft.internal_boundaries.len()
+            >= MAX_OBSTACLES
+        {
+            return Err("Maximum 32 geometric features".into());
+        }
+        let source = self
+            .internal_boundary(id)
+            .cloned()
+            .ok_or("Missing internal boundary")?;
+        if breakpoint == 0 || breakpoint >= source.spline.intervals().len() {
+            return Err("Choose an interior baffle knot".into());
+        }
+        let (left, right) = source
+            .spline
+            .split(breakpoint)
+            .map_err(|error| error.to_string())?;
+        let left_laws = source.span_laws[..breakpoint].to_vec();
+        let right_laws = source.span_laws[breakpoint..].to_vec();
+        let new_id = InternalBoundaryId(self.next_internal_boundary_id);
+        self.next_internal_boundary_id = self
+            .next_internal_boundary_id
+            .checked_add(1)
+            .ok_or("Internal-boundary IDs exhausted")?;
+        self.begin();
+        let boundary = self
+            .document
+            .draft
+            .internal_boundaries
+            .iter_mut()
+            .find(|boundary| boundary.id == id)
+            .unwrap();
+        boundary.spline = left;
+        boundary.span_laws = left_laws;
+        self.document
+            .draft
+            .internal_boundaries
+            .push(InternalBoundary {
+                id: new_id,
+                spline: right,
+                region: source.region,
+                span_laws: right_laws,
+            });
+        self.changed();
+        self.commit();
+        Ok(new_id)
+    }
+
+    /// Joins the nearest endpoints of two baffles. Reversing a curve also
+    /// reverses span order and exchanges its geometrical left/right faces.
+    pub fn merge_internal_boundaries(
+        &mut self,
+        first: InternalBoundaryId,
+        second: InternalBoundaryId,
+        tolerance: f64,
+    ) -> Result<InternalBoundaryId, String> {
+        if first == second {
+            return Err("Select two different baffles".into());
+        }
+        let mut a = self
+            .internal_boundary(first)
+            .cloned()
+            .ok_or("Missing first baffle")?;
+        let mut b = self
+            .internal_boundary(second)
+            .cloned()
+            .ok_or("Missing second baffle")?;
+        if a.region != b.region {
+            return Err("Baffles in different regions cannot be merged".into());
+        }
+        fn reverse(boundary: &mut InternalBoundary) {
+            boundary.spline = boundary.spline.reversed();
+            boundary.span_laws.reverse();
+            for law in &mut boundary.span_laws {
+                std::mem::swap(&mut law.left, &mut law.right);
+            }
+        }
+        let a_start = a.spline.evaluate(0.0);
+        let a_end = a.spline.evaluate(a.spline.period());
+        let b_start = b.spline.evaluate(0.0);
+        let b_end = b.spline.evaluate(b.spline.period());
+        let choices = [
+            ((a_end - b_start).norm(), false, false),
+            ((a_end - b_end).norm(), false, true),
+            ((a_start - b_start).norm(), true, false),
+            ((a_start - b_end).norm(), true, true),
+        ];
+        let &(_, reverse_a, reverse_b) = choices
+            .iter()
+            .min_by(|left, right| left.0.total_cmp(&right.0))
+            .unwrap();
+        if reverse_a {
+            reverse(&mut a);
+        }
+        if reverse_b {
+            reverse(&mut b);
+        }
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return Err("Merge tolerance must be finite and nonnegative".into());
+        }
+        if a.spline.controls().len() + b.spline.controls().len() - 1 > 128 {
+            return Err("Merged baffle would exceed 128 controls".into());
+        }
+        if (a.spline.evaluate(a.spline.period()) - b.spline.evaluate(0.0)).norm() > tolerance {
+            return Err("Nearest endpoints are too far apart to merge".into());
+        }
+        let spline = a
+            .spline
+            .join(b.spline, tolerance)
+            .map_err(|error| error.to_string())?;
+        let mut laws = a.span_laws;
+        laws.extend(b.span_laws);
+        self.begin();
+        let kept = self
+            .document
+            .draft
+            .internal_boundaries
+            .iter_mut()
+            .find(|boundary| boundary.id == first)
+            .unwrap();
+        kept.spline = spline;
+        kept.span_laws = laws;
+        self.document
+            .draft
+            .internal_boundaries
+            .retain(|boundary| boundary.id != second);
+        self.changed();
+        self.commit();
+        Ok(first)
+    }
+
     pub fn remove_internal_boundary_point(
         &mut self,
         id: InternalBoundaryId,
@@ -614,6 +799,14 @@ impl Editor {
         let boundary = self
             .internal_boundary(id)
             .ok_or("Missing internal boundary")?;
+        if boundary
+            .spline
+            .multiplicities()
+            .iter()
+            .any(|multiplicity| *multiplicity != 1)
+        {
+            return Err("Use split/merge or Undo to edit a repeated-knot baffle".into());
+        }
         let mut spline = boundary.spline.clone();
         let old_control_count = spline.controls().len();
         if index >= old_control_count {
@@ -844,7 +1037,7 @@ impl Editor {
             return Err("Maximum 32 geometric features".into());
         }
         let source = self.obstacle(id).cloned().ok_or("Missing obstacle")?;
-        let spline = PeriodicCubicSpline::new(
+        let spline = PeriodicCubicSpline::new_with_multiplicities(
             source
                 .spline
                 .controls()
@@ -852,6 +1045,7 @@ impl Editor {
                 .map(|point| *point + offset)
                 .collect(),
             source.spline.intervals().to_vec(),
+            source.spline.multiplicities().to_vec(),
         )
         .map_err(|error| error.to_string())?;
         let new_id = ObstacleId(self.next_obstacle_id);
@@ -1016,6 +1210,14 @@ impl Editor {
     }
     pub fn remove_point(&mut self, id: ObstacleId, index: usize) -> Result<(), String> {
         let obstacle = self.obstacle(id).ok_or("Missing obstacle")?;
+        if obstacle
+            .spline
+            .multiplicities()
+            .iter()
+            .any(|multiplicity| *multiplicity != 1)
+        {
+            return Err("Use Undo to remove a repeated loop knot".into());
+        }
         let mut spline = obstacle.spline.clone();
         let mut span_conditions = obstacle.span_conditions.clone();
         if index >= span_conditions.len() {
@@ -1067,6 +1269,47 @@ impl Editor {
                 Ok(i)
             }
         }
+    }
+
+    /// Refines a loop breakpoint to C1 or C0 without changing its shape or its
+    /// per-span assignments. Breakpoint zero is the editable periodic seam.
+    pub fn set_obstacle_continuity(
+        &mut self,
+        id: ObstacleId,
+        breakpoint: usize,
+        continuity: u8,
+    ) -> Result<(), String> {
+        if continuity > 2 {
+            return Err("Cubic continuity must be C0, C1, or C2".into());
+        }
+        let obstacle = self.obstacle(id).ok_or("Missing obstacle")?;
+        let current = obstacle
+            .spline
+            .continuity(breakpoint)
+            .ok_or("Missing loop knot")?;
+        if continuity > current {
+            return Err("Smoothing an edited corner is not shape preserving; use Undo".into());
+        }
+        if continuity == current {
+            return Ok(());
+        }
+        let mut spline = obstacle.spline.clone();
+        while spline.continuity(breakpoint).unwrap() > continuity {
+            spline
+                .increase_multiplicity(breakpoint)
+                .map_err(|error| error.to_string())?;
+        }
+        self.begin();
+        self.document
+            .draft
+            .obstacles
+            .iter_mut()
+            .find(|obstacle| obstacle.id == id)
+            .unwrap()
+            .spline = spline;
+        self.changed();
+        self.commit();
+        Ok(())
     }
 
     pub fn set_obstacle_boundary_condition(

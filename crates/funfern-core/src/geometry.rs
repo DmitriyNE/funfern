@@ -715,6 +715,46 @@ impl ValidationJob {
                     };
                     local_neighbors = gap <= 4.0 * margin;
                 } else {
+                    // Open boundaries may form intentional tip junctions. The
+                    // incident endpoint segments are topological neighbors even
+                    // when the two pieces have different stable IDs.
+                    let open_offset = self.scene.obstacles.len();
+                    if a.curve >= open_offset && b.curve >= open_offset {
+                        let a_open = a.curve - open_offset;
+                        let b_open = b.curve - open_offset;
+                        let a_points = &self.open_boundaries[a_open];
+                        let b_points = &self.open_boundaries[b_open];
+                        let a_last_segment = a_points.len() - 2;
+                        let b_last_segment = b_points.len() - 2;
+                        let shared_incident_tip = [
+                            (0, 0, a.index == 0 && b.index == 0),
+                            (
+                                0,
+                                b_points.len() - 1,
+                                a.index == 0 && b.index == b_last_segment,
+                            ),
+                            (
+                                a_points.len() - 1,
+                                0,
+                                a.index == a_last_segment && b.index == 0,
+                            ),
+                            (
+                                a_points.len() - 1,
+                                b_points.len() - 1,
+                                a.index == a_last_segment && b.index == b_last_segment,
+                            ),
+                        ]
+                        .into_iter()
+                        .any(|(a_tip, b_tip, incident)| {
+                            incident
+                                && self.scene.internal_boundaries[a_open].region
+                                    == self.scene.internal_boundaries[b_open].region
+                                && (a_points[a_tip].point - b_points[b_tip].point).norm() <= 1.0e-12
+                        });
+                        if shared_incident_tip {
+                            continue;
+                        }
+                    }
                     let (amin, amax) = self.bounds[a.curve];
                     let (bmin, bmax) = self.bounds[b.curve];
                     if amax.x + margin < bmin.x
