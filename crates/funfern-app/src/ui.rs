@@ -324,7 +324,7 @@ impl Default for Playground {
             wave_boundary_committed: OuterBoundaryConditions::default(),
             wave_time_step: 0.0,
             wave_time_offset: 0.0,
-            wave_running: false,
+            wave_running: true,
             wave_speed: 1.0,
             wave_accumulator: 0.0,
             wave_reset_requested: false,
@@ -1672,6 +1672,25 @@ impl Playground {
                 self.editor.revert();
                 self.clear_transient();
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let wave_available = self.wave_operator.is_some();
+                ui.add_enabled_ui(wave_available, |ui| {
+                    if ui.button("Reset").clicked() {
+                        self.wave_reset_requested = true;
+                    }
+                    if ui.button("Step").clicked() {
+                        self.wave_step_requested = true;
+                    }
+                    if ui
+                        .button(if self.wave_running { "Pause" } else { "Run" })
+                        .clicked()
+                    {
+                        self.wave_running = !self.wave_running;
+                    }
+                });
+                ui.separator();
+                ui.small("Wave");
+            });
         });
     }
 
@@ -2586,24 +2605,8 @@ impl Playground {
                     "Detailed build, repair, and fallback timing is available in Performance.",
                 );
             }
-            ui.add_space(8.0);
-            ui.label("Wave simulation");
             let wave_available = self.wave_operator.is_some();
             ui.add_enabled_ui(wave_available, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(if self.wave_running { "Pause" } else { "Run" })
-                        .clicked()
-                    {
-                        self.wave_running = !self.wave_running;
-                    }
-                    if ui.button("Step").clicked() {
-                        self.wave_step_requested = true;
-                    }
-                    if ui.button("Reset").clicked() {
-                        self.wave_reset_requested = true;
-                    }
-                });
                 ui.horizontal(|ui| {
                     if ui
                         .selectable_label(self.mode == Mode::Pulse, "Place pulse")
@@ -6567,6 +6570,15 @@ mod tests {
         assert!(h.texts.iter().any(|(text, _)| text == "Add geometry"));
         assert!(h.texts.iter().any(|(text, _)| text == "Rounded loop"));
         assert!(h.texts.iter().any(|(text, _)| text == "Custom"));
+    }
+
+    #[test]
+    fn wave_starts_running_and_playback_controls_live_in_top_bar() {
+        let h = Harness::new();
+        assert!(h.state.wave_running);
+        assert!(h.texts.iter().any(|(text, _)| text == "Pause"));
+        assert!(h.texts.iter().any(|(text, _)| text == "Step"));
+        assert!(h.texts.iter().any(|(text, _)| text == "Reset"));
     }
 
     #[test]

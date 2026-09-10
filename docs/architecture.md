@@ -29,9 +29,10 @@ Use egui for panels, controls, and diagnostics. Render the field and directly
 manipulated geometry in the viewport. Coordinate panel input capture and the usable
 viewport rectangle with the camera and editor.
 
-The application shell is canvas-first: a top action bar owns document and view
-actions, a compact tool rail chooses the active task, and a contextual right
-inspector exposes controls for the current selection. Selection remains contextual
+The application shell is canvas-first: a top action bar owns document, view, and
+wave playback actions, a compact tool rail chooses the active task, and a
+contextual right inspector exposes controls for the current selection. The solver
+starts in the running state after its initial operator is committed. Selection remains contextual
 rather than introducing separate selection modes. Add geometry opens a transient
 role/primitive popover; the current Rounded and Custom workflows are entries in an
 extensible primitive catalog. The lower-right status strip carries a compact

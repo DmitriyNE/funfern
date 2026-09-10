@@ -45,6 +45,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   Solver or mesh errors open the diagnostics window automatically; normal mesh
   rebuilds use the progress indicator and do not light the error badge. Metrics
   remain transient and are not serialized.
+- Wave playback now starts in the running state, with Run/Pause, Step, and Reset
+  grouped on the right side of the top bar while solver tuning remains in the
+  Simulation inspector.
 - Added egui coverage for tool-rail/popover discovery, diagnostics opening, and the
   compact metric summary. Formatting, Clippy, all 138 workspace tests, native
   release compilation, and the release Trunk/WASM build pass. Interactive browser
