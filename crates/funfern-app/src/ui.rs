@@ -1760,7 +1760,7 @@ impl Playground {
                     let primitive_label = if self.creation_role == CreationRole::InternalBoundary {
                         "Straight"
                     } else {
-                        "Rounded loop"
+                        "Circle"
                     };
                     if ui.button(primitive_label).clicked() {
                         self.mode = Mode::Preset;
@@ -1774,7 +1774,6 @@ impl Playground {
                         close = true;
                     }
                 });
-                ui.small("More standard primitives can be added here later.");
             });
         if close {
             open = false;
@@ -6602,7 +6601,7 @@ mod tests {
         assert!(h.state.add_geometry_open);
         h.frame(vec![]);
         assert!(h.texts.iter().any(|(text, _)| text == "Add geometry"));
-        assert!(h.texts.iter().any(|(text, _)| text == "Rounded loop"));
+        assert!(h.texts.iter().any(|(text, _)| text == "Circle"));
         assert!(h.texts.iter().any(|(text, _)| text == "Custom"));
         h.click_text("Baffle");
         assert!(matches!(
@@ -6610,7 +6609,7 @@ mod tests {
             CreationRole::InternalBoundary
         ));
         assert!(h.texts.iter().any(|(text, _)| text == "Straight"));
-        assert!(!h.texts.iter().any(|(text, _)| text == "Rounded loop"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Circle"));
     }
 
     #[test]
