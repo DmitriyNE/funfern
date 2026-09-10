@@ -2840,29 +2840,64 @@ impl Playground {
                     })
                 })
             });
+        let merge_tolerance = if self.snap_to_grid {
+            self.snap_step.max(2.0e-4)
+        } else {
+            0.02
+        };
+        let nearest_tip_distance = if two_complete_baffles {
+            let endpoints = baffles.iter().filter_map(|id| {
+                let boundary = self.editor.internal_boundary(*id)?;
+                Some((
+                    boundary.spline.evaluate(0.0),
+                    boundary.spline.evaluate(boundary.spline.period()),
+                ))
+            });
+            let endpoints = endpoints.collect::<Vec<_>>();
+            (endpoints.len() == 2).then(|| {
+                let (a_start, a_end) = endpoints[0];
+                let (b_start, b_end) = endpoints[1];
+                [
+                    (a_end - b_start).norm(),
+                    (a_end - b_end).norm(),
+                    (a_start - b_start).norm(),
+                    (a_start - b_end).norm(),
+                ]
+                .into_iter()
+                .fold(f64::INFINITY, f64::min)
+            })
+        } else {
+            None
+        };
+        let can_merge = nearest_tip_distance.is_some_and(|distance| distance <= merge_tolerance);
         if ui
-            .add_enabled(
-                two_complete_baffles,
-                egui::Button::new("Merge nearest baffle tips"),
-            )
+            .add_enabled(can_merge, egui::Button::new("Merge nearest baffle tips"))
             .clicked()
         {
-            let tolerance = if self.snap_to_grid {
-                self.snap_step.max(2.0e-4)
-            } else {
-                0.02
-            };
-            let result = self
-                .editor
-                .merge_internal_boundaries(baffles[0], baffles[1], tolerance);
+            let result =
+                self.editor
+                    .merge_internal_boundaries(baffles[0], baffles[1], merge_tolerance);
             if let Some(id) = self.error(result) {
                 self.select_baffle(id);
             }
         }
         if baffles.len() == 2 && !two_complete_baffles {
             ui.small("Select every span of exactly two baffles to merge them.");
-        } else if two_complete_baffles {
-            ui.small("Tips must coincide within the snap step (0.02 without snapping). Side laws follow the arrows.");
+        } else if let Some(distance) = nearest_tip_distance {
+            if can_merge {
+                ui.small(format!(
+                    "Nearest tips are {:.4} apart; merge tolerance is {:.4}. Side laws follow the arrows.",
+                    distance, merge_tolerance
+                ));
+            } else {
+                ui.colored_label(
+                    GOLD,
+                    format!(
+                        "Nearest tips are {:.4} apart; move them within {:.4} to enable merge.",
+                        distance, merge_tolerance
+                    ),
+                );
+            }
         }
         ui.small("Sharpening is exact. Smoothing uses exact removal when possible, otherwise a minimum-change reshape.");
     }
