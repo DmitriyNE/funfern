@@ -45,7 +45,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   Slow mesh work and solver errors open the diagnostics window automatically;
   metrics remain transient and are not serialized.
 - Added egui coverage for tool-rail/popover discovery, diagnostics opening, and the
-  compact metric summary. Formatting, Clippy, all 137 workspace tests, native
+  compact metric summary. Formatting, Clippy, all 138 workspace tests, native
   release compilation, and the release Trunk/WASM build pass. Interactive browser
   testing remains user-owned as requested.
 

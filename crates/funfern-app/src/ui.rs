@@ -233,6 +233,8 @@ pub struct Playground {
     wave_prepare_ms: f64,
     wave_active_wall_seconds: f64,
     wave_completed_steps: u64,
+    wave_steps_per_second: f64,
+    wave_rate_previous_completed: u64,
     wave_dispatches: u64,
     wave_substeps_last: u64,
     wave_energy: Option<f64>,
@@ -333,6 +335,8 @@ impl Default for Playground {
             wave_prepare_ms: 0.0,
             wave_active_wall_seconds: 0.0,
             wave_completed_steps: 0,
+            wave_steps_per_second: 0.0,
+            wave_rate_previous_completed: 0,
             wave_dispatches: 0,
             wave_substeps_last: 0,
             wave_energy: None,
@@ -1332,6 +1336,8 @@ impl Playground {
             self.wave_time_offset = 0.0;
             self.wave_active_wall_seconds = 0.0;
             self.wave_completed_steps = 0;
+            self.wave_steps_per_second = 0.0;
+            self.wave_rate_previous_completed = 0;
             self.wave_dispatches = 0;
             self.wave_substeps_last = 0;
             self.wave_energy = None;
@@ -1441,6 +1447,8 @@ impl Playground {
             self.wave_time_step = candidate.time_step;
             self.wave_time_offset = candidate.simulation_time;
             self.wave_completed_steps = 0;
+            self.wave_steps_per_second = 0.0;
+            self.wave_rate_previous_completed = 0;
             self.wave_energy = None;
             self.wave_energy_step = u64::MAX;
             self.wave_source_dirty = false;
@@ -1516,7 +1524,20 @@ impl Playground {
         }
 
         self.wave_gpu_status = request.stats().status();
-        self.wave_completed_steps = request.stats().completed_steps();
+        let completed_steps = request.stats().completed_steps();
+        let completed_delta = completed_steps.saturating_sub(self.wave_rate_previous_completed);
+        let instantaneous_rate = if delta_seconds > 1.0e-6 {
+            completed_delta as f64 / delta_seconds
+        } else {
+            0.0
+        };
+        self.wave_steps_per_second = if self.wave_running {
+            0.85 * self.wave_steps_per_second + 0.15 * instantaneous_rate
+        } else {
+            0.0
+        };
+        self.wave_rate_previous_completed = completed_steps;
+        self.wave_completed_steps = completed_steps;
         self.wave_dispatches = request.stats().dispatches();
         self.wave_substeps_last = 0;
         if self.wave_operator.is_some() && request.ready() {
@@ -1738,17 +1759,20 @@ impl Playground {
         self.add_geometry_open = open;
     }
 
+    fn performance_warning(&self) -> bool {
+        self.mesh_error.is_some()
+            || self.wave_error.is_some()
+            || ((self.mesh_job.is_some() || self.simulation_candidate.is_some())
+                && self.mesh_max_slice_ms > 8.0)
+    }
+
     fn performance_summary(&self) -> String {
         let fps = if self.frame_ms > 0.0 {
             1000.0 / self.frame_ms
         } else {
             0.0
         };
-        let steps_per_second = if self.wave_active_wall_seconds > 0.0 {
-            self.wave_completed_steps as f64 / self.wave_active_wall_seconds
-        } else {
-            0.0
-        };
+        let steps_per_second = self.wave_steps_per_second;
         let dofs = self.wave_operator.as_ref().map_or_else(
             || "—".into(),
             |operator| operator.degrees_of_freedom().to_string(),
@@ -1766,8 +1790,7 @@ impl Playground {
     }
 
     fn performance_window(&mut self, ctx: &egui::Context) {
-        let warning =
-            self.mesh_error.is_some() || self.wave_error.is_some() || self.mesh_max_slice_ms > 8.0;
+        let warning = self.performance_warning();
         if warning && !self.performance_warning_active {
             self.performance_open = true;
         }
@@ -1881,8 +1904,10 @@ impl Playground {
                                 operator.estimated_gpu_bytes() as f64 / (1024.0 * 1024.0)
                             ));
                             ui.small(format!(
-                                "dt {:.6} · {} substeps/frame",
-                                self.wave_time_step, self.wave_substeps_last
+                                "dt {:.6} · {:.1} completed steps/s · {} substeps/frame",
+                                self.wave_time_step,
+                                self.wave_steps_per_second,
+                                self.wave_substeps_last
                             ));
                             let simulated_time = self.wave_time_offset
                                 + self.wave_completed_steps as f64 * self.wave_time_step;
@@ -5571,9 +5596,7 @@ impl Playground {
                         ui.colored_label(RED, "Attention required");
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let warning = state.mesh_error.is_some()
-                            || state.wave_error.is_some()
-                            || state.mesh_max_slice_ms > 8.0;
+                        let warning = state.performance_warning();
                         let summary = state.performance_summary();
                         let label = if warning {
                             format!("⚠ {summary}")
@@ -6543,18 +6566,28 @@ mod tests {
     fn performance_warning_opens_diagnostics_with_mesh_focus() {
         let mut h = Harness::new();
         assert!(!h.state.performance_open);
-        h.state.mesh_max_slice_ms = 12.0;
+        h.state.mesh_error = Some("synthetic mesh warning".into());
         h.frame(vec![]);
         assert!(h.state.performance_open);
         assert!(h.state.performance_warning_active);
     }
 
     #[test]
+    fn completed_mesh_slice_does_not_keep_warning_badge_lit() {
+        let mut h = Harness::new();
+        h.state.mesh_max_slice_ms = 12.0;
+        h.frame(vec![]);
+        assert!(!h.state.performance_warning_active);
+        assert!(!h.state.performance_open);
+    }
+
+    #[test]
     fn performance_summary_contains_solver_and_mesh_metrics() {
-        let h = Harness::new();
+        let mut h = Harness::new();
+        h.state.wave_steps_per_second = 42.0;
         let summary = h.state.performance_summary();
         assert!(summary.contains("FPS"));
-        assert!(summary.contains("steps/s"));
+        assert!(summary.contains("steps/s 42.0"));
         assert!(summary.contains("N"));
         assert!(summary.contains("mesh"));
         assert!(summary.contains("dt"));
