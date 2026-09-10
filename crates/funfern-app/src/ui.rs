@@ -2419,10 +2419,8 @@ impl Playground {
                     }
                 }
             });
-        if matches!(
-            self.active_tool,
-            ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary
-        ) && let Some((id, index)) = self.selection
+        if self.active_tool == ActiveTool::Select
+            && let Some((id, index)) = self.selection
         {
             if ui.button("Delete loop").clicked() {
                 self.editor.delete_obstacle(id);
@@ -2544,10 +2542,8 @@ impl Playground {
                 }
             }
         }
-        if matches!(
-            self.active_tool,
-            ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary
-        ) && let Some((id, index)) = self.internal_selection
+        if self.active_tool == ActiveTool::Select
+            && let Some((id, index)) = self.internal_selection
         {
             if ui.button("Delete baffle").clicked() {
                 self.editor.delete_internal_boundary(id);
@@ -2634,10 +2630,8 @@ impl Playground {
                 }
             }
         }
-        let has_single_control = matches!(
-            self.active_tool,
-            ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary
-        ) && self.selected_spans.is_empty()
+        let has_single_control = self.active_tool == ActiveTool::Select
+            && self.selected_spans.is_empty()
             && (matches!(self.selection, Some((_, Some(_))))
                 || matches!(self.internal_selection, Some((_, Some(_)))));
         if has_single_control {
@@ -2659,11 +2653,7 @@ impl Playground {
             });
         }
         let transformable = self.transformable_curve_controls();
-        if matches!(
-            self.active_tool,
-            ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary
-        ) && !self.selected_spans.is_empty()
-        {
+        if self.active_tool == ActiveTool::Transform && !self.selected_spans.is_empty() {
             ui.add_space(8.0);
             if let Some(groups) = transformable {
                 let piece_count = groups.len();
@@ -2733,11 +2723,10 @@ impl Playground {
                 ui.small("Partial selections need C0 knots at their exposed ends.");
             }
         }
-        if matches!(
-            self.active_tool,
-            ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary
-        ) {
+        if self.active_tool == ActiveTool::Transform {
             self.topology_inspector(ui);
+        }
+        if self.active_tool == ActiveTool::Boundary {
             self.boundary_inspector(ui);
         }
         ui.add_space(12.0);
@@ -3285,14 +3274,16 @@ impl Playground {
                     if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
                         self.custom.pop();
                     }
-                } else if ctx.input(|i| i.key_pressed(egui::Key::Delete))
+                } else if self.active_tool == ActiveTool::Select
+                    && ctx.input(|i| i.key_pressed(egui::Key::Delete))
                     && let Some((id, Some(index))) = self.selection
                 {
                     let result = self.editor.remove_point(id, index);
                     if self.error(result).is_some() {
                         self.select_loop(id);
                     }
-                } else if ctx.input(|i| i.key_pressed(egui::Key::Delete))
+                } else if self.active_tool == ActiveTool::Select
+                    && ctx.input(|i| i.key_pressed(egui::Key::Delete))
                     && let Some((id, Some(index))) = self.internal_selection
                 {
                     let result = self.editor.remove_internal_boundary_point(id, index);
@@ -3340,10 +3331,18 @@ impl Playground {
                 let space = ctx.input(|i| i.key_down(egui::Key::Space));
                 if middle || primary && space {
                     self.panning = true;
-                } else if primary && self.mode == Mode::Select {
+                } else if primary
+                    && self.mode == Mode::Select
+                    && matches!(
+                        self.active_tool,
+                        ActiveTool::Select | ActiveTool::Transform | ActiveTool::Boundary
+                    )
+                {
                     self.refresh_curves();
                     let modifiers = ctx.input(|input| input.modifiers);
-                    if let Some((id, index)) = self.hit_handle(p, r) {
+                    if self.active_tool == ActiveTool::Select
+                        && let Some((id, index)) = self.hit_handle(p, r)
+                    {
                         let control = GeometryControl::Loop(id, index);
                         self.select_control(control);
                         if let Some(point) = self.editor.control_point(control) {
@@ -3356,7 +3355,9 @@ impl Playground {
                                 moved: false,
                             });
                         }
-                    } else if let Some((id, index)) = self.hit_internal_handle(p, r) {
+                    } else if self.active_tool == ActiveTool::Select
+                        && let Some((id, index)) = self.hit_internal_handle(p, r)
+                    {
                         let control = GeometryControl::Baffle(id, index);
                         self.select_control(control);
                         if let Some(point) = self.editor.control_point(control) {
@@ -3369,7 +3370,9 @@ impl Playground {
                                 moved: false,
                             });
                         }
-                    } else if let Some(hit) = self.hit_gizmo(p, r) {
+                    } else if self.active_tool == ActiveTool::Transform
+                        && let Some(hit) = self.hit_gizmo(p, r)
+                    {
                         let pivot = self.selection_pivot().unwrap();
                         match hit {
                             GizmoHit::Pivot => {
@@ -3425,7 +3428,8 @@ impl Playground {
                             } else {
                                 self.set_span_selection(vec![span]);
                             }
-                            if !modifiers.shift
+                            if self.active_tool == ActiveTool::Transform
+                                && !modifiers.shift
                                 && self.selected_spans.contains(&span)
                                 && let Some(pivot) = self.selection_pivot()
                                 && self.transformable_curve_controls().is_some()
@@ -3556,6 +3560,7 @@ impl Playground {
                 }
                 if response.double_clicked()
                     && self.mode == Mode::Select
+                    && matches!(self.active_tool, ActiveTool::Select | ActiveTool::Transform)
                     && !space
                     && self.hit_handle(p, r).is_none()
                     && self.hit_internal_handle(p, r).is_none()
@@ -5959,6 +5964,7 @@ mod tests {
         assert_eq!(harness.state.baffle_face, InternalBoundarySide::Left);
 
         let history_before_laws = harness.state.editor.history_len().0;
+        harness.click_text("Boundary");
         harness.click_text("Reflecting");
         harness.click_text("First-order outgoing / impedance");
         harness.settle();
@@ -6002,6 +6008,7 @@ mod tests {
             history_before_laws + 2
         );
 
+        harness.click_text("Select");
         let before = harness.state.editor.history_len().0;
         let control = harness
             .state
@@ -6023,6 +6030,7 @@ mod tests {
     #[test]
     fn hole_curve_selection_assigns_the_clicked_span_condition() {
         let mut harness = Harness::new();
+        harness.click_text("Boundary");
         let point = harness
             .state
             .editor
@@ -6055,6 +6063,7 @@ mod tests {
     #[test]
     fn face_condition_picker_exposes_driven_and_second_order_conditions() {
         let mut harness = Harness::new();
+        harness.click_text("Boundary");
         let history = harness.state.editor.history_len().0;
         harness.click_text("Reflecting");
         harness.click_text("Dirichlet · prescribed value");
@@ -6129,6 +6138,7 @@ mod tests {
     #[test]
     fn outer_edge_click_selects_and_configures_that_boundary() {
         let mut harness = Harness::new();
+        harness.click_text("Boundary");
         harness.click(harness.point(Point2::new(0.35, 1.0)));
         assert_eq!(
             harness.state.selected_spans,
@@ -6216,6 +6226,7 @@ mod tests {
         assert!(harness.state.selected_spans.is_empty());
 
         harness.state.select_loop(id);
+        harness.click_text("Transform");
         harness.state.snap_to_grid = true;
         harness.state.snap_step = 0.1;
         let curve_point = harness
@@ -6377,6 +6388,7 @@ mod tests {
     #[test]
     fn rotation_ring_is_rigid_and_pivot_drag_is_transient() {
         let mut harness = Harness::new();
+        harness.click_text("Transform");
         let id = ObstacleId(1);
         let before = harness
             .state
@@ -6426,6 +6438,7 @@ mod tests {
     #[test]
     fn whole_curve_drag_and_panel_transform_move_all_controls() {
         let mut harness = Harness::new();
+        harness.click_text("Transform");
         let id = ObstacleId(1);
         let before = harness
             .state
@@ -6505,6 +6518,7 @@ mod tests {
         harness
             .state
             .set_span_selection(vec![GeometrySpan::Baffle(id, 1)]);
+        harness.click_text("Transform");
         assert!(harness.state.transformable_curve_controls().is_none());
         let (loop_breakpoints, baffle_breakpoints) =
             harness.state.exposed_selection_breakpoints().unwrap();
@@ -6673,6 +6687,25 @@ mod tests {
     #[test]
     fn inspector_panel_switches_show_their_content() {
         let mut h = Harness::new();
+        h.click_text("Transform");
+        assert_eq!(h.state.active_tool, ActiveTool::Transform);
+        assert!(
+            h.texts
+                .iter()
+                .any(|(text, _)| text.starts_with("Transform · "))
+        );
+        assert!(!h.texts.iter().any(|(text, _)| text == "Condition"));
+
+        h.click_text("Boundary");
+        assert_eq!(h.state.active_tool, ActiveTool::Boundary);
+        assert!(h.texts.iter().any(|(text, _)| text == "Condition"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Apply transform"));
+
+        h.click_text("Select");
+        assert_eq!(h.state.active_tool, ActiveTool::Select);
+        assert!(h.texts.iter().any(|(text, _)| text == "Select filtered"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Condition"));
+
         h.click_text("View");
         assert_eq!(h.state.inspector_panel, Some(InspectorPanel::View));
         h.click_text("Simulation");
