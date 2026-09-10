@@ -60,14 +60,6 @@ impl ActiveTool {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum PerformanceFocus {
-    #[default]
-    Frame,
-    Mesh,
-    Handoff,
-    Solver,
-}
 #[derive(Clone, Copy, Default, PartialEq)]
 enum SpanSelectionFilter {
     #[default]
@@ -159,7 +151,6 @@ pub struct Playground {
     active_tool: ActiveTool,
     add_geometry_open: bool,
     performance_open: bool,
-    performance_focus: PerformanceFocus,
     performance_history: VecDeque<f32>,
     performance_warning_active: bool,
     mode: Mode,
@@ -258,7 +249,6 @@ impl Default for Playground {
             active_tool: ActiveTool::Select,
             add_geometry_open: false,
             performance_open: false,
-            performance_focus: PerformanceFocus::Frame,
             performance_history: VecDeque::with_capacity(90),
             performance_warning_active: false,
             mode: Mode::Select,
@@ -1651,23 +1641,6 @@ impl Playground {
                 self.editor.revert();
                 self.clear_transient();
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let warning = self.mesh_error.is_some()
-                    || self.wave_error.is_some()
-                    || self.mesh_max_slice_ms > 8.0;
-                let label = if warning {
-                    "⚠ Performance"
-                } else {
-                    "◌ Performance"
-                };
-                if ui
-                    .selectable_label(self.performance_open, label)
-                    .on_hover_text("Open frame, mesh, handoff, and solver diagnostics")
-                    .clicked()
-                {
-                    self.performance_open = !self.performance_open;
-                }
-            });
         });
     }
 
@@ -1765,18 +1738,38 @@ impl Playground {
         self.add_geometry_open = open;
     }
 
+    fn performance_summary(&self) -> String {
+        let fps = if self.frame_ms > 0.0 {
+            1000.0 / self.frame_ms
+        } else {
+            0.0
+        };
+        let steps_per_second = if self.wave_active_wall_seconds > 0.0 {
+            self.wave_completed_steps as f64 / self.wave_active_wall_seconds
+        } else {
+            0.0
+        };
+        let dofs = self.wave_operator.as_ref().map_or_else(
+            || "—".into(),
+            |operator| operator.degrees_of_freedom().to_string(),
+        );
+        let mesh = self.mesh.as_ref().map_or_else(
+            || "—".into(),
+            |mesh| format!("{}v/{}t", mesh.vertices.len(), mesh.triangles.len()),
+        );
+        let dt = if self.wave_time_step > 0.0 {
+            format!("{:.2e}", self.wave_time_step)
+        } else {
+            "—".into()
+        };
+        format!("FPS {fps:.0} · steps/s {steps_per_second:.1} · N {dofs} · mesh {mesh} · dt {dt}")
+    }
+
     fn performance_window(&mut self, ctx: &egui::Context) {
         let warning =
             self.mesh_error.is_some() || self.wave_error.is_some() || self.mesh_max_slice_ms > 8.0;
         if warning && !self.performance_warning_active {
             self.performance_open = true;
-            self.performance_focus = if self.wave_error.is_some() {
-                PerformanceFocus::Solver
-            } else if self.mesh_error.is_some() || self.mesh_max_slice_ms > 8.0 {
-                PerformanceFocus::Mesh
-            } else {
-                PerformanceFocus::Frame
-            };
         }
         self.performance_warning_active = warning;
         if self.frame_ms.is_finite() && self.frame_ms > 0.0 {
@@ -1791,45 +1784,67 @@ impl Playground {
         let mut open = true;
         egui::Window::new("Performance diagnostics")
             .open(&mut open)
-            .default_width(370.0)
+            .default_width(390.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (focus, label) in [
-                        (PerformanceFocus::Frame, "Frame"),
-                        (PerformanceFocus::Mesh, "Mesh"),
-                        (PerformanceFocus::Handoff, "Handoff"),
-                        (PerformanceFocus::Solver, "Solver"),
-                    ] {
-                        if ui.selectable_label(self.performance_focus == focus, label).clicked() {
-                            self.performance_focus = focus;
-                        }
-                    }
-                });
+                ui.heading("Performance diagnostics");
+                ui.monospace(self.performance_summary());
                 ui.separator();
-                match self.performance_focus {
-                    PerformanceFocus::Frame => {
-                        ui.label(format!("Frame {:.2} ms · {:.0} px/unit", self.frame_ms, self.scale));
+                egui::CollapsingHeader::new("Frame")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.label(format!(
+                            "Frame {:.2} ms · {:.0} px/unit",
+                            self.frame_ms, self.scale
+                        ));
                         let recent_max = self
                             .performance_history
                             .iter()
                             .copied()
                             .fold(0.0_f32, f32::max);
-                        ui.small(format!("Recent peak {:.2} ms · {} samples", recent_max, self.performance_history.len()));
-                        ui.small("UI and viewport input remain responsive while this window is open.");
-                    }
-                    PerformanceFocus::Mesh => {
+                        ui.small(format!(
+                            "Recent peak {:.2} ms · {} samples",
+                            recent_max,
+                            self.performance_history.len()
+                        ));
+                    });
+                egui::CollapsingHeader::new("Mesh")
+                    .default_open(true)
+                    .show(ui, |ui| {
                         if let Some(mesh) = &self.mesh {
-                            ui.label(format!("{} vertices · {} triangles", mesh.vertices.len(), mesh.triangles.len()));
-                            ui.small(format!("Minimum angle {:.1}° · maximum edge {:.3}", mesh.quality.minimum_angle_degrees, mesh.quality.maximum_edge_length));
+                            ui.label(format!(
+                                "{} vertices · {} triangles",
+                                mesh.vertices.len(),
+                                mesh.triangles.len()
+                            ));
+                            ui.small(format!(
+                                "Minimum angle {:.1}° · maximum edge {:.3}",
+                                mesh.quality.minimum_angle_degrees,
+                                mesh.quality.maximum_edge_length
+                            ));
                         } else {
                             ui.label("No committed mesh");
                         }
-                        ui.small(format!("Build {:.1} ms · work {:.1} ms · longest slice {:.2} ms", self.mesh_build_ms, self.mesh_work_ms, self.mesh_max_slice_ms));
-                        ui.small(format!("Completed edits {} · full rebuild fallbacks {}", self.mesh_attempts, self.mesh_fallbacks));
-                        if let Some(report) = self.mesh_job.as_ref().map(|job| job.report()).or(self.mesh_report.as_ref()) {
+                        ui.small(format!(
+                            "Build {:.1} ms · work {:.1} ms · longest slice {:.2} ms",
+                            self.mesh_build_ms, self.mesh_work_ms, self.mesh_max_slice_ms
+                        ));
+                        ui.small(format!(
+                            "Completed edits {} · full rebuild fallbacks {}",
+                            self.mesh_attempts, self.mesh_fallbacks
+                        ));
+                        if let Some(report) = self
+                            .mesh_job
+                            .as_ref()
+                            .map(|job| job.report())
+                            .or(self.mesh_report.as_ref())
+                        {
                             if report.used_local {
-                                ui.small(format!("Local repair · {:.1}% triangles unchanged", 100.0 * report.preserved_triangles as f64 / report.original_triangles.max(1) as f64));
+                                ui.small(format!(
+                                    "Local repair · {:.1}% triangles unchanged",
+                                    100.0 * report.preserved_triangles as f64
+                                        / report.original_triangles.max(1) as f64
+                                ));
                             }
                             if let Some(reason) = &report.fallback_reason {
                                 ui.colored_label(GOLD, format!("Full rebuild: {reason}"));
@@ -1838,23 +1853,44 @@ impl Playground {
                         if let Some(error) = &self.mesh_error {
                             ui.colored_label(RED, error);
                         }
-                    }
-                    PerformanceFocus::Handoff => {
-                        ui.label(format!("Operator/transfer preparation {:.1} ms", self.wave_prepare_ms));
-                        ui.small("The previous committed field remains active until the candidate is ready.");
-                        if self.simulation_candidate.is_some() {
-                            ui.small("Candidate handoff in progress…");
+                    });
+                egui::CollapsingHeader::new("Handoff")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.label(format!(
+                            "Operator/transfer preparation {:.1} ms",
+                            self.wave_prepare_ms
+                        ));
+                        ui.small(
+                            "The previous committed field remains active until the candidate is ready.",
+                        );
+                        ui.small(if self.simulation_candidate.is_some() {
+                            "Candidate handoff in progress…"
                         } else {
-                            ui.small("No candidate handoff pending.");
-                        }
-                    }
-                    PerformanceFocus::Solver => {
+                            "No candidate handoff pending."
+                        });
+                    });
+                egui::CollapsingHeader::new("Solver")
+                    .default_open(true)
+                    .show(ui, |ui| {
                         ui.label(format!("GPU {}", self.wave_gpu_status));
                         if let Some(operator) = &self.wave_operator {
-                            ui.small(format!("{} DOFs · {:.2} MiB", operator.degrees_of_freedom(), operator.estimated_gpu_bytes() as f64 / (1024.0 * 1024.0)));
-                            ui.small(format!("dt {:.6} · {} substeps/frame", self.wave_time_step, self.wave_substeps_last));
-                            let simulated_time = self.wave_time_offset + self.wave_completed_steps as f64 * self.wave_time_step;
-                            let throughput = if self.wave_active_wall_seconds > 0.0 { simulated_time / self.wave_active_wall_seconds } else { 0.0 };
+                            ui.small(format!(
+                                "{} DOFs · {:.2} MiB",
+                                operator.degrees_of_freedom(),
+                                operator.estimated_gpu_bytes() as f64 / (1024.0 * 1024.0)
+                            ));
+                            ui.small(format!(
+                                "dt {:.6} · {} substeps/frame",
+                                self.wave_time_step, self.wave_substeps_last
+                            ));
+                            let simulated_time = self.wave_time_offset
+                                + self.wave_completed_steps as f64 * self.wave_time_step;
+                            let throughput = if self.wave_active_wall_seconds > 0.0 {
+                                simulated_time / self.wave_active_wall_seconds
+                            } else {
+                                0.0
+                            };
                             ui.small(format!("{throughput:.2} simulated s / wall s"));
                             if let Some(energy) = self.wave_energy {
                                 ui.small(format!("Discrete energy {energy:.6e}"));
@@ -1865,8 +1901,7 @@ impl Playground {
                         if let Some(error) = &self.wave_error {
                             ui.colored_label(RED, error);
                         }
-                    }
-                }
+                    });
             });
         self.performance_open = open;
     }
@@ -5536,16 +5571,22 @@ impl Playground {
                         ui.colored_label(RED, "Attention required");
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.small(format!(
-                            "{:.1} ms  ·  {:.0} px/unit  ·  {}",
-                            state.frame_ms,
-                            state.scale,
-                            if cfg!(target_arch = "wasm32") {
-                                "WebGPU"
-                            } else {
-                                "wgpu"
-                            }
-                        ));
+                        let warning = state.mesh_error.is_some()
+                            || state.wave_error.is_some()
+                            || state.mesh_max_slice_ms > 8.0;
+                        let summary = state.performance_summary();
+                        let label = if warning {
+                            format!("⚠ {summary}")
+                        } else {
+                            summary
+                        };
+                        if ui
+                            .small_button(label)
+                            .on_hover_text("Open performance diagnostics")
+                            .clicked()
+                        {
+                            state.performance_open = !state.performance_open;
+                        }
                     });
                 });
             });
@@ -6505,7 +6546,18 @@ mod tests {
         h.state.mesh_max_slice_ms = 12.0;
         h.frame(vec![]);
         assert!(h.state.performance_open);
-        assert_eq!(h.state.performance_focus, PerformanceFocus::Mesh);
+        assert!(h.state.performance_warning_active);
+    }
+
+    #[test]
+    fn performance_summary_contains_solver_and_mesh_metrics() {
+        let h = Harness::new();
+        let summary = h.state.performance_summary();
+        assert!(summary.contains("FPS"));
+        assert!(summary.contains("steps/s"));
+        assert!(summary.contains("N"));
+        assert!(summary.contains("mesh"));
+        assert!(summary.contains("dt"));
     }
 
     #[test]

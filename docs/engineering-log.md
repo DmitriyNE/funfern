@@ -39,13 +39,15 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Moved document actions to the top bar and made task context visible in the
   inspector. Add geometry now uses a transient role/primitive popover; the existing
   Rounded and Custom workflows remain available there.
-- Moved detailed frame, mesh, handoff, and solver measurements into a draggable
-  Performance diagnostics window. Slow mesh work and solver errors open the relevant
-  section automatically; metrics remain transient and are not serialized.
-- Added egui coverage for tool-rail/popover discovery and automatic diagnostics
-  focus. Formatting, Clippy, all 136 workspace tests, native release compilation,
-  and the release Trunk/WASM build pass. Interactive browser testing remains
-  user-owned as requested.
+- Moved detailed frame, mesh, handoff, and solver measurements into one draggable
+  Performance diagnostics window with collapsible sections. The lower-right status
+  control now summarizes FPS, solver steps per second, DOFs, mesh size, and dt.
+  Slow mesh work and solver errors open the diagnostics window automatically;
+  metrics remain transient and are not serialized.
+- Added egui coverage for tool-rail/popover discovery, diagnostics opening, and the
+  compact metric summary. Formatting, Clippy, all 137 workspace tests, native
+  release compilation, and the release Trunk/WASM build pass. Interactive browser
+  testing remains user-owned as requested.
 
 ## 2026-09-10 — Dense-scene span selection
 

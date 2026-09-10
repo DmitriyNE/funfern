@@ -34,10 +34,12 @@ actions, a compact tool rail chooses the active task, and a contextual right
 inspector exposes controls for the current selection. Selection remains contextual
 rather than introducing separate selection modes. Add geometry opens a transient
 role/primitive popover; the current Rounded and Custom workflows are entries in an
-extensible primitive catalog. Performance measurements are UI-only diagnostics in a
-draggable popover opened from the status bar. A short rolling frame history is kept
-in memory, and mesh/solver warnings focus the relevant diagnostics section without
-changing document history or scene files.
+extensible primitive catalog. The lower-right status strip carries a compact
+performance summary (FPS, solver steps per second, DOFs, mesh size, and timestep).
+Detailed performance measurements are UI-only diagnostics in one draggable,
+scrollable popover with Frame, Mesh, Handoff, and Solver sections. A short rolling
+frame history is kept in memory, and mesh/solver warnings open the diagnostics
+popover without changing document history or scene files.
 
 ## Geometry and discretization
 

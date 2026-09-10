@@ -72,8 +72,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **UI shell:** the top bar keeps Undo/Redo, scene files, Fit View, and status
   actions visible. The left tool rail switches between Select, Add geometry,
   Transform, Boundary, Materials, and Simulation; the right inspector follows the
-  active task and current selection. Detailed frame, mesh, handoff, and solver
-  measurements open from the Performance status control and surface automatically
+  active task and current selection. The lower-right status control shows FPS,
+  solver steps per second, DOFs, mesh size, and solver dt; clicking it opens the
+  full frame, mesh, handoff, and solver diagnostics, which surface automatically
   for warnings.
 - **Select:** clicking a handle selects that one control for local reshaping.
   Clicking a curve selects its knot span; Shift-click toggles spans, and
