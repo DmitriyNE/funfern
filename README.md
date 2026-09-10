@@ -1,5 +1,7 @@
 # funfern
 
+[![CI and Pages](https://github.com/DmitriyNE/funfern/actions/workflows/ci.yml/badge.svg)](https://github.com/DmitriyNE/funfern/actions/workflows/ci.yml)
+
 A browser finite-element wave playground with editable periodic and open cubic
 splines, material regions, holes and reflecting baffles, constrained triangle meshes,
 persistent invalid drafts, undo/redo, and versioned scene files.
@@ -217,6 +219,11 @@ cargo run -p funfern-app --release --locked -- --mesh-edit-benchmark
 cargo run -p funfern-app --release --locked -- --wave-gpu-check
 cargo run -p funfern-app --release --locked -- --wave-transfer-check
 ```
+
+GitHub Actions runs formatting, Clippy, the workspace tests, and native and WASM
+release builds for pull requests and pushes to `main`. A successful `main` run
+publishes the browser bundle to <https://dmitriyne.github.io/funfern/>. The Pages
+source is configured as **GitHub Actions** in the repository settings.
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,

@@ -35,6 +35,19 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
 
+## 2026-09-10 — CI and GitHub Pages
+
+- Added a GitHub Actions pipeline for Rustfmt, Clippy with warnings denied, all
+  workspace tests, the native release build, and the release Trunk/WASM bundle.
+- Successful runs from `main` upload the `dist` artifact and deploy it through
+  GitHub's Pages environment. Pull requests build the same browser target without
+  deploying it.
+- Pinned Rust 1.96.0 and Trunk 0.21.14. The Pages build takes its repository base
+  path from `actions/configure-pages`, so hashed WASM and JavaScript assets load
+  correctly below `/funfern/` and continue to work with a future custom domain.
+- Enabled the repository Pages site with the workflow publishing source and HTTPS
+  enforcement at `https://dmitriyne.github.io/funfern/`.
+
 ## 2026-09-10 — Safe smoothing and loop role conversion
 
 - Added repeated-knot removal for open and periodic cubics, including the seam.
