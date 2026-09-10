@@ -4037,13 +4037,6 @@ impl Playground {
                 egui::StrokeKind::Inside,
             );
         }
-        painter.text(
-            r.left_top() + egui::vec2(18.0, 16.0),
-            egui::Align2::LEFT_TOP,
-            "FIXED DOMAIN  /  [−1, 1]²",
-            egui::FontId::monospace(11.0),
-            Color32::from_rgb(124, 145, 161),
-        );
         if self.sampling_warning {
             painter.text(
                 r.left_bottom() + egui::vec2(18.0, -18.0),
