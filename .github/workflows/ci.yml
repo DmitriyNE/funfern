@@ -25,6 +25,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev
+
       - name: Install Rust toolchain
         run: |
           rustup toolchain install "$RUST_VERSION" \
@@ -46,16 +57,22 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-${{ env.RUST_VERSION }}-
 
-      - name: Cache Trunk
-        id: trunk-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/bin/trunk
-          key: trunk-${{ runner.os }}-${{ env.TRUNK_VERSION }}
-
       - name: Install Trunk
-        if: steps.trunk-cache.outputs.cache-hit != 'true'
-        run: cargo install trunk --version "$TRUNK_VERSION" --locked
+        working-directory: /tmp
+        env:
+          TRUNK_ARCHIVE: trunk-x86_64-unknown-linux-gnu.tar.gz
+        run: |
+          curl --fail --location --silent --show-error \
+            --output "$TRUNK_ARCHIVE" \
+            "https://github.com/trunk-rs/trunk/releases/download/v$TRUNK_VERSION/$TRUNK_ARCHIVE"
+          curl --fail --location --silent --show-error \
+            --output "$TRUNK_ARCHIVE.sha256" \
+            "https://github.com/trunk-rs/trunk/releases/download/v$TRUNK_VERSION/$TRUNK_ARCHIVE.sha256"
+          sed "s/$/  $TRUNK_ARCHIVE/" "$TRUNK_ARCHIVE.sha256" > checksums.txt
+          sha256sum --check checksums.txt
+          tar --extract --gzip --file "$TRUNK_ARCHIVE"
+          sudo install trunk /usr/local/bin/trunk
+          trunk --version
 
       - name: Check formatting
         run: cargo fmt --all -- --check
