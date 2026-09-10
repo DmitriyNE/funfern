@@ -75,6 +75,7 @@ enum GeometrySpan {
     Loop(ObstacleId, usize),
     Baffle(InternalBoundaryId, usize),
 }
+type ExposedBreakpoints = (Vec<(ObstacleId, usize)>, Vec<(InternalBoundaryId, usize)>);
 struct SimulationCandidate {
     mesh: Arc<TriMesh>,
     scene: Scene,
@@ -461,46 +462,106 @@ impl Playground {
             return None;
         }
         let mut groups = Vec::<Vec<GeometryControl>>::new();
+        let mut loop_ids = Vec::new();
+        let mut baffle_ids = Vec::new();
         for selected in &self.selected_spans {
             match *selected {
-                GeometrySpan::Loop(id, _) => {
-                    if groups.iter().any(|group| {
-                        matches!(group.first(), Some(GeometryControl::Loop(selected, _)) if *selected == id)
-                    }) {
-                        continue;
-                    }
-                    let obstacle = self.editor.obstacle(id)?;
-                    if !(0..obstacle.spline.intervals().len())
-                        .all(|span| self.selected_spans.contains(&GeometrySpan::Loop(id, span)))
-                    {
-                        return None;
-                    }
-                    groups.push(
-                        (0..obstacle.spline.controls().len())
-                            .map(|index| GeometryControl::Loop(id, index))
-                            .collect(),
-                    );
-                }
-                GeometrySpan::Baffle(id, _) => {
-                    if groups.iter().any(|group| {
-                        matches!(group.first(), Some(GeometryControl::Baffle(selected, _)) if *selected == id)
-                    }) {
-                        continue;
-                    }
-                    let boundary = self.editor.internal_boundary(id)?;
-                    if !(0..boundary.spline.intervals().len()).all(|span| {
-                        self.selected_spans
-                            .contains(&GeometrySpan::Baffle(id, span))
-                    }) {
-                        return None;
-                    }
-                    groups.push(
-                        (0..boundary.spline.controls().len())
-                            .map(|index| GeometryControl::Baffle(id, index))
-                            .collect(),
-                    );
-                }
+                GeometrySpan::Loop(id, _) if !loop_ids.contains(&id) => loop_ids.push(id),
+                GeometrySpan::Baffle(id, _) if !baffle_ids.contains(&id) => baffle_ids.push(id),
                 GeometrySpan::Outer(_) => return None,
+                _ => {}
+            }
+        }
+        for id in loop_ids {
+            let spline = &self.editor.obstacle(id)?.spline;
+            let count = spline.intervals().len();
+            let selected = (0..count)
+                .map(|span| self.selected_spans.contains(&GeometrySpan::Loop(id, span)))
+                .collect::<Vec<_>>();
+            if selected.iter().all(|value| *value) {
+                groups.push(
+                    (0..spline.controls().len())
+                        .map(|index| GeometryControl::Loop(id, index))
+                        .collect(),
+                );
+                continue;
+            }
+            let anchor = selected.iter().position(|value| !*value)?;
+            let mut run = Vec::new();
+            let mut runs = Vec::new();
+            for offset in 1..=count {
+                let span = (anchor + offset) % count;
+                if selected[span] {
+                    run.push(span);
+                } else if !run.is_empty() {
+                    runs.push(std::mem::take(&mut run));
+                }
+            }
+            if !run.is_empty() {
+                runs.push(run);
+            }
+            for run in runs {
+                let first = run[0];
+                let after = (run[run.len() - 1] + 1) % count;
+                if spline.multiplicities()[first] != 3 || spline.multiplicities()[after] != 3 {
+                    return None;
+                }
+                let mut controls = Vec::new();
+                for span in run {
+                    for index in spline.span_control_indices(span)? {
+                        let control = GeometryControl::Loop(id, index);
+                        if !controls.contains(&control) {
+                            controls.push(control);
+                        }
+                    }
+                }
+                groups.push(controls);
+            }
+        }
+        for id in baffle_ids {
+            let spline = &self.editor.internal_boundary(id)?.spline;
+            let count = spline.intervals().len();
+            let selected = (0..count)
+                .map(|span| {
+                    self.selected_spans
+                        .contains(&GeometrySpan::Baffle(id, span))
+                })
+                .collect::<Vec<_>>();
+            if selected.iter().all(|value| *value) {
+                groups.push(
+                    (0..spline.controls().len())
+                        .map(|index| GeometryControl::Baffle(id, index))
+                        .collect(),
+                );
+                continue;
+            }
+            let mut start = 0;
+            while start < count {
+                if !selected[start] {
+                    start += 1;
+                    continue;
+                }
+                let first = start;
+                while start + 1 < count && selected[start + 1] {
+                    start += 1;
+                }
+                let last = start;
+                let left_isolated = first == 0 || spline.multiplicities()[first - 1] == 3;
+                let right_isolated = last + 1 == count || spline.multiplicities()[last] == 3;
+                if !left_isolated || !right_isolated {
+                    return None;
+                }
+                let mut controls = Vec::new();
+                for span in first..=last {
+                    for index in spline.span_control_indices(span)? {
+                        let control = GeometryControl::Baffle(id, index);
+                        if !controls.contains(&control) {
+                            controls.push(control);
+                        }
+                    }
+                }
+                groups.push(controls);
+                start += 1;
             }
         }
         Some(groups)
@@ -521,16 +582,24 @@ impl Playground {
                 .map(|point| vec![(control, point)])
                 .unwrap_or_default();
         }
-        self.transformable_curve_controls()
+        let mut points = Vec::new();
+        for control in self
+            .transformable_curve_controls()
             .unwrap_or_default()
             .into_iter()
             .flatten()
-            .filter_map(|control| {
-                self.editor
-                    .control_point(control)
-                    .map(|point| (control, point))
-            })
-            .collect()
+        {
+            if points
+                .iter()
+                .any(|(candidate, _): &(GeometryControl, Point2)| *candidate == control)
+            {
+                continue;
+            }
+            if let Some(point) = self.editor.control_point(control) {
+                points.push((control, point));
+            }
+        }
+        points
     }
 
     fn selection_pivot(&self) -> Option<Point2> {
@@ -543,36 +612,56 @@ impl Playground {
                 .first()
                 .map(|(_, point)| *point);
         }
-        let mut weighted = Point2::default();
-        let mut total = 0.0;
-        for group in self.transformable_curve_controls()? {
-            let (curve_weighted, curve_length) = self.curve_arc_measure(&group)?;
-            weighted = weighted + curve_weighted;
-            total += curve_length;
-        }
-        (total > 0.0).then(|| weighted / total)
+        self.transformable_curve_controls()?;
+        self.selected_arc_measure()
+            .map(|(weighted, length)| weighted / length)
     }
 
-    fn curve_arc_measure(&self, group: &[GeometryControl]) -> Option<(Point2, f64)> {
+    fn selected_arc_measure(&self) -> Option<(Point2, f64)> {
         let options = SamplingOptions {
             tolerance: 1.0e-3,
             max_depth: 12,
             max_points: 2048,
         };
-        let samples = match group.first()? {
-            GeometryControl::Loop(id, _) => {
-                sample(&self.editor.obstacle(*id)?.spline, options).ok()?
-            }
-            GeometryControl::Baffle(id, _) => {
-                sample_open(&self.editor.internal_boundary(*id)?.spline, options).ok()?
-            }
-        };
         let mut weighted = Point2::default();
         let mut total = 0.0;
-        for segment in samples.windows(2) {
-            let length = (segment[1].point - segment[0].point).norm();
-            weighted = weighted + (segment[0].point + segment[1].point) * (0.5 * length);
-            total += length;
+        let mut loop_ids = Vec::new();
+        let mut baffle_ids = Vec::new();
+        for selected in &self.selected_spans {
+            match *selected {
+                GeometrySpan::Loop(id, _) if !loop_ids.contains(&id) => loop_ids.push(id),
+                GeometrySpan::Baffle(id, _) if !baffle_ids.contains(&id) => baffle_ids.push(id),
+                _ => {}
+            }
+        }
+        for id in loop_ids {
+            let spline = &self.editor.obstacle(id)?.spline;
+            let samples = sample(spline, options).ok()?;
+            for segment in samples.windows(2) {
+                let parameter = (segment[0].t + segment[1].t) * 0.5;
+                let span = spline.span_index(parameter)?;
+                if self.selected_spans.contains(&GeometrySpan::Loop(id, span)) {
+                    let length = (segment[1].point - segment[0].point).norm();
+                    weighted = weighted + (segment[0].point + segment[1].point) * (0.5 * length);
+                    total += length;
+                }
+            }
+        }
+        for id in baffle_ids {
+            let spline = &self.editor.internal_boundary(id)?.spline;
+            let samples = sample_open(spline, options).ok()?;
+            for segment in samples.windows(2) {
+                let parameter = (segment[0].t + segment[1].t) * 0.5;
+                let span = spline.span_index(parameter)?;
+                if self
+                    .selected_spans
+                    .contains(&GeometrySpan::Baffle(id, span))
+                {
+                    let length = (segment[1].point - segment[0].point).norm();
+                    weighted = weighted + (segment[0].point + segment[1].point) * (0.5 * length);
+                    total += length;
+                }
+            }
         }
         (total > 0.0).then_some((weighted, total))
     }
@@ -665,10 +754,14 @@ impl Playground {
         };
         let mut updates = Vec::new();
         for group in groups {
-            let Some((weighted, length)) = self.curve_arc_measure(&group) else {
+            let Some(center) = group
+                .iter()
+                .filter_map(|control| self.editor.control_point(*control))
+                .reduce(|sum, point| sum + point)
+                .map(|sum| sum / group.len() as f64)
+            else {
                 return;
             };
-            let center = weighted / length;
             let delta = if horizontal {
                 Point2::new(0.0, pivot.y - center.y)
             } else {
@@ -1636,9 +1729,9 @@ impl Playground {
         if !self.selected_spans.is_empty() {
             ui.add_space(8.0);
             if let Some(groups) = transformable {
-                let curve_count = groups.len();
-                let noun = if curve_count == 1 { "curve" } else { "curves" };
-                ui.collapsing(format!("Transform · {curve_count} {noun}"), |ui| {
+                let piece_count = groups.len();
+                let noun = if piece_count == 1 { "piece" } else { "pieces" };
+                ui.collapsing(format!("Transform · {piece_count} {noun}"), |ui| {
                     if let Some(pivot) = self.selection_pivot() {
                         ui.small(format!("Pivot  x {:.4}  y {:.4}", pivot.x, pivot.y));
                     }
@@ -1697,10 +1790,10 @@ impl Playground {
                             self.align_selection(false);
                         }
                     });
-                    ui.small("Drag selected curves to move · ring rotates · center moves pivot");
+                    ui.small("Drag selected spans to move · ring rotates · center moves pivot");
                 });
             } else {
-                ui.small("Select every span of movable curves to transform geometry.");
+                ui.small("Partial selections need C0 knots at their exposed ends.");
             }
         }
         self.topology_inspector(ui);
@@ -2176,6 +2269,37 @@ impl Playground {
             ui.small("Select one span to edit its end knot.");
         }
 
+        if let Some((loop_breakpoints, baffle_breakpoints)) = self.exposed_selection_breakpoints()
+            && (!loop_breakpoints.is_empty() || !baffle_breakpoints.is_empty())
+        {
+            let needs_refinement = loop_breakpoints.iter().any(|(id, breakpoint)| {
+                self.editor
+                    .obstacle(*id)
+                    .and_then(|obstacle| obstacle.spline.continuity(*breakpoint))
+                    != Some(0)
+            }) || baffle_breakpoints.iter().any(|(id, breakpoint)| {
+                self.editor
+                    .internal_boundary(*id)
+                    .and_then(|boundary| boundary.spline.continuity(*breakpoint))
+                    != Some(0)
+            });
+            if ui
+                .add_enabled(
+                    needs_refinement,
+                    egui::Button::new("Isolate selection at C0"),
+                )
+                .clicked()
+            {
+                let result = self
+                    .editor
+                    .isolate_span_boundaries(&loop_breakpoints, &baffle_breakpoints);
+                if self.error(result).is_some() {
+                    self.gizmo_pivot = None;
+                }
+            }
+            ui.small("Isolation inserts exact corner knots at every exposed end, enabling rigid piece transforms.");
+        }
+
         let mut baffles = Vec::new();
         for selected in &self.selected_spans {
             if let GeometrySpan::Baffle(id, _) = *selected
@@ -2222,6 +2346,56 @@ impl Playground {
             ui.small("Tips must coincide within the snap step (0.02 without snapping). Side laws follow the arrows.");
         }
         ui.small("Sharpening is exact. Smoothing a subsequently edited corner uses Undo.");
+    }
+
+    fn exposed_selection_breakpoints(&self) -> Option<ExposedBreakpoints> {
+        if self
+            .selected_spans
+            .iter()
+            .any(|span| matches!(span, GeometrySpan::Outer(_)))
+        {
+            return None;
+        }
+        let mut loops = Vec::new();
+        let mut baffles = Vec::new();
+        let mut loop_ids = Vec::new();
+        let mut baffle_ids = Vec::new();
+        for selected in &self.selected_spans {
+            match *selected {
+                GeometrySpan::Loop(id, _) if !loop_ids.contains(&id) => loop_ids.push(id),
+                GeometrySpan::Baffle(id, _) if !baffle_ids.contains(&id) => baffle_ids.push(id),
+                _ => {}
+            }
+        }
+        for id in loop_ids {
+            let count = self.editor.obstacle(id)?.spline.intervals().len();
+            let selected = (0..count)
+                .map(|span| self.selected_spans.contains(&GeometrySpan::Loop(id, span)))
+                .collect::<Vec<_>>();
+            if selected.iter().all(|value| *value) {
+                continue;
+            }
+            for breakpoint in 0..count {
+                if selected[breakpoint] != selected[(breakpoint + count - 1) % count] {
+                    loops.push((id, breakpoint));
+                }
+            }
+        }
+        for id in baffle_ids {
+            let count = self.editor.internal_boundary(id)?.spline.intervals().len();
+            let selected = (0..count)
+                .map(|span| {
+                    self.selected_spans
+                        .contains(&GeometrySpan::Baffle(id, span))
+                })
+                .collect::<Vec<_>>();
+            for breakpoint in 1..count {
+                if selected[breakpoint] != selected[breakpoint - 1] {
+                    baffles.push((id, breakpoint));
+                }
+            }
+        }
+        Some((loops, baffles))
     }
 
     fn selected_baffle_spans(&self) -> Option<Vec<(InternalBoundaryId, usize)>> {
@@ -5444,6 +5618,108 @@ mod tests {
         assert_eq!(harness.state.transform_translation, Point2::default());
         assert_eq!(harness.state.transform_rotation_degrees, 0.0);
         assert_eq!(harness.state.transform_scale, 1.0);
+    }
+
+    #[test]
+    fn c0_isolated_baffle_span_transforms_rigidly_as_one_history_action() {
+        let mut harness = Harness::new();
+        let id = harness
+            .state
+            .editor
+            .create_internal_boundary(
+                OpenCubicSpline::new(
+                    vec![
+                        Point2::new(-0.8, 0.55),
+                        Point2::new(-0.6, 0.72),
+                        Point2::new(-0.2, 0.48),
+                        Point2::new(0.15, 0.7),
+                        Point2::new(0.5, 0.48),
+                        Point2::new(0.8, 0.6),
+                    ],
+                    vec![0.8, 1.1, 0.9],
+                )
+                .unwrap(),
+                BACKGROUND_REGION,
+            )
+            .unwrap();
+        harness
+            .state
+            .set_span_selection(vec![GeometrySpan::Baffle(id, 1)]);
+        assert!(harness.state.transformable_curve_controls().is_none());
+        let (loop_breakpoints, baffle_breakpoints) =
+            harness.state.exposed_selection_breakpoints().unwrap();
+        assert!(loop_breakpoints.is_empty());
+        assert_eq!(baffle_breakpoints, [(id, 1), (id, 2)]);
+        let isolation_history = harness.state.editor.history_len().0;
+        harness.click_text("Isolate selection at C0");
+        assert_eq!(harness.state.editor.history_len().0, isolation_history + 1);
+        let before = harness
+            .state
+            .editor
+            .internal_boundary(id)
+            .unwrap()
+            .spline
+            .clone();
+        let controls = harness.state.transformable_curve_controls().unwrap();
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0].len(), 4);
+        let history = harness.state.editor.history_len().0;
+        let delta = Point2::new(0.025, -0.015);
+        harness.state.transform_translation = delta;
+        harness.state.apply_selection_transform();
+        let after = &harness.state.editor.internal_boundary(id).unwrap().spline;
+        let bounds = before.span_bounds(1).unwrap();
+        for index in 0..=20 {
+            let parameter = bounds[0] + (bounds[1] - bounds[0]) * index as f64 / 20.0;
+            assert!(
+                (after.evaluate(parameter) - before.evaluate(parameter) - delta).norm() < 1.0e-10
+            );
+        }
+        assert!((after.evaluate(0.0) - before.evaluate(0.0)).norm() < 1.0e-12);
+        assert!(
+            (after.evaluate(after.period()) - before.evaluate(before.period())).norm() < 1.0e-12
+        );
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
+        harness.state.editor.undo();
+        assert_eq!(
+            harness.state.editor.internal_boundary(id).unwrap().spline,
+            before
+        );
+    }
+
+    #[test]
+    fn c0_isolated_loop_selection_can_wrap_the_periodic_seam() {
+        let mut harness = Harness::new();
+        let id = ObstacleId(1);
+        harness
+            .state
+            .editor
+            .set_obstacle_continuity(id, 7, 0)
+            .unwrap();
+        harness
+            .state
+            .editor
+            .set_obstacle_continuity(id, 1, 0)
+            .unwrap();
+        harness
+            .state
+            .set_span_selection(vec![GeometrySpan::Loop(id, 7), GeometrySpan::Loop(id, 0)]);
+        let groups = harness.state.transformable_curve_controls().unwrap();
+        assert_eq!(groups.len(), 1);
+        let before = harness.state.editor.obstacle(id).unwrap().spline.clone();
+        let untouched = before.evaluate(3.5);
+        let history = harness.state.editor.history_len().0;
+        let delta = Point2::new(-0.012, 0.018);
+        harness.state.transform_translation = delta;
+        harness.state.apply_selection_transform();
+        let after = &harness.state.editor.obstacle(id).unwrap().spline;
+        for parameter in [7.2, 7.8, 0.2, 0.8] {
+            assert!(
+                (after.evaluate(parameter) - before.evaluate(parameter) - delta).norm() < 1.0e-10
+            );
+        }
+        assert!((after.evaluate(3.5) - untouched).norm() < 1.0e-12);
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
     }
     #[test]
     fn both_creation_workflows_and_custom_cancel() {

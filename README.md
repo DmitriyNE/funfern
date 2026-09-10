@@ -71,10 +71,13 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Clicking a curve selects its knot span; Shift-click toggles spans, and
   Ctrl/Cmd-click selects the complete curve. Double-click inserts a knot without
   changing the curve and selects its control.
-- **Transform:** complete selected loops and baffles can be dragged, translated,
-  rotated, uniformly scaled, snapped, or aligned as one undoable action. Snapping
-  moves their shared arc-length centroid, preserving the curves' shape. Drag the
-  viewport ring to rotate and its center marker to reposition the temporary pivot.
+- **Transform:** complete curves and partial selections bounded by C0 knots can
+  be dragged, translated, rotated, uniformly scaled, snapped, or aligned as one
+  undoable action. **Isolate selection at C0** inserts every missing boundary
+  corner exactly. Each selected subcurve then moves rigidly; connected neighboring
+  spans follow only through their shared corner point. Snapping moves the selected
+  arc-length centroid. Drag the viewport ring to rotate and its center marker to
+  reposition the temporary pivot. Seam-wrapped loop selections are supported.
   A selected span exposes the continuity at its end knot. **Make C1** and
   **Make corner C0** refine the cubic exactly; gold diamonds on the curve are
   repeated knots, separate from circular control handles. Smoothing a corner

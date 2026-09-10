@@ -1312,6 +1312,101 @@ impl Editor {
         Ok(())
     }
 
+    /// Refines several loop and baffle breakpoints to C0 as one exact history
+    /// action. All splines are prepared before the document is mutated.
+    pub fn isolate_span_boundaries(
+        &mut self,
+        loop_breakpoints: &[(ObstacleId, usize)],
+        baffle_breakpoints: &[(InternalBoundaryId, usize)],
+    ) -> Result<(), String> {
+        let mut loop_updates = Vec::<(ObstacleId, PeriodicCubicSpline)>::new();
+        for &(id, breakpoint) in loop_breakpoints {
+            if let Some((_, spline)) = loop_updates
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == id)
+            {
+                while spline.continuity(breakpoint).ok_or("Missing loop knot")? > 0 {
+                    spline
+                        .increase_multiplicity(breakpoint)
+                        .map_err(|error| error.to_string())?;
+                }
+            } else {
+                let mut spline = self.obstacle(id).ok_or("Missing obstacle")?.spline.clone();
+                while spline.continuity(breakpoint).ok_or("Missing loop knot")? > 0 {
+                    spline
+                        .increase_multiplicity(breakpoint)
+                        .map_err(|error| error.to_string())?;
+                }
+                loop_updates.push((id, spline));
+            }
+        }
+        let mut baffle_updates = Vec::<(InternalBoundaryId, OpenCubicSpline)>::new();
+        for &(id, breakpoint) in baffle_breakpoints {
+            if let Some((_, spline)) = baffle_updates
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == id)
+            {
+                while spline
+                    .continuity(breakpoint)
+                    .ok_or("Choose an interior baffle knot")?
+                    > 0
+                {
+                    spline
+                        .increase_multiplicity(breakpoint)
+                        .map_err(|error| error.to_string())?;
+                }
+            } else {
+                let mut spline = self
+                    .internal_boundary(id)
+                    .ok_or("Missing internal boundary")?
+                    .spline
+                    .clone();
+                while spline
+                    .continuity(breakpoint)
+                    .ok_or("Choose an interior baffle knot")?
+                    > 0
+                {
+                    spline
+                        .increase_multiplicity(breakpoint)
+                        .map_err(|error| error.to_string())?;
+                }
+                baffle_updates.push((id, spline));
+            }
+        }
+        let changed = loop_updates.iter().any(|(id, spline)| {
+            self.obstacle(*id)
+                .is_some_and(|obstacle| obstacle.spline != *spline)
+        }) || baffle_updates.iter().any(|(id, spline)| {
+            self.internal_boundary(*id)
+                .is_some_and(|boundary| boundary.spline != *spline)
+        });
+        if !changed {
+            return Ok(());
+        }
+        self.begin();
+        for (id, spline) in loop_updates {
+            self.document
+                .draft
+                .obstacles
+                .iter_mut()
+                .find(|obstacle| obstacle.id == id)
+                .unwrap()
+                .spline = spline;
+        }
+        for (id, spline) in baffle_updates {
+            self.document
+                .draft
+                .internal_boundaries
+                .iter_mut()
+                .find(|boundary| boundary.id == id)
+                .unwrap()
+                .spline = spline;
+        }
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
     pub fn set_obstacle_boundary_condition(
         &mut self,
         id: ObstacleId,

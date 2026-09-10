@@ -154,9 +154,15 @@ supports exact affine transforms. Repeated-knot multiplicity is stored separatel
 from positive knot intervals, so C2, C1, and C0 joins do not create empty
 boundary-condition spans. Raising multiplicity uses exact knot insertion and
 leaves geometry and span assignments unchanged, including at the periodic seam.
-Rigid dragging and snapping apply one displacement derived from the selection's
-arc-length centroid. The rotation pivot is transient, as are selection, transform inputs, and
-snapping preferences. Bulk boundary edits validate all outer, hole, and oriented
+Complete curves are always transformable. A partial selection is transformable
+when every exposed end is a C0 knot or an open-curve endpoint. The union of the
+four controls active on each selected span receives one affine map, which moves
+the selected subcurve rigidly; an adjacent unselected span can change only through
+its shared corner control. An atomic isolation action inserts every missing C0
+knot first. This also works for selection components wrapping across a periodic
+seam. Rigid dragging and snapping use the selected arcs' length-weighted centroid.
+The rotation pivot is transient, as are selection, transform inputs, and snapping
+preferences. Bulk boundary edits validate all outer, hole, and oriented
 baffle-face targets before one revision and history transaction. Baffle left/right
 always follows increasing spline parameter.
 

@@ -16,10 +16,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   spring is conservative.
 - [ ] Replace the temporary wave reset after open-baffle geometry edits with a
   side-aware transfer that preserves each moving trace without cross-wall sampling.
-- [ ] Continue stage-two spline topology editing with loop role/topology changes,
-  safe smoothing, and transforms of isolated partial curves. Box selection and
-  selection filters remain useful follow-ups for dense scenes. Rational weights
-  remain conditional on a demonstrated workflow need.
+- [ ] Continue stage-two spline topology editing with loop role/topology changes
+  and safe smoothing. Box selection and selection filters remain useful follow-ups
+  for dense scenes. Rational weights remain conditional on a demonstrated
+  workflow need.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
   and local-repair cases. The user reports that the end-to-end handoff still feels
   slow even though the small scripted transfer case is much faster.
@@ -36,6 +36,24 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Improve open-baffle crack-tip element quality. The assigned-law native check
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
+
+## 2026-09-10 — Rigid partial-span transforms
+
+- Added exact control-support queries for open and periodic cubic spans. A partial
+  selection becomes transformable when every exposed end is C0 or a baffle tip;
+  selected spans receive one rigid affine map while neighbors remain connected at
+  the shared corner.
+- Added **Isolate selection at C0**, which finds every selected/unselected
+  transition and performs all required shape-preserving knot insertions as one
+  history action. It supports multiple disjoint pieces, multiple curves, open
+  endpoints, and loop selections crossing the periodic seam.
+- Pivot and grid snapping now use only selected arc length rather than the full
+  parent curves. Viewport dragging, the rotation gizmo, numeric transforms, and
+  alignment all use the same isolated control groups.
+- Direct UI tests cover atomic baffle isolation, exact partial-span translation,
+  unchanged remote endpoints, undo, and a seam-wrapped loop selection.
+- Verification passes formatting, Clippy with warnings denied, all **126 workspace
+  tests**, native release compilation, and the optimized Trunk/WebGPU build.
 
 ## 2026-09-10 — Explicit corners and baffle topology
 

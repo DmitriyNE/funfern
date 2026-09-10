@@ -209,6 +209,17 @@ impl OpenCubicSpline {
         Some([start, start + interval])
     }
 
+    /// The four control indices active on one nonempty cubic span.
+    pub fn span_control_indices(&self, index: usize) -> Option<[usize; 4]> {
+        (index < self.intervals.len()).then(|| {
+            let last = 3 + self.multiplicities[..index]
+                .iter()
+                .map(|value| *value as usize)
+                .sum::<usize>();
+            [last - 3, last - 2, last - 1, last]
+        })
+    }
+
     pub fn set_control(&mut self, index: usize, point: Point2) -> Result<(), SplineError> {
         if !point.finite() {
             return Err(SplineError::NonFinite);
@@ -617,6 +628,23 @@ impl PeriodicCubicSpline {
 
     pub fn span_bounds(&self, index: usize) -> Option<[f64; 2]> {
         (index < self.intervals.len()).then(|| [self.knots[index], self.knots[index + 1]])
+    }
+    /// The four periodic control indices active on one nonempty cubic span.
+    pub fn span_control_indices(&self, index: usize) -> Option<[usize; 4]> {
+        (index < self.intervals.len()).then(|| {
+            let last = self.multiplicities[..=index]
+                .iter()
+                .map(|value| *value as usize)
+                .sum::<usize>()
+                - 1;
+            let count = self.controls.len();
+            [
+                (last + count - 3) % count,
+                (last + count - 2) % count,
+                (last + count - 1) % count,
+                last % count,
+            ]
+        })
     }
     fn knot(&self, i: isize) -> f64 {
         let n = self.controls.len() as isize;
