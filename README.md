@@ -67,25 +67,28 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 
 ## Edit
 
-- **Select:** left-click a handle, curve, or outer domain edge; drag handles to
-  reshape, or drag a curve to translate all of its controls. Shift-click handles
-  or curves to build a multi-control selection. Double-click a curve to insert a
-  knot without changing its shape. Clicking near an existing knot selects its
-  associated control instead of adding a repeated knot.
-- **Transform:** the selection inspector applies numeric translation, rotation,
-  uniform scale, grid snapping, and horizontal/vertical alignment as one undoable
-  action. Whole loops and baffles can be duplicated with their span assignments;
-  selected baffles can also be straightened between their endpoints.
-- **Boundaries:** clicking an outer edge, hole, or open baffle selects and highlights
-  that boundary in the viewport. One Boundary inspector shows the conditions that
-  apply to the selected target. Outer edges support reflecting, prescribed
+- **Select:** clicking a handle selects that one control for local reshaping.
+  Clicking a curve selects its knot span; Shift-click toggles spans, and
+  Ctrl/Cmd-click selects the complete curve. Double-click inserts a knot without
+  changing the curve and selects its control.
+- **Transform:** complete selected loops and baffles can be dragged, translated,
+  rotated, uniformly scaled, snapped, or aligned as one undoable action. Snapping
+  moves their shared arc-length centroid, preserving the curves' shape. Drag the
+  viewport ring to rotate and its center marker to reposition the temporary pivot.
+  Partial-span geometry transforms await explicit spline continuity controls.
+  Whole loops and baffles can also be duplicated with their span assignments;
+  selected baffles can be straightened between their endpoints.
+- **Boundaries:** one Boundary inspector applies conditions to every compatible
+  selected span and reports mixed assignments. Outer edges support reflecting,
+  prescribed
   time-varying Neumann and Dirichlet data, and first- or second-order outgoing
   conditions. Hole and baffle faces support the same choices, with an adjustable
   impedance ratio for first-order outgoing behavior. The baffle face selector stays
-  in the inspector because its left and right traces are geometrically coincident.
+  in the inspector because its left and right traces are geometrically coincident;
+  viewport arrows show the start-to-end direction defining those sides.
   A baffle span instead can use one conservative thin-gap law coupling both traces;
-  this is mutually exclusive with independent face conditions, and increasing its
-  stiffness can reduce the solver time step.
+  applying a face condition converts it back to independent faces, and increasing
+  gap stiffness can reduce the solver time step.
   New scenes start with the second-order auxiliary condition on all four outer
   edges.
 - **Geometry role:** choose Hole, Material interface, or Open baffle before

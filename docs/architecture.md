@@ -147,12 +147,20 @@ excludes selection and navigation. Stable obstacle IDs increase independently of
 undo, preventing reuse after undoing creation. Loading derives the next ID from
 both scenes and clears history.
 
-Selection may address one whole curve or a transient set of controls across loops
-and baffles. Group drags and numeric affine transforms write all selected controls
-through one editor revision and one history transaction. Duplication creates new
-stable geometry IDs, copies knot intervals and span laws, and gives duplicated
-material-interface or wall loops their own interior region with the same material.
-Selection, transform inputs, snapping preferences, and pivots remain transient.
+Selection is either one spline control or a transient set of topological spans.
+Handles always select one control for local deformation; spans support bulk
+boundary assignment, while a set containing every span of movable curves also
+supports exact affine transforms. Partial-span transforms wait for explicit
+continuity boundaries because cubic spans share control support. Rigid dragging
+and snapping apply one displacement derived from the selection's arc-length
+centroid. The rotation pivot is transient, as are selection, transform inputs, and
+snapping preferences. Bulk boundary edits validate all outer, hole, and oriented
+baffle-face targets before one revision and history transaction. Baffle left/right
+always follows increasing spline parameter.
+
+Duplication creates new stable geometry IDs, copies knot intervals and span laws,
+and gives duplicated material-interface or wall loops their own interior region
+with the same material.
 
 Version 7 JSON stores the fixed domain, loop roles, all assigned boundary laws,
 materials, regions, controls, intervals, and both scenes. Versions 2–6 remain

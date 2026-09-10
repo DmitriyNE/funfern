@@ -37,6 +37,25 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   currently reaches only `dt=5.42e-4` at parent h=0.08 because the post-cut mesh
   has small tip angles; this dominates the CFL bound and solver throughput.
 
+## 2026-09-10 — Span selection, bulk boundary editing, and transform gizmo
+
+- Replaced control multiselection with exclusive single-control editing and
+  Shift-based span multiselection. Ctrl/Cmd-click selects a complete curve;
+  Ctrl/Cmd+Shift-click adds or removes all of its spans.
+- Unified bulk condition assignment across compatible outer, hole, and oriented
+  baffle-face spans. Mixed values are explicit, all targets validate before one
+  history action, and applying a face condition converts selected thin-gap spans
+  to independent faces.
+- Complete selected curves translate, rotate, scale, snap, and align without
+  changing their relative controls. Grid snapping applies one displacement to the
+  arc-length centroid. Partial-span transforms remain disabled until continuity
+  boundaries can isolate their support.
+- Added a viewport rotation ring, a draggable transient pivot, baffle direction
+  arrows, and coherent Left/Right highlighting across every selected span.
+- Verification passes formatting, Clippy with warnings denied, all **122 workspace
+  tests**, native release compilation, and a release Trunk build. Playwright
+  confirmed WebGPU startup and rendering with no console errors.
+
 ## 2026-09-10 — Product spline transforms, duplication, and straight baffles
 
 - Added Shift-based control and whole-curve multi-selection. Dragging a selected

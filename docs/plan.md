@@ -257,14 +257,16 @@ junction, transaction, and long-time stability checks.
 
 ## 9. Product spline editing
 
-The first transform slice is implemented: Shift-based multi-control selection,
-whole-curve dragging, numeric translate/rotate/scale, snapping and alignment,
-duplication with span assignments, and exact straightening of open baffles. The
-second slice must extend the spline representation for explicit corners and
-continuity before adding split/merge topology operations.
+The transform slice is implemented with exclusive single-control editing and
+multi-span selection. Selected spans support bulk boundary assignment; complete
+curves support rigid pivot-snapped dragging, numeric affine transforms, and a
+viewport rotation gizmo. Duplication and exact baffle straightening retain span
+assignments. The next slice must extend the spline representation for explicit
+corners and continuity before enabling partial-span transforms and split/merge
+topology operations.
 
-- Add multi-selection and translate/rotate/scale operations for controls and whole
-  loops, plus duplication and practical snapping/alignment tools.
+- Keep complete-curve translate/rotate/scale, duplication, snapping, and alignment
+  predictable under span selection.
 - Expose knot-interval and seam editing without conflating control positions with
   interpolation points. Preserve or clearly report changes to span assignments.
 - Add direct span selection and the topology operations needed by interior regions,

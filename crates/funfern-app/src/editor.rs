@@ -6,6 +6,23 @@ pub enum GeometryControl {
     Baffle(InternalBoundaryId, usize),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryFaceTarget {
+    Outer(OuterSide),
+    Hole(ObstacleId, usize),
+    Baffle(InternalBoundaryId, usize, InternalBoundarySide),
+}
+
+fn outer_condition_from_face(condition: FaceBoundaryCondition) -> OuterBoundaryCondition {
+    match condition {
+        FaceBoundaryCondition::Reflecting => OuterBoundaryCondition::Reflecting,
+        FaceBoundaryCondition::Impedance { .. } => OuterBoundaryCondition::FirstOrderOutgoing,
+        FaceBoundaryCondition::SecondOrderOutgoing => OuterBoundaryCondition::SecondOrderOutgoing,
+        FaceBoundaryCondition::Neumann { signal } => OuterBoundaryCondition::Neumann { signal },
+        FaceBoundaryCondition::Dirichlet { signal } => OuterBoundaryCondition::Dirichlet { signal },
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Document {
     pub draft: Scene,
@@ -57,6 +74,185 @@ impl Default for Editor {
     }
 }
 impl Editor {
+    pub fn boundary_face_condition(
+        &self,
+        target: BoundaryFaceTarget,
+    ) -> Result<FaceBoundaryCondition, String> {
+        match target {
+            BoundaryFaceTarget::Outer(side) => {
+                Ok(match self.document.draft.outer_boundaries.get(side) {
+                    OuterBoundaryCondition::Reflecting => FaceBoundaryCondition::Reflecting,
+                    OuterBoundaryCondition::FirstOrderOutgoing => {
+                        FaceBoundaryCondition::Impedance { ratio: 1.0 }
+                    }
+                    OuterBoundaryCondition::SecondOrderOutgoing => {
+                        FaceBoundaryCondition::SecondOrderOutgoing
+                    }
+                    OuterBoundaryCondition::Neumann { signal } => {
+                        FaceBoundaryCondition::Neumann { signal }
+                    }
+                    OuterBoundaryCondition::Dirichlet { signal } => {
+                        FaceBoundaryCondition::Dirichlet { signal }
+                    }
+                })
+            }
+            BoundaryFaceTarget::Hole(id, span) => {
+                let obstacle = self.obstacle(id).ok_or("Missing obstacle")?;
+                if !matches!(obstacle.role, LoopRole::Hole { .. }) {
+                    return Err("The selected loop does not expose a boundary face".into());
+                }
+                obstacle
+                    .span_conditions
+                    .get(span)
+                    .copied()
+                    .ok_or_else(|| "Missing obstacle span".into())
+            }
+            BoundaryFaceTarget::Baffle(id, span, side) => {
+                let law = self
+                    .internal_boundary(id)
+                    .ok_or("Missing internal boundary")?
+                    .span_laws
+                    .get(span)
+                    .copied()
+                    .ok_or("Missing internal-boundary span")?;
+                Ok(match side {
+                    InternalBoundarySide::Left => law.left,
+                    InternalBoundarySide::Right => law.right,
+                })
+            }
+        }
+    }
+
+    /// Applies one face condition to a validated set of heterogeneous boundary
+    /// targets as one document revision and history action.
+    pub fn set_boundary_face_conditions(
+        &mut self,
+        targets: &[BoundaryFaceTarget],
+        condition: FaceBoundaryCondition,
+    ) -> Result<(), String> {
+        if !condition.valid() {
+            return Err("Boundary parameters must be valid and finite".into());
+        }
+        let mut unique_targets = Vec::with_capacity(targets.len());
+        for target in targets {
+            if !unique_targets.contains(target) {
+                unique_targets.push(*target);
+            }
+        }
+        let targets = unique_targets;
+        for target in &targets {
+            self.boundary_face_condition(*target)?;
+        }
+        let changed = targets.iter().any(|target| match target {
+            BoundaryFaceTarget::Outer(side) => {
+                self.document.draft.outer_boundaries.get(*side)
+                    != outer_condition_from_face(condition)
+            }
+            BoundaryFaceTarget::Hole(id, span) => {
+                self.obstacle(*id).unwrap().span_conditions[*span] != condition
+            }
+            BoundaryFaceTarget::Baffle(id, span, side) => {
+                let law = self.internal_boundary(*id).unwrap().span_laws[*span];
+                !matches!(law.coupling, InternalBoundaryCoupling::Independent)
+                    || match side {
+                        InternalBoundarySide::Left => law.left,
+                        InternalBoundarySide::Right => law.right,
+                    } != condition
+            }
+        });
+        if !changed {
+            return Ok(());
+        }
+        self.begin();
+        for target in targets {
+            match target {
+                BoundaryFaceTarget::Outer(side) => {
+                    self.document.draft.outer_boundaries.sides[side.index()] =
+                        outer_condition_from_face(condition);
+                }
+                BoundaryFaceTarget::Hole(id, span) => {
+                    self.document
+                        .draft
+                        .obstacles
+                        .iter_mut()
+                        .find(|obstacle| obstacle.id == id)
+                        .unwrap()
+                        .span_conditions[span] = condition;
+                }
+                BoundaryFaceTarget::Baffle(id, span, side) => {
+                    let law = &mut self
+                        .document
+                        .draft
+                        .internal_boundaries
+                        .iter_mut()
+                        .find(|boundary| boundary.id == id)
+                        .unwrap()
+                        .span_laws[span];
+                    if !matches!(law.coupling, InternalBoundaryCoupling::Independent) {
+                        law.left = FaceBoundaryCondition::Reflecting;
+                        law.right = FaceBoundaryCondition::Reflecting;
+                        law.coupling = InternalBoundaryCoupling::Independent;
+                    }
+                    match side {
+                        InternalBoundarySide::Left => law.left = condition,
+                        InternalBoundarySide::Right => law.right = condition,
+                    }
+                }
+            }
+        }
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_internal_boundary_couplings(
+        &mut self,
+        spans: &[(InternalBoundaryId, usize)],
+        coupling: InternalBoundaryCoupling,
+    ) -> Result<(), String> {
+        if !coupling.valid() {
+            return Err("Thin-gap stiffness must be finite and positive".into());
+        }
+        let mut unique_spans = Vec::with_capacity(spans.len());
+        for span in spans {
+            if !unique_spans.contains(span) {
+                unique_spans.push(*span);
+            }
+        }
+        let spans = unique_spans;
+        for (id, span) in &spans {
+            self.internal_boundary(*id)
+                .ok_or("Missing internal boundary")?
+                .span_laws
+                .get(*span)
+                .ok_or("Missing internal-boundary span")?;
+        }
+        if spans.iter().all(|(id, span)| {
+            self.internal_boundary(*id).unwrap().span_laws[*span].coupling == coupling
+        }) {
+            return Ok(());
+        }
+        self.begin();
+        for (id, span) in spans {
+            let law = &mut self
+                .document
+                .draft
+                .internal_boundaries
+                .iter_mut()
+                .find(|boundary| boundary.id == id)
+                .unwrap()
+                .span_laws[span];
+            law.coupling = coupling;
+            if !matches!(coupling, InternalBoundaryCoupling::Independent) {
+                law.left = FaceBoundaryCondition::Reflecting;
+                law.right = FaceBoundaryCondition::Reflecting;
+            }
+        }
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
     pub fn control_point(&self, control: GeometryControl) -> Option<Point2> {
         match control {
             GeometryControl::Loop(id, index) => self

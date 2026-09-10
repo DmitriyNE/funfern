@@ -656,3 +656,116 @@ fn duplication_preserves_assignments_and_straightens_baffles() {
     assert!(editor.obstacle(copy).is_none());
     assert!(editor.document.draft.region(copy_region).is_none());
 }
+
+#[test]
+fn bulk_face_assignment_is_atomic_and_converts_thin_gaps() {
+    let mut editor = Editor::default();
+    let baffle = editor
+        .create_internal_boundary(
+            OpenCubicSpline::uniform(vec![
+                Point2::new(-0.8, 0.6),
+                Point2::new(-0.4, 0.7),
+                Point2::new(0.0, 0.55),
+                Point2::new(0.4, 0.7),
+                Point2::new(0.8, 0.6),
+            ])
+            .unwrap(),
+            BACKGROUND_REGION,
+        )
+        .unwrap();
+    editor
+        .set_internal_boundary_couplings(
+            &[(baffle, 0), (baffle, 1)],
+            InternalBoundaryCoupling::ThinGap {
+                stiffness_ratio: 2.0,
+            },
+        )
+        .unwrap();
+    let before = editor.document.clone();
+    let history = editor.history_len().0;
+    let condition = FaceBoundaryCondition::Dirichlet {
+        signal: BoundarySignal {
+            offset: 0.2,
+            amplitude: 0.5,
+            frequency_hz: 3.0,
+            phase_radians: 0.1,
+        },
+    };
+    editor
+        .set_boundary_face_conditions(
+            &[
+                BoundaryFaceTarget::Outer(OuterSide::Top),
+                BoundaryFaceTarget::Hole(ObstacleId(1), 2),
+                BoundaryFaceTarget::Baffle(baffle, 0, InternalBoundarySide::Right),
+                BoundaryFaceTarget::Baffle(baffle, 1, InternalBoundarySide::Right),
+            ],
+            condition,
+        )
+        .unwrap();
+    assert_eq!(editor.history_len().0, history + 1);
+    assert_eq!(
+        editor.document.draft.outer_boundaries.get(OuterSide::Top),
+        OuterBoundaryCondition::Dirichlet {
+            signal: condition.signal().unwrap()
+        }
+    );
+    assert_eq!(
+        editor.obstacle(ObstacleId(1)).unwrap().span_conditions[2],
+        condition
+    );
+    for law in &editor.internal_boundary(baffle).unwrap().span_laws {
+        assert_eq!(law.left, FaceBoundaryCondition::Reflecting);
+        assert_eq!(law.right, condition);
+        assert_eq!(law.coupling, InternalBoundaryCoupling::Independent);
+    }
+    editor.undo();
+    assert_eq!(editor.document, before);
+
+    let before = editor.document.clone();
+    let history = editor.history_len();
+    assert!(
+        editor
+            .set_boundary_face_conditions(
+                &[
+                    BoundaryFaceTarget::Hole(ObstacleId(1), 0),
+                    BoundaryFaceTarget::Baffle(
+                        InternalBoundaryId(u64::MAX),
+                        0,
+                        InternalBoundarySide::Left,
+                    ),
+                ],
+                FaceBoundaryCondition::SecondOrderOutgoing,
+            )
+            .is_err()
+    );
+    assert_eq!(editor.document, before);
+    assert_eq!(editor.history_len(), history);
+}
+
+#[test]
+fn heterogeneous_first_order_assignment_preserves_face_ratio() {
+    let mut editor = Editor::default();
+    editor
+        .set_boundary_face_conditions(
+            &[
+                BoundaryFaceTarget::Outer(OuterSide::Left),
+                BoundaryFaceTarget::Hole(ObstacleId(1), 0),
+            ],
+            FaceBoundaryCondition::Impedance { ratio: 2.5 },
+        )
+        .unwrap();
+    assert_eq!(
+        editor.document.draft.outer_boundaries.get(OuterSide::Left),
+        OuterBoundaryCondition::FirstOrderOutgoing
+    );
+    assert_eq!(
+        editor.obstacle(ObstacleId(1)).unwrap().span_conditions[0],
+        FaceBoundaryCondition::Impedance { ratio: 2.5 }
+    );
+    assert_eq!(
+        editor
+            .boundary_face_condition(BoundaryFaceTarget::Outer(OuterSide::Left))
+            .unwrap(),
+        FaceBoundaryCondition::Impedance { ratio: 1.0 }
+    );
+}
