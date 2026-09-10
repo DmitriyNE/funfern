@@ -165,6 +165,7 @@ pub struct Playground {
     mode: Mode,
     creation_role: CreationRole,
     material_selection: MaterialId,
+    material_name_edit: Option<(MaterialId, String)>,
     region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
     internal_selection: Option<(InternalBoundaryId, Option<usize>)>,
@@ -266,6 +267,7 @@ impl Default for Playground {
             mode: Mode::Select,
             creation_role: CreationRole::Hole,
             material_selection: DEFAULT_MATERIAL,
+            material_name_edit: None,
             region_selection: BACKGROUND_REGION,
             selection: Some((ObstacleId(1), None)),
             internal_selection: None,
@@ -2060,6 +2062,48 @@ impl Playground {
             .material(self.material_selection)
             .cloned()
         {
+            if !matches!(
+                self.material_name_edit.as_ref(),
+                Some((id, _)) if *id == material.id
+            ) {
+                self.material_name_edit = Some((material.id, material.name.clone()));
+            }
+            let mut edited_name = None;
+            let mut name_lost_focus = false;
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                if let Some((_, name)) = self.material_name_edit.as_mut() {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(name)
+                            .desired_width(ui.available_width())
+                            .hint_text("Material name"),
+                    );
+                    if response.changed() {
+                        edited_name = Some(name.clone());
+                    }
+                    name_lost_focus = response.lost_focus();
+                }
+            });
+            if edited_name.is_some() {
+                self.editor.begin();
+            }
+            if let Some(name) = edited_name
+                && !name.trim().is_empty()
+                && name.len() <= 64
+            {
+                material.name = name;
+                let result = self.editor.update_material(material.clone());
+                self.error(result);
+            }
+            if name_lost_focus {
+                if let Some((_, name)) = self.material_name_edit.as_ref()
+                    && (name.trim().is_empty() || name.len() > 64)
+                {
+                    self.material_name_edit = Some((material.id, material.name.clone()));
+                }
+                self.editor.commit();
+                self.material_name_edit = None;
+            }
             let responses = [
                 ui.add(
                     egui::DragValue::new(&mut material.mass_density)
