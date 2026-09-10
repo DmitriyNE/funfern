@@ -2196,7 +2196,7 @@ impl Playground {
             } else {
                 ui.small("Preparing…");
             }
-            if self.mesh_started.is_some() || self.mesh_job.is_some() {
+            if self.mesh_job.is_some() {
                 ui.small("Mesh build in progress…");
             }
             let wave_available = self.wave_operator.is_some();
