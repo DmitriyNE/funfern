@@ -2205,13 +2205,13 @@ impl Playground {
             ui.add_enabled_ui(wave_available, |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .selectable_label(self.mode == Mode::Pulse, "Place pulse")
+                        .add(egui::Button::new("Place pulse").selected(self.mode == Mode::Pulse))
                         .clicked()
                     {
                         self.mode = Mode::Pulse;
                     }
                     if ui
-                        .selectable_label(self.mode == Mode::Source, "Move source")
+                        .add(egui::Button::new("Move source").selected(self.mode == Mode::Source))
                         .clicked()
                     {
                         self.mode = Mode::Source;
@@ -3623,7 +3623,6 @@ impl Playground {
                         }
                         Mode::Pulse => {
                             self.wave_pending_pulse = Some(self.world(p, r));
-                            self.mode = Mode::Select;
                         }
                         Mode::Source => {
                             self.wave_source.position = self.world(p, r);
@@ -3633,7 +3632,6 @@ impl Playground {
                                 .and_then(|mesh| mesh_region_at(mesh, self.wave_source.position))
                                 .unwrap_or(RegionId(0));
                             self.wave_source_dirty = true;
-                            self.mode = Mode::Select;
                         }
                         Mode::Select => {}
                     }
@@ -6914,12 +6912,16 @@ mod tests {
         let pulse = Point2::new(0.45, -0.3);
         h.click(h.point(pulse));
         assert!((h.state.wave_pending_pulse.unwrap() - pulse).norm() < 1.0e-6);
-        assert!(h.state.mode == Mode::Select);
+        assert!(h.state.mode == Mode::Pulse);
+        let second_pulse = Point2::new(0.2, -0.1);
+        h.click(h.point(second_pulse));
+        assert!((h.state.wave_pending_pulse.unwrap() - second_pulse).norm() < 1.0e-6);
         h.state.mode = Mode::Source;
         let source = Point2::new(-0.55, 0.25);
         h.click(h.point(source));
         assert!((h.state.wave_source.position - source).norm() < 1.0e-6);
         assert!(h.state.wave_source_dirty);
+        assert!(h.state.mode == Mode::Source);
         assert_eq!(h.state.editor.document, document);
         assert_eq!(h.state.editor.history_len(), (0, 0));
 
