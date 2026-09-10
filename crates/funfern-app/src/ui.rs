@@ -1865,6 +1865,9 @@ impl Playground {
                                 mesh.quality.minimum_angle_degrees,
                                 mesh.quality.maximum_edge_length
                             ));
+                            let low_quality =
+                                self.mesh_low_quality.iter().filter(|poor| **poor).count();
+                            ui.small(format!("{low_quality} elements below 15°"));
                         } else {
                             ui.label("No committed mesh");
                         }
@@ -2188,16 +2191,8 @@ impl Playground {
             } else if let Some(error) = &self.mesh_error {
                 ui.colored_label(RED, error);
                 ui.small("Previous mesh retained.");
-            } else if let Some(mesh) = &self.mesh {
-                let low_quality = self.mesh_low_quality.iter().filter(|poor| **poor).count();
-                ui.small(format!(
-                "{} vertices · {} triangles\nmin angle {:.1}° · max edge {:.3}\n{} elements below 15°",
-                mesh.vertices.len(),
-                mesh.triangles.len(),
-                mesh.quality.minimum_angle_degrees,
-                mesh.quality.maximum_edge_length,
-                low_quality
-            ));
+            } else if self.mesh.is_some() {
+                ui.small("Mesh ready.");
             } else {
                 ui.small("Preparing…");
             }
@@ -2263,7 +2258,10 @@ impl Playground {
                     operator.degrees_of_freedom(),
                     self.wave_time_step,
                 ));
-                ui.small("Throughput, memory, handoff timing, and energy are in Performance.");
+                if let Some(energy) = self.wave_energy {
+                    ui.small(format!("Discrete energy {energy:.6e}"));
+                }
+                ui.small("Throughput, memory, and handoff timing are in Performance.");
             } else if self.mesh.is_some() {
                 ui.small("Preparing wave operator…");
             } else if self.simulation_candidate.is_some() {
