@@ -29,6 +29,16 @@ Use egui for panels, controls, and diagnostics. Render the field and directly
 manipulated geometry in the viewport. Coordinate panel input capture and the usable
 viewport rectangle with the camera and editor.
 
+The application shell is canvas-first: a top action bar owns document and view
+actions, a compact tool rail chooses the active task, and a contextual right
+inspector exposes controls for the current selection. Selection remains contextual
+rather than introducing separate selection modes. Add geometry opens a transient
+role/primitive popover; the current Rounded and Custom workflows are entries in an
+extensible primitive catalog. Performance measurements are UI-only diagnostics in a
+draggable popover opened from the status bar. A short rolling frame history is kept
+in memory, and mesh/solver warnings focus the relevant diagnostics section without
+changing document history or scene files.
+
 ## Geometry and discretization
 
 Geometry owns curves, loops, boundary labels, materials, and regions.

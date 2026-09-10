@@ -14,9 +14,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Evaluate a dissipative relative dashpot for thin gaps. Keeping centered time
   integration would require an off-diagonal damping solve; the implemented gap
   spring is conservative.
-- [ ] Redesign the UI around the active task and selection context. Reduce the
-  current long vertical scan, make modes and selection state clearer, and use
-  progressive disclosure for advanced geometry, boundary, and solver settings.
+- [ ] Add standard primitive entries to the Add geometry catalog beyond Rounded and
+  Custom. Keep creation role selection and primitive parameters in the transient
+  popover.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
   and local-repair cases. The user reports that the end-to-end handoff still feels
   slow even though the small scripted transfer case is much faster.
@@ -31,6 +31,21 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend fragile local repair/fallback behavior, especially for moderate loop,
   interface, and baffle motion. Record concrete fallback triggers; small edits still
   enter the full rebuild path too easily.
+
+## 2026-09-11 — Contextual UI shell and diagnostics
+
+- Replaced the single long left panel with a top action bar, compact task rail,
+  central viewport, right inspector, and persistent status strip.
+- Moved document actions to the top bar and made task context visible in the
+  inspector. Add geometry now uses a transient role/primitive popover; the existing
+  Rounded and Custom workflows remain available there.
+- Moved detailed frame, mesh, handoff, and solver measurements into a draggable
+  Performance diagnostics window. Slow mesh work and solver errors open the relevant
+  section automatically; metrics remain transient and are not serialized.
+- Added egui coverage for tool-rail/popover discovery and automatic diagnostics
+  focus. Formatting, Clippy, all 136 workspace tests, native release compilation,
+  and the release Trunk/WASM build pass. Interactive browser testing remains
+  user-owned as requested.
 
 ## 2026-09-10 — Dense-scene span selection
 
