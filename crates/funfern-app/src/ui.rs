@@ -1988,126 +1988,117 @@ impl Playground {
     fn materials_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.heading("Materials");
-        ui.small("Assign region materials and edit the material library.");
-        if self.active_tool == ActiveTool::Materials {
-            ui.add_space(8.0);
-            ui.collapsing("Regions and materials", |ui| {
-                let materials = self.editor.document.draft.materials.clone();
-                let regions = self.editor.document.draft.regions.clone();
-                for region in regions {
-                    let label = if region.id == BACKGROUND_REGION {
-                        "Background".into()
-                    } else {
-                        self.editor
-                            .document
-                            .draft
-                            .obstacles
-                            .iter()
-                            .find(|loop_| loop_.role.interior() == Some(region.id))
-                            .map_or_else(
-                                || format!("Region {}", region.id.0),
-                                |loop_| format!("Loop {} interior", loop_.id.0),
-                            )
-                    };
-                    let mut selected = region.material;
-                    if ui
-                        .selectable_label(self.region_selection == region.id, label)
-                        .clicked()
-                    {
-                        self.region_selection = region.id;
-                    }
-                    egui::ComboBox::from_id_salt(("region_material", region.id.0))
-                        .selected_text(
-                            materials
-                                .iter()
-                                .find(|material| material.id == selected)
-                                .map_or("Missing", |material| material.name.as_str()),
-                        )
-                        .show_ui(ui, |ui| {
-                            for material in &materials {
-                                ui.selectable_value(&mut selected, material.id, &material.name);
-                            }
-                        });
-                    if selected != region.material {
-                        let result = self.editor.set_region_material(region.id, selected);
-                        self.error(result);
-                    }
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Material");
-                    if ui.small_button("+").clicked() {
-                        let result = self.editor.add_material();
-                        if let Some(id) = self.error(result) {
-                            self.material_selection = id;
-                        }
-                    }
-                });
-                egui::ComboBox::from_id_salt("material_editor")
-                    .selected_text(
-                        materials
-                            .iter()
-                            .find(|material| material.id == self.material_selection)
-                            .map_or("Missing", |material| material.name.as_str()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for material in &materials {
-                            ui.selectable_value(
-                                &mut self.material_selection,
-                                material.id,
-                                &material.name,
-                            );
-                        }
-                    });
-                if let Some(mut material) = self
-                    .editor
+        ui.label("Subdomain assignment");
+        let materials = self.editor.document.draft.materials.clone();
+        let regions = self.editor.document.draft.regions.clone();
+        for region in regions {
+            let label = if region.id == BACKGROUND_REGION {
+                "Background".into()
+            } else {
+                self.editor
                     .document
                     .draft
-                    .material(self.material_selection)
-                    .cloned()
-                {
-                    let responses = [
-                        ui.add(
-                            egui::DragValue::new(&mut material.mass_density)
-                                .speed(0.01)
-                                .range(1.0e-6..=1.0e6)
-                                .prefix("density ")
-                                .update_while_editing(false),
-                        ),
-                        ui.add(
-                            egui::DragValue::new(&mut material.stiffness)
-                                .speed(0.01)
-                                .range(1.0e-6..=1.0e6)
-                                .prefix("stiffness ")
-                                .update_while_editing(false),
-                        ),
-                        ui.add(
-                            egui::DragValue::new(&mut material.damping)
-                                .speed(0.005)
-                                .range(0.0..=1.0e6)
-                                .prefix("damping ")
-                                .update_while_editing(false),
-                        ),
-                    ];
-                    if responses.iter().any(egui::Response::changed) {
-                        let result = self.editor.update_material(material.clone());
-                        self.error(result);
+                    .obstacles
+                    .iter()
+                    .find(|loop_| loop_.role.interior() == Some(region.id))
+                    .map_or_else(
+                        || format!("Region {}", region.id.0),
+                        |loop_| format!("Loop {} interior", loop_.id.0),
+                    )
+            };
+            let mut selected = region.material;
+            if ui
+                .selectable_label(self.region_selection == region.id, label)
+                .clicked()
+            {
+                self.region_selection = region.id;
+            }
+            egui::ComboBox::from_id_salt(("region_material", region.id.0))
+                .selected_text(
+                    materials
+                        .iter()
+                        .find(|material| material.id == selected)
+                        .map_or("Missing", |material| material.name.as_str()),
+                )
+                .show_ui(ui, |ui| {
+                    for material in &materials {
+                        ui.selectable_value(&mut selected, material.id, &material.name);
                     }
-                    ui.small(format!(
-                        "wave speed {:.3}",
-                        (material.stiffness / material.mass_density).sqrt()
-                    ));
-                    if self.material_selection != DEFAULT_MATERIAL
-                        && ui.small_button("Delete unused material").clicked()
-                    {
-                        let result = self.editor.delete_material(self.material_selection);
-                        if self.error(result).is_some() {
-                            self.material_selection = DEFAULT_MATERIAL;
-                        }
-                    }
+                });
+            if selected != region.material {
+                let result = self.editor.set_region_material(region.id, selected);
+                self.error(result);
+            }
+        }
+        ui.separator();
+        ui.label("Library");
+        ui.horizontal(|ui| {
+            ui.label("Material");
+            if ui.small_button("+").clicked() {
+                let result = self.editor.add_material();
+                if let Some(id) = self.error(result) {
+                    self.material_selection = id;
                 }
-                ui.small("Interfaces share a trace; closed walls keep separate traces.");
+            }
+        });
+        egui::ComboBox::from_id_salt("material_editor")
+            .selected_text(
+                materials
+                    .iter()
+                    .find(|material| material.id == self.material_selection)
+                    .map_or("Missing", |material| material.name.as_str()),
+            )
+            .show_ui(ui, |ui| {
+                for material in &materials {
+                    ui.selectable_value(&mut self.material_selection, material.id, &material.name);
+                }
             });
+        if let Some(mut material) = self
+            .editor
+            .document
+            .draft
+            .material(self.material_selection)
+            .cloned()
+        {
+            let responses = [
+                ui.add(
+                    egui::DragValue::new(&mut material.mass_density)
+                        .speed(0.01)
+                        .range(1.0e-6..=1.0e6)
+                        .prefix("density ")
+                        .update_while_editing(false),
+                ),
+                ui.add(
+                    egui::DragValue::new(&mut material.stiffness)
+                        .speed(0.01)
+                        .range(1.0e-6..=1.0e6)
+                        .prefix("stiffness ")
+                        .update_while_editing(false),
+                ),
+                ui.add(
+                    egui::DragValue::new(&mut material.damping)
+                        .speed(0.005)
+                        .range(0.0..=1.0e6)
+                        .prefix("damping ")
+                        .update_while_editing(false),
+                ),
+            ];
+            if responses.iter().any(egui::Response::changed) {
+                let result = self.editor.update_material(material.clone());
+                self.error(result);
+            }
+            ui.small(format!(
+                "wave speed {:.3}",
+                (material.stiffness / material.mass_density).sqrt()
+            ));
+            if self.material_selection != DEFAULT_MATERIAL
+                && ui.small_button("Delete unused material").clicked()
+            {
+                let result = self.editor.delete_material(self.material_selection);
+                if self.error(result).is_some() {
+                    self.material_selection = DEFAULT_MATERIAL;
+                }
+            }
         }
     }
 
