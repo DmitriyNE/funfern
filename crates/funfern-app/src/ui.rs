@@ -2707,7 +2707,7 @@ impl Playground {
         self.boundary_inspector(ui);
         ui.add_space(12.0);
         ui.add_space(6.0);
-        ui.small("Pan: middle drag / Space + drag\nZoom: wheel over viewport\nUndo: Ctrl/Cmd + Z · Shift for redo");
+        ui.small("Pan: right drag / Space + drag\nZoom: wheel over viewport\nUndo: Ctrl/Cmd + Z · Shift for redo");
     }
 
     fn selected_boundary_targets(&self) -> Option<Vec<BoundaryFaceTarget>> {
@@ -3288,9 +3288,10 @@ impl Playground {
                     self.center = self.center + before - after;
                 }
                 let primary = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
-                let middle = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Middle));
+                let secondary =
+                    ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
                 let space = ctx.input(|i| i.key_down(egui::Key::Space));
-                if middle || primary && space {
+                if secondary || primary && space {
                     self.panning = true;
                 } else if primary && self.mode == Mode::Select {
                     self.refresh_curves();
@@ -3616,7 +3617,7 @@ impl Playground {
             } else if moved {
                 self.pending_span_collapse = None;
             }
-            if !ctx.input(|i| i.pointer.button_down(egui::PointerButton::Middle)) {
+            if !ctx.input(|i| i.pointer.button_down(egui::PointerButton::Secondary)) {
                 self.panning = false;
             }
         }
@@ -6717,9 +6718,9 @@ mod tests {
         let before = h.state.editor.document.clone();
         let center = h.state.center;
         let p = h.rect.center();
-        h.button(p, PointerButton::Middle, true);
+        h.button(p, PointerButton::Secondary, true);
         h.move_to(p + egui::vec2(40.0, 20.0));
-        h.button(p + egui::vec2(40.0, 20.0), PointerButton::Middle, false);
+        h.button(p + egui::vec2(40.0, 20.0), PointerButton::Secondary, false);
         assert_ne!(h.state.center, center);
         assert_eq!(h.state.editor.document, before);
         let center = h.state.center;
