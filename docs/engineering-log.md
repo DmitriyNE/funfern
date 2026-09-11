@@ -7,8 +7,6 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Add physical-boundary residuals for reflecting, driven, impedance, and
-  second-order laws to the solution indicator.
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
 - [ ] Decide whether the load-compatible closed-wall role still warrants assigned
@@ -32,6 +30,36 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
+
+## 2026-09-12 — Physical boundary residuals for solution AMR
+
+- Extended the resumable solution indicator across every physical boundary edge.
+  Reflecting, prescribed Neumann, first-order impedance, and second-order radiation
+  faces now contribute their active-law residual to the adjacent element. Closed
+  walls use their solver-defined reflecting law, while transmitting material
+  interfaces remain part of the interior flux-jump estimate.
+- Included paired thin-gap spring terms on both baffle traces. Pair lookup uses the
+  stable boundary ID and parameter interval, rejects missing, duplicate, crossed,
+  or geometrically inconsistent faces, and preserves distinct left/right laws.
+- Added the second-order auxiliary field to indicator snapshots. The app aligns the
+  post-step GPU auxiliary readback to the existing centered displacement snapshot
+  on the host, avoiding another GPU buffer or transfer. Malformed lengths and
+  non-finite auxiliary values are rejected before estimation.
+- Kept prescribed Dirichlet mismatch diagnostic-only because the solver strongly
+  eliminates those nodal values. Performance diagnostics now show the relative
+  recovery, cell, interior-jump, and boundary contributions, the number of physical
+  edges evaluated, and the largest Dirichlet mismatch.
+- Added manufactured boundary-law regressions, deterministic sliced execution,
+  hole impedance coverage, two-sided thin-gap pairing/error coverage, Dirichlet
+  policy coverage, malformed auxiliary snapshots, and host time-alignment coverage.
+  The end-to-end `--amr-check` now requires finite physical-boundary results.
+- Verification: formatting, Clippy with warnings denied, all 186 workspace tests,
+  native release compilation, release Trunk/WASM packaging, and the Apple M1 Max /
+  Metal `--amr-check` pass. The live estimate evaluated 101 boundary edges with a
+  `4.984e-4` boundary contribution; total indicator work was 2.50 ms with a 1.30 ms
+  longest slice. The complete check finished in 5.90 s and its final deterministic
+  transaction produced 2,036 triangles / 6,224 DOFs with 371 insertions and 279
+  collapses. Interactive browser testing remains deferred by prior agreement.
 
 ## 2026-09-12 — Bidirectional solution AMR tuning
 

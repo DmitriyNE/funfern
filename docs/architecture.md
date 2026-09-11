@@ -9,7 +9,7 @@ walls, and open baffles with independent face laws or coupled thin-gap spans are
 implemented. The closed-wall representation is retained for scene compatibility,
 but the current editor does not offer it as a normal role. A first spatial
 edge-size adaptation transaction is implemented; user wavelength and active
-solution indicators remain work.
+solution indicators drive bounded bidirectional refinement and coarsening.
 
 ## Responsibilities and dependencies
 
@@ -608,8 +608,16 @@ the live quadratic solution. The existing GPU state readback uses spare auxiliar
 lanes to carry centered displacement, velocity, and acceleration at one explicit
 time level; this avoids another buffer or readback. The core estimator combines
 material-aware recovered flux defects, a strong interior equation residual with the
-volume source removed, and interior flux jumps. It does not yet add
-physical-boundary residuals. Recovery never averages across a material region or a
+volume source removed, interior flux jumps, and physical-boundary residuals.
+Reflecting and prescribed Neumann faces measure normal-flux error. First-order
+impedance faces also include boundary velocity. Second-order radiation faces add
+the tangential second derivative of their auxiliary memory. The host reconstructs
+that memory at the centered indicator time from the post-step auxiliary readback,
+`psi(t) = psi(t + dt) - dt (u(t) + u(t + dt)) / 2`, so the boundary law is evaluated
+at one time level without another GPU transfer. Thin-gap faces add their paired
+trace spring residual on both sides. Prescribed Dirichlet mismatch is reported as a
+diagnostic but does not change the size target because strong elimination already
+enforces those nodal values. Recovery never averages across a material region or a
 duplicated baffle/wall trace.
 
 The relative indicator maps error to local edge length, caps that length by the

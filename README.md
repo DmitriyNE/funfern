@@ -224,6 +224,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   reflection. Hole and baffle spans support reflecting or local first-order
   impedance conditions; closed walls remain reflecting and material interfaces
   transmit. Changes reuse the mesh and transactionally transfer the live field.
+- **Solution adaptation:** a resumable quadratic indicator combines recovered-flux
+  defects, interior equation and flux-jump residuals, and the active physical
+  boundary laws. It includes paired thin-gap traces and second-order radiation
+  memory while treating prescribed Dirichlet mismatch as a diagnostic. The result
+  drives bounded refinement and coarsening with wavelength and grading limits.
 - **Interior media:** every triangle carries a stable region ID. The P2e operator
   assembles piecewise mass, stiffness, and damping. Material interfaces use a
   conforming shared trace. Closed walls and open baffles have separate solution

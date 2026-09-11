@@ -1883,6 +1883,8 @@ impl Playground {
         let dofs = operator.degrees_of_freedom();
         if !request.ready()
             || display.generation != request.generation()
+            || display.current.len() != dofs
+            || display.auxiliary.len() != dofs
             || display.indicator_displacement.len() != dofs
             || display.indicator_velocity.len() != dofs
             || display.indicator_acceleration.len() != dofs
@@ -1906,6 +1908,12 @@ impl Playground {
             self.amr_status = "waiting for source state";
             return;
         };
+        let Some(auxiliary) =
+            aligned_indicator_auxiliary(display, operator, self.wave_time_step, step)
+        else {
+            self.amr_status = "waiting for aligned readback";
+            return;
+        };
         let snapshot = QuadraticSolutionSnapshot {
             mesh_revision: mesh.mesh_revision,
             displacement: display
@@ -1923,6 +1931,7 @@ impl Playground {
                 .iter()
                 .map(|value| *value as f64)
                 .collect(),
+            auxiliary,
             volume_acceleration,
             time,
             time_step: self.wave_time_step,
@@ -2621,6 +2630,29 @@ impl Playground {
                                 report.refine_candidates,
                                 report.coarsen_candidates,
                                 report.work_units
+                            ));
+                            let total = report.recovery_contribution
+                                + report.cell_residual_contribution
+                                + report.interior_jump_contribution
+                                + report.boundary_residual_contribution;
+                            let percent = |value: f64| {
+                                if total > f64::MIN_POSITIVE {
+                                    100.0 * value / total
+                                } else {
+                                    0.0
+                                }
+                            };
+                            ui.small(format!(
+                                "Error share: recovery {:.0}% · cell {:.0}% · interior {:.0}% · boundary {:.0}%",
+                                percent(report.recovery_contribution),
+                                percent(report.cell_residual_contribution),
+                                percent(report.interior_jump_contribution),
+                                percent(report.boundary_residual_contribution),
+                            ));
+                            ui.small(format!(
+                                "Boundary edges {} · Dirichlet mismatch {:.2e}",
+                                report.boundary_edges_evaluated,
+                                report.maximum_dirichlet_mismatch
                             ));
                         }
                         if let Some(report) = &self.mesh_adaptation_report {
@@ -6020,6 +6052,41 @@ fn highest_forcing_frequency(scene: &Scene, source: SourceSettings) -> f64 {
     frequency
 }
 
+fn aligned_indicator_auxiliary(
+    display: &WaveDisplay,
+    operator: &QuadraticWaveOperator,
+    time_step: f64,
+    completed_steps: u64,
+) -> Option<Vec<f64>> {
+    let count = operator.degrees_of_freedom();
+    if !time_step.is_finite()
+        || time_step <= 0.0
+        || display.current.len() != count
+        || display.auxiliary.len() != count
+        || display.indicator_displacement.len() != count
+    {
+        return None;
+    }
+    Some(
+        (0..count)
+            .map(|node| {
+                if !operator.auxiliary_active()[node]
+                    || operator.dirichlet_signals()[node].is_some()
+                    || completed_steps == 0
+                {
+                    display.auxiliary[node] as f64
+                } else {
+                    display.auxiliary[node] as f64
+                        - 0.5
+                            * time_step
+                            * (display.indicator_displacement[node] as f64
+                                + display.current[node] as f64)
+                }
+            })
+            .collect(),
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AmrTransactionDecision {
     refine: bool,
@@ -6385,7 +6452,19 @@ pub fn amr_benchmark(
             let energy_estimated = state
                 .solution_indicator_report
                 .as_ref()
-                .is_some_and(|report| report.maximum_indicator > 1.0e-8);
+                .is_some_and(|report| {
+                    report.maximum_indicator > 1.0e-8
+                        && report.boundary_edges_evaluated > 0
+                        && [
+                            report.recovery_contribution,
+                            report.cell_residual_contribution,
+                            report.interior_jump_contribution,
+                            report.boundary_residual_contribution,
+                            report.maximum_dirichlet_mismatch,
+                        ]
+                        .into_iter()
+                        .all(f64::is_finite)
+                });
             if !energy_estimated {
                 return;
             }
@@ -6492,6 +6571,18 @@ pub fn amr_benchmark(
                 maximum_target = report.maximum_target,
                 indicator_work_ms = state.amr_work_ms,
                 indicator_max_slice_ms = state.amr_max_slice_ms,
+                indicator_boundary_edges = state
+                    .solution_indicator_report
+                    .as_ref()
+                    .map_or(0, |report| report.boundary_edges_evaluated),
+                indicator_boundary_contribution = state
+                    .solution_indicator_report
+                    .as_ref()
+                    .map_or(0.0, |report| report.boundary_residual_contribution),
+                indicator_dirichlet_mismatch = state
+                    .solution_indicator_report
+                    .as_ref()
+                    .map_or(0.0, |report| report.maximum_dirichlet_mismatch),
                 dofs = operator.degrees_of_freedom(),
                 solver_dt = state.wave_time_step,
                 elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
@@ -9637,5 +9728,39 @@ mod tests {
             },
         };
         assert_eq!(highest_forcing_frequency(&scene, source), 4.0);
+    }
+
+    #[test]
+    fn indicator_auxiliary_is_aligned_to_the_centered_gpu_snapshot() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let operator = h.state.wave_operator.as_ref().unwrap();
+        let count = operator.degrees_of_freedom();
+        let display = WaveDisplay {
+            current: vec![3.0; count],
+            auxiliary: vec![10.0; count],
+            indicator_displacement: vec![1.0; count],
+            ..Default::default()
+        };
+
+        let aligned = aligned_indicator_auxiliary(&display, operator, 0.2, 1).unwrap();
+        let active = operator
+            .auxiliary_active()
+            .iter()
+            .zip(operator.dirichlet_signals())
+            .position(|(active, dirichlet)| *active && dirichlet.is_none())
+            .expect("second-order boundary node");
+        let inactive = operator
+            .auxiliary_active()
+            .iter()
+            .position(|active| !*active)
+            .expect("interior node");
+        assert!((aligned[active] - 9.6).abs() < 1.0e-12);
+        assert_eq!(aligned[inactive], 10.0);
+        assert_eq!(
+            aligned_indicator_auxiliary(&display, operator, 0.2, 0).unwrap(),
+            vec![10.0; count]
+        );
     }
 }

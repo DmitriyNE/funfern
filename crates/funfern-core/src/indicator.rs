@@ -1,9 +1,10 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    MeshSizeField, Point2, QuadraticWaveOperator, RegionId, Scene, TriMesh,
-    enriched_quadratic_basis, enriched_quadratic_basis_gradients,
-    enriched_quadratic_basis_laplacians,
+    BoundaryLabel, BoundarySide, FaceBoundaryCondition, InternalBoundaryCoupling,
+    InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField, OuterBoundaryCondition,
+    Point2, QuadraticWaveOperator, RegionId, Scene, TriMesh, enriched_quadratic_basis,
+    enriched_quadratic_basis_gradients, enriched_quadratic_basis_laplacians,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -12,6 +13,8 @@ pub struct QuadraticSolutionSnapshot {
     pub displacement: Vec<f64>,
     pub velocity: Vec<f64>,
     pub acceleration: Vec<f64>,
+    /// Second-order boundary memory aligned with `time` and `displacement`.
+    pub auxiliary: Vec<f64>,
     pub volume_acceleration: Vec<f64>,
     pub time: f64,
     pub time_step: f64,
@@ -59,6 +62,12 @@ pub struct SolutionIndicatorReport {
     pub maximum_target: f64,
     pub refine_candidates: usize,
     pub coarsen_candidates: usize,
+    pub recovery_contribution: f64,
+    pub cell_residual_contribution: f64,
+    pub interior_jump_contribution: f64,
+    pub boundary_residual_contribution: f64,
+    pub boundary_edges_evaluated: usize,
+    pub maximum_dirichlet_mismatch: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -222,18 +231,39 @@ struct Recovery {
 #[derive(Clone, Copy, Default)]
 struct ElementEstimate {
     recovery: f64,
-    residual: f64,
+    cell_residual: f64,
+    interior_jump: f64,
+    boundary_residual: f64,
     energy: f64,
     area: f64,
     edge: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BoundaryPairKey {
+    id: InternalBoundaryId,
+    start: u64,
+    end: u64,
+}
+
+#[derive(Clone, Copy)]
+struct BoundaryRecord {
+    triangle: usize,
+    nodes: [usize; 3],
+    condition: FaceBoundaryCondition,
+    mass_density: f64,
+    stiffness: f64,
+    pair: Option<(BoundaryPairKey, usize, f64)>,
+}
+
 enum IndicatorPhase {
     Validate,
     BuildEdges(usize),
+    BuildBoundary(usize),
     Recover(usize),
     Estimate(usize),
     Jump(usize),
+    Boundary(usize),
     Target(usize),
     Grade { pass: usize, edge: usize },
     Finish,
@@ -249,6 +279,8 @@ pub struct SolutionIndicatorJob {
     phase: IndicatorPhase,
     edges: BTreeMap<(usize, usize), Vec<usize>>,
     edge_list: Vec<((usize, usize), Vec<usize>)>,
+    boundary_records: Vec<BoundaryRecord>,
+    boundary_pairs: BTreeMap<BoundaryPairKey, [Option<usize>; 2]>,
     recovery: BTreeMap<(usize, RegionId), Recovery>,
     estimates: Vec<ElementEstimate>,
     indicators: Vec<f64>,
@@ -276,6 +308,8 @@ impl SolutionIndicatorJob {
             phase: IndicatorPhase::Validate,
             edges: BTreeMap::new(),
             edge_list: Vec::new(),
+            boundary_records: Vec::new(),
+            boundary_pairs: BTreeMap::new(),
             recovery: BTreeMap::new(),
             estimates: vec![ElementEstimate::default(); count],
             indicators: vec![0.0; count],
@@ -292,9 +326,13 @@ impl SolutionIndicatorJob {
 
     pub fn phase(&self) -> &'static str {
         match self.phase {
-            IndicatorPhase::Validate | IndicatorPhase::BuildEdges(_) => "Preparing AMR estimate",
+            IndicatorPhase::Validate
+            | IndicatorPhase::BuildEdges(_)
+            | IndicatorPhase::BuildBoundary(_) => "Preparing AMR estimate",
             IndicatorPhase::Recover(_) => "Recovering wave gradients",
-            IndicatorPhase::Estimate(_) | IndicatorPhase::Jump(_) => "Estimating wave error",
+            IndicatorPhase::Estimate(_) | IndicatorPhase::Jump(_) | IndicatorPhase::Boundary(_) => {
+                "Estimating wave error"
+            }
             IndicatorPhase::Target(_) | IndicatorPhase::Grade { .. } => "Grading AMR target",
             IndicatorPhase::Finish | IndicatorPhase::Done => "AMR estimate ready",
         }
@@ -342,7 +380,7 @@ impl SolutionIndicatorJob {
             IndicatorPhase::BuildEdges(index) => {
                 if index == self.mesh.triangles.len() {
                     self.edge_list = std::mem::take(&mut self.edges).into_iter().collect();
-                    self.phase = IndicatorPhase::Recover(0);
+                    self.phase = IndicatorPhase::BuildBoundary(0);
                 } else {
                     let vertices = self.mesh.triangles[index].vertices;
                     for edge in [
@@ -355,9 +393,11 @@ impl SolutionIndicatorJob {
                     self.phase = IndicatorPhase::BuildEdges(index + 1);
                 }
             }
+            IndicatorPhase::BuildBoundary(index) => self.build_boundary(index)?,
             IndicatorPhase::Recover(index) => self.recover(index)?,
             IndicatorPhase::Estimate(index) => self.estimate(index)?,
             IndicatorPhase::Jump(index) => self.jump(index)?,
+            IndicatorPhase::Boundary(index) => self.boundary(index)?,
             IndicatorPhase::Target(index) => self.target(index)?,
             IndicatorPhase::Grade { pass, edge } => self.grade(pass, edge),
             IndicatorPhase::Finish => return Ok(Some(self.finish())),
@@ -418,6 +458,7 @@ impl SolutionIndicatorJob {
             || self.snapshot.displacement.len() != count
             || self.snapshot.velocity.len() != count
             || self.snapshot.acceleration.len() != count
+            || self.snapshot.auxiliary.len() != count
             || self.snapshot.volume_acceleration.len() != count
             || !self.snapshot.time.is_finite()
             || !self.snapshot.time_step.is_finite()
@@ -428,12 +469,203 @@ impl SolutionIndicatorJob {
                 .iter()
                 .chain(&self.snapshot.velocity)
                 .chain(&self.snapshot.acceleration)
+                .chain(&self.snapshot.auxiliary)
                 .chain(&self.snapshot.volume_acceleration)
                 .any(|value| !value.is_finite())
         {
             return Err(SolutionIndicatorError::InvalidSnapshot);
         }
         Ok(())
+    }
+
+    fn build_boundary(&mut self, index: usize) -> Result<(), SolutionIndicatorError> {
+        if index == self.mesh.boundary_edges.len() {
+            self.phase = IndicatorPhase::Recover(0);
+            return Ok(());
+        }
+        let edge = self.mesh.boundary_edges[index];
+        if edge.vertices[0] >= self.mesh.vertices.len()
+            || edge.vertices[1] >= self.mesh.vertices.len()
+            || edge.vertices[0] == edge.vertices[1]
+            || !edge.parameters.iter().all(|value| value.is_finite())
+            || edge.parameters[0] == edge.parameters[1]
+        {
+            return Err(SolutionIndicatorError::InvalidMesh);
+        }
+        let key = edge_key(edge.vertices);
+        let sides = self
+            .edge_list
+            .binary_search_by_key(&key, |(candidate, _)| *candidate)
+            .ok()
+            .map(|found| &self.edge_list[found].1)
+            .ok_or(SolutionIndicatorError::InvalidMesh)?;
+        if matches!(edge.label, BoundaryLabel::MaterialInterface(_)) {
+            if sides.len() != 2 {
+                return Err(SolutionIndicatorError::InvalidMesh);
+            }
+            self.phase = IndicatorPhase::BuildBoundary(index + 1);
+            return Ok(());
+        }
+        if sides.len() != 1 {
+            return Err(SolutionIndicatorError::InvalidMesh);
+        }
+        let triangle = sides[0];
+        let region = self.mesh.triangles[triangle].region;
+        let material = self
+            .scene
+            .region_material(region)
+            .ok_or(SolutionIndicatorError::InvalidScene)?;
+        let raw_nodes = self.boundary_edge_nodes(triangle, edge.vertices)?;
+        let nodes = if edge.parameters[0] < edge.parameters[1] {
+            raw_nodes
+        } else {
+            [raw_nodes[2], raw_nodes[1], raw_nodes[0]]
+        };
+        let (condition, pair) = match edge.label {
+            BoundaryLabel::Outer(side) => {
+                if region != crate::BACKGROUND_REGION {
+                    return Err(SolutionIndicatorError::InvalidMesh);
+                }
+                let condition = match self.scene.outer_boundaries.get(side) {
+                    OuterBoundaryCondition::Reflecting => FaceBoundaryCondition::Reflecting,
+                    OuterBoundaryCondition::FirstOrderOutgoing => {
+                        FaceBoundaryCondition::Impedance { ratio: 1.0 }
+                    }
+                    OuterBoundaryCondition::SecondOrderOutgoing => {
+                        FaceBoundaryCondition::SecondOrderOutgoing
+                    }
+                    OuterBoundaryCondition::Neumann { signal } => {
+                        FaceBoundaryCondition::Neumann { signal }
+                    }
+                    OuterBoundaryCondition::Dirichlet { signal } => {
+                        FaceBoundaryCondition::Dirichlet { signal }
+                    }
+                };
+                (condition, None)
+            }
+            BoundaryLabel::Obstacle(id) => {
+                let obstacle = self
+                    .scene
+                    .obstacles
+                    .iter()
+                    .find(|obstacle| obstacle.id == id)
+                    .ok_or(SolutionIndicatorError::InvalidScene)?;
+                let LoopRole::Hole { exterior } = obstacle.role else {
+                    return Err(SolutionIndicatorError::InvalidMesh);
+                };
+                if exterior != region {
+                    return Err(SolutionIndicatorError::InvalidMesh);
+                }
+                let span = obstacle
+                    .spline
+                    .span_index(0.5 * (edge.parameters[0] + edge.parameters[1]))
+                    .ok_or(SolutionIndicatorError::InvalidMesh)?;
+                (obstacle.span_conditions[span], None)
+            }
+            BoundaryLabel::Wall { loop_id, side } => {
+                let obstacle = self
+                    .scene
+                    .obstacles
+                    .iter()
+                    .find(|obstacle| obstacle.id == loop_id)
+                    .ok_or(SolutionIndicatorError::InvalidScene)?;
+                let LoopRole::Wall { exterior, interior } = obstacle.role else {
+                    return Err(SolutionIndicatorError::InvalidMesh);
+                };
+                let expected = match side {
+                    BoundarySide::Exterior => exterior,
+                    BoundarySide::Interior => interior,
+                };
+                if expected != region {
+                    return Err(SolutionIndicatorError::InvalidMesh);
+                }
+                (FaceBoundaryCondition::Reflecting, None)
+            }
+            BoundaryLabel::InternalBoundary { id, side } => {
+                let boundary = self
+                    .scene
+                    .internal_boundaries
+                    .iter()
+                    .find(|boundary| boundary.id == id)
+                    .ok_or(SolutionIndicatorError::InvalidScene)?;
+                if boundary.region != region {
+                    return Err(SolutionIndicatorError::InvalidMesh);
+                }
+                let span = boundary
+                    .spline
+                    .span_index(0.5 * (edge.parameters[0] + edge.parameters[1]))
+                    .ok_or(SolutionIndicatorError::InvalidMesh)?;
+                let law = boundary.span_laws[span];
+                let condition = match side {
+                    InternalBoundarySide::Left => law.left,
+                    InternalBoundarySide::Right => law.right,
+                };
+                let pair = match law.coupling {
+                    InternalBoundaryCoupling::Independent => None,
+                    InternalBoundaryCoupling::ThinGap { stiffness_ratio } => {
+                        let start = edge.parameters[0].min(edge.parameters[1]).to_bits();
+                        let end = edge.parameters[0].max(edge.parameters[1]).to_bits();
+                        let slot = match side {
+                            InternalBoundarySide::Left => 0,
+                            InternalBoundarySide::Right => 1,
+                        };
+                        Some((
+                            BoundaryPairKey { id, start, end },
+                            slot,
+                            stiffness_ratio * material.stiffness,
+                        ))
+                    }
+                };
+                (condition, pair)
+            }
+            BoundaryLabel::MaterialInterface(_) => unreachable!(),
+        };
+        let record_index = self.boundary_records.len();
+        self.boundary_records.push(BoundaryRecord {
+            triangle,
+            nodes,
+            condition,
+            mass_density: material.mass_density,
+            stiffness: material.stiffness,
+            pair,
+        });
+        if let Some((key, slot, _)) = pair {
+            let entry = self.boundary_pairs.entry(key).or_default();
+            if entry[slot].replace(record_index).is_some() {
+                return Err(SolutionIndicatorError::InvalidMesh);
+            }
+        }
+        self.phase = IndicatorPhase::BuildBoundary(index + 1);
+        Ok(())
+    }
+
+    fn boundary_edge_nodes(
+        &self,
+        triangle_index: usize,
+        edge: [usize; 2],
+    ) -> Result<[usize; 3], SolutionIndicatorError> {
+        let triangle = self.mesh.triangles[triangle_index];
+        let a = triangle
+            .vertices
+            .iter()
+            .position(|vertex| *vertex == edge[0])
+            .ok_or(SolutionIndicatorError::InvalidMesh)?;
+        let b = triangle
+            .vertices
+            .iter()
+            .position(|vertex| *vertex == edge[1])
+            .ok_or(SolutionIndicatorError::InvalidMesh)?;
+        let midpoint = match (a.min(b), a.max(b)) {
+            (0, 1) => 3,
+            (1, 2) => 4,
+            (0, 2) => 5,
+            _ => return Err(SolutionIndicatorError::InvalidMesh),
+        };
+        Ok([
+            edge[0],
+            self.operator.element_nodes()[triangle_index][midpoint] as usize,
+            edge[1],
+        ])
     }
 
     fn recover(&mut self, index: usize) -> Result<(), SolutionIndicatorError> {
@@ -518,7 +750,7 @@ impl SolutionIndicatorJob {
                 / material.stiffness;
             let residual = material.mass_density * (a - source) + material.damping * v
                 - material.stiffness * laplace_u;
-            estimate.residual +=
+            estimate.cell_residual +=
                 weight * geometry.area * geometry.maximum_edge.powi(2) * residual.powi(2)
                     / material.stiffness;
             estimate.energy += weight
@@ -535,7 +767,7 @@ impl SolutionIndicatorJob {
 
     fn jump(&mut self, index: usize) -> Result<(), SolutionIndicatorError> {
         if index == self.edge_list.len() {
-            self.phase = IndicatorPhase::Target(0);
+            self.phase = IndicatorPhase::Boundary(0);
             return Ok(());
         }
         let (edge, sides) = &self.edge_list[index];
@@ -578,10 +810,103 @@ impl SolutionIndicatorJob {
                     .region_material(self.mesh.triangles[*triangle_index].region)
                     .ok_or(SolutionIndicatorError::InvalidScene)?
                     .stiffness;
-                self.estimates[*triangle_index].residual += 0.5 * length * integral / stiffness;
+                self.estimates[*triangle_index].interior_jump +=
+                    0.5 * length * integral / stiffness;
             }
         }
         self.phase = IndicatorPhase::Jump(index + 1);
+        Ok(())
+    }
+
+    fn boundary(&mut self, index: usize) -> Result<(), SolutionIndicatorError> {
+        if index == self.boundary_records.len() {
+            self.phase = IndicatorPhase::Target(0);
+            return Ok(());
+        }
+        let record = self.boundary_records[index];
+        let triangle = self.mesh.triangles[record.triangle];
+        let geometry = element_geometry(&self.mesh, triangle.vertices)?;
+        let edge_points = [
+            self.operator.node_points()[record.nodes[0]],
+            self.operator.node_points()[record.nodes[2]],
+        ];
+        let length = (edge_points[1] - edge_points[0]).norm();
+        if !length.is_finite() || length <= 0.0 {
+            return Err(SolutionIndicatorError::InvalidMesh);
+        }
+        let normal = outward_normal(geometry.points, edge_points);
+        let auxiliary_second =
+            line_second_derivative(&self.snapshot.auxiliary, record.nodes, length);
+        let paired_nodes = if let Some((key, slot, spring)) = record.pair {
+            let pair = self
+                .boundary_pairs
+                .get(&key)
+                .ok_or(SolutionIndicatorError::InvalidMesh)?;
+            let partner_index = pair[1 - slot].ok_or(SolutionIndicatorError::InvalidMesh)?;
+            let partner = self.boundary_records[partner_index];
+            let Some((partner_key, partner_slot, partner_spring)) = partner.pair else {
+                return Err(SolutionIndicatorError::InvalidMesh);
+            };
+            if partner_key != key
+                || partner_slot == slot
+                || (partner_spring - spring).abs() > 1.0e-12 * spring.abs().max(1.0)
+                || [0, 2].into_iter().any(|endpoint| {
+                    (self.operator.node_points()[record.nodes[endpoint]]
+                        - self.operator.node_points()[partner.nodes[endpoint]])
+                        .norm()
+                        > 1.0e-10 * length.max(1.0)
+                })
+            {
+                return Err(SolutionIndicatorError::InvalidMesh);
+            }
+            Some((partner.nodes, spring))
+        } else {
+            None
+        };
+        let mut integral = 0.0;
+        for (fraction, weight) in line_quadrature() {
+            let point = edge_points[0].lerp(edge_points[1], fraction);
+            let barycentric =
+                barycentric(point, geometry.points).ok_or(SolutionIndicatorError::InvalidMesh)?;
+            let gradients = enriched_quadratic_basis_gradients(barycentric, geometry.gradients);
+            let nodes = self.operator.element_nodes()[record.triangle].map(|node| node as usize);
+            let flux = record.stiffness
+                * gradient(&self.snapshot.displacement, nodes, gradients).dot(normal);
+            let displacement = line_scalar(&self.snapshot.displacement, record.nodes, fraction);
+            let velocity = line_scalar(&self.snapshot.velocity, record.nodes, fraction);
+            if let FaceBoundaryCondition::Dirichlet { signal } = record.condition {
+                self.report.maximum_dirichlet_mismatch = self
+                    .report
+                    .maximum_dirichlet_mismatch
+                    .max((displacement - signal.value(self.snapshot.time)).abs());
+                continue;
+            }
+            let mut residual = match record.condition {
+                FaceBoundaryCondition::Reflecting => flux,
+                FaceBoundaryCondition::Neumann { signal } => {
+                    flux - signal.value(self.snapshot.time)
+                }
+                FaceBoundaryCondition::Impedance { ratio } => {
+                    let impedance = ratio * (record.mass_density * record.stiffness).sqrt();
+                    flux + impedance * velocity
+                }
+                FaceBoundaryCondition::SecondOrderOutgoing => {
+                    let impedance = (record.mass_density * record.stiffness).sqrt();
+                    let wave_speed = (record.stiffness / record.mass_density).sqrt();
+                    flux + impedance * velocity
+                        - 0.5 * record.stiffness * wave_speed * auxiliary_second
+                }
+                FaceBoundaryCondition::Dirichlet { .. } => unreachable!(),
+            };
+            if let Some((partner, spring)) = paired_nodes {
+                residual += spring
+                    * (displacement - line_scalar(&self.snapshot.displacement, partner, fraction));
+            }
+            integral += weight * length * residual * residual;
+        }
+        self.estimates[record.triangle].boundary_residual += length * integral / record.stiffness;
+        self.report.boundary_edges_evaluated += 1;
+        self.phase = IndicatorPhase::Boundary(index + 1);
         Ok(())
     }
 
@@ -594,8 +919,11 @@ impl SolutionIndicatorJob {
         let floor =
             self.options.amplitude_floor * self.total_energy.max(f64::MIN_POSITIVE) * estimate.area
                 / self.total_area.max(f64::MIN_POSITIVE);
-        let indicator =
-            ((estimate.recovery + estimate.residual) / (estimate.energy + floor)).sqrt();
+        let residual = estimate.recovery
+            + estimate.cell_residual
+            + estimate.interior_jump
+            + estimate.boundary_residual;
+        let indicator = (residual / (estimate.energy + floor)).sqrt();
         let scale = if indicator <= f64::MIN_POSITIVE {
             self.options.maximum_scale
         } else {
@@ -657,6 +985,12 @@ impl SolutionIndicatorJob {
     }
 
     fn finish(&mut self) -> SolutionIndicatorResult {
+        for estimate in &self.estimates {
+            self.report.recovery_contribution += estimate.recovery;
+            self.report.cell_residual_contribution += estimate.cell_residual;
+            self.report.interior_jump_contribution += estimate.interior_jump;
+            self.report.boundary_residual_contribution += estimate.boundary_residual;
+        }
         let triangle_targets = self
             .targets
             .iter()
@@ -755,6 +1089,31 @@ fn gradient(values: &[f64], nodes: [usize; 7], basis: [Point2; 7]) -> Point2 {
         })
 }
 
+fn line_scalar(values: &[f64], nodes: [usize; 3], fraction: f64) -> f64 {
+    let basis = [
+        (1.0 - fraction) * (1.0 - 2.0 * fraction),
+        4.0 * fraction * (1.0 - fraction),
+        fraction * (2.0 * fraction - 1.0),
+    ];
+    nodes
+        .into_iter()
+        .zip(basis)
+        .map(|(node, weight)| values[node] * weight)
+        .sum()
+}
+
+fn line_second_derivative(values: &[f64], nodes: [usize; 3], length: f64) -> f64 {
+    4.0 * (values[nodes[0]] - 2.0 * values[nodes[1]] + values[nodes[2]]) / (length * length)
+}
+
+fn line_quadrature() -> [(f64, f64); 3] {
+    [
+        (0.112_701_665_379_258_3, 5.0 / 18.0),
+        (0.5, 8.0 / 18.0),
+        (0.887_298_334_620_741_7, 5.0 / 18.0),
+    ]
+}
+
 fn edge_key([a, b]: [usize; 2]) -> (usize, usize) {
     if a < b { (a, b) } else { (b, a) }
 }
@@ -817,8 +1176,10 @@ fn quadrature() -> [([f64; 3], f64); 6] {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState,
-        MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, OuterBoundaryConditions, mesh_scene,
+        BACKGROUND_REGION, BoundarySignal, InternalBoundary, InternalBoundaryLaw,
+        MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshQuality, MeshTriangle,
+        MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition,
+        OuterBoundaryConditions, OuterSide, mesh_scene,
     };
 
     fn square() -> Arc<TriMesh> {
@@ -879,10 +1240,86 @@ mod tests {
             displacement,
             velocity: zeros.clone(),
             acceleration: zeros.clone(),
+            auxiliary: zeros.clone(),
             volume_acceleration: zeros,
             time: 0.25,
             time_step: 0.01,
         }
+    }
+
+    fn meshed_setup(
+        scene: Scene,
+        revision: u64,
+    ) -> (Arc<TriMesh>, Arc<QuadraticWaveOperator>, Scene) {
+        let mesh = Arc::new(
+            mesh_scene(
+                &scene,
+                revision,
+                MeshingOptions {
+                    curve_tolerance: 1.0e-3,
+                    target_edge_length: 0.18,
+                    minimum_angle_degrees: 12.0,
+                    max_vertices: 20_000,
+                    max_triangles: 40_000,
+                    max_refinement_steps: 20_000,
+                },
+            )
+            .unwrap(),
+        );
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &scene,
+                scene.outer_boundaries,
+            )
+            .unwrap(),
+        );
+        (mesh, operator, scene)
+    }
+
+    fn constant_signal(value: f64) -> BoundarySignal {
+        BoundarySignal {
+            offset: value,
+            ..BoundarySignal::ZERO
+        }
+    }
+
+    fn test_boundary_nodes(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        edge: &crate::BoundaryEdge,
+    ) -> [usize; 3] {
+        let (triangle_index, triangle) = mesh
+            .triangles
+            .iter()
+            .enumerate()
+            .find(|(_, triangle)| {
+                edge.vertices
+                    .iter()
+                    .all(|vertex| triangle.vertices.contains(vertex))
+            })
+            .unwrap();
+        let a = triangle
+            .vertices
+            .iter()
+            .position(|vertex| *vertex == edge.vertices[0])
+            .unwrap();
+        let b = triangle
+            .vertices
+            .iter()
+            .position(|vertex| *vertex == edge.vertices[1])
+            .unwrap();
+        let midpoint = match (a.min(b), a.max(b)) {
+            (0, 1) => 3,
+            (1, 2) => 4,
+            (0, 2) => 5,
+            _ => unreachable!(),
+        };
+        [
+            edge.vertices[0],
+            operator.element_nodes()[triangle_index][midpoint] as usize,
+            edge.vertices[1],
+        ]
     }
 
     fn run(
@@ -928,6 +1365,259 @@ mod tests {
                 .target_edge_length(Point2::new(0.25, 0.25), BACKGROUND_REGION)
                 .is_finite()
         );
+    }
+
+    #[test]
+    fn manufactured_outer_laws_have_zero_boundary_residual_and_detect_mismatch() {
+        let mut scene = Scene::default();
+        scene.outer_boundaries.sides[OuterSide::Bottom.index()] = OuterBoundaryCondition::Neumann {
+            signal: constant_signal(-2.0),
+        };
+        scene.outer_boundaries.sides[OuterSide::Right.index()] =
+            OuterBoundaryCondition::FirstOrderOutgoing;
+        scene.outer_boundaries.sides[OuterSide::Top.index()] =
+            OuterBoundaryCondition::SecondOrderOutgoing;
+        scene.outer_boundaries.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Neumann {
+            signal: constant_signal(-1.0),
+        };
+        let (mesh, operator, scene) = meshed_setup(scene, 71);
+        let mut state = snapshot(&mesh, &operator, |point| point.x + 2.0 * point.y);
+        state.velocity.fill(-1.0);
+        state.auxiliary = operator
+            .node_points()
+            .iter()
+            .map(|point| point.x * point.x)
+            .collect();
+        let options = SolutionIndicatorOptions::default();
+        let one = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator.clone(),
+                scene.clone(),
+                state.clone(),
+                options,
+            ),
+            1,
+        )
+        .unwrap();
+        let many = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator.clone(),
+                scene.clone(),
+                state.clone(),
+                options,
+            ),
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(one.element_indicators, many.element_indicators);
+        assert_eq!(one.report, many.report);
+        assert_eq!(
+            one.report.boundary_edges_evaluated,
+            mesh.boundary_edges.len()
+        );
+        assert!(
+            one.report.boundary_residual_contribution < 1.0e-20,
+            "{:?}",
+            one.report
+        );
+
+        state.velocity.fill(0.0);
+        let mismatch = run(
+            SolutionIndicatorJob::new(mesh, operator, scene, state, options),
+            10_000,
+        )
+        .unwrap();
+        assert!(mismatch.report.boundary_residual_contribution > 1.0e-3);
+    }
+
+    #[test]
+    fn dirichlet_mismatch_is_diagnostic_only() {
+        let scene = Scene {
+            outer_boundaries: OuterBoundaryConditions::uniform(OuterBoundaryCondition::Dirichlet {
+                signal: BoundarySignal::ZERO,
+            }),
+            ..Scene::default()
+        };
+        let (mesh, operator, scene) = meshed_setup(scene, 72);
+        let exact = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator.clone(),
+                scene.clone(),
+                snapshot(&mesh, &operator, |_| 0.0),
+                SolutionIndicatorOptions::default(),
+            ),
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(exact.report.maximum_dirichlet_mismatch, 0.0);
+        assert_eq!(exact.report.boundary_residual_contribution, 0.0);
+
+        let mismatch = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator.clone(),
+                scene,
+                snapshot(&mesh, &operator, |_| 0.25),
+                SolutionIndicatorOptions::default(),
+            ),
+            10_000,
+        )
+        .unwrap();
+        assert!((mismatch.report.maximum_dirichlet_mismatch - 0.25).abs() < 1.0e-12);
+        assert_eq!(mismatch.report.boundary_residual_contribution, 0.0);
+    }
+
+    #[test]
+    fn hole_impedance_contributes_to_its_adjacent_elements() {
+        let mut scene = Scene::initial();
+        scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        scene.obstacles[0]
+            .span_conditions
+            .fill(FaceBoundaryCondition::Impedance { ratio: 1.0 });
+        let (mesh, operator, scene) = meshed_setup(scene, 73);
+        let mut state = snapshot(&mesh, &operator, |_| 0.0);
+        state.velocity.fill(1.0);
+        let result = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions::default(),
+            ),
+            10_000,
+        )
+        .unwrap();
+        assert!(result.report.boundary_residual_contribution > 0.0);
+        assert_eq!(
+            result.report.boundary_edges_evaluated,
+            mesh.boundary_edges.len()
+        );
+    }
+
+    #[test]
+    fn thin_gap_faces_add_without_cancelling_and_require_a_pair() {
+        let mut scene = Scene {
+            outer_boundaries: OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting),
+            ..Scene::default()
+        };
+        scene.internal_boundaries.push(InternalBoundary {
+            id: InternalBoundaryId(4),
+            spline: OpenCubicSpline::uniform(vec![
+                Point2::new(-0.75, 0.0),
+                Point2::new(-0.25, 0.0),
+                Point2::new(0.25, 0.0),
+                Point2::new(0.75, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![InternalBoundaryLaw {
+                left: FaceBoundaryCondition::Reflecting,
+                right: FaceBoundaryCondition::Reflecting,
+                coupling: InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 3.0,
+                },
+            }],
+        });
+        let (mesh, gap_operator, gap_scene) = meshed_setup(scene, 74);
+        let mut state = snapshot(&mesh, &gap_operator, |_| 0.0);
+        for (node, point) in gap_operator.node_points().iter().enumerate() {
+            state.displacement[node] = if point.y > 1.0e-10 {
+                1.0
+            } else if point.y < -1.0e-10 {
+                -1.0
+            } else {
+                0.0
+            };
+        }
+        for edge in &mesh.boundary_edges {
+            let BoundaryLabel::InternalBoundary { side, .. } = edge.label else {
+                continue;
+            };
+            let value = match side {
+                InternalBoundarySide::Left => 1.0,
+                InternalBoundarySide::Right => -1.0,
+            };
+            for node in test_boundary_nodes(&mesh, &gap_operator, edge) {
+                state.displacement[node] = value;
+            }
+        }
+        let malformed_state = state.clone();
+        let options = SolutionIndicatorOptions::default();
+        let gap = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                gap_operator.clone(),
+                gap_scene.clone(),
+                state.clone(),
+                options,
+            ),
+            10_000,
+        )
+        .unwrap();
+
+        let mut independent_scene = gap_scene.clone();
+        independent_scene.internal_boundaries[0].span_laws[0].coupling =
+            InternalBoundaryCoupling::Independent;
+        let independent_operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &independent_scene,
+                independent_scene.outer_boundaries,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            independent_operator.node_points(),
+            gap_operator.node_points()
+        );
+        let independent = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                independent_operator,
+                independent_scene,
+                state,
+                options,
+            ),
+            10_000,
+        )
+        .unwrap();
+        assert!(
+            gap.report.boundary_residual_contribution
+                > independent.report.boundary_residual_contribution
+        );
+
+        let mut malformed = mesh.as_ref().clone();
+        let right = malformed
+            .boundary_edges
+            .iter()
+            .position(|edge| {
+                matches!(
+                    edge.label,
+                    BoundaryLabel::InternalBoundary {
+                        side: InternalBoundarySide::Right,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        malformed.boundary_edges.remove(right);
+        let malformed = Arc::new(malformed);
+        let result = run(
+            SolutionIndicatorJob::new(
+                malformed.clone(),
+                gap_operator,
+                gap_scene,
+                malformed_state,
+                options,
+            ),
+            10_000,
+        );
+        assert_eq!(result.unwrap_err(), SolutionIndicatorError::InvalidMesh);
     }
 
     #[test]
@@ -1136,6 +1826,38 @@ mod tests {
         );
         let mut state = snapshot(&mesh, &operator, |_| 0.0);
         state.velocity.pop();
+        assert_eq!(
+            run(
+                SolutionIndicatorJob::new(
+                    mesh.clone(),
+                    operator.clone(),
+                    scene.clone(),
+                    state,
+                    SolutionIndicatorOptions::default(),
+                ),
+                100,
+            )
+            .unwrap_err(),
+            SolutionIndicatorError::InvalidSnapshot
+        );
+        let mut state = snapshot(&mesh, &operator, |_| 0.0);
+        state.auxiliary.pop();
+        assert_eq!(
+            run(
+                SolutionIndicatorJob::new(
+                    mesh.clone(),
+                    operator.clone(),
+                    scene.clone(),
+                    state,
+                    SolutionIndicatorOptions::default(),
+                ),
+                100,
+            )
+            .unwrap_err(),
+            SolutionIndicatorError::InvalidSnapshot
+        );
+        let mut state = snapshot(&mesh, &operator, |_| 0.0);
+        state.auxiliary[0] = f64::NAN;
         assert_eq!(
             run(
                 SolutionIndicatorJob::new(
