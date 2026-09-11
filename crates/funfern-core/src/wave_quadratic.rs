@@ -19,6 +19,7 @@ pub struct BoundaryLoad {
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuadraticWaveOperator {
     geometry_revision: u64,
+    mesh_revision: u64,
     outer_boundaries: OuterBoundaryConditions,
     node_points: Vec<Point2>,
     element_nodes: Vec<[u32; 7]>,
@@ -375,6 +376,7 @@ impl QuadraticWaveOperator {
             .collect();
         Ok(Self {
             geometry_revision: mesh.geometry_revision,
+            mesh_revision: mesh.mesh_revision,
             outer_boundaries,
             node_points,
             element_nodes,
@@ -396,6 +398,10 @@ impl QuadraticWaveOperator {
 
     pub fn geometry_revision(&self) -> u64 {
         self.geometry_revision
+    }
+
+    pub fn mesh_revision(&self) -> u64 {
+        self.mesh_revision
     }
 
     pub fn outer_boundaries(&self) -> OuterBoundaryConditions {
@@ -1299,6 +1305,7 @@ mod tests {
     fn square() -> TriMesh {
         TriMesh {
             geometry_revision: 9,
+            mesh_revision: 9,
             vertices: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
                 .into_iter()
                 .map(|[x, y]| MeshVertex {

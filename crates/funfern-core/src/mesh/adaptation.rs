@@ -143,6 +143,7 @@ pub struct MeshUpdateJob {
     previous_scene: Scene,
     scene: Scene,
     revision: u64,
+    mesh_revision: u64,
     options: MeshingOptions,
     phase: Phase,
     builder: Option<MeshBuilder>,
@@ -302,6 +303,16 @@ impl MeshUpdateJob {
         revision: u64,
         options: MeshingOptions,
     ) -> Self {
+        Self::new_versioned(previous, scene, revision, revision, options)
+    }
+
+    pub fn new_versioned(
+        previous: Option<(Arc<TriMesh>, Scene)>,
+        scene: Scene,
+        revision: u64,
+        mesh_revision: u64,
+        options: MeshingOptions,
+    ) -> Self {
         let (mesh, previous_scene) = previous.map_or((None, Scene::default()), |(mesh, scene)| {
             (Some(mesh), scene)
         });
@@ -310,6 +321,7 @@ impl MeshUpdateJob {
             previous_scene,
             scene,
             revision,
+            mesh_revision,
             options,
             phase: Phase::Done,
             builder: None,
@@ -386,9 +398,10 @@ impl MeshUpdateJob {
     }
 
     fn full(&mut self) {
-        self.job = Some(MeshingJob::new(
+        self.job = Some(MeshingJob::new_versioned(
             self.scene.clone(),
             self.revision,
+            self.mesh_revision,
             self.options,
         ));
         self.phase = Phase::Full;
@@ -1143,6 +1156,7 @@ impl MeshUpdateJob {
                     self.job = Some(MeshingJob {
                         scene: self.scene.clone(),
                         geometry_revision: self.revision,
+                        mesh_revision: self.mesh_revision,
                         builder,
                         legalization_work: 0,
                         state: MeshingJobState::Legalize,
@@ -1718,6 +1732,7 @@ mod tests {
         assert!(quality.minimum_angle_degrees >= 12.0 && quality.maximum_edge_length <= 0.04);
         let refined = Arc::new(TriMesh {
             geometry_revision: 0,
+            mesh_revision: 0,
             vertices: b.vertices.clone(),
             triangles: b.triangles.clone(),
             boundary_edges: b.boundary_edges.clone(),

@@ -7,7 +7,9 @@ use crate::{
 };
 use crate::{Scene, WORLD_TOLERANCE};
 mod adaptation;
+mod amr;
 pub use adaptation::*;
+pub use amr::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OuterSide {
@@ -104,6 +106,9 @@ pub struct MeshQuality {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TriMesh {
     pub geometry_revision: u64,
+    /// Identifies this particular discretization. Several meshes may represent
+    /// the same accepted geometry revision after resolution changes or AMR.
+    pub mesh_revision: u64,
     pub vertices: Vec<MeshVertex>,
     pub triangles: Vec<MeshTriangle>,
     pub boundary_edges: Vec<BoundaryEdge>,
@@ -1682,6 +1687,7 @@ enum MeshingJobState {
 /// check a clock between units. This is a work bound, not a realtime guarantee.
 pub struct MeshingJob {
     geometry_revision: u64,
+    mesh_revision: u64,
     scene: Scene,
     builder: MeshBuilder,
     legalization_work: usize,
@@ -1690,8 +1696,18 @@ pub struct MeshingJob {
 
 impl MeshingJob {
     pub fn new(scene: Scene, geometry_revision: u64, options: MeshingOptions) -> Self {
+        Self::new_versioned(scene, geometry_revision, geometry_revision, options)
+    }
+
+    pub fn new_versioned(
+        scene: Scene,
+        geometry_revision: u64,
+        mesh_revision: u64,
+        options: MeshingOptions,
+    ) -> Self {
         Self {
             geometry_revision,
+            mesh_revision,
             state: MeshingJobState::Validate(Box::new(ValidationJob::new(
                 scene.clone(),
                 geometry_revision,
@@ -2375,6 +2391,7 @@ impl MeshingJob {
                 if index == b.boundary_edges.len() {
                     return Ok(Some(TriMesh {
                         geometry_revision: self.geometry_revision,
+                        mesh_revision: self.mesh_revision,
                         vertices: std::mem::take(&mut b.vertices),
                         triangles: std::mem::take(&mut b.triangles),
                         boundary_edges: std::mem::take(&mut b.boundary_edges),

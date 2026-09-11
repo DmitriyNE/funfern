@@ -7,9 +7,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Turn local-remesh hardening into the foundation for required solution-driven
-  adaptive mesh refinement. Preserve stable identities and field state through
-  insertion, collapse, repair, and bounded per-frame adaptation work.
+- [ ] Add user wavelength targets and a solution-error indicator on top of the
+  spatial-field AMR transaction. Expose refinement activity without turning normal
+  editing into a mesh-management workflow.
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
 - [ ] Decide whether the load-compatible closed-wall role still warrants assigned
@@ -31,8 +31,43 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   record solver throughput and memory behavior over time.
 - [ ] Make operator assembly and transfer-map construction resumable if their
   synchronous post-mesh tail becomes visible on larger discretizations.
-- [ ] Decide whether paired-trace coarsening is useful for open baffles, and extend
-  local repair to closed walls if that legacy role remains worth supporting.
+- [ ] Extend coordinate-edit local repair to closed walls if that legacy role
+  remains worth supporting.
+
+## 2026-09-12 — Spatial size-field adaptive mesh transaction
+
+- Added dependency-free `MeshSizeField` and resumable `MeshAdaptationJob` APIs.
+  One transaction coarsens and refines an immutable committed mesh against a smooth
+  target length, restores local legality, verifies topology, and publishes a valid
+  result under explicit work, topology-change, and capacity limits.
+- Added a separate mesh revision alongside the geometry revision. Wave operators,
+  GPU preparation, and linear/quadratic transfer maps now reject a different
+  discretization even when it represents the same accepted scene.
+- Preserved persistent vertex lineage and modification generations across passes.
+  The refine/collapse hysteresis is 1.05/0.35, and generation cooldown prevents
+  newly changed vertices from immediately reversing topology.
+- Kept box corners, spline seams and knot breakpoints, and baffle tips fixed.
+  Ordinary hole/material-interface constraints coarsen when their merged exact
+  cubic span stays within curve tolerance. Open baffles and closed walls refine and
+  coarsen both coincident traces atomically. Testing exposed a closed-wall seam case
+  where paired parameters differ by one period; pairing now follows coincident,
+  opposite geometric edges while retaining each face's own parameter interval.
+- Integrated AMR with the existing application transaction pipeline in soft 2 ms
+  slices. A completed mesh receives a new operator and exact quadratic transfer;
+  the old GPU solution continues until mesh, operator, state, timestep, and lineage
+  commit together. There is no normal UI or persistence surface in this slice.
+- Added deterministic slice-size, moving-target refine/coarsen, malformed input,
+  immutable-source, lineage, hole/interface/wall/baffle topology, and exact
+  quadratic-transfer tests. The opt-in native `--amr-check` evolves a nonzero field
+  and performs two spatial-target handoffs with zero exposed nodes.
+- Apple M1 Max / Metal release check: first pass inserted 359 vertices and produced
+  1,516 triangles; moving the target inserted 372 and collapsed 207, producing
+  1,844 triangles and 5,638 quadratic DOFs. The second pass used 766,693 work units,
+  converged without a limit, preserved 624 source triangles, and the complete
+  startup/two-handoff check took 1.17 s with solver dt 0.003947.
+- Formatting, Clippy with warnings denied, workspace tests, native release build,
+  and release WASM packaging pass. Interactive browser verification was skipped by
+  prior agreement; the feature has no normal browser UI yet.
 
 ## 2026-09-11 — Local mesh repair for open baffles
 

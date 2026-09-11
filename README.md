@@ -193,6 +193,14 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   motion, large edits, and exhausted repairs still rebuild.
   Open-curve insertion reuses safe nearby bulk vertices at the exact curve position
   to avoid tiny CFL-limiting elements around baffles.
+- **Adaptive mesh foundation:** the core can refine and coarsen an existing mesh
+  against a bounded spatial edge-size field while preserving the accepted geometry
+  revision. A separate mesh revision identifies each discretization. Outer edges,
+  holes, material interfaces, closed walls, and both coincident baffle faces remain
+  constrained; spline breakpoints, box corners, and open tips remain fixed. The app
+  runs adaptation in 2 ms slices and transfers the live quadratic field at an atomic
+  GPU handoff. This first slice is internal and exercised by `--amr-check`; normal
+  editor sessions do not yet expose an AMR control or solution-error indicator.
 - **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
   Gaussian displacement with zero initial velocity. Move source positions the
   optional continuous sinusoidal source. Simulation speed is bounded to 16
@@ -251,6 +259,7 @@ cargo run -p funfern-core --release --example wave_boundary_reflection
 cargo run -p funfern-app --release --locked -- --mesh-edit-benchmark
 cargo run -p funfern-app --release --locked -- --wave-gpu-check
 cargo run -p funfern-app --release --locked -- --wave-transfer-check
+cargo run -p funfern-app --release --locked -- --amr-check
 ```
 
 GitHub Actions runs formatting, Clippy, the workspace tests, and native and WASM
@@ -294,6 +303,9 @@ field, performs a real control-point edit, verifies transfer of all three state
 components, then verifies that a lower-order boundary transaction clears the
 auxiliary state, and finally checks a same-mesh material-coefficient transaction
 against f64.
+`--amr-check` evolves a nonzero field, moves a smooth spatial refinement target,
+requires both refinement and coarsening, transfers all quadratic state with no
+exposed nodes, verifies mesh/operator revision agreement, and exits.
 The field view tessellates every quadratic parent triangle into six display
 triangles around its shared edge-midpoint and element bubble nodes. Native GPU
 startup and the wave kernel were exercised on Apple M1 Max / Metal. The user

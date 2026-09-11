@@ -39,6 +39,8 @@ pub struct TransferSample {
 pub struct TransferMap {
     source_revision: u64,
     target_revision: u64,
+    source_mesh_revision: u64,
+    target_mesh_revision: u64,
     source_vertices: usize,
     samples: Vec<Option<TransferSample>>,
 }
@@ -193,6 +195,8 @@ impl TransferMap {
         Ok(Self {
             source_revision: source.geometry_revision,
             target_revision: target.geometry_revision,
+            source_mesh_revision: source.mesh_revision,
+            target_mesh_revision: target.mesh_revision,
             source_vertices: source.vertices.len(),
             samples,
         })
@@ -217,6 +221,8 @@ impl TransferMap {
     pub fn matches_meshes(&self, source: &TriMesh, target: &TriMesh) -> bool {
         self.source_revision == source.geometry_revision
             && self.target_revision == target.geometry_revision
+            && self.source_mesh_revision == source.mesh_revision
+            && self.target_mesh_revision == target.mesh_revision
             && self.source_vertices == source.vertices.len()
             && self.samples.len() == target.vertices.len()
     }
@@ -268,6 +274,8 @@ pub struct QuadraticTransferSample {
 pub struct QuadraticTransferMap {
     source_revision: u64,
     target_revision: u64,
+    source_mesh_revision: u64,
+    target_mesh_revision: u64,
     source_dofs: usize,
     samples: Vec<Option<QuadraticTransferSample>>,
 }
@@ -301,6 +309,8 @@ impl QuadraticTransferMap {
         Ok(Self {
             source_revision: mesh.geometry_revision,
             target_revision: mesh.geometry_revision,
+            source_mesh_revision: mesh.mesh_revision,
+            target_mesh_revision: mesh.mesh_revision,
             source_dofs: source_operator.degrees_of_freedom(),
             samples,
         })
@@ -387,6 +397,8 @@ impl QuadraticTransferMap {
         Ok(Self {
             source_revision: source_mesh.geometry_revision,
             target_revision: target_mesh.geometry_revision,
+            source_mesh_revision: source_mesh.mesh_revision,
+            target_mesh_revision: target_mesh.mesh_revision,
             source_dofs: source_operator.degrees_of_freedom(),
             samples,
         })
@@ -409,6 +421,8 @@ impl QuadraticTransferMap {
     ) -> bool {
         self.source_revision == source_mesh.geometry_revision
             && self.target_revision == target_mesh.geometry_revision
+            && self.source_mesh_revision == source_mesh.mesh_revision
+            && self.target_mesh_revision == target_mesh.mesh_revision
             && self.source_dofs == source_operator.degrees_of_freedom()
             && self.samples.len() == target_operator.degrees_of_freedom()
             && source_operator.geometry_revision() == source_mesh.geometry_revision
@@ -540,6 +554,7 @@ fn validate_quadratic_pair(
         TransferError::InvalidTarget
     };
     if operator.geometry_revision() != mesh.geometry_revision
+        || operator.mesh_revision() != mesh.mesh_revision
         || operator.element_nodes().len() != mesh.triangles.len()
         || operator.node_points().len() < mesh.vertices.len()
         || operator
@@ -708,6 +723,7 @@ mod tests {
     fn mesh(revision: u64, points: &[[f64; 2]], triangles: &[[usize; 3]]) -> TriMesh {
         TriMesh {
             geometry_revision: revision,
+            mesh_revision: revision,
             vertices: points
                 .iter()
                 .map(|p| MeshVertex {
@@ -966,6 +982,16 @@ mod tests {
         );
         assert_eq!(
             QuadraticTransferMap::build(&source, &operator, &stale, &operator),
+            Err(TransferError::InvalidTarget)
+        );
+        let mut stale_mesh = source.clone();
+        stale_mesh.mesh_revision += 1;
+        assert_eq!(
+            QuadraticTransferMap::build(&stale_mesh, &operator, &source, &operator),
+            Err(TransferError::InvalidSource)
+        );
+        assert_eq!(
+            QuadraticTransferMap::build(&source, &operator, &stale_mesh, &operator),
             Err(TransferError::InvalidTarget)
         );
     }

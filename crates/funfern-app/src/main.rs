@@ -45,5 +45,11 @@ fn main() {
                 ui::wave_transfer_benchmark.after(ui::frame),
             );
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::args().any(|arg| arg == "--amr-check") {
+        app.insert_resource(ui::amr_check_scene())
+            .init_resource::<ui::AmrBenchmark>()
+            .add_systems(EguiPrimaryContextPass, ui::amr_benchmark.after(ui::frame));
+    }
     app.run();
 }

@@ -172,6 +172,7 @@ struct SimulationCandidate {
     simulation_time: f64,
     exposed_nodes: usize,
     source_region: RegionId,
+    adaptation_state: MeshAdaptationState,
 }
 #[derive(Resource)]
 pub struct Playground {
@@ -234,6 +235,10 @@ pub struct Playground {
     mesh: Option<Arc<TriMesh>>,
     simulation_candidate: Option<SimulationCandidate>,
     mesh_job: Option<MeshUpdateJob>,
+    mesh_adaptation_job: Option<MeshAdaptationJob>,
+    mesh_adaptation_state: Option<MeshAdaptationState>,
+    mesh_adaptation_report: Option<MeshAdaptationReport>,
+    next_mesh_revision: u64,
     mesh_source: Scene,
     mesh_committed_scene: Scene,
     mesh_committed_max_edge: f64,
@@ -346,6 +351,10 @@ impl Default for Playground {
             mesh: None,
             simulation_candidate: None,
             mesh_job: None,
+            mesh_adaptation_job: None,
+            mesh_adaptation_state: None,
+            mesh_adaptation_report: None,
+            next_mesh_revision: 1,
             mesh_source: Scene::default(),
             mesh_committed_scene: Scene::default(),
             mesh_committed_max_edge: 0.0,
@@ -1279,7 +1288,10 @@ impl Playground {
     fn refresh_mesh(&mut self) {
         // Prepare from the displayed mesh's own scene, never an obsolete
         // in-flight request. Geometry edits are coalesced until the drag ends.
-        if self.editor.editing() || self.simulation_candidate.is_some() {
+        if self.editor.editing()
+            || self.simulation_candidate.is_some()
+            || self.mesh_adaptation_job.is_some()
+        {
             return;
         }
         let start = Instant::now();
@@ -1294,10 +1306,13 @@ impl Playground {
                 .as_ref()
                 .filter(|_| self.mesh_committed_max_edge == self.mesh_max_edge)
                 .map(|mesh| (mesh.clone(), self.mesh_committed_scene.clone()));
-            self.mesh_job = Some(MeshUpdateJob::new(
+            let mesh_revision = self.next_mesh_revision;
+            self.next_mesh_revision = self.next_mesh_revision.wrapping_add(1).max(1);
+            self.mesh_job = Some(MeshUpdateJob::new_versioned(
                 previous,
                 self.mesh_source.clone(),
                 self.editor.revision,
+                mesh_revision,
                 MeshingOptions {
                     curve_tolerance: (self.mesh_max_edge * 0.02).min(1.5e-3),
                     target_edge_length: self.mesh_max_edge / 1.05,
@@ -1373,6 +1388,7 @@ impl Playground {
                                         .map_or(operator.degrees_of_freedom(), |map| {
                                             map.exposed_nodes()
                                         });
+                                    let adaptation_state = MeshAdaptationState::from_mesh(&mesh);
                                     let time_step = operator.recommended_time_step();
                                     self.simulation_candidate = Some(SimulationCandidate {
                                         source_region: mesh_region_at(
@@ -1392,6 +1408,7 @@ impl Playground {
                                         resume_running: self.wave_running,
                                         simulation_time: 0.0,
                                         exposed_nodes,
+                                        adaptation_state,
                                     });
                                     self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
                                     self.mesh_error = None;
@@ -1436,6 +1453,10 @@ impl Playground {
                                 time_step,
                                 exposed_nodes: transfer.exposed_nodes(),
                                 transfer: Some(transfer),
+                                adaptation_state: self
+                                    .mesh_adaptation_state
+                                    .clone()
+                                    .unwrap_or_else(|| MeshAdaptationState::from_mesh(mesh)),
                                 generation: None,
                                 resume_running: self.wave_running,
                                 simulation_time: 0.0,
@@ -1459,6 +1480,129 @@ impl Playground {
                 .mesh_started
                 .map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
         }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn start_mesh_adaptation(
+        &mut self,
+        field: Arc<dyn MeshSizeField>,
+        options: MeshAdaptationOptions,
+    ) -> Result<(), String> {
+        if self.editor.editing()
+            || self.mesh_job.is_some()
+            || self.mesh_adaptation_job.is_some()
+            || self.simulation_candidate.is_some()
+        {
+            return Err("Another mesh transaction is active".into());
+        }
+        let mesh = self
+            .mesh
+            .as_ref()
+            .ok_or("The committed mesh is not ready")?
+            .clone();
+        let state = self
+            .mesh_adaptation_state
+            .clone()
+            .filter(|state| state.mesh_revision == mesh.mesh_revision)
+            .unwrap_or_else(|| MeshAdaptationState::from_mesh(&mesh));
+        let revision = self.next_mesh_revision;
+        self.next_mesh_revision = self.next_mesh_revision.wrapping_add(1).max(1);
+        self.mesh_adaptation_job = Some(MeshAdaptationJob::new(
+            mesh,
+            self.mesh_committed_scene.clone(),
+            state,
+            revision,
+            field,
+            options,
+        ));
+        self.mesh_adaptation_report = None;
+        Ok(())
+    }
+
+    fn refresh_mesh_adaptation(&mut self) {
+        if self.mesh_adaptation_job.is_none() || self.simulation_candidate.is_some() {
+            return;
+        }
+        let started = Instant::now();
+        let mut result = None;
+        if let Some(job) = &mut self.mesh_adaptation_job {
+            for _ in 0..100_000 {
+                result = job.advance(1);
+                if result.is_some() || started.elapsed().as_secs_f64() >= 0.002 {
+                    break;
+                }
+            }
+        }
+        let Some(result) = result else {
+            return;
+        };
+        let report = match &result {
+            Ok(result) => result.report.clone(),
+            Err(_) => self.mesh_adaptation_job.as_ref().unwrap().report().clone(),
+        };
+        self.mesh_adaptation_report = Some(report);
+        self.mesh_adaptation_job = None;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.mesh_error = Some(error.to_string());
+                return;
+            }
+        };
+        let mesh = Arc::new(result.mesh);
+        let low_quality = (0..mesh.triangles.len())
+            .map(|index| mesh.triangle_quality(index).unwrap().minimum_angle_degrees < 15.0)
+            .collect();
+        let prepare = Instant::now();
+        let operator = match QuadraticWaveOperator::assemble_scene_with_boundaries(
+            &mesh,
+            &self.mesh_committed_scene,
+            self.mesh_committed_scene.outer_boundaries,
+        ) {
+            Ok(operator) => operator,
+            Err(error) => {
+                self.mesh_error = Some(error.to_string());
+                return;
+            }
+        };
+        let transfer = match self
+            .wave_mesh
+            .as_ref()
+            .zip(self.wave_operator.as_ref())
+            .map(|(source_mesh, source_operator)| {
+                QuadraticTransferMap::build(source_mesh, source_operator, &mesh, &operator)
+            })
+            .transpose()
+        {
+            Ok(transfer) => transfer,
+            Err(error) => {
+                self.mesh_error = Some(error.to_string());
+                return;
+            }
+        };
+        let exposed_nodes = transfer.as_ref().map_or(
+            operator.degrees_of_freedom(),
+            QuadraticTransferMap::exposed_nodes,
+        );
+        self.simulation_candidate = Some(SimulationCandidate {
+            source_region: mesh_region_at(&mesh, self.wave_source.position)
+                .unwrap_or(BACKGROUND_REGION),
+            mesh,
+            scene: self.mesh_committed_scene.clone(),
+            max_edge: self.mesh_committed_max_edge,
+            low_quality,
+            time_step: operator.recommended_time_step(),
+            operator: Arc::new(operator),
+            boundary: self.mesh_committed_scene.outer_boundaries,
+            transfer,
+            generation: None,
+            resume_running: self.wave_running,
+            simulation_time: 0.0,
+            exposed_nodes,
+            adaptation_state: result.state,
+        });
+        self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
+        self.mesh_error = None;
     }
 
     fn refresh_wave(
@@ -1583,6 +1727,7 @@ impl Playground {
             self.mesh_committed_max_edge = candidate.max_edge;
             self.wave_mesh = Some(candidate.mesh);
             self.wave_operator = Some(candidate.operator);
+            self.mesh_adaptation_state = Some(candidate.adaptation_state);
             self.wave_boundary_committed = candidate.boundary;
             self.wave_time_step = candidate.time_step;
             self.wave_time_offset = candidate.simulation_time;
@@ -5408,6 +5553,7 @@ pub fn frame(
     state.show(&mut root, Some(&display));
     state.editor.validate_frame(12_000);
     state.refresh_mesh();
+    state.refresh_mesh_adaptation();
     state.refresh_wave(
         &mut request,
         &display,
@@ -5533,6 +5679,240 @@ pub fn wave_gpu_check_scene() -> Playground {
             accepted: scene,
         });
     state
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn amr_check_scene() -> Playground {
+    Playground {
+        automated_benchmark: true,
+        mesh_max_edge: 0.16,
+        wave_running: false,
+        ..Default::default()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Resource)]
+pub struct AmrBenchmark {
+    started: Instant,
+    phase: u8,
+    source_mesh_revision: u64,
+    first_mesh_revision: u64,
+    first_insertions: usize,
+    first_triangles: usize,
+    handoff_exposed_nodes: Option<usize>,
+    simulation_time: f64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for AmrBenchmark {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            phase: 0,
+            source_mesh_revision: 0,
+            first_mesh_revision: 0,
+            first_insertions: 0,
+            first_triangles: 0,
+            handoff_exposed_nodes: None,
+            simulation_time: 0.0,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn amr_options() -> MeshAdaptationOptions {
+    MeshAdaptationOptions {
+        meshing: MeshingOptions {
+            curve_tolerance: 1.5e-3,
+            target_edge_length: 0.16 / 1.05,
+            minimum_angle_degrees: 12.0,
+            max_vertices: 50_000,
+            max_triangles: 100_000,
+            max_refinement_steps: 50_000,
+        },
+        minimum_target_edge_length: 0.05,
+        maximum_target_edge_length: 0.16,
+        max_topology_changes: 700,
+        ..Default::default()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn amr_radial_field(center: Point2) -> Arc<dyn MeshSizeField> {
+    Arc::new(move |point: Point2, _region: RegionId| {
+        let distance = (point - center).norm();
+        if distance <= 0.28 {
+            0.05
+        } else if distance >= 0.48 {
+            0.16
+        } else {
+            let x = (distance - 0.28) / 0.20;
+            let smooth = x * x * (3.0 - 2.0 * x);
+            0.05 + 0.11 * smooth
+        }
+    })
+}
+
+/// Opt-in end-to-end AMR transaction check. It keeps normal sessions unchanged,
+/// but exercises bounded preparation, two GPU handoffs, refinement and coarsening.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn amr_benchmark(
+    mut benchmark: ResMut<AmrBenchmark>,
+    mut state: ResMut<Playground>,
+    mut request: ResMut<WaveGpuRequest>,
+    display: Res<WaveDisplay>,
+    mut assets: ResMut<Assets<ShaderBuffer>>,
+    mut exit: MessageWriter<bevy::app::AppExit>,
+) {
+    if benchmark.started.elapsed().as_secs_f64() > 90.0 {
+        error!(phase = benchmark.phase, "AMR check timed out");
+        exit.write(bevy::app::AppExit::error());
+        return;
+    }
+    if let Some(candidate) = &state.simulation_candidate {
+        benchmark.handoff_exposed_nodes = Some(candidate.exposed_nodes);
+    }
+    match benchmark.phase {
+        0 => {
+            let (Some(mesh), Some(operator)) = (
+                state.wave_mesh.as_ref().cloned(),
+                state.wave_operator.as_ref().cloned(),
+            ) else {
+                return;
+            };
+            if !request.ready() || state.simulation_candidate.is_some() {
+                return;
+            }
+            state.wave_running = false;
+            if let Err(error) = request.inject_pulse(
+                &mut assets,
+                &mesh,
+                &operator,
+                PulseSettings {
+                    position: Point2::new(-0.72, 0.38),
+                    amplitude: 0.65,
+                    width: 0.07,
+                    region: BACKGROUND_REGION,
+                },
+            ) {
+                error!(%error, "AMR pulse setup failed");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+            request.request_steps(24);
+            benchmark.source_mesh_revision = mesh.mesh_revision;
+            benchmark.phase = 1;
+        }
+        1 => {
+            if request.stats().completed_steps() < 24
+                || display.current.is_empty()
+                || display.current.iter().all(|value| value.abs() < 1.0e-7)
+            {
+                return;
+            }
+            benchmark.simulation_time = state.wave_time_offset
+                + request.stats().completed_steps() as f64 * state.wave_time_step;
+            state.wave_running = true;
+            if let Err(error) = state
+                .start_mesh_adaptation(amr_radial_field(Point2::new(-0.55, 0.45)), amr_options())
+            {
+                error!(%error, "Could not start first AMR transaction");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+            benchmark.phase = 2;
+        }
+        2 => {
+            if state.mesh_adaptation_job.is_some() || state.simulation_candidate.is_some() {
+                return;
+            }
+            let (Some(mesh), Some(report)) = (&state.wave_mesh, &state.mesh_adaptation_report)
+            else {
+                return;
+            };
+            if mesh.mesh_revision == benchmark.source_mesh_revision {
+                return;
+            }
+            if report.inserted_vertices == 0
+                || benchmark.handoff_exposed_nodes != Some(0)
+                || state.wave_error.is_some()
+                || state.mesh_error.is_some()
+            {
+                error!(?report, wave_error = ?state.wave_error, mesh_error = ?state.mesh_error, "First AMR transaction failed checks");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+            benchmark.first_mesh_revision = mesh.mesh_revision;
+            benchmark.first_insertions = report.inserted_vertices;
+            benchmark.first_triangles = mesh.triangles.len();
+            benchmark.handoff_exposed_nodes = None;
+            if let Err(error) = state
+                .start_mesh_adaptation(amr_radial_field(Point2::new(0.55, -0.45)), amr_options())
+            {
+                error!(%error, "Could not start second AMR transaction");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+            benchmark.phase = 3;
+        }
+        3 => {
+            if state.mesh_adaptation_job.is_some() || state.simulation_candidate.is_some() {
+                return;
+            }
+            let (Some(mesh), Some(operator), Some(report), Some(adaptation_state)) = (
+                &state.wave_mesh,
+                &state.wave_operator,
+                &state.mesh_adaptation_report,
+                &state.mesh_adaptation_state,
+            ) else {
+                return;
+            };
+            let simulation_time = state.wave_time_offset
+                + request.stats().completed_steps() as f64 * state.wave_time_step;
+            let valid = mesh.mesh_revision != benchmark.first_mesh_revision
+                && mesh.mesh_revision == operator.mesh_revision()
+                && mesh.mesh_revision == adaptation_state.mesh_revision
+                && mesh.geometry_revision == operator.geometry_revision()
+                && report.inserted_vertices > 0
+                && report.collapsed_vertices > 0
+                && benchmark.handoff_exposed_nodes == Some(0)
+                && display.current.len() == operator.degrees_of_freedom()
+                && display.previous.len() == operator.degrees_of_freedom()
+                && display.auxiliary.len() == operator.degrees_of_freedom()
+                && display.current.iter().any(|value| value.abs() > 1.0e-7)
+                && simulation_time >= benchmark.simulation_time
+                && state.wave_running
+                && state.wave_error.is_none()
+                && state.mesh_error.is_none();
+            info!(
+                first_insertions = benchmark.first_insertions,
+                first_triangles = benchmark.first_triangles,
+                second_insertions = report.inserted_vertices,
+                second_collapses = report.collapsed_vertices,
+                second_triangles = mesh.triangles.len(),
+                topology_changes = report.topology_changes,
+                work_units = report.work_units,
+                converged = report.converged,
+                limit = ?report.limit,
+                preserved_triangles = report.preserved_triangles,
+                minimum_target = report.minimum_target,
+                maximum_target = report.maximum_target,
+                dofs = operator.degrees_of_freedom(),
+                solver_dt = state.wave_time_step,
+                elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
+                "AMR check complete"
+            );
+            if valid {
+                exit.write(bevy::app::AppExit::Success);
+            } else {
+                error!(?report, wave_error = ?state.wave_error, mesh_error = ?state.mesh_error, "AMR result failed invariants");
+                exit.write(bevy::app::AppExit::error());
+            }
+            benchmark.phase = 4;
+        }
+        _ => {}
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

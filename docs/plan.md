@@ -147,12 +147,16 @@ the state at commit time rather than the state when preparation began.
 
 ## 5. Bounded incremental adaptation
 
-**Partial implementation brought forward:** control-coordinate edits reuse the
+**Spatial-field foundation implemented:** control-coordinate edits reuse the
 previous mesh, move a bounded region, and repair with constrained flips,
-refinement, and conservative interior coarsening. Remote elements remain fixed.
-The application reports latency, exact element reuse, and fallback frequency.
-Creation/deletion, knot edits, large motions and failed repair rebuild globally.
-Persistent cooldown and broader adaptation remain pending.
+refinement, and conservative interior coarsening. A separate resumable adaptation
+transaction now refines and coarsens bulk and constrained boundaries against an
+immutable spatial edge-size field. It preserves vertex lineage, applies generation
+cooldown, distinguishes mesh identity from geometry identity, and carries the live
+quadratic field through the normal atomic GPU handoff. The internal native check
+moves the target and requires refinement, coarsening, and zero exposed transfer
+nodes. User wavelength controls, active solution indicators, and visualization
+remain pending.
 
 - Implement local mesh motion, retriangulation, refinement, and coarsening, keeping
   full remeshing as a fallback.

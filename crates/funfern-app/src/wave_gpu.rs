@@ -418,6 +418,7 @@ impl WaveGpuRequest {
         time_step: f64,
     ) -> Result<(), String> {
         if mesh.geometry_revision != operator.geometry_revision()
+            || mesh.mesh_revision != operator.mesh_revision()
             || mesh.triangles.len() != operator.element_nodes().len()
         {
             return Err("Mesh and quadratic wave operator do not agree".into());

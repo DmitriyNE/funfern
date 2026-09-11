@@ -168,6 +168,7 @@ impl std::error::Error for WaveError {}
 #[derive(Clone, Debug, PartialEq)]
 pub struct WaveOperator {
     geometry_revision: u64,
+    mesh_revision: u64,
     row_offsets: Vec<u32>,
     columns: Vec<u32>,
     stiffness: Vec<f64>,
@@ -276,6 +277,7 @@ impl WaveOperator {
         let maximum_time_step = 2.0 / maximum_eigenvalue_bound.sqrt();
         Ok(Self {
             geometry_revision: mesh.geometry_revision,
+            mesh_revision: mesh.mesh_revision,
             row_offsets,
             columns,
             stiffness,
@@ -288,6 +290,10 @@ impl WaveOperator {
 
     pub fn geometry_revision(&self) -> u64 {
         self.geometry_revision
+    }
+
+    pub fn mesh_revision(&self) -> u64 {
+        self.mesh_revision
     }
 
     pub fn degrees_of_freedom(&self) -> usize {
@@ -619,6 +625,7 @@ mod tests {
         }
         TriMesh {
             geometry_revision: 7,
+            mesh_revision: 7,
             vertices,
             triangles,
             boundary_edges: Vec::new(),

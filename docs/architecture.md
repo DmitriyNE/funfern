@@ -7,8 +7,9 @@ prescribed Neumann data, prescribed Dirichlet data, and first- or second-order
 radiation. Stable material regions, transmitting interfaces, closed two-sided
 walls, and open baffles with independent face laws or coupled thin-gap spans are
 implemented. The closed-wall representation is retained for scene compatibility,
-but the current editor does not offer it as a normal role. Broader adaptation
-remains work.
+but the current editor does not offer it as a normal role. A first spatial
+edge-size adaptation transaction is implemented; user wavelength and active
+solution indicators remain work.
 
 ## Responsibilities and dependencies
 
@@ -303,7 +304,8 @@ so finer meshes also resolve the curved boundary more closely. App capacities
 are 50,000 vertices, 100,000 triangles, and 50,000 insertions. These limits do
 not promise either a particular wave accuracy or interactive rebuild latency.
 
-`TriMesh` stores f64 vertices, counter-clockwise triangle indices with stable
+`TriMesh` stores separate geometry and mesh revisions, f64 vertices,
+counter-clockwise triangle indices with stable
 region IDs, labeled outer/hole/interface/wall/baffle edges, stable curve IDs, continuous
 boundary parameters, and aggregate quality. Boundary labels are independent of
 temporary vertex and triangle indices. Verification requires positive triangle
@@ -338,9 +340,10 @@ mesh has its own committed scene and resolution, separate from the latest reques
 Superseding a job always starts from that committed pair, so a half-finished
 candidate cannot become the source of a later edit.
 
-`MeshUpdateJob` attempts reuse for hole control-coordinate edits with unchanged
-loop IDs, roles, and knot intervals at the same resolution. Interface and wall
-motion currently uses the full region-aware mesher. The local path imports the accepted mesh and
+`MeshUpdateJob` attempts reuse for hole, material-interface, and open-baffle
+control-coordinate edits with unchanged IDs, roles, and knot intervals at the same
+resolution. Closed-wall motion currently uses the full region-aware mesher. The
+local path imports the accepted mesh and
 connectivity in resumable linear passes. Boundary vertices whose spline parameter
 positions changed move to the new spline; unchanged boundary vertices remain fixed.
 Interior displacement uses 24 Jacobi averaging sweeps with fixed boundary values
@@ -354,9 +357,10 @@ flips and quality refinement are confined to the frozen patch; an operation that
 needs to cross its boundary triggers full reconstruction. Conservative interior
 edge collapse checks the link condition, orientation, angle, and edge-size bounds.
 Collapse is attempted below 0.35h, separated from the 1.05h refinement threshold
-to reduce oscillation. Boundary vertices are never collapsed. Final compaction
+to reduce oscillation. Coordinate-edit repair does not collapse boundary vertices.
+Final compaction
 removes unused interior vertices; indices may change, but distant geometry and
-triangles are preserved. There is no persistent per-vertex cooldown yet.
+triangles are preserved.
 
 Local work is limited to five million units, 256 curved-boundary subdivisions and
 512 quality insertions, with the existing capacities and per-frame budget. Output
@@ -371,8 +375,7 @@ by the core. Fallback frequency counts completed requests, excluding canceled jo
 
 Creation, deletion, knot edits, resolution changes, excessive motion and failed
 repair use the full resumable mesher. Resolution remains an application preference,
-excluded from geometry files and undo history. This is the first geometry-only
-part of milestone 5; wave-state transfer and broader adaptation remain pending.
+excluded from geometry files and undo history.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a
@@ -572,6 +575,34 @@ its CPU cost. Browser threading is not a prerequisite for the initial design.
 Adapt to geometry/quality first, then user wavelength targets and potentially the
 field. Use hysteresis and cooldown for refinement/coarsening. Retain full remeshing
 as a fallback for large or troublesome edits.
+
+`MeshAdaptationJob` is the first broader adaptation path. One immutable transaction
+samples a spatial target length at triangle vertices, edge midpoints, and centroids;
+coarsens short edges; restores local constrained-Delaunay legality; refines long
+edges; verifies the result; and compacts it. Every phase resumes under the caller's
+work budget. The app gives it the same soft 2 ms frame slice as ordinary meshing.
+Refinement starts above `1.05 h_target` and collapse below `0.35 h_target`.
+Persistent vertex lineage records the generation of each topology change, and a
+configurable generation cooldown prevents an immediately changed vertex from
+oscillating on the next pass.
+
+Outer corners, spline seams and logical knot breakpoints, and open-curve tips are
+anchors. Other constraint vertices may coarsen if the merged chord still represents
+the exact cubic span within the fixed curve tolerance. Material interfaces keep a
+shared trace. Closed walls and open baffles refine or collapse their two coincident,
+oppositely oriented traces atomically; each face retains its own periodic parameter
+interval. Malformed pair topology is an error, while a locally unsafe collapse is
+skipped. Capacity or topology-change exhaustion publishes a valid partial result
+with an explicit limit report; malformed input and total work exhaustion discard
+the candidate.
+
+Geometry revision identifies the accepted scene, while mesh revision identifies a
+particular discretization of it. Wave operators and linear/quadratic transfer maps
+validate both. A successful adaptation assembles a candidate operator, prepares a
+quadratic transfer from the still-running source mesh, and commits mesh, operator,
+state, timestep, and lineage together after the tagged GPU handoff. The current
+target field is an internal API and is not serialized. Solution-error estimation,
+user-facing wavelength controls, and AMR visualization are later slices.
 
 Coordinate-only edits of closed holes, transmitting material interfaces, and open
 baffles first try local mesh repair. Each attempt imports the immutable committed
