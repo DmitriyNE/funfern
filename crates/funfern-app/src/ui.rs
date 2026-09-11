@@ -485,6 +485,21 @@ impl Playground {
             r.center().y - ((p.y - self.center.y) * self.scale).clamp(-1e7, 1e7) as f32,
         )
     }
+
+    fn wave_display_operator<'a>(
+        &'a self,
+        display: &WaveDisplay,
+    ) -> Option<&'a QuadraticWaveOperator> {
+        if let Some(candidate) = &self.simulation_candidate
+            && candidate.generation == Some(display.generation)
+            && display.current.len() == candidate.operator.degrees_of_freedom()
+        {
+            return Some(&candidate.operator);
+        }
+        self.wave_operator
+            .as_deref()
+            .filter(|operator| display.current.len() == operator.degrees_of_freedom())
+    }
     fn world(&self, p: Pos2, r: Rect) -> Point2 {
         Point2::new(
             self.center.x + (p.x - r.center().x) as f64 / self.scale,
@@ -4809,9 +4824,9 @@ impl Playground {
             painter.add(egui::Shape::mesh(regions));
         }
         if self.show_field
-            && let (Some(operator), Some(display)) = (&self.wave_operator, wave_display)
+            && let Some(display) = wave_display
             && display.generation > 0
-            && display.current.len() == operator.degrees_of_freedom()
+            && let Some(operator) = self.wave_display_operator(display)
         {
             let mut field = egui::Mesh::default();
             field.reserve_vertices(operator.degrees_of_freedom());
@@ -6252,12 +6267,6 @@ pub fn amr_benchmark(
             {
                 return;
             }
-            // The ordinary automatic controller has now completed an aligned
-            // GPU-to-host estimate. Keep the remainder deterministic while it
-            // exercises known refine/coarsen transaction targets.
-            state.amr_enabled = false;
-            state.solution_indicator_job = None;
-            state.solution_indicator_source = None;
             state.wave_running = false;
             if let Err(error) = request.inject_pulse(
                 &mut assets,
@@ -6275,18 +6284,34 @@ pub fn amr_benchmark(
                 return;
             }
             request.request_steps(24);
-            benchmark.source_mesh_revision = mesh.mesh_revision;
             benchmark.phase = 1;
         }
         1 => {
-            if request.stats().completed_steps() < 24
-                || display.current.is_empty()
-                || display.current.iter().all(|value| value.abs() < 1.0e-7)
-            {
+            if state.mesh_error.is_some() || state.amr_error.is_some() {
+                error!(mesh_error = ?state.mesh_error, amr_error = ?state.amr_error, "Automatic solution AMR failed");
+                exit.write(bevy::app::AppExit::error());
+                return;
+            }
+            let energy_estimated = state
+                .solution_indicator_report
+                .as_ref()
+                .is_some_and(|report| report.maximum_indicator > 1.0e-8);
+            if !energy_estimated {
+                return;
+            }
+            // A nonzero solution estimate has reached the automatic controller.
+            // Let any transaction it opened finish, then use deterministic target
+            // fields for the remaining topology invariants.
+            state.amr_enabled = false;
+            state.solution_indicator_job = None;
+            state.solution_indicator_source = None;
+            if state.mesh_adaptation_job.is_some() || state.simulation_candidate.is_some() {
                 return;
             }
             benchmark.simulation_time = state.wave_time_offset
                 + request.stats().completed_steps() as f64 * state.wave_time_step;
+            benchmark.source_mesh_revision = state.wave_mesh.as_ref().unwrap().mesh_revision;
+            benchmark.handoff_exposed_nodes = None;
             state.wave_running = true;
             if let Err(error) = state
                 .start_mesh_adaptation(amr_radial_field(Point2::new(-0.55, 0.45)), amr_options())
@@ -9372,6 +9397,49 @@ mod tests {
         assert!(h.state.mesh_error.is_some());
         assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &displayed));
         assert_eq!(h.state.mesh_committed_max_edge, 0.08);
+    }
+
+    #[test]
+    fn candidate_readback_renders_with_candidate_operator_during_commit_frame() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let active_revision = h.state.wave_operator.as_ref().unwrap().mesh_revision();
+        let active_dofs = h.state.wave_operator.as_ref().unwrap().degrees_of_freedom();
+
+        h.state.mesh_max_edge = 0.16;
+        build_mesh_candidate(&mut h.state);
+        let candidate = h.state.simulation_candidate.as_mut().unwrap();
+        candidate.generation = Some(42);
+        let candidate_revision = candidate.operator.mesh_revision();
+        let candidate_dofs = candidate.operator.degrees_of_freedom();
+        assert_ne!(candidate_revision, active_revision);
+
+        let candidate_display = WaveDisplay {
+            generation: 42,
+            current: vec![0.0; candidate_dofs],
+            ..Default::default()
+        };
+        assert_eq!(
+            h.state
+                .wave_display_operator(&candidate_display)
+                .unwrap()
+                .mesh_revision(),
+            candidate_revision
+        );
+
+        let active_display = WaveDisplay {
+            generation: 41,
+            current: vec![0.0; active_dofs],
+            ..Default::default()
+        };
+        assert_eq!(
+            h.state
+                .wave_display_operator(&active_display)
+                .unwrap()
+                .mesh_revision(),
+            active_revision
+        );
     }
 
     #[test]

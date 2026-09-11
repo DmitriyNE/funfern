@@ -60,12 +60,19 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   deterministic transaction passes.
 - Physical boundary residual terms are deliberately deferred as the next AMR slice;
   the present indicator uses interior cell and flux information at those edges.
-- Verification: formatting, Clippy with warnings denied, all 174 workspace tests,
+- Follow-up fixes clamp the interpolated spatial field back to its configured bounds
+  after tolerant barycentric lookup, preventing a nominal `0.02` target from becoming
+  `0.019999…`. During the one frame where a candidate-generation readback precedes
+  its application commit, the viewport now renders it with the candidate operator;
+  the wave colors no longer disappear because of a temporary DOF-count mismatch.
+- Verification: formatting, Clippy with warnings denied, all 176 workspace tests,
   native release compilation, and release Trunk/WASM packaging pass. The Apple M1
-  Max / Metal `--amr-check` completed in 1.17 s; its automatic indicator used 1.33
-  ms in one slice, and the deterministic transaction checks again finished at 1,844
-  triangles / 5,638 DOFs with 372 insertions and 207 collapses. Interactive browser
-  testing remains deferred by prior agreement.
+  Max / Metal `--amr-check` processed a nonzero field through automatic adaptation
+  without a target-bound failure, then completed both deterministic transactions in
+  5.33 s. Indicator work totaled 3.05 ms with a 1.66 ms longest slice; the final
+  mesh had 2,093 triangles / 6,398 DOFs, with 356 insertions and 275 collapses in
+  the second deterministic pass. Interactive browser testing remains deferred by
+  prior agreement.
 
 ## 2026-09-12 — Spatial size-field adaptive mesh transaction
 

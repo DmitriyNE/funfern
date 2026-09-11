@@ -105,10 +105,17 @@ pub struct AdaptiveSizeField {
     minimum: Point2,
     cell: Point2,
     fallback: f64,
+    lower_bound: f64,
+    upper_bound: f64,
 }
 
 impl AdaptiveSizeField {
-    fn new(mesh: Arc<TriMesh>, triangle_targets: Vec<[f64; 3]>, fallback: f64) -> Self {
+    fn new(
+        mesh: Arc<TriMesh>,
+        triangle_targets: Vec<[f64; 3]>,
+        lower_bound: f64,
+        upper_bound: f64,
+    ) -> Self {
         let mut minimum = Point2::new(f64::INFINITY, f64::INFINITY);
         let mut maximum = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
         for vertex in &mesh.vertices {
@@ -162,7 +169,9 @@ impl AdaptiveSizeField {
             dimension,
             minimum,
             cell,
-            fallback,
+            fallback: upper_bound,
+            lower_bound,
+            upper_bound,
         }
     }
 
@@ -195,7 +204,9 @@ impl MeshSizeField for AdaptiveSizeField {
                 target = Some(target.map_or(value, |current| current.min(value)));
             }
         }
-        target.unwrap_or(self.fallback)
+        target
+            .unwrap_or(self.fallback)
+            .clamp(self.lower_bound, self.upper_bound)
     }
 }
 
@@ -681,6 +692,7 @@ impl SolutionIndicatorJob {
         let field = Arc::new(AdaptiveSizeField::new(
             self.mesh.clone(),
             triangle_targets,
+            self.options.minimum_edge_length,
             self.options.maximum_edge_length,
         ));
         SolutionIndicatorResult {
@@ -1007,6 +1019,28 @@ mod tests {
                 .element_targets
                 .iter()
                 .all(|target| *target <= 0.020_000_001)
+        );
+    }
+
+    #[test]
+    fn spatial_interpolation_cannot_escape_configured_size_limits() {
+        let mesh = square();
+        let field = AdaptiveSizeField::new(
+            mesh,
+            vec![[0.02, 0.02, 0.16], [0.16, 0.16, 0.16]],
+            0.02,
+            0.16,
+        );
+        // The point is within the deliberate barycentric edge tolerance. Its
+        // tiny negative weight would extrapolate below 0.02 without the final
+        // clamp and be rejected by MeshAdaptationJob.
+        assert_eq!(
+            field.target_edge_length(Point2::new(0.5, -5.0e-11), BACKGROUND_REGION),
+            0.02
+        );
+        assert_eq!(
+            field.target_edge_length(Point2::new(2.0, 2.0), BACKGROUND_REGION),
+            0.16
         );
     }
 
