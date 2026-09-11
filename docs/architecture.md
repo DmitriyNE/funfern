@@ -573,20 +573,24 @@ Adapt to geometry/quality first, then user wavelength targets and potentially th
 field. Use hysteresis and cooldown for refinement/coarsening. Retain full remeshing
 as a fallback for large or troublesome edits.
 
-Coordinate-only edits of closed holes and transmitting material interfaces first
-try local mesh repair. Each attempt imports the immutable committed mesh afresh;
-failed topology changes never become the input to the next attempt. The first patch
-contains vertices within `max(4h, 4d)` of each moved loop's old/new bounds plus one
-triangle guard ring. Retry attempts add `2h` and another guard ring, up to three
-attempts total. Curved-boundary and refinement budgets also grow per attempt. A
-motion over `4h`, a patch larger than `max(256, triangle_count/3)`, invalid input,
+Coordinate-only edits of closed holes, transmitting material interfaces, and open
+baffles first try local mesh repair. Each attempt imports the immutable committed
+mesh afresh; failed topology changes never become the input to the next attempt.
+The first patch contains vertices within `max(4h, 4d)` of each moved loop's old/new
+bounds plus one triangle guard ring. Retry attempts add `2h` and another guard ring,
+up to three attempts total. Curved-boundary and refinement budgets also grow per
+attempt. A motion over `4h`, a patch larger than `max(256, triangle_count/3)`, invalid input,
 capacity exhaustion, or the aggregate local-work ceiling goes directly to a full
 rebuild. Inversion, contact with the frozen patch boundary, curved subdivision
 exhaustion, and refinement exhaustion retry first. Stable loop IDs associate mesh
 vertices with splines, while closed boundary cycles are reconstructed in scene
-order so nested material regions keep their explicit ownership. Open baffles and
-two-trace walls remain on the full-build path until local repair can preserve their
-paired trace identities and free endpoints.
+order so nested material regions keep their explicit ownership. Open baffles are
+imported as parameter-keyed pairs of oppositely oriented left/right edges. Their
+interior vertices stay distinct and coincident, their free tips stay shared, and any
+curvature or length subdivision splits both faces at the same parameter. Segment
+capsules select a narrow repair strip instead of the bounding box of the whole open
+curve. Trace coarsening, baffle topology changes, and two-trace closed-wall motion
+remain on the full-build path.
 
 ## Radiation and IGA
 

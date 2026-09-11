@@ -183,11 +183,13 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   a finer solve or 0.16 for a quick preview. Changing resolution rebuilds the
   accepted mesh without changing geometry/history. Resolution is not stored in scene files.
   Full fine builds can take tens of seconds when spread across frames. Small
-  hole and material-interface control-point edits reuse and repair a bounded region
-  of the previous mesh. A failed local repair retries from the unchanged committed
-  mesh with up to two larger guard regions before using a full rebuild. The
-  Performance panel reports attempts, retry causes, patch size, unchanged elements,
-  and a session fallback-cause count. Creation, deletion, knot changes, baffle/wall
+  hole, material-interface, and open-baffle control-point edits reuse and repair a
+  bounded region of the previous mesh. Baffle repair keeps its coincident left/right
+  traces and shared free tips intact, and subdivides both faces together. A failed
+  local repair retries from the unchanged committed mesh with up to two larger guard
+  regions before using a full rebuild. The Performance panel reports attempts, retry
+  causes, patch size, repaired baffles/trace segments, unchanged elements, and a
+  session fallback-cause count. Creation, deletion, knot/topology changes, closed-wall
   motion, large edits, and exhausted repairs still rebuild.
   Open-curve insertion reuses safe nearby bulk vertices at the exact curve position
   to avoid tiny CFL-limiting elements around baffles.

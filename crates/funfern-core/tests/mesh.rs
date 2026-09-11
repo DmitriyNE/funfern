@@ -698,6 +698,389 @@ fn open_reflecting_boundary_cuts_two_traces_and_reconnects_at_free_tips() {
 }
 
 #[test]
+fn open_baffle_control_edit_repairs_paired_traces_locally() {
+    let options = MeshingOptions {
+        target_edge_length: 0.05,
+        curve_tolerance: 0.0008,
+        minimum_angle_degrees: 12.0,
+        max_vertices: 50_000,
+        max_triangles: 100_000,
+        max_refinement_steps: 50_000,
+    };
+    let mut scene = Scene::default();
+    scene.internal_boundaries.push(InternalBoundary {
+        id: InternalBoundaryId(7),
+        spline: OpenCubicSpline::uniform(vec![
+            Point2::new(-0.42, -0.08),
+            Point2::new(-0.2, 0.14),
+            Point2::new(0.0, -0.12),
+            Point2::new(0.2, 0.12),
+            Point2::new(0.42, 0.02),
+        ])
+        .unwrap(),
+        region: BACKGROUND_REGION,
+        span_laws: vec![InternalBoundaryLaw::REFLECTING; 2],
+    });
+    let source = Arc::new(mesh_scene(&scene, 0, options).unwrap());
+    let mut target = scene.clone();
+    let point = target.internal_boundaries[0].spline.controls()[2];
+    target.internal_boundaries[0]
+        .spline
+        .set_control(2, point + Point2::new(0.006, -0.004))
+        .unwrap();
+    let result = finish_update(
+        MeshUpdateJob::new(Some((source.clone(), scene)), target, 1, options),
+        257,
+    );
+    assert!(result.report.used_local, "{:?}", result.report);
+    assert_eq!(result.report.repaired_baffles, 1);
+    assert!(result.report.paired_trace_segments >= 2);
+    assert!(result.report.preserved_triangles > result.report.repair_triangles);
+    assert_mesh_invariants(&result.mesh, 1);
+    let adjacency = edge_adjacency(&result.mesh);
+    let left = result
+        .mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            edge.label
+                == BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(7),
+                    side: InternalBoundarySide::Left,
+                }
+        })
+        .collect::<Vec<_>>();
+    let right = result
+        .mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            edge.label
+                == BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(7),
+                    side: InternalBoundarySide::Right,
+                }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(left.len(), right.len());
+    assert_eq!(left.len(), result.report.paired_trace_segments);
+    for edge in left.iter().chain(&right) {
+        assert_eq!(
+            adjacency[&edge_key(edge.vertices[0], edge.vertices[1])].len(),
+            1
+        );
+    }
+    for left_edge in left {
+        assert!(right.iter().any(|right_edge| {
+            let left_points = left_edge
+                .vertices
+                .map(|vertex| result.mesh.vertices[vertex].point);
+            let right_points = right_edge
+                .vertices
+                .map(|vertex| result.mesh.vertices[vertex].point);
+            left_edge.parameters == [right_edge.parameters[1], right_edge.parameters[0]]
+                && left_points == [right_points[1], right_points[0]]
+        }));
+    }
+    assert_eq!(source.geometry_revision, 0);
+}
+
+#[test]
+fn baffle_transforms_stay_local_and_stretched_traces_split_in_pairs() {
+    let options = MeshingOptions {
+        target_edge_length: 0.04 / 1.05,
+        curve_tolerance: 0.0007,
+        minimum_angle_degrees: 12.0,
+        max_vertices: 50_000,
+        max_triangles: 100_000,
+        max_refinement_steps: 50_000,
+    };
+    let mut scene = Scene::default();
+    scene.internal_boundaries.push(InternalBoundary {
+        id: InternalBoundaryId(12),
+        spline: OpenCubicSpline::uniform(vec![
+            Point2::new(-0.36, -0.01),
+            Point2::new(-0.18, 0.015),
+            Point2::new(0.0, -0.015),
+            Point2::new(0.18, 0.015),
+            Point2::new(0.36, -0.01),
+        ])
+        .unwrap(),
+        region: BACKGROUND_REGION,
+        span_laws: vec![InternalBoundaryLaw::REFLECTING; 2],
+    });
+    let mut mesh = Arc::new(mesh_scene(&scene, 0, options).unwrap());
+    let initial_segments = mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            edge.label
+                == BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(12),
+                    side: InternalBoundarySide::Left,
+                }
+        })
+        .count();
+
+    for (revision, transform) in [0_usize, 1, 2, 3].into_iter().enumerate() {
+        let mut target = scene.clone();
+        let controls = target.internal_boundaries[0].spline.controls().to_vec();
+        let center = controls
+            .iter()
+            .copied()
+            .fold(Point2::default(), |sum, p| sum + p)
+            / controls.len() as f64;
+        for (index, point) in controls.iter().copied().enumerate() {
+            let point = match transform {
+                0 => point + Point2::new(0.004, 0.003),
+                1 => {
+                    let angle = 2.0_f64.to_radians();
+                    let relative = point - center;
+                    center
+                        + Point2::new(
+                            relative.x * angle.cos() - relative.y * angle.sin(),
+                            relative.x * angle.sin() + relative.y * angle.cos(),
+                        )
+                }
+                2 => center + (point - center) * 1.025,
+                3 => controls[0].lerp(controls[controls.len() - 1], index as f64 / 4.0),
+                _ => unreachable!(),
+            };
+            target.internal_boundaries[0]
+                .spline
+                .set_control(index, point)
+                .unwrap();
+        }
+        let source = mesh.clone();
+        let result = finish_update(
+            MeshUpdateJob::new(
+                Some((source.clone(), scene.clone())),
+                target.clone(),
+                revision as u64 + 1,
+                options,
+            ),
+            257,
+        );
+        assert!(
+            result.report.used_local,
+            "transform {transform}: {:?}",
+            result.report
+        );
+        assert_eq!(result.report.repaired_baffles, 1);
+        assert!(result.report.preserved_triangles > result.report.repair_triangles);
+        assert_mesh_invariants(&result.mesh, 1);
+        assert_eq!(source.geometry_revision, revision as u64);
+        mesh = Arc::new(result.mesh);
+        scene = target;
+    }
+
+    let before_stretch = mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            edge.label
+                == BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(12),
+                    side: InternalBoundarySide::Left,
+                }
+        })
+        .count();
+    assert!(before_stretch >= initial_segments);
+    let mut stretched = scene.clone();
+    let end = stretched.internal_boundaries[0].spline.controls().len() - 1;
+    let point = stretched.internal_boundaries[0].spline.controls()[end];
+    stretched.internal_boundaries[0]
+        .spline
+        .set_control(end, point + Point2::new(0.035, 0.0))
+        .unwrap();
+    let result = finish_update(
+        MeshUpdateJob::new(Some((mesh, scene)), stretched, 5, options),
+        257,
+    );
+    assert!(result.report.used_local, "{:?}", result.report);
+    assert!(result.report.paired_trace_segments > before_stretch);
+}
+
+#[test]
+fn malformed_or_topology_changed_baffles_fall_back_with_typed_causes() {
+    let options = MeshingOptions {
+        target_edge_length: 0.08,
+        minimum_angle_degrees: 12.0,
+        ..Default::default()
+    };
+    let mut scene = Scene::default();
+    scene.internal_boundaries.push(InternalBoundary {
+        id: InternalBoundaryId(4),
+        spline: OpenCubicSpline::uniform(vec![
+            Point2::new(-0.4, 0.0),
+            Point2::new(-0.15, 0.03),
+            Point2::new(0.15, -0.03),
+            Point2::new(0.4, 0.0),
+        ])
+        .unwrap(),
+        region: BACKGROUND_REGION,
+        span_laws: vec![InternalBoundaryLaw::REFLECTING],
+    });
+    let source = Arc::new(mesh_scene(&scene, 0, options).unwrap());
+    let mut malformed = (*source).clone();
+    malformed.boundary_edges.retain(|edge| {
+        edge.label
+            != (BoundaryLabel::InternalBoundary {
+                id: InternalBoundaryId(4),
+                side: InternalBoundarySide::Right,
+            })
+            || edge.parameters[0] < 0.5
+    });
+    let mut moved = scene.clone();
+    let point = moved.internal_boundaries[0].spline.controls()[1];
+    moved.internal_boundaries[0]
+        .spline
+        .set_control(1, point + Point2::new(0.003, 0.0))
+        .unwrap();
+    let result = finish_update(
+        MeshUpdateJob::new(
+            Some((Arc::new(malformed), scene.clone())),
+            moved,
+            1,
+            options,
+        ),
+        10_000,
+    );
+    assert_eq!(
+        result.report.fallback_failure.unwrap().kind,
+        MeshUpdateFailureKind::PairedTraceMismatch
+    );
+
+    let mut inserted = scene.clone();
+    inserted.internal_boundaries[0].spline.insert(0.5).unwrap();
+    inserted.internal_boundaries[0]
+        .span_laws
+        .push(InternalBoundaryLaw::REFLECTING);
+    let result = finish_update(
+        MeshUpdateJob::new(Some((source, scene)), inserted, 2, options),
+        10_000,
+    );
+    assert_eq!(
+        result.report.fallback_failure.unwrap().kind,
+        MeshUpdateFailureKind::IncompatibleGeometry
+    );
+}
+
+#[test]
+fn mixed_loops_and_multiple_baffles_preserve_unmoved_topology() {
+    let options = MeshingOptions {
+        target_edge_length: 0.065,
+        curve_tolerance: 0.001,
+        minimum_angle_degrees: 12.0,
+        max_vertices: 50_000,
+        max_triangles: 100_000,
+        max_refinement_steps: 50_000,
+    };
+    let mut scene = Scene::default();
+    scene.obstacles.push(Obstacle::hole(
+        ObstacleId(30),
+        PeriodicCubicSpline::rounded(Point2::new(-0.5, 0.0), 0.13),
+    ));
+    scene.materials.push(medium(2, "Lens", 1.4, [160, 100, 80]));
+    scene.regions.push(Region {
+        id: RegionId(2),
+        material: MaterialId(2),
+    });
+    scene.obstacles.push(Obstacle::with_role(
+        ObstacleId(5),
+        PeriodicCubicSpline::rounded(Point2::new(0.5, 0.0), 0.14),
+        LoopRole::MaterialInterface {
+            exterior: BACKGROUND_REGION,
+            interior: RegionId(2),
+        },
+    ));
+    for (id, y) in [(9, -0.42), (2, 0.42)] {
+        scene.internal_boundaries.push(InternalBoundary {
+            id: InternalBoundaryId(id),
+            spline: OpenCubicSpline::uniform(vec![
+                Point2::new(-0.28, y),
+                Point2::new(-0.09, y + 0.015),
+                Point2::new(0.09, y - 0.015),
+                Point2::new(0.28, y),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![InternalBoundaryLaw::REFLECTING],
+        });
+    }
+    assert!(validate(&scene).valid());
+    let source = Arc::new(mesh_scene(&scene, 0, options).unwrap());
+    let source_second_trace = source
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                edge.label,
+                BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(2),
+                    ..
+                }
+            )
+        })
+        .map(|edge| {
+            (
+                edge.parameters.map(f64::to_bits),
+                edge.vertices.map(|vertex| {
+                    let point = source.vertices[vertex].point;
+                    [point.x.to_bits(), point.y.to_bits()]
+                }),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut target = scene.clone();
+    let point = target.internal_boundaries[0].spline.controls()[1];
+    target.internal_boundaries[0]
+        .spline
+        .set_control(1, point + Point2::new(0.005, -0.003))
+        .unwrap();
+    let result = finish_update(
+        MeshUpdateJob::new(Some((source, scene)), target, 1, options),
+        257,
+    );
+    assert!(result.report.used_local, "{:?}", result.report);
+    assert_eq!(result.report.repaired_baffles, 1);
+    assert!(result.report.preserved_triangles > result.report.repair_triangles);
+    assert_eq!(
+        result
+            .mesh
+            .triangles
+            .iter()
+            .map(|triangle| triangle.region)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([BACKGROUND_REGION, RegionId(2)])
+    );
+    let target_second_trace = result
+        .mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                edge.label,
+                BoundaryLabel::InternalBoundary {
+                    id: InternalBoundaryId(2),
+                    ..
+                }
+            )
+        })
+        .map(|edge| {
+            (
+                edge.parameters.map(f64::to_bits),
+                edge.vertices.map(|vertex| {
+                    let point = result.mesh.vertices[vertex].point;
+                    [point.x.to_bits(), point.y.to_bits()]
+                }),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(target_second_trace, source_second_trace);
+}
+
+#[test]
 fn baffle_insertion_avoids_accidental_cfl_slivers() {
     let mut scene = Scene::default();
     scene.obstacles.push(Obstacle::with_role(

@@ -56,6 +56,18 @@ fn main() {
             exterior: BACKGROUND_REGION,
             interior: RegionId(2),
         };
+        scene.internal_boundaries.push(InternalBoundary {
+            id: InternalBoundaryId(1),
+            spline: OpenCubicSpline::uniform(vec![
+                Point2::new(-0.38, 0.0),
+                Point2::new(-0.13, 0.015),
+                Point2::new(0.13, -0.015),
+                Point2::new(0.38, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![InternalBoundaryLaw::REFLECTING],
+        });
         let start = Instant::now();
         let mut mesh = Arc::new(mesh_scene(&scene, 0, options).unwrap());
         println!(
@@ -64,19 +76,29 @@ fn main() {
             mesh.triangles.len()
         );
         for (revision, (loop_index, delta)) in [
-            (0, Point2::new(0.005, 0.0)),
-            (1, Point2::new(0.0, 0.005)),
-            (0, Point2::new(-0.005, -0.005)),
+            (Some(0), Point2::new(0.005, 0.0)),
+            (Some(1), Point2::new(0.0, 0.005)),
+            (None, Point2::new(-0.005, -0.005)),
         ]
         .into_iter()
         .enumerate()
         {
             let mut next = scene.clone();
-            let p = next.obstacles[loop_index].spline.controls()[0];
-            next.obstacles[loop_index]
-                .spline
-                .set_control(0, p + delta)
-                .unwrap();
+            let target_name = if let Some(loop_index) = loop_index {
+                let p = next.obstacles[loop_index].spline.controls()[0];
+                next.obstacles[loop_index]
+                    .spline
+                    .set_control(0, p + delta)
+                    .unwrap();
+                format!("loop {loop_index}")
+            } else {
+                let p = next.internal_boundaries[0].spline.controls()[1];
+                next.internal_boundaries[0]
+                    .spline
+                    .set_control(1, p + delta)
+                    .unwrap();
+                "baffle 0".into()
+            };
             let start = Instant::now();
             let mut job = MeshUpdateJob::new(
                 Some((mesh.clone(), scene.clone())),
@@ -102,9 +124,8 @@ fn main() {
                 if let Some(result) = result {
                     let result = result.unwrap();
                     println!(
-                        "  edit {} loop {}: ready {:.1} ms, active {:.1} ms, gaps {:.1} ms, max {:.3} ms, {slices} slices; attempts {}, retry causes {:?}, fallback {:?}, patch {}v/{}t, preserved {:.1}%",
+                        "  edit {} {target_name}: ready {:.1} ms, active {:.1} ms, gaps {:.1} ms, max {:.3} ms, {slices} slices; attempts {}, retry causes {:?}, fallback {:?}, patch {}v/{}t, baffles {}/{}, preserved {:.1}%",
                         revision + 1,
-                        loop_index,
                         start.elapsed().as_secs_f64() * 1000.0,
                         work.as_secs_f64() * 1000.0,
                         start.elapsed().saturating_sub(work).as_secs_f64() * 1000.0,
@@ -123,6 +144,8 @@ fn main() {
                             .map(|failure| failure.kind),
                         result.report.repair_vertices,
                         result.report.repair_triangles,
+                        result.report.repaired_baffles,
+                        result.report.paired_trace_segments,
                         100.0 * result.report.preserved_triangles as f64
                             / result.report.original_triangles.max(1) as f64,
                     );

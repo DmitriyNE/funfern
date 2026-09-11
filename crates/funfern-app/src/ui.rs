@@ -2131,6 +2131,13 @@ impl Playground {
                                     report.inserted_vertices,
                                     report.collapsed_vertices
                                 ));
+                                if report.repaired_baffles > 0 {
+                                    ui.small(format!(
+                                        "Baffles {} · paired trace segments {}",
+                                        report.repaired_baffles,
+                                        report.paired_trace_segments
+                                    ));
+                                }
                             }
                             if report.used_local {
                                 ui.small(format!(
@@ -7952,6 +7959,8 @@ mod tests {
             repair_vertices: 120,
             repair_triangles: 210,
             moved_vertices: 18,
+            repaired_baffles: 2,
+            paired_trace_segments: 24,
             retry_failures: vec![MeshUpdateFailure {
                 kind: MeshUpdateFailureKind::ElementInversion,
                 detail: "synthetic inversion".into(),
@@ -7976,6 +7985,11 @@ mod tests {
             h.texts
                 .iter()
                 .any(|(text, _)| text.contains("Retry 1: local motion inverted"))
+        );
+        assert!(
+            h.texts
+                .iter()
+                .any(|(text, _)| text.contains("Baffles 2 · paired trace segments 24"))
         );
         assert!(
             h.texts
@@ -8303,7 +8317,7 @@ mod tests {
     }
 
     #[test]
-    fn moved_baffle_rebuild_prepares_a_face_aware_field_transfer() {
+    fn moved_baffle_repairs_locally_and_prepares_a_face_aware_field_transfer() {
         let mut h = Harness::new();
         let id = h
             .state
@@ -8348,6 +8362,10 @@ mod tests {
         assert_ne!(candidate.mesh.geometry_revision, old_revision);
         assert!(candidate.transfer.is_some());
         assert_eq!(candidate.exposed_nodes, 0);
+        let report = h.state.mesh_report.as_ref().unwrap();
+        assert!(report.used_local, "{report:?}");
+        assert_eq!(report.repaired_baffles, 1);
+        assert!(report.paired_trace_segments > 0);
     }
 
     #[test]

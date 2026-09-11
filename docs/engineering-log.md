@@ -31,9 +31,41 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   record solver throughput and memory behavior over time.
 - [ ] Make operator assembly and transfer-map construction resumable if their
   synchronous post-mesh tail becomes visible on larger discretizations.
-- [ ] Extend local repair to open baffles and paired closed-wall traces while
-  preserving coherent face identity and free endpoints. The current hardened path
-  covers closed holes and transmitting material interfaces.
+- [ ] Decide whether paired-trace coarsening is useful for open baffles, and extend
+  local repair to closed walls if that legacy role remains worth supporting.
+
+## 2026-09-11 — Local mesh repair for open baffles
+
+- Extended coordinate-only local repair to open baffles without changing their
+  two-face topology. Imported trace edges are paired by stable baffle ID and exact
+  parameter interval; left/right interior vertices remain distinct and coincident,
+  while the two free tips remain shared. Malformed pairs and tip connectivity now
+  produce separate typed fallback causes.
+- Selected baffle patches with capsules around each old trace segment, new trace
+  segment, and endpoint sweep. This keeps a long baffle edit local instead of using
+  the bounding box of the whole open curve. Translation, rotation, uniform scale,
+  straighten, and control-coordinate edits use this path when motion stays within
+  `4h` and the active patch stays below one third of the mesh.
+- Added paired curve refinement: if curvature or edge length requires a split, both
+  faces receive distinct coincident vertices at the same spline parameter and both
+  adjacent elements split together. Knot insertion/removal, continuity and topology
+  edits, split/merge, creation/deletion, region reassignment, and closed walls retain
+  the full-build path. Trace coarsening remains deferred.
+- Update reports and Performance diagnostics now include repaired-baffle and paired
+  trace-segment counts. The app regression also requires a local result and a valid
+  face-aware field-transfer map with no newly exposed nodes after a baffle move.
+- Added mesh tests for paired face orientation and coincidence, shared tips, distant
+  element reuse, immutable source meshes, rigid transforms, straightening, forced
+  paired subdivision, malformed traces, topology-change fallback, and mixed holes,
+  material interfaces, and multiple baffles with stable unmoved topology.
+- On Apple M1 Max in release mode, the representative eight-loop scene plus one
+  baffle built in 326.0 ms at `h=0.04` and 3.56 s at `h=0.02`. Baffle edits completed
+  locally on the first attempt in 49.1 ms and 246.3 ms, preserving 90.9% and 95.9%
+  of triangles. Hole/interface edits stayed at 43.9–44.3 ms and 216.8–217.7 ms;
+  the longest cooperative slice was 2.201 ms.
+- Formatting, Clippy with warnings denied, all 159 workspace tests, native release
+  compilation, and release Trunk/WASM packaging pass. Interactive browser
+  verification remains deferred by prior agreement.
 
 ## 2026-09-11 — Retryable local repair for holes and material interfaces
 

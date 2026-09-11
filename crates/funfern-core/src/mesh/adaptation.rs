@@ -17,6 +17,8 @@ pub enum MeshUpdateFailureKind {
     InvalidOptions,
     Capacity,
     BoundarySampling,
+    PairedTraceMismatch,
+    BaffleTipTopology,
     RepairFailure,
 }
 
@@ -37,6 +39,8 @@ impl MeshUpdateFailureKind {
             Self::InvalidOptions => "invalid meshing options",
             Self::Capacity => "mesh capacity",
             Self::BoundarySampling => "boundary sampling",
+            Self::PairedTraceMismatch => "paired baffle trace mismatch",
+            Self::BaffleTipTopology => "invalid baffle tip topology",
             Self::RepairFailure => "other local repair failure",
         }
     }
@@ -64,6 +68,8 @@ pub struct MeshUpdateReport {
     pub collapsed_vertices: usize,
     pub repair_vertices: usize,
     pub repair_triangles: usize,
+    pub repaired_baffles: usize,
+    pub paired_trace_segments: usize,
 }
 
 pub struct MeshUpdateResult {
@@ -89,6 +95,7 @@ enum Phase {
     Move(usize),
     Check(usize),
     Boundary(usize),
+    BaffleBoundary(usize),
     Coarsen(usize),
     Loops {
         loop_index: usize,
@@ -100,6 +107,27 @@ enum Phase {
     CompactEdges(usize),
     Full,
     Done,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MovingBoundaryId {
+    Loop(u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TraceSegmentKey {
+    id: InternalBoundaryId,
+    start: u64,
+    end: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TracePair {
+    id: InternalBoundaryId,
+    start: u64,
+    end: u64,
+    left: usize,
+    right: usize,
 }
 
 /// Reuses a previously accepted mesh for control-coordinate changes with the
@@ -135,7 +163,11 @@ pub struct MeshUpdateJob {
     compact_vertices: Vec<MeshVertex>,
     boundary_splits: usize,
     attempt: usize,
-    moving_bounds: BTreeMap<u64, [Point2; 2]>,
+    moving_bounds: BTreeMap<MovingBoundaryId, [Point2; 2]>,
+    trace_edges: BTreeMap<TraceSegmentKey, [Option<usize>; 2]>,
+    trace_pairs: Vec<TracePair>,
+    moved_baffles: BTreeSet<InternalBoundaryId>,
+    moving_trace_segments: Vec<[Point2; 4]>,
 }
 
 fn key(mut vertices: [usize; 3]) -> [usize; 3] {
@@ -152,7 +184,11 @@ fn classify_failure(error: &MeshError) -> MeshUpdateFailure {
         MeshError::Capacity { .. } => MeshUpdateFailureKind::Capacity,
         MeshError::RefinementLimit(_) => MeshUpdateFailureKind::RefinementLimit,
         MeshError::Topology(reason) => {
-            if reason.contains("fixed patch boundary") || reason.contains("left the patch") {
+            if reason.contains("paired baffle trace") {
+                MeshUpdateFailureKind::PairedTraceMismatch
+            } else if reason.contains("baffle tip") {
+                MeshUpdateFailureKind::BaffleTipTopology
+            } else if reason.contains("fixed patch boundary") || reason.contains("left the patch") {
                 MeshUpdateFailureKind::FixedPatchBoundary
             } else if reason.contains("inverted") {
                 MeshUpdateFailureKind::ElementInversion
@@ -192,6 +228,73 @@ fn point_in_expanded_bounds(point: Point2, bounds: [Point2; 2], radius: f64) -> 
         && point.y <= bounds[1].y + radius
 }
 
+fn point_near_moving_segment(point: Point2, segment: [Point2; 4], radius: f64) -> bool {
+    crate::point_segment_distance(point, segment[0], segment[1]) < radius
+        || crate::point_segment_distance(point, segment[2], segment[3]) < radius
+        || crate::point_segment_distance(point, segment[0], segment[2]) < radius
+        || crate::point_segment_distance(point, segment[1], segment[3]) < radius
+}
+
+fn record_motion(
+    radius: &mut f64,
+    moving_bounds: &mut BTreeMap<MovingBoundaryId, [Point2; 2]>,
+    id: Option<MovingBoundaryId>,
+    source: Point2,
+    target: Point2,
+    edge_length: f64,
+) -> Result<Point2, MeshError> {
+    let delta = target - source;
+    if delta.norm() > 4.0 * edge_length {
+        return Err(MeshError::Topology(
+            "boundary motion exceeds local repair radius",
+        ));
+    }
+    *radius = radius.max(4.0 * delta.norm());
+    if let Some(id) = id {
+        let bounds = moving_bounds.entry(id).or_insert([
+            Point2::new(f64::INFINITY, f64::INFINITY),
+            Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
+        ]);
+        for point in [source, target] {
+            bounds[0].x = bounds[0].x.min(point.x);
+            bounds[0].y = bounds[0].y.min(point.y);
+            bounds[1].x = bounds[1].x.max(point.x);
+            bounds[1].y = bounds[1].y.max(point.y);
+        }
+    }
+    Ok(delta)
+}
+
+fn trace_key(
+    id: InternalBoundaryId,
+    side: InternalBoundarySide,
+    parameters: [f64; 2],
+) -> Result<(TraceSegmentKey, usize), MeshError> {
+    let [a, b] = parameters;
+    if !a.is_finite() || !b.is_finite() || a == b {
+        return Err(MeshError::Topology(
+            "paired baffle trace has invalid parameters",
+        ));
+    }
+    let (start, end, side_index) = match side {
+        InternalBoundarySide::Left if a < b => (a, b, 0),
+        InternalBoundarySide::Right if b < a => (b, a, 1),
+        _ => {
+            return Err(MeshError::Topology(
+                "paired baffle trace has inconsistent orientation",
+            ));
+        }
+    };
+    Ok((
+        TraceSegmentKey {
+            id,
+            start: start.to_bits(),
+            end: end.to_bits(),
+        },
+        side_index,
+    ))
+}
+
 impl MeshUpdateJob {
     pub fn new(
         previous: Option<(Arc<TriMesh>, Scene)>,
@@ -228,6 +331,10 @@ impl MeshUpdateJob {
             boundary_splits: 0,
             attempt: 0,
             moving_bounds: BTreeMap::new(),
+            trace_edges: BTreeMap::new(),
+            trace_pairs: vec![],
+            moved_baffles: BTreeSet::new(),
+            moving_trace_segments: vec![],
         };
         if let Some(mesh) = &result.previous {
             result.report.local_attempted = true;
@@ -237,9 +344,7 @@ impl MeshUpdateJob {
                 .obstacles
                 .iter()
                 .chain(&result.scene.obstacles)
-                .all(|loop_| !matches!(loop_.role, LoopRole::Wall { .. }))
-                && result.previous_scene.internal_boundaries.is_empty()
-                && result.scene.internal_boundaries.is_empty();
+                .all(|loop_| !matches!(loop_.role, LoopRole::Wall { .. }));
             let compatible = supported
                 && result.previous_scene.obstacles.len() == result.scene.obstacles.len()
                 && result.scene.obstacles.iter().all(|new| {
@@ -247,6 +352,17 @@ impl MeshUpdateJob {
                         old.id == new.id
                             && old.role == new.role
                             && old.spline.intervals() == new.spline.intervals()
+                    })
+                })
+                && result.previous_scene.internal_boundaries.len()
+                    == result.scene.internal_boundaries.len()
+                && result.scene.internal_boundaries.iter().all(|new| {
+                    result.previous_scene.internal_boundaries.iter().any(|old| {
+                        old.id == new.id
+                            && old.region == new.region
+                            && old.spline.controls().len() == new.spline.controls().len()
+                            && old.spline.intervals() == new.spline.intervals()
+                            && old.spline.multiplicities() == new.spline.multiplicities()
                     })
                 });
             if compatible {
@@ -298,6 +414,18 @@ impl MeshUpdateJob {
             .iter()
             .map(|loop_| loop_.role)
             .collect();
+        builder.internal_boundary_ids = self
+            .scene
+            .internal_boundaries
+            .iter()
+            .map(|boundary| boundary.id)
+            .collect();
+        builder.internal_boundary_regions = self
+            .scene
+            .internal_boundaries
+            .iter()
+            .map(|boundary| boundary.region)
+            .collect();
         self.builder = Some(builder);
         self.job = None;
         self.displacement.clear();
@@ -314,6 +442,10 @@ impl MeshUpdateJob {
         self.compact_vertices.clear();
         self.boundary_splits = 0;
         self.moving_bounds.clear();
+        self.trace_edges.clear();
+        self.trace_pairs.clear();
+        self.moved_baffles.clear();
+        self.moving_trace_segments.clear();
         self.report.repair_attempts += 1;
         self.report.preserved_triangles = 0;
         self.report.preserved_connectivity = 0;
@@ -322,6 +454,8 @@ impl MeshUpdateJob {
         self.report.collapsed_vertices = 0;
         self.report.repair_vertices = 0;
         self.report.repair_triangles = 0;
+        self.report.repaired_baffles = 0;
+        self.report.paired_trace_segments = 0;
         debug_assert_eq!(self.report.original_triangles, old.triangles.len());
         self.phase = Phase::Vertices(0);
     }
@@ -337,6 +471,132 @@ impl MeshUpdateJob {
         }
     }
 
+    fn finish_trace_import(&mut self) -> Result<(), MeshError> {
+        let b = self.builder.as_mut().unwrap();
+        let mut pairs = Vec::with_capacity(self.trace_edges.len());
+        for boundary in &self.scene.internal_boundaries {
+            let mut boundary_pairs = self
+                .trace_edges
+                .iter()
+                .filter(|(key, _)| key.id == boundary.id)
+                .map(|(key, faces)| {
+                    let [Some(left), Some(right)] = *faces else {
+                        return Err(MeshError::Topology(
+                            "paired baffle trace is missing one face",
+                        ));
+                    };
+                    Ok(TracePair {
+                        id: key.id,
+                        start: key.start,
+                        end: key.end,
+                        left,
+                        right,
+                    })
+                })
+                .collect::<Result<Vec<_>, MeshError>>()?;
+            boundary_pairs
+                .sort_by(|a, b| f64::from_bits(a.start).total_cmp(&f64::from_bits(b.start)));
+            if boundary_pairs.len() < 2 {
+                return Err(MeshError::Topology(
+                    "paired baffle trace needs at least two segments",
+                ));
+            }
+            let period = boundary.spline.period();
+            if f64::from_bits(boundary_pairs[0].start) != 0.0
+                || f64::from_bits(boundary_pairs.last().unwrap().end) != period
+            {
+                return Err(MeshError::Topology(
+                    "paired baffle trace does not cover the spline",
+                ));
+            }
+            let mut chain = Vec::with_capacity(boundary_pairs.len() + 1);
+            for (index, pair) in boundary_pairs.iter().enumerate() {
+                let left = b.boundary_edges[pair.left];
+                let right = b.boundary_edges[pair.right];
+                if left.label
+                    != (BoundaryLabel::InternalBoundary {
+                        id: boundary.id,
+                        side: InternalBoundarySide::Left,
+                    })
+                    || right.label
+                        != (BoundaryLabel::InternalBoundary {
+                            id: boundary.id,
+                            side: InternalBoundarySide::Right,
+                        })
+                    || left.parameters != [f64::from_bits(pair.start), f64::from_bits(pair.end)]
+                    || right.parameters != [f64::from_bits(pair.end), f64::from_bits(pair.start)]
+                {
+                    return Err(MeshError::Topology(
+                        "paired baffle trace labels or parameters disagree",
+                    ));
+                }
+                for edge in [left, right] {
+                    if b.adjacency
+                        .get(&edge_key(edge.vertices[0], edge.vertices[1]))
+                        .is_none_or(|adjacent| adjacent.len() != 1)
+                    {
+                        return Err(MeshError::Topology(
+                            "paired baffle trace has incorrect adjacency",
+                        ));
+                    }
+                    b.internal_trace_vertices.extend(edge.vertices);
+                }
+                let tolerance = b.options.curve_tolerance * 0.1;
+                if (b.point(left.vertices[0]) - b.point(right.vertices[1])).norm() > tolerance
+                    || (b.point(left.vertices[1]) - b.point(right.vertices[0])).norm() > tolerance
+                {
+                    return Err(MeshError::Topology(
+                        "paired baffle trace faces are not coincident",
+                    ));
+                }
+                if index == 0 {
+                    if left.vertices[0] != right.vertices[1] {
+                        return Err(MeshError::Topology(
+                            "baffle tip is not shared by both faces",
+                        ));
+                    }
+                    chain.push((left.vertices[0], f64::from_bits(pair.start)));
+                } else {
+                    let previous = boundary_pairs[index - 1];
+                    let previous_left = b.boundary_edges[previous.left];
+                    let previous_right = b.boundary_edges[previous.right];
+                    if previous.end != pair.start
+                        || previous_left.vertices[1] != left.vertices[0]
+                        || previous_right.vertices[0] != right.vertices[1]
+                    {
+                        return Err(MeshError::Topology("paired baffle trace has a chain gap"));
+                    }
+                    if left.vertices[0] == right.vertices[1] {
+                        return Err(MeshError::Topology(
+                            "paired baffle trace shares an interior vertex",
+                        ));
+                    }
+                }
+                if index + 1 == boundary_pairs.len() && left.vertices[1] != right.vertices[0] {
+                    return Err(MeshError::Topology(
+                        "baffle tip is not shared by both faces",
+                    ));
+                }
+                chain.push((left.vertices[1], f64::from_bits(pair.end)));
+            }
+            b.internal_chains.push(chain);
+            pairs.extend(boundary_pairs);
+        }
+        if pairs.len() != self.trace_edges.len() {
+            return Err(MeshError::Topology(
+                "paired baffle trace has an unknown boundary id",
+            ));
+        }
+        self.trace_pairs = pairs;
+        self.report.repaired_baffles = self.moved_baffles.len();
+        self.report.paired_trace_segments = self
+            .trace_pairs
+            .iter()
+            .filter(|pair| self.moved_baffles.contains(&pair.id))
+            .count();
+        Ok(())
+    }
+
     pub fn phase(&self) -> &'static str {
         if self.attempt > 0 && !matches!(self.phase, Phase::Full | Phase::Done | Phase::Validate(_))
         {
@@ -350,7 +610,10 @@ impl MeshUpdateJob {
             Phase::Smooth { .. } | Phase::Move(_) => "Moving local mesh",
             Phase::Coarsen(_) => "Coarsening local mesh",
             Phase::Repair => self.job.as_ref().unwrap().phase(),
-            Phase::Check(_) | Phase::Boundary(_) | Phase::Loops { .. } => "Checking local geometry",
+            Phase::Check(_)
+            | Phase::Boundary(_)
+            | Phase::BaffleBoundary(_)
+            | Phase::Loops { .. } => "Checking local geometry",
             Phase::CompactVertices(_) | Phase::CompactTriangles(_) | Phase::CompactEdges(_) => {
                 "Measuring mesh reuse"
             }
@@ -430,50 +693,72 @@ impl MeshUpdateJob {
                     return Err(MeshError::Topology("invalid source vertex"));
                 }
                 let mut delta = Point2::default();
-                if let Some(BoundaryPoint { label, parameter }) = vertex.boundary
-                    && let Some(id) = match label {
-                        BoundaryLabel::Obstacle(id) | BoundaryLabel::MaterialInterface(id) => {
-                            Some(id)
-                        }
-                        _ => None,
-                    }
-                {
-                    let before = self
-                        .previous_scene
-                        .obstacles
-                        .iter()
-                        .find(|o| o.id == id)
-                        .ok_or(MeshError::Topology("missing source obstacle"))?;
-                    let after = self
-                        .scene
-                        .obstacles
-                        .iter()
-                        .find(|o| o.id == id)
-                        .ok_or(MeshError::Topology("missing target obstacle"))?;
+                if let Some(BoundaryPoint { label, parameter }) = vertex.boundary {
                     if !parameter.is_finite() {
                         return Err(MeshError::Topology("invalid boundary parameter"));
                     }
-                    if (after.spline.evaluate(parameter) - before.spline.evaluate(parameter)).norm()
-                        > 1e-12
-                    {
-                        let target = after.spline.evaluate(parameter);
-                        delta = target - vertex.point;
-                        if delta.norm() > 4.0 * self.options.target_edge_length {
-                            return Err(MeshError::Topology(
-                                "boundary motion exceeds local repair radius",
-                            ));
+                    match label {
+                        BoundaryLabel::Obstacle(id) | BoundaryLabel::MaterialInterface(id) => {
+                            let before = self
+                                .previous_scene
+                                .obstacles
+                                .iter()
+                                .find(|o| o.id == id)
+                                .ok_or(MeshError::Topology("missing source obstacle"))?;
+                            let after = self
+                                .scene
+                                .obstacles
+                                .iter()
+                                .find(|o| o.id == id)
+                                .ok_or(MeshError::Topology("missing target obstacle"))?;
+                            let before_point = before.spline.evaluate(parameter);
+                            let target = after.spline.evaluate(parameter);
+                            if (target - before_point).norm() > 1e-12 {
+                                delta = record_motion(
+                                    &mut self.radius,
+                                    &mut self.moving_bounds,
+                                    Some(MovingBoundaryId::Loop(id.0)),
+                                    vertex.point,
+                                    target,
+                                    self.options.target_edge_length,
+                                )?;
+                            }
                         }
-                        self.radius = self.radius.max(4.0 * delta.norm());
-                        let bounds = self.moving_bounds.entry(id.0).or_insert([
-                            Point2::new(f64::INFINITY, f64::INFINITY),
-                            Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
-                        ]);
-                        for point in [vertex.point, target] {
-                            bounds[0].x = bounds[0].x.min(point.x);
-                            bounds[0].y = bounds[0].y.min(point.y);
-                            bounds[1].x = bounds[1].x.max(point.x);
-                            bounds[1].y = bounds[1].y.max(point.y);
+                        BoundaryLabel::InternalBoundary { id, .. } => {
+                            let before = self
+                                .previous_scene
+                                .internal_boundaries
+                                .iter()
+                                .find(|boundary| boundary.id == id)
+                                .ok_or(MeshError::Topology("missing source baffle"))?;
+                            let after = self
+                                .scene
+                                .internal_boundaries
+                                .iter()
+                                .find(|boundary| boundary.id == id)
+                                .ok_or(MeshError::Topology("missing target baffle"))?;
+                            if before.spline.span_index(parameter).is_none()
+                                || after.spline.span_index(parameter).is_none()
+                            {
+                                return Err(MeshError::Topology(
+                                    "paired baffle trace has an invalid parameter",
+                                ));
+                            }
+                            let before_point = before.spline.evaluate(parameter);
+                            let target = after.spline.evaluate(parameter);
+                            if (target - before_point).norm() > 1e-12 {
+                                delta = record_motion(
+                                    &mut self.radius,
+                                    &mut self.moving_bounds,
+                                    None,
+                                    vertex.point,
+                                    target,
+                                    self.options.target_edge_length,
+                                )?;
+                                self.moved_baffles.insert(id);
+                            }
                         }
+                        BoundaryLabel::Outer(_) | BoundaryLabel::Wall { .. } => {}
                     }
                 }
                 self.builder
@@ -517,6 +802,7 @@ impl MeshUpdateJob {
             }
             Phase::Edges(i) => {
                 if i == old.boundary_edges.len() {
+                    self.finish_trace_import()?;
                     self.radius = self.radius.max(4.0 * self.options.target_edge_length)
                         + self.attempt as f64 * 2.0 * self.options.target_edge_length;
                     self.phase = Phase::Region(0);
@@ -526,26 +812,60 @@ impl MeshUpdateJob {
                 if edge.vertices.iter().any(|v| *v >= self.next_boundary.len()) {
                     return Err(MeshError::Topology("invalid source boundary"));
                 }
-                if self.next_boundary[edge.vertices[0]]
-                    .replace(edge.vertices[1])
-                    .is_some()
-                {
-                    return Err(MeshError::Topology("non-manifold source boundary"));
-                }
-                let loop_index = match edge.label {
-                    BoundaryLabel::Outer(_) => 0,
-                    BoundaryLabel::Obstacle(id) | BoundaryLabel::MaterialInterface(id) => self
-                        .scene
-                        .obstacles
-                        .iter()
-                        .position(|loop_| loop_.id == id)
-                        .map(|index| index + 1)
-                        .ok_or(MeshError::Topology("missing target boundary loop"))?,
-                    BoundaryLabel::Wall { .. } | BoundaryLabel::InternalBoundary { .. } => {
+                match edge.label {
+                    BoundaryLabel::Outer(_)
+                    | BoundaryLabel::Obstacle(_)
+                    | BoundaryLabel::MaterialInterface(_) => {
+                        if self.next_boundary[edge.vertices[0]]
+                            .replace(edge.vertices[1])
+                            .is_some()
+                        {
+                            return Err(MeshError::Topology("non-manifold source boundary"));
+                        }
+                        let loop_index = match edge.label {
+                            BoundaryLabel::Outer(_) => 0,
+                            BoundaryLabel::Obstacle(id) | BoundaryLabel::MaterialInterface(id) => {
+                                self.scene
+                                    .obstacles
+                                    .iter()
+                                    .position(|loop_| loop_.id == id)
+                                    .map(|index| index + 1)
+                                    .ok_or(MeshError::Topology("missing target boundary loop"))?
+                            }
+                            _ => unreachable!(),
+                        };
+                        self.boundary_seeds[loop_index].get_or_insert(edge.vertices[0]);
+                    }
+                    BoundaryLabel::InternalBoundary { id, side } => {
+                        if side == InternalBoundarySide::Left
+                            && edge
+                                .vertices
+                                .iter()
+                                .any(|vertex| self.displacement[*vertex] != Point2::default())
+                        {
+                            self.moving_trace_segments.push([
+                                old.vertices[edge.vertices[0]].point,
+                                old.vertices[edge.vertices[1]].point,
+                                old.vertices[edge.vertices[0]].point
+                                    + self.displacement[edge.vertices[0]],
+                                old.vertices[edge.vertices[1]].point
+                                    + self.displacement[edge.vertices[1]],
+                            ]);
+                        }
+                        let (key, side_index) = trace_key(id, side, edge.parameters)?;
+                        if self.trace_edges.entry(key).or_insert([None, None])[side_index]
+                            .replace(i)
+                            .is_some()
+                        {
+                            return Err(MeshError::Topology(
+                                "paired baffle trace contains a duplicate face",
+                            ));
+                        }
+                    }
+                    BoundaryLabel::Wall { .. } => {
                         return Err(MeshError::Topology("unsupported source boundary topology"));
                     }
-                };
-                self.boundary_seeds[loop_index].get_or_insert(edge.vertices[0]);
+                }
                 self.builder.as_mut().unwrap().add_boundary_edge(edge);
                 self.phase = Phase::Edges(i + 1);
             }
@@ -557,10 +877,13 @@ impl MeshUpdateJob {
                     return Ok(None);
                 }
                 if b.vertices[i].boundary.is_none()
-                    && self
+                    && (self
                         .moving_bounds
                         .values()
                         .any(|bounds| point_in_expanded_bounds(b.point(i), *bounds, self.radius))
+                        || self.moving_trace_segments.iter().any(|segment| {
+                            point_near_moving_segment(b.point(i), *segment, self.radius)
+                        }))
                 {
                     self.allowed[i] = true;
                     self.smooth_vertices.push(i);
@@ -603,7 +926,7 @@ impl MeshUpdateJob {
                     return Ok(None);
                 }
                 let triangle = b.triangles[i];
-                if triangle.vertices.iter().any(|v| self.allowed[*v]) {
+                if triangle.vertices.iter().all(|v| self.allowed[*v]) {
                     self.report.repair_triangles += 1;
                     if self.report.repair_triangles > (old.triangles.len() / 3).max(256) {
                         return Err(MeshError::Topology(
@@ -616,7 +939,7 @@ impl MeshUpdateJob {
             Phase::Smooth { pass, index } => {
                 if index == self.smooth_vertices.len() {
                     std::mem::swap(&mut self.displacement, &mut self.next_displacement);
-                    self.phase = if pass == 23 {
+                    self.phase = if pass + 1 == 24 * (self.attempt + 1) {
                         Phase::Move(0)
                     } else {
                         Phase::Smooth {
@@ -681,7 +1004,7 @@ impl MeshUpdateJob {
             Phase::Boundary(i) => {
                 let b = self.builder.as_mut().unwrap();
                 if i == b.boundary_edges.len() {
-                    self.phase = Phase::Coarsen(0);
+                    self.phase = Phase::BaffleBoundary(0);
                     return Ok(None);
                 }
                 let edge = b.boundary_edges[i];
@@ -726,6 +1049,59 @@ impl MeshUpdateJob {
                     }
                 }
                 self.phase = Phase::Boundary(i + 1);
+            }
+            Phase::BaffleBoundary(i) => {
+                if i == self.trace_pairs.len() {
+                    self.phase = Phase::Coarsen(0);
+                    return Ok(None);
+                }
+                let pair = self.trace_pairs[i];
+                let spline = &self
+                    .scene
+                    .internal_boundaries
+                    .iter()
+                    .find(|boundary| boundary.id == pair.id)
+                    .ok_or(MeshError::Topology("missing target baffle"))?
+                    .spline;
+                let [t0, t1] = [f64::from_bits(pair.start), f64::from_bits(pair.end)];
+                let b = self.builder.as_mut().unwrap();
+                let edge = b.boundary_edges[pair.left];
+                let a = spline.evaluate(t0);
+                let d = spline.evaluate(t1);
+                let hull = [
+                    a,
+                    a + spline.derivative(t0, 1) * ((t1 - t0) / 3.0),
+                    d - spline.derivative(t1, 1) * ((t1 - t0) / 3.0),
+                    d,
+                ];
+                let chord_too_long = (b.point(edge.vertices[1]) - b.point(edge.vertices[0])).norm()
+                    > b.options.target_edge_length * (1.0 + 1e-9);
+                let curve_too_far = hull.iter().any(|point| {
+                    crate::point_segment_distance(
+                        *point,
+                        b.point(edge.vertices[0]),
+                        b.point(edge.vertices[1]),
+                    ) > b.options.curve_tolerance * (1.0 + 1e-9)
+                });
+                if chord_too_long || curve_too_far {
+                    if self.boundary_splits >= (256 << self.attempt) {
+                        return Err(MeshError::Topology("paired baffle subdivision limit"));
+                    }
+                    let parameter = 0.5 * (t0 + t1);
+                    let children =
+                        split_baffle_pair(b, pair, spline.evaluate(parameter), parameter)?;
+                    self.trace_pairs[i] = children[0];
+                    self.trace_pairs.push(children[1]);
+                    self.boundary_splits += 1;
+                    self.report.paired_trace_segments = self
+                        .trace_pairs
+                        .iter()
+                        .filter(|pair| self.moved_baffles.contains(&pair.id))
+                        .count();
+                    self.phase = Phase::BaffleBoundary(i);
+                } else {
+                    self.phase = Phase::BaffleBoundary(i + 1);
+                }
             }
             Phase::Coarsen(i) => {
                 let b = self.builder.as_mut().unwrap();
@@ -900,6 +1276,141 @@ fn split_curved_boundary(
             parameter,
         }),
     )?;
+    b.boundary_keys
+        .remove(&edge_key(edge.vertices[0], edge.vertices[1]));
+    b.boundary_edges[index] = BoundaryEdge {
+        vertices: [edge.vertices[0], vertex],
+        label: edge.label,
+        parameters: [edge.parameters[0], parameter],
+    };
+    b.boundary_keys.insert(edge_key(edge.vertices[0], vertex));
+    b.add_boundary_edge(BoundaryEdge {
+        vertices: [vertex, edge.vertices[1]],
+        label: edge.label,
+        parameters: [parameter, edge.parameters[1]],
+    });
+    b.split_edge(edge.vertices, vertex)
+}
+
+fn split_baffle_pair(
+    b: &mut MeshBuilder,
+    pair: TracePair,
+    point: Point2,
+    parameter: f64,
+) -> Result<[TracePair; 2], MeshError> {
+    let left = b.boundary_edges[pair.left];
+    let right = b.boundary_edges[pair.right];
+    let [start, end] = [f64::from_bits(pair.start), f64::from_bits(pair.end)];
+    if left.label
+        != (BoundaryLabel::InternalBoundary {
+            id: pair.id,
+            side: InternalBoundarySide::Left,
+        })
+        || right.label
+            != (BoundaryLabel::InternalBoundary {
+                id: pair.id,
+                side: InternalBoundarySide::Right,
+            })
+        || left.parameters != [start, end]
+        || right.parameters != [end, start]
+    {
+        return Err(MeshError::Topology(
+            "paired baffle trace changed during repair",
+        ));
+    }
+    if b.vertices.len() + 2 > b.options.max_vertices
+        || b.triangles.len() + 2 > b.options.max_triangles
+    {
+        return Err(b.capacity_error());
+    }
+    preflight_baffle_split(b, left, point)?;
+    preflight_baffle_split(b, right, point)?;
+
+    let left_new_edge = b.boundary_edges.len();
+    let left_vertex = b.add_vertex(
+        point,
+        Some(BoundaryPoint {
+            label: left.label,
+            parameter,
+        }),
+    )?;
+    split_boundary_record(b, pair.left, left_vertex, parameter)?;
+    let right_new_edge = b.boundary_edges.len();
+    let right_vertex = b.add_vertex(
+        point,
+        Some(BoundaryPoint {
+            label: right.label,
+            parameter,
+        }),
+    )?;
+    split_boundary_record(b, pair.right, right_vertex, parameter)?;
+    b.internal_trace_vertices.insert(left_vertex);
+    b.internal_trace_vertices.insert(right_vertex);
+
+    let midpoint = parameter.to_bits();
+    Ok([
+        TracePair {
+            id: pair.id,
+            start: pair.start,
+            end: midpoint,
+            left: pair.left,
+            right: right_new_edge,
+        },
+        TracePair {
+            id: pair.id,
+            start: midpoint,
+            end: pair.end,
+            left: left_new_edge,
+            right: pair.right,
+        },
+    ])
+}
+
+fn preflight_baffle_split(
+    b: &MeshBuilder,
+    edge: BoundaryEdge,
+    point: Point2,
+) -> Result<(), MeshError> {
+    let adjacent = b
+        .adjacency
+        .get(&edge_key(edge.vertices[0], edge.vertices[1]))
+        .ok_or(MeshError::Topology(
+            "paired baffle trace edge has no adjacent element",
+        ))?;
+    if adjacent.len() != 1 {
+        return Err(MeshError::Topology(
+            "paired baffle trace edge has incorrect adjacency",
+        ));
+    }
+    let triangle = b.triangles[adjacent[0].0];
+    if triangle
+        .vertices
+        .iter()
+        .any(|vertex| !b.repair_region.as_ref().unwrap()[*vertex])
+    {
+        return Err(MeshError::Topology(
+            "paired baffle split reached the fixed patch boundary",
+        ));
+    }
+    let [a, c] = edge.vertices.map(|vertex| b.point(vertex));
+    let d = b.point(adjacent[0].1);
+    let sign = orient2d(a, c, d);
+    if sign == PredicateSign::Zero || orient2d(a, point, d) != sign || orient2d(point, c, d) != sign
+    {
+        return Err(MeshError::Topology(
+            "paired baffle refinement inverted an element",
+        ));
+    }
+    Ok(())
+}
+
+fn split_boundary_record(
+    b: &mut MeshBuilder,
+    index: usize,
+    vertex: usize,
+    parameter: f64,
+) -> Result<(), MeshError> {
+    let edge = b.boundary_edges[index];
     b.boundary_keys
         .remove(&edge_key(edge.vertices[0], edge.vertices[1]));
     b.boundary_edges[index] = BoundaryEdge {
@@ -1149,6 +1660,20 @@ mod tests {
         ] {
             assert!(!retryable(classify_failure(&error).kind));
         }
+        assert_eq!(
+            classify_failure(&MeshError::Topology(
+                "paired baffle trace is missing one face"
+            ))
+            .kind,
+            MeshUpdateFailureKind::PairedTraceMismatch
+        );
+        assert_eq!(
+            classify_failure(&MeshError::Topology(
+                "baffle tip is not shared by both faces"
+            ))
+            .kind,
+            MeshUpdateFailureKind::BaffleTipTopology
+        );
     }
 
     #[test]
