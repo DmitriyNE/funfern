@@ -216,6 +216,7 @@ pub struct Playground {
     load: Option<LoadCandidate>,
     frame_ms: f32,
     ready: bool,
+    logo_texture: Option<egui::TextureHandle>,
     keyboard_captured: bool,
     mesh: Option<Arc<TriMesh>>,
     simulation_candidate: Option<SimulationCandidate>,
@@ -326,6 +327,7 @@ impl Default for Playground {
             load: None,
             frame_ms: 0.0,
             ready: false,
+            logo_texture: None,
             keyboard_captured: false,
             mesh: None,
             simulation_candidate: None,
@@ -1750,9 +1752,7 @@ impl Playground {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let compact = ui.available_width() < 1100.0;
-        ui.horizontal(|ui| {
-            ui.heading(egui::RichText::new("funfern").size(20.0).color(TEAL));
-            ui.separator();
+        ui.horizontal_centered(|ui| {
             let (undo, redo) = self.editor.history_len();
             if ui
                 .add_enabled(undo > 0, egui::Button::new("Undo"))
@@ -4718,6 +4718,22 @@ impl Playground {
                 Stroke::new(1.0, GOLD),
             );
         }
+        if let Some(texture) = &self.logo_texture {
+            let width = (r.width() * 0.22)
+                .clamp(96.0, 210.0)
+                .min((r.width() - 28.0).max(0.0));
+            if width >= 96.0 {
+                let size = egui::vec2(width, width * 88.0 / 216.0);
+                let logo_rect =
+                    Rect::from_min_size(Pos2::new(r.right() - size.x - 14.0, r.top() + 14.0), size);
+                painter.image(
+                    texture.id(),
+                    logo_rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+        }
         self.interaction_mode_overlay(ctx, r);
         r
     }
@@ -6399,6 +6415,17 @@ impl Playground {
         // Remember capture before panels can end a text edit this frame.
         self.keyboard_captured = root.ctx().text_edit_focused();
         self.expire_notice();
+        if self.logo_texture.is_none() {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [216, 88],
+                include_bytes!("../../../assets/logo-216x88.rgba"),
+            );
+            self.logo_texture = Some(root.ctx().load_texture(
+                "funfern-logo",
+                image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
         let state = self;
         egui::Panel::top("topbar")
             .exact_size(42.0)
@@ -7412,6 +7439,17 @@ mod tests {
     #[test]
     fn contextual_shell_exposes_tools_and_add_geometry_popover() {
         let mut h = Harness::new();
+        assert!(h.state.logo_texture.is_some());
+        assert!(!h.texts.iter().any(|(text, _)| text == "funfern"));
+        let undo_center_y = h
+            .texts
+            .iter()
+            .find(|(text, _)| text == "Undo")
+            .unwrap()
+            .1
+            .center()
+            .y;
+        assert!((undo_center_y - 21.0).abs() < 4.0);
         for label in ["Edit", "View", "Simulation", "Materials", "+ Draw"] {
             assert!(
                 h.texts.iter().any(|(text, _)| text == label),
