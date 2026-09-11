@@ -62,8 +62,12 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   material is assigned. Region rows and canvas material colors remain consistent.
 - [ ] Open Performance from the lower-right summary. Verify FPS, steps/s, DOFs,
   mesh size, solver dt, energy, frame-time graph/statistics, mesh quality, handoff,
-  and solver sections. A normal rebuild must not open diagnostics or show a warning;
-  an injected or real mesh/solver error should do both.
+  and solver sections. After moving a hole and a material interface, verify local
+  attempt count, retry causes, repair vertices/triangles, moved/inserted/collapsed
+  vertices, reuse percentage, and the session fallback histogram. During a retry,
+  the status should read `Mesh rebuilding: Expanding local repair`. A normal rebuild
+  must not open diagnostics or show a warning; an injected or real mesh/solver error
+  should do both.
 - [ ] Disable WebGPU or use an unsupported browser and reload. Readable startup
   guidance must remain visible. Also check an adapter/device initialization failure.
 - [ ] Load `examples/eight-obstacles.json`. Observe idle and dragging frame times,

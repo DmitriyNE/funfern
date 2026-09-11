@@ -31,9 +31,45 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   record solver throughput and memory behavior over time.
 - [ ] Make operator assembly and transfer-map construction resumable if their
   synchronous post-mesh tail becomes visible on larger discretizations.
-- [ ] Extend fragile local repair/fallback behavior, especially for moderate loop,
-  interface, and baffle motion. Record concrete fallback triggers; small edits still
-  enter the full rebuild path too easily.
+- [ ] Extend local repair to open baffles and paired closed-wall traces while
+  preserving coherent face identity and free endpoints. The current hardened path
+  covers closed holes and transmitting material interfaces.
+
+## 2026-09-11 — Retryable local repair for holes and material interfaces
+
+- Reworked coordinate-edit adaptation as three isolated attempts sourced from the
+  unchanged committed mesh. Attempts expand from one to three triangle guard rings,
+  add `2h` of reach each time, raise the boundary-split budget through
+  256/512/1024, and raise refinement through 512/1024/2048. Total local work
+  remains capped at five million units; motion beyond `4h` and patches above
+  `max(256, triangles/3)` fall back immediately.
+- Added local motion for shared-trace material interfaces, including refinement of
+  curved edges with triangles on both sides. Boundary cycles now follow scene loop
+  order and stable IDs, so nested region ownership does not depend on numeric ID
+  sorting. Per-loop old/new bounding boxes replace the previous moved-point scan
+  while selecting nearby bulk vertices.
+- Replaced free-form fallback strings in update reports with typed causes plus
+  details. Reports retain retry history and expose repair attempts, patch vertices
+  and triangles, reuse, moved/inserted/collapsed counts, and final fallback cause.
+  Performance diagnostics show these values and a session fallback histogram; the
+  status strip names an expanding retry while it is active.
+- Added regression coverage for ordinary repeated hole edits, material-interface
+  motion on both sides of a shared trace, nested material-interface motion,
+  immutable retry restarts, retryable/terminal classification, scheduling
+  determinism, large-motion fallback, topology changes, and mesh invariants.
+- Open baffles and two-trace walls deliberately retain full rebuilding. Their local
+  repair needs paired-side and endpoint-aware topology rather than treating them as
+  closed cycles.
+- The release timing harness mixed hole and interface edits across eight loops. At
+  `h=0.04`, the initial build took 315.5 ms and edits took 41.8–43.1 ms while
+  preserving 93.9–94.8% of triangles. At `h=0.02`, the initial build took 4.63 s
+  and edits took 207–221 ms while preserving 97.3–98.2%. All six edits succeeded
+  on the first local attempt; the longest measured cooperative slice was 3.53 ms.
+  Interactive browser checking was skipped as previously agreed with the user.
+- Formatting, Clippy with warnings denied, all 155 workspace tests, native release
+  compilation, and release Trunk/WASM packaging pass. Trunk 0.21.14 required
+  `NO_COLOR=false` because the surrounding CLI environment sets `NO_COLOR=1`, which
+  that version parses as an invalid boolean.
 
 ## 2026-09-11 — Uniform scale gizmo and modifier-safe span dragging
 

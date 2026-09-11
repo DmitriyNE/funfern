@@ -14,7 +14,7 @@ use funfern_app::{
     persistence::{self, LoadCandidate},
 };
 use funfern_core::*;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, Sender},
@@ -240,6 +240,7 @@ pub struct Playground {
     mesh_report: Option<MeshUpdateReport>,
     mesh_attempts: usize,
     mesh_fallbacks: usize,
+    mesh_fallback_causes: BTreeMap<MeshUpdateFailureKind, usize>,
     mesh_max_edge: f64,
     mesh_source_max_edge: f64,
     mesh_low_quality: Vec<bool>,
@@ -351,6 +352,7 @@ impl Default for Playground {
             mesh_report: None,
             mesh_attempts: 0,
             mesh_fallbacks: 0,
+            mesh_fallback_causes: BTreeMap::new(),
             mesh_max_edge: 0.08,
             mesh_source_max_edge: 0.0,
             mesh_low_quality: vec![],
@@ -1331,6 +1333,9 @@ impl Playground {
                 self.mesh_attempts += 1;
                 if !report.used_local {
                     self.mesh_fallbacks += 1;
+                    if let Some(failure) = &report.fallback_failure {
+                        *self.mesh_fallback_causes.entry(failure.kind).or_default() += 1;
+                    }
                 }
             }
             self.mesh_report = Some(report);
@@ -2113,15 +2118,48 @@ impl Playground {
                             .map(|job| job.report())
                             .or(self.mesh_report.as_ref())
                         {
-                            if report.used_local {
+                            if report.local_attempted && report.repair_attempts > 0 {
                                 ui.small(format!(
-                                    "Local repair · {:.1}% triangles unchanged",
-                                    100.0 * report.preserved_triangles as f64
-                                        / report.original_triangles.max(1) as f64
+                                    "Local repair attempts {} · final patch {} vertices / {} triangles",
+                                    report.repair_attempts,
+                                    report.repair_vertices,
+                                    report.repair_triangles
+                                ));
+                                ui.small(format!(
+                                    "Moved {} · inserted {} · collapsed {}",
+                                    report.moved_vertices,
+                                    report.inserted_vertices,
+                                    report.collapsed_vertices
                                 ));
                             }
-                            if let Some(reason) = &report.fallback_reason {
-                                ui.colored_label(GOLD, format!("Full rebuild: {reason}"));
+                            if report.used_local {
+                                ui.small(format!(
+                                    "Reuse {:.1}% unchanged · {:.1}% connectivity retained",
+                                    100.0 * report.preserved_triangles as f64
+                                        / report.original_triangles.max(1) as f64,
+                                    100.0 * report.preserved_connectivity as f64
+                                        / report.original_triangles.max(1) as f64,
+                                ));
+                            }
+                            for (index, failure) in report.retry_failures.iter().enumerate() {
+                                ui.small(format!(
+                                    "Retry {}: {}",
+                                    index + 1,
+                                    failure.kind.label()
+                                ));
+                            }
+                            if let Some(failure) = &report.fallback_failure {
+                                ui.colored_label(
+                                    GOLD,
+                                    format!("Full rebuild: {}", failure.kind.label()),
+                                )
+                                .on_hover_text(&failure.detail);
+                            }
+                        }
+                        if !self.mesh_fallback_causes.is_empty() {
+                            ui.small("Fallback causes this session:");
+                            for (kind, count) in &self.mesh_fallback_causes {
+                                ui.small(format!("{} · {count}", kind.label()));
                             }
                         }
                         if let Some(error) = &self.mesh_error {
@@ -7902,6 +7940,53 @@ mod tests {
         assert!(summary.contains("DOFs"));
         assert!(summary.contains("mesh"));
         assert!(summary.contains("dt"));
+    }
+
+    #[test]
+    fn performance_diagnostics_explain_local_retries_and_fallback_causes() {
+        let mut h = Harness::new();
+        h.state.performance_open = true;
+        h.state.mesh_report = Some(MeshUpdateReport {
+            local_attempted: true,
+            repair_attempts: 3,
+            repair_vertices: 120,
+            repair_triangles: 210,
+            moved_vertices: 18,
+            retry_failures: vec![MeshUpdateFailure {
+                kind: MeshUpdateFailureKind::ElementInversion,
+                detail: "synthetic inversion".into(),
+            }],
+            fallback_failure: Some(MeshUpdateFailure {
+                kind: MeshUpdateFailureKind::RefinementLimit,
+                detail: "synthetic refinement exhaustion".into(),
+            }),
+            ..Default::default()
+        });
+        h.state
+            .mesh_fallback_causes
+            .insert(MeshUpdateFailureKind::RefinementLimit, 2);
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(
+            h.texts.iter().any(|(text, _)| text.contains("attempts 3")),
+            "{:?}",
+            h.texts.iter().map(|(text, _)| text).collect::<Vec<_>>()
+        );
+        assert!(
+            h.texts
+                .iter()
+                .any(|(text, _)| text.contains("Retry 1: local motion inverted"))
+        );
+        assert!(
+            h.texts
+                .iter()
+                .any(|(text, _)| text.contains("Full rebuild: local refinement limit"))
+        );
+        assert!(
+            h.texts
+                .iter()
+                .any(|(text, _)| text.contains("local refinement limit · 2"))
+        );
     }
 
     #[test]

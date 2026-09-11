@@ -29,7 +29,32 @@ fn main() {
                     )
                 })
                 .collect(),
+            materials: vec![
+                Material::default_medium(),
+                Material {
+                    id: MaterialId(2),
+                    name: "Inclusion".into(),
+                    mass_density: 1.0,
+                    stiffness: 1.8,
+                    damping: 0.0,
+                    color: [190, 110, 80],
+                },
+            ],
+            regions: vec![
+                Region {
+                    id: BACKGROUND_REGION,
+                    material: DEFAULT_MATERIAL,
+                },
+                Region {
+                    id: RegionId(2),
+                    material: MaterialId(2),
+                },
+            ],
             ..Scene::default()
+        };
+        scene.obstacles[1].role = LoopRole::MaterialInterface {
+            exterior: BACKGROUND_REGION,
+            interior: RegionId(2),
         };
         let start = Instant::now();
         let mut mesh = Arc::new(mesh_scene(&scene, 0, options).unwrap());
@@ -38,17 +63,20 @@ fn main() {
             start.elapsed().as_secs_f64() * 1000.0,
             mesh.triangles.len()
         );
-        for (revision, delta) in [
-            Point2::new(0.005, 0.0),
-            Point2::new(0.0, 0.005),
-            Point2::new(-0.005, -0.005),
+        for (revision, (loop_index, delta)) in [
+            (0, Point2::new(0.005, 0.0)),
+            (1, Point2::new(0.0, 0.005)),
+            (0, Point2::new(-0.005, -0.005)),
         ]
         .into_iter()
         .enumerate()
         {
             let mut next = scene.clone();
-            let p = next.obstacles[0].spline.controls()[0];
-            next.obstacles[0].spline.set_control(0, p + delta).unwrap();
+            let p = next.obstacles[loop_index].spline.controls()[0];
+            next.obstacles[loop_index]
+                .spline
+                .set_control(0, p + delta)
+                .unwrap();
             let start = Instant::now();
             let mut job = MeshUpdateJob::new(
                 Some((mesh.clone(), scene.clone())),
@@ -74,13 +102,29 @@ fn main() {
                 if let Some(result) = result {
                     let result = result.unwrap();
                     println!(
-                        "  edit {}: ready {:.1} ms, active {:.1} ms, gaps {:.1} ms, max {:.3} ms, {slices} slices; {:?}",
+                        "  edit {} loop {}: ready {:.1} ms, active {:.1} ms, gaps {:.1} ms, max {:.3} ms, {slices} slices; attempts {}, retry causes {:?}, fallback {:?}, patch {}v/{}t, preserved {:.1}%",
                         revision + 1,
+                        loop_index,
                         start.elapsed().as_secs_f64() * 1000.0,
                         work.as_secs_f64() * 1000.0,
                         start.elapsed().saturating_sub(work).as_secs_f64() * 1000.0,
                         max.as_secs_f64() * 1000.0,
-                        result.report
+                        result.report.repair_attempts,
+                        result
+                            .report
+                            .retry_failures
+                            .iter()
+                            .map(|failure| failure.kind)
+                            .collect::<Vec<_>>(),
+                        result
+                            .report
+                            .fallback_failure
+                            .as_ref()
+                            .map(|failure| failure.kind),
+                        result.report.repair_vertices,
+                        result.report.repair_triangles,
+                        100.0 * result.report.preserved_triangles as f64
+                            / result.report.original_triangles.max(1) as f64,
                     );
                     mesh = Arc::new(result.mesh);
                     break;

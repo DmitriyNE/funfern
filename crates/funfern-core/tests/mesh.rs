@@ -813,9 +813,43 @@ fn nested_material_regions_follow_explicit_region_ownership() {
         },
     ));
     assert!(validate(&scene).valid());
-    let mesh = mesh(&scene);
+    let options = MeshingOptions {
+        target_edge_length: 0.05,
+        curve_tolerance: 0.0008,
+        minimum_angle_degrees: 12.0,
+        max_vertices: 50_000,
+        max_triangles: 100_000,
+        max_refinement_steps: 50_000,
+    };
+    let mesh = mesh_scene(&scene, 17, options).unwrap();
     assert_eq!(
         mesh.triangles
+            .iter()
+            .map(|triangle| triangle.region)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([BACKGROUND_REGION, RegionId(2), RegionId(3)])
+    );
+
+    let source_scene = scene.clone();
+    let point = scene.obstacles[1].spline.controls()[2];
+    scene.obstacles[1]
+        .spline
+        .set_control(2, point + Point2::new(0.006, 0.003))
+        .unwrap();
+    let updated = finish_update(
+        MeshUpdateJob::new(
+            Some((Arc::new(mesh), source_scene)),
+            scene.clone(),
+            18,
+            options,
+        ),
+        257,
+    );
+    assert!(updated.report.used_local, "{:?}", updated.report);
+    assert_eq!(
+        updated
+            .mesh
+            .triangles
             .iter()
             .map(|triangle| triangle.region)
             .collect::<BTreeSet<_>>(),
@@ -910,6 +944,60 @@ fn repeated_control_edits_preserve_distant_elements_and_quality() {
 }
 
 #[test]
+fn material_interface_edits_repair_both_sides_locally() {
+    let options = MeshingOptions {
+        target_edge_length: 0.05,
+        curve_tolerance: 0.0008,
+        minimum_angle_degrees: 12.0,
+        max_vertices: 50_000,
+        max_triangles: 100_000,
+        max_refinement_steps: 50_000,
+    };
+    let scene =
+        two_region_scene(|exterior, interior| LoopRole::MaterialInterface { exterior, interior });
+    let source = Arc::new(mesh_scene(&scene, 0, options).unwrap());
+    let mut next = scene.clone();
+    let point = next.obstacles[0].spline.controls()[1];
+    next.obstacles[0]
+        .spline
+        .set_control(1, point + Point2::new(0.008, -0.004))
+        .unwrap();
+
+    let result = finish_update(
+        MeshUpdateJob::new(Some((source.clone(), scene)), next, 1, options),
+        257,
+    );
+    assert!(result.report.used_local, "{:?}", result.report);
+    assert_eq!(result.report.repair_attempts, 1);
+    assert!(result.report.retry_failures.is_empty());
+    assert!(result.report.preserved_triangles > result.report.repair_triangles);
+    assert_eq!(
+        result
+            .mesh
+            .triangles
+            .iter()
+            .map(|triangle| triangle.region)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([BACKGROUND_REGION, RegionId(2)])
+    );
+    let adjacency = edge_adjacency(&result.mesh);
+    for edge in result
+        .mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| matches!(edge.label, BoundaryLabel::MaterialInterface(ObstacleId(20))))
+    {
+        let sides = &adjacency[&edge_key(edge.vertices[0], edge.vertices[1])];
+        assert_eq!(sides.len(), 2);
+        assert_ne!(
+            result.mesh.triangles[sides[0]].region,
+            result.mesh.triangles[sides[1]].region
+        );
+    }
+    assert_eq!(source.geometry_revision, 0, "source mesh remains immutable");
+}
+
+#[test]
 fn adaptation_scheduling_and_fallback_are_explicit() {
     let options = MeshingOptions {
         target_edge_length: 0.06,
@@ -963,7 +1051,25 @@ fn adaptation_scheduling_and_fallback_are_explicit() {
             10000,
         );
         assert!(!result.report.used_local);
-        assert!(result.report.fallback_reason.is_some());
+        assert!(result.report.fallback_failure.is_some());
         assert_mesh_invariants(&result.mesh, holes);
     }
+
+    let mut too_far = scene.clone();
+    for index in 0..too_far.obstacles[0].spline.controls().len() {
+        let point = too_far.obstacles[0].spline.controls()[index];
+        too_far.obstacles[0]
+            .spline
+            .set_control(index, point + Point2::new(0.3, 0.0))
+            .unwrap();
+    }
+    let result = finish_update(
+        MeshUpdateJob::new(Some((mesh, scene)), too_far, 10, options),
+        10_000,
+    );
+    assert_eq!(
+        result.report.fallback_failure.unwrap().kind,
+        MeshUpdateFailureKind::MotionTooLarge
+    );
+    assert_eq!(result.report.repair_attempts, 1);
 }

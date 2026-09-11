@@ -183,9 +183,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   a finer solve or 0.16 for a quick preview. Changing resolution rebuilds the
   accepted mesh without changing geometry/history. Resolution is not stored in scene files.
   Full fine builds can take tens of seconds when spread across frames. Small
-  hole control-point edits now reuse and repair a bounded region of the previous mesh.
-  The panel reports unchanged elements and full-rebuild fallbacks; creation,
-  deletion, knot changes, interface/baffle motion, and large/failed repairs still rebuild.
+  hole and material-interface control-point edits reuse and repair a bounded region
+  of the previous mesh. A failed local repair retries from the unchanged committed
+  mesh with up to two larger guard regions before using a full rebuild. The
+  Performance panel reports attempts, retry causes, patch size, unchanged elements,
+  and a session fallback-cause count. Creation, deletion, knot changes, baffle/wall
+  motion, large edits, and exhausted repairs still rebuild.
   Open-curve insertion reuses safe nearby bulk vertices at the exact curve position
   to avoid tiny CFL-limiting elements around baffles.
 - **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a

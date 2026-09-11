@@ -1,11 +1,60 @@
 use super::*;
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MeshUpdateFailureKind {
+    IncompatibleGeometry,
+    UnsupportedBoundaryTopology,
+    MotionTooLarge,
+    PatchTooLarge,
+    FixedPatchBoundary,
+    ElementInversion,
+    BoundarySubdivisionLimit,
+    RefinementLimit,
+    WorkLimit,
+    InvalidSource,
+    InvalidGeometry,
+    InvalidOptions,
+    Capacity,
+    BoundarySampling,
+    RepairFailure,
+}
+
+impl MeshUpdateFailureKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::IncompatibleGeometry => "geometry topology changed",
+            Self::UnsupportedBoundaryTopology => "unsupported boundary topology",
+            Self::MotionTooLarge => "motion exceeds local limit",
+            Self::PatchTooLarge => "repair patch is too large",
+            Self::FixedPatchBoundary => "repair reached the fixed patch boundary",
+            Self::ElementInversion => "local motion inverted an element",
+            Self::BoundarySubdivisionLimit => "boundary subdivision limit",
+            Self::RefinementLimit => "local refinement limit",
+            Self::WorkLimit => "local work limit",
+            Self::InvalidSource => "invalid source mesh",
+            Self::InvalidGeometry => "invalid target geometry",
+            Self::InvalidOptions => "invalid meshing options",
+            Self::Capacity => "mesh capacity",
+            Self::BoundarySampling => "boundary sampling",
+            Self::RepairFailure => "other local repair failure",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeshUpdateFailure {
+    pub kind: MeshUpdateFailureKind,
+    pub detail: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MeshUpdateReport {
     pub local_attempted: bool,
     pub used_local: bool,
-    pub fallback_reason: Option<String>,
+    pub repair_attempts: usize,
+    pub retry_failures: Vec<MeshUpdateFailure>,
+    pub fallback_failure: Option<MeshUpdateFailure>,
     pub original_triangles: usize,
     /// Same vertex identities AND exactly the same coordinates.
     pub preserved_triangles: usize,
@@ -13,6 +62,7 @@ pub struct MeshUpdateReport {
     pub moved_vertices: usize,
     pub inserted_vertices: usize,
     pub collapsed_vertices: usize,
+    pub repair_vertices: usize,
     pub repair_triangles: usize,
 }
 
@@ -27,7 +77,11 @@ enum Phase {
     Triangles(usize),
     Edges(usize),
     Region(usize),
-    Expand(usize),
+    Expand {
+        ring: usize,
+        index: usize,
+    },
+    Patch(usize),
     Smooth {
         pass: usize,
         index: usize,
@@ -69,24 +123,73 @@ pub struct MeshUpdateJob {
     work: usize,
     displacement: Vec<Point2>,
     next_displacement: Vec<Point2>,
-    moving: Vec<Point2>,
-    mobile: Vec<bool>,
     smooth_vertices: Vec<usize>,
     allowed: Vec<bool>,
+    next_allowed: Vec<bool>,
     radius: f64,
     next_boundary: Vec<Option<usize>>,
-    seeds: BTreeMap<u64, usize>,
-    loop_seeds: Vec<usize>,
+    boundary_seeds: Vec<Option<usize>>,
     old_keys: BTreeSet<[usize; 3]>,
     output: Option<TriMesh>,
     remap: Vec<usize>,
     compact_vertices: Vec<MeshVertex>,
     boundary_splits: usize,
+    attempt: usize,
+    moving_bounds: BTreeMap<u64, [Point2; 2]>,
 }
 
 fn key(mut vertices: [usize; 3]) -> [usize; 3] {
     vertices.sort();
     vertices
+}
+
+fn classify_failure(error: &MeshError) -> MeshUpdateFailure {
+    let detail = error.to_string();
+    let kind = match error {
+        MeshError::InvalidOptions => MeshUpdateFailureKind::InvalidOptions,
+        MeshError::InvalidGeometry(_) => MeshUpdateFailureKind::InvalidGeometry,
+        MeshError::Sampling(_) => MeshUpdateFailureKind::BoundarySampling,
+        MeshError::Capacity { .. } => MeshUpdateFailureKind::Capacity,
+        MeshError::RefinementLimit(_) => MeshUpdateFailureKind::RefinementLimit,
+        MeshError::Topology(reason) => {
+            if reason.contains("fixed patch boundary") || reason.contains("left the patch") {
+                MeshUpdateFailureKind::FixedPatchBoundary
+            } else if reason.contains("inverted") {
+                MeshUpdateFailureKind::ElementInversion
+            } else if reason.contains("subdivision limit") {
+                MeshUpdateFailureKind::BoundarySubdivisionLimit
+            } else if reason.contains("too much of the mesh") {
+                MeshUpdateFailureKind::PatchTooLarge
+            } else if reason.contains("motion exceeds") {
+                MeshUpdateFailureKind::MotionTooLarge
+            } else if reason.contains("source")
+                || reason.contains("boundary has a gap")
+                || reason.contains("boundary cycle")
+            {
+                MeshUpdateFailureKind::InvalidSource
+            } else {
+                MeshUpdateFailureKind::RepairFailure
+            }
+        }
+    };
+    MeshUpdateFailure { kind, detail }
+}
+
+fn retryable(kind: MeshUpdateFailureKind) -> bool {
+    matches!(
+        kind,
+        MeshUpdateFailureKind::FixedPatchBoundary
+            | MeshUpdateFailureKind::ElementInversion
+            | MeshUpdateFailureKind::BoundarySubdivisionLimit
+            | MeshUpdateFailureKind::RefinementLimit
+    )
+}
+
+fn point_in_expanded_bounds(point: Point2, bounds: [Point2; 2], radius: f64) -> bool {
+    point.x >= bounds[0].x - radius
+        && point.x <= bounds[1].x + radius
+        && point.y >= bounds[0].y - radius
+        && point.y <= bounds[1].y + radius
 }
 
 impl MeshUpdateJob {
@@ -112,31 +215,32 @@ impl MeshUpdateJob {
             work: 0,
             displacement: vec![],
             next_displacement: vec![],
-            moving: vec![],
-            mobile: vec![],
             smooth_vertices: vec![],
             allowed: vec![],
+            next_allowed: vec![],
             radius: 0.0,
             next_boundary: vec![],
-            seeds: BTreeMap::new(),
-            loop_seeds: vec![],
+            boundary_seeds: vec![],
             old_keys: BTreeSet::new(),
             output: None,
             remap: vec![],
             compact_vertices: vec![],
             boundary_splits: 0,
+            attempt: 0,
+            moving_bounds: BTreeMap::new(),
         };
         if let Some(mesh) = &result.previous {
             result.report.local_attempted = true;
             result.report.original_triangles = mesh.triangles.len();
-            let compatible = result
+            let supported = result
                 .previous_scene
                 .obstacles
                 .iter()
                 .chain(&result.scene.obstacles)
-                .all(|loop_| matches!(loop_.role, LoopRole::Hole { .. }))
+                .all(|loop_| !matches!(loop_.role, LoopRole::Wall { .. }))
                 && result.previous_scene.internal_boundaries.is_empty()
-                && result.scene.internal_boundaries.is_empty()
+                && result.scene.internal_boundaries.is_empty();
+            let compatible = supported
                 && result.previous_scene.obstacles.len() == result.scene.obstacles.len()
                 && result.scene.obstacles.iter().all(|new| {
                     result.previous_scene.obstacles.iter().any(|old| {
@@ -146,24 +250,18 @@ impl MeshUpdateJob {
                     })
                 });
             if compatible {
-                let mut builder = MeshBuilder::new(options);
-                builder.loop_ids = result
-                    .scene
-                    .obstacles
-                    .iter()
-                    .map(|loop_| loop_.id)
-                    .collect();
-                builder.loop_roles = result
-                    .scene
-                    .obstacles
-                    .iter()
-                    .map(|loop_| loop_.role)
-                    .collect();
-                result.builder = Some(builder);
                 result.phase =
                     Phase::Validate(Box::new(ValidationJob::new(result.scene.clone(), revision)));
             } else {
-                result.fallback("loop topology, role, or knot vector changed".into());
+                let kind = if supported {
+                    MeshUpdateFailureKind::IncompatibleGeometry
+                } else {
+                    MeshUpdateFailureKind::UnsupportedBoundaryTopology
+                };
+                result.fallback(MeshUpdateFailure {
+                    kind,
+                    detail: kind.label().into(),
+                });
             }
         } else {
             result.full();
@@ -180,19 +278,75 @@ impl MeshUpdateJob {
         self.phase = Phase::Full;
     }
 
-    fn fallback(&mut self, reason: String) {
-        self.report.fallback_reason = Some(reason);
+    fn fallback(&mut self, failure: MeshUpdateFailure) {
+        self.report.fallback_failure = Some(failure);
         self.report.used_local = false;
         self.builder = None;
         self.full();
     }
 
+    fn start_attempt(&mut self) {
+        let old = self
+            .previous
+            .as_ref()
+            .expect("local attempt needs a source mesh");
+        let mut builder = MeshBuilder::new(self.options);
+        builder.loop_ids = self.scene.obstacles.iter().map(|loop_| loop_.id).collect();
+        builder.loop_roles = self
+            .scene
+            .obstacles
+            .iter()
+            .map(|loop_| loop_.role)
+            .collect();
+        self.builder = Some(builder);
+        self.job = None;
+        self.displacement.clear();
+        self.next_displacement.clear();
+        self.smooth_vertices.clear();
+        self.allowed.clear();
+        self.next_allowed.clear();
+        self.radius = 0.0;
+        self.next_boundary.clear();
+        self.boundary_seeds = vec![None; self.scene.obstacles.len() + 1];
+        self.old_keys.clear();
+        self.output = None;
+        self.remap.clear();
+        self.compact_vertices.clear();
+        self.boundary_splits = 0;
+        self.moving_bounds.clear();
+        self.report.repair_attempts += 1;
+        self.report.preserved_triangles = 0;
+        self.report.preserved_connectivity = 0;
+        self.report.moved_vertices = 0;
+        self.report.inserted_vertices = 0;
+        self.report.collapsed_vertices = 0;
+        self.report.repair_vertices = 0;
+        self.report.repair_triangles = 0;
+        debug_assert_eq!(self.report.original_triangles, old.triangles.len());
+        self.phase = Phase::Vertices(0);
+    }
+
+    fn handle_local_failure(&mut self, error: MeshError) {
+        let failure = classify_failure(&error);
+        if retryable(failure.kind) && self.attempt < 2 {
+            self.report.retry_failures.push(failure);
+            self.attempt += 1;
+            self.start_attempt();
+        } else {
+            self.fallback(failure);
+        }
+    }
+
     pub fn phase(&self) -> &'static str {
+        if self.attempt > 0 && !matches!(self.phase, Phase::Full | Phase::Done | Phase::Validate(_))
+        {
+            return "Expanding local repair";
+        }
         match &self.phase {
             Phase::Full => self.job.as_ref().unwrap().phase(),
             Phase::Validate(_) => "Validating edit",
             Phase::Vertices(_) | Phase::Triangles(_) | Phase::Edges(_) => "Reusing mesh",
-            Phase::Region(_) | Phase::Expand(_) => "Selecting repair region",
+            Phase::Region(_) | Phase::Expand { .. } | Phase::Patch(_) => "Selecting repair region",
             Phase::Smooth { .. } | Phase::Move(_) => "Moving local mesh",
             Phase::Coarsen(_) => "Coarsening local mesh",
             Phase::Repair => self.job.as_ref().unwrap().phase(),
@@ -225,7 +379,10 @@ impl MeshUpdateJob {
             }
             self.work += 1;
             if self.work > 5_000_000 {
-                self.fallback("local repair work limit reached".into());
+                self.fallback(MeshUpdateFailure {
+                    kind: MeshUpdateFailureKind::WorkLimit,
+                    detail: "local repair work limit reached".into(),
+                });
                 continue;
             }
             match self.step() {
@@ -238,7 +395,7 @@ impl MeshUpdateJob {
                     }));
                 }
                 Ok(None) => {}
-                Err(error) => self.fallback(error.to_string()),
+                Err(error) => self.handle_local_failure(error),
             }
         }
         None
@@ -258,7 +415,7 @@ impl MeshUpdateJob {
                     if let Some(issue) = result.issue {
                         return Err(MeshError::InvalidGeometry(issue));
                     }
-                    self.phase = Phase::Vertices(0);
+                    self.start_attempt();
                 } else {
                     self.phase = Phase::Validate(validation);
                 }
@@ -273,10 +430,13 @@ impl MeshUpdateJob {
                     return Err(MeshError::Topology("invalid source vertex"));
                 }
                 let mut delta = Point2::default();
-                if let Some(BoundaryPoint {
-                    label: BoundaryLabel::Obstacle(id),
-                    parameter,
-                }) = vertex.boundary
+                if let Some(BoundaryPoint { label, parameter }) = vertex.boundary
+                    && let Some(id) = match label {
+                        BoundaryLabel::Obstacle(id) | BoundaryLabel::MaterialInterface(id) => {
+                            Some(id)
+                        }
+                        _ => None,
+                    }
                 {
                     let before = self
                         .previous_scene
@@ -296,14 +456,24 @@ impl MeshUpdateJob {
                     if (after.spline.evaluate(parameter) - before.spline.evaluate(parameter)).norm()
                         > 1e-12
                     {
-                        delta = after.spline.evaluate(parameter) - vertex.point;
-                        if delta.norm() > 2.0 * self.options.target_edge_length {
+                        let target = after.spline.evaluate(parameter);
+                        delta = target - vertex.point;
+                        if delta.norm() > 4.0 * self.options.target_edge_length {
                             return Err(MeshError::Topology(
                                 "boundary motion exceeds local repair radius",
                             ));
                         }
-                        self.moving.push(vertex.point);
                         self.radius = self.radius.max(4.0 * delta.norm());
+                        let bounds = self.moving_bounds.entry(id.0).or_insert([
+                            Point2::new(f64::INFINITY, f64::INFINITY),
+                            Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
+                        ]);
+                        for point in [vertex.point, target] {
+                            bounds[0].x = bounds[0].x.min(point.x);
+                            bounds[0].y = bounds[0].y.min(point.y);
+                            bounds[1].x = bounds[1].x.max(point.x);
+                            bounds[1].y = bounds[1].y.max(point.y);
+                        }
                     }
                 }
                 self.builder
@@ -312,8 +482,8 @@ impl MeshUpdateJob {
                     .add_vertex(vertex.point, vertex.boundary)?;
                 self.displacement.push(delta);
                 self.next_displacement.push(delta);
-                self.mobile.push(delta != Point2::default());
                 self.allowed.push(delta != Point2::default());
+                self.next_allowed.push(false);
                 self.next_boundary.push(None);
                 self.phase = Phase::Vertices(i + 1);
             }
@@ -347,7 +517,8 @@ impl MeshUpdateJob {
             }
             Phase::Edges(i) => {
                 if i == old.boundary_edges.len() {
-                    self.radius = self.radius.max(4.0 * self.options.target_edge_length);
+                    self.radius = self.radius.max(4.0 * self.options.target_edge_length)
+                        + self.attempt as f64 * 2.0 * self.options.target_edge_length;
                     self.phase = Phase::Region(0);
                     return Ok(None);
                 }
@@ -361,36 +532,70 @@ impl MeshUpdateJob {
                 {
                     return Err(MeshError::Topology("non-manifold source boundary"));
                 }
-                let label = match edge.label {
+                let loop_index = match edge.label {
                     BoundaryLabel::Outer(_) => 0,
-                    BoundaryLabel::Obstacle(id) => id.0,
-                    BoundaryLabel::MaterialInterface(id) => id.0,
-                    BoundaryLabel::Wall { loop_id, .. } => loop_id.0,
-                    BoundaryLabel::InternalBoundary { id, .. } => id.0,
+                    BoundaryLabel::Obstacle(id) | BoundaryLabel::MaterialInterface(id) => self
+                        .scene
+                        .obstacles
+                        .iter()
+                        .position(|loop_| loop_.id == id)
+                        .map(|index| index + 1)
+                        .ok_or(MeshError::Topology("missing target boundary loop"))?,
+                    BoundaryLabel::Wall { .. } | BoundaryLabel::InternalBoundary { .. } => {
+                        return Err(MeshError::Topology("unsupported source boundary topology"));
+                    }
                 };
-                self.seeds.entry(label).or_insert(edge.vertices[0]);
+                self.boundary_seeds[loop_index].get_or_insert(edge.vertices[0]);
                 self.builder.as_mut().unwrap().add_boundary_edge(edge);
                 self.phase = Phase::Edges(i + 1);
             }
             Phase::Region(i) => {
                 let b = self.builder.as_mut().unwrap();
                 if i == b.vertices.len() {
-                    self.phase = Phase::Expand(0);
+                    self.next_allowed.clone_from(&self.allowed);
+                    self.phase = Phase::Expand { ring: 0, index: 0 };
                     return Ok(None);
                 }
                 if b.vertices[i].boundary.is_none()
                     && self
-                        .moving
-                        .iter()
-                        .any(|p| (b.point(i) - *p).norm() < self.radius)
+                        .moving_bounds
+                        .values()
+                        .any(|bounds| point_in_expanded_bounds(b.point(i), *bounds, self.radius))
                 {
-                    self.mobile[i] = true;
                     self.allowed[i] = true;
                     self.smooth_vertices.push(i);
                 }
                 self.phase = Phase::Region(i + 1);
             }
-            Phase::Expand(i) => {
+            Phase::Expand { ring, index } => {
+                let b = self.builder.as_mut().unwrap();
+                if index == b.triangles.len() {
+                    self.allowed.clone_from(&self.next_allowed);
+                    if ring + 1 < self.attempt + 1 {
+                        self.next_allowed.clone_from(&self.allowed);
+                        self.phase = Phase::Expand {
+                            ring: ring + 1,
+                            index: 0,
+                        };
+                    } else {
+                        self.report.repair_vertices =
+                            self.allowed.iter().filter(|allowed| **allowed).count();
+                        self.phase = Phase::Patch(0);
+                    }
+                    return Ok(None);
+                }
+                let triangle = b.triangles[index];
+                if triangle.vertices.iter().any(|v| self.allowed[*v]) {
+                    for v in triangle.vertices {
+                        self.next_allowed[v] = true;
+                    }
+                }
+                self.phase = Phase::Expand {
+                    ring,
+                    index: index + 1,
+                };
+            }
+            Phase::Patch(i) => {
                 let b = self.builder.as_mut().unwrap();
                 if i == b.triangles.len() {
                     b.repair_region = Some(std::mem::take(&mut self.allowed));
@@ -398,18 +603,15 @@ impl MeshUpdateJob {
                     return Ok(None);
                 }
                 let triangle = b.triangles[i];
-                if triangle.vertices.iter().any(|v| self.mobile[*v]) {
+                if triangle.vertices.iter().any(|v| self.allowed[*v]) {
                     self.report.repair_triangles += 1;
                     if self.report.repair_triangles > (old.triangles.len() / 3).max(256) {
                         return Err(MeshError::Topology(
                             "edit affects too much of the mesh for local repair",
                         ));
                     }
-                    for v in triangle.vertices {
-                        self.allowed[v] = true;
-                    }
                 }
-                self.phase = Phase::Expand(i + 1);
+                self.phase = Phase::Patch(i + 1);
             }
             Phase::Smooth { pass, index } => {
                 if index == self.smooth_vertices.len() {
@@ -483,7 +685,9 @@ impl MeshUpdateJob {
                     return Ok(None);
                 }
                 let edge = b.boundary_edges[i];
-                if let BoundaryLabel::Obstacle(id) = edge.label {
+                if let BoundaryLabel::Obstacle(id) | BoundaryLabel::MaterialInterface(id) =
+                    edge.label
+                {
                     let spline = &self
                         .scene
                         .obstacles
@@ -507,7 +711,7 @@ impl MeshUpdateJob {
                             b.point(edge.vertices[1]),
                         ) > b.options.curve_tolerance * (1.0 + 1e-9)
                     }) {
-                        if self.boundary_splits >= 256 {
+                        if self.boundary_splits >= (256 << self.attempt) {
                             return Err(MeshError::Topology("local boundary subdivision limit"));
                         }
                         let parameter = (t0 + t1) * 0.5;
@@ -526,7 +730,6 @@ impl MeshUpdateJob {
             Phase::Coarsen(i) => {
                 let b = self.builder.as_mut().unwrap();
                 if i == self.smooth_vertices.len() {
-                    self.loop_seeds = self.seeds.values().copied().collect();
                     self.phase = Phase::Loops {
                         loop_index: 0,
                         current: None,
@@ -554,10 +757,13 @@ impl MeshUpdateJob {
                 current,
             } => {
                 let b = self.builder.as_mut().unwrap();
-                if loop_index == self.loop_seeds.len() {
+                if loop_index == self.boundary_seeds.len() {
                     let mut builder = self.builder.take().unwrap();
-                    builder.options.max_refinement_steps =
-                        builder.options.max_refinement_steps.min(512);
+                    builder.interior_loops = vec![None; self.scene.obstacles.len()];
+                    builder.options.max_refinement_steps = builder
+                        .options
+                        .max_refinement_steps
+                        .min(512 << self.attempt);
                     self.job = Some(MeshingJob {
                         scene: self.scene.clone(),
                         geometry_revision: self.revision,
@@ -568,7 +774,8 @@ impl MeshUpdateJob {
                     self.phase = Phase::Repair;
                     return Ok(None);
                 }
-                let start = self.loop_seeds[loop_index];
+                let start = self.boundary_seeds[loop_index]
+                    .ok_or(MeshError::Topology("source boundary loop is missing"))?;
                 let v = current.unwrap_or(start);
                 if current.is_none() {
                     b.domain_loops.push(Polygon { vertices: vec![] });
@@ -664,17 +871,18 @@ fn split_curved_boundary(
         .adjacency
         .get(&edge_key(edge.vertices[0], edge.vertices[1]))
         .ok_or(MeshError::Topology("missing boundary edge"))?;
-    if adjacent.len() != 1 {
+    if adjacent.is_empty() || adjacent.len() > 2 {
         return Err(MeshError::Topology("non-manifold boundary edge"));
     }
-    let opposite = adjacent[0].1;
     let [a, c] = edge.vertices.map(|v| b.point(v));
-    let d = b.point(opposite);
-    let sign = orient2d(a, c, d);
-    if orient2d(a, point, d) != sign || orient2d(point, c, d) != sign {
-        return Err(MeshError::Topology(
-            "curved boundary refinement inverted an element",
-        ));
+    for (_, opposite) in adjacent {
+        let d = b.point(*opposite);
+        let sign = orient2d(a, c, d);
+        if orient2d(a, point, d) != sign || orient2d(point, c, d) != sign {
+            return Err(MeshError::Topology(
+                "curved boundary refinement inverted an element",
+            ));
+        }
     }
     if edge
         .vertices
@@ -865,6 +1073,82 @@ mod tests {
         let original = b.triangles.clone();
         assert!(!collapse(&mut b, 5, 4).unwrap());
         assert_eq!(b.triangles, original);
+    }
+
+    #[test]
+    fn retryable_failures_start_fresh_attempts_and_terminal_failure_falls_back() {
+        let options = MeshingOptions {
+            target_edge_length: 0.08,
+            minimum_angle_degrees: 12.0,
+            ..Default::default()
+        };
+        let scene = Scene::initial();
+        let mesh = Arc::new(mesh_scene(&scene, 0, options).unwrap());
+        let mut next = scene.clone();
+        let point = next.obstacles[0].spline.controls()[0];
+        next.obstacles[0]
+            .spline
+            .set_control(0, point + Point2::new(0.004, 0.0))
+            .unwrap();
+        let mut job = MeshUpdateJob::new(Some((mesh, scene)), next, 1, options);
+        while !matches!(job.phase, Phase::Vertices(_)) {
+            assert!(job.advance(1).is_none());
+        }
+        for _ in 0..4 {
+            assert!(job.advance(1).is_none());
+        }
+        assert_eq!(job.builder.as_ref().unwrap().vertices.len(), 4);
+
+        job.handle_local_failure(MeshError::Topology("local motion inverted an element"));
+        assert_eq!(job.attempt, 1);
+        assert_eq!(job.report.repair_attempts, 2);
+        assert_eq!(job.report.retry_failures.len(), 1);
+        assert!(matches!(job.phase, Phase::Vertices(0)));
+        assert_eq!(job.phase(), "Expanding local repair");
+        assert!(job.builder.as_ref().unwrap().vertices.is_empty());
+
+        job.handle_local_failure(MeshError::RefinementLimit(MeshQuality {
+            minimum_angle_degrees: 4.0,
+            maximum_edge_length: 0.2,
+        }));
+        assert_eq!(job.attempt, 2);
+        assert_eq!(job.report.repair_attempts, 3);
+        assert_eq!(job.report.retry_failures.len(), 2);
+        assert!(job.builder.as_ref().unwrap().vertices.is_empty());
+
+        job.handle_local_failure(MeshError::Topology("local boundary subdivision limit"));
+        assert!(matches!(job.phase, Phase::Full));
+        assert_eq!(
+            job.report.fallback_failure.as_ref().unwrap().kind,
+            MeshUpdateFailureKind::BoundarySubdivisionLimit
+        );
+        assert_eq!(job.report.retry_failures.len(), 2);
+    }
+
+    #[test]
+    fn failure_classification_separates_retryable_and_terminal_causes() {
+        for error in [
+            MeshError::Topology("edge split reached the fixed patch boundary"),
+            MeshError::Topology("mesh contains an inverted triangle"),
+            MeshError::Topology("local boundary subdivision limit"),
+            MeshError::RefinementLimit(MeshQuality {
+                minimum_angle_degrees: 1.0,
+                maximum_edge_length: 1.0,
+            }),
+        ] {
+            assert!(retryable(classify_failure(&error).kind));
+        }
+        for error in [
+            MeshError::InvalidOptions,
+            MeshError::Capacity {
+                vertices: 1,
+                triangles: 1,
+            },
+            MeshError::Topology("invalid source vertex"),
+            MeshError::Topology("edit affects too much of the mesh for local repair"),
+        ] {
+            assert!(!retryable(classify_failure(&error).kind));
+        }
     }
 
     #[test]
