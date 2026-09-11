@@ -7,6 +7,12 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Add a uniform scale handle beside the rotation gizmo. Scale eligible selected
+  spans as one rigid object around the movable pivot, support snapping, and commit
+  one history entry per drag.
+- [ ] Turn local-remesh hardening into the foundation for required solution-driven
+  adaptive mesh refinement. Preserve stable identities and field state through
+  insertion, collapse, repair, and bounded per-frame adaptation work.
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
 - [ ] Decide whether the load-compatible closed-wall role still warrants assigned
@@ -31,6 +37,59 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend fragile local repair/fallback behavior, especially for moderate loop,
   interface, and baffle motion. Record concrete fallback triggers; small edits still
   enter the full rebuild path too easily.
+
+## 2026-09-11 — Toy-first product roadmap after the editor overhaul
+
+- Keep funfern an exploratory time-domain wave toy. Judge product work by whether
+  it creates an interesting, visible experiment that is easy to set up and share.
+  Engineering-simulation workflows such as frequency-domain solves, eigenmodes,
+  parameter sweeps, and heavy units infrastructure are outside the intended scope.
+  Lightweight units may still be useful where they clarify time and wavelength.
+- Finish the current geometry slice with a uniform scale handle alongside the
+  rotation and pivot gizmos. A selected boundary group scales around the movable
+  pivot as one object; snapping and the complete drag follow the existing transform
+  and undo semantics.
+- AMR remains a required goal from the initial specification. First make local
+  insertion, collapse, constraint repair, and state transfer reliable enough to
+  reduce full-remesh fallbacks. Then add coefficient-gradient and solution-error
+  indicators, bounded work per frame, and a view that explains refinement activity.
+- Add an example gallery with names, short descriptions, metadata, and thumbnails.
+  Add crash-safe autosave through IndexedDB in the browser and an atomic recovery
+  file in native builds. Scene-only screenshots come first, with optional UI and
+  plots; browser video capture can follow.
+- Build a probe system that shares time-series recording and plotting across point,
+  curve, region, and selected-geometry probes. Curve probes should support waterfall
+  and average-intensity views. A later far-field probe should remain time-domain,
+  using a closed Huygens/Kirchhoff sampling contour to derive angle-time and
+  integrated polar radiation views in a homogeneous exterior region.
+- Represent spatial variation as a reusable profile plus an explicit placement
+  frame. Profiles use local dimensionless coordinates such as `x`, `y`, `r`, and
+  `theta`; frames can be world-fixed, object-attached, or independently transformed.
+  Evaluate profiles at FEM quadrature points. This supports GRIN and Luneburg media
+  without making non-rigid region edits silently warp a field definition.
+- Keep distributed excitation separate from passive material properties. A volume
+  source targets a region or material and combines its own spatial profile/frame
+  with a time signal, enabling shaped and phased radiators. Geometry selections can
+  also become reusable probe targets.
+- Extend topology so several subdomains may meet at a validated junction, and make
+  the rectangular outer extent editable before considering arbitrary outer shapes.
+- Add derived vector-style overlays from the scalar solution, such as gradient,
+  flux, and intensity/energy flow. A true vector PDE should be added only if it
+  enables a compelling toy interaction that these derived fields cannot provide.
+- Introduce symmetric positive-definite 2x2 tensor stiffness as the first anisotropic
+  material model, initially constant with an orientation gizmo and later compatible
+  with spatial profiles. Choose any nonlinear material model for clear visible
+  behavior and stable explicit time stepping rather than general constitutive scope.
+- PML remains explicitly out of scope. Investigate time-domain nonlocal radiation
+  conditions instead: exact or modal DtN on simple enclosing shapes, rational
+  auxiliary-state approximations, time-domain boundary integrals, and compressed
+  boundary-history representations. Compare their reflection, cost, and visual
+  payoff before committing one to the product.
+- Proposed sequence: scale gizmo; local-remesh hardening and AMR foundations;
+  examples, metadata, thumbnails, and autosave; probes; spatial material/source
+  profiles with Luneburg and radiator examples; active solution AMR; far-field
+  views; editable domain extent and junction topology; derived vector overlays,
+  tensors, a focused nonlinear model; then nonlocal radiation experiments.
 
 ## 2026-09-11 — Staged interaction overhaul
 
