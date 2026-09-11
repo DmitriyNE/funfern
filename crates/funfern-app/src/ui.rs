@@ -1685,7 +1685,7 @@ impl Playground {
                     self.select_inspector_panel(panel);
                 }
             }
-            if ui.button("+ Add").clicked() {
+            if ui.button("+ Draw").clicked() {
                 self.inspector_panel = Some(InspectorPanel::Edit);
                 self.active_tool = ActiveTool::AddGeometry;
                 self.add_geometry_open = true;
@@ -6598,14 +6598,14 @@ mod tests {
     #[test]
     fn contextual_shell_exposes_tools_and_add_geometry_popover() {
         let mut h = Harness::new();
-        for label in ["Edit", "View", "Simulation", "Materials", "+ Add"] {
+        for label in ["Edit", "View", "Simulation", "Materials", "+ Draw"] {
             assert!(
                 h.texts.iter().any(|(text, _)| text == label),
                 "missing {label}"
             );
         }
         assert!(!h.texts.iter().any(|(text, _)| text == "Revert draft"));
-        h.click_text("+ Add");
+        h.click_text("+ Draw");
         assert_eq!(h.state.active_tool, ActiveTool::AddGeometry);
         assert!(h.state.add_geometry_open);
         h.frame(vec![]);
