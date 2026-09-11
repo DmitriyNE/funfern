@@ -65,11 +65,16 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   `0.019999…`. During the one frame where a candidate-generation readback precedes
   its application commit, the viewport now renders it with the candidate operator;
   the wave colors no longer disappear because of a temporary DOF-count mismatch.
-- Verification: formatting, Clippy with warnings denied, all 176 workspace tests,
+- Automatic adaptation no longer inherits the fixed five-million-unit ceiling used
+  by explicit transactions. Its work allowance now scales with the committed mesh
+  and the selected topology-change preset. If that bounded allowance is still
+  exhausted, the automatic controller records the report and retains the current
+  valid mesh without raising a global mesh fault.
+- Verification: formatting, Clippy with warnings denied, all 178 workspace tests,
   native release compilation, and release Trunk/WASM packaging pass. The Apple M1
   Max / Metal `--amr-check` processed a nonzero field through automatic adaptation
   without a target-bound failure, then completed both deterministic transactions in
-  5.33 s. Indicator work totaled 3.05 ms with a 1.66 ms longest slice; the final
+  5.26 s. Indicator work totaled 3.05 ms with a 1.69 ms longest slice; the final
   mesh had 2,093 triangles / 6,398 DOFs, with 356 insertions and 275 collapses in
   the second deterministic pass. Interactive browser testing remains deferred by
   prior agreement.

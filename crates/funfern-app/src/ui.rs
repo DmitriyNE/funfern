@@ -278,6 +278,7 @@ pub struct Playground {
     simulation_candidate: Option<SimulationCandidate>,
     mesh_job: Option<MeshUpdateJob>,
     mesh_adaptation_job: Option<MeshAdaptationJob>,
+    mesh_adaptation_automatic: bool,
     mesh_adaptation_state: Option<MeshAdaptationState>,
     mesh_adaptation_report: Option<MeshAdaptationReport>,
     solution_indicator_job: Option<SolutionIndicatorJob>,
@@ -410,6 +411,7 @@ impl Default for Playground {
             simulation_candidate: None,
             mesh_job: None,
             mesh_adaptation_job: None,
+            mesh_adaptation_automatic: false,
             mesh_adaptation_state: None,
             mesh_adaptation_report: None,
             solution_indicator_job: None,
@@ -1384,6 +1386,7 @@ impl Playground {
             self.solution_indicator_result = None;
             self.solution_indicator_source = None;
             self.mesh_adaptation_job = None;
+            self.mesh_adaptation_automatic = false;
             self.amr_status = "geometry has priority";
         }
         if self.editor.editing() || self.simulation_candidate.is_some() {
@@ -1609,6 +1612,7 @@ impl Playground {
             field,
             options,
         ));
+        self.mesh_adaptation_automatic = false;
         self.mesh_adaptation_report = None;
         Ok(())
     }
@@ -1636,8 +1640,14 @@ impl Playground {
         };
         self.mesh_adaptation_report = Some(report);
         self.mesh_adaptation_job = None;
+        let automatic = std::mem::take(&mut self.mesh_adaptation_automatic);
         let result = match result {
             Ok(result) => result,
+            Err(MeshAdaptationError::WorkLimit) if automatic => {
+                self.amr_status = "adaptation budget reached; mesh retained";
+                self.amr_error = None;
+                return;
+            }
             Err(error) => {
                 self.mesh_error = Some(error.to_string());
                 return;
@@ -1802,6 +1812,7 @@ impl Playground {
                 self.amr_error = None;
                 return;
             }
+            let topology_budget = self.amr_quality.topology_budget();
             let options = MeshAdaptationOptions {
                 meshing: MeshingOptions {
                     curve_tolerance: (self.amr_minimum_edge * 0.02).min(1.5e-3),
@@ -1813,12 +1824,14 @@ impl Playground {
                 },
                 minimum_target_edge_length: self.amr_minimum_edge,
                 maximum_target_edge_length: self.amr_maximum_edge,
-                max_topology_changes: self.amr_quality.topology_budget(),
+                max_topology_changes: topology_budget,
+                max_work_units: automatic_adaptation_work_limit(mesh, topology_budget),
                 ..Default::default()
             };
             let field: Arc<dyn MeshSizeField> = result.field;
             match self.start_mesh_adaptation(field, options) {
                 Ok(()) => {
+                    self.mesh_adaptation_automatic = true;
                     self.amr_status = "adapting mesh";
                     self.amr_error = None;
                 }
@@ -3132,6 +3145,7 @@ impl Playground {
             self.solution_indicator_result = None;
             self.solution_indicator_source = None;
             self.mesh_adaptation_job = None;
+            self.mesh_adaptation_automatic = false;
             self.amr_last_analyzed_step = None;
             self.amr_last_started = None;
             self.amr_error = None;
@@ -5987,6 +6001,23 @@ fn amr_transaction_needed(mesh: &TriMesh, result: &SolutionIndicatorResult) -> b
         })
         .fold(1.0_f64, f64::max);
     candidates >= candidate_threshold || severity >= 1.5
+}
+
+fn automatic_adaptation_work_limit(mesh: &TriMesh, topology_budget: usize) -> usize {
+    // A topology change restarts a global candidate scan. Paired traces can add
+    // two vertices, four triangles, and two constrained edges in one change.
+    // Budget for those growing scans rather than applying the small fixed limit
+    // used by explicit adaptation transactions.
+    let scan_units = mesh
+        .vertices
+        .len()
+        .saturating_add(mesh.triangles.len())
+        .saturating_add(mesh.boundary_edges.len())
+        .saturating_add(topology_budget.saturating_mul(8));
+    let scan_passes = topology_budget.saturating_mul(2).saturating_add(32);
+    scan_units
+        .saturating_mul(scan_passes)
+        .max(MeshAdaptationOptions::default().max_work_units)
 }
 
 pub fn frame(
@@ -9453,6 +9484,53 @@ mod tests {
                 "missing {label}"
             );
         }
+    }
+
+    #[test]
+    fn automatic_adaptation_budget_scales_with_mesh_and_preset() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        let mesh = &h.state.simulation_candidate.as_ref().unwrap().mesh;
+        let default_limit = MeshAdaptationOptions::default().max_work_units;
+        let fast = automatic_adaptation_work_limit(mesh, AmrQuality::Fast.topology_budget());
+        let detailed =
+            automatic_adaptation_work_limit(mesh, AmrQuality::Detailed.topology_budget());
+        assert!(fast >= default_limit);
+        assert!(detailed > fast);
+    }
+
+    #[test]
+    fn automatic_adaptation_work_limit_retains_the_committed_mesh() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let committed = h.state.mesh.clone().unwrap();
+        let options = MeshAdaptationOptions {
+            minimum_target_edge_length: 0.02,
+            maximum_target_edge_length: 0.08,
+            max_topology_changes: 1,
+            max_work_units: 1,
+            ..Default::default()
+        };
+        h.state
+            .start_mesh_adaptation(Arc::new(|_: Point2, _: RegionId| 0.08), options)
+            .unwrap();
+        h.state.mesh_adaptation_automatic = true;
+
+        h.state.refresh_mesh_adaptation();
+
+        assert!(h.state.mesh_adaptation_job.is_none());
+        assert!(h.state.mesh_error.is_none());
+        assert!(h.state.amr_error.is_none());
+        assert_eq!(
+            h.state.amr_status,
+            "adaptation budget reached; mesh retained"
+        );
+        assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &committed));
+        assert_eq!(
+            h.state.mesh_adaptation_report.as_ref().unwrap().work_units,
+            2
+        );
     }
 
     #[test]
