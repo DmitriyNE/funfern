@@ -199,8 +199,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   holes, material interfaces, closed walls, and both coincident baffle faces remain
   constrained; spline breakpoints, box corners, and open tips remain fixed. The app
   runs adaptation in 2 ms slices and transfers the live quadratic field at an atomic
-  GPU handoff. This first slice is internal and exercised by `--amr-check`; normal
-  editor sessions do not yet expose an AMR control or solution-error indicator.
+  GPU handoff. Automatic adaptation is enabled by default. A recovery-plus-residual
+  indicator reads synchronized displacement, velocity, and acceleration from spare
+  lanes in the existing GPU state readback, then builds a graded spatial size field
+  in bounded frame slices. Fast, Balanced, and Detailed presets set the error and
+  wavelength targets; advanced controls bound the smallest and largest element.
+  The View panel can overlay the current target field.
 - **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
   Gaussian displacement with zero initial velocity. Move source positions the
   optional continuous sinusoidal source. Simulation speed is bounded to 16
@@ -303,9 +307,11 @@ field, performs a real control-point edit, verifies transfer of all three state
 components, then verifies that a lower-order boundary transaction clears the
 auxiliary state, and finally checks a same-mesh material-coefficient transaction
 against f64.
-`--amr-check` evolves a nonzero field, moves a smooth spatial refinement target,
-requires both refinement and coarsening, transfers all quadratic state with no
-exposed nodes, verifies mesh/operator revision agreement, and exits.
+`--amr-check` first requires the normal automatic controller to finish an aligned
+GPU-to-host solution estimate, then evolves a nonzero field, moves a deterministic
+spatial refinement target, requires both refinement and coarsening, transfers all
+quadratic state with no exposed nodes, verifies mesh/operator revision agreement,
+and exits.
 The field view tessellates every quadratic parent triangle into six display
 triangles around its shared edge-midpoint and element bubble nodes. Native GPU
 startup and the wave kernel were exercised on Apple M1 Max / Metal. The user

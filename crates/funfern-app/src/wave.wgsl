@@ -89,7 +89,13 @@ fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
     let dt = parameters.time_data.x;
     let dirichlet = nodes[i].boundary.x;
     if dirichlet != 0u {
-        states[i].levels.z = signal_value(nodes[i].dirichlet_signal, parameters.time_data.z + dt);
+        let previous = signal_value(nodes[i].dirichlet_signal, parameters.time_data.z - dt);
+        let current = signal_value(nodes[i].dirichlet_signal, parameters.time_data.z);
+        let next = signal_value(nodes[i].dirichlet_signal, parameters.time_data.z + dt);
+        states[i].levels.z = next;
+        states[i].auxiliary.y = (next - 2.0 * current + previous) / (dt * dt);
+        states[i].auxiliary.z = (next - previous) / (2.0 * dt);
+        states[i].auxiliary.w = current;
         states[i].levels.w = parameters.time_data.w + 1.0;
         return;
     }
@@ -116,12 +122,16 @@ fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
         + neumann_acceleration(i, parameters.time_data.z);
     let previous = states[i].levels.x;
     let current = states[i].levels.y;
-    states[i].levels.z = (
+    let next = (
         2.0 * current
         - (1.0 - 0.5 * gamma * dt) * previous
         - dt2 * ku
         + dt2 * acceleration
     ) / (1.0 + 0.5 * gamma * dt);
+    states[i].levels.z = next;
+    states[i].auxiliary.y = (next - 2.0 * current + previous) / dt2;
+    states[i].auxiliary.z = (next - previous) / (2.0 * dt);
+    states[i].auxiliary.w = current;
     // The step dispatch reads a stable counter. The following rotate dispatch
     // commits this predicted value, allowing asynchronous readback to identify
     // exactly which time level it contains.
@@ -159,4 +169,7 @@ fn inject(@builtin(global_invocation_id) id: vec3<u32>) {
         * forcing_weights[i].y;
     states[i].levels.x += addition;
     states[i].levels.y += addition;
+    states[i].auxiliary.y = 0.0;
+    states[i].auxiliary.z = 0.0;
+    states[i].auxiliary.w += addition;
 }

@@ -208,7 +208,8 @@ impl QuadraticWaveOperator {
 
             let mut local_stiffness = [[0.0; 7]; 7];
             for (barycentric, weight) in stiffness_quadrature() {
-                let gradients = basis_gradients(barycentric, barycentric_gradients);
+                let gradients =
+                    enriched_quadratic_basis_gradients(barycentric, barycentric_gradients);
                 for i in 0..7 {
                     for j in 0..7 {
                         local_stiffness[i][j] += weight * gradients[i].dot(gradients[j]);
@@ -1203,7 +1204,10 @@ fn validate_coefficients(coefficients: WaveCoefficients) -> Result<(), WaveError
     }
 }
 
-fn basis_gradients(barycentric: [f64; 3], gradients: [Point2; 3]) -> [Point2; 7] {
+pub fn enriched_quadratic_basis_gradients(
+    barycentric: [f64; 3],
+    gradients: [Point2; 3],
+) -> [Point2; 7] {
     let [l0, l1, l2] = barycentric;
     let [g0, g1, g2] = gradients;
     let bubble_gradient = (g0 * (l1 * l2) + g1 * (l0 * l2) + g2 * (l0 * l1)) * 27.0;
@@ -1215,6 +1219,24 @@ fn basis_gradients(barycentric: [f64; 3], gradients: [Point2; 3]) -> [Point2; 7]
         (g1 * l2 + g2 * l1) * 4.0 - bubble_gradient * (4.0 / 9.0),
         (g2 * l0 + g0 * l2) * 4.0 - bubble_gradient * (4.0 / 9.0),
         bubble_gradient,
+    ]
+}
+
+/// Laplacians of the seven enriched-quadratic basis functions. Barycentric
+/// coordinate gradients are constant on an affine triangle.
+pub fn enriched_quadratic_basis_laplacians(
+    [l0, l1, l2]: [f64; 3],
+    [g0, g1, g2]: [Point2; 3],
+) -> [f64; 7] {
+    let bubble = 54.0 * (l0 * g1.dot(g2) + l1 * g0.dot(g2) + l2 * g0.dot(g1));
+    [
+        4.0 * g0.dot(g0) + bubble / 9.0,
+        4.0 * g1.dot(g1) + bubble / 9.0,
+        4.0 * g2.dot(g2) + bubble / 9.0,
+        8.0 * g0.dot(g1) - 4.0 * bubble / 9.0,
+        8.0 * g1.dot(g2) - 4.0 * bubble / 9.0,
+        8.0 * g2.dot(g0) - 4.0 * bubble / 9.0,
+        bubble,
     ]
 }
 
@@ -2108,6 +2130,25 @@ mod tests {
             .map(|(basis, x)| basis * x)
             .sum::<f64>();
         assert!((interpolated_x - barycentric[1]).abs() < 2.0e-15);
+    }
+
+    #[test]
+    fn enriched_basis_laplacians_reproduce_a_quadratic() {
+        let barycentric = [0.17, 0.29, 0.54];
+        let gradients = [
+            Point2::new(-1.0, -1.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(0.0, 1.0),
+        ];
+        let laplacians = enriched_quadratic_basis_laplacians(barycentric, gradients);
+        assert!(laplacians.iter().sum::<f64>().abs() < 2.0e-13);
+        let x_squared = [0.0, 1.0, 0.0, 0.25, 0.25, 0.0, 1.0 / 9.0];
+        let laplace = laplacians
+            .into_iter()
+            .zip(x_squared)
+            .map(|(basis, value)| basis * value)
+            .sum::<f64>();
+        assert!((laplace - 2.0).abs() < 2.0e-13);
     }
 
     #[test]

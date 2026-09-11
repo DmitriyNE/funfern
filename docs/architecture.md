@@ -600,9 +600,26 @@ Geometry revision identifies the accepted scene, while mesh revision identifies 
 particular discretization of it. Wave operators and linear/quadratic transfer maps
 validate both. A successful adaptation assembles a candidate operator, prepares a
 quadratic transfer from the still-running source mesh, and commits mesh, operator,
-state, timestep, and lineage together after the tagged GPU handoff. The current
-target field is an internal API and is not serialized. Solution-error estimation,
-user-facing wavelength controls, and AMR visualization are later slices.
+state, timestep, and lineage together after the tagged GPU handoff. The target field
+is transient and is not serialized. The application derives it automatically from
+the live quadratic solution. The existing GPU state readback uses spare auxiliary
+lanes to carry centered displacement, velocity, and acceleration at one explicit
+time level; this avoids another buffer or readback. The core estimator combines
+material-aware recovered flux defects, a strong interior equation residual with the
+volume source removed, and interior flux jumps. It does not yet add
+physical-boundary residuals. Recovery never averages across a material region or a
+duplicated baffle/wall trace.
+
+The relative indicator maps error to local edge length, caps that length by the
+shortest wavelength of every active continuous or driven-boundary source, and grades
+neighboring targets. Fast, Balanced, and Detailed presets select tolerance,
+elements per wavelength, and topology budget. Advanced minimum/maximum limits keep
+capacity explicit and allow quiet regions to become coarser than the initial mesh.
+The app advances indicator and adaptation jobs in soft 2 ms slices, rejects stale
+mesh/GPU/settings generations, waits between estimates, and requires enough
+candidates or a large size mismatch before opening a mesh transaction. Geometry
+editing cancels estimator/adaptation preparation and takes priority. An optional
+heatmap shows the transient target.
 
 Coordinate-only edits of closed holes, transmitting material interfaces, and open
 baffles first try local mesh repair. Each attempt imports the immutable committed

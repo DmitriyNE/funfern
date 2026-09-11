@@ -95,6 +95,48 @@ impl SpanSelectionFilter {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AmrQuality {
+    Fast,
+    #[default]
+    Balanced,
+    Detailed,
+}
+impl AmrQuality {
+    const ALL: [Self; 3] = [Self::Fast, Self::Balanced, Self::Detailed];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "Fast",
+            Self::Balanced => "Balanced",
+            Self::Detailed => "Detailed",
+        }
+    }
+
+    const fn relative_tolerance(self) -> f64 {
+        match self {
+            Self::Fast => 0.10,
+            Self::Balanced => 0.06,
+            Self::Detailed => 0.035,
+        }
+    }
+
+    const fn elements_per_wavelength(self) -> f64 {
+        match self {
+            Self::Fast => 4.0,
+            Self::Balanced => 6.0,
+            Self::Detailed => 8.0,
+        }
+    }
+
+    const fn topology_budget(self) -> usize {
+        match self {
+            Self::Fast => 250,
+            Self::Balanced => 600,
+            Self::Detailed => 1_200,
+        }
+    }
+}
 #[derive(Clone, Copy)]
 enum MarqueeOperation {
     Replace,
@@ -238,6 +280,22 @@ pub struct Playground {
     mesh_adaptation_job: Option<MeshAdaptationJob>,
     mesh_adaptation_state: Option<MeshAdaptationState>,
     mesh_adaptation_report: Option<MeshAdaptationReport>,
+    solution_indicator_job: Option<SolutionIndicatorJob>,
+    solution_indicator_result: Option<SolutionIndicatorResult>,
+    solution_indicator_report: Option<SolutionIndicatorReport>,
+    solution_indicator_source: Option<(u64, u64, u64, u64, u64)>,
+    amr_enabled: bool,
+    amr_quality: AmrQuality,
+    amr_minimum_edge: f64,
+    amr_maximum_edge: f64,
+    amr_settings_revision: u64,
+    amr_last_analyzed_step: Option<u64>,
+    amr_last_started: Option<Instant>,
+    amr_status: &'static str,
+    amr_error: Option<String>,
+    amr_work_ms: f64,
+    amr_max_slice_ms: f64,
+    show_amr_target: bool,
     next_mesh_revision: u64,
     mesh_source: Scene,
     mesh_committed_scene: Scene,
@@ -354,6 +412,22 @@ impl Default for Playground {
             mesh_adaptation_job: None,
             mesh_adaptation_state: None,
             mesh_adaptation_report: None,
+            solution_indicator_job: None,
+            solution_indicator_result: None,
+            solution_indicator_report: None,
+            solution_indicator_source: None,
+            amr_enabled: true,
+            amr_quality: AmrQuality::Balanced,
+            amr_minimum_edge: 0.02,
+            amr_maximum_edge: 0.16,
+            amr_settings_revision: 1,
+            amr_last_analyzed_step: None,
+            amr_last_started: None,
+            amr_status: "waiting for solution",
+            amr_error: None,
+            amr_work_ms: 0.0,
+            amr_max_slice_ms: 0.0,
+            show_amr_target: false,
             next_mesh_revision: 1,
             mesh_source: Scene::default(),
             mesh_committed_scene: Scene::default(),
@@ -1288,15 +1362,20 @@ impl Playground {
     fn refresh_mesh(&mut self) {
         // Prepare from the displayed mesh's own scene, never an obsolete
         // in-flight request. Geometry edits are coalesced until the drag ends.
-        if self.editor.editing()
-            || self.simulation_candidate.is_some()
-            || self.mesh_adaptation_job.is_some()
-        {
+        let geometry_pending = !self.mesh_source.geometry_eq(&self.editor.document.accepted)
+            || self.mesh_source_max_edge != self.mesh_max_edge;
+        if self.editor.editing() || geometry_pending {
+            self.solution_indicator_job = None;
+            self.solution_indicator_result = None;
+            self.solution_indicator_source = None;
+            self.mesh_adaptation_job = None;
+            self.amr_status = "geometry has priority";
+        }
+        if self.editor.editing() || self.simulation_candidate.is_some() {
             return;
         }
         let start = Instant::now();
-        let geometry_changed = !self.mesh_source.geometry_eq(&self.editor.document.accepted)
-            || self.mesh_source_max_edge != self.mesh_max_edge;
+        let geometry_changed = geometry_pending;
         if geometry_changed {
             self.mesh_started = Some(start);
             self.mesh_source = self.editor.document.accepted.clone();
@@ -1605,6 +1684,207 @@ impl Playground {
         self.mesh_error = None;
     }
 
+    fn solution_indicator_options(&self) -> SolutionIndicatorOptions {
+        SolutionIndicatorOptions {
+            minimum_edge_length: self.amr_minimum_edge,
+            maximum_edge_length: self.amr_maximum_edge,
+            relative_tolerance: self.amr_quality.relative_tolerance(),
+            elements_per_wavelength: self.amr_quality.elements_per_wavelength(),
+            forcing_frequency_hz: highest_forcing_frequency(
+                &self.mesh_committed_scene,
+                self.wave_source,
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn refresh_solution_amr(&mut self, request: &WaveGpuRequest, display: &WaveDisplay) {
+        if !self.amr_enabled {
+            self.solution_indicator_job = None;
+            self.solution_indicator_result = None;
+            self.solution_indicator_source = None;
+            self.amr_status = "off";
+            return;
+        }
+        if self.editor.editing()
+            || self.mesh_job.is_some()
+            || self.mesh_adaptation_job.is_some()
+            || self.simulation_candidate.is_some()
+        {
+            if self.editor.editing() || self.mesh_job.is_some() {
+                self.solution_indicator_job = None;
+                self.solution_indicator_source = None;
+                self.amr_status = "geometry has priority";
+            } else if self.mesh_adaptation_job.is_some() {
+                self.amr_status = "adapting mesh";
+            } else {
+                self.amr_status = "handing off mesh";
+            }
+            return;
+        }
+
+        if self.solution_indicator_job.is_some() {
+            let started = Instant::now();
+            let mut result = None;
+            if let Some(job) = &mut self.solution_indicator_job {
+                self.amr_status = job.phase();
+                for _ in 0..100_000 {
+                    result = job.advance(1);
+                    if result.is_some() || started.elapsed().as_secs_f64() >= 0.002 {
+                        break;
+                    }
+                }
+            }
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            self.amr_work_ms += elapsed;
+            self.amr_max_slice_ms = self.amr_max_slice_ms.max(elapsed);
+            let Some(result) = result else {
+                return;
+            };
+            let source = self.solution_indicator_source.take();
+            let report = match &result {
+                Ok(result) => result.report.clone(),
+                Err(_) => self
+                    .solution_indicator_job
+                    .as_ref()
+                    .unwrap()
+                    .report()
+                    .clone(),
+            };
+            self.solution_indicator_job = None;
+            self.solution_indicator_report = Some(report);
+            let Some((mesh_revision, generation, buffer_revision, step, settings_revision)) =
+                source
+            else {
+                self.amr_status = "discarded stale estimate";
+                return;
+            };
+            let Some(mesh) = self.wave_mesh.as_ref() else {
+                self.amr_status = "discarded stale estimate";
+                return;
+            };
+            if mesh.mesh_revision != mesh_revision
+                || request.generation() != generation
+                || request.buffer_revision() != buffer_revision
+                || self.amr_settings_revision != settings_revision
+            {
+                self.amr_status = "discarded stale estimate";
+                return;
+            }
+            self.amr_last_analyzed_step = Some(step);
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    self.amr_error = Some(error.to_string());
+                    self.amr_status = "estimate failed";
+                    return;
+                }
+            };
+            let adaptation_needed = amr_transaction_needed(mesh, &result);
+            self.solution_indicator_result = Some(result.clone());
+            if !adaptation_needed {
+                self.amr_status = "mesh matches solution";
+                self.amr_error = None;
+                return;
+            }
+            let options = MeshAdaptationOptions {
+                meshing: MeshingOptions {
+                    curve_tolerance: (self.amr_minimum_edge * 0.02).min(1.5e-3),
+                    target_edge_length: self.amr_maximum_edge / 1.05,
+                    minimum_angle_degrees: 12.0,
+                    max_vertices: 50_000,
+                    max_triangles: 100_000,
+                    max_refinement_steps: 50_000,
+                },
+                minimum_target_edge_length: self.amr_minimum_edge,
+                maximum_target_edge_length: self.amr_maximum_edge,
+                max_topology_changes: self.amr_quality.topology_budget(),
+                ..Default::default()
+            };
+            let field: Arc<dyn MeshSizeField> = result.field;
+            match self.start_mesh_adaptation(field, options) {
+                Ok(()) => {
+                    self.amr_status = "adapting mesh";
+                    self.amr_error = None;
+                }
+                Err(error) => {
+                    self.amr_error = Some(error);
+                    self.amr_status = "adaptation deferred";
+                }
+            }
+            return;
+        }
+
+        let (Some(mesh), Some(operator)) = (self.wave_mesh.as_ref(), self.wave_operator.as_ref())
+        else {
+            self.amr_status = "waiting for solution";
+            return;
+        };
+        let dofs = operator.degrees_of_freedom();
+        if !request.ready()
+            || display.generation != request.generation()
+            || display.indicator_displacement.len() != dofs
+            || display.indicator_velocity.len() != dofs
+            || display.indicator_acceleration.len() != dofs
+        {
+            self.amr_status = "waiting for aligned readback";
+            return;
+        }
+        let step = display.completed_steps;
+        if self
+            .amr_last_analyzed_step
+            .is_some_and(|previous| step < previous.saturating_add(8))
+            || self
+                .amr_last_started
+                .is_some_and(|started| started.elapsed().as_secs_f64() < 0.75)
+        {
+            self.amr_status = "monitoring solution";
+            return;
+        }
+        let time = self.wave_time_offset + step.saturating_sub(1) as f64 * self.wave_time_step;
+        let Some(volume_acceleration) = request.volume_acceleration(time) else {
+            self.amr_status = "waiting for source state";
+            return;
+        };
+        let snapshot = QuadraticSolutionSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            displacement: display
+                .indicator_displacement
+                .iter()
+                .map(|value| *value as f64)
+                .collect(),
+            velocity: display
+                .indicator_velocity
+                .iter()
+                .map(|value| *value as f64)
+                .collect(),
+            acceleration: display
+                .indicator_acceleration
+                .iter()
+                .map(|value| *value as f64)
+                .collect(),
+            volume_acceleration,
+            time,
+            time_step: self.wave_time_step,
+        };
+        self.solution_indicator_job = Some(SolutionIndicatorJob::new(
+            mesh.clone(),
+            operator.clone(),
+            self.mesh_committed_scene.clone(),
+            snapshot,
+            self.solution_indicator_options(),
+        ));
+        self.solution_indicator_source = Some((
+            mesh.mesh_revision,
+            request.generation(),
+            request.buffer_revision(),
+            step,
+            self.amr_settings_revision,
+        ));
+        self.amr_last_started = Some(Instant::now());
+        self.amr_status = "preparing estimate";
+    }
+
     fn refresh_wave(
         &mut self,
         request: &mut WaveGpuRequest,
@@ -1627,6 +1907,11 @@ impl Playground {
             self.wave_energy = None;
             self.wave_energy_step = 0;
             self.wave_error = None;
+            self.solution_indicator_job = None;
+            self.solution_indicator_result = None;
+            self.solution_indicator_source = None;
+            self.amr_last_analyzed_step = None;
+            self.amr_status = "waiting for reset readback";
             if let (Some(mesh), Some(operator)) = (&self.wave_mesh, &self.wave_operator) {
                 if let Err(error) = request.reset(
                     assets,
@@ -1739,6 +2024,11 @@ impl Playground {
             self.wave_source_dirty = false;
             self.wave_source.region = candidate.source_region;
             self.wave_running = candidate.resume_running;
+            self.solution_indicator_job = None;
+            self.solution_indicator_result = None;
+            self.solution_indicator_source = None;
+            self.amr_last_analyzed_step = None;
+            self.amr_status = "waiting for solution";
             self.mesh_build_ms = self
                 .mesh_started
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -2254,6 +2544,33 @@ impl Playground {
                             self.mesh_build_ms, self.mesh_work_ms, self.mesh_max_slice_ms
                         ));
                         ui.small(format!(
+                            "AMR {} · indicator work {:.1} ms · longest slice {:.2} ms",
+                            self.amr_status, self.amr_work_ms, self.amr_max_slice_ms
+                        ));
+                        if let Some(report) = &self.solution_indicator_report {
+                            ui.small(format!(
+                                "Indicator {:.3e}–{:.3e} · target {:.3}–{:.3}",
+                                report.minimum_indicator,
+                                report.maximum_indicator,
+                                report.minimum_target,
+                                report.maximum_target
+                            ));
+                            ui.small(format!(
+                                "Refine candidates {} · coarsen candidates {} · {} work units",
+                                report.refine_candidates,
+                                report.coarsen_candidates,
+                                report.work_units
+                            ));
+                        }
+                        if let Some(report) = &self.mesh_adaptation_report {
+                            ui.small(format!(
+                                "Last adaptation: {} inserted · {} collapsed · {} topology changes",
+                                report.inserted_vertices,
+                                report.collapsed_vertices,
+                                report.topology_changes
+                            ));
+                        }
+                        ui.small(format!(
                             "Completed edits {} · full rebuild fallbacks {}",
                             self.mesh_attempts, self.mesh_fallbacks
                         ));
@@ -2451,6 +2768,7 @@ impl Playground {
         ui.add_enabled_ui(self.show_mesh, |ui| {
             ui.checkbox(&mut self.show_mesh_boundary, "Mesh boundary labels");
         });
+        ui.checkbox(&mut self.show_amr_target, "Adaptation target");
         ui.checkbox(&mut self.show_field, "Field colors");
         ui.add_enabled_ui(self.show_field, |ui| {
             ui.add(
@@ -2490,6 +2808,7 @@ impl Playground {
             self.show_boundary_conditions = false;
             self.show_mesh = false;
             self.show_mesh_boundary = true;
+            self.show_amr_target = false;
             self.show_field = true;
             self.field_gain = 2.0;
         }
@@ -2745,6 +3064,62 @@ impl Playground {
             ui.small("Mesh ready");
         } else {
             ui.small("Preparing mesh…");
+        }
+
+        ui.add_space(8.0);
+        ui.label("Automatic adaptation");
+        let previous_amr = (
+            self.amr_enabled,
+            self.amr_quality,
+            self.amr_minimum_edge,
+            self.amr_maximum_edge,
+        );
+        ui.checkbox(&mut self.amr_enabled, "Adapt mesh to the wave");
+        ui.add_enabled_ui(self.amr_enabled, |ui| {
+            egui::ComboBox::from_id_salt("amr_quality")
+                .width(ui.available_width())
+                .selected_text(self.amr_quality.label())
+                .show_ui(ui, |ui| {
+                    for quality in AmrQuality::ALL {
+                        ui.selectable_value(&mut self.amr_quality, quality, quality.label());
+                    }
+                });
+            egui::CollapsingHeader::new("Advanced size limits").show(ui, |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut self.amr_minimum_edge)
+                        .range(0.005..=0.15)
+                        .speed(0.002)
+                        .prefix("min "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut self.amr_maximum_edge)
+                        .range(0.02..=0.30)
+                        .speed(0.005)
+                        .prefix("max "),
+                );
+                self.amr_minimum_edge = self.amr_minimum_edge.min(self.amr_maximum_edge).max(0.005);
+                self.amr_maximum_edge = self.amr_maximum_edge.max(self.amr_minimum_edge);
+            });
+            ui.small(self.amr_status);
+            if let Some(error) = &self.amr_error {
+                ui.colored_label(RED, error);
+            }
+        });
+        let current_amr = (
+            self.amr_enabled,
+            self.amr_quality,
+            self.amr_minimum_edge,
+            self.amr_maximum_edge,
+        );
+        if current_amr != previous_amr {
+            self.amr_settings_revision = self.amr_settings_revision.wrapping_add(1).max(1);
+            self.solution_indicator_job = None;
+            self.solution_indicator_result = None;
+            self.solution_indicator_source = None;
+            self.mesh_adaptation_job = None;
+            self.amr_last_analyzed_step = None;
+            self.amr_last_started = None;
+            self.amr_error = None;
         }
 
         ui.add_space(10.0);
@@ -4451,6 +4826,26 @@ impl Playground {
             }
             painter.add(egui::Shape::mesh(field));
         }
+        if self.show_amr_target
+            && let (Some(mesh), Some(result)) = (&self.mesh, &self.solution_indicator_result)
+            && result.element_targets.len() == mesh.triangles.len()
+        {
+            let minimum = self.amr_minimum_edge;
+            let span = (self.amr_maximum_edge - minimum).max(f64::MIN_POSITIVE);
+            let mut target_mesh = egui::Mesh::default();
+            target_mesh.reserve_vertices(mesh.triangles.len() * 3);
+            target_mesh.reserve_triangles(mesh.triangles.len());
+            for (triangle, target) in mesh.triangles.iter().zip(&result.element_targets) {
+                let fraction = ((*target - minimum) / span).clamp(0.0, 1.0) as f32;
+                let color = amr_target_color(fraction);
+                let base = target_mesh.vertices.len() as u32;
+                for vertex in triangle.vertices {
+                    target_mesh.colored_vertex(self.screen(mesh.vertices[vertex].point, r), color);
+                }
+                target_mesh.add_triangle(base, base + 1, base + 2);
+            }
+            painter.add(egui::Shape::mesh(target_mesh));
+        }
         let domain = [
             Point2::new(-1.0, -1.0),
             Point2::new(1.0, -1.0),
@@ -5490,6 +5885,17 @@ fn boundary_condition_color(condition: FaceBoundaryCondition) -> Color32 {
     }
 }
 
+fn amr_target_color(fraction: f32) -> Color32 {
+    let fine = [240.0, 82.0, 92.0];
+    let coarse = [49.0, 154.0, 224.0];
+    Color32::from_rgba_unmultiplied(
+        egui::lerp(fine[0]..=coarse[0], fraction) as u8,
+        egui::lerp(fine[1]..=coarse[1], fraction) as u8,
+        egui::lerp(fine[2]..=coarse[2], fraction) as u8,
+        105,
+    )
+}
+
 fn outer_boundary_condition_color(condition: OuterBoundaryCondition) -> Color32 {
     match condition {
         OuterBoundaryCondition::Reflecting => Color32::from_rgb(142, 161, 175),
@@ -5510,6 +5916,62 @@ fn mesh_region_at(mesh: &TriMesh, point: Point2) -> Option<RegionId> {
             && (a - c).cross(point - c) >= -1.0e-12;
         inside.then_some(triangle.region)
     })
+}
+
+fn highest_forcing_frequency(scene: &Scene, source: SourceSettings) -> f64 {
+    let mut frequency = if source.enabled && source.amplitude != 0.0 {
+        source.frequency_hz as f64
+    } else {
+        0.0
+    };
+    for condition in scene.outer_boundaries.sides {
+        if let Some(signal) = condition.signal()
+            && signal.amplitude != 0.0
+        {
+            frequency = frequency.max(signal.frequency_hz);
+        }
+    }
+    let mut include = |condition: FaceBoundaryCondition| {
+        if let Some(signal) = condition.signal()
+            && signal.amplitude != 0.0
+        {
+            frequency = frequency.max(signal.frequency_hz);
+        }
+    };
+    for obstacle in &scene.obstacles {
+        for condition in &obstacle.span_conditions {
+            include(*condition);
+        }
+    }
+    for boundary in &scene.internal_boundaries {
+        for law in &boundary.span_laws {
+            include(law.left);
+            include(law.right);
+        }
+    }
+    frequency
+}
+
+fn amr_transaction_needed(mesh: &TriMesh, result: &SolutionIndicatorResult) -> bool {
+    let candidate_threshold = (mesh.triangles.len() / 1_000).max(4);
+    let candidates = result.report.refine_candidates + result.report.coarsen_candidates;
+    let severity = mesh
+        .triangles
+        .iter()
+        .zip(&result.element_targets)
+        .map(|(triangle, target)| {
+            let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+            let edge = [
+                (points[1] - points[0]).norm(),
+                (points[2] - points[1]).norm(),
+                (points[0] - points[2]).norm(),
+            ]
+            .into_iter()
+            .fold(0.0_f64, f64::max);
+            (edge / target).max(target / edge.max(f64::MIN_POSITIVE))
+        })
+        .fold(1.0_f64, f64::max);
+    candidates >= candidate_threshold || severity >= 1.5
 }
 
 pub fn frame(
@@ -5561,6 +6023,7 @@ pub fn frame(
         &mut commands,
         time.delta_secs_f64(),
     );
+    state.refresh_solution_amr(&request, &display);
     Ok(())
 }
 
@@ -5754,8 +6217,9 @@ fn amr_radial_field(center: Point2) -> Arc<dyn MeshSizeField> {
     })
 }
 
-/// Opt-in end-to-end AMR transaction check. It keeps normal sessions unchanged,
-/// but exercises bounded preparation, two GPU handoffs, refinement and coarsening.
+/// Opt-in end-to-end AMR transaction check. It first requires an automatic,
+/// solution-driven estimate from the ordinary frame controller, then exercises
+/// two deterministic moving-target handoffs for refinement/coarsening invariants.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn amr_benchmark(
     mut benchmark: ResMut<AmrBenchmark>,
@@ -5781,9 +6245,19 @@ pub fn amr_benchmark(
             ) else {
                 return;
             };
-            if !request.ready() || state.simulation_candidate.is_some() {
+            if !request.ready()
+                || state.simulation_candidate.is_some()
+                || state.mesh_adaptation_job.is_some()
+                || state.solution_indicator_report.is_none()
+            {
                 return;
             }
+            // The ordinary automatic controller has now completed an aligned
+            // GPU-to-host estimate. Keep the remainder deterministic while it
+            // exercises known refine/coarsen transaction targets.
+            state.amr_enabled = false;
+            state.solution_indicator_job = None;
+            state.solution_indicator_source = None;
             state.wave_running = false;
             if let Err(error) = request.inject_pulse(
                 &mut assets,
@@ -5880,6 +6354,9 @@ pub fn amr_benchmark(
                 && display.current.len() == operator.degrees_of_freedom()
                 && display.previous.len() == operator.degrees_of_freedom()
                 && display.auxiliary.len() == operator.degrees_of_freedom()
+                && display.indicator_displacement.len() == operator.degrees_of_freedom()
+                && display.indicator_velocity.len() == operator.degrees_of_freedom()
+                && display.indicator_acceleration.len() == operator.degrees_of_freedom()
                 && display.current.iter().any(|value| value.abs() > 1.0e-7)
                 && simulation_time >= benchmark.simulation_time
                 && state.wave_running
@@ -5898,6 +6375,8 @@ pub fn amr_benchmark(
                 preserved_triangles = report.preserved_triangles,
                 minimum_target = report.minimum_target,
                 maximum_target = report.maximum_target,
+                indicator_work_ms = state.amr_work_ms,
+                indicator_max_slice_ms = state.amr_max_slice_ms,
                 dofs = operator.degrees_of_freedom(),
                 solver_dt = state.wave_time_step,
                 elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
@@ -6963,6 +7442,10 @@ impl Playground {
                         ui.colored_label(GOLD, "Validating scene file…");
                     } else if let Some(job) = &state.mesh_job {
                         ui.colored_label(GOLD, format!("Mesh rebuilding: {}", job.phase()));
+                    } else if let Some(job) = &state.solution_indicator_job {
+                        ui.colored_label(GOLD, job.phase());
+                    } else if let Some(job) = &state.mesh_adaptation_job {
+                        ui.colored_label(GOLD, format!("Mesh adapting: {}", job.phase()));
                     } else if let Some(candidate) = &state.simulation_candidate {
                         ui.colored_label(
                             GOLD,
@@ -6976,7 +7459,10 @@ impl Playground {
                                 )
                             },
                         );
-                    } else if state.mesh_error.is_some() || state.wave_error.is_some() {
+                    } else if state.mesh_error.is_some()
+                        || state.wave_error.is_some()
+                        || state.amr_error.is_some()
+                    {
                         ui.colored_label(RED, "Attention required");
                     } else if state.mesh.is_none() {
                         ui.colored_label(GOLD, "Preparing initial mesh…");
@@ -8886,5 +9372,52 @@ mod tests {
         assert!(h.state.mesh_error.is_some());
         assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &displayed));
         assert_eq!(h.state.mesh_committed_max_edge, 0.08);
+    }
+
+    #[test]
+    fn automatic_adaptation_controls_are_exposed_and_enabled_by_default() {
+        let mut h = Harness::new();
+        h.click_text("Simulation");
+        assert!(h.state.amr_enabled);
+        for label in ["Automatic adaptation", "Adapt mesh to the wave", "Balanced"] {
+            assert!(
+                h.texts.iter().any(|(text, _)| text == label),
+                "missing {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn wavelength_guard_uses_every_active_time_varying_driver() {
+        let mut scene = Scene::initial();
+        scene.outer_boundaries.sides[0] = OuterBoundaryCondition::Dirichlet {
+            signal: BoundarySignal {
+                amplitude: 1.0,
+                frequency_hz: 3.0,
+                ..BoundarySignal::ZERO
+            },
+        };
+        scene.obstacles[0].span_conditions[0] = FaceBoundaryCondition::Neumann {
+            signal: BoundarySignal {
+                amplitude: 2.0,
+                frequency_hz: 5.0,
+                ..BoundarySignal::ZERO
+            },
+        };
+        let source = SourceSettings {
+            enabled: true,
+            amplitude: 1.0,
+            frequency_hz: 4.0,
+            ..SourceSettings::default()
+        };
+        assert_eq!(highest_forcing_frequency(&scene, source), 5.0);
+        scene.obstacles[0].span_conditions[0] = FaceBoundaryCondition::Neumann {
+            signal: BoundarySignal {
+                amplitude: 0.0,
+                frequency_hz: 9.0,
+                ..BoundarySignal::ZERO
+            },
+        };
+        assert_eq!(highest_forcing_frequency(&scene, source), 4.0);
     }
 }

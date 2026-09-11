@@ -139,19 +139,26 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     let acceleration = source_forcing + neumann_acceleration(i, time) - ku - gamma * velocity;
     let dt = parameters.time_data.x;
     let dirichlet = nodes[i].boundary.x;
+    var aligned_acceleration = acceleration;
+    var aligned_velocity = velocity;
+    var aligned_current = current;
     if dirichlet != 0u {
         let prescribed = signal_value(nodes[i].dirichlet_signal, time);
         let previous = signal_value(nodes[i].dirichlet_signal, time - dt);
+        let next = signal_value(nodes[i].dirichlet_signal, time + dt);
         states[i].levels = vec4<f32>(previous, prescribed, prescribed, 0.0);
+        aligned_acceleration = (next - 2.0 * prescribed + previous) / (dt * dt);
+        aligned_velocity = (next - previous) / (2.0 * dt);
+        aligned_current = prescribed;
     } else {
         let previous = current - dt * velocity + 0.5 * dt * dt * acceleration;
         states[i].levels = vec4<f32>(previous, current, current, 0.0);
     }
     states[i].auxiliary = vec4<f32>(
         transfers[i].mapped.z * nodes[i].position_damping.w,
-        0.0,
-        0.0,
-        0.0,
+        aligned_acceleration,
+        aligned_velocity,
+        aligned_current,
     );
     if i == 0u {
         parameters.time_data.z = time;

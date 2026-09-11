@@ -183,6 +183,10 @@ impl WaveGpuRequest {
         self.generation
     }
 
+    pub fn buffer_revision(&self) -> u64 {
+        self.buffer_revision
+    }
+
     pub fn stats(&self) -> &Arc<WaveGpuStats> {
         &self.stats
     }
@@ -400,6 +404,27 @@ impl WaveGpuRequest {
         self.desired_steps == self.stats.completed_steps()
     }
 
+    /// Nodal volume acceleration for the same source represented by the GPU
+    /// forcing buffer. Boundary forcing is accounted for by the estimator's
+    /// interior flux terms and is deliberately absent here.
+    pub fn volume_acceleration(&self, time: f64) -> Option<Vec<f64>> {
+        let handles = self.buffers.as_ref()?;
+        let source = handles.source;
+        let value = if source.enabled {
+            source.amplitude as f64
+                * (std::f64::consts::TAU * source.frequency_hz as f64 * time).sin()
+        } else {
+            0.0
+        };
+        Some(
+            handles
+                .source_weights
+                .iter()
+                .map(|weight| value * *weight as f64)
+                .collect(),
+        )
+    }
+
     pub fn reset(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
@@ -608,7 +633,7 @@ fn create_buffers(
                 *current as f32,
                 if awaits_transfer { -1.0 } else { 0.0 },
             ),
-            auxiliary: Vec4::new(*auxiliary as f32, 0.0, 0.0, 0.0),
+            auxiliary: Vec4::new(*auxiliary as f32, 0.0, 0.0, *current as f32),
         })
         .collect::<Vec<_>>();
     Ok((
@@ -879,6 +904,11 @@ pub struct WaveDisplay {
     pub current: Vec<f32>,
     pub previous: Vec<f32>,
     pub auxiliary: Vec<f32>,
+    /// Centered fields aligned at the time level immediately before the latest
+    /// committed step. They reuse spare lanes in the normal state readback.
+    pub indicator_displacement: Vec<f32>,
+    pub indicator_velocity: Vec<f32>,
+    pub indicator_acceleration: Vec<f32>,
     pub completed_steps: u64,
     pub readbacks: u64,
 }
@@ -984,13 +1014,22 @@ fn receive_readback(
     display.current.clear();
     display.previous.clear();
     display.auxiliary.clear();
+    display.indicator_displacement.clear();
+    display.indicator_velocity.clear();
+    display.indicator_acceleration.clear();
     display.current.reserve(states.len());
     display.previous.reserve(states.len());
     display.auxiliary.reserve(states.len());
+    display.indicator_displacement.reserve(states.len());
+    display.indicator_velocity.reserve(states.len());
+    display.indicator_acceleration.reserve(states.len());
     for state in states {
         display.current.push(state.levels.y);
         display.previous.push(state.levels.x);
         display.auxiliary.push(state.auxiliary.x);
+        display.indicator_acceleration.push(state.auxiliary.y);
+        display.indicator_velocity.push(state.auxiliary.z);
+        display.indicator_displacement.push(state.auxiliary.w);
     }
     display.readbacks = display.readbacks.saturating_add(1);
 }

@@ -7,9 +7,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Add user wavelength targets and a solution-error indicator on top of the
-  spatial-field AMR transaction. Expose refinement activity without turning normal
-  editing into a mesh-management workflow.
+- [ ] Add physical-boundary residuals for reflecting, driven, impedance, and
+  second-order laws to the solution indicator.
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
 - [ ] Decide whether the load-compatible closed-wall role still warrants assigned
@@ -33,6 +32,40 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
+
+## 2026-09-12 — Automatic solution-driven AMR
+
+- Added a dependency-free, resumable quadratic solution indicator. It combines
+  material-aware recovered displacement/velocity flux defects, the strong interior
+  wave-equation residual with continuous-source acceleration removed, and flux jumps
+  across interior edges. Recovery keys include region identity, so material
+  interfaces and duplicated wall/baffle traces do not smear into one another.
+- Reused three spare lanes in the existing GPU state buffer and readback for
+  time-aligned displacement, velocity, and acceleration. Normal stepping, pulse
+  injection, prescribed Dirichlet nodes, and transferred states maintain these
+  values without another GPU buffer or host transfer.
+- Enabled automatic adaptation by default with Fast, Balanced, and Detailed presets,
+  advanced minimum/maximum element sizes, a wavelength ceiling derived from every
+  active continuous or driven-boundary source, neighbor grading, scheduling delay,
+  candidate/severity hysteresis, and stale mesh/GPU/source/settings rejection.
+  Geometry edits cancel pending solution work and retain priority.
+- Added an optional adaptation-target overlay in View. Simulation reports the live
+  AMR phase; Performance reports indicator range, target range, candidates, work,
+  slice timing, and the last topology changes.
+- Added core tests for deterministic slicing, affine recovery, amplitude
+  normalization, volume-source subtraction, wavelength limiting, field lookup, and
+  malformed/stale snapshots. UI coverage checks the default controls and scans all
+  source kinds for the wavelength guard. `--amr-check` now requires the ordinary
+  automatic controller to complete an aligned readback/estimate before its two
+  deterministic transaction passes.
+- Physical boundary residual terms are deliberately deferred as the next AMR slice;
+  the present indicator uses interior cell and flux information at those edges.
+- Verification: formatting, Clippy with warnings denied, all 174 workspace tests,
+  native release compilation, and release Trunk/WASM packaging pass. The Apple M1
+  Max / Metal `--amr-check` completed in 1.17 s; its automatic indicator used 1.33
+  ms in one slice, and the deterministic transaction checks again finished at 1,844
+  triangles / 5,638 DOFs with 372 insertions and 207 collapses. Interactive browser
+  testing remains deferred by prior agreement.
 
 ## 2026-09-12 — Spatial size-field adaptive mesh transaction
 
