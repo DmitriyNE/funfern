@@ -6,7 +6,9 @@ implemented. Outer sides, hole spans, and baffle faces support reflecting or
 prescribed Neumann data, prescribed Dirichlet data, and first- or second-order
 radiation. Stable material regions, transmitting interfaces, closed two-sided
 walls, and open baffles with independent face laws or coupled thin-gap spans are
-implemented. Broader adaptation remains work.
+implemented. The closed-wall representation is retained for scene compatibility,
+but the current editor does not offer it as a normal role. Broader adaptation
+remains work.
 
 ## Responsibilities and dependencies
 
@@ -30,18 +32,36 @@ manipulated geometry in the viewport. Coordinate panel input capture and the usa
 viewport rectangle with the camera and editor.
 
 The application shell is canvas-first: a top action bar owns document, view,
-panel, Add geometry, and wave playback actions, while a hideable contextual right
+inspector, Draw, and wave playback actions, while a hideable contextual right
 inspector exposes one of four panels: Edit, View, Simulation, or Materials. The
 solver starts in the running state after its initial operator is committed.
-Selection remains contextual rather than introducing separate selection modes. Add geometry opens a transient
-role/primitive popover; the current Rounded and Custom workflows are entries in an
-extensible primitive catalog. The lower-right status strip carries a compact
-performance summary (FPS, solver steps per second, DOFs, mesh size, and timestep).
-Detailed performance measurements are UI-only diagnostics in one draggable,
-scrollable popover with Frame, Mesh, Handoff, and Solver sections. A short rolling
-frame history is kept in memory, and mesh/solver errors open the diagnostics
-popover without changing document history or scene files. Normal rebuild progress
-uses the separate status indicator and does not present as an error.
+Selection remains contextual rather than introducing separate selection modes.
+Draw opens a transient role/primitive popover: holes and interfaces offer Circle
+and Custom, while baffles offer Straight and Custom. A single `InteractionMode`
+owns draw, pulse-placement, and source-placement state. Placement modes are shown
+over the viewport and survive inspector changes; preset geometry is deliberately
+one-shot, while pulse and source placement remain active until toggled off, ended
+with the overlay, or cancelled with Escape.
+
+The lower-right status control carries a compact performance summary (FPS, solver
+steps per second, DOFs, mesh size, and timestep). Detailed performance measurements
+are UI-only diagnostics in one draggable, scrollable window with Frame, Mesh,
+Handoff, and Solver sections. It includes a rolling frame-time plot and aggregate
+frame statistics. Mesh/solver errors open diagnostics and light the warning marker;
+ordinary rebuilding does neither. Validation, mesh, and handoff stages share the
+middle of the status strip, while successful document and handoff actions appear as
+short-lived notices.
+
+Control handles are exclusive selections. Boundary spans support click, Shift
+toggle, Command/Ctrl whole-curve selection, and marquee selection with optional
+filters. Whole-object role and delete actions appear only when one complete curve
+is selected, so a mixed selection cannot accidentally act on its last member.
+Selected spans move as rigid pieces and expose the transform, boundary, and
+topology controls together. A viewport rotation ring and movable pivot complement
+numeric transforms. Boundary laws may be visualized in place for the outer box,
+hole spans, and both baffle traces; selection is drawn over that diagnostic layer.
+Closed two-sided loops remain load-compatible but are omitted from normal creation
+and role controls because open baffles cover the useful two-trace workflow.
 
 ## Geometry and discretization
 

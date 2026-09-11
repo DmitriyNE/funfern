@@ -20,31 +20,41 @@ use std::sync::{
     mpsc::{self, Receiver, Sender},
 };
 const TEAL: Color32 = Color32::from_rgb(91, 220, 194);
+const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
-#[derive(Default, PartialEq)]
-enum Mode {
-    #[default]
-    Select,
-    Preset,
-    Custom,
-    Pulse,
-    Source,
-}
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum CreationRole {
     #[default]
     Hole,
     MaterialInterface,
     InternalBoundary,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum ActiveTool {
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum InteractionMode {
     #[default]
     Select,
-    AddGeometry,
-    Materials,
-    Simulation,
+    DrawPreset {
+        role: CreationRole,
+    },
+    DrawCustom {
+        role: CreationRole,
+    },
+    PlacePulse,
+    MoveSource,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusedFeature {
+    Loop(ObstacleId),
+    Baffle(InternalBoundaryId),
+}
+const EDITABLE_LOOP_KINDS: [(LoopKind, &str); 2] = [
+    (LoopKind::Hole, "Hole"),
+    (LoopKind::MaterialInterface, "Material interface"),
+];
+struct UiNotice {
+    text: String,
+    created: Instant,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum InspectorPanel {
@@ -154,19 +164,21 @@ struct SimulationCandidate {
 pub struct Playground {
     automated_benchmark: bool,
     editor: Editor,
-    active_tool: ActiveTool,
+    interaction_mode: InteractionMode,
     inspector_panel: Option<InspectorPanel>,
     add_geometry_open: bool,
+    add_geometry_anchor: Pos2,
     performance_open: bool,
     performance_history: VecDeque<f32>,
     performance_warning_active: bool,
-    mode: Mode,
     creation_role: CreationRole,
     material_selection: MaterialId,
     material_name_edit: Option<(MaterialId, String)>,
+    loop_role_edit: Option<(ObstacleId, LoopKind)>,
     region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
     internal_selection: Option<(InternalBoundaryId, Option<usize>)>,
+    focused_feature: Option<FocusedFeature>,
     selected_spans: Vec<GeometrySpan>,
     span_selection_filter: SpanSelectionFilter,
     baffle_face: InternalBoundarySide,
@@ -187,6 +199,7 @@ pub struct Playground {
     polygon: bool,
     handles: bool,
     reference: bool,
+    show_boundary_conditions: bool,
     cache_revision: u64,
     cache_scale: f64,
     cache_accepted: Scene,
@@ -196,6 +209,7 @@ pub struct Playground {
     accepted_internal_curves: Vec<InternalCurve>,
     sampling_warning: bool,
     message: String,
+    notice: Option<UiNotice>,
     sender: Sender<FileEvent>,
     receiver: Mutex<Receiver<FileEvent>>,
     file_busy: bool,
@@ -236,6 +250,8 @@ pub struct Playground {
     wave_reset_requested: bool,
     wave_step_requested: bool,
     wave_pending_pulse: Option<Point2>,
+    pulse_amplitude: f32,
+    pulse_width: f32,
     wave_source: SourceSettings,
     wave_source_dirty: bool,
     wave_prepare_ms: f64,
@@ -256,19 +272,21 @@ impl Default for Playground {
         Self {
             automated_benchmark: false,
             editor: Editor::default(),
-            active_tool: ActiveTool::Select,
+            interaction_mode: InteractionMode::Select,
             inspector_panel: Some(InspectorPanel::Edit),
             add_geometry_open: false,
+            add_geometry_anchor: Pos2::new(520.0, 40.0),
             performance_open: false,
             performance_history: VecDeque::with_capacity(90),
             performance_warning_active: false,
-            mode: Mode::Select,
             creation_role: CreationRole::Hole,
             material_selection: DEFAULT_MATERIAL,
             material_name_edit: None,
+            loop_role_edit: None,
             region_selection: BACKGROUND_REGION,
-            selection: Some((ObstacleId(1), None)),
+            selection: None,
             internal_selection: None,
+            focused_feature: Some(FocusedFeature::Loop(ObstacleId(1))),
             selected_spans: (0..8)
                 .map(|span| GeometrySpan::Loop(ObstacleId(1), span))
                 .collect(),
@@ -291,6 +309,7 @@ impl Default for Playground {
             polygon: true,
             handles: true,
             reference: true,
+            show_boundary_conditions: false,
             cache_revision: u64::MAX,
             cache_scale: 0.0,
             cache_accepted: Scene::default(),
@@ -300,6 +319,7 @@ impl Default for Playground {
             accepted_internal_curves: vec![],
             sampling_warning: false,
             message: String::new(),
+            notice: None,
             sender,
             receiver: Mutex::new(receiver),
             file_busy: false,
@@ -340,6 +360,8 @@ impl Default for Playground {
             wave_reset_requested: false,
             wave_step_requested: false,
             wave_pending_pulse: None,
+            pulse_amplitude: 0.65,
+            pulse_width: 0.06,
             wave_source: SourceSettings::default(),
             wave_source_dirty: false,
             wave_prepare_ms: 0.0,
@@ -372,6 +394,7 @@ impl Playground {
     fn clear_transient(&mut self) {
         self.selection = None;
         self.internal_selection = None;
+        self.focused_feature = None;
         self.selected_spans.clear();
         self.gizmo_pivot = None;
         self.pending_span_collapse = None;
@@ -379,7 +402,7 @@ impl Playground {
         self.drag = None;
         self.panning = false;
         self.custom.clear();
-        self.mode = Mode::Select;
+        self.interaction_mode = InteractionMode::Select;
     }
     fn error<T>(&mut self, result: Result<T, String>) -> Option<T> {
         match result {
@@ -394,10 +417,28 @@ impl Playground {
         }
     }
 
+    fn notify(&mut self, text: impl Into<String>) {
+        self.notice = Some(UiNotice {
+            text: text.into(),
+            created: Instant::now(),
+        });
+    }
+
+    fn expire_notice(&mut self) {
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.created.elapsed().as_secs_f32() >= 4.0)
+        {
+            self.notice = None;
+        }
+    }
+
     fn select_control(&mut self, control: GeometryControl) {
         self.selected_spans.clear();
         self.gizmo_pivot = None;
         self.pending_span_collapse = None;
+        self.loop_role_edit = None;
         self.focus_control(Some(control));
     }
 
@@ -406,14 +447,17 @@ impl Playground {
             None => {
                 self.selection = None;
                 self.internal_selection = None;
+                self.focused_feature = None;
             }
             Some(GeometryControl::Loop(id, index)) => {
                 self.selection = Some((id, Some(index)));
                 self.internal_selection = None;
+                self.focused_feature = Some(FocusedFeature::Loop(id));
             }
             Some(GeometryControl::Baffle(id, index)) => {
                 self.selection = None;
                 self.internal_selection = Some((id, Some(index)));
+                self.focused_feature = Some(FocusedFeature::Baffle(id));
             }
         }
     }
@@ -454,20 +498,77 @@ impl Playground {
         }
         self.gizmo_pivot = None;
         self.pending_span_collapse = None;
-        match self.selected_spans.last().copied() {
-            Some(GeometrySpan::Loop(id, _)) => {
-                self.selection = Some((id, None));
-                self.internal_selection = None;
+        self.loop_role_edit = None;
+        self.selection = None;
+        self.internal_selection = None;
+        self.focused_feature = self.complete_selected_feature();
+    }
+
+    fn complete_selected_feature(&self) -> Option<FocusedFeature> {
+        let first = *self.selected_spans.first()?;
+        match first {
+            GeometrySpan::Loop(id, _) => {
+                let obstacle = self.editor.obstacle(id)?;
+                (self.selected_spans.len() == obstacle.spline.intervals().len()
+                    && self.selected_spans.iter().all(
+                        |span| matches!(span, GeometrySpan::Loop(candidate, _) if *candidate == id),
+                    ))
+                .then_some(FocusedFeature::Loop(id))
             }
-            Some(GeometrySpan::Baffle(id, _)) => {
-                self.selection = None;
-                self.internal_selection = Some((id, None));
+            GeometrySpan::Baffle(id, _) => {
+                let boundary = self.editor.internal_boundary(id)?;
+                (self.selected_spans.len() == boundary.spline.intervals().len()
+                    && self
+                        .selected_spans
+                        .iter()
+                        .all(|span| matches!(span, GeometrySpan::Baffle(candidate, _) if *candidate == id)))
+                .then_some(FocusedFeature::Baffle(id))
             }
-            Some(GeometrySpan::Outer(_)) | None => {
-                self.selection = None;
-                self.internal_selection = None;
-            }
+            GeometrySpan::Outer(_) => None,
         }
+    }
+
+    fn selection_summary(&self) -> Option<String> {
+        if let Some((id, Some(index))) = self.selection {
+            return Some(format!(
+                "Control {} on {} {}",
+                index + 1,
+                self.editor.obstacle(id)?.role.label(),
+                id.0
+            ));
+        }
+        if let Some((id, Some(index))) = self.internal_selection {
+            return Some(format!("Control {} on Baffle {}", index + 1, id.0));
+        }
+        if self.selected_spans.is_empty() {
+            return None;
+        }
+        if let Some(feature) = self.complete_selected_feature() {
+            return Some(match feature {
+                FocusedFeature::Loop(id) => format!(
+                    "{} spans on {} {}",
+                    self.selected_spans.len(),
+                    self.editor.obstacle(id)?.role.label(),
+                    id.0
+                ),
+                FocusedFeature::Baffle(id) => {
+                    format!("{} spans on Baffle {}", self.selected_spans.len(), id.0)
+                }
+            });
+        }
+        let mut boundaries = BTreeSet::new();
+        for span in &self.selected_spans {
+            boundaries.insert(match span {
+                GeometrySpan::Outer(_) => (0_u8, 0_u64),
+                GeometrySpan::Loop(id, _) => (1, id.0),
+                GeometrySpan::Baffle(id, _) => (2, id.0),
+            });
+        }
+        Some(format!(
+            "{} spans across {} boundaries",
+            self.selected_spans.len(),
+            boundaries.len()
+        ))
     }
 
     fn span_valid(&self, span: GeometrySpan) -> bool {
@@ -679,6 +780,15 @@ impl Playground {
             .is_none_or(|control| self.editor.control_point(control).is_some());
         if !control_valid {
             self.focus_control(None);
+        }
+        let focus_valid = match self.focused_feature {
+            Some(FocusedFeature::Loop(id)) => self.editor.obstacle(id).is_some(),
+            Some(FocusedFeature::Baffle(id)) => self.editor.internal_boundary(id).is_some(),
+            None => true,
+        };
+        if !focus_valid {
+            self.focused_feature = None;
+            self.loop_role_edit = None;
         }
     }
 
@@ -1018,7 +1128,7 @@ impl Playground {
             if let Some(id) = self.error(result) {
                 self.select_baffle(id);
                 self.custom.clear();
-                self.mode = Mode::Select;
+                self.interaction_mode = InteractionMode::Select;
             }
             return;
         }
@@ -1033,7 +1143,7 @@ impl Playground {
         if let Some(id) = self.error(result) {
             self.select_loop(id);
             self.custom.clear();
-            self.mode = Mode::Select;
+            self.interaction_mode = InteractionMode::Select;
         }
     }
 
@@ -1067,11 +1177,11 @@ impl Playground {
                 FileEvent::Loaded(bytes) => match persistence::parse(&bytes) {
                     Ok(load) => {
                         self.load = Some(load);
-                        self.message = "Validating scene file…".into()
+                        self.message.clear();
                     }
                     Err(e) => self.message = e,
                 },
-                FileEvent::Saved => self.message = "Scene saved".into(),
+                FileEvent::Saved => self.notify("Scene saved"),
                 FileEvent::Cancelled => {}
                 FileEvent::Error(e) => self.message = e,
             }
@@ -1084,7 +1194,7 @@ impl Playground {
                 Ok(document) => {
                     self.editor.replace_validated(document);
                     self.clear_transient();
-                    self.message = "Scene loaded; history cleared".into()
+                    self.notify("Scene loaded; history cleared");
                 }
                 Err(e) => self.message = e,
             }
@@ -1312,7 +1422,7 @@ impl Playground {
                             });
                             self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
                             self.wave_error = None;
-                            self.message = "Preparing material/boundary transaction…".into();
+                            self.message.clear();
                         }
                         Err(error) => self.wave_error = Some(error.to_string()),
                     }
@@ -1467,7 +1577,7 @@ impl Playground {
             self.mesh_build_ms = self
                 .mesh_started
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-            self.message = commit_message;
+            self.notify(commit_message);
         } else if self
             .simulation_candidate
             .as_ref()
@@ -1519,8 +1629,8 @@ impl Playground {
                 operator,
                 PulseSettings {
                     position,
-                    amplitude: 0.65,
-                    width: 0.06,
+                    amplitude: self.pulse_amplitude,
+                    width: self.pulse_width,
                     region,
                 },
             ) {
@@ -1619,19 +1729,27 @@ impl Playground {
             return;
         }
         self.inspector_panel = Some(panel);
-        match panel {
-            InspectorPanel::Edit => {
-                if self.active_tool != ActiveTool::Select {
-                    self.active_tool = ActiveTool::Select;
-                }
+    }
+
+    fn save_scene(&mut self) {
+        self.editor.commit();
+        match persistence::save(&self.editor.document) {
+            Ok(json) => {
+                files::save(self.sender.clone(), json.into_bytes());
+                self.file_busy = true;
             }
-            InspectorPanel::View => self.active_tool = ActiveTool::Select,
-            InspectorPanel::Simulation => self.active_tool = ActiveTool::Simulation,
-            InspectorPanel::Materials => self.active_tool = ActiveTool::Materials,
+            Err(error) => self.message = error,
         }
     }
 
+    fn load_scene(&mut self) {
+        self.editor.commit();
+        files::load(self.sender.clone());
+        self.file_busy = true;
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let compact = ui.available_width() < 1100.0;
         ui.horizontal(|ui| {
             ui.heading(egui::RichText::new("funfern").size(20.0).color(TEAL));
             ui.separator();
@@ -1652,43 +1770,76 @@ impl Playground {
             }
             ui.separator();
             let file_enabled = !self.file_busy && self.load.is_none() && !self.automated_benchmark;
-            if ui
-                .add_enabled(file_enabled, egui::Button::new("Save"))
-                .clicked()
-            {
-                self.editor.commit();
-                match persistence::save(&self.editor.document) {
-                    Ok(json) => {
-                        files::save(self.sender.clone(), json.into_bytes());
-                        self.file_busy = true;
-                    }
-                    Err(error) => self.message = error,
+            if compact {
+                ui.add_enabled_ui(file_enabled, |ui| {
+                    ui.menu_button("File", |ui| {
+                        if ui.button("Save").clicked() {
+                            self.save_scene();
+                            ui.close();
+                        }
+                        if ui.button("Load").clicked() {
+                            self.load_scene();
+                            ui.close();
+                        }
+                    });
+                });
+            } else {
+                if ui
+                    .add_enabled(file_enabled, egui::Button::new("Save"))
+                    .clicked()
+                {
+                    self.save_scene();
                 }
-            }
-            if ui
-                .add_enabled(file_enabled, egui::Button::new("Load"))
-                .clicked()
-            {
-                self.editor.commit();
-                files::load(self.sender.clone());
-                self.file_busy = true;
+                if ui
+                    .add_enabled(file_enabled, egui::Button::new("Load"))
+                    .clicked()
+                {
+                    self.load_scene();
+                }
             }
             if ui.button("Fit view").clicked() {
                 self.fit = true;
             }
             ui.separator();
-            for panel in InspectorPanel::ALL {
-                if ui
-                    .selectable_label(self.inspector_panel == Some(panel), panel.label())
-                    .clicked()
-                {
-                    self.select_inspector_panel(panel);
+            if compact {
+                let label = self.inspector_panel.map_or("Panels", |panel| panel.label());
+                ui.menu_button(label, |ui| {
+                    for panel in InspectorPanel::ALL {
+                        if ui
+                            .selectable_label(self.inspector_panel == Some(panel), panel.label())
+                            .clicked()
+                        {
+                            self.select_inspector_panel(panel);
+                            ui.close();
+                        }
+                    }
+                });
+            } else {
+                for panel in InspectorPanel::ALL {
+                    if ui
+                        .selectable_label(self.inspector_panel == Some(panel), panel.label())
+                        .clicked()
+                    {
+                        self.select_inspector_panel(panel);
+                    }
                 }
             }
-            if ui.button("+ Draw").clicked() {
-                self.inspector_panel = Some(InspectorPanel::Edit);
-                self.active_tool = ActiveTool::AddGeometry;
-                self.add_geometry_open = true;
+            let drawing = matches!(
+                self.interaction_mode,
+                InteractionMode::DrawPreset { .. } | InteractionMode::DrawCustom { .. }
+            );
+            let draw_response =
+                ui.add(egui::Button::new("+ Draw").selected(drawing || self.add_geometry_open));
+            self.add_geometry_anchor = draw_response.rect.left_bottom() + egui::vec2(0.0, 4.0);
+            if draw_response.clicked() {
+                if drawing || self.add_geometry_open {
+                    self.interaction_mode = InteractionMode::Select;
+                    self.custom.clear();
+                    self.add_geometry_open = false;
+                } else {
+                    self.inspector_panel = Some(InspectorPanel::Edit);
+                    self.add_geometry_open = true;
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let wave_available = self.wave_operator.is_some();
@@ -1696,7 +1847,11 @@ impl Playground {
                     if ui.button("Reset").clicked() {
                         self.wave_reset_requested = true;
                     }
-                    if ui.button("Step").clicked() {
+                    if ui
+                        .add_enabled(!self.wave_running, egui::Button::new("Step"))
+                        .on_hover_text("Pause the simulation to advance one solver step")
+                        .clicked()
+                    {
                         self.wave_step_requested = true;
                     }
                     if ui
@@ -1717,10 +1872,11 @@ impl Playground {
         }
         let mut open = true;
         let mut close = false;
-        egui::Window::new("Add geometry")
+        egui::Window::new("Draw geometry")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
+            .fixed_pos(self.add_geometry_anchor)
             .default_width(250.0)
             .show(ctx, |ui| {
                 ui.small("Choose a role, then place a primitive in the viewport.");
@@ -1763,13 +1919,15 @@ impl Playground {
                         "Circle"
                     };
                     if ui.button(primitive_label).clicked() {
-                        self.mode = Mode::Preset;
-                        self.active_tool = ActiveTool::AddGeometry;
+                        self.interaction_mode = InteractionMode::DrawPreset {
+                            role: self.creation_role,
+                        };
                         close = true;
                     }
                     if ui.button("Custom").clicked() {
-                        self.mode = Mode::Custom;
-                        self.active_tool = ActiveTool::AddGeometry;
+                        self.interaction_mode = InteractionMode::DrawCustom {
+                            role: self.creation_role,
+                        };
                         self.custom.clear();
                         close = true;
                     }
@@ -1805,7 +1963,25 @@ impl Playground {
         } else {
             "—".into()
         };
-        format!("FPS {fps:.0} · steps/s {steps_per_second:.1} · N {dofs} · mesh {mesh} · dt {dt}")
+        format!(
+            "FPS {fps:.0} · steps/s {steps_per_second:.1} · DOFs {dofs} · mesh {mesh} · dt {dt}"
+        )
+    }
+
+    fn compact_performance_summary(&self) -> String {
+        let fps = if self.frame_ms > 0.0 {
+            1000.0 / self.frame_ms
+        } else {
+            0.0
+        };
+        let dofs = self.wave_operator.as_ref().map_or_else(
+            || "—".into(),
+            |operator| operator.degrees_of_freedom().to_string(),
+        );
+        format!(
+            "FPS {fps:.0} · steps/s {:.1} · DOFs {dofs}",
+            self.wave_steps_per_second
+        )
     }
 
     fn performance_window(&mut self, ctx: &egui::Context) {
@@ -1829,7 +2005,6 @@ impl Playground {
             .default_width(390.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.heading("Performance diagnostics");
                 ui.monospace(self.performance_summary());
                 ui.separator();
                 egui::CollapsingHeader::new("Frame")
@@ -1844,11 +2019,52 @@ impl Playground {
                             .iter()
                             .copied()
                             .fold(0.0_f32, f32::max);
+                        let average = self.performance_history.iter().sum::<f32>()
+                            / self.performance_history.len().max(1) as f32;
+                        let mut ordered = self.performance_history.iter().copied().collect::<Vec<_>>();
+                        ordered.sort_by(f32::total_cmp);
+                        let p95 = ordered
+                            .get(((ordered.len() as f32 * 0.95).ceil() as usize).saturating_sub(1))
+                            .copied()
+                            .unwrap_or(0.0);
                         ui.small(format!(
-                            "Recent peak {:.2} ms · {} samples",
+                            "Average {:.2} ms · p95 {:.2} ms · peak {:.2} ms · {} samples",
+                            average,
+                            p95,
                             recent_max,
                             self.performance_history.len()
                         ));
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 46.0),
+                            egui::Sense::hover(),
+                        );
+                        if self.performance_history.len() > 1 && recent_max > 0.0 {
+                            let points = self
+                                .performance_history
+                                .iter()
+                                .enumerate()
+                                .map(|(index, value)| {
+                                    egui::pos2(
+                                        egui::lerp(
+                                            rect.left()..=rect.right(),
+                                            index as f32
+                                                / (self.performance_history.len() - 1) as f32,
+                                        ),
+                                        rect.bottom() - rect.height() * (*value / recent_max),
+                                    )
+                                })
+                                .collect();
+                            ui.painter().rect_stroke(
+                                rect,
+                                2.0,
+                                Stroke::new(1.0, Color32::from_rgb(55, 69, 80)),
+                                egui::StrokeKind::Inside,
+                            );
+                            ui.painter().add(egui::Shape::line(
+                                points,
+                                Stroke::new(1.5, TEAL),
+                            ));
+                        }
                     });
                 egui::CollapsingHeader::new("Mesh")
                     .default_open(true)
@@ -1967,30 +2183,118 @@ impl Playground {
         }
     }
 
+    fn panel_header(&mut self, ui: &mut egui::Ui, title: &str) {
+        ui.horizontal(|ui| {
+            ui.heading(title);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("×")
+                    .on_hover_text("Close inspector")
+                    .clicked()
+                {
+                    self.inspector_panel = None;
+                }
+            });
+        });
+    }
+
     fn view_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.heading("View");
+        self.panel_header(ui, "View");
         ui.separator();
         ui.checkbox(&mut self.grid, "Grid");
         ui.checkbox(&mut self.polygon, "Control polygons");
         ui.checkbox(&mut self.handles, "Handles");
         ui.checkbox(&mut self.reference, "Accepted reference");
         ui.checkbox(&mut self.show_materials, "Material regions");
+        ui.checkbox(&mut self.show_boundary_conditions, "Boundary conditions");
+        if self.show_boundary_conditions {
+            for (label, color) in [
+                (
+                    "Reflecting",
+                    boundary_condition_color(FaceBoundaryCondition::Reflecting),
+                ),
+                (
+                    "First-order / impedance",
+                    boundary_condition_color(FaceBoundaryCondition::Impedance { ratio: 1.0 }),
+                ),
+                (
+                    "Second-order",
+                    boundary_condition_color(FaceBoundaryCondition::SecondOrderOutgoing),
+                ),
+                (
+                    "Driven Neumann",
+                    boundary_condition_color(FaceBoundaryCondition::Neumann {
+                        signal: BoundarySignal::ZERO,
+                    }),
+                ),
+                (
+                    "Driven Dirichlet",
+                    boundary_condition_color(FaceBoundaryCondition::Dirichlet {
+                        signal: BoundarySignal::ZERO,
+                    }),
+                ),
+                ("Thin gap", Color32::from_rgb(215, 123, 244)),
+            ] {
+                ui.horizontal(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(18.0, 8.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 2.0, color);
+                    ui.small(label);
+                });
+            }
+        }
         ui.checkbox(&mut self.show_mesh, "Accepted triangle mesh");
         ui.add_enabled_ui(self.show_mesh, |ui| {
             ui.checkbox(&mut self.show_mesh_boundary, "Mesh boundary labels");
         });
         ui.checkbox(&mut self.show_field, "Field colors");
-        ui.add(
-            egui::Slider::new(&mut self.field_gain, 0.25..=12.0)
-                .logarithmic(true)
-                .text("field intensity"),
-        );
+        ui.add_enabled_ui(self.show_field, |ui| {
+            ui.add(
+                egui::Slider::new(&mut self.field_gain, 0.25..=12.0)
+                    .logarithmic(true)
+                    .text("field intensity"),
+            );
+            let width = ui.available_width().max(60.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 10.0), egui::Sense::hover());
+            for index in 0..64 {
+                let fraction = index as f32 / 63.0;
+                let value = 2.0 * fraction - 1.0;
+                let strip = Rect::from_min_max(
+                    egui::pos2(rect.left() + rect.width() * index as f32 / 64.0, rect.top()),
+                    egui::pos2(
+                        rect.left() + rect.width() * (index + 1) as f32 / 64.0,
+                        rect.bottom(),
+                    ),
+                );
+                ui.painter()
+                    .rect_filled(strip, 0.0, field_color(value, 1.0));
+            }
+            ui.horizontal(|ui| {
+                ui.small("negative");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.small("positive");
+                });
+            });
+        });
+        ui.add_space(8.0);
+        if ui.button("Restore view defaults").clicked() {
+            self.grid = true;
+            self.polygon = true;
+            self.handles = true;
+            self.reference = true;
+            self.show_materials = true;
+            self.show_boundary_conditions = false;
+            self.show_mesh = false;
+            self.show_mesh_boundary = true;
+            self.show_field = true;
+            self.field_gain = 2.0;
+        }
     }
 
     fn materials_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.heading("Materials");
+        self.panel_header(ui, "Materials");
         ui.label("Subdomain assignment");
         let materials = self.editor.document.draft.materials.clone();
         let regions = self.editor.document.draft.regions.clone();
@@ -2006,28 +2310,43 @@ impl Playground {
                     .find(|loop_| loop_.role.interior() == Some(region.id))
                     .map_or_else(
                         || format!("Region {}", region.id.0),
-                        |loop_| format!("Loop {} interior", loop_.id.0),
+                        |loop_| format!("{} {} interior", loop_.role.label(), loop_.id.0),
                     )
             };
             let mut selected = region.material;
-            if ui
-                .selectable_label(self.region_selection == region.id, label)
-                .clicked()
-            {
-                self.region_selection = region.id;
-            }
-            egui::ComboBox::from_id_salt(("region_material", region.id.0))
-                .selected_text(
-                    materials
-                        .iter()
-                        .find(|material| material.id == selected)
-                        .map_or("Missing", |material| material.name.as_str()),
-                )
-                .show_ui(ui, |ui| {
-                    for material in &materials {
-                        ui.selectable_value(&mut selected, material.id, &material.name);
-                    }
-                });
+            ui.horizontal(|ui| {
+                if ui
+                    .add_sized(
+                        [128.0, 22.0],
+                        egui::Button::new(label).selected(self.region_selection == region.id),
+                    )
+                    .clicked()
+                {
+                    self.region_selection = region.id;
+                }
+                if let Some(material) = materials.iter().find(|material| material.id == selected) {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        rect,
+                        2.0,
+                        Color32::from_rgb(material.color[0], material.color[1], material.color[2]),
+                    );
+                }
+                egui::ComboBox::from_id_salt(("region_material", region.id.0))
+                    .width(ui.available_width())
+                    .selected_text(
+                        materials
+                            .iter()
+                            .find(|material| material.id == selected)
+                            .map_or("Missing", |material| material.name.as_str()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for material in &materials {
+                            ui.selectable_value(&mut selected, material.id, &material.name);
+                        }
+                    });
+            });
             if selected != region.material {
                 let result = self.editor.set_region_material(region.id, selected);
                 self.error(result);
@@ -2036,26 +2355,44 @@ impl Playground {
         ui.separator();
         ui.label("Library");
         ui.horizontal(|ui| {
-            ui.label("Material");
-            if ui.small_button("+").clicked() {
+            if ui.button("+ Material").clicked() {
                 let result = self.editor.add_material();
                 if let Some(id) = self.error(result) {
                     self.material_selection = id;
                 }
             }
         });
-        egui::ComboBox::from_id_salt("material_editor")
-            .selected_text(
-                materials
-                    .iter()
-                    .find(|material| material.id == self.material_selection)
-                    .map_or("Missing", |material| material.name.as_str()),
-            )
-            .show_ui(ui, |ui| {
-                for material in &materials {
-                    ui.selectable_value(&mut self.material_selection, material.id, &material.name);
-                }
-            });
+        ui.horizontal(|ui| {
+            if let Some(material) = materials
+                .iter()
+                .find(|material| material.id == self.material_selection)
+            {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    rect,
+                    2.0,
+                    Color32::from_rgb(material.color[0], material.color[1], material.color[2]),
+                );
+            }
+            egui::ComboBox::from_id_salt("material_editor")
+                .width(ui.available_width())
+                .selected_text(
+                    materials
+                        .iter()
+                        .find(|material| material.id == self.material_selection)
+                        .map_or("Missing", |material| material.name.as_str()),
+                )
+                .show_ui(ui, |ui| {
+                    for material in &materials {
+                        ui.selectable_value(
+                            &mut self.material_selection,
+                            material.id,
+                            &material.name,
+                        );
+                    }
+                });
+        });
         if let Some(mut material) = self
             .editor
             .document
@@ -2128,6 +2465,7 @@ impl Playground {
                         .update_while_editing(false),
                 ),
             ];
+            ui.small("Nondimensional coefficients");
             if responses.iter().any(egui::Response::changed) {
                 let result = self.editor.update_material(material.clone());
                 self.error(result);
@@ -2162,127 +2500,179 @@ impl Playground {
 
     fn simulation_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.heading("Simulation");
+        self.panel_header(ui, "Simulation");
         ui.add_space(8.0);
         ui.separator();
-        if self.active_tool == ActiveTool::Simulation {
-            ui.label("Accepted mesh");
-            egui::ComboBox::from_id_salt("mesh_resolution")
-                .selected_text(format!("Max edge {:.2}", self.mesh_max_edge))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.mesh_max_edge,
-                        0.16,
-                        "Coarse P2e · parent h ≤ 0.16",
-                    );
-                    ui.selectable_value(&mut self.mesh_max_edge, 0.08, "P2e · parent h ≤ 0.08");
-                    ui.selectable_value(
-                        &mut self.mesh_max_edge,
-                        0.04,
-                        "Fine P2e · parent h ≤ 0.04",
-                    );
-                });
-            ui.small("Seven-node enriched quadratic wave basis.");
-            if self.editor.editing() && self.mesh_source != self.editor.document.accepted {
-                ui.small("Waiting for edit to finish…");
-            } else if let Some(job) = &self.mesh_job {
-                ui.small(format!("Mesh rebuilding: {}…", job.phase()));
-            } else if let Some(error) = &self.mesh_error {
-                ui.colored_label(RED, error);
-                ui.small("Previous mesh retained.");
-            } else if self.mesh.is_some() {
-                ui.small("Mesh ready.");
+        ui.label("Mesh resolution");
+        let resolution_name = |edge: f64| {
+            if edge >= 0.12 {
+                "Coarse"
+            } else if edge >= 0.06 {
+                "Medium"
             } else {
-                ui.small("Preparing…");
+                "Fine"
             }
-            let wave_available = self.wave_operator.is_some();
-            ui.add_enabled_ui(wave_available, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(egui::Button::new("Place pulse").selected(self.mode == Mode::Pulse))
-                        .clicked()
-                    {
-                        self.mode = if self.mode == Mode::Pulse {
-                            Mode::Select
-                        } else {
-                            Mode::Pulse
-                        };
-                    }
-                    if ui
-                        .add(egui::Button::new("Move source").selected(self.mode == Mode::Source))
-                        .clicked()
-                    {
-                        self.mode = if self.mode == Mode::Source {
-                            Mode::Select
-                        } else {
-                            Mode::Source
-                        };
-                    }
-                });
-                ui.add(
-                    egui::Slider::new(&mut self.wave_speed, 0.1..=4.0)
-                        .logarithmic(true)
-                        .text("simulation speed"),
-                );
+        };
+        egui::ComboBox::from_id_salt("mesh_resolution")
+            .width(ui.available_width())
+            .selected_text(format!(
+                "{} · max edge {:.2}",
+                resolution_name(self.mesh_max_edge),
+                self.mesh_max_edge
+            ))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.mesh_max_edge, 0.16, "Coarse · h ≤ 0.16 · P2e");
+                ui.selectable_value(&mut self.mesh_max_edge, 0.08, "Medium · h ≤ 0.08 · P2e");
+                ui.selectable_value(&mut self.mesh_max_edge, 0.04, "Fine · h ≤ 0.04 · P2e");
+            });
+        if self.mesh.is_some() && self.mesh_committed_max_edge != self.mesh_max_edge {
+            ui.small(format!(
+                "Active {:.2} · requested {:.2}",
+                self.mesh_committed_max_edge, self.mesh_max_edge
+            ));
+        }
+        if self.editor.editing() && self.mesh_source != self.editor.document.accepted {
+            ui.small("Waiting for edit to finish…");
+        } else if let Some(job) = &self.mesh_job {
+            ui.small(format!("Mesh rebuilding: {}…", job.phase()));
+        } else if let Some(error) = &self.mesh_error {
+            ui.colored_label(RED, error);
+            ui.small("Previous mesh retained.");
+        } else if self.mesh.is_some() {
+            ui.small("Mesh ready");
+        } else {
+            ui.small("Preparing mesh…");
+        }
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.label("Excitation");
+        let wave_available = self.wave_operator.is_some();
+        ui.add_enabled_ui(wave_available, |ui| {
+            ui.horizontal(|ui| {
+                let placing_pulse = self.interaction_mode == InteractionMode::PlacePulse;
                 if ui
-                    .checkbox(&mut self.wave_source.enabled, "Continuous source")
-                    .changed()
+                    .add(egui::Button::new("Place pulse").selected(placing_pulse))
+                    .on_hover_text(
+                        "Click repeatedly in the viewport; click again or press Esc to finish",
+                    )
+                    .clicked()
                 {
+                    self.interaction_mode = if placing_pulse {
+                        InteractionMode::Select
+                    } else {
+                        InteractionMode::PlacePulse
+                    };
+                }
+                let moving_source = self.interaction_mode == InteractionMode::MoveSource;
+                if ui
+                    .add(egui::Button::new("Move source").selected(moving_source))
+                    .on_hover_text(
+                        "Click repeatedly in the viewport; click again or press Esc to finish",
+                    )
+                    .clicked()
+                {
+                    self.interaction_mode = if moving_source {
+                        InteractionMode::Select
+                    } else {
+                        InteractionMode::MoveSource
+                    };
+                }
+            });
+            ui.add(
+                egui::Slider::new(&mut self.pulse_amplitude, 0.01..=5.0)
+                    .logarithmic(true)
+                    .text("pulse strength"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.pulse_width, 0.005..=0.3)
+                    .logarithmic(true)
+                    .text("pulse width"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.wave_speed, 0.1..=4.0)
+                    .logarithmic(true)
+                    .text("simulation speed"),
+            );
+            if ui
+                .checkbox(&mut self.wave_source.enabled, "Continuous source")
+                .changed()
+            {
+                self.wave_source_dirty = true;
+            }
+            ui.add_enabled_ui(self.wave_source.enabled, |ui| {
+                let mut position = self.wave_source.position;
+                ui.horizontal(|ui| {
+                    ui.label("Position");
+                    ui.add(
+                        egui::DragValue::new(&mut position.x)
+                            .speed(0.005)
+                            .prefix("x "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut position.y)
+                            .speed(0.005)
+                            .prefix("y "),
+                    );
+                });
+                if position != self.wave_source.position {
+                    self.wave_source.position = position;
+                    self.wave_source.region = self
+                        .wave_mesh
+                        .as_ref()
+                        .and_then(|mesh| mesh_region_at(mesh, position))
+                        .unwrap_or(BACKGROUND_REGION);
                     self.wave_source_dirty = true;
                 }
-                ui.add_enabled_ui(self.wave_source.enabled, |ui| {
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut self.wave_source.frequency_hz, 0.25..=8.0)
-                                .logarithmic(true)
-                                .text("source frequency"),
-                        )
-                        .changed()
-                    {
+                for response in [
+                    ui.add(
+                        egui::Slider::new(&mut self.wave_source.frequency_hz, 0.25..=8.0)
+                            .logarithmic(true)
+                            .text("source frequency"),
+                    ),
+                    ui.add(
+                        egui::Slider::new(&mut self.wave_source.amplitude, 1.0..=50.0)
+                            .logarithmic(true)
+                            .text("source strength"),
+                    ),
+                    ui.add(
+                        egui::Slider::new(&mut self.wave_source.width, 0.005..=0.3)
+                            .logarithmic(true)
+                            .text("source width"),
+                    ),
+                ] {
+                    if response.changed() {
                         self.wave_source_dirty = true;
                     }
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut self.wave_source.amplitude, 1.0..=50.0)
-                                .logarithmic(true)
-                                .text("source strength"),
-                        )
-                        .changed()
-                    {
-                        self.wave_source_dirty = true;
-                    }
-                });
-            });
-            if let Some(operator) = &self.wave_operator {
-                ui.small(format!(
-                    "GPU {} · {} DOFs · dt {:.6}",
-                    self.wave_gpu_status,
-                    operator.degrees_of_freedom(),
-                    self.wave_time_step,
-                ));
-                if let Some(energy) = self.wave_energy {
-                    ui.small(format!("Discrete energy {energy:.6e}"));
                 }
-            } else if self.mesh.is_some() {
-                ui.small("Preparing wave operator…");
-            } else if self.simulation_candidate.is_some() {
-                ui.small("Preparing initial wave state…");
-            } else {
-                ui.small("Waiting for an accepted mesh…");
-            }
-            if let Some(error) = &self.wave_error {
-                ui.colored_label(RED, error);
-            }
+                ui.small(format!("Region {}", self.wave_source.region.0));
+            });
+        });
+        if let Some(operator) = &self.wave_operator {
             ui.small(format!(
-                "{} outer boundary · λ=0.4 source preset",
-                self.wave_boundary_committed.label()
+                "GPU {} · {} DOFs · dt {:.6}",
+                self.wave_gpu_status,
+                operator.degrees_of_freedom(),
+                self.wave_time_step,
             ));
+            if let Some(energy) = self.wave_energy {
+                ui.small(format!("Discrete energy {energy:.6e}"));
+            }
+        } else if self.mesh.is_some() {
+            ui.small("Preparing wave operator…");
+        } else if self.simulation_candidate.is_some() {
+            ui.small("Preparing initial wave state…");
+        } else {
+            ui.small("Waiting for an accepted mesh…");
+        }
+        if let Some(error) = &self.wave_error {
+            ui.colored_label(RED, error);
         }
     }
 
     fn edit_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.heading("Edit");
+        self.panel_header(ui, "Edit");
         if self
             .editor
             .document
@@ -2298,43 +2688,55 @@ impl Playground {
                 .first()
                 .map_or(DEFAULT_MATERIAL, |material| material.id);
         }
-        if self.active_tool == ActiveTool::Select {
+        ui.horizontal(|ui| {
+            ui.label("Span filter");
+            egui::ComboBox::from_id_salt("span_selection_filter")
+                .selected_text(self.span_selection_filter.label())
+                .show_ui(ui, |ui| {
+                    for filter in [
+                        SpanSelectionFilter::All,
+                        SpanSelectionFilter::Outer,
+                        SpanSelectionFilter::Loops,
+                        SpanSelectionFilter::Baffles,
+                    ] {
+                        ui.selectable_value(
+                            &mut self.span_selection_filter,
+                            filter,
+                            filter.label(),
+                        );
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            if ui.small_button("Select filtered").clicked() {
+                self.select_filtered();
+            }
+            if ui.small_button("Invert").clicked() {
+                self.invert_filtered_selection();
+            }
+            if ui.small_button("Clear").clicked() {
+                self.set_span_selection(vec![]);
+            }
+        });
+        if let InteractionMode::DrawCustom { .. } = self.interaction_mode {
             ui.horizontal(|ui| {
-                ui.label("Span filter");
-                egui::ComboBox::from_id_salt("span_selection_filter")
-                    .selected_text(self.span_selection_filter.label())
-                    .show_ui(ui, |ui| {
-                        for filter in [
-                            SpanSelectionFilter::All,
-                            SpanSelectionFilter::Outer,
-                            SpanSelectionFilter::Loops,
-                            SpanSelectionFilter::Baffles,
-                        ] {
-                            ui.selectable_value(
-                                &mut self.span_selection_filter,
-                                filter,
-                                filter.label(),
-                            );
-                        }
-                    });
-            });
-            ui.horizontal(|ui| {
-                if ui.small_button("Select filtered").clicked() {
-                    self.select_filtered();
+                ui.label(format!("{} / 128 points", self.custom.len()));
+                if ui
+                    .add_enabled(self.custom.len() >= 4, egui::Button::new("Finish"))
+                    .clicked()
+                {
+                    self.finish_custom();
                 }
-                if ui.small_button("Invert").clicked() {
-                    self.invert_filtered_selection();
-                }
-                if ui.small_button("Clear").clicked() {
-                    self.set_span_selection(vec![]);
+                if ui.button("Cancel").clicked() {
+                    self.custom.clear();
+                    self.interaction_mode = InteractionMode::Select;
                 }
             });
+            ui.small("Enter finishes · Backspace removes the last point");
         }
-        if self.active_tool == ActiveTool::AddGeometry && self.mode == Mode::Custom {
-            ui.small(format!(
-                "{} / 128 points · Backspace removes · Esc cancels",
-                self.custom.len()
-            ));
+        if let Some(summary) = self.selection_summary() {
+            ui.add_space(8.0);
+            ui.strong(summary);
         }
         ui.add_space(10.0);
         ui.separator();
@@ -2366,11 +2768,11 @@ impl Playground {
                         .selectable_label(
                             self.selected_spans.iter().any(
                                 |span| matches!(span, GeometrySpan::Loop(id, _) if *id == o.id),
-                            ) || self.selection.is_some_and(|s| s.0 == o.id),
+                            ) || self.focused_feature == Some(FocusedFeature::Loop(o.id)),
                             format!(
-                                "Loop {:02} · {}{} · {} controls",
-                                o.id.0,
+                                "{} {}{} · {} controls",
                                 o.role.label(),
+                                o.id.0,
                                 assignment,
                                 o.spline.controls().len()
                             ),
@@ -2385,9 +2787,8 @@ impl Playground {
                         .selectable_label(
                             self.selected_spans.iter().any(|span| {
                                 matches!(span, GeometrySpan::Baffle(id, _) if *id == boundary.id)
-                            }) || self
-                                .internal_selection
-                                .is_some_and(|selection| selection.0 == boundary.id),
+                            }) || self.focused_feature
+                                == Some(FocusedFeature::Baffle(boundary.id)),
                             format!(
                                 "Baffle {:02} · {} · {} controls",
                                 boundary.id.0,
@@ -2409,41 +2810,48 @@ impl Playground {
                     }
                 }
             });
-        if let Some((id, index)) = self.selection {
-            if ui.button("Delete loop").clicked() {
+
+        if let Some(FocusedFeature::Loop(id)) = self.focused_feature
+            && self.complete_selected_feature() == Some(FocusedFeature::Loop(id))
+        {
+            if ui
+                .button(egui::RichText::new("Delete loop").color(RED))
+                .clicked()
+            {
                 self.editor.delete_obstacle(id);
                 self.clear_transient();
             }
-            if index.is_none() && ui.button("Duplicate loop").clicked() {
+            if ui.button("Duplicate loop").clicked() {
                 let result = self.editor.duplicate_obstacle(id, Point2::new(0.05, -0.05));
                 if let Some(id) = self.error(result) {
                     self.select_loop(id);
                 }
             }
-            if index.is_none()
-                && let Some(current_kind) = self.editor.loop_kind(id)
-            {
+            if let Some(current_kind) = self.editor.loop_kind(id) {
                 ui.add_space(6.0);
                 ui.label("Loop role");
-                let mut kind = current_kind;
+                let mut kind = self
+                    .loop_role_edit
+                    .filter(|(candidate, _)| *candidate == id)
+                    .map_or(current_kind, |(_, kind)| kind);
                 egui::ComboBox::from_id_salt(("loop_kind", id.0))
-                    .selected_text(match current_kind {
+                    .width(ui.available_width())
+                    .selected_text(match kind {
                         LoopKind::Hole => "Hole",
                         LoopKind::MaterialInterface => "Material interface",
-                        LoopKind::Wall => "Two-sided closed wall",
+                        LoopKind::Wall => "Legacy closed wall",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut kind, LoopKind::Hole, "Hole");
-                        ui.selectable_value(
-                            &mut kind,
-                            LoopKind::MaterialInterface,
-                            "Material interface",
-                        );
-                        ui.selectable_value(&mut kind, LoopKind::Wall, "Two-sided closed wall");
+                        for (editable_kind, label) in EDITABLE_LOOP_KINDS {
+                            ui.selectable_value(&mut kind, editable_kind, label);
+                        }
                     });
-                if current_kind == LoopKind::Hole {
+                self.loop_role_edit = Some((id, kind));
+                if kind == LoopKind::MaterialInterface && kind != current_kind {
                     let materials = self.editor.document.draft.materials.clone();
-                    egui::ComboBox::from_label("New interior material")
+                    ui.label("Interior material");
+                    egui::ComboBox::from_id_salt(("new_interior_material", id.0))
+                        .width(ui.available_width())
                         .selected_text(
                             self.editor
                                 .document
@@ -2461,80 +2869,87 @@ impl Playground {
                             }
                         });
                 }
-                if kind != current_kind {
+                if kind != current_kind && ui.button("Apply role change").clicked() {
                     let result = self.editor.set_loop_kind(id, kind, self.material_selection);
                     if self.error(result).is_some() {
                         self.select_loop(id);
-                    }
-                }
-            }
-            if let Some(index) = index
-                && let Some(o) = self.editor.obstacle(id)
-                && let Some(p) = o.spline.controls().get(index).copied()
-            {
-                ui.add_space(8.0);
-                ui.label(format!("Control {}", index + 1));
-                let mut p = p;
-                let responses = ui
-                    .push_id((id.0, index, "coordinates"), |ui| {
-                        ui.horizontal(|ui| {
-                            [
-                                ui.add(
-                                    egui::DragValue::new(&mut p.x)
-                                        .speed(0.002)
-                                        .range(-1e6..=1e6)
-                                        .prefix("x ")
-                                        .update_while_editing(false),
-                                ),
-                                ui.add(
-                                    egui::DragValue::new(&mut p.y)
-                                        .speed(0.002)
-                                        .range(-1e6..=1e6)
-                                        .prefix("y ")
-                                        .update_while_editing(false),
-                                ),
-                            ]
-                        })
-                        .inner
-                    })
-                    .inner;
-                if responses
-                    .iter()
-                    .any(|r| r.gained_focus() || r.drag_started() || r.changed())
-                {
-                    self.editor.begin();
-                }
-                if responses.iter().any(|r| r.changed()) {
-                    let result = self.editor.set_point(id, index, p);
-                    self.error(result);
-                }
-                if responses.iter().any(|r| r.lost_focus() || r.drag_stopped()) {
-                    self.editor.commit();
-                }
-                let can_remove = self.editor.obstacle(id).is_some_and(|o| {
-                    o.spline.controls().len() > 4
-                        && o.spline.multiplicities().iter().all(|value| *value == 1)
-                });
-                if ui
-                    .add_enabled(
-                        can_remove,
-                        egui::Button::new("Remove control · reshapes curve"),
-                    )
-                    .clicked()
-                {
-                    let result = self.editor.remove_point(id, index);
-                    if self.error(result).is_some() {
-                        self.select_loop(id);
+                        self.loop_role_edit = None;
                     }
                 }
             }
         }
-        if let Some((id, index)) = self.internal_selection {
-            if ui.button("Delete baffle").clicked() {
+        if let Some((id, Some(index))) = self.selection
+            && let Some(o) = self.editor.obstacle(id)
+            && let Some(p) = o.spline.controls().get(index).copied()
+        {
+            ui.add_space(8.0);
+            ui.label(format!("Control {}", index + 1));
+            let mut p = p;
+            let responses = ui
+                .push_id((id.0, index, "coordinates"), |ui| {
+                    ui.horizontal(|ui| {
+                        [
+                            ui.add(
+                                egui::DragValue::new(&mut p.x)
+                                    .speed(0.002)
+                                    .range(-1e6..=1e6)
+                                    .prefix("x ")
+                                    .update_while_editing(false),
+                            ),
+                            ui.add(
+                                egui::DragValue::new(&mut p.y)
+                                    .speed(0.002)
+                                    .range(-1e6..=1e6)
+                                    .prefix("y ")
+                                    .update_while_editing(false),
+                            ),
+                        ]
+                    })
+                    .inner
+                })
+                .inner;
+            if responses
+                .iter()
+                .any(|r| r.gained_focus() || r.drag_started() || r.changed())
+            {
+                self.editor.begin();
+            }
+            if responses.iter().any(|r| r.changed()) {
+                let result = self.editor.set_point(id, index, p);
+                self.error(result);
+            }
+            if responses.iter().any(|r| r.lost_focus() || r.drag_stopped()) {
+                self.editor.commit();
+            }
+            let can_remove = self.editor.obstacle(id).is_some_and(|o| {
+                o.spline.controls().len() > 4
+                    && o.spline.multiplicities().iter().all(|value| *value == 1)
+            });
+            if ui
+                .add_enabled(
+                    can_remove,
+                    egui::Button::new("Remove control · reshapes curve"),
+                )
+                .clicked()
+            {
+                let result = self.editor.remove_point(id, index);
+                if self.error(result).is_some() {
+                    self.select_loop(id);
+                }
+            }
+        }
+
+        if let Some(FocusedFeature::Baffle(id)) = self.focused_feature
+            && self.complete_selected_feature() == Some(FocusedFeature::Baffle(id))
+        {
+            if ui
+                .button(egui::RichText::new("Delete baffle").color(RED))
+                .clicked()
+            {
                 self.editor.delete_internal_boundary(id);
                 self.clear_transient();
             }
-            if index.is_none() && ui.button("Duplicate baffle").clicked() {
+            if ui.button("Duplicate baffle").clicked() {
                 let result = self
                     .editor
                     .duplicate_internal_boundary(id, Point2::new(0.05, -0.05));
@@ -2548,70 +2963,70 @@ impl Playground {
                     self.gizmo_pivot = None;
                 }
             }
-            if let Some(index) = index
-                && let Some(boundary) = self.editor.internal_boundary(id)
-                && let Some(point) = boundary.spline.controls().get(index).copied()
-            {
-                ui.add_space(8.0);
-                ui.label(format!("Baffle control {}", index + 1));
-                let mut point = point;
-                let responses = ui
-                    .push_id((id.0, index, "baffle_coordinates"), |ui| {
-                        ui.horizontal(|ui| {
-                            [
-                                ui.add(
-                                    egui::DragValue::new(&mut point.x)
-                                        .speed(0.002)
-                                        .range(-1e6..=1e6)
-                                        .prefix("x ")
-                                        .update_while_editing(false),
-                                ),
-                                ui.add(
-                                    egui::DragValue::new(&mut point.y)
-                                        .speed(0.002)
-                                        .range(-1e6..=1e6)
-                                        .prefix("y ")
-                                        .update_while_editing(false),
-                                ),
-                            ]
-                        })
-                        .inner
+        }
+        if let Some((id, Some(index))) = self.internal_selection
+            && let Some(boundary) = self.editor.internal_boundary(id)
+            && let Some(point) = boundary.spline.controls().get(index).copied()
+        {
+            ui.add_space(8.0);
+            ui.label(format!("Baffle control {}", index + 1));
+            let mut point = point;
+            let responses = ui
+                .push_id((id.0, index, "baffle_coordinates"), |ui| {
+                    ui.horizontal(|ui| {
+                        [
+                            ui.add(
+                                egui::DragValue::new(&mut point.x)
+                                    .speed(0.002)
+                                    .range(-1e6..=1e6)
+                                    .prefix("x ")
+                                    .update_while_editing(false),
+                            ),
+                            ui.add(
+                                egui::DragValue::new(&mut point.y)
+                                    .speed(0.002)
+                                    .range(-1e6..=1e6)
+                                    .prefix("y ")
+                                    .update_while_editing(false),
+                            ),
+                        ]
                     })
-                    .inner;
-                if responses.iter().any(|response| {
-                    response.gained_focus() || response.drag_started() || response.changed()
-                }) {
-                    self.editor.begin();
-                }
-                if responses.iter().any(|response| response.changed()) {
-                    let result = self.editor.set_internal_boundary_point(id, index, point);
-                    self.error(result);
-                }
-                if responses
-                    .iter()
-                    .any(|response| response.lost_focus() || response.drag_stopped())
-                {
-                    self.editor.commit();
-                }
-                let can_remove = self.editor.internal_boundary(id).is_some_and(|boundary| {
-                    boundary.spline.controls().len() > 4
-                        && boundary
-                            .spline
-                            .multiplicities()
-                            .iter()
-                            .all(|value| *value == 1)
-                });
-                if ui
-                    .add_enabled(
-                        can_remove,
-                        egui::Button::new("Remove control · reshapes curve"),
-                    )
-                    .clicked()
-                {
-                    let result = self.editor.remove_internal_boundary_point(id, index);
-                    if self.error(result).is_some() {
-                        self.select_baffle(id);
-                    }
+                    .inner
+                })
+                .inner;
+            if responses.iter().any(|response| {
+                response.gained_focus() || response.drag_started() || response.changed()
+            }) {
+                self.editor.begin();
+            }
+            if responses.iter().any(|response| response.changed()) {
+                let result = self.editor.set_internal_boundary_point(id, index, point);
+                self.error(result);
+            }
+            if responses
+                .iter()
+                .any(|response| response.lost_focus() || response.drag_stopped())
+            {
+                self.editor.commit();
+            }
+            let can_remove = self.editor.internal_boundary(id).is_some_and(|boundary| {
+                boundary.spline.controls().len() > 4
+                    && boundary
+                        .spline
+                        .multiplicities()
+                        .iter()
+                        .all(|value| *value == 1)
+            });
+            if ui
+                .add_enabled(
+                    can_remove,
+                    egui::Button::new("Remove control · reshapes curve"),
+                )
+                .clicked()
+            {
+                let result = self.editor.remove_internal_boundary_point(id, index);
+                if self.error(result).is_some() {
+                    self.select_baffle(id);
                 }
             }
         }
@@ -2694,10 +3109,22 @@ impl Playground {
                     }
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("Align horizontal").clicked() {
+                    if ui
+                        .add_enabled(piece_count > 1, egui::Button::new("Align horizontal"))
+                        .on_hover_text(
+                            "Align the centers of two or more independently movable pieces",
+                        )
+                        .clicked()
+                    {
                         self.align_selection(true);
                     }
-                    if ui.button("Align vertical").clicked() {
+                    if ui
+                        .add_enabled(piece_count > 1, egui::Button::new("Align vertical"))
+                        .on_hover_text(
+                            "Align the centers of two or more independently movable pieces",
+                        )
+                        .clicked()
+                    {
                         self.align_selection(false);
                     }
                 });
@@ -2734,6 +3161,45 @@ impl Playground {
         if self.selected_spans.is_empty() {
             return;
         }
+        let has_endpoint = self.selected_topology_endpoint().is_some();
+        let exposed = self.exposed_selection_breakpoints();
+        let needs_isolation = exposed.as_ref().is_some_and(|(loops, baffles)| {
+            loops.iter().any(|(id, breakpoint)| {
+                self.editor
+                    .obstacle(*id)
+                    .and_then(|obstacle| obstacle.spline.continuity(*breakpoint))
+                    != Some(0)
+            }) || baffles.iter().any(|(id, breakpoint)| {
+                self.editor
+                    .internal_boundary(*id)
+                    .and_then(|boundary| boundary.spline.continuity(*breakpoint))
+                    != Some(0)
+            })
+        });
+        let mut selected_baffles = Vec::new();
+        for span in &self.selected_spans {
+            if let GeometrySpan::Baffle(id, _) = span
+                && !selected_baffles.contains(id)
+            {
+                selected_baffles.push(*id);
+            }
+        }
+        let has_merge_pair = selected_baffles.len() == 2
+            && self
+                .selected_spans
+                .iter()
+                .all(|span| matches!(span, GeometrySpan::Baffle(_, _)))
+            && selected_baffles.iter().all(|id| {
+                self.editor.internal_boundary(*id).is_some_and(|boundary| {
+                    (0..boundary.spline.intervals().len()).all(|span| {
+                        self.selected_spans
+                            .contains(&GeometrySpan::Baffle(*id, span))
+                    })
+                })
+            });
+        if !has_endpoint && !needs_isolation && !has_merge_pair {
+            return;
+        }
         ui.add_space(8.0);
         ui.separator();
         ui.label("Spline topology");
@@ -2757,9 +3223,9 @@ impl Playground {
                                     if let Some(displacement) = self.error(result)
                                         && displacement > 0.0
                                     {
-                                        self.message = format!(
+                                        self.notify(format!(
                                             "Continuity upgraded; curve reshaped by at most {displacement:.3e}"
-                                        );
+                                        ));
                                     }
                                 }
                             }
@@ -2785,9 +3251,9 @@ impl Playground {
                                         if let Some(displacement) = self.error(result)
                                             && displacement > 0.0
                                         {
-                                            self.message = format!(
+                                            self.notify(format!(
                                                 "Continuity upgraded; curve reshaped by at most {displacement:.3e}"
-                                            );
+                                            ));
                                         }
                                     }
                                 }
@@ -2807,33 +3273,15 @@ impl Playground {
             }
         }
 
-        if let Some((loop_breakpoints, baffle_breakpoints)) = self.exposed_selection_breakpoints()
-            && (!loop_breakpoints.is_empty() || !baffle_breakpoints.is_empty())
+        if let Some((loop_breakpoints, baffle_breakpoints)) = exposed
+            && needs_isolation
+            && ui.button("Isolate selection at C0").clicked()
         {
-            let needs_refinement = loop_breakpoints.iter().any(|(id, breakpoint)| {
-                self.editor
-                    .obstacle(*id)
-                    .and_then(|obstacle| obstacle.spline.continuity(*breakpoint))
-                    != Some(0)
-            }) || baffle_breakpoints.iter().any(|(id, breakpoint)| {
-                self.editor
-                    .internal_boundary(*id)
-                    .and_then(|boundary| boundary.spline.continuity(*breakpoint))
-                    != Some(0)
-            });
-            if ui
-                .add_enabled(
-                    needs_refinement,
-                    egui::Button::new("Isolate selection at C0"),
-                )
-                .clicked()
-            {
-                let result = self
-                    .editor
-                    .isolate_span_boundaries(&loop_breakpoints, &baffle_breakpoints);
-                if self.error(result).is_some() {
-                    self.gizmo_pivot = None;
-                }
+            let result = self
+                .editor
+                .isolate_span_boundaries(&loop_breakpoints, &baffle_breakpoints);
+            if self.error(result).is_some() {
+                self.gizmo_pivot = None;
             }
         }
 
@@ -2888,32 +3336,54 @@ impl Playground {
             None
         };
         let can_merge = nearest_tip_distance.is_some_and(|distance| distance <= merge_tolerance);
-        if ui
-            .add_enabled(can_merge, egui::Button::new("Merge nearest baffle tips"))
-            .clicked()
-        {
-            let result =
-                self.editor
-                    .merge_internal_boundaries(baffles[0], baffles[1], merge_tolerance);
-            if let Some(id) = self.error(result) {
-                self.select_baffle(id);
+        if two_complete_baffles {
+            if ui
+                .add_enabled(can_merge, egui::Button::new("Merge nearest baffle tips"))
+                .clicked()
+            {
+                let result =
+                    self.editor
+                        .merge_internal_boundaries(baffles[0], baffles[1], merge_tolerance);
+                if let Some(id) = self.error(result) {
+                    self.select_baffle(id);
+                }
+            }
+            if let Some(distance) = nearest_tip_distance {
+                if can_merge {
+                    ui.small(format!(
+                        "Nearest tips {:.4} apart · tolerance {:.4}",
+                        distance, merge_tolerance
+                    ));
+                } else {
+                    ui.colored_label(
+                        GOLD,
+                        format!(
+                            "Move tips within {:.4} to merge · currently {:.4}",
+                            merge_tolerance, distance
+                        ),
+                    );
+                }
             }
         }
-        if let Some(distance) = nearest_tip_distance {
-            if can_merge {
-                ui.small(format!(
-                    "Nearest tips are {:.4} apart; merge tolerance is {:.4}. Side laws follow the arrows.",
-                    distance, merge_tolerance
-                ));
-            } else {
-                ui.colored_label(
-                    GOLD,
-                    format!(
-                        "Nearest tips are {:.4} apart; move them within {:.4} to enable merge.",
-                        distance, merge_tolerance
-                    ),
-                );
+    }
+
+    fn selected_topology_endpoint(&self) -> Option<Point2> {
+        if self.selected_spans.len() != 1 {
+            return None;
+        }
+        match self.selected_spans[0] {
+            GeometrySpan::Loop(id, span) => {
+                let spline = &self.editor.obstacle(id)?.spline;
+                let breakpoint = (span + 1) % spline.intervals().len();
+                Some(spline.evaluate(spline.knots()[breakpoint]))
             }
+            GeometrySpan::Baffle(id, span) => {
+                let spline = &self.editor.internal_boundary(id)?.spline;
+                let breakpoint = span + 1;
+                (breakpoint < spline.intervals().len())
+                    .then(|| spline.evaluate(spline.breakpoint(breakpoint).unwrap()))
+            }
+            GeometrySpan::Outer(_) => None,
         }
     }
 
@@ -2986,19 +3456,12 @@ impl Playground {
             ui.small("Click a span; Shift-click adds spans.");
             return;
         }
-        ui.strong(format!("{} selected spans", self.selected_spans.len()));
         let has_baffles = self
             .selected_spans
             .iter()
             .any(|span| matches!(span, GeometrySpan::Baffle(_, _)));
-        if has_baffles {
-            ui.horizontal(|ui| {
-                ui.label("Baffle face");
-                ui.selectable_value(&mut self.baffle_face, InternalBoundarySide::Left, "Left");
-                ui.selectable_value(&mut self.baffle_face, InternalBoundarySide::Right, "Right");
-            });
-        }
-
+        let mut coupled_gap = false;
+        let mut mixed_gap = false;
         if let Some(spans) = self.selected_baffle_spans() {
             let couplings = spans
                 .iter()
@@ -3010,8 +3473,14 @@ impl Playground {
                 .first()
                 .copied()
                 .filter(|first| couplings.iter().all(|coupling| coupling == first));
+            mixed_gap = common.is_none()
+                && couplings
+                    .iter()
+                    .any(|coupling| matches!(coupling, InternalBoundaryCoupling::ThinGap { .. }));
             let mut selected = None;
-            egui::ComboBox::from_label("Span law")
+            ui.label("Span law");
+            egui::ComboBox::from_id_salt("selected_baffle_span_law")
+                .width(ui.available_width())
                 .selected_text(match common {
                     Some(InternalBoundaryCoupling::Independent) => "Independent faces",
                     Some(InternalBoundaryCoupling::ThinGap { .. }) => "Coupled thin gap",
@@ -3034,6 +3503,7 @@ impl Playground {
             let mut coupling = selected.or(common);
             let mut changed = selected.is_some();
             if let Some(InternalBoundaryCoupling::ThinGap { stiffness_ratio }) = &mut coupling {
+                coupled_gap = true;
                 changed |= ui
                     .add(
                         egui::DragValue::new(stiffness_ratio)
@@ -3043,7 +3513,7 @@ impl Playground {
                             .update_while_editing(false),
                     )
                     .changed();
-                ui.small("A coupled law replaces both independent face conditions.");
+                ui.small("The gap law controls both faces.");
             }
             if changed && let Some(coupling) = coupling {
                 let result = self
@@ -3051,6 +3521,19 @@ impl Playground {
                     .set_internal_boundary_couplings(&spans, coupling);
                 self.error(result);
             }
+        }
+        if coupled_gap || mixed_gap {
+            if mixed_gap {
+                ui.small("Select one span law before editing face conditions.");
+            }
+            return;
+        }
+        if has_baffles {
+            ui.horizontal(|ui| {
+                ui.label("Baffle face");
+                ui.selectable_value(&mut self.baffle_face, InternalBoundarySide::Left, "Left");
+                ui.selectable_value(&mut self.baffle_face, InternalBoundarySide::Right, "Right");
+            });
         }
 
         let Some(targets) = self.selected_boundary_targets() else {
@@ -3089,7 +3572,9 @@ impl Playground {
             .and_then(FaceBoundaryCondition::signal)
             .unwrap_or(BoundarySignal::ZERO);
         let mut selected = None;
-        egui::ComboBox::from_label("Condition")
+        ui.label("Condition");
+        egui::ComboBox::from_id_salt("selected_boundary_condition")
+            .width(ui.available_width())
             .selected_text(common.map_or("Mixed", FaceBoundaryCondition::label))
             .show_ui(ui, |ui| {
                 ui.selectable_value(
@@ -3195,6 +3680,22 @@ impl Playground {
         let over = response.contains_pointer() && pointer.is_some_and(|p| r.contains(p));
         let typing = self.keyboard_captured || ctx.text_edit_focused();
         let enabled = !self.automated_benchmark && !self.file_busy && self.load.is_none();
+        if over && !typing {
+            let cursor = if self.panning {
+                egui::CursorIcon::Grabbing
+            } else if self.interaction_mode != InteractionMode::Select {
+                egui::CursorIcon::Crosshair
+            } else if let Some(point) = pointer
+                && (self.hit_handle(point, r).is_some()
+                    || self.hit_internal_handle(point, r).is_some()
+                    || self.hit_gizmo(point, r).is_some())
+            {
+                egui::CursorIcon::Grab
+            } else {
+                egui::CursorIcon::Default
+            };
+            ctx.set_cursor_icon(cursor);
+        }
         if enabled {
             if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 let drag = self.drag.take();
@@ -3212,7 +3713,7 @@ impl Playground {
                     self.editor.cancel();
                 } else {
                     self.custom.clear();
-                    self.mode = Mode::Select;
+                    self.interaction_mode = InteractionMode::Select;
                 }
                 self.panning = false;
             }
@@ -3225,12 +3726,12 @@ impl Playground {
                 self.clear_transient();
             }
             if over && !typing {
-                if self.mode == Mode::Select
+                if self.interaction_mode == InteractionMode::Select
                     && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
                 {
                     self.select_filtered();
                 }
-                if self.mode == Mode::Custom {
+                if matches!(self.interaction_mode, InteractionMode::DrawCustom { .. }) {
                     if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                         self.finish_custom();
                     }
@@ -3293,7 +3794,7 @@ impl Playground {
                 let space = ctx.input(|i| i.key_down(egui::Key::Space));
                 if secondary || primary && space {
                     self.panning = true;
-                } else if primary && self.mode == Mode::Select {
+                } else if primary && self.interaction_mode == InteractionMode::Select {
                     self.refresh_curves();
                     let modifiers = ctx.input(|input| input.modifiers);
                     if let Some((id, index)) = self.hit_handle(p, r) {
@@ -3508,7 +4009,7 @@ impl Playground {
                     }
                 }
                 if response.double_clicked()
-                    && self.mode == Mode::Select
+                    && self.interaction_mode == InteractionMode::Select
                     && !space
                     && self.hit_handle(p, r).is_none()
                     && self.hit_internal_handle(p, r).is_none()
@@ -3527,10 +4028,11 @@ impl Playground {
                         }
                     }
                 } else if response.clicked() && !space && !self.panning {
-                    match self.mode {
-                        Mode::Preset => {
+                    match self.interaction_mode {
+                        InteractionMode::DrawPreset { role } => {
                             let center = self.world(p, r);
-                            if self.creation_role == CreationRole::InternalBoundary {
+                            self.creation_role = role;
+                            if role == CreationRole::InternalBoundary {
                                 let result = self.editor.create_internal_boundary(
                                     OpenCubicSpline::uniform(vec![
                                         center + Point2::new(-0.25, 0.0),
@@ -3543,7 +4045,7 @@ impl Playground {
                                 );
                                 if let Some(id) = self.error(result) {
                                     self.select_baffle(id);
-                                    self.mode = Mode::Select;
+                                    self.interaction_mode = InteractionMode::Select;
                                 }
                             } else {
                                 let result = self.create_spline(
@@ -3552,12 +4054,13 @@ impl Playground {
                                 );
                                 if let Some(id) = self.error(result) {
                                     self.select_loop(id);
-                                    self.mode = Mode::Select;
+                                    self.interaction_mode = InteractionMode::Select;
                                 }
                             }
                         }
-                        Mode::Custom => {
-                            if self.creation_role != CreationRole::InternalBoundary
+                        InteractionMode::DrawCustom { role } => {
+                            self.creation_role = role;
+                            if role != CreationRole::InternalBoundary
                                 && self.custom.len() >= 4
                                 && self.screen(self.custom[0], r).distance(p) < 10.0
                             {
@@ -3568,10 +4071,10 @@ impl Playground {
                                 self.message = "Maximum 128 control points".into();
                             }
                         }
-                        Mode::Pulse => {
+                        InteractionMode::PlacePulse => {
                             self.wave_pending_pulse = Some(self.world(p, r));
                         }
-                        Mode::Source => {
+                        InteractionMode::MoveSource => {
                             self.wave_source.position = self.world(p, r);
                             self.wave_source.region = self
                                 .wave_mesh
@@ -3580,7 +4083,7 @@ impl Playground {
                                 .unwrap_or(RegionId(0));
                             self.wave_source_dirty = true;
                         }
-                        Mode::Select => {}
+                        InteractionMode::Select => {}
                     }
                 }
             }
@@ -3751,7 +4254,7 @@ impl Playground {
             };
             painter.line_segment(
                 selected_outer.map(|point| self.screen(point, r)),
-                Stroke::new(3.5, TEAL),
+                Stroke::new(3.5, SELECT),
             );
         }
         if self.reference && self.editor.document.draft != self.editor.document.accepted {
@@ -3772,6 +4275,90 @@ impl Playground {
         }
         for curve in &self.draft_internal_curves {
             self.draw_internal_curve(&painter, r, curve, color, 3.0);
+        }
+        if self.show_boundary_conditions {
+            for side in OuterSide::ALL {
+                let points = outer_side_points(side).map(|point| self.screen(point, r));
+                painter.line_segment(
+                    points,
+                    Stroke::new(
+                        2.5,
+                        outer_boundary_condition_color(
+                            self.editor.document.draft.outer_boundaries.get(side),
+                        ),
+                    ),
+                );
+            }
+            for obstacle in &self.editor.document.draft.obstacles {
+                if !matches!(obstacle.role, LoopRole::Hole { .. }) {
+                    continue;
+                }
+                let Some(curve) = self
+                    .draft_curves
+                    .iter()
+                    .find(|curve| curve.id == obstacle.id)
+                else {
+                    continue;
+                };
+                for (span, condition) in obstacle.span_conditions.iter().copied().enumerate() {
+                    if let Some(bounds) = obstacle.spline.span_bounds(span) {
+                        self.draw_curve_span_colored(
+                            &painter,
+                            r,
+                            curve,
+                            bounds,
+                            boundary_condition_color(condition),
+                            2.5,
+                        );
+                    }
+                }
+            }
+            for boundary in &self.editor.document.draft.internal_boundaries {
+                let Some(curve) = self
+                    .draft_internal_curves
+                    .iter()
+                    .find(|curve| curve.id == boundary.id)
+                else {
+                    continue;
+                };
+                for (span, law) in boundary.span_laws.iter().copied().enumerate() {
+                    let Some(bounds) = boundary.spline.span_bounds(span) else {
+                        continue;
+                    };
+                    match law.coupling {
+                        InternalBoundaryCoupling::Independent => {
+                            self.draw_internal_span_condition(
+                                &painter,
+                                r,
+                                curve,
+                                bounds,
+                                InternalBoundarySide::Left,
+                                boundary_condition_color(law.left),
+                            );
+                            self.draw_internal_span_condition(
+                                &painter,
+                                r,
+                                curve,
+                                bounds,
+                                InternalBoundarySide::Right,
+                                boundary_condition_color(law.right),
+                            );
+                        }
+                        InternalBoundaryCoupling::ThinGap { .. } => {
+                            for side in [InternalBoundarySide::Left, InternalBoundarySide::Right] {
+                                self.draw_internal_span_condition(
+                                    &painter,
+                                    r,
+                                    curve,
+                                    bounds,
+                                    side,
+                                    Color32::from_rgb(215, 123, 244),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
         for selected in &self.selected_spans {
             match *selected {
@@ -3798,8 +4385,27 @@ impl Playground {
                         self.draw_internal_span_face(&painter, r, curve, bounds, self.baffle_face);
                     }
                 }
-                GeometrySpan::Outer(_) => {}
+                GeometrySpan::Outer(side) => {
+                    painter.line_segment(
+                        outer_side_points(side).map(|point| self.screen(point, r)),
+                        Stroke::new(3.5, Color32::WHITE),
+                    );
+                }
             }
+        }
+        if let Some(endpoint) = self.selected_topology_endpoint() {
+            let center = self.screen(endpoint, r);
+            let radius = 6.0;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    center + egui::vec2(0.0, -radius),
+                    center + egui::vec2(radius, 0.0),
+                    center + egui::vec2(0.0, radius),
+                    center + egui::vec2(-radius, 0.0),
+                ],
+                GOLD,
+                Stroke::new(1.5, Color32::from_rgb(16, 23, 31)),
+            ));
         }
         // Repeated knots are curve points rather than spline controls. Show
         // them independently so C1 joins and C0 corners cannot be mistaken for
@@ -3902,7 +4508,7 @@ impl Playground {
                         Stroke::new(
                             1.5,
                             if selected {
-                                color
+                                SELECT
                             } else {
                                 Color32::from_rgb(106, 133, 150)
                             },
@@ -3948,7 +4554,7 @@ impl Playground {
                     painter.circle_stroke(
                         position,
                         if active { 6.0 } else { 4.0 },
-                        Stroke::new(1.5, if selected { color } else { GOLD }),
+                        Stroke::new(1.5, if selected { SELECT } else { GOLD }),
                     );
                 }
             }
@@ -3958,8 +4564,8 @@ impl Playground {
         {
             let center = self.screen(pivot, r);
             let radius = self.gizmo_radius(r, pivot);
-            painter.circle_stroke(center, radius, Stroke::new(1.5, TEAL));
-            painter.circle_filled(center + egui::vec2(radius, 0.0), 4.0, TEAL);
+            painter.circle_stroke(center, radius, Stroke::new(1.5, SELECT));
+            painter.circle_filled(center + egui::vec2(radius, 0.0), 4.0, SELECT);
             painter.circle_filled(center, 5.0, GOLD);
             painter.line_segment(
                 [
@@ -4038,7 +4644,7 @@ impl Playground {
         {
             let marquee = Rect::from_two_pos(*anchor, *current).intersect(r);
             let color = match operation {
-                MarqueeOperation::Replace => TEAL,
+                MarqueeOperation::Replace => SELECT,
                 MarqueeOperation::Add => GOLD,
                 MarqueeOperation::Subtract => RED,
             };
@@ -4063,7 +4669,113 @@ impl Playground {
                 GOLD,
             );
         }
+        if let Some(pointer) = pointer.filter(|point| r.contains(*point)) {
+            match self.interaction_mode {
+                InteractionMode::DrawPreset {
+                    role: CreationRole::InternalBoundary,
+                } => {
+                    let center = self.world(pointer, r);
+                    painter.line_segment(
+                        [
+                            self.screen(center + Point2::new(-0.25, 0.0), r),
+                            self.screen(center + Point2::new(0.25, 0.0), r),
+                        ],
+                        Stroke::new(2.0, GOLD),
+                    );
+                }
+                InteractionMode::DrawPreset { .. } => {
+                    painter.circle_stroke(
+                        pointer,
+                        (0.15 * self.scale) as f32,
+                        Stroke::new(2.0, GOLD),
+                    );
+                }
+                InteractionMode::PlacePulse => {
+                    painter.circle_stroke(
+                        pointer,
+                        (self.pulse_width as f64 * self.scale) as f32,
+                        Stroke::new(1.5, GOLD),
+                    );
+                }
+                _ => {}
+            }
+        }
+        if self.wave_source.enabled || self.interaction_mode == InteractionMode::MoveSource {
+            let center = self.screen(self.wave_source.position, r);
+            painter.circle_stroke(center, 7.0, Stroke::new(2.0, GOLD));
+            painter.line_segment(
+                [
+                    center + egui::vec2(-10.0, 0.0),
+                    center + egui::vec2(10.0, 0.0),
+                ],
+                Stroke::new(1.0, GOLD),
+            );
+            painter.line_segment(
+                [
+                    center + egui::vec2(0.0, -10.0),
+                    center + egui::vec2(0.0, 10.0),
+                ],
+                Stroke::new(1.0, GOLD),
+            );
+        }
+        self.interaction_mode_overlay(ctx, r);
         r
+    }
+
+    fn interaction_mode_overlay(&mut self, ctx: &egui::Context, viewport: Rect) {
+        let (title, hint) = match self.interaction_mode {
+            InteractionMode::Select => return,
+            InteractionMode::DrawPreset { role } => (
+                match role {
+                    CreationRole::Hole => "Drawing hole · Circle",
+                    CreationRole::MaterialInterface => "Drawing interface · Circle",
+                    CreationRole::InternalBoundary => "Drawing baffle · Straight",
+                },
+                "Click to place",
+            ),
+            InteractionMode::DrawCustom { role } => (
+                match role {
+                    CreationRole::Hole => "Drawing hole · Custom",
+                    CreationRole::MaterialInterface => "Drawing interface · Custom",
+                    CreationRole::InternalBoundary => "Drawing baffle · Custom",
+                },
+                "Click to add control points",
+            ),
+            InteractionMode::PlacePulse => ("Placing pulse", "Click repeatedly to inject"),
+            InteractionMode::MoveSource => ("Moving source", "Click to reposition"),
+        };
+        egui::Area::new("interaction_mode_overlay".into())
+            .fixed_pos(viewport.left_top() + egui::vec2(12.0, 12.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong(title);
+                        ui.label(hint);
+                        if matches!(self.interaction_mode, InteractionMode::DrawCustom { .. }) {
+                            ui.label(format!("{} points", self.custom.len()));
+                            if ui
+                                .add_enabled(self.custom.len() >= 4, egui::Button::new("Finish"))
+                                .clicked()
+                            {
+                                self.finish_custom();
+                            }
+                        }
+                        let cancel_label = if matches!(
+                            self.interaction_mode,
+                            InteractionMode::PlacePulse | InteractionMode::MoveSource
+                        ) {
+                            "Done"
+                        } else {
+                            "Cancel"
+                        };
+                        if ui.button(cancel_label).clicked() {
+                            self.custom.clear();
+                            self.interaction_mode = InteractionMode::Select;
+                        }
+                    });
+                });
+            });
     }
 
     fn hit_outer_boundary(&self, p: Pos2, r: Rect) -> Option<OuterSide> {
@@ -4283,6 +4995,18 @@ impl Playground {
     }
 
     fn draw_curve_span(&self, painter: &egui::Painter, r: Rect, curve: &Curve, bounds: [f64; 2]) {
+        self.draw_curve_span_colored(painter, r, curve, bounds, Color32::WHITE, 4.0);
+    }
+
+    fn draw_curve_span_colored(
+        &self,
+        painter: &egui::Painter,
+        r: Rect,
+        curve: &Curve,
+        bounds: [f64; 2],
+        color: Color32,
+        width: f32,
+    ) {
         for segment in curve.samples.windows(2) {
             let parameter = 0.5 * (segment[0].t + segment[1].t);
             if parameter >= bounds[0] && parameter <= bounds[1] {
@@ -4291,9 +5015,43 @@ impl Playground {
                         self.screen(segment[0].point, r),
                         self.screen(segment[1].point, r),
                     ],
-                    Stroke::new(4.0, Color32::WHITE),
+                    Stroke::new(width, color),
                 );
             }
+        }
+    }
+
+    fn draw_internal_span_condition(
+        &self,
+        painter: &egui::Painter,
+        r: Rect,
+        curve: &InternalCurve,
+        bounds: [f64; 2],
+        side: InternalBoundarySide,
+        color: Color32,
+    ) {
+        for segment in curve.samples.windows(2) {
+            let parameter = 0.5 * (segment[0].t + segment[1].t);
+            if parameter < bounds[0] || parameter > bounds[1] {
+                continue;
+            }
+            let points = [
+                self.screen(segment[0].point, r),
+                self.screen(segment[1].point, r),
+            ];
+            let tangent = points[1] - points[0];
+            let length = tangent.length();
+            if length <= f32::EPSILON {
+                continue;
+            }
+            let mut normal = egui::vec2(tangent.y, -tangent.x) * (4.0 / length);
+            if side == InternalBoundarySide::Right {
+                normal = -normal;
+            }
+            painter.line_segment(
+                [points[0] + normal, points[1] + normal],
+                Stroke::new(2.5, color),
+            );
         }
     }
 
@@ -4426,6 +5184,26 @@ fn field_color(value: f32, gain: f32) -> Color32 {
     )
 }
 
+fn boundary_condition_color(condition: FaceBoundaryCondition) -> Color32 {
+    match condition {
+        FaceBoundaryCondition::Reflecting => Color32::from_rgb(142, 161, 175),
+        FaceBoundaryCondition::Impedance { .. } => Color32::from_rgb(63, 144, 239),
+        FaceBoundaryCondition::SecondOrderOutgoing => Color32::from_rgb(155, 126, 222),
+        FaceBoundaryCondition::Neumann { .. } => GOLD,
+        FaceBoundaryCondition::Dirichlet { .. } => RED,
+    }
+}
+
+fn outer_boundary_condition_color(condition: OuterBoundaryCondition) -> Color32 {
+    match condition {
+        OuterBoundaryCondition::Reflecting => Color32::from_rgb(142, 161, 175),
+        OuterBoundaryCondition::FirstOrderOutgoing => Color32::from_rgb(63, 144, 239),
+        OuterBoundaryCondition::SecondOrderOutgoing => Color32::from_rgb(155, 126, 222),
+        OuterBoundaryCondition::Neumann { .. } => GOLD,
+        OuterBoundaryCondition::Dirichlet { .. } => RED,
+    }
+}
+
 fn mesh_region_at(mesh: &TriMesh, point: Point2) -> Option<RegionId> {
     mesh.triangles.iter().find_map(|triangle| {
         let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
@@ -4450,6 +5228,13 @@ pub fn frame(
     let ctx = contexts.ctx_mut()?;
     if !state.ready {
         ctx.set_visuals(egui::Visuals::dark());
+        ctx.style_mut_of(egui::Theme::Dark, |style| {
+            style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            style.spacing.button_padding = egui::vec2(8.0, 4.0);
+            style.spacing.interact_size.y = 24.0;
+            style.visuals.selection.bg_fill = Color32::from_rgb(38, 94, 135);
+            style.visuals.selection.stroke = Stroke::new(1.0, SELECT);
+        });
         ctx.options_mut(|o| o.max_passes = 1.try_into().unwrap());
         state.ready = true;
         #[cfg(target_arch = "wasm32")]
@@ -5613,6 +6398,7 @@ impl Playground {
     fn show(&mut self, root: &mut egui::Ui, wave_display: Option<&WaveDisplay>) -> Rect {
         // Remember capture before panels can end a text edit this frame.
         self.keyboard_captured = root.ctx().text_edit_focused();
+        self.expire_notice();
         let state = self;
         egui::Panel::top("topbar")
             .exact_size(42.0)
@@ -5631,26 +6417,41 @@ impl Playground {
                         }
                     };
                     ui.colored_label(color, text);
-                    if state.mesh_job.is_some() {
-                        ui.colored_label(GOLD, "Mesh work in progress");
+                    if state.load.is_some() {
+                        ui.colored_label(GOLD, "Validating scene file…");
+                    } else if let Some(job) = &state.mesh_job {
+                        ui.colored_label(GOLD, format!("Mesh rebuilding: {}", job.phase()));
                     } else if let Some(candidate) = &state.simulation_candidate {
                         ui.colored_label(
                             GOLD,
-                            format!(
-                                "Handoff in progress · {} vertices · {} triangles",
-                                candidate.mesh.vertices.len(),
-                                candidate.mesh.triangles.len()
-                            ),
+                            if candidate.generation.is_some() {
+                                "Uploading solver state…".into()
+                            } else {
+                                format!(
+                                    "Preparing solver handoff · {} vertices · {} triangles",
+                                    candidate.mesh.vertices.len(),
+                                    candidate.mesh.triangles.len()
+                                )
+                            },
                         );
                     } else if state.mesh_error.is_some() || state.wave_error.is_some() {
                         ui.colored_label(RED, "Attention required");
+                    } else if state.mesh.is_none() {
+                        ui.colored_label(GOLD, "Preparing initial mesh…");
                     }
                     if !state.message.is_empty() {
-                        ui.colored_label(GOLD, &state.message);
+                        ui.colored_label(RED, &state.message);
+                    }
+                    if let Some(notice) = &state.notice {
+                        ui.colored_label(GOLD, &notice.text);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let warning = state.performance_warning();
-                        let summary = state.performance_summary();
+                        let summary = if ui.ctx().content_rect().width() < 1100.0 {
+                            state.compact_performance_summary()
+                        } else {
+                            state.performance_summary()
+                        };
                         let label = if warning {
                             format!("⚠ {summary}")
                         } else {
@@ -5881,7 +6682,9 @@ mod tests {
     fn custom_open_baffle_creation_and_handle_drag() {
         let mut harness = Harness::new();
         harness.state.creation_role = CreationRole::InternalBoundary;
-        harness.state.mode = Mode::Custom;
+        harness.state.interaction_mode = InteractionMode::DrawCustom {
+            role: CreationRole::InternalBoundary,
+        };
         for point in [
             Point2::new(-0.65, 0.48),
             Point2::new(-0.25, 0.62),
@@ -5904,7 +6707,11 @@ mod tests {
             1
         );
         let id = harness.state.editor.document.draft.internal_boundaries[0].id;
-        assert_eq!(harness.state.internal_selection, Some((id, None)));
+        assert_eq!(harness.state.internal_selection, None);
+        assert_eq!(
+            harness.state.focused_feature,
+            Some(FocusedFeature::Baffle(id))
+        );
         assert_eq!(
             harness.state.selected_spans,
             vec![GeometrySpan::Baffle(id, 0)]
@@ -6072,7 +6879,8 @@ mod tests {
             .spline
             .evaluate(1.5);
         harness.click(harness.point(point));
-        assert_eq!(harness.state.internal_selection, Some((id, None)));
+        assert_eq!(harness.state.internal_selection, None);
+        assert_eq!(harness.state.focused_feature, None);
         assert_eq!(
             harness.state.selected_spans,
             vec![GeometrySpan::Baffle(id, 1)]
@@ -6537,12 +7345,16 @@ mod tests {
     #[test]
     fn both_creation_workflows_and_custom_cancel() {
         let mut h = Harness::new();
-        h.state.mode = Mode::Preset;
+        h.state.interaction_mode = InteractionMode::DrawPreset {
+            role: CreationRole::Hole,
+        };
         h.click(h.point(Point2::new(0.5, 0.4)));
         assert_eq!(h.state.editor.document.draft.obstacles.len(), 2);
-        assert!(h.state.mode == Mode::Select);
+        assert_eq!(h.state.interaction_mode, InteractionMode::Select);
         assert_eq!(h.state.editor.history_len().0, 1);
-        h.state.mode = Mode::Custom;
+        h.state.interaction_mode = InteractionMode::DrawCustom {
+            role: CreationRole::Hole,
+        };
         for p in [
             Point2::new(-0.7, -0.4),
             Point2::new(-0.4, -0.4),
@@ -6557,7 +7369,9 @@ mod tests {
         assert_eq!(h.state.editor.history_len().0, 2);
         h.settle();
         assert_eq!(h.state.editor.acceptance, Acceptance::Valid);
-        h.state.mode = Mode::Custom;
+        h.state.interaction_mode = InteractionMode::DrawCustom {
+            role: CreationRole::Hole,
+        };
         h.click(h.point(Point2::new(0.4, -0.3)));
         h.click(h.point(Point2::new(0.6, -0.3)));
         h.key(Key::Backspace, Modifiers::NONE);
@@ -6606,10 +7420,9 @@ mod tests {
         }
         assert!(!h.texts.iter().any(|(text, _)| text == "Revert draft"));
         h.click_text("+ Draw");
-        assert_eq!(h.state.active_tool, ActiveTool::AddGeometry);
         assert!(h.state.add_geometry_open);
         h.frame(vec![]);
-        assert!(h.texts.iter().any(|(text, _)| text == "Add geometry"));
+        assert!(h.texts.iter().any(|(text, _)| text == "Draw geometry"));
         assert!(h.texts.iter().any(|(text, _)| text == "Circle"));
         assert!(h.texts.iter().any(|(text, _)| text == "Custom"));
         h.click_text("Baffle");
@@ -6642,6 +7455,59 @@ mod tests {
     }
 
     #[test]
+    fn inspector_switches_preserve_visible_placement_modes() {
+        let mut h = Harness::new();
+        h.state.interaction_mode = InteractionMode::PlacePulse;
+        h.click_text("View");
+        assert_eq!(h.state.inspector_panel, Some(InspectorPanel::View));
+        assert_eq!(h.state.interaction_mode, InteractionMode::PlacePulse);
+        assert!(h.texts.iter().any(|(text, _)| text == "Placing pulse"));
+    }
+
+    #[test]
+    fn mixed_curve_span_selection_hides_whole_feature_actions() {
+        let mut h = Harness::new();
+        let second = h
+            .state
+            .editor
+            .create_loop(
+                PeriodicCubicSpline::rounded(Point2::new(0.55, 0.55), 0.1),
+                LoopRole::Hole {
+                    exterior: BACKGROUND_REGION,
+                },
+            )
+            .unwrap();
+        h.state.set_span_selection(vec![
+            GeometrySpan::Loop(ObstacleId(1), 0),
+            GeometrySpan::Loop(second, 0),
+        ]);
+        h.frame(vec![]);
+        assert_eq!(h.state.focused_feature, None);
+        assert!(
+            h.texts
+                .iter()
+                .any(|(text, _)| text == "2 spans across 2 boundaries")
+        );
+        assert!(!h.texts.iter().any(|(text, _)| text == "Loop role"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Delete loop"));
+    }
+
+    #[test]
+    fn view_exposes_boundary_assignments_and_closed_wall_is_not_offered() {
+        let mut h = Harness::new();
+        h.click_text("View");
+        h.click_text("Boundary conditions");
+        assert!(h.state.show_boundary_conditions);
+        assert!(EDITABLE_LOOP_KINDS.contains(&(LoopKind::Hole, "Hole")));
+        assert!(EDITABLE_LOOP_KINDS.contains(&(LoopKind::MaterialInterface, "Material interface")));
+        assert!(
+            !EDITABLE_LOOP_KINDS
+                .iter()
+                .any(|(kind, _)| *kind == LoopKind::Wall)
+        );
+    }
+
+    #[test]
     fn wave_starts_running_and_playback_controls_live_in_top_bar() {
         let h = Harness::new();
         assert!(h.state.wave_running);
@@ -6654,12 +7520,11 @@ mod tests {
     fn handoff_status_is_shown_in_status_bar() {
         let mut h = Harness::new();
         build_mesh_candidate(&mut h.state);
-        h.state.active_tool = ActiveTool::Simulation;
         h.frame(vec![]);
         assert!(
             h.texts
                 .iter()
-                .any(|(text, _)| text.starts_with("Handoff in progress"))
+                .any(|(text, _)| text.starts_with("Preparing solver handoff"))
         );
         assert!(
             !h.texts
@@ -6671,7 +7536,7 @@ mod tests {
     #[test]
     fn transient_commit_message_is_rendered_in_status_bar() {
         let mut h = Harness::new();
-        h.state.message = "Simulation mesh committed".into();
+        h.state.notify("Simulation mesh committed");
         h.frame(vec![]);
         let (_, rect) = h
             .texts
@@ -6707,7 +7572,7 @@ mod tests {
         let summary = h.state.performance_summary();
         assert!(summary.contains("FPS"));
         assert!(summary.contains("steps/s 42.0"));
-        assert!(summary.contains("N"));
+        assert!(summary.contains("DOFs"));
         assert!(summary.contains("mesh"));
         assert!(summary.contains("dt"));
     }
@@ -6776,7 +7641,9 @@ mod tests {
     fn numeric_edit_commits_once_and_typing_captures_editor_keys() {
         let mut h = Harness::new();
         h.click(h.point(Point2::new(0.15, 0.0)));
-        h.state.mode = Mode::Custom;
+        h.state.interaction_mode = InteractionMode::DrawCustom {
+            role: CreationRole::Hole,
+        };
         h.state.custom = vec![
             Point2::new(-0.7, 0.4),
             Point2::new(-0.4, 0.4),
@@ -6842,7 +7709,9 @@ mod tests {
         }]);
         assert_ne!(center, h.state.center);
         assert_eq!(h.state.editor.history_len(), (0, 0));
-        h.state.mode = Mode::Custom;
+        h.state.interaction_mode = InteractionMode::DrawCustom {
+            role: CreationRole::Hole,
+        };
         let points = [
             Point2::new(-0.7, 0.4),
             Point2::new(-0.4, 0.4),
@@ -6865,29 +7734,29 @@ mod tests {
         commit_mesh_without_gpu(&mut h.state);
         h.click_text("Simulation");
         h.click_text("Place pulse");
-        assert!(h.state.mode == Mode::Pulse);
+        assert_eq!(h.state.interaction_mode, InteractionMode::PlacePulse);
         h.click_text("Place pulse");
-        assert!(h.state.mode == Mode::Select);
+        assert_eq!(h.state.interaction_mode, InteractionMode::Select);
         h.click_text("Move source");
-        assert!(h.state.mode == Mode::Source);
+        assert_eq!(h.state.interaction_mode, InteractionMode::MoveSource);
         h.click_text("Move source");
-        assert!(h.state.mode == Mode::Select);
+        assert_eq!(h.state.interaction_mode, InteractionMode::Select);
 
         let document = h.state.editor.document.clone();
-        h.state.mode = Mode::Pulse;
+        h.state.interaction_mode = InteractionMode::PlacePulse;
         let pulse = Point2::new(0.45, -0.3);
         h.click(h.point(pulse));
         assert!((h.state.wave_pending_pulse.unwrap() - pulse).norm() < 1.0e-6);
-        assert!(h.state.mode == Mode::Pulse);
+        assert_eq!(h.state.interaction_mode, InteractionMode::PlacePulse);
         let second_pulse = Point2::new(0.2, -0.1);
         h.click(h.point(second_pulse));
         assert!((h.state.wave_pending_pulse.unwrap() - second_pulse).norm() < 1.0e-6);
-        h.state.mode = Mode::Source;
+        h.state.interaction_mode = InteractionMode::MoveSource;
         let source = Point2::new(-0.55, 0.25);
         h.click(h.point(source));
         assert!((h.state.wave_source.position - source).norm() < 1.0e-6);
         assert!(h.state.wave_source_dirty);
-        assert!(h.state.mode == Mode::Source);
+        assert_eq!(h.state.interaction_mode, InteractionMode::MoveSource);
         assert_eq!(h.state.editor.document, document);
         assert_eq!(h.state.editor.history_len(), (0, 0));
 

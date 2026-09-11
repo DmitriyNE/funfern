@@ -70,13 +70,14 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 ## Edit
 
 - **UI shell:** the top bar keeps Undo/Redo, scene files, Fit View, four
-  hideable inspector panels, Add geometry, and wave playback controls visible;
+  hideable inspector panels, Draw, and wave playback controls visible;
   the solver starts running once its initial mesh is ready. Edit contains
   selection, transforms, topology, and boundary tools; View contains visual
   overlays and field intensity; Simulation contains mesh and solver settings;
   Materials contains the material library. The lower-right status control shows
   FPS, solver steps per second, DOFs, mesh size, and solver dt; clicking it opens
-  the full frame, mesh, handoff, and solver diagnostics.
+  the full frame, mesh, handoff, and solver diagnostics. Narrow windows collapse
+  document and inspector actions into compact menus.
 - **Select:** clicking a handle selects that one control for local reshaping.
   Clicking a curve selects its knot span; Shift-click toggles spans, and
   Ctrl/Cmd-click selects the complete curve. Double-click inserts a knot without
@@ -106,10 +107,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   per-span laws, undo history, and start-to-end face orientation; reversing a
   piece exchanges its left/right assignments. Coincident split tips remain a
   valid mesh junction.
-- **Loop roles:** the selected loop can switch between a hole, material
-  interface, and two-sided closed wall. Creating an interior region uses the
-  chosen material. Converting to a hole removes that region and is allowed only
-  when it contains no child loops or baffles.
+- **Loop roles:** a completely selected loop can switch between a hole and material
+  interface. Creating an interior region uses the chosen material. Converting to a
+  hole removes that region and is allowed only when it contains no child loops or
+  baffles. Existing two-sided closed walls remain load-compatible but are omitted
+  from the normal role picker.
 - **Boundaries:** one Boundary inspector applies conditions to every compatible
   selected span and reports mixed assignments. Outer edges support reflecting,
   prescribed
@@ -122,15 +124,18 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   applying a face condition converts it back to independent faces, and increasing
   gap stiffness can reduce the solver time step.
   New scenes start with the second-order auxiliary condition on all four outer
-  edges.
-- **Geometry role:** choose Hole, Material interface, or Open baffle before
+  edges. View > Boundary conditions colors the assigned laws directly on the
+  outer box, hole spans, and both baffle traces.
+- **Geometry role:** choose Hole, Interface, or Baffle from Draw before
   creating. An interface retains its interior and shares its finite-element trace
   with the exterior. A baffle is an open curve with two independent coincident
   traces; waves reflect from its faces and diffract around its free endpoints.
   Nested loops and baffles inherit the region under the creation point. Closed
   two-sided walls remain load-compatible but are no longer a primary creation tool.
-- **Rounded:** click to place eight controls on a radius `0.15` circle, then
+- **Circle:** click to place eight controls on a radius `0.15` circle, then
   automatically return to selection. The spline lies inside its control polygon.
+- **Straight:** click to place a four-control straight baffle, then return to
+  selection.
 - **Custom:** click control points; four points enable the live preview. Enter
   finishes an open baffle; Enter or clicking the first handle closes a loop.
   Backspace removes the last point; Escape cancels construction. These are control
@@ -140,12 +145,16 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   A removal that would merge different span conditions is rejected until the two
   assignments agree. Shape-preserving insertion copies the split span assignment.
   Deleting an entire loop is a separate panel action.
-- **Materials:** create materials under Regions and materials, edit positive mass
-  density and stiffness plus nonnegative volume damping, and assign a material to
-  the background or a retained loop interior. Clicking a filled region in the
-  viewport selects and highlights it. Material changes preserve the live field
-  and reuse the committed mesh.
-- **Navigate:** middle-drag or Space + left-drag pans. Wheel zoom stays centered
+- **Materials:** create and name materials in the Library, edit positive mass
+  density and stiffness plus nonnegative volume damping, and assign them under
+  Subdomain assignment. Unused non-default materials can be deleted. Clicking a
+  filled region in the viewport selects and highlights it. Material changes
+  preserve the live field and reuse the committed mesh.
+- **Simulation input:** Place pulse and Move source remain active for repeated
+  viewport clicks and can be toggled off with the same selected button, the
+  viewport Done action, or Escape. Pulse strength/width and continuous-source
+  position, frequency, strength, width, and region are editable in Simulation.
+- **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered
   on the cursor. Fit View frames the fixed square. Panel scrolling and text
   editing do not manipulate the viewport.
 - **Drafts:** green curves are accepted, amber curves are being checked, red

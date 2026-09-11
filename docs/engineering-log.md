@@ -14,9 +14,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Evaluate a dissipative relative dashpot for thin gaps. Keeping centered time
   integration would require an off-diagonal damping solve; the implemented gap
   spring is conservative.
-- [ ] Add standard primitive entries to the Add geometry catalog beyond Rounded and
-  Custom. Keep creation role selection and primitive parameters in the transient
-  popover.
+- [ ] Add standard primitive entries to the Draw catalog beyond Circle, Straight,
+  and Custom. Keep creation role selection and primitive parameters in the
+  transient popover.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
   and local-repair cases. The user reports that the end-to-end handoff still feels
   slow even though the small scripted transfer case is much faster.
@@ -31,6 +31,40 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend fragile local repair/fallback behavior, especially for moderate loop,
   interface, and baffle motion. Record concrete fallback triggers; small edits still
   enter the full rebuild path too easily.
+
+## 2026-09-11 — Staged interaction overhaul
+
+- Replaced the overlapping tool and mode state with one explicit interaction mode.
+  Draw, pulse placement, and source placement now remain visible over the viewport;
+  inspector changes do not silently arm or cancel them. Circle/Straight placement
+  is one-shot, while pulse and source tools support repeated clicks and toggle off
+  from the same button.
+- Made control handles exclusive and boundary spans multi-selectable. Edit now keeps
+  selection filters and contextual transform/boundary/topology controls together.
+  Whole-object role and delete actions require exactly one complete selected curve,
+  eliminating the last-selected-object ambiguity in mixed selections.
+- Added viewport feedback for drawing, pulse width, source position, transform pivot,
+  rotation, topology endpoints, and assigned boundary laws. Baffle left/right traces
+  are drawn coherently; thin gaps use one paired indication. Selection blue is now
+  distinct from accepted-geometry teal.
+- Simplified all four inspectors. Simulation has named resolution presets, pulse and
+  continuous-source parameters, and energy. View owns field intensity, boundary-law
+  visualization, a legend, and view reset. Materials presents subdomain assignments
+  separately from its named library and supports deletion only when unused. Legacy
+  closed-wall loops remain loadable but are hidden from the normal role picker.
+- Made the top bar responsive, added close controls to inspectors, added contextual
+  cursors/tooltips, and separated persistent errors from four-second success notices.
+  Performance diagnostics is one continuous window with a 90-frame plot plus
+  average, p95, and peak frame times. The status strip owns current validation,
+  rebuild, and handoff stages.
+- Automated app/editor tests cover the refactored interaction state and all prior
+  geometry, history, persistence, mesh, boundary, and handoff behavior. Formatting,
+  Clippy with warnings denied, all 146 workspace tests, native release compilation,
+  and a release Trunk/WASM bundle pass. The native automated edit run initialized
+  Apple M1 Max / Metal and completed three local mesh repairs. Interactive browser
+  checking remains user-owned. Practical keyboard/focus/contrast support is in
+  scope; a screen-reader representation of the custom numerical canvas remains
+  future work.
 
 ## 2026-09-11 — Contextual UI shell and diagnostics
 
