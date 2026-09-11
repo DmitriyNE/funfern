@@ -204,7 +204,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   lanes in the existing GPU state readback, then builds a graded spatial size field
   in bounded frame slices. Fast, Balanced, and Detailed presets set the error and
   wavelength targets; advanced controls bound the smallest and largest element.
-  The View panel can overlay the current target field.
+  Refinement reacts immediately, while coarsening requires two quiet estimates and
+  has its own transaction quota. The View panel can overlay the current target field.
 - **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
   Gaussian displacement with zero initial velocity. Move source positions the
   optional continuous sinusoidal source. Simulation speed is bounded to 16

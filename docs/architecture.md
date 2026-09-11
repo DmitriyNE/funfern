@@ -581,7 +581,9 @@ samples a spatial target length at triangle vertices, edge midpoints, and centro
 coarsens short edges; restores local constrained-Delaunay legality; refines long
 edges; verifies the result; and compacts it. Every phase resumes under the caller's
 work budget. The app gives it the same soft 2 ms frame slice as ordinary meshing.
-Refinement starts above `1.05 h_target` and collapse below `0.35 h_target`.
+Refinement starts above `1.05 h_target`; collapse uses a configurable lower ratio.
+Automatic solution adaptation uses `0.65 h_target`, with post-collapse size and
+quality checks providing the final guard.
 Persistent vertex lineage records the generation of each topology change, and a
 configurable generation cooldown prevents an immediately changed vertex from
 oscillating on the next pass.
@@ -612,14 +614,20 @@ duplicated baffle/wall trace.
 
 The relative indicator maps error to local edge length, caps that length by the
 shortest wavelength of every active continuous or driven-boundary source, and grades
-neighboring targets. Fast, Balanced, and Detailed presets select tolerance,
-elements per wavelength, and topology budget. Advanced minimum/maximum limits keep
-capacity explicit and allow quiet regions to become coarser than the initial mesh.
+neighboring targets. Quiet-element growth factors and collapse thresholds are paired
+so a low-error mesh can actually coarsen. Graded targets stay local to each source
+triangle instead of taking the minimum over an entire vertex star; evaluation still
+chooses the conservative side on a shared edge. Fast, Balanced, and Detailed presets
+select tolerance, elements per wavelength, topology budget, and maximum coarsening
+step. Advanced minimum/maximum limits keep capacity explicit and allow quiet regions
+to become coarser than the initial mesh.
+
 The app advances indicator and adaptation jobs in soft 2 ms slices, rejects stale
-mesh/GPU/settings generations, waits between estimates, and requires enough
-candidates or a large size mismatch before opening a mesh transaction. Geometry
-editing cancels estimator/adaptation preparation and takes priority. An optional
-heatmap shows the transient target.
+mesh/GPU/settings generations, and waits between estimates. Refinement can start
+after one estimate. Coarsening requires two consecutive estimates on the same mesh,
+and consumes at most half of one automatic transaction so refinement retains a
+separate topology budget. Geometry editing cancels estimator/adaptation preparation
+and takes priority. An optional heatmap shows the transient target.
 
 Coordinate-only edits of closed holes, transmitting material interfaces, and open
 baffles first try local mesh repair. Each attempt imports the immutable committed

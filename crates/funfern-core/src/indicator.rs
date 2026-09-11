@@ -27,6 +27,7 @@ pub struct SolutionIndicatorOptions {
     pub grading_ratio: f64,
     pub minimum_scale: f64,
     pub maximum_scale: f64,
+    pub coarsen_ratio: f64,
     pub amplitude_floor: f64,
     pub max_work_units: usize,
 }
@@ -41,7 +42,8 @@ impl Default for SolutionIndicatorOptions {
             forcing_frequency_hz: 0.0,
             grading_ratio: 1.5,
             minimum_scale: 0.6,
-            maximum_scale: 1.4,
+            maximum_scale: 2.2,
+            coarsen_ratio: 0.65,
             amplitude_floor: 1.0e-8,
             max_work_units: 5_000_000,
         }
@@ -384,6 +386,9 @@ impl SolutionIndicatorJob {
             || options.minimum_scale >= 1.0
             || options.maximum_scale <= 1.0
             || options.maximum_scale <= options.minimum_scale
+            || !options.coarsen_ratio.is_finite()
+            || options.coarsen_ratio <= 0.0
+            || options.coarsen_ratio >= 1.0
             || !options.amplitude_floor.is_finite()
             || options.amplitude_floor <= 0.0
             || options.max_work_units == 0
@@ -652,24 +657,10 @@ impl SolutionIndicatorJob {
     }
 
     fn finish(&mut self) -> SolutionIndicatorResult {
-        let mut vertex_targets = BTreeMap::<(usize, RegionId), f64>::new();
-        for (index, triangle) in self.mesh.triangles.iter().enumerate() {
-            for vertex in triangle.vertices {
-                vertex_targets
-                    .entry((vertex, triangle.region))
-                    .and_modify(|target| *target = target.min(self.targets[index]))
-                    .or_insert(self.targets[index]);
-            }
-        }
         let triangle_targets = self
-            .mesh
-            .triangles
+            .targets
             .iter()
-            .map(|triangle| {
-                triangle
-                    .vertices
-                    .map(|vertex| vertex_targets[&(vertex, triangle.region)])
-            })
+            .map(|target| [*target; 3])
             .collect::<Vec<_>>();
         self.report.minimum_target = self.targets.iter().copied().fold(f64::INFINITY, f64::min);
         self.report.maximum_target = self.targets.iter().copied().fold(0.0, f64::max);
@@ -685,7 +676,10 @@ impl SolutionIndicatorJob {
             if lengths.iter().copied().fold(0.0, f64::max) > 1.05 * target {
                 self.report.refine_candidates += 1;
             }
-            if lengths.iter().any(|length| *length < 0.35 * target) {
+            if lengths
+                .iter()
+                .any(|length| *length < self.options.coarsen_ratio * target)
+            {
                 self.report.coarsen_candidates += 1;
             }
         }
@@ -823,7 +817,8 @@ fn quadrature() -> [([f64; 3], f64); 6] {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, MeshQuality, MeshTriangle, MeshVertex, OuterBoundaryConditions,
+        BACKGROUND_REGION, MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState,
+        MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, OuterBoundaryConditions, mesh_scene,
     };
 
     fn square() -> Arc<TriMesh> {
@@ -991,6 +986,82 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.report.maximum_indicator, 0.0);
+    }
+
+    #[test]
+    fn repeated_quiet_estimates_coarsen_a_fine_mesh_without_refinement() {
+        let scene = Scene::default();
+        let meshing = MeshingOptions {
+            curve_tolerance: 1.0e-3,
+            target_edge_length: 0.12,
+            minimum_angle_degrees: 12.0,
+            max_vertices: 20_000,
+            max_triangles: 40_000,
+            max_refinement_steps: 20_000,
+        };
+        let mut mesh = Arc::new(mesh_scene(&scene, 10, meshing).unwrap());
+        let mut adaptation_state = MeshAdaptationState::from_mesh(&mesh);
+        let initial_triangles = mesh.triangles.len();
+        let mut coarsening_changes = 0;
+
+        for pass in 0..2 {
+            let operator = Arc::new(
+                QuadraticWaveOperator::assemble_scene_with_boundaries(
+                    &mesh,
+                    &scene,
+                    scene.outer_boundaries,
+                )
+                .unwrap(),
+            );
+            let estimate = run(
+                SolutionIndicatorJob::new(
+                    mesh.clone(),
+                    operator.clone(),
+                    scene.clone(),
+                    snapshot(&mesh, &operator, |_| 0.0),
+                    SolutionIndicatorOptions {
+                        minimum_edge_length: 0.06,
+                        maximum_edge_length: 0.30,
+                        maximum_scale: 2.2,
+                        coarsen_ratio: 0.65,
+                        ..Default::default()
+                    },
+                ),
+                1_000,
+            )
+            .unwrap();
+            assert_eq!(estimate.report.refine_candidates, 0);
+
+            let mut job = MeshAdaptationJob::new(
+                mesh.clone(),
+                scene.clone(),
+                adaptation_state,
+                11 + pass,
+                estimate.field,
+                MeshAdaptationOptions {
+                    meshing,
+                    minimum_target_edge_length: 0.06,
+                    maximum_target_edge_length: 0.30,
+                    collapse_ratio: 0.65,
+                    max_topology_changes: 160,
+                    max_coarsening_changes: 80,
+                    max_work_units: 20_000_000,
+                    ..Default::default()
+                },
+            );
+            let adapted = loop {
+                if let Some(result) = job.advance(1_000) {
+                    break result.unwrap();
+                }
+            };
+            assert_eq!(adapted.report.inserted_vertices, 0);
+            coarsening_changes += adapted.report.coarsening_changes;
+            mesh = Arc::new(adapted.mesh);
+            adaptation_state = adapted.state;
+        }
+
+        assert!(coarsening_changes > 0);
+        assert!(mesh.triangles.len() < initial_triangles);
     }
 
     #[test]

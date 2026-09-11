@@ -33,6 +33,33 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Bidirectional solution AMR tuning
+
+- Fixed the one-way size policy. The estimator previously allowed targets to grow
+  by only `1.4×`, while collapse required an edge below `0.35×` target; ordinary
+  near-uniform elements therefore could not become collapse candidates. Automatic
+  presets now use compatible `1.9–2.5×` quiet growth and a `0.65×` collapse ratio.
+- Refinement and coarsening decisions are evaluated separately. Refinement remains
+  immediate; coarsening requires two consecutive requests on the same committed
+  mesh. Collapse work is capped at half the preset topology budget so it cannot
+  consume the capacity reserved for urgent refinement.
+- Kept graded targets local to each source triangle instead of spreading the lowest
+  value through every triangle sharing a vertex. Shared-edge lookup remains
+  conservative, and the active-source wavelength ceiling is unchanged.
+- Rejected collapses now continue through the already sorted candidate set instead
+  of restarting a full vertex scan for every rejection. Performance diagnostics
+  report requested candidates, accepted/rejected collapses, and separate refinement
+  and coarsening change counts.
+- Added regressions proving that repeated quiet estimates shrink a fine mesh without
+  inserting vertices, a zero coarsening quota still permits refinement, confirmation
+  requires two estimates, and every preset can cross its collapse threshold.
+- Verification: formatting, Clippy with warnings denied, all 181 workspace tests,
+  native release compilation, release Trunk/WASM packaging, and the Apple M1 Max /
+  Metal `--amr-check` pass. The live-field check completed in 5.00 s with 371
+  insertions and 279 collapsed vertices in its final deterministic transaction,
+  2.40 ms total indicator work, and a 1.24 ms longest indicator slice. Interactive
+  browser testing remains deferred by prior agreement.
+
 ## 2026-09-12 — Automatic solution-driven AMR
 
 - Added a dependency-free, resumable quadratic solution indicator. It combines

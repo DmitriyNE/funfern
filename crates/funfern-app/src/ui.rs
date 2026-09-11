@@ -136,6 +136,18 @@ impl AmrQuality {
             Self::Detailed => 1_200,
         }
     }
+
+    const fn maximum_coarsening_scale(self) -> f64 {
+        match self {
+            Self::Fast => 2.5,
+            Self::Balanced => 2.2,
+            Self::Detailed => 1.9,
+        }
+    }
+
+    const fn collapse_ratio(self) -> f64 {
+        0.65
+    }
 }
 #[derive(Clone, Copy)]
 enum MarqueeOperation {
@@ -292,6 +304,7 @@ pub struct Playground {
     amr_settings_revision: u64,
     amr_last_analyzed_step: Option<u64>,
     amr_last_started: Option<Instant>,
+    amr_coarsen_streak: u8,
     amr_status: &'static str,
     amr_error: Option<String>,
     amr_work_ms: f64,
@@ -425,6 +438,7 @@ impl Default for Playground {
             amr_settings_revision: 1,
             amr_last_analyzed_step: None,
             amr_last_started: None,
+            amr_coarsen_streak: 0,
             amr_status: "waiting for solution",
             amr_error: None,
             amr_work_ms: 0.0,
@@ -1387,6 +1401,7 @@ impl Playground {
             self.solution_indicator_source = None;
             self.mesh_adaptation_job = None;
             self.mesh_adaptation_automatic = false;
+            self.amr_coarsen_streak = 0;
             self.amr_status = "geometry has priority";
         }
         if self.editor.editing() || self.simulation_candidate.is_some() {
@@ -1719,6 +1734,8 @@ impl Playground {
                 &self.mesh_committed_scene,
                 self.wave_source,
             ),
+            maximum_scale: self.amr_quality.maximum_coarsening_scale(),
+            coarsen_ratio: self.amr_quality.collapse_ratio(),
             ..Default::default()
         }
     }
@@ -1728,6 +1745,7 @@ impl Playground {
             self.solution_indicator_job = None;
             self.solution_indicator_result = None;
             self.solution_indicator_source = None;
+            self.amr_coarsen_streak = 0;
             self.amr_status = "off";
             return;
         }
@@ -1805,14 +1823,26 @@ impl Playground {
                     return;
                 }
             };
-            let adaptation_needed = amr_transaction_needed(mesh, &result);
+            let decision = amr_transaction_decision(mesh, &result);
+            let coarsening_confirmed =
+                update_coarsening_confirmation(&mut self.amr_coarsen_streak, decision.coarsen);
             self.solution_indicator_result = Some(result.clone());
-            if !adaptation_needed {
+            if !decision.refine && !decision.coarsen {
                 self.amr_status = "mesh matches solution";
                 self.amr_error = None;
                 return;
             }
+            if !decision.refine && !coarsening_confirmed {
+                self.amr_status = "confirming coarsening";
+                self.amr_error = None;
+                return;
+            }
             let topology_budget = self.amr_quality.topology_budget();
+            let coarsening_budget = if coarsening_confirmed {
+                topology_budget / 2
+            } else {
+                0
+            };
             let options = MeshAdaptationOptions {
                 meshing: MeshingOptions {
                     curve_tolerance: (self.amr_minimum_edge * 0.02).min(1.5e-3),
@@ -1824,7 +1854,9 @@ impl Playground {
                 },
                 minimum_target_edge_length: self.amr_minimum_edge,
                 maximum_target_edge_length: self.amr_maximum_edge,
+                collapse_ratio: self.amr_quality.collapse_ratio(),
                 max_topology_changes: topology_budget,
+                max_coarsening_changes: coarsening_budget,
                 max_work_units: automatic_adaptation_work_limit(mesh, topology_budget),
                 ..Default::default()
             };
@@ -2056,6 +2088,7 @@ impl Playground {
             self.solution_indicator_result = None;
             self.solution_indicator_source = None;
             self.amr_last_analyzed_step = None;
+            self.amr_coarsen_streak = 0;
             self.amr_status = "waiting for solution";
             self.mesh_build_ms = self
                 .mesh_started
@@ -2591,11 +2624,16 @@ impl Playground {
                             ));
                         }
                         if let Some(report) = &self.mesh_adaptation_report {
+                            let refinement_changes = report
+                                .topology_changes
+                                .saturating_sub(report.coarsening_changes);
                             ui.small(format!(
-                                "Last adaptation: {} inserted · {} collapsed · {} topology changes",
-                                report.inserted_vertices,
-                                report.collapsed_vertices,
-                                report.topology_changes
+                                "Last adaptation: {} refinement changes · {} coarsening changes",
+                                refinement_changes, report.coarsening_changes
+                            ));
+                            ui.small(format!(
+                                "Collapse results: {} accepted · {} rejected",
+                                report.coarsening_changes, report.skipped_collapses
                             ));
                         }
                         ui.small(format!(
@@ -3148,6 +3186,7 @@ impl Playground {
             self.mesh_adaptation_automatic = false;
             self.amr_last_analyzed_step = None;
             self.amr_last_started = None;
+            self.amr_coarsen_streak = 0;
             self.amr_error = None;
         }
 
@@ -5981,26 +6020,46 @@ fn highest_forcing_frequency(scene: &Scene, source: SourceSettings) -> f64 {
     frequency
 }
 
-fn amr_transaction_needed(mesh: &TriMesh, result: &SolutionIndicatorResult) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AmrTransactionDecision {
+    refine: bool,
+    coarsen: bool,
+}
+
+fn amr_transaction_decision(
+    mesh: &TriMesh,
+    result: &SolutionIndicatorResult,
+) -> AmrTransactionDecision {
     let candidate_threshold = (mesh.triangles.len() / 1_000).max(4);
-    let candidates = result.report.refine_candidates + result.report.coarsen_candidates;
-    let severity = mesh
-        .triangles
-        .iter()
-        .zip(&result.element_targets)
-        .map(|(triangle, target)| {
-            let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
-            let edge = [
-                (points[1] - points[0]).norm(),
-                (points[2] - points[1]).norm(),
-                (points[0] - points[2]).norm(),
-            ]
-            .into_iter()
-            .fold(0.0_f64, f64::max);
-            (edge / target).max(target / edge.max(f64::MIN_POSITIVE))
-        })
-        .fold(1.0_f64, f64::max);
-    candidates >= candidate_threshold || severity >= 1.5
+    let mut refinement_severity = 1.0_f64;
+    let mut coarsening_severity = 1.0_f64;
+    for (triangle, target) in mesh.triangles.iter().zip(&result.element_targets) {
+        let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+        let lengths = [
+            (points[1] - points[0]).norm(),
+            (points[2] - points[1]).norm(),
+            (points[0] - points[2]).norm(),
+        ];
+        let maximum_edge = lengths.iter().copied().fold(0.0_f64, f64::max);
+        let minimum_edge = lengths.iter().copied().fold(f64::INFINITY, f64::min);
+        refinement_severity = refinement_severity.max(maximum_edge / target);
+        coarsening_severity = coarsening_severity.max(target / minimum_edge.max(f64::MIN_POSITIVE));
+    }
+    AmrTransactionDecision {
+        refine: result.report.refine_candidates >= candidate_threshold
+            || refinement_severity >= 1.5,
+        coarsen: result.report.coarsen_candidates >= candidate_threshold
+            || coarsening_severity >= 1.8,
+    }
+}
+
+fn update_coarsening_confirmation(streak: &mut u8, requested: bool) -> bool {
+    if requested {
+        *streak = streak.saturating_add(1);
+    } else {
+        *streak = 0;
+    }
+    *streak >= 2
 }
 
 fn automatic_adaptation_work_limit(mesh: &TriMesh, topology_budget: usize) -> usize {
@@ -9497,6 +9556,19 @@ mod tests {
             automatic_adaptation_work_limit(mesh, AmrQuality::Detailed.topology_budget());
         assert!(fast >= default_limit);
         assert!(detailed > fast);
+    }
+
+    #[test]
+    fn automatic_coarsening_requires_two_estimates_and_has_compatible_thresholds() {
+        let mut streak = 0;
+        assert!(!update_coarsening_confirmation(&mut streak, true));
+        assert!(update_coarsening_confirmation(&mut streak, true));
+        assert!(!update_coarsening_confirmation(&mut streak, false));
+        assert_eq!(streak, 0);
+
+        for quality in AmrQuality::ALL {
+            assert!(quality.maximum_coarsening_scale() * quality.collapse_ratio() > 1.0);
+        }
     }
 
     #[test]

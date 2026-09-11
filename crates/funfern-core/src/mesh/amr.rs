@@ -23,6 +23,7 @@ pub struct MeshAdaptationOptions {
     pub refine_ratio: f64,
     pub collapse_ratio: f64,
     pub max_topology_changes: usize,
+    pub max_coarsening_changes: usize,
     pub max_work_units: usize,
     pub cooldown_generations: u64,
 }
@@ -37,6 +38,7 @@ impl Default for MeshAdaptationOptions {
             refine_ratio: 1.05,
             collapse_ratio: 0.35,
             max_topology_changes: 512,
+            max_coarsening_changes: usize::MAX,
             max_work_units: 5_000_000,
             cooldown_generations: 1,
         }
@@ -82,6 +84,7 @@ pub struct MeshAdaptationReport {
     pub limit: Option<MeshAdaptationLimit>,
     pub work_units: usize,
     pub topology_changes: usize,
+    pub coarsening_changes: usize,
     pub inserted_vertices: usize,
     pub collapsed_vertices: usize,
     pub boundary_insertions: usize,
@@ -166,10 +169,7 @@ enum AdaptationPhase {
     ImportVertices(usize),
     ImportTriangles(usize),
     ImportBoundary(usize),
-    FindCollapse {
-        index: usize,
-        best: Option<CollapseCandidate>,
-    },
+    FindCollapse(usize),
     ApplyCollapse(Option<CollapseCandidate>),
     LegalizeAfterCollapse,
     FindRefine {
@@ -197,6 +197,7 @@ pub struct MeshAdaptationJob {
     state: MeshAdaptationState,
     next_generation: u64,
     blocked: BTreeSet<CollapseKey>,
+    collapse_candidates: Vec<CollapseCandidate>,
     report: MeshAdaptationReport,
     source_triangle_keys: BTreeSet<[u64; 3]>,
     source_points_by_lineage: BTreeMap<u64, Point2>,
@@ -238,6 +239,7 @@ impl MeshAdaptationJob {
             state,
             next_generation,
             blocked: BTreeSet::new(),
+            collapse_candidates: Vec::new(),
             report,
             source_triangle_keys: BTreeSet::new(),
             source_points_by_lineage: BTreeMap::new(),
@@ -254,7 +256,7 @@ impl MeshAdaptationJob {
             AdaptationPhase::ImportVertices(_)
             | AdaptationPhase::ImportTriangles(_)
             | AdaptationPhase::ImportBoundary(_) => "Importing adaptive mesh",
-            AdaptationPhase::FindCollapse { .. } | AdaptationPhase::ApplyCollapse(_) => {
+            AdaptationPhase::FindCollapse(_) | AdaptationPhase::ApplyCollapse(_) => {
                 "Coarsening adaptive mesh"
             }
             AdaptationPhase::LegalizeAfterCollapse | AdaptationPhase::LegalizeAfterRefine => {
@@ -311,16 +313,11 @@ impl MeshAdaptationJob {
             AdaptationPhase::ImportVertices(index) => self.import_vertex(index)?,
             AdaptationPhase::ImportTriangles(index) => self.import_triangle(index)?,
             AdaptationPhase::ImportBoundary(index) => self.import_boundary(index)?,
-            AdaptationPhase::FindCollapse { index, best } => {
-                self.find_collapse(index, best)?;
-            }
+            AdaptationPhase::FindCollapse(index) => self.find_collapse(index)?,
             AdaptationPhase::ApplyCollapse(candidate) => self.apply_collapse(candidate)?,
             AdaptationPhase::LegalizeAfterCollapse => {
                 if self.builder.dirty_edges.is_empty() {
-                    self.phase = AdaptationPhase::FindCollapse {
-                        index: 0,
-                        best: None,
-                    };
+                    self.phase = AdaptationPhase::FindCollapse(0);
                 } else {
                     self.builder.legalize_one()?;
                     self.phase = AdaptationPhase::LegalizeAfterCollapse;
@@ -478,10 +475,7 @@ impl MeshAdaptationJob {
             self.builder.queued_edges.clear();
             self.builder.bad_triangles.clear();
             self.builder.scores.fill(None);
-            self.phase = AdaptationPhase::FindCollapse {
-                index: 0,
-                best: None,
-            };
+            self.phase = AdaptationPhase::FindCollapse(0);
             return Ok(());
         }
         let edge = self.source.boundary_edges[index];
@@ -533,12 +527,9 @@ impl MeshAdaptationJob {
             >= self.options.cooldown_generations
     }
 
-    fn find_collapse(
-        &mut self,
-        index: usize,
-        mut best: Option<CollapseCandidate>,
-    ) -> Result<(), MeshAdaptationError> {
+    fn find_collapse(&mut self, index: usize) -> Result<(), MeshAdaptationError> {
         if self.report.topology_changes >= self.options.max_topology_changes {
+            self.collapse_candidates.clear();
             self.report.limit = Some(MeshAdaptationLimit::TopologyChanges);
             self.phase = AdaptationPhase::FindRefine {
                 index: 0,
@@ -546,15 +537,23 @@ impl MeshAdaptationJob {
             };
             return Ok(());
         }
+        if self.report.coarsening_changes >= self.options.max_coarsening_changes {
+            self.collapse_candidates.clear();
+            self.phase = AdaptationPhase::FindRefine {
+                index: 0,
+                best: None,
+            };
+            return Ok(());
+        }
         if index == self.builder.vertices.len() {
-            self.phase = AdaptationPhase::ApplyCollapse(best);
+            self.collapse_candidates.sort_unstable_by(|left, right| {
+                (right.score, right.key).cmp(&(left.score, left.key))
+            });
+            self.phase = AdaptationPhase::ApplyCollapse(self.collapse_candidates.pop());
             return Ok(());
         }
         if self.builder.incident[index].is_empty() || !self.vertex_ready(index) {
-            self.phase = AdaptationPhase::FindCollapse {
-                index: index + 1,
-                best,
-            };
+            self.phase = AdaptationPhase::FindCollapse(index + 1);
             return Ok(());
         }
         let candidate = if self.builder.vertices[index].boundary.is_some() {
@@ -564,16 +563,10 @@ impl MeshAdaptationJob {
         };
         if let Some(candidate) = candidate
             && !self.blocked.contains(&candidate.key)
-            && best.is_none_or(|current| {
-                (candidate.score, candidate.key) < (current.score, current.key)
-            })
         {
-            best = Some(candidate);
+            self.collapse_candidates.push(candidate);
         }
-        self.phase = AdaptationPhase::FindCollapse {
-            index: index + 1,
-            best,
-        };
+        self.phase = AdaptationPhase::FindCollapse(index + 1);
         Ok(())
     }
 
@@ -760,16 +753,15 @@ impl MeshAdaptationJob {
             self.collapse_interior(candidate.key)?
         };
         if changed {
+            self.collapse_candidates.clear();
             self.report.topology_changes += 1;
+            self.report.coarsening_changes += 1;
             self.report.collapsed_vertices += pair_count;
             self.phase = AdaptationPhase::LegalizeAfterCollapse;
         } else {
             self.report.skipped_collapses += 1;
             self.blocked.insert(candidate.key);
-            self.phase = AdaptationPhase::FindCollapse {
-                index: 0,
-                best: None,
-            };
+            self.phase = AdaptationPhase::ApplyCollapse(self.collapse_candidates.pop());
         }
         Ok(())
     }
@@ -1644,6 +1636,28 @@ mod tests {
                 .map(|vertex| second.mesh.vertices[vertex].point);
             orient2d(points[0], points[1], points[2]) == PredicateSign::Positive
         }));
+    }
+
+    #[test]
+    fn coarsening_quota_preserves_capacity_for_refinement() {
+        let scene = Scene::initial();
+        let mut configuration = options(0.24, 0.08);
+        configuration.max_coarsening_changes = 0;
+        let source = Arc::new(mesh_scene(&scene, 33, configuration.meshing).unwrap());
+        let result = run(
+            MeshAdaptationJob::new(
+                source.clone(),
+                scene,
+                MeshAdaptationState::from_mesh(&source),
+                34,
+                radial(Point2::new(-0.55, 0.45), 0.08, 0.24),
+                configuration,
+            ),
+            37,
+        );
+        assert_eq!(result.report.coarsening_changes, 0);
+        assert_eq!(result.report.collapsed_vertices, 0);
+        assert!(result.report.inserted_vertices > 0, "{:?}", result.report);
     }
 
     #[test]
