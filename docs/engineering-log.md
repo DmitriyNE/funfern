@@ -7,9 +7,6 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Add a uniform scale handle beside the rotation gizmo. Scale eligible selected
-  spans as one rigid object around the movable pivot, support snapping, and commit
-  one history entry per drag.
 - [ ] Turn local-remesh hardening into the foundation for required solution-driven
   adaptive mesh refinement. Preserve stable identities and field state through
   insertion, collapse, repair, and bounded per-frame adaptation work.
@@ -37,6 +34,30 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend fragile local repair/fallback behavior, especially for moderate loop,
   interface, and baffle motion. Record concrete fallback triggers; small edits still
   enter the full rebuild path too easily.
+
+## 2026-09-11 — Uniform scale gizmo and modifier-safe span dragging
+
+- Added a square uniform-scale grip to the transform ring. It scales every eligible
+  selected curve piece around the shared movable pivot from the drag-start control
+  snapshot, uses a diagonal resize cursor, and takes hit priority over the rotation
+  ring. Ordinary scaling is continuous; Shift snaps the positive factor to 0.1
+  increments. Release creates one document transaction and Escape restores the
+  exact pre-drag draft.
+- Deferred removal of a Shift-clicked selected span until pointer release. Crossing
+  the drag threshold retains the selection instead, so Shift-drag can translate it.
+  Starting on an unselected span adds it before moving the resulting transformable
+  selection. Shift also temporarily enables the configured grid for curve and
+  individual-control translation even when persistent Snap is disabled.
+- Invalid scaled geometry remains in the draft while the accepted scene stays
+  active. Existing whole-curve and C0-isolated partial-span eligibility, numeric
+  transforms, scene files, and transient pivot semantics remain unchanged.
+- Automated egui coverage exercises continuous and snapped scaling, scale-handle
+  hit priority, pivot invariance, one-entry undo, Escape cancellation, invalid-draft
+  persistence, an isolated baffle span, Shift-click toggling, Shift-drag addition
+  and retention, and temporary grid snapping for controls and curves.
+- Formatting, Clippy with warnings denied, all 151 workspace tests, native release
+  compilation, and release Trunk/WASM packaging pass. Interactive browser checking
+  remains user-owned.
 
 ## 2026-09-11 — Toy-first product roadmap after the editor overhaul
 

@@ -23,6 +23,7 @@ const TEAL: Color32 = Color32::from_rgb(91, 220, 194);
 const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
+const GIZMO_PADDING: f64 = 18.0;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum CreationRole {
     #[default]
@@ -100,6 +101,11 @@ enum MarqueeOperation {
     Add,
     Subtract,
 }
+#[derive(Clone, Copy)]
+enum PendingSpanClick {
+    Collapse(GeometrySpan),
+    Toggle(GeometrySpan),
+}
 enum Drag {
     Translate {
         anchor: Point2,
@@ -111,6 +117,12 @@ enum Drag {
     Rotate {
         pivot: Point2,
         start_angle: f64,
+        controls: Vec<(GeometryControl, Point2)>,
+        moved: bool,
+    },
+    Scale {
+        pivot: Point2,
+        start_control_distance: f64,
         controls: Vec<(GeometryControl, Point2)>,
         moved: bool,
     },
@@ -129,6 +141,7 @@ enum Drag {
 enum GizmoHit {
     Pivot,
     Rotate,
+    Scale,
 }
 struct Curve {
     id: ObstacleId,
@@ -183,7 +196,7 @@ pub struct Playground {
     span_selection_filter: SpanSelectionFilter,
     baffle_face: InternalBoundarySide,
     gizmo_pivot: Option<Point2>,
-    pending_span_collapse: Option<GeometrySpan>,
+    pending_span_click: Option<PendingSpanClick>,
     custom: Vec<Point2>,
     drag: Option<Drag>,
     transform_translation: Point2,
@@ -294,7 +307,7 @@ impl Default for Playground {
             span_selection_filter: SpanSelectionFilter::All,
             baffle_face: InternalBoundarySide::Left,
             gizmo_pivot: None,
-            pending_span_collapse: None,
+            pending_span_click: None,
             custom: vec![],
             drag: None,
             transform_translation: Point2::default(),
@@ -399,7 +412,7 @@ impl Playground {
         self.focused_feature = None;
         self.selected_spans.clear();
         self.gizmo_pivot = None;
-        self.pending_span_collapse = None;
+        self.pending_span_click = None;
         self.region_selection = BACKGROUND_REGION;
         self.drag = None;
         self.panning = false;
@@ -439,7 +452,7 @@ impl Playground {
     fn select_control(&mut self, control: GeometryControl) {
         self.selected_spans.clear();
         self.gizmo_pivot = None;
-        self.pending_span_collapse = None;
+        self.pending_span_click = None;
         self.loop_role_edit = None;
         self.focus_control(Some(control));
     }
@@ -499,7 +512,7 @@ impl Playground {
             }
         }
         self.gizmo_pivot = None;
-        self.pending_span_collapse = None;
+        self.pending_span_click = None;
         self.loop_role_edit = None;
         self.selection = None;
         self.internal_selection = None;
@@ -3685,12 +3698,17 @@ impl Playground {
                 egui::CursorIcon::Grabbing
             } else if self.interaction_mode != InteractionMode::Select {
                 egui::CursorIcon::Crosshair
-            } else if let Some(point) = pointer
-                && (self.hit_handle(point, r).is_some()
-                    || self.hit_internal_handle(point, r).is_some()
-                    || self.hit_gizmo(point, r).is_some())
-            {
-                egui::CursorIcon::Grab
+            } else if let Some(point) = pointer {
+                match self.hit_gizmo(point, r) {
+                    Some(GizmoHit::Scale) => egui::CursorIcon::ResizeNwSe,
+                    Some(_) => egui::CursorIcon::Grab,
+                    None if self.hit_handle(point, r).is_some()
+                        || self.hit_internal_handle(point, r).is_some() =>
+                    {
+                        egui::CursorIcon::Grab
+                    }
+                    None => egui::CursorIcon::Default,
+                }
             } else {
                 egui::CursorIcon::Default
             };
@@ -3709,6 +3727,7 @@ impl Playground {
                     }
                     _ => {}
                 }
+                self.pending_span_click = None;
                 if drag.is_some() || self.editor.editing() {
                     self.editor.cancel();
                 } else {
@@ -3842,6 +3861,18 @@ impl Playground {
                                     moved: false,
                                 });
                             }
+                            GizmoHit::Scale => {
+                                let relative = self.world(p, r) - pivot;
+                                let padding = GIZMO_PADDING / self.scale;
+                                self.editor.begin();
+                                self.drag = Some(Drag::Scale {
+                                    pivot,
+                                    start_control_distance: (relative.norm() - padding)
+                                        .max(f64::EPSILON),
+                                    controls: self.selected_control_points(),
+                                    moved: false,
+                                });
+                            }
                         }
                     } else {
                         let obstacle_hit = self.hit_curve(p, r);
@@ -3873,13 +3904,17 @@ impl Playground {
                             } else if modifiers.command {
                                 self.set_span_selection(curve_spans);
                             } else if modifiers.shift {
-                                self.toggle_span(span);
+                                if self.selected_spans.contains(&span) {
+                                    self.pending_span_click = Some(PendingSpanClick::Toggle(span));
+                                } else {
+                                    self.toggle_span(span);
+                                }
                             } else if self.selected_spans.contains(&span) {
-                                self.pending_span_collapse = Some(span);
+                                self.pending_span_click = Some(PendingSpanClick::Collapse(span));
                             } else {
                                 self.set_span_selection(vec![span]);
                             }
-                            if !modifiers.shift
+                            if !(modifiers.command && modifiers.shift)
                                 && self.selected_spans.contains(&span)
                                 && let Some(pivot) = self.selection_pivot()
                                 && self.transformable_curve_controls().is_some()
@@ -3894,7 +3929,7 @@ impl Playground {
                                 });
                             }
                         } else {
-                            self.pending_span_collapse = None;
+                            self.pending_span_click = None;
                             self.drag = Some(Drag::Marquee {
                                 anchor: p,
                                 current: p,
@@ -3916,7 +3951,8 @@ impl Playground {
                         + Point2::new(-delta.x as f64 / self.scale, delta.y as f64 / self.scale);
                 } else if response.dragged_by(egui::PointerButton::Primary) {
                     let world = self.world(p, r);
-                    let snap_to_grid = self.snap_to_grid;
+                    let snap_to_grid =
+                        self.snap_to_grid || ctx.input(|input| input.modifiers.shift);
                     let snap_step = self.snap_step;
                     let snap = |point: Point2| {
                         if !snap_to_grid || !snap_step.is_finite() || snap_step <= 0.0 {
@@ -3980,6 +4016,29 @@ impl Playground {
                                     .collect::<Vec<_>>(),
                             )
                         }
+                        Some(Drag::Scale {
+                            pivot,
+                            start_control_distance,
+                            controls,
+                            moved,
+                        }) => {
+                            *moved = true;
+                            let control_distance =
+                                ((world - *pivot).norm() - GIZMO_PADDING / self.scale).max(0.0);
+                            let mut factor =
+                                (control_distance / *start_control_distance).clamp(1.0e-4, 1.0e4);
+                            if ctx.input(|input| input.modifiers.shift) {
+                                factor = ((factor * 10.0).round() / 10.0).clamp(0.1, 1.0e4);
+                            }
+                            Some(
+                                controls
+                                    .iter()
+                                    .map(|(control, point)| {
+                                        (*control, *pivot + (*point - *pivot) * factor)
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                        }
                         Some(Drag::Pivot { offset, .. }) => {
                             self.gizmo_pivot = Some(world + *offset);
                             None
@@ -3996,6 +4055,9 @@ impl Playground {
                         }
                         None => None,
                     };
+                    if self.drag.is_none() {
+                        self.pending_span_click = None;
+                    }
                     if let Some(updates) = updates {
                         let result = self.editor.set_control_points(&updates);
                         self.error(result);
@@ -4016,6 +4078,7 @@ impl Playground {
                 {
                     self.editor.commit();
                     self.drag = None;
+                    self.pending_span_click = None;
                     if let Some((id, t)) = self.hit_curve(p, r) {
                         let result = self.editor.insert(id, t);
                         if let Some(index) = self.error(result) {
@@ -4092,9 +4155,16 @@ impl Playground {
             let drag = self.drag.take();
             let moved = matches!(
                 &drag,
-                Some(Drag::Translate { moved: true, .. } | Drag::Rotate { moved: true, .. })
+                Some(
+                    Drag::Translate { moved: true, .. }
+                        | Drag::Rotate { moved: true, .. }
+                        | Drag::Scale { moved: true, .. }
+                )
             );
-            if matches!(&drag, Some(Drag::Translate { .. } | Drag::Rotate { .. })) {
+            if matches!(
+                &drag,
+                Some(Drag::Translate { .. } | Drag::Rotate { .. } | Drag::Scale { .. })
+            ) {
                 self.editor.commit();
             }
             if let Some(Drag::Marquee {
@@ -4115,10 +4185,13 @@ impl Playground {
                     }
                 }
             }
-            if !moved && let Some(span) = self.pending_span_collapse.take() {
-                self.set_span_selection(vec![span]);
+            if !moved && let Some(action) = self.pending_span_click.take() {
+                match action {
+                    PendingSpanClick::Collapse(span) => self.set_span_selection(vec![span]),
+                    PendingSpanClick::Toggle(span) => self.toggle_span(span),
+                }
             } else if moved {
-                self.pending_span_collapse = None;
+                self.pending_span_click = None;
             }
             if !ctx.input(|i| i.pointer.button_down(egui::PointerButton::Secondary)) {
                 self.panning = false;
@@ -4566,6 +4639,15 @@ impl Playground {
             let radius = self.gizmo_radius(r, pivot);
             painter.circle_stroke(center, radius, Stroke::new(1.5, SELECT));
             painter.circle_filled(center + egui::vec2(radius, 0.0), 4.0, SELECT);
+            let scale_handle = self.scale_handle_position(r, pivot);
+            let scale_rect = Rect::from_center_size(scale_handle, egui::vec2(10.0, 10.0));
+            painter.rect_filled(scale_rect, 1.0, Color32::from_rgb(16, 23, 31));
+            painter.rect_stroke(
+                scale_rect,
+                1.0,
+                Stroke::new(2.0, SELECT),
+                egui::StrokeKind::Inside,
+            );
             painter.circle_filled(center, 5.0, GOLD);
             painter.line_segment(
                 [
@@ -4859,6 +4941,8 @@ impl Playground {
         let distance = center.distance(point);
         if distance <= 8.0 {
             Some(GizmoHit::Pivot)
+        } else if self.scale_handle_position(r, pivot).distance(point) <= 8.0 {
+            Some(GizmoHit::Scale)
         } else if (distance - self.gizmo_radius(r, pivot)).abs() <= 7.0 {
             Some(GizmoHit::Rotate)
         } else {
@@ -4872,7 +4956,13 @@ impl Playground {
             .iter()
             .map(|(_, point)| center.distance(self.screen(*point, r)))
             .fold(22.0_f32, f32::max)
-            + 18.0
+            + GIZMO_PADDING as f32
+    }
+
+    fn scale_handle_position(&self, r: Rect, pivot: Point2) -> Pos2 {
+        let center = self.screen(pivot, r);
+        let offset = self.gizmo_radius(r, pivot) * std::f32::consts::FRAC_1_SQRT_2;
+        center + egui::vec2(offset, offset)
     }
 
     fn hit_handle(&self, p: Pos2, r: Rect) -> Option<(ObstacleId, usize)> {
@@ -6579,6 +6669,13 @@ mod tests {
         fn point(&self, p: Point2) -> Pos2 {
             self.state.screen(p, self.rect)
         }
+        fn scale_drag_end(&self, pivot: Point2, factor: f32) -> Pos2 {
+            let center = self.point(pivot);
+            let start = self.state.scale_handle_position(self.rect, pivot);
+            let radial = start - center;
+            let distance = (radial.length() - GIZMO_PADDING as f32) * factor + GIZMO_PADDING as f32;
+            center + radial.normalized() * distance
+        }
         fn move_to(&mut self, p: Pos2) {
             self.frame(vec![Event::PointerMoved(p)]);
         }
@@ -7212,6 +7309,184 @@ mod tests {
     }
 
     #[test]
+    fn scale_handle_scales_about_pivot_as_one_undoable_drag() {
+        let mut harness = Harness::new();
+        let id = ObstacleId(1);
+        let document = harness.state.editor.document.clone();
+        let before = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .spline
+            .controls()
+            .to_vec();
+        let pivot = harness.state.selection_pivot().unwrap();
+        let start = harness.state.scale_handle_position(harness.rect, pivot);
+        assert!(matches!(
+            harness.state.hit_gizmo(start, harness.rect),
+            Some(GizmoHit::Scale)
+        ));
+        let end = harness.scale_drag_end(pivot, 1.25);
+        harness.button(start, PointerButton::Primary, true);
+        harness.move_to(end);
+        harness.button(end, PointerButton::Primary, false);
+        harness.settle();
+
+        let scaled = harness.state.editor.obstacle(id).unwrap().spline.controls();
+        assert!(scaled.iter().zip(&before).all(|(scaled, before)| {
+            (*scaled - pivot - (*before - pivot) * 1.25).norm() < 1.0e-6
+        }));
+        assert!((harness.state.selection_pivot().unwrap() - pivot).norm() < 1.0e-10);
+        assert_eq!(harness.state.editor.history_len(), (1, 0));
+        harness.state.editor.undo();
+        assert_eq!(harness.state.editor.document, document);
+    }
+
+    #[test]
+    fn shift_snaps_scale_and_escape_cancels_scale_drag() {
+        let mut harness = Harness::new();
+        let id = ObstacleId(1);
+        let before = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .spline
+            .controls()
+            .to_vec();
+        let pivot = harness.state.selection_pivot().unwrap();
+        let start = harness.state.scale_handle_position(harness.rect, pivot);
+        let end = harness.scale_drag_end(pivot, 1.26);
+        harness.drag_with_modifiers(start, end, Modifiers::SHIFT);
+        harness.settle();
+        let scaled = harness.state.editor.obstacle(id).unwrap().spline.controls();
+        assert!(scaled.iter().zip(&before).all(|(scaled, before)| {
+            (*scaled - pivot - (*before - pivot) * 1.3).norm() < 1.0e-10
+        }));
+
+        let document = harness.state.editor.document.clone();
+        let pivot = harness.state.selection_pivot().unwrap();
+        let start = harness.state.scale_handle_position(harness.rect, pivot);
+        let end = harness.scale_drag_end(pivot, 0.7);
+        harness.button(start, PointerButton::Primary, true);
+        harness.move_to(end);
+        harness.key(Key::Escape, Modifiers::NONE);
+        harness.button(end, PointerButton::Primary, false);
+        assert_eq!(harness.state.editor.document, document);
+        assert_eq!(harness.state.editor.history_len(), (1, 0));
+    }
+
+    #[test]
+    fn invalid_scale_stays_in_draft_and_preserves_accepted_scene() {
+        let mut harness = Harness::new();
+        let accepted = harness.state.editor.document.accepted.clone();
+        harness.state.scale = 100.0;
+        let pivot = harness.state.selection_pivot().unwrap();
+        let start = harness.state.scale_handle_position(harness.rect, pivot);
+        let end = harness.scale_drag_end(pivot, 9.0);
+        harness.button(start, PointerButton::Primary, true);
+        harness.move_to(end);
+        harness.button(end, PointerButton::Primary, false);
+        harness.settle();
+
+        assert!(matches!(
+            harness.state.editor.acceptance,
+            Acceptance::Invalid(_)
+        ));
+        assert_eq!(harness.state.editor.document.accepted, accepted);
+        assert_ne!(harness.state.editor.document.draft, accepted);
+        assert_eq!(harness.state.editor.history_len(), (1, 0));
+    }
+
+    #[test]
+    fn shift_click_toggles_but_shift_drag_adds_moves_and_grid_snaps() {
+        let mut harness = Harness::new();
+        let id = ObstacleId(1);
+        let spline = &harness.state.editor.obstacle(id).unwrap().spline;
+        let first = harness.point(spline.evaluate(0.5));
+        harness.click_with_modifiers(first, Modifiers::SHIFT);
+        assert_eq!(harness.state.selected_spans.len(), 7);
+        assert!(
+            !harness
+                .state
+                .selected_spans
+                .contains(&GeometrySpan::Loop(id, 0))
+        );
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
+
+        let before = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .spline
+            .controls()
+            .to_vec();
+        harness.state.snap_to_grid = false;
+        harness.state.snap_step = 0.1;
+        let start_world = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .spline
+            .evaluate(0.5);
+        let start = harness.point(start_world);
+        let end = harness.point(start_world + Point2::new(0.07, 0.06));
+        harness.drag_with_modifiers(start, end, Modifiers::SHIFT);
+        harness.settle();
+
+        assert_eq!(harness.state.selected_spans.len(), 8);
+        let moved = harness.state.editor.obstacle(id).unwrap().spline.controls();
+        let delta = moved[0] - before[0];
+        assert!(
+            moved
+                .iter()
+                .zip(&before)
+                .all(|(moved, before)| (*moved - *before - delta).norm() < 1.0e-12)
+        );
+        let pivot = harness.state.selection_pivot().unwrap();
+        assert!((pivot.x / 0.1 - (pivot.x / 0.1).round()).abs() < 1.0e-10);
+        assert!((pivot.y / 0.1 - (pivot.y / 0.1).round()).abs() < 1.0e-10);
+        assert_eq!(harness.state.editor.history_len(), (1, 0));
+
+        let start_world = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .spline
+            .evaluate(2.5);
+        harness.drag_with_modifiers(
+            harness.point(start_world),
+            harness.point(start_world + Point2::new(0.07, -0.06)),
+            Modifiers::SHIFT,
+        );
+        harness.settle();
+        assert_eq!(harness.state.selected_spans.len(), 8);
+        assert_eq!(harness.state.editor.history_len(), (2, 0));
+    }
+
+    #[test]
+    fn shift_drag_snaps_a_control_when_persistent_snap_is_off() {
+        let mut harness = Harness::new();
+        let id = ObstacleId(1);
+        harness.state.snap_to_grid = false;
+        harness.state.snap_step = 0.1;
+        let before = harness.state.editor.obstacle(id).unwrap().spline.controls()[0];
+        let start = harness.point(before);
+        let end = harness.point(before + Point2::new(0.07, 0.06));
+        harness.drag_with_modifiers(start, end, Modifiers::SHIFT);
+        harness.settle();
+        let moved = harness.state.editor.obstacle(id).unwrap().spline.controls()[0];
+        assert!((moved.x / 0.1 - (moved.x / 0.1).round()).abs() < 1.0e-10);
+        assert!((moved.y / 0.1 - (moved.y / 0.1).round()).abs() < 1.0e-10);
+        assert_eq!(harness.state.selection, Some((id, Some(0))));
+        assert_eq!(harness.state.editor.history_len(), (1, 0));
+    }
+
+    #[test]
     fn whole_curve_drag_and_panel_transform_move_all_controls() {
         let mut harness = Harness::new();
         let id = ObstacleId(1);
@@ -7333,6 +7608,20 @@ mod tests {
             harness.state.editor.internal_boundary(id).unwrap().spline,
             before
         );
+
+        let pivot = harness.state.selection_pivot().unwrap();
+        let start = harness.state.scale_handle_position(harness.rect, pivot);
+        let end = harness.scale_drag_end(pivot, 1.2);
+        harness.button(start, PointerButton::Primary, true);
+        harness.move_to(end);
+        harness.button(end, PointerButton::Primary, false);
+        let after = &harness.state.editor.internal_boundary(id).unwrap().spline;
+        for index in 0..=20 {
+            let parameter = bounds[0] + (bounds[1] - bounds[0]) * index as f64 / 20.0;
+            let expected = pivot + (before.evaluate(parameter) - pivot) * 1.2;
+            assert!((after.evaluate(parameter) - expected).norm() < 1.0e-6);
+        }
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
     }
 
     #[test]

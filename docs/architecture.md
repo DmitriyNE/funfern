@@ -57,9 +57,10 @@ toggle, Command/Ctrl whole-curve selection, and marquee selection with optional
 filters. Whole-object role and delete actions appear only when one complete curve
 is selected, so a mixed selection cannot accidentally act on its last member.
 Selected spans move as rigid pieces and expose the transform, boundary, and
-topology controls together. A viewport rotation ring and movable pivot complement
-numeric transforms. Boundary laws may be visualized in place for the outer box,
-hole spans, and both baffle traces; selection is drawn over that diagnostic layer.
+topology controls together. A viewport rotation ring, uniform scale grip, and
+movable pivot complement numeric transforms. Boundary laws may be visualized in
+place for the outer box, hole spans, and both baffle traces; selection is drawn over
+that diagnostic layer.
 Closed two-sided loops remain load-compatible but are omitted from normal creation
 and role controls because open baffles cover the useful two-trace workflow.
 
@@ -199,8 +200,11 @@ the selected subcurve rigidly; an adjacent unselected span can change only throu
 its shared corner control. An atomic isolation action inserts every missing C0
 knot first. This also works for selection components wrapping across a periodic
 seam. Rigid dragging and snapping use the selected arcs' length-weighted centroid.
-The rotation pivot is transient, as are selection, transform inputs, and snapping
-preferences. Bulk boundary edits validate all outer, hole, and oriented
+Shift distinguishes a click from a drag before toggling an already selected span;
+during translation it temporarily enables grid snapping, and during rotation or
+uniform scaling it selects the transform's fixed increment. The transform pivot is
+transient, as are selection, transform inputs, and snapping preferences. Bulk
+boundary edits validate all outer, hole, and oriented
 baffle-face targets before one revision and history transaction. Baffle left/right
 always follows increasing spline parameter.
 

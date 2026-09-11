@@ -80,8 +80,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   document and inspector actions into compact menus.
 - **Select:** clicking a handle selects that one control for local reshaping.
   Clicking a curve selects its knot span; Shift-click toggles spans, and
-  Ctrl/Cmd-click selects the complete curve. Double-click inserts a knot without
-  changing the curve and selects its control. Drag from empty viewport space to
+  Ctrl/Cmd-click selects the complete curve. Shift-drag adds an unselected span
+  before moving the resulting transformable selection and temporarily enables
+  grid snapping. Double-click inserts a knot without changing the curve and
+  selects its control. Drag from empty viewport space to
   box-select every touched span; Shift-drag adds and Alt-drag subtracts. The span
   filter limits box selection and Ctrl/Cmd+A to outer edges, loops, baffles, or all
   geometry. Select filtered, Invert, and Clear provide the same bulk operations in
@@ -91,8 +93,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   undoable action. **Isolate selection at C0** inserts every missing boundary
   corner exactly. Each selected subcurve then moves rigidly; connected neighboring
   spans follow only through their shared corner point. Snapping moves the selected
-  arc-length centroid. Drag the viewport ring to rotate and its center marker to
-  reposition the temporary pivot. Seam-wrapped loop selections are supported.
+  arc-length centroid. Drag the viewport ring to rotate, its square grip to scale,
+  and its center marker to reposition the temporary pivot. Shift snaps rotation to
+  15°, scale to 0.1 increments, and translation to the configured grid even when
+  persistent snapping is off. Seam-wrapped loop selections are supported.
   A selected span exposes the continuity at its end knot. **C1 tangent** and
   **C0 corner** refine the cubic exactly; gold diamonds on the curve are
   repeated knots, separate from circular control handles. **C2 smooth** and

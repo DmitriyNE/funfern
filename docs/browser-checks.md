@@ -29,8 +29,10 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   Alt-subtract, filters, Select filtered, Invert, and Clear. Mixed-object span
   selection must not expose a whole-object delete or role change.
 - [ ] Drag selected spans as one rigid piece with snapping enabled. Exercise the
-  rotation ring, Shift angle snapping, movable rotation center, and numeric
-  translate/rotate/scale controls. Verify that no transform submode is required.
+  rotation ring, square scale grip, Shift angle/scale snapping, movable transform
+  center, and numeric translate/rotate/scale controls. With persistent snapping
+  off, Shift-drag a selected and an unselected span and verify grid snapping without
+  losing the selection. Verify that no transform submode is required.
 - [ ] Assign one condition to multiple outer, hole, and baffle spans. On baffles,
   verify coherent left/right face selection and that Thin gap replaces the two
   independent face conditions instead of competing with them. Enable View >
