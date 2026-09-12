@@ -2415,12 +2415,12 @@ impl Playground {
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button("Export scene SVG").clicked() {
-                            self.export_scene_svg();
-                            ui.close();
-                        }
                         if ui.button("Copy scene link").clicked() {
                             self.copy_scene_link(ui.ctx());
+                            ui.close();
+                        }
+                        if ui.button("Export scene SVG").clicked() {
+                            self.export_scene_svg();
                             ui.close();
                         }
                     });
@@ -2446,12 +2446,12 @@ impl Playground {
                 }
                 ui.add_enabled_ui(file_enabled, |ui| {
                     ui.menu_button("Export", |ui| {
-                        if ui.button("Scene SVG").clicked() {
-                            self.export_scene_svg();
-                            ui.close();
-                        }
                         if ui.button("Copy scene link").clicked() {
                             self.copy_scene_link(ui.ctx());
+                            ui.close();
+                        }
+                        if ui.button("Scene SVG").clicked() {
+                            self.export_scene_svg();
                             ui.close();
                         }
                     });
@@ -2622,7 +2622,7 @@ impl Playground {
                                     let preview = paint_example_thumbnail(
                                         ui,
                                         &example.document.accepted,
-                                        egui::vec2(180.0, 112.0),
+                                        egui::vec2(144.0, 144.0),
                                     );
                                     ui.vertical(|ui| {
                                         ui.heading(example.name);
