@@ -57,7 +57,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Extended the native transfer and AMR checks to run with a live point recorder.
   The two-handoff AMR check retained 147 samples with a largest rebind interval of
   0.0273 simulation seconds and no clock discontinuity or history loss.
-- All 206 workspace tests and Clippy with warnings denied pass. The release Metal
+- Plot dragging now scrubs the time window directly: dragging left moves toward
+  earlier retained samples, leaves Live mode, and stays fixed as new samples arrive.
+  Regression checks cover both time-window dragging and moving the floating window.
+- All 207 workspace tests and Clippy with warnings denied pass. The release Metal
   GPU check on an Apple M1 Max exercised 9,690 DOFs at `dt=0.0030078`, produced
   finite nonnegative probe energy, matched the f64 field within `1.30e-6` relative
   L2 error, and advanced at 18.9 simulated seconds per wall second. Native release

@@ -3388,7 +3388,7 @@ impl Playground {
                             self.probe_history_seconds,
                         );
                     }
-                    ui.small("Drag a plot to inspect earlier time · wheel to zoom");
+                    ui.small("Drag left for earlier time · wheel to zoom");
                 });
             if clear {
                 self.clear_probe_trace(id);
@@ -3441,7 +3441,7 @@ impl Playground {
         if response.dragged() {
             let start_end = view.drag_start_end.get_or_insert(maximum_time);
             view.end_time =
-                *start_end - response.drag_delta().x as f64 / rect.width() as f64 * visible_span;
+                *start_end + response.drag_delta().x as f64 / rect.width() as f64 * visible_span;
         }
         if response.drag_stopped() {
             view.drag_start_end = None;
@@ -10429,12 +10429,65 @@ mod tests {
             .unwrap_or_else(|| panic!("texts: {:?}", h.texts))
             .1;
         let start = egui::pos2(field_label.left() + 180.0, field_label.bottom() + 46.0);
-        h.drag_with_modifiers(start, start + egui::vec2(100.0, 0.0), Modifiers::NONE);
+        h.drag_with_modifiers(start, start + egui::vec2(-100.0, 0.0), Modifiers::NONE);
 
         let view = &h.state.probe_views[&id];
         assert!(!view.live);
         assert!(view.end_time < 10.0);
         assert!((view.end_time - 9.5).abs() < 0.15, "{}", view.end_time);
+        let panned_end = view.end_time;
+        h.state
+            .probe_traces
+            .get_mut(&id)
+            .unwrap()
+            .samples
+            .push_back(PointProbeRecord {
+                probe_id: id.0,
+                time: 10.1,
+                displacement: 101.0,
+                velocity: 0.0,
+                energy_density: 0.0,
+            });
+        h.frame(vec![]);
+        assert!((h.state.probe_views[&id].end_time - panned_end).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn probe_readout_window_keeps_its_dragged_position() {
+        let mut h = Harness::new();
+        let id = h
+            .state
+            .editor
+            .create_point_probe(Point2::new(0.4, 0.4))
+            .unwrap();
+        let title = format!("{} · point probe", h.state.editor.document.probes[0].name);
+        h.state.probe_windows.insert(id);
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let before = h
+            .texts
+            .iter()
+            .find(|(text, _)| text == &title)
+            .unwrap_or_else(|| panic!("texts: {:?}", h.texts))
+            .1
+            .center();
+        h.drag_with_modifiers(before, before + egui::vec2(100.0, 50.0), Modifiers::NONE);
+        h.frame(vec![]);
+        let after = h
+            .texts
+            .iter()
+            .find(|(text, _)| text == &title)
+            .unwrap()
+            .1
+            .center();
+        assert!(
+            (after.x - before.x - 100.0).abs() < 2.0,
+            "{before:?} {after:?}"
+        );
+        assert!(
+            (after.y - before.y - 50.0).abs() < 2.0,
+            "{before:?} {after:?}"
+        );
     }
 
     #[test]

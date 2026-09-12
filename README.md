@@ -163,7 +163,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   in the viewport. Markers can be selected, dragged, renamed, colored, disabled,
   cleared, or deleted. Each probe opens a floating readout with
   field, velocity, and local energy-density traces on a shared simulation-time
-  window. Hide individual traces, drag a plot to inspect earlier samples, scroll to
+  window. Hide individual traces, drag left to inspect earlier samples, scroll to
   change the time span, and select Live to follow the solver again. Sampling follows
   solver time rather than browser frame rate. Definitions are saved and undoable;
   recorded traces are transient.
