@@ -3293,7 +3293,7 @@ mod tests {
         let shader = include_str!("curve_probe.wgsl");
         assert!(shader.contains("let normal_gradient"));
         assert!(shader.contains("let flux = -stencil.material.y * velocity * normal_gradient"));
-        assert!(shader.contains("bitcast<f32>(0x7fc00000u)"));
+        assert!(shader.contains("bitcast<f32>(0x7fc00000u | (point & 1u))"));
         assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
     }
 
@@ -3373,6 +3373,7 @@ mod tests {
         assert!(shader.contains("fn reduce_area_probes"));
         assert!(shader.contains("let mean = accumulated.x / covered_area"));
         assert!(shader.contains("let rms = sqrt(max(accumulated.y / covered_area, 0.0))"));
+        assert!(shader.contains("bitcast<f32>(0x7fc00000u | (probe & 1u))"));
         assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
     }
 
@@ -3384,5 +3385,17 @@ mod tests {
         assert!(shader.contains("let age = (margin - projection) / sample_interval;"));
         assert!(shader.contains("sample.z - dot(normal, ray) * sample.y / wave_speed"));
         assert!(shader.contains("amplitude * amplitude"));
+        assert!(shader.contains("bitcast<f32>(0x7fc00000u | (direction & 1u))"));
+    }
+
+    #[test]
+    fn webgpu_probe_shaders_do_not_construct_nan_as_a_constant_expression() {
+        for shader in [
+            include_str!("curve_probe.wgsl"),
+            include_str!("area_probe.wgsl"),
+            include_str!("far_field.wgsl"),
+        ] {
+            assert!(!shader.contains("bitcast<f32>(0x7fc00000u)"));
+        }
     }
 }

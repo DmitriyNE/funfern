@@ -61,7 +61,10 @@ fn sample_curve_probes(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let index = frame * row_stride + point;
     let time = parameters.time_data.z - parameters.time_data.x;
     if stencil.normal_stride_valid.w < 0.5 {
-        output[index].values = vec4<f32>(bitcast<f32>(0x7fc00000u), bitcast<f32>(0x7fc00000u), bitcast<f32>(0x7fc00000u), time);
+        // WebGPU rejects a constant expression whose value is NaN. Keep the
+        // readback sentinel, but construct it from the runtime point index.
+        let nan = bitcast<f32>(0x7fc00000u | (point & 1u));
+        output[index].values = vec4<f32>(nan, nan, nan, time);
         return;
     }
     let a = stencil.nodes_a;

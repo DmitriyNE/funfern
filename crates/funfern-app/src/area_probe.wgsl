@@ -129,7 +129,9 @@ fn reduce_area_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
     let completed = u32(parameters.time_data.w);
     let frame = (completed / stride) % frames;
     let output_index = frame * 16u + probe;
-    let nan = bitcast<f32>(0x7fc00000u);
+    // WebGPU rejects a constant expression whose value is NaN. Keep the
+    // readback sentinel, but construct it from the runtime probe index.
+    let nan = bitcast<f32>(0x7fc00000u | (probe & 1u));
     if descriptor.offset_count.y == 0u || descriptor.areas.x <= 0.0 {
         output[output_index].primary = vec4<f32>(nan);
         output[output_index].secondary = vec4<f32>(nan, nan, nan, 0.0);

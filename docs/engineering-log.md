@@ -54,6 +54,15 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-12 — Browser probe-shader compatibility fix
+
+- Chromium WebGPU rejected the line-, area-, and far-field probe modules because
+  their WGSL constructed NaN sentinels as constant expressions. Native wgpu/Naga
+  accepted the same source, so native testing did not expose the regression.
+- The shaders now derive the same NaN payload from their runtime invocation index.
+  Readback filtering and gap semantics are unchanged. A local release WASM build
+  starts in Chromium with every probe pipeline accepted.
+
 ## 2026-09-12 — Region-owned volume sources
 
 - Added one optional distributed source per subdomain. Each source has a signed

@@ -128,7 +128,9 @@ fn project_directions(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if valid {
         directional_history[index].values = vec4<f32>(amplitude, amplitude * amplitude, far_time, 1.0);
     } else {
-        let nan = bitcast<f32>(0x7fc00000u);
+        // WebGPU rejects a constant expression whose value is NaN. Keep the
+        // readback sentinel, but construct it from the runtime direction.
+        let nan = bitcast<f32>(0x7fc00000u | (direction & 1u));
         directional_history[index].values = vec4<f32>(nan, nan, far_time, 0.0);
     }
 }
