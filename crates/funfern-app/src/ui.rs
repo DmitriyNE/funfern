@@ -441,7 +441,9 @@ pub struct Playground {
     curve_probe_display_readback: u64,
     probe_sample_rate: f64,
     probe_history_seconds: f64,
-    show_probe_markers: bool,
+    show_point_probes: bool,
+    show_line_probes: bool,
+    show_boundary_probes: bool,
     probe_drag: Option<ProbeDrag>,
     source_dragging: bool,
     segment_probe_start: Option<Point2>,
@@ -600,7 +602,9 @@ impl Default for Playground {
             curve_probe_display_readback: 0,
             probe_sample_rate: 120.0,
             probe_history_seconds: 10.0,
-            show_probe_markers: true,
+            show_point_probes: true,
+            show_line_probes: true,
+            show_boundary_probes: true,
             probe_drag: None,
             source_dragging: false,
             segment_probe_start: None,
@@ -4550,6 +4554,9 @@ impl Playground {
             ui.checkbox(&mut self.show_mesh_boundary, "Mesh boundary labels");
         });
         ui.checkbox(&mut self.show_amr_target, "Adaptation target");
+        ui.checkbox(&mut self.show_point_probes, "Point probes");
+        ui.checkbox(&mut self.show_line_probes, "Line probes");
+        ui.checkbox(&mut self.show_boundary_probes, "Boundary probes");
         ui.checkbox(&mut self.show_field, "Field colors");
         ui.add_enabled_ui(self.show_field, |ui| {
             ui.add(
@@ -4590,6 +4597,9 @@ impl Playground {
             self.show_mesh = false;
             self.show_mesh_boundary = true;
             self.show_amr_target = false;
+            self.show_point_probes = true;
+            self.show_line_probes = true;
+            self.show_boundary_probes = true;
             self.show_field = true;
             self.field_gain = 2.0;
         }
@@ -4859,7 +4869,6 @@ impl Playground {
         response.on_hover_text(
             "Create a boundary probe from one contiguous span selection on one curve",
         );
-        ui.checkbox(&mut self.show_probe_markers, "Show markers");
         ui.add(
             egui::Slider::new(&mut self.probe_sample_rate, 30.0..=480.0)
                 .logarithmic(true)
@@ -7864,8 +7873,11 @@ impl Playground {
                 Stroke::new(1.0, GOLD),
             );
         }
-        if self.show_probe_markers {
+        if self.show_point_probes || self.show_line_probes || self.show_boundary_probes {
             for probe in &self.editor.document.probes {
+                if !self.probe_visible(probe.target) {
+                    continue;
+                }
                 let selected = self.selected_probe == Some(probe.id);
                 let color = if self.probe_status.contains_key(&probe.id) {
                     RED
@@ -8169,14 +8181,12 @@ impl Playground {
     }
 
     fn hit_probe(&self, point: Pos2, viewport: Rect) -> Option<ProbeHit> {
-        if !self.show_probe_markers {
-            return None;
-        }
         self.editor
             .document
             .probes
             .iter()
             .rev()
+            .filter(|probe| self.probe_visible(probe.target))
             .find_map(|probe| match probe.target {
                 ProbeTarget::Point(position) => (self.screen(position, viewport).distance(point)
                     <= 10.0)
@@ -8222,6 +8232,14 @@ impl Playground {
                         .then_some(ProbeHit::Boundary(probe.id))
                 }
             })
+    }
+
+    fn probe_visible(&self, target: ProbeTarget) -> bool {
+        match target {
+            ProbeTarget::Point(_) => self.show_point_probes,
+            ProbeTarget::Segment { .. } => self.show_line_probes,
+            ProbeTarget::Boundary(_) => self.show_boundary_probes,
+        }
     }
     fn hit_internal_handle(&self, p: Pos2, r: Rect) -> Option<(InternalBoundaryId, usize)> {
         if !self.handles {
@@ -11950,6 +11968,23 @@ mod tests {
         assert_eq!(h.state.inspector_panel, Some(InspectorPanel::Materials));
         h.click_text("Probes");
         assert_eq!(h.state.inspector_panel, Some(InspectorPanel::Probes));
+    }
+
+    #[test]
+    fn view_panel_toggles_each_probe_kind_independently() {
+        let mut h = Harness::new();
+        h.click_text("View");
+        for label in ["Point probes", "Line probes", "Boundary probes"] {
+            assert!(h.texts.iter().any(|(text, _)| text == label));
+        }
+        h.click_text("Point probes");
+        assert!(!h.state.show_point_probes);
+        assert!(h.state.show_line_probes);
+        assert!(h.state.show_boundary_probes);
+        h.click_text("Restore view defaults");
+        assert!(h.state.show_point_probes);
+        assert!(h.state.show_line_probes);
+        assert!(h.state.show_boundary_probes);
     }
 
     #[test]

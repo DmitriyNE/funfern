@@ -53,10 +53,13 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   deterministic best-overlap remapping. Deleted geometry removes its probes in
   the same history action. Runtime traces keep their IDs and time history through
   accepted geometry and AMR handoffs.
+- View now controls point, line, and boundary probe visibility independently.
+  Hidden probe markers and overlays also stop participating in viewport hit tests;
+  recording and open readouts continue normally.
 - Scene JSON is version 12. Boundary feature, span run, trace side, direction, and
   sampling preset now round-trip through files, links, examples, autosave, and
   Undo/Redo; versions 1–11 remain loadable.
-- All 232 workspace tests, formatting, Clippy with warnings denied, native release
+- All 233 workspace tests, formatting, Clippy with warnings denied, native release
   compilation, and the release Trunk/WASM build pass.
 
 ## 2026-09-12 — Direct and persistent continuous source
