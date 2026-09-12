@@ -199,8 +199,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **Far field:** enable the outer-domain far field in Probes and adjust one inset.
   Funfern derives a square Huygens contour from the domain, samples it on the GPU,
   and projects the delayed field into 96 observation directions. Its floating
-  readout combines a direction/time waterfall, a 40 dB relative polar pattern,
-  and angular energy over time. The contour must enclose every modeled boundary
+  readout combines a direction/time waterfall, matching 40 dB instantaneous and
+  visible-window-averaged polar patterns, and angular energy over time. Double-click
+  the contour or its `FF` badge to open it. The contour must enclose every modeled boundary
   and stay in the lossless background material; View can hide its overlay.
 - **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered
   on the cursor. Fit View frames the fixed square. Panel scrolling and text

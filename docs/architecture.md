@@ -516,8 +516,9 @@ explicit configuration error replaces truncated output when it cannot.
 Only the compact 96-direction, 512-frame ring is read back. Its host history stays
 continuous across remesh and AMR generations when the inset and background wave
 speed remain compatible. The readout shares the other probes' time-navigation
-semantics across a direction/time waterfall, a normalized 40 dB polar pattern, and
-angularly integrated intensity versus time. The contour is derived display state,
+semantics across a direction/time waterfall, normalized 40 dB instantaneous and
+visible-window-averaged polar patterns, and angularly integrated intensity versus
+time. The contour is derived display state,
 not selectable geometry, and its visibility has an independent View toggle.
 
 The previous h≈0.16 overlay was an editor preview. Wave benchmarks start with

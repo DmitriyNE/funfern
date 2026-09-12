@@ -4541,7 +4541,29 @@ impl Playground {
                     &mut self.far_field_view,
                     self.probe_history_seconds,
                 );
-                Self::far_field_polar(ui, &frames, &self.far_field_view);
+                let instantaneous = frames
+                    .iter()
+                    .min_by(|a, b| {
+                        (a.time - self.far_field_view.end_time)
+                            .abs()
+                            .total_cmp(&(b.time - self.far_field_view.end_time).abs())
+                    })
+                    .map(|frame| frame.intensity.clone())
+                    .unwrap_or_default();
+                let averaged = Self::far_field_average(&frames, &times, &self.far_field_view);
+                ui.small("Relative radiation pattern · 40 dB");
+                ui.columns(2, |columns| {
+                    Self::far_field_polar(
+                        &mut columns[0],
+                        "Instantaneous",
+                        &instantaneous,
+                    );
+                    Self::far_field_polar(
+                        &mut columns[1],
+                        "Time-averaged",
+                        &averaged,
+                    );
+                });
                 Self::probe_plot(
                     ui,
                     "Angular energy",
@@ -4551,7 +4573,9 @@ impl Playground {
                     &mut self.far_field_view,
                     self.probe_history_seconds,
                 );
-                ui.small("Drag through time · wheel to zoom · polar scale spans 40 dB");
+                ui.small(
+                    "Drag through time · wheel to zoom · average follows the visible window · polar scale spans 40 dB",
+                );
             });
         if clear {
             let time = self
@@ -4690,9 +4714,42 @@ impl Playground {
         );
     }
 
-    fn far_field_polar(ui: &mut egui::Ui, frames: &[FarFieldRecord], view: &ProbeViewState) {
-        ui.small("Relative radiation pattern");
-        let size = ui.available_width().clamp(150.0, 270.0);
+    fn far_field_average(
+        frames: &[FarFieldRecord],
+        times: &[PointProbeRecord],
+        view: &ProbeViewState,
+    ) -> Vec<f32> {
+        let mut window = view.clone();
+        let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, &mut window) else {
+            return vec![];
+        };
+        let mut average = vec![0.0_f32; FAR_FIELD_DIRECTIONS];
+        let mut count = 0_u32;
+        for frame in frames
+            .iter()
+            .filter(|frame| frame.time >= minimum_time && frame.time <= maximum_time)
+        {
+            if frame.intensity.len() != FAR_FIELD_DIRECTIONS {
+                continue;
+            }
+            for (sum, value) in average.iter_mut().zip(&frame.intensity) {
+                *sum += *value;
+            }
+            count += 1;
+        }
+        if count > 0 {
+            for value in &mut average {
+                *value /= count as f32;
+            }
+            average
+        } else {
+            vec![]
+        }
+    }
+
+    fn far_field_polar(ui: &mut egui::Ui, label: &str, intensity: &[f32]) {
+        ui.small(label);
+        let size = ui.available_width().max(100.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
         let center = rect.center();
         let radius = 0.44 * size;
@@ -4719,22 +4776,22 @@ impl Playground {
             ],
             Stroke::new(0.7, Color32::from_rgb(55, 69, 80)),
         );
-        let Some(frame) = frames.iter().min_by(|a, b| {
-            (a.time - view.end_time)
-                .abs()
-                .total_cmp(&(b.time - view.end_time).abs())
-        }) else {
-            return;
-        };
-        let maximum = frame
-            .intensity
+        let maximum = intensity
             .iter()
             .copied()
             .filter(|value| value.is_finite())
-            .fold(0.0_f32, f32::max)
-            .max(1.0e-30);
-        let mut points = frame
-            .intensity
+            .fold(0.0_f32, f32::max);
+        if maximum <= 1.0e-30 {
+            ui.painter().text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                "Waiting for signal",
+                egui::FontId::monospace(10.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+            return;
+        }
+        let mut points = intensity
             .iter()
             .copied()
             .enumerate()
@@ -7433,7 +7490,9 @@ impl Playground {
             } else if self.interaction_mode != InteractionMode::Select {
                 egui::CursorIcon::Crosshair
             } else if let Some(point) = pointer {
-                if self.hit_source(point, r) || self.hit_probe(point, r).is_some() {
+                if self.hit_far_field(point, r) {
+                    egui::CursorIcon::PointingHand
+                } else if self.hit_source(point, r) || self.hit_probe(point, r).is_some() {
                     egui::CursorIcon::Grab
                 } else {
                     match self.hit_gizmo(point, r) {
@@ -8023,15 +8082,18 @@ impl Playground {
                 if response.double_clicked()
                     && self.interaction_mode == InteractionMode::Select
                     && !space
-                    && !self.hit_source(p, r)
-                    && self.hit_handle(p, r).is_none()
-                    && self.hit_internal_handle(p, r).is_none()
+                    && (self.hit_far_field(p, r)
+                        || (!self.hit_source(p, r)
+                            && self.hit_handle(p, r).is_none()
+                            && self.hit_internal_handle(p, r).is_none()))
                 {
                     self.editor.commit();
                     self.probe_drag = None;
                     self.drag = None;
                     self.pending_span_click = None;
-                    if let Some(id) = self.hit_probe(p, r).map(ProbeHit::id) {
+                    if self.hit_far_field(p, r) {
+                        self.far_field_open = true;
+                    } else if let Some(id) = self.hit_probe(p, r).map(ProbeHit::id) {
                         self.select_probe(id);
                         self.probe_windows.insert(id);
                     } else if let Some((id, t)) = self.hit_curve(p, r) {
@@ -9279,6 +9341,33 @@ impl Playground {
                 .screen(self.wave_source.position, viewport)
                 .distance(point)
                 <= 12.0
+    }
+
+    fn hit_far_field(&self, point: Pos2, viewport: Rect) -> bool {
+        if !self.editor.document.far_field.enabled || !self.show_far_field_contour {
+            return false;
+        }
+        let half_extent = 1.0 - self.editor.document.far_field.inset;
+        let corners = [
+            Point2::new(-half_extent, -half_extent),
+            Point2::new(half_extent, -half_extent),
+            Point2::new(half_extent, half_extent),
+            Point2::new(-half_extent, half_extent),
+        ]
+        .map(|world| self.screen(world, viewport));
+        corners
+            .iter()
+            .copied()
+            .zip(corners.iter().copied().cycle().skip(1))
+            .take(4)
+            .any(|(start, end)| {
+                point_segment_distance(
+                    Point2::new(point.x as f64, point.y as f64),
+                    Point2::new(start.x as f64, start.y as f64),
+                    Point2::new(end.x as f64, end.y as f64),
+                ) <= 7.0
+            })
+            || corners[2].distance(point) <= 24.0
     }
 
     fn area_region_anchor(&self, region: RegionId) -> Point2 {
@@ -13575,6 +13664,54 @@ mod tests {
         h.click(marker);
         assert!(h.state.probe_windows.contains(&id));
         assert_eq!(h.state.selected_probe, Some(id));
+    }
+
+    #[test]
+    fn double_clicking_the_far_field_contour_opens_its_readout() {
+        let mut h = Harness::new();
+        h.state
+            .editor
+            .set_far_field(FarFieldSettings {
+                enabled: true,
+                inset: 0.12,
+            })
+            .unwrap();
+        h.state.far_field_open = false;
+        h.frame(vec![]);
+
+        let contour = h.point(Point2::new(0.0, -0.88));
+        h.click(contour);
+        assert!(!h.state.far_field_open);
+        h.click(contour);
+        assert!(h.state.far_field_open);
+    }
+
+    #[test]
+    fn far_field_average_follows_the_visible_time_window() {
+        let frames = [(0.0, 100.0), (1.0, 1.0), (2.0, 3.0), (3.0, 5.0)]
+            .into_iter()
+            .map(|(time, intensity)| FarFieldRecord {
+                time,
+                amplitude: vec![0.0; FAR_FIELD_DIRECTIONS],
+                intensity: vec![intensity; FAR_FIELD_DIRECTIONS],
+            })
+            .collect::<Vec<_>>();
+        let times = frames
+            .iter()
+            .map(|frame| PointProbeRecord {
+                probe_id: 0,
+                time: frame.time,
+                displacement: 0.0,
+                velocity: 0.0,
+                energy_density: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let mut view = ProbeViewState::new(2.0);
+        view.live = false;
+        view.end_time = 3.0;
+        view.span = 2.0;
+        let average = Playground::far_field_average(&frames, &times, &view);
+        assert_eq!(average, vec![3.0; FAR_FIELD_DIRECTIONS]);
     }
 
     #[test]
