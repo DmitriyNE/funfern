@@ -54,6 +54,26 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-12 — Unified document ownership and persisted presentation
+
+- Replaced the parallel example simulation preset with a complete `Document`.
+  Sources, probes, far-field configuration, and accepted/draft scenes now live in
+  one `DocumentModel`; examples no longer need a second structure that can drift
+  from file persistence.
+- Undo/Redo stores `DocumentModel` directly instead of maintaining a duplicate
+  history snapshot shape. Presentation settings wrap that model in `Document`, are
+  persisted across scene files, shared links, examples, and recovery, and remain
+  outside model history so an edit does not unexpectedly rewind the current view.
+- Moved View-panel toggles, field intensity, and material-overlay configuration into
+  `PresentationSettings`. Scene JSON version 16 serializes them, while older files
+  load with the established defaults. Camera, selection, panel/window layout, GPU
+  state, and derived caches remain transient.
+- Added round-trip, migration, validation, and model-history tests for the new
+  ownership boundary.
+- Verification passes: formatting, warnings-denied Clippy, all **288 workspace
+  tests**, native release compilation, release Trunk/WASM packaging, and the
+  Chromium/WebGPU startup, frame-advance, and resize smoke test.
+
 ## 2026-09-12 — Browser probe-shader compatibility fix
 
 - Chromium WebGPU rejected the line-, area-, and far-field probe modules because

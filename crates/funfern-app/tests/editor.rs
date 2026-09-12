@@ -15,21 +15,27 @@ fn move_point(e: &mut Editor, p: Point2) {
     e.commit();
     settle(e);
 }
+fn set_file_version(value: &mut serde_json::Value, version: u32) {
+    value["version"] = version.into();
+    if version < 16 {
+        value.as_object_mut().unwrap().remove("presentation");
+    }
+}
 #[test]
 fn invalid_draft_persists_and_recovers() {
     let mut e = Editor::default();
-    let accepted = e.document.accepted.clone();
+    let accepted = e.document.model.accepted.clone();
     move_point(&mut e, Point2::new(8.0, 0.0));
     assert!(matches!(e.acceptance, Acceptance::Invalid(_)));
-    assert_eq!(e.document.accepted, accepted);
-    assert_ne!(e.document.draft, accepted);
+    assert_eq!(e.document.model.accepted, accepted);
+    assert_ne!(e.document.model.draft, accepted);
     for _ in 0..10 {
         e.validate_frame(1000);
     }
-    assert_ne!(e.document.draft, accepted);
+    assert_ne!(e.document.model.draft, accepted);
     move_point(&mut e, Point2::new(0.15, 0.0));
     assert_eq!(e.acceptance, Acceptance::Valid);
-    assert_eq!(e.document.accepted, e.document.draft);
+    assert_eq!(e.document.model.accepted, e.document.model.draft);
 }
 #[test]
 fn drag_is_one_entry_and_escape_restores_both_scenes() {
@@ -83,7 +89,7 @@ fn stale_validation_cannot_accept_new_draft() {
     e.set_point(ObstacleId(1), 0, Point2::new(0.16, 0.0))
         .unwrap();
     let old = e.revision;
-    let mut job = ValidationJob::new(e.document.draft.clone(), old);
+    let mut job = ValidationJob::new(e.document.model.draft.clone(), old);
     e.set_point(ObstacleId(1), 0, Point2::new(8.0, 0.0))
         .unwrap();
     let result = loop {
@@ -91,10 +97,10 @@ fn stale_validation_cannot_accept_new_draft() {
             break result;
         }
     };
-    let accepted = e.document.accepted.clone();
+    let accepted = e.document.model.accepted.clone();
     e.apply_validation(result);
     assert_eq!(e.acceptance, Acceptance::Pending);
-    assert_eq!(e.document.accepted, accepted);
+    assert_eq!(e.document.model.accepted, accepted);
     settle(&mut e);
     assert!(matches!(e.acceptance, Acceptance::Invalid(_)));
 }
@@ -124,6 +130,7 @@ fn outer_side_conditions_are_undoable_and_round_trip_with_time_signals() {
     assert_eq!(
         editor
             .document
+            .model
             .accepted
             .outer_boundaries
             .get(OuterSide::Bottom),
@@ -133,7 +140,7 @@ fn outer_side_conditions_are_undoable_and_round_trip_with_time_signals() {
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut version_five: serde_json::Value = serde_json::from_str(&json).unwrap();
-    version_five["version"] = 5.into();
+    set_file_version(&mut version_five, 5);
     version_five.as_object_mut().unwrap().remove("far_field");
     for scene in ["draft", "accepted"] {
         version_five[scene]
@@ -143,7 +150,7 @@ fn outer_side_conditions_are_undoable_and_round_trip_with_time_signals() {
     }
     let migrated = decode(serde_json::to_string(&version_five).unwrap().as_bytes()).unwrap();
     assert_eq!(
-        migrated.accepted.outer_boundaries,
+        migrated.model.accepted.outer_boundaries,
         OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting)
     );
 
@@ -152,6 +159,7 @@ fn outer_side_conditions_are_undoable_and_round_trip_with_time_signals() {
     assert_eq!(
         editor
             .document
+            .model
             .accepted
             .outer_boundaries
             .get(OuterSide::Top),
@@ -207,13 +215,76 @@ fn scene_round_trip_keeps_nonuniform_knots_and_invalid_drafts() {
 }
 
 #[test]
+fn presentation_round_trips_and_older_scenes_receive_defaults() {
+    let document = Document {
+        presentation: PresentationSettings {
+            grid: false,
+            control_polygons: false,
+            handles: false,
+            accepted_reference: false,
+            boundary_conditions: true,
+            mesh: true,
+            mesh_boundaries: false,
+            adaptation_target: true,
+            point_probes: false,
+            line_probes: false,
+            boundary_probes: false,
+            area_probes: false,
+            far_field_contour: false,
+            field: false,
+            field_gain: 7.5,
+            material_overlay: MaterialOverlay::Property(MaterialProperty::Impedance),
+            material_overlay_opacity: 0.73,
+            material_overlay_auto_range: false,
+            material_overlay_logarithmic: true,
+            material_overlay_manual_min: 0.2,
+            material_overlay_manual_max: 4.8,
+        },
+        ..Default::default()
+    };
+
+    let json = save(&document).unwrap();
+    assert_eq!(decode(json.as_bytes()).unwrap(), document);
+
+    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+    set_file_version(&mut legacy, 15);
+    let decoded = decode(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();
+    assert_eq!(decoded.model, document.model);
+    assert_eq!(decoded.presentation, PresentationSettings::default());
+
+    let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    malformed["presentation"]["field_gain"] = 0.into();
+    assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
+}
+
+#[test]
+fn presentation_is_outside_model_history() {
+    let mut editor = Editor::default();
+    move_point(&mut editor, Point2::new(0.17, 0.01));
+    let changed_model = editor.document.model.clone();
+    editor.document.presentation.grid = false;
+    editor.document.presentation.field_gain = 6.0;
+    let presentation = editor.document.presentation;
+    let revision = editor.revision;
+
+    editor.undo();
+    assert_ne!(editor.document.model, changed_model);
+    assert_eq!(editor.document.presentation, presentation);
+    assert!(editor.revision > revision);
+
+    editor.redo();
+    assert_eq!(editor.document.model, changed_model);
+    assert_eq!(editor.document.presentation, presentation);
+}
+
+#[test]
 fn line_probes_are_undoable_bounded_and_round_trip() {
     let mut editor = Editor::default();
     let id = editor
         .create_segment_probe(Point2::new(-0.5, 0.2), Point2::new(0.5, 0.2))
         .unwrap();
     assert_eq!(editor.history_len(), (1, 0));
-    let mut probe = editor.document.probes[0].clone();
+    let mut probe = editor.document.model.probes[0].clone();
     probe.target = ProbeTarget::Segment {
         start: Point2::new(0.5, 0.2),
         end: Point2::new(-0.5, 0.2),
@@ -226,19 +297,19 @@ fn line_probes_are_undoable_bounded_and_round_trip() {
         document
     );
     editor.undo();
-    assert_eq!(editor.document.probes[0].id, id);
+    assert_eq!(editor.document.model.probes[0].id, id);
     editor.undo();
-    assert!(editor.document.probes.is_empty());
+    assert!(editor.document.model.probes.is_empty());
 
     let mut invalid = document.clone();
-    invalid.probes[0].target = ProbeTarget::Segment {
+    invalid.model.probes[0].target = ProbeTarget::Segment {
         start: Point2::default(),
         end: Point2::default(),
         preset: ProbeSamplingPreset::Medium,
     };
     assert!(
         Editor::default()
-            .update_probe(invalid.probes[0].clone())
+            .update_probe(invalid.model.probes[0].clone())
             .is_err()
     );
 }
@@ -268,12 +339,13 @@ fn area_probe_targets_and_far_field_settings_round_trip() {
         .unwrap();
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 15"));
+    assert!(json.contains("\"version\": 16"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
-    assert_eq!(decoded.far_field.inset, 0.17);
+    assert_eq!(decoded.model.far_field.inset, 0.17);
     assert!(matches!(
         decoded
+            .model
             .probes
             .iter()
             .find(|probe| probe.id == disk)
@@ -283,10 +355,18 @@ fn area_probe_targets_and_far_field_settings_round_trip() {
     ));
 
     editor.delete_obstacle(region);
-    assert!(editor.document.probes.iter().any(|probe| probe.id == disk));
+    assert!(
+        editor
+            .document
+            .model
+            .probes
+            .iter()
+            .any(|probe| probe.id == disk)
+    );
     assert!(
         !editor
             .document
+            .model
             .probes
             .iter()
             .any(|probe| probe.id == attached)
@@ -295,6 +375,7 @@ fn area_probe_targets_and_far_field_settings_round_trip() {
     assert!(
         editor
             .document
+            .model
             .probes
             .iter()
             .any(|probe| probe.id == attached)
@@ -317,7 +398,7 @@ fn malformed_area_and_far_field_targets_are_rejected() {
     assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
-    legacy["version"] = 12.into();
+    set_file_version(&mut legacy, 12);
     legacy.as_object_mut().unwrap().remove("far_field");
     assert!(decode(serde_json::to_string(&legacy).unwrap().as_bytes()).is_err());
 }
@@ -328,7 +409,7 @@ fn version_nine_point_probes_remain_loadable() {
     editor.create_point_probe(Point2::new(0.1, -0.2)).unwrap();
     let json = save(&editor.document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    value["version"] = 9.into();
+    set_file_version(&mut value, 9);
     value.as_object_mut().unwrap().remove("source");
     value.as_object_mut().unwrap().remove("far_field");
     assert_eq!(
@@ -339,27 +420,25 @@ fn version_nine_point_probes_remain_loadable() {
 
 #[test]
 fn continuous_source_round_trips_and_version_ten_uses_the_default() {
-    let document = Document {
-        source: SourceSettings {
-            enabled: true,
-            position: Point2::new(-0.37, 0.28),
-            amplitude: 23.0,
-            width: 0.045,
-            frequency_hz: 3.25,
-            region: BACKGROUND_REGION,
-        },
-        ..Default::default()
+    let mut document = Document::default();
+    document.model.source = SourceSettings {
+        enabled: true,
+        position: Point2::new(-0.37, 0.28),
+        amplitude: 23.0,
+        width: 0.045,
+        frequency_hz: 3.25,
+        region: BACKGROUND_REGION,
     };
     let json = save(&document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 15);
+    assert_eq!(value["version"], 16);
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
-    value["version"] = 10.into();
+    set_file_version(&mut value, 10);
     value.as_object_mut().unwrap().remove("source");
     value.as_object_mut().unwrap().remove("far_field");
     let legacy = decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
-    assert_eq!(legacy.source, SourceSettings::default());
+    assert_eq!(legacy.model.source, SourceSettings::default());
 
     let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
     malformed["source"]["width"] = 0.into();
@@ -392,20 +471,24 @@ fn volume_source_round_trips_and_is_one_undoable_region_edit() {
         .unwrap();
     settle(&mut editor);
     assert_eq!(
-        editor.document.accepted.volume_source(BACKGROUND_REGION),
+        editor
+            .document
+            .model
+            .accepted
+            .volume_source(BACKGROUND_REGION),
         Some(&source)
     );
     editor.undo();
-    assert!(editor.document.draft.volume_sources.is_empty());
+    assert!(editor.document.model.draft.volume_sources.is_empty());
     editor.redo();
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 15"));
+    assert!(json.contains("\"version\": 16"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
-    legacy["version"] = 14.into();
+    set_file_version(&mut legacy, 14);
     assert!(decode(serde_json::to_string(&legacy).unwrap().as_bytes()).is_err());
 }
 #[test]
@@ -417,7 +500,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 16.into(),
+            0 => value["version"] = 17.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -470,7 +553,7 @@ fn open_internal_boundary_round_trip_and_history() {
     );
     let created = editor.document.clone();
     editor.undo();
-    assert!(editor.document.draft.internal_boundaries.is_empty());
+    assert!(editor.document.model.draft.internal_boundaries.is_empty());
     editor.redo();
     assert_eq!(editor.document, created);
 
@@ -494,25 +577,28 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        15
+        16
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
-    assert_eq!(decoded.draft.internal_boundaries[0].id, boundary);
-    assert_eq!(decoded.draft.internal_boundaries[0].span_laws, [law]);
+    assert_eq!(decoded.model.draft.internal_boundaries[0].id, boundary);
+    assert_eq!(decoded.model.draft.internal_boundaries[0].span_laws, [law]);
 
     let mut parallel_gap: serde_json::Value = serde_json::from_str(&json).unwrap();
-    parallel_gap["version"] = 6.into();
+    set_file_version(&mut parallel_gap, 6);
     parallel_gap.as_object_mut().unwrap().remove("far_field");
     for scene in ["draft", "accepted"] {
         parallel_gap[scene]["internal_boundaries"][0]["span_laws"][0]["left"] =
             serde_json::json!({ "kind": "impedance", "ratio": 1.25 });
     }
     let migrated_gap = decode(serde_json::to_string(&parallel_gap).unwrap().as_bytes()).unwrap();
-    assert_eq!(migrated_gap.draft.internal_boundaries[0].span_laws, [law]);
+    assert_eq!(
+        migrated_gap.model.draft.internal_boundaries[0].span_laws,
+        [law]
+    );
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
-    legacy["version"] = 3.into();
+    set_file_version(&mut legacy, 3);
     legacy.as_object_mut().unwrap().remove("far_field");
     for scene in ["draft", "accepted"] {
         let stored = &mut legacy[scene]["internal_boundaries"][0];
@@ -521,7 +607,7 @@ fn open_internal_boundary_round_trip_and_history() {
     }
     let migrated = decode(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();
     assert_eq!(
-        migrated.draft.internal_boundaries[0].span_laws,
+        migrated.model.draft.internal_boundaries[0].span_laws,
         [InternalBoundaryLaw::REFLECTING]
     );
 }
@@ -631,7 +717,7 @@ fn continuity_split_merge_and_orientation_are_atomic_and_round_trip() {
     settle(&mut editor);
     assert_eq!(editor.acceptance, Acceptance::Valid);
     let mesh = mesh_scene(
-        &editor.document.draft,
+        &editor.document.model.draft,
         editor.revision,
         MeshingOptions {
             target_edge_length: 0.25,
@@ -642,7 +728,7 @@ fn continuity_split_merge_and_orientation_are_atomic_and_round_trip() {
     .expect("a split baffle junction must remain meshable");
     QuadraticWaveOperator::assemble_scene(
         &mesh,
-        &editor.document.draft,
+        &editor.document.model.draft,
         OuterBoundaryCondition::Reflecting,
     )
     .expect("a split baffle junction must assemble into the wave operator");
@@ -669,7 +755,9 @@ fn continuity_split_merge_and_orientation_are_atomic_and_round_trip() {
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
     assert_eq!(
-        decoded.draft.internal_boundaries[0].spline.multiplicities(),
+        decoded.model.draft.internal_boundaries[0]
+            .spline
+            .multiplicities(),
         &[1, 3]
     );
     editor.undo();
@@ -743,7 +831,13 @@ fn loop_role_conversion_owns_regions_and_rejects_nonempty_holes() {
         .unwrap();
     let interior = editor.obstacle(id).unwrap().role.interior().unwrap();
     assert_eq!(
-        editor.document.draft.region(interior).unwrap().material,
+        editor
+            .document
+            .model
+            .draft
+            .region(interior)
+            .unwrap()
+            .material,
         material
     );
     assert_eq!(editor.history_len().0, history + 1);
@@ -755,12 +849,12 @@ fn loop_role_conversion_owns_regions_and_rejects_nonempty_holes() {
     assert_eq!(editor.loop_kind(id), Some(LoopKind::Wall));
     editor.set_loop_kind(id, LoopKind::Hole, material).unwrap();
     assert_eq!(editor.loop_kind(id), Some(LoopKind::Hole));
-    assert!(editor.document.draft.region(interior).is_none());
+    assert!(editor.document.model.draft.region(interior).is_none());
     settle(&mut editor);
     assert_eq!(editor.acceptance, Acceptance::Valid);
     editor.undo();
     assert_eq!(editor.loop_kind(id), Some(LoopKind::Wall));
-    assert!(editor.document.draft.region(interior).is_some());
+    assert!(editor.document.model.draft.region(interior).is_some());
 
     let child = editor
         .create_loop(
@@ -798,7 +892,7 @@ fn hole_span_conditions_round_trip_follow_seam_insertion_and_guard_removal() {
         .unwrap();
     settle(&mut editor);
     assert_eq!(
-        editor.document.accepted.obstacles[0].span_conditions[7],
+        editor.document.model.accepted.obstacles[0].span_conditions[7],
         assigned
     );
 
@@ -830,7 +924,7 @@ fn hole_span_conditions_round_trip_follow_seam_insertion_and_guard_removal() {
     assert_eq!(decoded, editor.document);
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
-    legacy["version"] = 4.into();
+    set_file_version(&mut legacy, 4);
     legacy.as_object_mut().unwrap().remove("far_field");
     for scene in ["draft", "accepted"] {
         legacy[scene]["loops"][0]
@@ -840,7 +934,7 @@ fn hole_span_conditions_round_trip_follow_seam_insertion_and_guard_removal() {
     }
     let migrated = decode(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();
     assert!(
-        migrated.draft.obstacles[0]
+        migrated.model.draft.obstacles[0]
             .span_conditions
             .iter()
             .all(|condition| *condition == FaceBoundaryCondition::Reflecting)
@@ -869,12 +963,15 @@ fn insertion_and_removal_are_individual_actions() {
 #[test]
 fn representative_example_loads_and_extreme_finite_draft_remains_editable() {
     let document = decode(include_bytes!("../../../examples/eight-obstacles.json")).unwrap();
-    assert_eq!(document.draft.obstacles.len(), 8);
+    assert_eq!(document.model.draft.obstacles.len(), 8);
     let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
     value["draft"]["loops"][0]["controls"][0][0] = serde_json::json!(1e100);
     let loaded = decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
-    assert_eq!(loaded.accepted, document.accepted);
-    assert_eq!(loaded.draft.obstacles[0].spline.controls()[0].x, 1e100);
+    assert_eq!(loaded.model.accepted, document.model.accepted);
+    assert_eq!(
+        loaded.model.draft.obstacles[0].spline.controls()[0].x,
+        1e100
+    );
 }
 
 #[test]
@@ -890,7 +987,13 @@ fn material_regions_round_trip_and_version_one_migrates_to_holes() {
         )
         .unwrap();
     settle(&mut editor);
-    let mut values = editor.document.draft.material(material).unwrap().clone();
+    let mut values = editor
+        .document
+        .model
+        .draft
+        .material(material)
+        .unwrap()
+        .clone();
     values.mass_density = ScalarField::constant(2.5);
     values.stiffness = ScalarField::constant(6.0);
     values.damping = ScalarField::constant(0.1);
@@ -900,6 +1003,7 @@ fn material_regions_round_trip_and_version_one_migrates_to_holes() {
     assert_eq!(document, editor.document);
     assert!(matches!(
         document
+            .model
             .draft
             .obstacles
             .iter()
@@ -916,9 +1020,9 @@ fn material_regions_round_trip_and_version_one_migrates_to_holes() {
       "accepted": [{"id": 9, "controls": [[-0.2,0.0],[0.0,0.2],[0.2,0.0],[0.0,-0.2]], "intervals": [1.0,1.0,1.0,1.0]}]
     }"#;
     let migrated = decode(legacy).unwrap();
-    assert_eq!(migrated.draft.materials, Scene::default().materials);
+    assert_eq!(migrated.model.draft.materials, Scene::default().materials);
     assert!(matches!(
-        migrated.draft.obstacles[0].role,
+        migrated.model.draft.obstacles[0].role,
         LoopRole::Hole {
             exterior: BACKGROUND_REGION
         }
@@ -939,7 +1043,13 @@ fn spatial_materials_parameters_and_frames_round_trip() {
         .unwrap();
     settle(&mut editor);
     let region_id = editor.obstacle(loop_id).unwrap().role.interior().unwrap();
-    let mut material = editor.document.draft.material(material_id).unwrap().clone();
+    let mut material = editor
+        .document
+        .model
+        .draft
+        .material(material_id)
+        .unwrap()
+        .clone();
     material.parameters = vec![MaterialParameter {
         name: "R".into(),
         value: 0.35,
@@ -960,7 +1070,7 @@ fn spatial_materials_parameters_and_frames_round_trip() {
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 15"));
+    assert!(json.contains("\"version\": 16"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -987,7 +1097,7 @@ fn version_thirteen_materials_gain_world_unit_region_frames() {
     let region_id = editor.obstacle(loop_id).unwrap().role.interior().unwrap();
     let json = save(&editor.document).unwrap();
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
-    legacy["version"] = 13.into();
+    set_file_version(&mut legacy, 13);
     for scene_name in ["draft", "accepted"] {
         let scene = legacy[scene_name].as_object_mut().unwrap();
         for material in scene["materials"].as_array_mut().unwrap() {
@@ -1003,10 +1113,15 @@ fn version_thirteen_materials_gain_world_unit_region_frames() {
     }
     let migrated = decode(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();
     assert_eq!(
-        migrated.draft.region(BACKGROUND_REGION).unwrap().frame,
+        migrated
+            .model
+            .draft
+            .region(BACKGROUND_REGION)
+            .unwrap()
+            .frame,
         MaterialFrame::world()
     );
-    let frame = migrated.draft.region(region_id).unwrap().frame;
+    let frame = migrated.model.draft.region(region_id).unwrap().frame;
     assert_eq!(frame.attachment, MaterialFrameAttachment::FollowRegion);
     assert!((frame.origin - Point2::new(0.46, -0.21)).norm() < 1.0e-3);
     assert_eq!(frame.angle_radians, 0.0);
@@ -1056,7 +1171,7 @@ fn attached_material_frame_follows_a_whole_loop_similarity() {
     editor.begin();
     editor.set_control_points(&updates).unwrap();
     editor.commit();
-    let frame = editor.document.draft.region(region_id).unwrap().frame;
+    let frame = editor.document.model.draft.region(region_id).unwrap().frame;
     assert!((frame.origin - transform(original_frame.origin)).norm() < 1.0e-12);
     assert!((frame.angle_radians - (original_frame.angle_radians + angle)).abs() < 1.0e-12);
     assert_eq!(editor.history_len().0, history + 1);
@@ -1070,7 +1185,7 @@ fn attached_material_frame_follows_a_whole_loop_similarity() {
         )])
         .unwrap();
     assert_eq!(
-        editor.document.draft.region(region_id).unwrap().frame,
+        editor.document.model.draft.region(region_id).unwrap().frame,
         before_partial
     );
     editor.cancel();
@@ -1087,6 +1202,7 @@ fn material_edits_and_region_assignments_are_undoable() {
     assert_eq!(
         editor
             .document
+            .model
             .draft
             .region(BACKGROUND_REGION)
             .unwrap()
@@ -1099,6 +1215,7 @@ fn material_edits_and_region_assignments_are_undoable() {
     assert_eq!(
         editor
             .document
+            .model
             .draft
             .region(BACKGROUND_REGION)
             .unwrap()
@@ -1146,9 +1263,9 @@ fn mixed_control_update_is_one_history_action() {
 #[test]
 fn duplication_preserves_assignments_and_straightens_baffles() {
     let mut editor = Editor::default();
-    editor.document.draft.obstacles[0].span_conditions[2] =
+    editor.document.model.draft.obstacles[0].span_conditions[2] =
         FaceBoundaryCondition::SecondOrderOutgoing;
-    editor.document.accepted = editor.document.draft.clone();
+    editor.document.model.accepted = editor.document.model.draft.clone();
     let duplicate = editor
         .duplicate_obstacle(ObstacleId(1), Point2::new(0.4, 0.0))
         .unwrap();
@@ -1214,12 +1331,18 @@ fn duplication_preserves_assignments_and_straightens_baffles() {
     let copy_region = editor.obstacle(copy).unwrap().role.interior().unwrap();
     assert_ne!(copy_region, source_region);
     assert_eq!(
-        editor.document.draft.region(copy_region).unwrap().material,
+        editor
+            .document
+            .model
+            .draft
+            .region(copy_region)
+            .unwrap()
+            .material,
         material
     );
     editor.undo();
     assert!(editor.obstacle(copy).is_none());
-    assert!(editor.document.draft.region(copy_region).is_none());
+    assert!(editor.document.model.draft.region(copy_region).is_none());
 }
 
 #[test]
@@ -1269,7 +1392,12 @@ fn bulk_face_assignment_is_atomic_and_converts_thin_gaps() {
         .unwrap();
     assert_eq!(editor.history_len().0, history + 1);
     assert_eq!(
-        editor.document.draft.outer_boundaries.get(OuterSide::Top),
+        editor
+            .document
+            .model
+            .draft
+            .outer_boundaries
+            .get(OuterSide::Top),
         OuterBoundaryCondition::Dirichlet {
             signal: condition.signal().unwrap()
         }
@@ -1320,7 +1448,12 @@ fn heterogeneous_first_order_assignment_preserves_face_ratio() {
         )
         .unwrap();
     assert_eq!(
-        editor.document.draft.outer_boundaries.get(OuterSide::Left),
+        editor
+            .document
+            .model
+            .draft
+            .outer_boundaries
+            .get(OuterSide::Left),
         OuterBoundaryCondition::FirstOrderOutgoing
     );
     assert_eq!(
@@ -1340,19 +1473,25 @@ fn validated_example_replacement_is_one_undoable_action() {
     let mut editor = Editor::default();
     let before = editor.document.clone();
     let scene = Scene::default();
-    let example = Document {
-        draft: scene.clone(),
-        accepted: scene,
-        probes: vec![],
-        source: SourceSettings::default(),
-        far_field: Default::default(),
+    let mut example = Document {
+        model: DocumentModel {
+            draft: scene.clone(),
+            accepted: scene,
+            probes: vec![],
+            source: SourceSettings::default(),
+            far_field: Default::default(),
+        },
+        presentation: Default::default(),
     };
+    example.presentation.mesh = true;
+    example.presentation.field_gain = 5.0;
 
     editor.replace_validated_with_history(example.clone());
     assert_eq!(editor.document, example);
     assert_eq!(editor.history_len(), (1, 0));
     editor.undo();
-    assert_eq!(editor.document, before);
+    assert_eq!(editor.document.model, before.model);
+    assert_eq!(editor.document.presentation, example.presentation);
 }
 
 #[test]
@@ -1364,26 +1503,29 @@ fn point_probes_are_undoable_and_persist_without_affecting_geometry_acceptance()
     assert_eq!(editor.acceptance, Acceptance::Valid);
     assert_eq!(editor.history_len(), (1, 0));
 
-    let mut probe = editor.document.probes[0].clone();
+    let mut probe = editor.document.model.probes[0].clone();
     probe.name = "Receiver".into();
     probe.target = ProbeTarget::Point(Point2::new(-0.2, 0.3));
     editor.update_probe(probe.clone()).unwrap();
     assert_eq!(editor.history_len(), (2, 0));
     editor.undo();
-    assert_eq!(editor.document.probes[0].name, format!("Probe {}", id.0));
+    assert_eq!(
+        editor.document.model.probes[0].name,
+        format!("Probe {}", id.0)
+    );
     editor.redo();
-    assert_eq!(editor.document.probes[0], probe);
+    assert_eq!(editor.document.model.probes[0], probe);
 
     let json = save(&editor.document).unwrap();
     let decoded = decode(json.as_bytes()).unwrap();
-    assert_eq!(decoded.probes, [probe]);
-    assert_eq!(decoded.draft, editor.document.draft);
-    assert_eq!(decoded.accepted, editor.document.accepted);
+    assert_eq!(decoded.model.probes, [probe]);
+    assert_eq!(decoded.model.draft, editor.document.model.draft);
+    assert_eq!(decoded.model.accepted, editor.document.model.accepted);
 
     editor.delete_probe(id).unwrap();
-    assert!(editor.document.probes.is_empty());
+    assert!(editor.document.model.probes.is_empty());
     editor.undo();
-    assert_eq!(editor.document.probes.len(), 1);
+    assert_eq!(editor.document.model.probes.len(), 1);
 }
 
 #[test]
@@ -1438,20 +1580,20 @@ fn boundary_probe_round_trips_and_tracks_periodic_insertion() {
         })
         .unwrap();
     editor.insert(ObstacleId(1), 7.5).unwrap();
-    let ProbeTarget::Boundary(target) = editor.document.probes[0].target else {
+    let ProbeTarget::Boundary(target) = editor.document.model.probes[0].target else {
         panic!("expected boundary probe")
     };
     assert_eq!(target.spans(9), vec![7, 8, 0]);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 15"));
+    assert!(json.contains("\"version\": 16"));
     let decoded = decode(json.as_bytes()).unwrap();
-    assert_eq!(decoded.probes, editor.document.probes);
+    assert_eq!(decoded.model.probes, editor.document.model.probes);
 
     editor.delete_obstacle(ObstacleId(1));
-    assert!(editor.document.probes.is_empty());
+    assert!(editor.document.model.probes.is_empty());
     editor.undo();
-    assert_eq!(editor.document.probes[0].id, id);
+    assert_eq!(editor.document.model.probes[0].id, id);
 }
 
 #[test]
@@ -1481,7 +1623,7 @@ fn baffle_split_keeps_largest_attached_piece() {
         })
         .unwrap();
     let right = editor.split_internal_boundary(baffle, 1).unwrap();
-    let ProbeTarget::Boundary(target) = editor.document.probes[0].target else {
+    let ProbeTarget::Boundary(target) = editor.document.model.probes[0].target else {
         panic!("expected boundary probe")
     };
     assert_eq!(target.feature, BoundaryProbeFeature::Baffle(right));
@@ -1520,7 +1662,7 @@ fn baffle_merge_moves_attachment_into_retained_curve() {
     editor
         .merge_internal_boundaries(first, second, 1.0e-12)
         .unwrap();
-    let ProbeTarget::Boundary(target) = editor.document.probes[0].target else {
+    let ProbeTarget::Boundary(target) = editor.document.model.probes[0].target else {
         panic!("expected boundary probe")
     };
     assert_eq!(target.feature, BoundaryProbeFeature::Baffle(first));

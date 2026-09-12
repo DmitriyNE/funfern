@@ -1,7 +1,8 @@
 use crate::editor::{
-    BoundaryProbeFeature, BoundaryProbeSide, BoundaryProbeTarget, Document, FarFieldSettings,
-    MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, ProbeDefinition, ProbeId, ProbeSamplingPreset,
-    ProbeTarget, SourceSettings,
+    BoundaryProbeFeature, BoundaryProbeSide, BoundaryProbeTarget, Document, DocumentModel,
+    FarFieldSettings, MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty,
+    PresentationSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget,
+    SourceSettings,
 };
 use funfern_core::*;
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,53 @@ struct FileV2 {
     source: Option<StoredSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     far_field: Option<StoredFarField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    presentation: Option<StoredPresentation>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredPresentation {
+    grid: bool,
+    control_polygons: bool,
+    handles: bool,
+    accepted_reference: bool,
+    boundary_conditions: bool,
+    mesh: bool,
+    mesh_boundaries: bool,
+    adaptation_target: bool,
+    point_probes: bool,
+    line_probes: bool,
+    boundary_probes: bool,
+    area_probes: bool,
+    far_field_contour: bool,
+    field: bool,
+    field_gain: f32,
+    material_overlay: StoredMaterialOverlay,
+    material_overlay_opacity: f32,
+    material_overlay_auto_range: bool,
+    material_overlay_logarithmic: bool,
+    material_overlay_manual_min: f64,
+    material_overlay_manual_max: f64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", content = "property", rename_all = "snake_case")]
+enum StoredMaterialOverlay {
+    Off,
+    Regions,
+    Property(StoredMaterialProperty),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredMaterialProperty {
+    Density,
+    Stiffness,
+    Damping,
+    WaveSpeed,
+    Impedance,
+    VolumeSource,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -864,11 +912,12 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 15,
+        version: 16,
         domain: DOMAIN,
-        draft: encode_scene(&document.draft),
-        accepted: encode_scene(&document.accepted),
+        draft: encode_scene(&document.model.draft),
+        accepted: encode_scene(&document.model.accepted),
         probes: document
+            .model
             .probes
             .iter()
             .map(|probe| StoredProbe {
@@ -919,17 +968,104 @@ fn encode_document(document: &Document) -> FileV2 {
             })
             .collect(),
         source: Some(StoredSource {
-            enabled: document.source.enabled,
-            position: [document.source.position.x, document.source.position.y],
-            amplitude: document.source.amplitude,
-            width: document.source.width,
-            frequency_hz: document.source.frequency_hz,
-            region: document.source.region.0,
+            enabled: document.model.source.enabled,
+            position: [
+                document.model.source.position.x,
+                document.model.source.position.y,
+            ],
+            amplitude: document.model.source.amplitude,
+            width: document.model.source.width,
+            frequency_hz: document.model.source.frequency_hz,
+            region: document.model.source.region.0,
         }),
         far_field: Some(StoredFarField {
-            enabled: document.far_field.enabled,
-            inset: document.far_field.inset,
+            enabled: document.model.far_field.enabled,
+            inset: document.model.far_field.inset,
         }),
+        presentation: Some(encode_presentation(document.presentation)),
+    }
+}
+
+fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
+    StoredPresentation {
+        grid: settings.grid,
+        control_polygons: settings.control_polygons,
+        handles: settings.handles,
+        accepted_reference: settings.accepted_reference,
+        boundary_conditions: settings.boundary_conditions,
+        mesh: settings.mesh,
+        mesh_boundaries: settings.mesh_boundaries,
+        adaptation_target: settings.adaptation_target,
+        point_probes: settings.point_probes,
+        line_probes: settings.line_probes,
+        boundary_probes: settings.boundary_probes,
+        area_probes: settings.area_probes,
+        far_field_contour: settings.far_field_contour,
+        field: settings.field,
+        field_gain: settings.field_gain,
+        material_overlay: match settings.material_overlay {
+            MaterialOverlay::Off => StoredMaterialOverlay::Off,
+            MaterialOverlay::Regions => StoredMaterialOverlay::Regions,
+            MaterialOverlay::Property(property) => {
+                StoredMaterialOverlay::Property(match property {
+                    MaterialProperty::Density => StoredMaterialProperty::Density,
+                    MaterialProperty::Stiffness => StoredMaterialProperty::Stiffness,
+                    MaterialProperty::Damping => StoredMaterialProperty::Damping,
+                    MaterialProperty::WaveSpeed => StoredMaterialProperty::WaveSpeed,
+                    MaterialProperty::Impedance => StoredMaterialProperty::Impedance,
+                    MaterialProperty::VolumeSource => StoredMaterialProperty::VolumeSource,
+                })
+            }
+        },
+        material_overlay_opacity: settings.material_overlay_opacity,
+        material_overlay_auto_range: settings.material_overlay_auto_range,
+        material_overlay_logarithmic: settings.material_overlay_logarithmic,
+        material_overlay_manual_min: settings.material_overlay_manual_min,
+        material_overlay_manual_max: settings.material_overlay_manual_max,
+    }
+}
+
+fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSettings, String> {
+    let settings = PresentationSettings {
+        grid: stored.grid,
+        control_polygons: stored.control_polygons,
+        handles: stored.handles,
+        accepted_reference: stored.accepted_reference,
+        boundary_conditions: stored.boundary_conditions,
+        mesh: stored.mesh,
+        mesh_boundaries: stored.mesh_boundaries,
+        adaptation_target: stored.adaptation_target,
+        point_probes: stored.point_probes,
+        line_probes: stored.line_probes,
+        boundary_probes: stored.boundary_probes,
+        area_probes: stored.area_probes,
+        far_field_contour: stored.far_field_contour,
+        field: stored.field,
+        field_gain: stored.field_gain,
+        material_overlay: match stored.material_overlay {
+            StoredMaterialOverlay::Off => MaterialOverlay::Off,
+            StoredMaterialOverlay::Regions => MaterialOverlay::Regions,
+            StoredMaterialOverlay::Property(property) => {
+                MaterialOverlay::Property(match property {
+                    StoredMaterialProperty::Density => MaterialProperty::Density,
+                    StoredMaterialProperty::Stiffness => MaterialProperty::Stiffness,
+                    StoredMaterialProperty::Damping => MaterialProperty::Damping,
+                    StoredMaterialProperty::WaveSpeed => MaterialProperty::WaveSpeed,
+                    StoredMaterialProperty::Impedance => MaterialProperty::Impedance,
+                    StoredMaterialProperty::VolumeSource => MaterialProperty::VolumeSource,
+                })
+            }
+        },
+        material_overlay_opacity: stored.material_overlay_opacity,
+        material_overlay_auto_range: stored.material_overlay_auto_range,
+        material_overlay_logarithmic: stored.material_overlay_logarithmic,
+        material_overlay_manual_min: stored.material_overlay_manual_min,
+        material_overlay_manual_max: stored.material_overlay_manual_max,
+    };
+    if settings.valid() {
+        Ok(settings)
+    } else {
+        Err("Scene contains invalid presentation settings".into())
     }
 }
 
@@ -1143,14 +1279,17 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 return Err("Unsupported scene domain".into());
             }
             Document {
-                draft: decode_v1(file.draft)?,
-                accepted: decode_v1(file.accepted)?,
-                probes: vec![],
-                source: SourceSettings::default(),
-                far_field: FarFieldSettings::default(),
+                model: DocumentModel {
+                    draft: decode_v1(file.draft)?,
+                    accepted: decode_v1(file.accepted)?,
+                    probes: vec![],
+                    source: SourceSettings::default(),
+                    far_field: FarFieldSettings::default(),
+                },
+                presentation: PresentationSettings::default(),
             }
         }
-        2..=15 => {
+        2..=16 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
@@ -1189,12 +1328,20 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
             if !far_field.valid() {
                 return Err("Scene contains invalid far-field settings".into());
             }
+            let presentation = match file.presentation {
+                Some(stored) if header.version >= 16 => decode_presentation(stored)?,
+                Some(_) => return Err("Presentation settings require scene version 16".into()),
+                None => PresentationSettings::default(),
+            };
             Document {
-                draft,
-                accepted,
-                probes,
-                source,
-                far_field,
+                model: DocumentModel {
+                    draft,
+                    accepted,
+                    probes,
+                    source,
+                    far_field,
+                },
+                presentation,
             }
         }
         _ => return Err("Unsupported scene version".into()),
@@ -1204,7 +1351,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
 
 #[doc(hidden)]
 pub fn candidate(document: Document) -> LoadCandidate {
-    let job = ValidationJob::new(document.accepted.clone(), 0);
+    let job = ValidationJob::new(document.model.accepted.clone(), 0);
     LoadCandidate { document, job }
 }
 

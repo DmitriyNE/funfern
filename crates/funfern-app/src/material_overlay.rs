@@ -1,3 +1,4 @@
+pub use funfern_app::editor::{MaterialOverlay, MaterialProperty};
 use funfern_core::{MaterialCoordinates, QuadraticWaveOperator, RegionId, Scene, TriMesh};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -10,66 +11,6 @@ const SUBTRIANGLES: [[usize; 3]; 6] = [
     [2, 5, 6],
     [5, 0, 6],
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MaterialOverlay {
-    Off,
-    Regions,
-    Property(MaterialProperty),
-}
-
-impl MaterialOverlay {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Off => "Off",
-            Self::Regions => "Material regions",
-            Self::Property(property) => property.label(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MaterialProperty {
-    Density,
-    Stiffness,
-    Damping,
-    WaveSpeed,
-    Impedance,
-    VolumeSource,
-}
-
-impl MaterialProperty {
-    pub const ALL: [Self; 6] = [
-        Self::Density,
-        Self::Stiffness,
-        Self::Damping,
-        Self::WaveSpeed,
-        Self::Impedance,
-        Self::VolumeSource,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Density => "Density",
-            Self::Stiffness => "Stiffness",
-            Self::Damping => "Damping",
-            Self::WaveSpeed => "Wave speed",
-            Self::Impedance => "Impedance",
-            Self::VolumeSource => "Volume source",
-        }
-    }
-
-    const fn index(self) -> usize {
-        match self {
-            Self::Density => 0,
-            Self::Stiffness => 1,
-            Self::Damping => 2,
-            Self::WaveSpeed => 3,
-            Self::Impedance => 4,
-            Self::VolumeSource => 5,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverlayRange {

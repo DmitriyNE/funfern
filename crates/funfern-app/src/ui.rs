@@ -22,11 +22,14 @@ use bevy_egui::{
     EguiContexts,
     egui::{self, Color32, Pos2, Rect, Stroke},
 };
+#[cfg(not(target_arch = "wasm32"))]
+use funfern_app::editor::DocumentModel;
 use funfern_app::{
     editor::{
         Acceptance, BoundaryFaceTarget, BoundaryProbeFeature, BoundaryProbeSide,
-        BoundaryProbeTarget, Editor, FarFieldSettings, GeometryControl, LoopKind, ProbeDefinition,
-        ProbeId, ProbeSamplingPreset, ProbeTarget, SourceSettings,
+        BoundaryProbeTarget, Editor, FarFieldSettings, GeometryControl, LoopKind,
+        PresentationSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget,
+        SourceSettings,
     },
     persistence::{self, LoadCandidate},
 };
@@ -747,11 +750,6 @@ pub struct Playground {
     far_field_view: ProbeViewState,
     probe_sample_rate: f64,
     probe_history_seconds: f64,
-    show_point_probes: bool,
-    show_line_probes: bool,
-    show_boundary_probes: bool,
-    show_area_probes: bool,
-    show_far_field_contour: bool,
     probe_drag: Option<ProbeDrag>,
     source_dragging: bool,
     segment_probe_start: Option<Point2>,
@@ -788,11 +786,6 @@ pub struct Playground {
     center: Point2,
     scale: f64,
     fit: bool,
-    grid: bool,
-    polygon: bool,
-    handles: bool,
-    reference: bool,
-    show_boundary_conditions: bool,
     cache_revision: u64,
     cache_scale: f64,
     cache_accepted: Scene,
@@ -809,7 +802,7 @@ pub struct Playground {
     load: Option<LoadCandidate>,
     load_mode: LoadMode,
     load_notice: &'static str,
-    load_example_simulation: Option<examples::ExampleSimulation>,
+    load_fresh_simulation: bool,
     startup_load_checked: bool,
     autosave_observed: funfern_app::editor::Document,
     autosave_due: Option<Instant>,
@@ -843,7 +836,6 @@ pub struct Playground {
     amr_error: Option<String>,
     amr_work_ms: f64,
     amr_max_slice_ms: f64,
-    show_amr_target: bool,
     next_mesh_revision: u64,
     mesh_source: Scene,
     mesh_committed_scene: Scene,
@@ -860,19 +852,9 @@ pub struct Playground {
     mesh_build_ms: f64,
     mesh_work_ms: f64,
     mesh_max_slice_ms: f64,
-    show_mesh: bool,
-    show_mesh_boundary: bool,
-    material_overlay: MaterialOverlay,
-    material_overlay_opacity: f32,
-    material_overlay_auto_range: bool,
-    material_overlay_logarithmic: bool,
-    material_overlay_manual_min: f64,
-    material_overlay_manual_max: f64,
     material_overlay_job: Option<MaterialOverlayJob>,
     material_overlay_snapshot: Option<MaterialOverlaySnapshot>,
     material_overlay_error: Option<String>,
-    show_field: bool,
-    field_gain: f32,
     wave_mesh: Option<Arc<TriMesh>>,
     wave_operator: Option<Arc<QuadraticWaveOperator>>,
     wave_boundary_committed: OuterBoundaryConditions,
@@ -935,11 +917,6 @@ impl Default for Playground {
             far_field_view: ProbeViewState::new(10.0),
             probe_sample_rate: 120.0,
             probe_history_seconds: 10.0,
-            show_point_probes: true,
-            show_line_probes: true,
-            show_boundary_probes: true,
-            show_area_probes: true,
-            show_far_field_contour: true,
             probe_drag: None,
             source_dragging: false,
             segment_probe_start: None,
@@ -978,11 +955,6 @@ impl Default for Playground {
             center: Point2::default(),
             scale: 300.0,
             fit: true,
-            grid: true,
-            polygon: true,
-            handles: true,
-            reference: true,
-            show_boundary_conditions: false,
             cache_revision: u64::MAX,
             cache_scale: 0.0,
             cache_accepted: Scene::default(),
@@ -999,7 +971,7 @@ impl Default for Playground {
             load: None,
             load_mode: LoadMode::Replace,
             load_notice: "Scene loaded; history cleared",
-            load_example_simulation: None,
+            load_fresh_simulation: false,
             startup_load_checked: false,
             autosave_observed: funfern_app::editor::Document::default(),
             autosave_due: None,
@@ -1033,7 +1005,6 @@ impl Default for Playground {
             amr_error: None,
             amr_work_ms: 0.0,
             amr_max_slice_ms: 0.0,
-            show_amr_target: false,
             next_mesh_revision: 1,
             mesh_source: Scene::default(),
             mesh_committed_scene: Scene::default(),
@@ -1050,19 +1021,9 @@ impl Default for Playground {
             mesh_build_ms: 0.0,
             mesh_work_ms: 0.0,
             mesh_max_slice_ms: 0.0,
-            show_mesh: false,
-            show_mesh_boundary: true,
-            material_overlay: MaterialOverlay::Regions,
-            material_overlay_opacity: 0.48,
-            material_overlay_auto_range: true,
-            material_overlay_logarithmic: false,
-            material_overlay_manual_min: 0.0,
-            material_overlay_manual_max: 1.0,
             material_overlay_job: None,
             material_overlay_snapshot: None,
             material_overlay_error: None,
-            show_field: true,
-            field_gain: 2.0,
             wave_mesh: None,
             wave_operator: None,
             wave_boundary_committed: OuterBoundaryConditions::default(),
@@ -1118,7 +1079,7 @@ impl Playground {
     }
 
     fn reconcile_probe_definitions(&mut self) {
-        let current = self.editor.document.probes.clone();
+        let current = self.editor.document.model.probes.clone();
         for probe in &current {
             if let Some(previous) = self
                 .probe_observed
@@ -1162,7 +1123,7 @@ impl Playground {
             return;
         }
         self.probe_display_readback = display.readbacks;
-        for probe in &self.editor.document.probes {
+        for probe in &self.editor.document.model.probes {
             if !probe.enabled || self.probe_status.contains_key(&probe.id) {
                 continue;
             }
@@ -1211,7 +1172,7 @@ impl Playground {
             return;
         }
         self.curve_probe_display_readback = display.readbacks;
-        for probe in &self.editor.document.probes {
+        for probe in &self.editor.document.model.probes {
             if !probe.enabled
                 || !matches!(
                     probe.target,
@@ -1265,7 +1226,7 @@ impl Playground {
             return;
         }
         self.area_probe_display_readback = display.readbacks;
-        for probe in &self.editor.document.probes {
+        for probe in &self.editor.document.model.probes {
             if !probe.enabled
                 || !matches!(
                     probe.target,
@@ -1630,14 +1591,14 @@ impl Playground {
         if self.simulation_candidate.is_some() || !request.ready() {
             return;
         }
-        if self.mesh_committed_scene != self.editor.document.accepted {
+        if self.mesh_committed_scene != self.editor.document.model.accepted {
             return;
         }
         let (Some(mesh), Some(operator)) = (&self.wave_mesh, &self.wave_operator) else {
             return;
         };
-        let probes = self.editor.document.probes.clone();
-        let far_field_settings = self.editor.document.far_field;
+        let probes = self.editor.document.model.probes.clone();
+        let far_field_settings = self.editor.document.model.far_field;
         let unchanged = self.probe_compiled.as_ref().is_some_and(|compiled| {
             compiled.generation == request.generation()
                 && compiled.mesh_revision == mesh.mesh_revision
@@ -2098,7 +2059,7 @@ impl Playground {
                 spans.push(span);
             }
         }
-        for obstacle in &self.editor.document.draft.obstacles {
+        for obstacle in &self.editor.document.model.draft.obstacles {
             for index in 0..obstacle.spline.intervals().len() {
                 let span = GeometrySpan::Loop(obstacle.id, index);
                 if self.span_matches_filter(span) {
@@ -2106,7 +2067,7 @@ impl Playground {
                 }
             }
         }
-        for boundary in &self.editor.document.draft.internal_boundaries {
+        for boundary in &self.editor.document.model.draft.internal_boundaries {
             for index in 0..boundary.spline.intervals().len() {
                 let span = GeometrySpan::Baffle(boundary.id, index);
                 if self.span_matches_filter(span) {
@@ -2719,7 +2680,7 @@ impl Playground {
             && let Some(result) = load.advance(12_000)
         {
             self.load = None;
-            let example_simulation = self.load_example_simulation.take();
+            let fresh_simulation = std::mem::take(&mut self.load_fresh_simulation);
             match result {
                 Ok(document) => {
                     match self.load_mode {
@@ -2729,18 +2690,14 @@ impl Playground {
                     self.clear_transient();
                     self.clear_all_probe_traces();
                     self.probe_compiled = None;
-                    self.wave_source = self.editor.document.source;
+                    self.wave_source = self.editor.document.model.source;
                     self.wave_source_dirty = true;
-                    if let Some(simulation) = example_simulation {
-                        self.wave_source = simulation.source;
+                    self.material_overlay_job = None;
+                    self.material_overlay_snapshot = None;
+                    self.material_overlay_error = None;
+                    if fresh_simulation {
                         self.wave_pending_pulse = None;
                         self.fresh_simulation_requested = true;
-                        self.show_boundary_conditions = true;
-                        self.material_overlay = simulation.material_overlay;
-                        self.material_overlay_opacity = simulation.material_overlay_opacity;
-                        self.material_overlay_auto_range = true;
-                        self.material_overlay_logarithmic = false;
-                        self.show_amr_target = simulation.show_amr_target;
                     }
                     if !self.load_notice.is_empty() {
                         self.notify(self.load_notice);
@@ -2756,7 +2713,7 @@ impl Playground {
         self.load = Some(load);
         self.load_mode = mode;
         self.load_notice = notice;
-        self.load_example_simulation = None;
+        self.load_fresh_simulation = false;
         self.message.clear();
     }
 
@@ -2766,7 +2723,7 @@ impl Playground {
             LoadMode::Undoable,
             "Example opened; Undo restores the previous scene",
         );
-        self.load_example_simulation = Some(example.simulation);
+        self.load_fresh_simulation = true;
     }
 
     fn start_initial_example_load(&mut self) {
@@ -2776,7 +2733,7 @@ impl Playground {
             LoadMode::Replace,
             "",
         );
-        self.load_example_simulation = Some(example.simulation);
+        self.load_fresh_simulation = true;
     }
 
     fn refresh_autosave(&mut self) {
@@ -2809,13 +2766,13 @@ impl Playground {
     fn refresh_curves(&mut self) {
         if self.cache_revision == self.editor.revision
             && self.cache_scale == self.scale
-            && self.cache_accepted == self.editor.document.accepted
+            && self.cache_accepted == self.editor.document.model.accepted
         {
             return;
         }
         self.cache_revision = self.editor.revision;
         self.cache_scale = self.scale;
-        self.cache_accepted = self.editor.document.accepted.clone();
+        self.cache_accepted = self.editor.document.model.accepted.clone();
         self.sampling_warning = false;
         let options = SamplingOptions {
             tolerance: 0.6 / self.scale,
@@ -2839,8 +2796,8 @@ impl Playground {
                     })
                     .collect()
             };
-            self.draft_curves = curves(&self.editor.document.draft);
-            self.accepted_curves = curves(&self.editor.document.accepted);
+            self.draft_curves = curves(&self.editor.document.model.draft);
+            self.accepted_curves = curves(&self.editor.document.model.accepted);
         }
         let mut internal_curves = |scene: &Scene| {
             scene
@@ -2861,14 +2818,16 @@ impl Playground {
                 })
                 .collect()
         };
-        self.draft_internal_curves = internal_curves(&self.editor.document.draft);
-        self.accepted_internal_curves = internal_curves(&self.editor.document.accepted);
+        self.draft_internal_curves = internal_curves(&self.editor.document.model.draft);
+        self.accepted_internal_curves = internal_curves(&self.editor.document.model.accepted);
     }
 
     fn refresh_mesh(&mut self) {
         // Prepare from the displayed mesh's own scene, never an obsolete
         // in-flight request. Geometry edits are coalesced until the drag ends.
-        let geometry_pending = !self.mesh_source.geometry_eq(&self.editor.document.accepted)
+        let geometry_pending = !self
+            .mesh_source
+            .geometry_eq(&self.editor.document.model.accepted)
             || self.mesh_source_max_edge != self.mesh_max_edge;
         if self.editor.editing() || geometry_pending {
             self.solution_indicator_job = None;
@@ -2886,7 +2845,7 @@ impl Playground {
         let geometry_changed = geometry_pending;
         if geometry_changed {
             self.mesh_started = Some(start);
-            self.mesh_source = self.editor.document.accepted.clone();
+            self.mesh_source = self.editor.document.model.accepted.clone();
             self.mesh_source_max_edge = self.mesh_max_edge;
             let previous = self
                 .mesh
@@ -3034,6 +2993,7 @@ impl Playground {
             && (!self
                 .editor
                 .document
+                .model
                 .accepted
                 .operator_eq(&self.mesh_committed_scene)
                 || self.fresh_simulation_requested)
@@ -3044,8 +3004,8 @@ impl Playground {
             let prepare = Instant::now();
             match QuadraticWaveOperator::assemble_scene_with_boundaries(
                 mesh,
-                &self.editor.document.accepted,
-                self.editor.document.accepted.outer_boundaries,
+                &self.editor.document.model.accepted,
+                self.editor.document.model.accepted.outer_boundaries,
             ) {
                 Ok(operator) => {
                     let fresh = self.fresh_simulation_requested;
@@ -3062,7 +3022,7 @@ impl Playground {
                             let volume_sources = match compile_volume_sources(
                                 mesh.clone(),
                                 operator.clone(),
-                                self.editor.document.accepted.clone(),
+                                self.editor.document.model.accepted.clone(),
                             ) {
                                 Ok(sources) => sources,
                                 Err(error) => {
@@ -3079,12 +3039,12 @@ impl Playground {
                                 source_region: mesh_region_at(mesh, self.wave_source.position)
                                     .unwrap_or(RegionId(0)),
                                 mesh: mesh.clone(),
-                                scene: self.editor.document.accepted.clone(),
+                                scene: self.editor.document.model.accepted.clone(),
                                 max_edge: self.mesh_committed_max_edge,
                                 low_quality: self.mesh_low_quality.clone(),
                                 operator,
                                 volume_sources,
-                                boundary: self.editor.document.accepted.outer_boundaries,
+                                boundary: self.editor.document.model.accepted.outer_boundaries,
                                 time_step,
                                 exposed_nodes,
                                 transfer,
@@ -3664,7 +3624,7 @@ impl Playground {
             self.wave_energy_step = u64::MAX;
             self.wave_source_dirty = false;
             self.wave_source.region = candidate.source_region;
-            self.editor.document.source.region = candidate.source_region;
+            self.editor.document.model.source.region = candidate.source_region;
             if candidate.fresh {
                 self.fresh_simulation_requested = false;
             }
@@ -3704,11 +3664,13 @@ impl Playground {
             && self
                 .editor
                 .document
+                .model
                 .accepted
                 .operator_eq(&self.mesh_committed_scene)
             && !self
                 .editor
                 .document
+                .model
                 .accepted
                 .volume_sources_eq(&self.mesh_committed_scene);
         if !source_only_change {
@@ -3716,7 +3678,7 @@ impl Playground {
         } else if let (Some(mesh), Some(operator)) =
             (self.wave_mesh.as_ref(), self.wave_operator.as_ref())
         {
-            let scene = self.editor.document.accepted.clone();
+            let scene = self.editor.document.model.accepted.clone();
             let revision = self.editor.revision;
             if !self
                 .volume_source_job
@@ -3744,7 +3706,7 @@ impl Playground {
             if let Some(result) = result {
                 let candidate = self.volume_source_job.take().unwrap();
                 if candidate.revision != self.editor.revision
-                    || candidate.scene != self.editor.document.accepted
+                    || candidate.scene != self.editor.document.model.accepted
                 {
                     // The result belongs to an obsolete accepted scene.
                 } else {
@@ -3922,7 +3884,7 @@ impl Playground {
     }
 
     fn export_scene_svg(&mut self) {
-        let svg = examples::scene_svg(&self.editor.document.accepted);
+        let svg = examples::scene_svg(&self.editor.document.model.accepted);
         files::save(self.sender.clone(), svg.into_bytes(), SaveKind::SceneSvg);
         self.file_busy = true;
     }
@@ -4129,11 +4091,12 @@ impl Playground {
                     }
                 });
                 if self.creation_role == CreationRole::MaterialInterface {
-                    let materials = self.editor.document.draft.materials.clone();
+                    let materials = self.editor.document.model.draft.materials.clone();
                     egui::ComboBox::from_label("Interior material")
                         .selected_text(
                             self.editor
                                 .document
+                                .model
                                 .draft
                                 .material(self.material_selection)
                                 .map_or("Missing", |material| material.name.as_str()),
@@ -4555,6 +4518,7 @@ impl Playground {
             let Some(probe) = self
                 .editor
                 .document
+                .model
                 .probes
                 .iter()
                 .find(|probe| probe.id == id)
@@ -4587,7 +4551,7 @@ impl Playground {
                 ProbeTarget::Segment { start, end, .. } => Some(((end - start).norm(), false)),
                 ProbeTarget::Boundary(target) => {
                     self.curve_probe_metrics.get(&id).copied().or_else(|| {
-                        Self::boundary_probe_path(&self.editor.document.draft, target)
+                        Self::boundary_probe_path(&self.editor.document.model.draft, target)
                             .map(|path| (path.length, path.closed))
                     })
                 }
@@ -5769,55 +5733,102 @@ impl Playground {
         ui.add_space(6.0);
         self.panel_header(ui, "View");
         ui.separator();
-        ui.checkbox(&mut self.grid, "Grid");
-        ui.checkbox(&mut self.polygon, "Control polygons");
-        ui.checkbox(&mut self.handles, "Handles");
-        ui.checkbox(&mut self.reference, "Accepted reference");
+        ui.checkbox(&mut self.editor.document.presentation.grid, "Grid");
+        ui.checkbox(
+            &mut self.editor.document.presentation.control_polygons,
+            "Control polygons",
+        );
+        ui.checkbox(&mut self.editor.document.presentation.handles, "Handles");
+        ui.checkbox(
+            &mut self.editor.document.presentation.accepted_reference,
+            "Accepted reference",
+        );
         egui::ComboBox::from_label("Material overlay")
-            .selected_text(self.material_overlay.label())
+            .selected_text(self.editor.document.presentation.material_overlay.label())
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.material_overlay, MaterialOverlay::Off, "Off");
                 ui.selectable_value(
-                    &mut self.material_overlay,
+                    &mut self.editor.document.presentation.material_overlay,
+                    MaterialOverlay::Off,
+                    "Off",
+                );
+                ui.selectable_value(
+                    &mut self.editor.document.presentation.material_overlay,
                     MaterialOverlay::Regions,
                     "Material regions",
                 );
                 ui.separator();
                 for property in MaterialProperty::ALL {
                     ui.selectable_value(
-                        &mut self.material_overlay,
+                        &mut self.editor.document.presentation.material_overlay,
                         MaterialOverlay::Property(property),
                         property.label(),
                     );
                 }
             });
-        if let MaterialOverlay::Property(property) = self.material_overlay {
+        if let MaterialOverlay::Property(property) =
+            self.editor.document.presentation.material_overlay
+        {
             ui.add(
-                egui::Slider::new(&mut self.material_overlay_opacity, 0.05..=1.0)
-                    .text("overlay opacity"),
+                egui::Slider::new(
+                    &mut self.editor.document.presentation.material_overlay_opacity,
+                    0.05..=1.0,
+                )
+                .text("overlay opacity"),
             );
-            ui.checkbox(&mut self.material_overlay_auto_range, "Automatic range")
+            ui.checkbox(&mut self.editor.document.presentation.material_overlay_auto_range, "Automatic range")
                 .on_hover_text(
                     "Trims outliers within each subdomain, then includes every subdomain in the color range",
                 );
             if property == MaterialProperty::VolumeSource {
-                self.material_overlay_logarithmic = false;
+                self.editor
+                    .document
+                    .presentation
+                    .material_overlay_logarithmic = false;
             } else {
-                ui.checkbox(&mut self.material_overlay_logarithmic, "Log scale");
+                ui.checkbox(
+                    &mut self
+                        .editor
+                        .document
+                        .presentation
+                        .material_overlay_logarithmic,
+                    "Log scale",
+                );
             }
-            if !self.material_overlay_auto_range {
+            if !self
+                .editor
+                .document
+                .presentation
+                .material_overlay_auto_range
+            {
                 ui.horizontal(|ui| {
                     ui.add(
-                        egui::DragValue::new(&mut self.material_overlay_manual_min).prefix("Min "),
+                        egui::DragValue::new(
+                            &mut self
+                                .editor
+                                .document
+                                .presentation
+                                .material_overlay_manual_min,
+                        )
+                        .prefix("Min "),
                     );
                     ui.add(
-                        egui::DragValue::new(&mut self.material_overlay_manual_max).prefix("Max "),
+                        egui::DragValue::new(
+                            &mut self
+                                .editor
+                                .document
+                                .presentation
+                                .material_overlay_manual_max,
+                        )
+                        .prefix("Max "),
                     );
                 });
             }
         }
-        ui.checkbox(&mut self.show_boundary_conditions, "Boundary conditions");
-        if self.show_boundary_conditions {
+        ui.checkbox(
+            &mut self.editor.document.presentation.boundary_conditions,
+            "Boundary conditions",
+        );
+        if self.editor.document.presentation.boundary_conditions {
             for (label, color) in [
                 (
                     "Reflecting",
@@ -5853,22 +5864,49 @@ impl Playground {
                 });
             }
         }
-        ui.checkbox(&mut self.show_mesh, "Accepted triangle mesh");
-        ui.add_enabled_ui(self.show_mesh, |ui| {
-            ui.checkbox(&mut self.show_mesh_boundary, "Mesh boundary labels");
+        ui.checkbox(
+            &mut self.editor.document.presentation.mesh,
+            "Accepted triangle mesh",
+        );
+        ui.add_enabled_ui(self.editor.document.presentation.mesh, |ui| {
+            ui.checkbox(
+                &mut self.editor.document.presentation.mesh_boundaries,
+                "Mesh boundary labels",
+            );
         });
-        ui.checkbox(&mut self.show_amr_target, "Adaptation target");
-        ui.checkbox(&mut self.show_point_probes, "Point probes");
-        ui.checkbox(&mut self.show_line_probes, "Line probes");
-        ui.checkbox(&mut self.show_boundary_probes, "Boundary probes");
-        ui.checkbox(&mut self.show_area_probes, "Area probes");
-        ui.checkbox(&mut self.show_far_field_contour, "Far-field contour");
-        ui.checkbox(&mut self.show_field, "Field colors");
-        ui.add_enabled_ui(self.show_field, |ui| {
+        ui.checkbox(
+            &mut self.editor.document.presentation.adaptation_target,
+            "Adaptation target",
+        );
+        ui.checkbox(
+            &mut self.editor.document.presentation.point_probes,
+            "Point probes",
+        );
+        ui.checkbox(
+            &mut self.editor.document.presentation.line_probes,
+            "Line probes",
+        );
+        ui.checkbox(
+            &mut self.editor.document.presentation.boundary_probes,
+            "Boundary probes",
+        );
+        ui.checkbox(
+            &mut self.editor.document.presentation.area_probes,
+            "Area probes",
+        );
+        ui.checkbox(
+            &mut self.editor.document.presentation.far_field_contour,
+            "Far-field contour",
+        );
+        ui.checkbox(&mut self.editor.document.presentation.field, "Field colors");
+        ui.add_enabled_ui(self.editor.document.presentation.field, |ui| {
             ui.add(
-                egui::Slider::new(&mut self.field_gain, 0.25..=12.0)
-                    .logarithmic(true)
-                    .text("field intensity"),
+                egui::Slider::new(
+                    &mut self.editor.document.presentation.field_gain,
+                    0.25..=12.0,
+                )
+                .logarithmic(true)
+                .text("field intensity"),
             );
             let width = ui.available_width().max(60.0);
             let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 10.0), egui::Sense::hover());
@@ -5894,25 +5932,7 @@ impl Playground {
         });
         ui.add_space(8.0);
         if ui.button("Restore view defaults").clicked() {
-            self.grid = true;
-            self.polygon = true;
-            self.handles = true;
-            self.reference = true;
-            self.material_overlay = MaterialOverlay::Regions;
-            self.material_overlay_opacity = 0.48;
-            self.material_overlay_auto_range = true;
-            self.material_overlay_logarithmic = false;
-            self.show_boundary_conditions = false;
-            self.show_mesh = false;
-            self.show_mesh_boundary = true;
-            self.show_amr_target = false;
-            self.show_point_probes = true;
-            self.show_line_probes = true;
-            self.show_boundary_probes = true;
-            self.show_area_probes = true;
-            self.show_far_field_contour = true;
-            self.show_field = true;
-            self.field_gain = 2.0;
+            self.editor.document.presentation = PresentationSettings::default();
         }
     }
 
@@ -5920,14 +5940,15 @@ impl Playground {
         ui.add_space(6.0);
         self.panel_header(ui, "Materials");
         ui.label("Subdomain assignment");
-        let materials = self.editor.document.draft.materials.clone();
-        let regions = self.editor.document.draft.regions.clone();
+        let materials = self.editor.document.model.draft.materials.clone();
+        let regions = self.editor.document.model.draft.regions.clone();
         for region in regions {
             let label = if region.id == BACKGROUND_REGION {
                 "Background".into()
             } else {
                 self.editor
                     .document
+                    .model
                     .draft
                     .obstacles
                     .iter()
@@ -5982,6 +6003,7 @@ impl Playground {
         let existing_source = self
             .editor
             .document
+            .model
             .draft
             .volume_source(source_region)
             .cloned();
@@ -6157,18 +6179,21 @@ impl Playground {
         if let Some(region) = self
             .editor
             .document
+            .model
             .draft
             .region(self.region_selection)
             .copied()
             && (self
                 .editor
                 .document
+                .model
                 .draft
                 .material(region.material)
                 .is_some_and(Material::varying)
                 || self
                     .editor
                     .document
+                    .model
                     .draft
                     .volume_source(region.id)
                     .is_some_and(VolumeSource::varying))
@@ -6283,6 +6308,7 @@ impl Playground {
         if let Some(mut material) = self
             .editor
             .document
+            .model
             .draft
             .material(self.material_selection)
             .cloned()
@@ -6475,6 +6501,7 @@ impl Playground {
             let frame = self
                 .editor
                 .document
+                .model
                 .draft
                 .regions
                 .iter()
@@ -6490,6 +6517,7 @@ impl Playground {
                 let material_in_use = self
                     .editor
                     .document
+                    .model
                     .draft
                     .regions
                     .iter()
@@ -6570,7 +6598,7 @@ impl Playground {
                 }
             });
             if ui.button("Clear all").clicked() {
-                for probe in self.editor.document.probes.clone() {
+                for probe in self.editor.document.model.probes.clone() {
                     self.clear_probe_trace(probe.id);
                 }
                 self.far_field_trace = FarFieldTrace::default();
@@ -6612,7 +6640,7 @@ impl Playground {
         ui.separator();
 
         ui.label("Far field");
-        let mut far_field = self.editor.document.far_field;
+        let mut far_field = self.editor.document.model.far_field;
         let enabled_changed = ui
             .checkbox(&mut far_field.enabled, "Outer-domain far field")
             .changed();
@@ -6667,7 +6695,7 @@ impl Playground {
         }
         ui.separator();
 
-        let probes = self.editor.document.probes.clone();
+        let probes = self.editor.document.model.probes.clone();
         if probes.is_empty() {
             ui.label("No probes");
         }
@@ -6807,6 +6835,7 @@ impl Playground {
         let Some(mut probe) = self
             .editor
             .document
+            .model
             .probes
             .iter()
             .find(|probe| probe.id == id)
@@ -7022,9 +7051,10 @@ impl Playground {
             let material = self
                 .editor
                 .document
+                .model
                 .draft
                 .region(region)
-                .and_then(|region| self.editor.document.draft.material(region.material))
+                .and_then(|region| self.editor.document.model.draft.material(region.material))
                 .map_or("Missing material", |material| material.name.as_str());
             ui.small(format!("{material} subdomain"));
         }
@@ -7113,7 +7143,7 @@ impl Playground {
                 self.mesh_committed_max_edge, self.mesh_max_edge
             ));
         }
-        if self.editor.editing() && self.mesh_source != self.editor.document.accepted {
+        if self.editor.editing() && self.mesh_source != self.editor.document.model.accepted {
             ui.small("Waiting for edit to finish…");
         } else if let Some(job) = &self.mesh_job {
             ui.small(format!("Mesh rebuilding: {}…", job.phase()));
@@ -7271,7 +7301,7 @@ impl Playground {
             if self.wave_source != source_before {
                 if self.wave_source.valid() {
                     self.editor.begin();
-                    self.editor.document.source = self.wave_source;
+                    self.editor.document.model.source = self.wave_source;
                     self.wave_source_dirty = true;
                 } else {
                     self.wave_source = source_before;
@@ -7315,6 +7345,7 @@ impl Playground {
         if self
             .editor
             .document
+            .model
             .draft
             .material(self.material_selection)
             .is_none()
@@ -7322,6 +7353,7 @@ impl Playground {
             self.material_selection = self
                 .editor
                 .document
+                .model
                 .draft
                 .materials
                 .first()
@@ -7381,15 +7413,15 @@ impl Playground {
         ui.separator();
         ui.label(format!(
             "Features  {} / 32",
-            self.editor.document.draft.obstacles.len()
-                + self.editor.document.draft.internal_boundaries.len()
+            self.editor.document.model.draft.obstacles.len()
+                + self.editor.document.model.draft.internal_boundaries.len()
         ));
         egui::ScrollArea::vertical()
             .id_salt("obstacles")
             .max_height(135.0)
             .show(ui, |ui| {
-                let obstacles = self.editor.document.draft.obstacles.clone();
-                let boundaries = self.editor.document.draft.internal_boundaries.clone();
+                let obstacles = self.editor.document.model.draft.obstacles.clone();
+                let boundaries = self.editor.document.model.draft.internal_boundaries.clone();
                 for o in &obstacles {
                     let assignment = if matches!(o.role, LoopRole::Hole { .. }) {
                         if o.span_conditions
@@ -7487,13 +7519,14 @@ impl Playground {
                     });
                 self.loop_role_edit = Some((id, kind));
                 if kind == LoopKind::MaterialInterface && kind != current_kind {
-                    let materials = self.editor.document.draft.materials.clone();
+                    let materials = self.editor.document.model.draft.materials.clone();
                     ui.label("Interior material");
                     egui::ComboBox::from_id_salt(("new_interior_material", id.0))
                         .width(ui.available_width())
                         .selected_text(
                             self.editor
                                 .document
+                                .model
                                 .draft
                                 .material(self.material_selection)
                                 .map_or("Missing", |material| material.name.as_str()),
@@ -8390,7 +8423,10 @@ impl Playground {
     }
 
     fn refresh_material_overlay(&mut self) {
-        if !matches!(self.material_overlay, MaterialOverlay::Property(_)) {
+        if !matches!(
+            self.editor.document.presentation.material_overlay,
+            MaterialOverlay::Property(_)
+        ) {
             return;
         }
         let (Some(mesh), Some(operator)) = (&self.mesh, &self.wave_operator) else {
@@ -8399,10 +8435,11 @@ impl Playground {
         let scene = if self
             .editor
             .document
+            .model
             .accepted
             .geometry_eq(&self.mesh_committed_scene)
         {
-            self.editor.document.accepted.clone()
+            self.editor.document.model.accepted.clone()
         } else {
             self.mesh_committed_scene.clone()
         };
@@ -8449,18 +8486,64 @@ impl Playground {
     }
 
     fn material_overlay_range(&self, property: MaterialProperty) -> Option<OverlayRange> {
-        if self.material_overlay_auto_range {
-            self.material_overlay_snapshot
-                .as_ref()?
-                .range(property, self.material_overlay_logarithmic)
-        } else if self.material_overlay_manual_min.is_finite()
-            && self.material_overlay_manual_max.is_finite()
-            && self.material_overlay_manual_min < self.material_overlay_manual_max
-            && (!self.material_overlay_logarithmic || self.material_overlay_manual_min > 0.0)
+        if self
+            .editor
+            .document
+            .presentation
+            .material_overlay_auto_range
+        {
+            self.material_overlay_snapshot.as_ref()?.range(
+                property,
+                self.editor
+                    .document
+                    .presentation
+                    .material_overlay_logarithmic,
+            )
+        } else if self
+            .editor
+            .document
+            .presentation
+            .material_overlay_manual_min
+            .is_finite()
+            && self
+                .editor
+                .document
+                .presentation
+                .material_overlay_manual_max
+                .is_finite()
+            && self
+                .editor
+                .document
+                .presentation
+                .material_overlay_manual_min
+                < self
+                    .editor
+                    .document
+                    .presentation
+                    .material_overlay_manual_max
+            && (!self
+                .editor
+                .document
+                .presentation
+                .material_overlay_logarithmic
+                || self
+                    .editor
+                    .document
+                    .presentation
+                    .material_overlay_manual_min
+                    > 0.0)
         {
             Some(OverlayRange {
-                minimum: self.material_overlay_manual_min,
-                maximum: self.material_overlay_manual_max,
+                minimum: self
+                    .editor
+                    .document
+                    .presentation
+                    .material_overlay_manual_min,
+                maximum: self
+                    .editor
+                    .document
+                    .presentation
+                    .material_overlay_manual_max,
             })
         } else {
             None
@@ -8473,7 +8556,9 @@ impl Playground {
         viewport: Rect,
         pointer: Option<Pos2>,
     ) {
-        let MaterialOverlay::Property(property) = self.material_overlay else {
+        let MaterialOverlay::Property(property) =
+            self.editor.document.presentation.material_overlay
+        else {
             return;
         };
         let snapshot = self.material_overlay_snapshot.as_ref();
@@ -8502,7 +8587,12 @@ impl Playground {
             format!(
                 "{} · {}",
                 property.label(),
-                if self.material_overlay_logarithmic {
+                if self
+                    .editor
+                    .document
+                    .presentation
+                    .material_overlay_logarithmic
+                {
                     "log"
                 } else {
                     "linear"
@@ -8690,7 +8780,7 @@ impl Playground {
                     || self.editor.editing()
                 {
                     self.editor.cancel();
-                    self.wave_source = self.editor.document.source;
+                    self.wave_source = self.editor.document.model.source;
                     self.wave_source_dirty = true;
                 } else if !cancelled_segment_start && !cancelled_area_start {
                     self.custom.clear();
@@ -8824,6 +8914,7 @@ impl Playground {
                                     let probe = self
                                         .editor
                                         .document
+                                        .model
                                         .probes
                                         .iter()
                                         .find(|probe| probe.id == id)
@@ -8843,6 +8934,7 @@ impl Playground {
                                     let (center, radius) = self
                                         .editor
                                         .document
+                                        .model
                                         .probes
                                         .iter()
                                         .find_map(|probe| match probe.target {
@@ -8865,6 +8957,7 @@ impl Playground {
                                     let center = self
                                         .editor
                                         .document
+                                        .model
                                         .probes
                                         .iter()
                                         .find_map(|probe| match probe.target {
@@ -9032,7 +9125,7 @@ impl Playground {
                             .as_ref()
                             .and_then(|mesh| mesh_region_at(mesh, position))
                             .unwrap_or(BACKGROUND_REGION);
-                        self.editor.document.source = self.wave_source;
+                        self.editor.document.model.source = self.wave_source;
                         self.wave_source_dirty = true;
                     } else if let Some(material_drag) = self.material_frame_drag.as_ref() {
                         let snap = |point: Point2| {
@@ -9088,22 +9181,24 @@ impl Playground {
                         let (id, target) = match *probe_drag {
                             ProbeDrag::Point { id } => (id, Some(ProbeTarget::Point(snap(world)))),
                             ProbeDrag::SegmentEndpoint { id, start_endpoint } => {
-                                let target = self.editor.document.probes.iter().find_map(|probe| {
-                                    if probe.id != id {
-                                        return None;
-                                    }
-                                    let ProbeTarget::Segment { start, end, preset } = probe.target
-                                    else {
-                                        return None;
-                                    };
-                                    let (start, end) = if start_endpoint {
-                                        (snap(world), end)
-                                    } else {
-                                        (start, snap(world))
-                                    };
-                                    ((end - start).norm() >= 1.0e-6)
-                                        .then_some(ProbeTarget::Segment { start, end, preset })
-                                });
+                                let target =
+                                    self.editor.document.model.probes.iter().find_map(|probe| {
+                                        if probe.id != id {
+                                            return None;
+                                        }
+                                        let ProbeTarget::Segment { start, end, preset } =
+                                            probe.target
+                                        else {
+                                            return None;
+                                        };
+                                        let (start, end) = if start_endpoint {
+                                            (snap(world), end)
+                                        } else {
+                                            (start, snap(world))
+                                        };
+                                        ((end - start).norm() >= 1.0e-6)
+                                            .then_some(ProbeTarget::Segment { start, end, preset })
+                                    });
                                 (id, target)
                             }
                             ProbeDrag::SegmentBody {
@@ -9123,6 +9218,7 @@ impl Playground {
                                         preset: self
                                             .editor
                                             .document
+                                            .model
                                             .probes
                                             .iter()
                                             .find_map(|probe| {
@@ -9161,6 +9257,7 @@ impl Playground {
                             && let Some(probe) = self
                                 .editor
                                 .document
+                                .model
                                 .probes
                                 .iter_mut()
                                 .find(|probe| probe.id == id)
@@ -9474,7 +9571,7 @@ impl Playground {
         }
         self.refresh_curves();
         painter.rect_filled(r, 0.0, Color32::from_rgb(16, 23, 31));
-        if self.grid {
+        if self.editor.document.presentation.grid {
             for i in -10..=10 {
                 let t = i as f64 / 10.0;
                 let color = if i == 0 {
@@ -9493,16 +9590,17 @@ impl Playground {
                 }
             }
         }
-        if self.material_overlay == MaterialOverlay::Regions
+        if self.editor.document.presentation.material_overlay == MaterialOverlay::Regions
             && let Some(mesh) = &self.mesh
         {
             let scene = if self
                 .editor
                 .document
+                .model
                 .accepted
                 .geometry_eq(&self.mesh_committed_scene)
             {
-                &self.editor.document.accepted
+                &self.editor.document.model.accepted
             } else {
                 &self.mesh_committed_scene
             };
@@ -9527,11 +9625,13 @@ impl Playground {
             }
             painter.add(egui::Shape::mesh(regions));
         }
-        if let MaterialOverlay::Property(property) = self.material_overlay
+        if let MaterialOverlay::Property(property) =
+            self.editor.document.presentation.material_overlay
             && let Some(snapshot) = &self.material_overlay_snapshot
             && let Some(range) = self.material_overlay_range(property)
         {
-            let alpha = (self.material_overlay_opacity * 255.0).round() as u8;
+            let alpha =
+                (self.editor.document.presentation.material_overlay_opacity * 255.0).round() as u8;
             let mut values = egui::Mesh::default();
             let mut invalid = egui::Mesh::default();
             values.reserve_vertices(snapshot.samples.len());
@@ -9542,7 +9642,13 @@ impl Playground {
                     .ok()
                     .and_then(|value| {
                         range
-                            .normalized(value, self.material_overlay_logarithmic)
+                            .normalized(
+                                value,
+                                self.editor
+                                    .document
+                                    .presentation
+                                    .material_overlay_logarithmic,
+                            )
                             .map(|fraction| overlay_property_color(property, fraction, alpha))
                     })
                     .unwrap_or(Color32::from_rgba_unmultiplied(255, 106, 123, alpha));
@@ -9570,7 +9676,7 @@ impl Playground {
                 painter.add(egui::Shape::mesh(invalid));
             }
         }
-        if self.show_field
+        if self.editor.document.presentation.field
             && let Some(display) = wave_display
             && display.generation > 0
             && let Some(operator) = self.wave_display_operator(display)
@@ -9579,10 +9685,13 @@ impl Playground {
             field.reserve_vertices(operator.degrees_of_freedom());
             field.reserve_triangles(operator.element_nodes().len() * 6);
             for (point, value) in operator.node_points().iter().zip(&display.current) {
-                let color = if matches!(self.material_overlay, MaterialOverlay::Property(_)) {
-                    field_color_over_overlay(*value, self.field_gain)
+                let color = if matches!(
+                    self.editor.document.presentation.material_overlay,
+                    MaterialOverlay::Property(_)
+                ) {
+                    field_color_over_overlay(*value, self.editor.document.presentation.field_gain)
                 } else {
-                    field_color(*value, self.field_gain)
+                    field_color(*value, self.editor.document.presentation.field_gain)
                 };
                 field.colored_vertex(self.screen(*point, r), color);
             }
@@ -9593,7 +9702,7 @@ impl Playground {
             }
             painter.add(egui::Shape::mesh(field));
         }
-        if self.show_amr_target
+        if self.editor.document.presentation.adaptation_target
             && let (Some(mesh), Some(result)) = (&self.mesh, &self.solution_indicator_result)
         {
             let minimum = self.amr_minimum_edge;
@@ -9624,7 +9733,7 @@ impl Playground {
             domain.map(|p| self.screen(p, r)).to_vec(),
             Stroke::new(1.5, Color32::from_rgb(100, 123, 140)),
         ));
-        if self.show_mesh
+        if self.editor.document.presentation.mesh
             && let Some(mesh) = &self.mesh
         {
             for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
@@ -9644,7 +9753,7 @@ impl Playground {
                     painter.line_segment([positions[edge[0]], positions[edge[1]]], mesh_stroke);
                 }
             }
-            if self.show_mesh_boundary {
+            if self.editor.document.presentation.mesh_boundaries {
                 for edge in &mesh.boundary_edges {
                     let color = match edge.label {
                         BoundaryLabel::Outer(_) => Color32::from_rgb(142, 161, 175),
@@ -9682,7 +9791,9 @@ impl Playground {
                 Stroke::new(3.5, SELECT),
             );
         }
-        if self.reference && self.editor.document.draft != self.editor.document.accepted {
+        if self.editor.document.presentation.accepted_reference
+            && self.editor.document.model.draft != self.editor.document.model.accepted
+        {
             for curve in &self.accepted_curves {
                 self.draw_curve(&painter, r, curve, Color32::from_rgb(66, 100, 98), 3.0);
             }
@@ -9701,7 +9812,7 @@ impl Playground {
         for curve in &self.draft_internal_curves {
             self.draw_internal_curve(&painter, r, curve, color, 3.0);
         }
-        if self.show_boundary_conditions {
+        if self.editor.document.presentation.boundary_conditions {
             for side in OuterSide::ALL {
                 let points = outer_side_points(side).map(|point| self.screen(point, r));
                 painter.line_segment(
@@ -9709,12 +9820,12 @@ impl Playground {
                     Stroke::new(
                         2.5,
                         outer_boundary_condition_color(
-                            self.editor.document.draft.outer_boundaries.get(side),
+                            self.editor.document.model.draft.outer_boundaries.get(side),
                         ),
                     ),
                 );
             }
-            for obstacle in &self.editor.document.draft.obstacles {
+            for obstacle in &self.editor.document.model.draft.obstacles {
                 if !matches!(obstacle.role, LoopRole::Hole { .. }) {
                     continue;
                 }
@@ -9738,7 +9849,7 @@ impl Playground {
                     }
                 }
             }
-            for boundary in &self.editor.document.draft.internal_boundaries {
+            for boundary in &self.editor.document.model.draft.internal_boundaries {
                 let Some(curve) = self
                     .draft_internal_curves
                     .iter()
@@ -9835,8 +9946,8 @@ impl Playground {
         // Repeated knots are curve points rather than spline controls. Show
         // them independently so C1 joins and C0 corners cannot be mistaken for
         // the circular control handles.
-        if self.handles {
-            for obstacle in &self.editor.document.draft.obstacles {
+        if self.editor.document.presentation.handles {
+            for obstacle in &self.editor.document.model.draft.obstacles {
                 for (breakpoint, multiplicity) in
                     obstacle.spline.multiplicities().iter().copied().enumerate()
                 {
@@ -9863,7 +9974,7 @@ impl Playground {
                     ));
                 }
             }
-            for boundary in &self.editor.document.draft.internal_boundaries {
+            for boundary in &self.editor.document.model.draft.internal_boundaries {
                 for (slot, multiplicity) in
                     boundary.spline.multiplicities().iter().copied().enumerate()
                 {
@@ -9892,14 +10003,14 @@ impl Playground {
                 }
             }
         }
-        for o in &self.editor.document.draft.obstacles {
+        for o in &self.editor.document.model.draft.obstacles {
             let selected = self.selection.is_some_and(|s| s.0 == o.id)
                 || self
                     .selected_spans
                     .iter()
                     .any(|span| matches!(span, GeometrySpan::Loop(id, _) if *id == o.id));
             let points = o.spline.controls();
-            if self.polygon {
+            if self.editor.document.presentation.control_polygons {
                 let mut polygon: Vec<_> = points.iter().map(|p| self.screen(*p, r)).collect();
                 polygon.push(polygon[0]);
                 painter.add(egui::Shape::line(
@@ -9914,7 +10025,7 @@ impl Playground {
                     ),
                 ));
             }
-            if self.handles {
+            if self.editor.document.presentation.handles {
                 for (i, p) in points.iter().enumerate() {
                     let pos = self.screen(*p, r);
                     let active = self.selection == Some((o.id, Some(i)));
@@ -9942,7 +10053,7 @@ impl Playground {
                 }
             }
         }
-        for boundary in &self.editor.document.draft.internal_boundaries {
+        for boundary in &self.editor.document.model.draft.internal_boundaries {
             let selected =
                 self.internal_selection
                     .is_some_and(|selection| selection.0 == boundary.id)
@@ -9950,7 +10061,7 @@ impl Playground {
                         |span| matches!(span, GeometrySpan::Baffle(id, _) if *id == boundary.id),
                     );
             let points = boundary.spline.controls();
-            if self.polygon {
+            if self.editor.document.presentation.control_polygons {
                 painter.add(egui::Shape::line(
                     points.iter().map(|point| self.screen(*point, r)).collect(),
                     Stroke::new(
@@ -9963,7 +10074,7 @@ impl Playground {
                     ),
                 ));
             }
-            if self.handles {
+            if self.editor.document.presentation.handles {
                 for (index, point) in points.iter().enumerate() {
                     let position = self.screen(*point, r);
                     let active = self.internal_selection == Some((boundary.id, Some(index)));
@@ -10208,8 +10319,10 @@ impl Playground {
                 _ => {}
             }
         }
-        if self.editor.document.far_field.enabled && self.show_far_field_contour {
-            let half_extent = 1.0 - self.editor.document.far_field.inset;
+        if self.editor.document.model.far_field.enabled
+            && self.editor.document.presentation.far_field_contour
+        {
+            let half_extent = 1.0 - self.editor.document.model.far_field.inset;
             let corners = [
                 Point2::new(-half_extent, -half_extent),
                 Point2::new(half_extent, -half_extent),
@@ -10248,12 +10361,12 @@ impl Playground {
                 Stroke::new(1.0, GOLD),
             );
         }
-        if self.show_point_probes
-            || self.show_line_probes
-            || self.show_boundary_probes
-            || self.show_area_probes
+        if self.editor.document.presentation.point_probes
+            || self.editor.document.presentation.line_probes
+            || self.editor.document.presentation.boundary_probes
+            || self.editor.document.presentation.area_probes
         {
-            for probe in &self.editor.document.probes {
+            for probe in &self.editor.document.model.probes {
                 if !self.probe_visible(probe.target) {
                     continue;
                 }
@@ -10303,7 +10416,7 @@ impl Playground {
                     }
                     ProbeTarget::Boundary(target) => {
                         let Some(path) =
-                            Self::boundary_probe_path(&self.editor.document.draft, target)
+                            Self::boundary_probe_path(&self.editor.document.model.draft, target)
                         else {
                             continue;
                         };
@@ -10385,6 +10498,7 @@ impl Playground {
                         } else if let Some(loop_) = self
                             .editor
                             .document
+                            .model
                             .draft
                             .obstacles
                             .iter()
@@ -10605,9 +10719,15 @@ impl Playground {
         if self.inspector_panel != Some(InspectorPanel::Materials) {
             return None;
         }
-        let region = self.editor.document.draft.region(self.region_selection)?;
+        let region = self
+            .editor
+            .document
+            .model
+            .draft
+            .region(self.region_selection)?;
         self.editor
             .document
+            .model
             .draft
             .material(region.material)
             .is_some_and(Material::varying)
@@ -10643,11 +10763,12 @@ impl Playground {
     }
 
     fn hit_handle(&self, p: Pos2, r: Rect) -> Option<(ObstacleId, usize)> {
-        if !self.handles {
+        if !self.editor.document.presentation.handles {
             return None;
         }
         self.editor
             .document
+            .model
             .draft
             .obstacles
             .iter()
@@ -10672,10 +10793,12 @@ impl Playground {
     }
 
     fn hit_far_field(&self, point: Pos2, viewport: Rect) -> bool {
-        if !self.editor.document.far_field.enabled || !self.show_far_field_contour {
+        if !self.editor.document.model.far_field.enabled
+            || !self.editor.document.presentation.far_field_contour
+        {
             return false;
         }
-        let half_extent = 1.0 - self.editor.document.far_field.inset;
+        let half_extent = 1.0 - self.editor.document.model.far_field.inset;
         let corners = [
             Point2::new(-half_extent, -half_extent),
             Point2::new(half_extent, -half_extent),
@@ -10701,6 +10824,7 @@ impl Playground {
     fn area_region_anchor(&self, region: RegionId) -> Point2 {
         self.editor
             .document
+            .model
             .draft
             .obstacles
             .iter()
@@ -10719,6 +10843,7 @@ impl Playground {
     fn hit_probe(&self, point: Pos2, viewport: Rect) -> Option<ProbeHit> {
         self.editor
             .document
+            .model
             .probes
             .iter()
             .rev()
@@ -10746,7 +10871,8 @@ impl Playground {
                     }
                 }
                 ProbeTarget::Boundary(target) => {
-                    let path = Self::boundary_probe_path(&self.editor.document.draft, target)?;
+                    let path =
+                        Self::boundary_probe_path(&self.editor.document.model.draft, target)?;
                     let mut remaining = path.length * 0.5;
                     let mut badge = path.segments.first()?.points[0];
                     for segment in path.segments {
@@ -10789,18 +10915,21 @@ impl Playground {
 
     fn probe_visible(&self, target: ProbeTarget) -> bool {
         match target {
-            ProbeTarget::Point(_) => self.show_point_probes,
-            ProbeTarget::Segment { .. } => self.show_line_probes,
-            ProbeTarget::Boundary(_) => self.show_boundary_probes,
-            ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => self.show_area_probes,
+            ProbeTarget::Point(_) => self.editor.document.presentation.point_probes,
+            ProbeTarget::Segment { .. } => self.editor.document.presentation.line_probes,
+            ProbeTarget::Boundary(_) => self.editor.document.presentation.boundary_probes,
+            ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => {
+                self.editor.document.presentation.area_probes
+            }
         }
     }
     fn hit_internal_handle(&self, p: Pos2, r: Rect) -> Option<(InternalBoundaryId, usize)> {
-        if !self.handles {
+        if !self.editor.document.presentation.handles {
             return None;
         }
         self.editor
             .document
+            .model
             .draft
             .internal_boundaries
             .iter()
@@ -11428,9 +11557,9 @@ pub fn mesh_benchmark_scene() -> Playground {
     let mut state = Playground {
         automated_benchmark: true,
         mesh_max_edge: 0.08,
-        show_mesh: true,
         ..Default::default()
     };
+    state.editor.document.presentation.mesh = true;
     let scene = Scene {
         obstacles: (0..8)
             .map(|i| {
@@ -11448,11 +11577,14 @@ pub fn mesh_benchmark_scene() -> Playground {
     state
         .editor
         .replace_validated(funfern_app::editor::Document {
-            draft: scene.clone(),
-            accepted: scene,
-            probes: vec![],
-            source: SourceSettings::default(),
-            far_field: Default::default(),
+            model: DocumentModel {
+                draft: scene.clone(),
+                accepted: scene,
+                probes: vec![],
+                source: SourceSettings::default(),
+                far_field: Default::default(),
+            },
+            presentation: Default::default(),
         });
     state
 }
@@ -11546,54 +11678,57 @@ pub fn wave_gpu_check_scene() -> Playground {
     state
         .editor
         .replace_validated(funfern_app::editor::Document {
-            draft: scene.clone(),
-            accepted: scene,
-            probes: vec![
-                ProbeDefinition {
-                    id: ProbeId(1),
-                    name: "GPU check".into(),
-                    color: [63, 144, 239],
-                    enabled: true,
-                    target: ProbeTarget::Point(Point2::new(-0.2, 0.42)),
-                },
-                ProbeDefinition {
-                    id: ProbeId(2),
-                    name: "GPU line check".into(),
-                    color: [78, 201, 176],
-                    enabled: true,
-                    target: ProbeTarget::Segment {
-                        start: Point2::new(-0.7, 0.42),
-                        end: Point2::new(0.7, 0.42),
-                        preset: ProbeSamplingPreset::Medium,
+            model: DocumentModel {
+                draft: scene.clone(),
+                accepted: scene,
+                probes: vec![
+                    ProbeDefinition {
+                        id: ProbeId(1),
+                        name: "GPU check".into(),
+                        color: [63, 144, 239],
+                        enabled: true,
+                        target: ProbeTarget::Point(Point2::new(-0.2, 0.42)),
                     },
-                },
-                ProbeDefinition {
-                    id: ProbeId(3),
-                    name: "GPU partial line check".into(),
-                    color: [244, 105, 122],
-                    enabled: true,
-                    target: ProbeTarget::Segment {
-                        start: Point2::new(-1.2, 0.7),
-                        end: Point2::new(1.2, 0.7),
-                        preset: ProbeSamplingPreset::Medium,
+                    ProbeDefinition {
+                        id: ProbeId(2),
+                        name: "GPU line check".into(),
+                        color: [78, 201, 176],
+                        enabled: true,
+                        target: ProbeTarget::Segment {
+                            start: Point2::new(-0.7, 0.42),
+                            end: Point2::new(0.7, 0.42),
+                            preset: ProbeSamplingPreset::Medium,
+                        },
                     },
-                },
-                ProbeDefinition {
-                    id: ProbeId(4),
-                    name: "GPU area check".into(),
-                    color: [164, 126, 232],
-                    enabled: true,
-                    target: ProbeTarget::AreaDisk {
-                        center: Point2::new(-0.42, 0.11),
-                        radius: 0.18,
+                    ProbeDefinition {
+                        id: ProbeId(3),
+                        name: "GPU partial line check".into(),
+                        color: [244, 105, 122],
+                        enabled: true,
+                        target: ProbeTarget::Segment {
+                            start: Point2::new(-1.2, 0.7),
+                            end: Point2::new(1.2, 0.7),
+                            preset: ProbeSamplingPreset::Medium,
+                        },
                     },
+                    ProbeDefinition {
+                        id: ProbeId(4),
+                        name: "GPU area check".into(),
+                        color: [164, 126, 232],
+                        enabled: true,
+                        target: ProbeTarget::AreaDisk {
+                            center: Point2::new(-0.42, 0.11),
+                            radius: 0.18,
+                        },
+                    },
+                ],
+                source: SourceSettings::default(),
+                far_field: FarFieldSettings {
+                    enabled: true,
+                    ..Default::default()
                 },
-            ],
-            source: SourceSettings::default(),
-            far_field: FarFieldSettings {
-                enabled: true,
-                ..Default::default()
             },
+            presentation: Default::default(),
         });
     state
 }
@@ -11607,8 +11742,8 @@ pub fn amr_check_scene() -> Playground {
         ..Default::default()
     };
     for scene in [
-        &mut state.editor.document.draft,
-        &mut state.editor.document.accepted,
+        &mut state.editor.document.model.draft,
+        &mut state.editor.document.model.accepted,
     ] {
         scene.materials[0].mass_density =
             ScalarField::formula("1 + 0.35 * r^2").expect("valid AMR-check material profile");
@@ -12036,9 +12171,9 @@ pub fn wave_gpu_benchmark(
         };
         target.sides[OuterSide::Left.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
         target.sides[OuterSide::Right.index()] = OuterBoundaryCondition::FirstOrderOutgoing;
-        if state.editor.document.accepted.outer_boundaries != target {
-            state.editor.document.draft.outer_boundaries = target;
-            state.editor.document.accepted.outer_boundaries = target;
+        if state.editor.document.model.accepted.outer_boundaries != target {
+            state.editor.document.model.draft.outer_boundaries = target;
+            state.editor.document.model.accepted.outer_boundaries = target;
             return;
         }
         if state.wave_boundary_committed != target || state.simulation_candidate.is_some() {
@@ -12088,7 +12223,7 @@ pub fn wave_gpu_benchmark(
         let volume_sources = compile_volume_sources(
             mesh.clone(),
             operator.clone(),
-            state.editor.document.accepted.clone(),
+            state.editor.document.model.accepted.clone(),
         )
         .unwrap();
         let volume_source_peak = volume_sources
@@ -12171,7 +12306,13 @@ pub fn wave_gpu_benchmark(
     let previous_error = error_norm(&display.previous, &benchmark.expected_previous);
     let auxiliary_error = error_norm(&display.auxiliary, &benchmark.expected_auxiliary);
     if let Some(target) = benchmark.source_update_target.as_ref() {
-        if state.editor.document.accepted.volume_source(target.region) != Some(target)
+        if state
+            .editor
+            .document
+            .model
+            .accepted
+            .volume_source(target.region)
+            != Some(target)
             || state.mesh_committed_scene.volume_source(target.region) != Some(target)
             || state.volume_source_job.is_some()
         {
@@ -12337,6 +12478,7 @@ pub fn wave_gpu_benchmark(
         let mut target = state
             .editor
             .document
+            .model
             .accepted
             .volume_source(BACKGROUND_REGION)
             .unwrap()
@@ -12429,18 +12571,21 @@ pub fn wave_transfer_benchmark(
                     ..BoundarySignal::ZERO
                 },
             };
-            if state.editor.document.accepted.obstacles[0].span_conditions[0] != hole_dirichlet
-                || state.editor.document.accepted.obstacles[0].span_conditions[2] != hole_neumann
+            if state.editor.document.model.accepted.obstacles[0].span_conditions[0]
+                != hole_dirichlet
+                || state.editor.document.model.accepted.obstacles[0].span_conditions[2]
+                    != hole_neumann
             {
-                state.editor.document.draft.obstacles[0].span_conditions[0] = hole_dirichlet;
-                state.editor.document.draft.obstacles[0].span_conditions[2] = hole_neumann;
-                state.editor.document.accepted.obstacles[0].span_conditions[0] = hole_dirichlet;
-                state.editor.document.accepted.obstacles[0].span_conditions[2] = hole_neumann;
+                state.editor.document.model.draft.obstacles[0].span_conditions[0] = hole_dirichlet;
+                state.editor.document.model.draft.obstacles[0].span_conditions[2] = hole_neumann;
+                state.editor.document.model.accepted.obstacles[0].span_conditions[0] =
+                    hole_dirichlet;
+                state.editor.document.model.accepted.obstacles[0].span_conditions[2] = hole_neumann;
                 return;
             }
-            if state.editor.document.accepted.outer_boundaries != target {
-                state.editor.document.draft.outer_boundaries = target;
-                state.editor.document.accepted.outer_boundaries = target;
+            if state.editor.document.model.accepted.outer_boundaries != target {
+                state.editor.document.model.draft.outer_boundaries = target;
+                state.editor.document.model.accepted.outer_boundaries = target;
                 return;
             }
             if state.wave_boundary_committed != target || state.simulation_candidate.is_some() {
@@ -12565,7 +12710,7 @@ pub fn wave_transfer_benchmark(
                     },
                 )
                 .collect();
-            let point = state.editor.document.accepted.obstacles[0]
+            let point = state.editor.document.model.accepted.obstacles[0]
                 .spline
                 .controls()[0];
             state.editor.begin();
@@ -12751,8 +12896,8 @@ pub fn wave_transfer_benchmark(
                 .collect();
             let target =
                 OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
-            state.editor.document.draft.outer_boundaries = target;
-            state.editor.document.accepted.outer_boundaries = target;
+            state.editor.document.model.draft.outer_boundaries = target;
+            state.editor.document.model.accepted.outer_boundaries = target;
             benchmark.boundary_started = Some(Instant::now());
             benchmark.phase = 4;
         }
@@ -12926,6 +13071,7 @@ pub fn wave_transfer_benchmark(
             let mut values = state
                 .editor
                 .document
+                .model
                 .draft
                 .material(material)
                 .unwrap()
@@ -13133,7 +13279,7 @@ pub fn mesh_benchmark(
     if state.mesh.is_none()
         || state.mesh_job.is_some()
         || state.editor.acceptance != Acceptance::Valid
-        || state.mesh_committed_scene != state.editor.document.accepted
+        || state.mesh_committed_scene != state.editor.document.model.accepted
         || benchmark
             .target
             .as_ref()
@@ -13165,14 +13311,14 @@ pub fn mesh_benchmark(
         Point2::new(0.0, 0.005),
         Point2::new(-0.005, -0.005),
     ][benchmark.edits];
-    let p = state.editor.document.accepted.obstacles[0]
+    let p = state.editor.document.model.accepted.obstacles[0]
         .spline
         .controls()[0];
     benchmark.start = Some(Instant::now());
     state.editor.begin();
     state.editor.set_point(ObstacleId(1), 0, p + delta).unwrap();
     state.editor.commit();
-    benchmark.target = Some(state.editor.document.draft.clone());
+    benchmark.target = Some(state.editor.document.model.draft.clone());
     benchmark.edits += 1;
 }
 
@@ -13180,8 +13326,8 @@ impl Playground {
     fn show(&mut self, root: &mut egui::Ui, wave_display: Option<&WaveDisplay>) -> Rect {
         // Remember capture before panels can end a text edit this frame.
         self.keyboard_captured = root.ctx().text_edit_focused();
-        if self.wave_source != self.editor.document.source {
-            self.wave_source = self.editor.document.source;
+        if self.wave_source != self.editor.document.model.source {
+            self.wave_source = self.editor.document.model.source;
             self.wave_source_dirty = true;
         }
         self.expire_notice();
@@ -13300,7 +13446,7 @@ fn paint_example_thumbnail(
     example: &examples::ExampleScene,
     size: egui::Vec2,
 ) -> egui::Response {
-    let scene = &example.document.accepted;
+    let scene = &example.document.model.accepted;
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let painter = ui.painter_at(rect);
     let background = scene
@@ -13417,8 +13563,8 @@ fn paint_example_thumbnail(
             painter.circle_stroke(midpoint, 7.0, Stroke::new(1.0, GOLD));
         }
     }
-    if example.simulation.source.enabled {
-        let center = project(example.simulation.source.position);
+    if example.document.model.source.enabled {
+        let center = project(example.document.model.source.position);
         painter.circle_stroke(center, 5.0, Stroke::new(1.8, GOLD));
         painter.line_segment(
             [
@@ -13658,12 +13804,20 @@ mod tests {
                 .state
                 .editor
                 .document
+                .model
                 .draft
                 .internal_boundaries
                 .len(),
             1
         );
-        let id = harness.state.editor.document.draft.internal_boundaries[0].id;
+        let id = harness
+            .state
+            .editor
+            .document
+            .model
+            .draft
+            .internal_boundaries[0]
+            .id;
         assert_eq!(harness.state.internal_selection, None);
         assert_eq!(
             harness.state.focused_feature,
@@ -13864,6 +14018,7 @@ mod tests {
                 .state
                 .editor
                 .document
+                .model
                 .draft
                 .outer_boundaries
                 .get(OuterSide::Top),
@@ -13907,7 +14062,7 @@ mod tests {
         h.key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
         assert_ne!(h.state.editor.document, before);
         let before = h.state.editor.document.clone();
-        let p = h.point(before.draft.obstacles[0].spline.controls()[0]);
+        let p = h.point(before.model.draft.obstacles[0].spline.controls()[0]);
         h.button(p, PointerButton::Primary, true);
         h.move_to(p + egui::vec2(25.0, 0.0));
         h.key(Key::Escape, Modifiers::NONE);
@@ -14213,7 +14368,7 @@ mod tests {
     #[test]
     fn invalid_scale_stays_in_draft_and_preserves_accepted_scene() {
         let mut harness = Harness::new();
-        let accepted = harness.state.editor.document.accepted.clone();
+        let accepted = harness.state.editor.document.model.accepted.clone();
         harness.state.scale = 100.0;
         let pivot = harness.state.selection_pivot().unwrap();
         let start = harness.state.scale_handle_position(harness.rect, pivot);
@@ -14227,8 +14382,8 @@ mod tests {
             harness.state.editor.acceptance,
             Acceptance::Invalid(_)
         ));
-        assert_eq!(harness.state.editor.document.accepted, accepted);
-        assert_ne!(harness.state.editor.document.draft, accepted);
+        assert_eq!(harness.state.editor.document.model.accepted, accepted);
+        assert_ne!(harness.state.editor.document.model.draft, accepted);
         assert_eq!(harness.state.editor.history_len(), (1, 0));
     }
 
@@ -14498,7 +14653,7 @@ mod tests {
             role: CreationRole::Hole,
         };
         h.click(h.point(Point2::new(0.5, 0.4)));
-        assert_eq!(h.state.editor.document.draft.obstacles.len(), 2);
+        assert_eq!(h.state.editor.document.model.draft.obstacles.len(), 2);
         assert_eq!(h.state.interaction_mode, InteractionMode::Select);
         assert_eq!(h.state.editor.history_len().0, 1);
         h.state.interaction_mode = InteractionMode::DrawCustom {
@@ -14514,7 +14669,7 @@ mod tests {
         }
         assert_eq!(h.state.custom.len(), 4);
         h.key(Key::Enter, Modifiers::NONE);
-        assert_eq!(h.state.editor.document.draft.obstacles.len(), 3);
+        assert_eq!(h.state.editor.document.model.draft.obstacles.len(), 3);
         assert_eq!(h.state.editor.history_len().0, 2);
         h.settle();
         assert_eq!(h.state.editor.acceptance, Acceptance::Valid);
@@ -14639,7 +14794,7 @@ mod tests {
         commit_mesh_without_gpu(&mut h.state);
         let before = h.state.editor.document.clone();
         h.state.startup_load_checked = true;
-        let expected_source = examples::catalog()[1].simulation.source;
+        let expected_source = examples::catalog()[1].document.model.source;
         h.state.start_example_load(&examples::catalog()[1]);
         for _ in 0..100 {
             h.state.update_files();
@@ -14656,7 +14811,7 @@ mod tests {
         );
         assert!(h.state.wave_source_dirty);
         assert!(h.state.fresh_simulation_requested);
-        assert!(h.state.show_boundary_conditions);
+        assert!(h.state.editor.document.presentation.boundary_conditions);
         assert_eq!(h.state.editor.history_len(), (1, 0));
 
         build_mesh_candidate(&mut h.state);
@@ -14665,7 +14820,11 @@ mod tests {
         assert!(candidate.transfer.is_none());
 
         h.state.editor.undo();
-        assert_eq!(h.state.editor.document, before);
+        assert_eq!(h.state.editor.document.model, before.model);
+        assert_eq!(
+            h.state.editor.document.presentation,
+            examples::catalog()[1].document.presentation
+        );
 
         let grin = examples::catalog()
             .iter()
@@ -14679,11 +14838,18 @@ mod tests {
             }
         }
         assert_eq!(
-            h.state.material_overlay,
+            h.state.editor.document.presentation.material_overlay,
             MaterialOverlay::Property(MaterialProperty::WaveSpeed)
         );
-        assert_eq!(h.state.material_overlay_opacity, 0.55);
-        assert!(!h.state.show_amr_target);
+        assert_eq!(
+            h.state
+                .editor
+                .document
+                .presentation
+                .material_overlay_opacity,
+            0.55
+        );
+        assert!(!h.state.editor.document.presentation.adaptation_target);
     }
 
     #[test]
@@ -14701,15 +14867,15 @@ mod tests {
         assert_eq!(h.state.editor.document, first.document);
         assert_eq!(
             h.state.wave_source.position,
-            first.simulation.source.position
+            first.document.model.source.position
         );
         assert_eq!(
             h.state.wave_source.frequency_hz,
-            first.simulation.source.frequency_hz
+            first.document.model.source.frequency_hz
         );
         assert!(h.state.wave_source.enabled);
         assert_eq!(h.state.editor.history_len(), (0, 0));
-        assert_eq!(h.state.editor.document.probes.len(), 1);
+        assert_eq!(h.state.editor.document.model.probes.len(), 1);
     }
 
     #[test]
@@ -14717,7 +14883,7 @@ mod tests {
         let mut h = Harness::new();
         h.state.startup_load_checked = true;
         let mut document = h.state.editor.document.clone();
-        document.source = SourceSettings {
+        document.model.source = SourceSettings {
             enabled: true,
             position: Point2::new(0.38, -0.26),
             amplitude: 27.0,
@@ -14737,8 +14903,8 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(h.state.editor.document.source, document.source);
-        assert_eq!(h.state.wave_source, document.source);
+        assert_eq!(h.state.editor.document.model.source, document.model.source);
+        assert_eq!(h.state.wave_source, document.model.source);
         assert!(h.state.wave_source_dirty);
     }
 
@@ -14813,18 +14979,18 @@ mod tests {
             assert!(h.texts.iter().any(|(text, _)| text == label));
         }
         h.click_text("Point probes");
-        assert!(!h.state.show_point_probes);
-        assert!(h.state.show_line_probes);
-        assert!(h.state.show_boundary_probes);
-        assert!(h.state.show_area_probes);
+        assert!(!h.state.editor.document.presentation.point_probes);
+        assert!(h.state.editor.document.presentation.line_probes);
+        assert!(h.state.editor.document.presentation.boundary_probes);
+        assert!(h.state.editor.document.presentation.area_probes);
         h.click_text("Area probes");
-        assert!(!h.state.show_point_probes);
-        assert!(!h.state.show_area_probes);
+        assert!(!h.state.editor.document.presentation.point_probes);
+        assert!(!h.state.editor.document.presentation.area_probes);
         h.click_text("Restore view defaults");
-        assert!(h.state.show_point_probes);
-        assert!(h.state.show_line_probes);
-        assert!(h.state.show_boundary_probes);
-        assert!(h.state.show_area_probes);
+        assert!(h.state.editor.document.presentation.point_probes);
+        assert!(h.state.editor.document.presentation.line_probes);
+        assert!(h.state.editor.document.presentation.boundary_probes);
+        assert!(h.state.editor.document.presentation.area_probes);
     }
 
     #[test]
@@ -14835,22 +15001,22 @@ mod tests {
         assert_eq!(h.state.interaction_mode, InteractionMode::PlaceProbe);
         let position = Point2::new(0.45, -0.35);
         h.click(h.point(position));
-        assert_eq!(h.state.editor.document.probes.len(), 1);
+        assert_eq!(h.state.editor.document.model.probes.len(), 1);
         assert_eq!(h.state.interaction_mode, InteractionMode::PlaceProbe);
         assert_eq!(h.state.editor.history_len(), (1, 0));
-        let id = h.state.editor.document.probes[0].id;
+        let id = h.state.editor.document.model.probes[0].id;
         h.state.probe_windows.clear();
         h.state.interaction_mode = InteractionMode::Select;
         let target = Point2::new(0.55, -0.2);
         h.drag_with_modifiers(h.point(position), h.point(target), Modifiers::NONE);
         assert_eq!(h.state.selected_probe, Some(id));
-        let ProbeTarget::Point(actual) = h.state.editor.document.probes[0].target else {
+        let ProbeTarget::Point(actual) = h.state.editor.document.model.probes[0].target else {
             panic!("expected point probe")
         };
         assert!((actual - target).norm() < 1.0e-6);
         assert_eq!(h.state.editor.history_len(), (2, 0));
         h.state.editor.undo();
-        let ProbeTarget::Point(actual) = h.state.editor.document.probes[0].target else {
+        let ProbeTarget::Point(actual) = h.state.editor.document.model.probes[0].target else {
             panic!("expected point probe")
         };
         assert!((actual - position).norm() < 1.0e-6);
@@ -14871,7 +15037,7 @@ mod tests {
                 .is_some_and(|actual| (actual - start).norm() < 1.0e-6)
         );
         h.click(h.point(end));
-        assert_eq!(h.state.editor.document.probes.len(), 1);
+        assert_eq!(h.state.editor.document.model.probes.len(), 1);
         assert_eq!(h.state.interaction_mode, InteractionMode::PlaceSegmentProbe);
         assert_eq!(h.state.editor.history_len(), (1, 0));
 
@@ -14893,7 +15059,7 @@ mod tests {
             start: moved_start,
             end: moved_end,
             preset,
-        } = h.state.editor.document.probes[0].target
+        } = h.state.editor.document.model.probes[0].target
         else {
             panic!("expected line probe")
         };
@@ -14903,7 +15069,7 @@ mod tests {
         assert_eq!(h.state.editor.history_len(), (2, 0));
         h.state.editor.undo();
         assert!(matches!(
-            h.state.editor.document.probes[0].target,
+            h.state.editor.document.model.probes[0].target,
             ProbeTarget::Segment { start: actual, .. } if (actual - start).norm() < 1.0e-6
         ));
     }
@@ -14919,10 +15085,10 @@ mod tests {
         let radius_point = center + Point2::new(0.15, 0.0);
         h.click(h.point(center));
         h.click(h.point(radius_point));
-        assert_eq!(h.state.editor.document.probes.len(), 1);
-        let id = h.state.editor.document.probes[0].id;
+        assert_eq!(h.state.editor.document.model.probes.len(), 1);
+        let id = h.state.editor.document.model.probes[0].id;
         assert!(matches!(
-            h.state.editor.document.probes[0].target,
+            h.state.editor.document.model.probes[0].target,
             ProbeTarget::AreaDisk { center: actual, radius }
                 if (actual - center).norm() < 1.0e-6 && (radius - 0.15).abs() < 1.0e-6
         ));
@@ -14933,7 +15099,7 @@ mod tests {
         h.drag_with_modifiers(h.point(center), h.point(moved), Modifiers::NONE);
         assert_eq!(h.state.selected_probe, Some(id));
         assert!(matches!(
-            h.state.editor.document.probes[0].target,
+            h.state.editor.document.model.probes[0].target,
             ProbeTarget::AreaDisk { center: actual, radius }
                 if (actual - moved).norm() < 1.0e-6 && (radius - 0.15).abs() < 1.0e-6
         ));
@@ -14945,14 +15111,14 @@ mod tests {
             Modifiers::NONE,
         );
         assert!(matches!(
-            h.state.editor.document.probes[0].target,
+            h.state.editor.document.model.probes[0].target,
             ProbeTarget::AreaDisk { center: actual, radius }
                 if (actual - moved).norm() < 1.0e-6 && (radius - new_radius).abs() < 1.0e-6
         ));
         assert_eq!(h.state.editor.history_len(), (3, 0));
         h.state.editor.undo();
         assert!(matches!(
-            h.state.editor.document.probes[0].target,
+            h.state.editor.document.model.probes[0].target,
             ProbeTarget::AreaDisk { radius, .. } if (radius - 0.15).abs() < 1.0e-6
         ));
     }
@@ -14968,7 +15134,7 @@ mod tests {
         assert_eq!(h.state.interaction_mode, InteractionMode::PlaceAreaRegion);
         h.click(h.point(Point2::new(0.8, 0.8)));
         assert!(matches!(
-            h.state.editor.document.probes[0].target,
+            h.state.editor.document.model.probes[0].target,
             ProbeTarget::AreaRegion { region } if region == BACKGROUND_REGION
         ));
         assert_eq!(h.state.interaction_mode, InteractionMode::PlaceAreaRegion);
@@ -15116,15 +15282,15 @@ mod tests {
         ]);
         h.frame(vec![]);
         h.click_text("+ From selected spans");
-        assert_eq!(h.state.editor.document.probes.len(), 1);
-        let ProbeTarget::Boundary(target) = h.state.editor.document.probes[0].target else {
+        assert_eq!(h.state.editor.document.model.probes.len(), 1);
+        let ProbeTarget::Boundary(target) = h.state.editor.document.model.probes[0].target else {
             panic!("expected boundary probe")
         };
         assert_eq!(target.spans(8), vec![7, 0]);
         assert!(
             h.state
                 .probe_windows
-                .contains(&h.state.editor.document.probes[0].id)
+                .contains(&h.state.editor.document.model.probes[0].id)
         );
     }
 
@@ -15306,7 +15472,7 @@ mod tests {
             area_revision: 0,
             far_field_revision: 0,
             mesh_revision: 1,
-            probes: state.editor.document.probes.clone(),
+            probes: state.editor.document.model.probes.clone(),
             sample_rate: 120.0,
             time_step: 0.01,
             far_field: FarFieldSettings::default(),
@@ -15526,9 +15692,9 @@ mod tests {
             readbacks,
         };
 
-        state.probe_compiled = Some(compile(3, 5, state.editor.document.probes.clone()));
+        state.probe_compiled = Some(compile(3, 5, state.editor.document.model.probes.clone()));
         state.ingest_probe_samples(&records(3, 5, &[0.9, 1.0], 1));
-        state.probe_compiled = Some(compile(4, 7, state.editor.document.probes.clone()));
+        state.probe_compiled = Some(compile(4, 7, state.editor.document.model.probes.clone()));
         state.probe_display_readback = 0;
         state.ingest_probe_samples(&records(4, 7, &[1.1, 1.2], 1));
 
@@ -15580,9 +15746,9 @@ mod tests {
             readbacks,
         };
 
-        state.probe_compiled = Some(compile(3, 5, state.editor.document.probes.clone()));
+        state.probe_compiled = Some(compile(3, 5, state.editor.document.model.probes.clone()));
         state.ingest_area_probe_samples(&records(3, 5, &[0.9, 1.0], 1));
-        state.probe_compiled = Some(compile(4, 7, state.editor.document.probes.clone()));
+        state.probe_compiled = Some(compile(4, 7, state.editor.document.model.probes.clone()));
         state.area_probe_display_readback = 0;
         state.ingest_area_probe_samples(&records(4, 7, &[1.1, 1.2], 1));
 
@@ -15730,7 +15896,10 @@ mod tests {
             .editor
             .create_point_probe(Point2::new(0.4, 0.4))
             .unwrap();
-        let title = format!("{} · point probe", h.state.editor.document.probes[0].name);
+        let title = format!(
+            "{} · point probe",
+            h.state.editor.document.model.probes[0].name
+        );
         h.state.probe_windows.insert(id);
         h.frame(vec![]);
         h.frame(vec![]);
@@ -15803,7 +15972,7 @@ mod tests {
         let mut h = Harness::new();
         h.click_text("View");
         h.click_text("Boundary conditions");
-        assert!(h.state.show_boundary_conditions);
+        assert!(h.state.editor.document.presentation.boundary_conditions);
         assert!(EDITABLE_LOOP_KINDS.contains(&(LoopKind::Hole, "Hole")));
         assert!(EDITABLE_LOOP_KINDS.contains(&(LoopKind::MaterialInterface, "Material interface")));
         assert!(
@@ -15960,13 +16129,15 @@ mod tests {
     #[test]
     fn double_click_inserts_once_and_existing_knot_selects() {
         let mut h = Harness::new();
-        h.state.handles = false;
-        let spline = h.state.editor.document.draft.obstacles[0].spline.clone();
+        h.state.editor.document.presentation.handles = false;
+        let spline = h.state.editor.document.model.draft.obstacles[0]
+            .spline
+            .clone();
         let p = h.point(spline.evaluate(0.5));
         h.click(p);
         h.click(p);
         assert_eq!(
-            h.state.editor.document.draft.obstacles[0]
+            h.state.editor.document.model.draft.obstacles[0]
                 .spline
                 .controls()
                 .len(),
@@ -15979,7 +16150,7 @@ mod tests {
         h.click(p);
         h.click(p);
         assert_eq!(
-            h.state.editor.document.draft.obstacles[0]
+            h.state.editor.document.model.draft.obstacles[0]
                 .spline
                 .controls()
                 .len(),
@@ -15989,7 +16160,7 @@ mod tests {
         assert!(h.state.selection.unwrap().1.is_some());
         h.key(Key::Delete, Modifiers::NONE);
         assert_eq!(
-            h.state.editor.document.draft.obstacles[0]
+            h.state.editor.document.model.draft.obstacles[0]
                 .spline
                 .controls()
                 .len(),
@@ -16023,7 +16194,7 @@ mod tests {
         h.move_to(h.rect.center());
         h.key(Key::Delete, Modifiers::NONE);
         assert_eq!(
-            h.state.editor.document.draft.obstacles[0]
+            h.state.editor.document.model.draft.obstacles[0]
                 .spline
                 .controls()
                 .len(),
@@ -16031,16 +16202,22 @@ mod tests {
         );
         h.frame(vec![Event::Text("0.25".into())]);
         h.key(Key::Enter, Modifiers::NONE);
-        assert_eq!(h.state.editor.document.draft.obstacles.len(), 1);
+        assert_eq!(h.state.editor.document.model.draft.obstacles.len(), 1);
         assert_eq!(h.state.custom.len(), 4);
         assert_eq!(
-            h.state.editor.document.draft.obstacles[0].spline.controls()[0].x,
+            h.state.editor.document.model.draft.obstacles[0]
+                .spline
+                .controls()[0]
+                .x,
             0.25
         );
         assert_eq!(h.state.editor.history_len(), (1, 0));
         h.key(Key::Z, Modifiers::COMMAND);
         assert_eq!(
-            h.state.editor.document.draft.obstacles[0].spline.controls()[0].x,
+            h.state.editor.document.model.draft.obstacles[0]
+                .spline
+                .controls()[0]
+                .x,
             0.15
         );
     }
@@ -16083,7 +16260,7 @@ mod tests {
         }
         h.click(h.point(points[0]));
         assert!(h.state.custom.is_empty());
-        assert_eq!(h.state.editor.document.draft.obstacles.len(), 2);
+        assert_eq!(h.state.editor.document.model.draft.obstacles.len(), 2);
         assert_eq!(h.state.editor.history_len(), (1, 0));
     }
 
@@ -16113,7 +16290,7 @@ mod tests {
         h.state.interaction_mode = InteractionMode::Select;
         h.click_text("Point source");
         assert!(h.state.wave_source.enabled);
-        assert_eq!(h.state.editor.document.source, h.state.wave_source);
+        assert_eq!(h.state.editor.document.model.source, h.state.wave_source);
         let source = Point2::new(-0.55, 0.25);
         h.drag_with_modifiers(
             h.point(h.state.wave_source.position),
@@ -16121,7 +16298,7 @@ mod tests {
             Modifiers::NONE,
         );
         assert!((h.state.wave_source.position - source).norm() < 1.0e-6);
-        assert_eq!(h.state.editor.document.source, h.state.wave_source);
+        assert_eq!(h.state.editor.document.model.source, h.state.wave_source);
         assert!(h.state.wave_source_dirty);
         assert_eq!(h.state.interaction_mode, InteractionMode::Select);
         assert_eq!(h.state.editor.history_len(), (2, 0));
@@ -16132,7 +16309,7 @@ mod tests {
         h.key(Key::Escape, Modifiers::NONE);
         h.button(h.point(cancelled), PointerButton::Primary, false);
         assert!((h.state.wave_source.position - source).norm() < 1.0e-6);
-        assert_eq!(h.state.editor.document.source, h.state.wave_source);
+        assert_eq!(h.state.editor.document.model.source, h.state.wave_source);
         assert_eq!(h.state.editor.history_len(), (2, 0));
 
         h.key(Key::Z, Modifiers::COMMAND);
@@ -16198,8 +16375,8 @@ mod tests {
         let mesh = h.state.mesh.clone().expect("initial accepted mesh");
 
         let target = OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
-        h.state.editor.document.draft.outer_boundaries = target;
-        h.state.editor.document.accepted.outer_boundaries = target;
+        h.state.editor.document.model.draft.outer_boundaries = target;
+        h.state.editor.document.model.accepted.outer_boundaries = target;
         h.state.refresh_mesh();
 
         let candidate = h
@@ -16384,6 +16561,7 @@ mod tests {
             .state
             .editor
             .document
+            .model
             .draft
             .material(material)
             .unwrap()
@@ -16404,7 +16582,7 @@ mod tests {
             .expect("material candidate");
         assert!(Arc::ptr_eq(&candidate.mesh, &mesh));
         assert!(h.state.mesh_job.is_none());
-        assert_eq!(candidate.scene, h.state.editor.document.accepted);
+        assert_eq!(candidate.scene, h.state.editor.document.model.accepted);
         assert!(candidate.transfer.is_some());
         let new_mass: f64 = candidate.operator.lumped_mass().iter().sum();
         assert!((new_mass - 2.0 * old_mass).abs() < 1.0e-10);
@@ -16453,7 +16631,7 @@ mod tests {
         let mesh = h.state.mesh.clone().unwrap();
         let operator = h.state.wave_operator.clone().unwrap();
 
-        let mut material = h.state.editor.document.draft.materials[0].clone();
+        let mut material = h.state.editor.document.model.draft.materials[0].clone();
         // Valid at the frame origin, but negative at assembly points near the sides.
         material.mass_density = ScalarField::formula("0.1 - x^2").unwrap();
         h.state.editor.update_material(material.clone()).unwrap();
@@ -16516,7 +16694,7 @@ mod tests {
         );
         assert_eq!(
             h.state.mesh_committed_scene,
-            h.state.editor.document.accepted
+            h.state.editor.document.model.accepted
         );
         assert_eq!(h.state.editor.history_len(), history);
         assert!(h.state.mesh_build_ms >= h.state.mesh_work_ms);
@@ -16597,7 +16775,7 @@ mod tests {
     #[test]
     fn native_amr_check_scene_exercises_a_spatial_material_indicator() {
         let mut state = amr_check_scene();
-        assert!(state.editor.document.accepted.has_varying_materials());
+        assert!(state.editor.document.model.accepted.has_varying_materials());
         build_mesh_candidate(&mut state);
         let candidate = state.simulation_candidate.as_ref().unwrap();
         let dofs = candidate.operator.degrees_of_freedom();
@@ -16868,8 +17046,8 @@ mod tests {
     fn material_frame_gizmo_drag_moves_origin_in_one_history_entry() {
         let mut h = Harness::new();
         let formula = ScalarField::formula("1 + 0.1 * x").unwrap();
-        h.state.editor.document.draft.materials[0].stiffness = formula.clone();
-        h.state.editor.document.accepted.materials[0].stiffness = formula;
+        h.state.editor.document.model.draft.materials[0].stiffness = formula.clone();
+        h.state.editor.document.model.accepted.materials[0].stiffness = formula;
         h.state.inspector_panel = Some(InspectorPanel::Materials);
         h.frame(vec![]);
         let start = h.point(Point2::new(0.0, 0.0));
@@ -16884,6 +17062,7 @@ mod tests {
             .state
             .editor
             .document
+            .model
             .accepted
             .region(BACKGROUND_REGION)
             .unwrap()
@@ -16901,11 +17080,12 @@ mod tests {
         let mut h = Harness::new();
         build_mesh_candidate(&mut h.state);
         commit_mesh_without_gpu(&mut h.state);
-        let mut material = h.state.editor.document.draft.materials[0].clone();
+        let mut material = h.state.editor.document.model.draft.materials[0].clone();
         material.stiffness = ScalarField::formula("1 + 0.1 * x").unwrap();
         h.state.editor.update_material(material).unwrap();
         h.settle();
-        h.state.material_overlay = MaterialOverlay::Property(MaterialProperty::Stiffness);
+        h.state.editor.document.presentation.material_overlay =
+            MaterialOverlay::Property(MaterialProperty::Stiffness);
         for _ in 0..1_000 {
             h.state.refresh_material_overlay();
             if h.state.material_overlay_job.is_none() && h.state.material_overlay_snapshot.is_some()
@@ -16927,7 +17107,8 @@ mod tests {
             .unwrap()
             .samples
             .len();
-        h.state.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
+        h.state.editor.document.presentation.material_overlay =
+            MaterialOverlay::Property(MaterialProperty::WaveSpeed);
         h.state.refresh_material_overlay();
         assert!(h.state.material_overlay_job.is_none());
         assert_eq!(

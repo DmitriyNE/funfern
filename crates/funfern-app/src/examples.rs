@@ -1,8 +1,8 @@
 use crate::material_overlay::{MaterialOverlay, MaterialProperty};
 use funfern_app::{
     editor::{
-        Document, FarFieldSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget,
-        SourceSettings,
+        Document, DocumentModel, FarFieldSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset,
+        ProbeTarget, SourceSettings,
     },
     persistence,
 };
@@ -13,7 +13,6 @@ pub struct ExampleScene {
     pub name: &'static str,
     pub description: &'static str,
     pub document: Document,
-    pub simulation: ExampleSimulation,
     pub property_preview: Option<ExamplePropertyPreview>,
 }
 
@@ -31,14 +30,6 @@ pub struct ExamplePropertyTriangle {
     pub values: [f64; 3],
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct ExampleSimulation {
-    pub source: SourceSettings,
-    pub material_overlay: MaterialOverlay,
-    pub material_overlay_opacity: f32,
-    pub show_amr_target: bool,
-}
-
 pub fn catalog() -> &'static [ExampleScene] {
     static CATALOG: OnceLock<Vec<ExampleScene>> = OnceLock::new();
     CATALOG.get_or_init(|| {
@@ -46,65 +37,76 @@ pub fn catalog() -> &'static [ExampleScene] {
             example(
                 "Starter obstacle",
                 "A point source scatters from a rounded obstacle above a reflecting floor.",
-                starter_obstacle(),
-                continuous_source(Point2::new(-0.55, 0.05), 2.5, 18.0, 0.06),
+                with_continuous_source(
+                    starter_obstacle(),
+                    Point2::new(-0.55, 0.05),
+                    2.5,
+                    18.0,
+                    0.06,
+                ),
             ),
             example(
                 "Double slit",
                 "A point source illuminates two apertures in a reflecting waveguide.",
-                double_slit(),
-                continuous_source(Point2::new(-0.62, 0.0), 3.0, 20.0, 0.05),
+                with_continuous_source(
+                    double_slit(),
+                    Point2::new(-0.62, 0.0),
+                    3.0,
+                    20.0,
+                    0.05,
+                ),
             ),
             example(
                 "Material lens",
                 "A point source illuminates a slower circular material region with absorbing edges.",
-                material_lens(),
-                continuous_source(Point2::new(-0.72, 0.0), 3.5, 16.0, 0.045),
+                with_continuous_source(
+                    material_lens(),
+                    Point2::new(-0.72, 0.0),
+                    3.5,
+                    16.0,
+                    0.045,
+                ),
             ),
             example(
                 "GRIN rod",
                 "An off-axis source is guided by a smooth transverse index profile.",
                 grin_rod(),
-                grin_rod_simulation(),
             ),
             example(
                 "Luneburg lens",
                 "A plane-like boundary wave focuses at the far rim of a radial index lens.",
                 luneburg_lens(),
-                luneburg_simulation(),
             ),
             example(
                 "Phased array",
                 "Five compact region sources use a phase ramp to steer a radiated beam.",
                 phased_array(),
-                phased_array_simulation(),
             ),
             example(
                 "Obstacle array",
                 "A point source drives multiple scattering through eight reflecting obstacles.",
-                obstacle_array(),
-                continuous_source(Point2::new(-0.92, 0.0), 3.0, 20.0, 0.045),
+                with_continuous_source(
+                    obstacle_array(),
+                    Point2::new(-0.92, 0.0),
+                    3.0,
+                    20.0,
+                    0.045,
+                ),
             ),
         ]
     })
 }
 
-fn example(
-    name: &'static str,
-    description: &'static str,
-    mut document: Document,
-    simulation: ExampleSimulation,
-) -> ExampleScene {
-    document.source = simulation.source;
-    let property_preview = match simulation.material_overlay {
-        MaterialOverlay::Property(property) => property_preview(&document.accepted, property),
+fn example(name: &'static str, description: &'static str, mut document: Document) -> ExampleScene {
+    document.presentation.boundary_conditions = true;
+    let property_preview = match document.presentation.material_overlay {
+        MaterialOverlay::Property(property) => property_preview(&document.model.accepted, property),
         MaterialOverlay::Off | MaterialOverlay::Regions => None,
     };
     ExampleScene {
         name,
         description,
         document,
-        simulation,
         property_preview,
     }
 }
@@ -227,25 +229,24 @@ fn point_in_polygon(point: Point2, polygon: &[Point2]) -> bool {
         })
 }
 
-fn continuous_source(
+fn with_continuous_source(
+    mut document: Document,
     position: Point2,
     frequency_hz: f32,
     amplitude: f32,
     width: f32,
-) -> ExampleSimulation {
-    ExampleSimulation {
-        source: SourceSettings {
-            enabled: true,
-            position,
-            amplitude,
-            width,
-            frequency_hz,
-            region: BACKGROUND_REGION,
-        },
-        material_overlay: MaterialOverlay::Off,
-        material_overlay_opacity: 0.55,
-        show_amr_target: false,
-    }
+) -> Document {
+    document.model.source = SourceSettings {
+        enabled: true,
+        position,
+        amplitude,
+        width,
+        frequency_hz,
+        region: BACKGROUND_REGION,
+    };
+    document.presentation.material_overlay = MaterialOverlay::Off;
+    document.presentation.material_overlay_opacity = 0.55;
+    document
 }
 
 fn reflecting_channel() -> OuterBoundaryConditions {
@@ -257,9 +258,9 @@ fn reflecting_channel() -> OuterBoundaryConditions {
 
 fn starter_obstacle() -> Document {
     let mut document = Document::default();
-    document.draft.outer_boundaries = reflecting_channel();
-    document.accepted.outer_boundaries = reflecting_channel();
-    document.probes.push(ProbeDefinition {
+    document.model.draft.outer_boundaries = reflecting_channel();
+    document.model.accepted.outer_boundaries = reflecting_channel();
+    document.model.probes.push(ProbeDefinition {
         id: ProbeId(1),
         name: "Receiver".into(),
         color: [63, 144, 239],
@@ -295,11 +296,14 @@ fn double_slit() -> Document {
         ..Default::default()
     };
     Document {
-        draft: scene.clone(),
-        accepted: scene,
-        probes: vec![],
-        source: SourceSettings::default(),
-        far_field: Default::default(),
+        model: DocumentModel {
+            draft: scene.clone(),
+            accepted: scene,
+            probes: vec![],
+            source: SourceSettings::default(),
+            far_field: Default::default(),
+        },
+        presentation: Default::default(),
     }
 }
 
@@ -336,19 +340,15 @@ fn material_lens() -> Document {
         },
     ));
     Document {
-        draft: scene.clone(),
-        accepted: scene,
-        probes: vec![],
-        source: SourceSettings::default(),
-        far_field: Default::default(),
+        model: DocumentModel {
+            draft: scene.clone(),
+            accepted: scene,
+            probes: vec![],
+            source: SourceSettings::default(),
+            far_field: Default::default(),
+        },
+        presentation: Default::default(),
     }
-}
-
-fn grin_rod_simulation() -> ExampleSimulation {
-    let mut simulation = continuous_source(Point2::new(-0.56, 0.11), 4.0, 16.0, 0.04);
-    simulation.source.region = RegionId(2);
-    simulation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
-    simulation
 }
 
 fn grin_rod() -> Document {
@@ -403,32 +403,37 @@ fn grin_rod() -> Document {
             interior: region,
         },
     ));
-    Document {
-        draft: scene.clone(),
-        accepted: scene,
-        probes: vec![ProbeDefinition {
-            id: ProbeId(1),
-            name: "Rod output profile".into(),
-            color: [94, 220, 195],
-            enabled: true,
-            target: ProbeTarget::Segment {
-                start: Point2::new(0.50, -0.38),
-                end: Point2::new(0.50, 0.38),
-                preset: ProbeSamplingPreset::High,
-            },
-        }],
-        source: SourceSettings::default(),
-        far_field: Default::default(),
-    }
-}
-
-fn luneburg_simulation() -> ExampleSimulation {
-    ExampleSimulation {
-        source: SourceSettings::default(),
-        material_overlay: MaterialOverlay::Property(MaterialProperty::WaveSpeed),
-        material_overlay_opacity: 0.55,
-        show_amr_target: false,
-    }
+    let mut document = Document {
+        model: DocumentModel {
+            draft: scene.clone(),
+            accepted: scene,
+            probes: vec![ProbeDefinition {
+                id: ProbeId(1),
+                name: "Rod output profile".into(),
+                color: [94, 220, 195],
+                enabled: true,
+                target: ProbeTarget::Segment {
+                    start: Point2::new(0.50, -0.38),
+                    end: Point2::new(0.50, 0.38),
+                    preset: ProbeSamplingPreset::High,
+                },
+            }],
+            source: SourceSettings::default(),
+            far_field: Default::default(),
+        },
+        presentation: Default::default(),
+    };
+    document.model.source = SourceSettings {
+        enabled: true,
+        position: Point2::new(-0.56, 0.11),
+        amplitude: 16.0,
+        width: 0.04,
+        frequency_hz: 4.0,
+        region,
+    };
+    document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
+    document.presentation.material_overlay_opacity = 0.55;
+    document
 }
 
 fn luneburg_lens() -> Document {
@@ -483,44 +488,41 @@ fn luneburg_lens() -> Document {
             interior: region,
         },
     ));
-    Document {
-        draft: scene.clone(),
-        accepted: scene,
-        probes: vec![
-            ProbeDefinition {
-                id: ProbeId(1),
-                name: "Focal profile".into(),
-                color: [94, 220, 195],
-                enabled: true,
-                target: ProbeTarget::Segment {
-                    start: Point2::new(center.x + RADIUS - 0.025, -0.28),
-                    end: Point2::new(center.x + RADIUS - 0.025, 0.28),
-                    preset: ProbeSamplingPreset::High,
+    let mut document = Document {
+        model: DocumentModel {
+            draft: scene.clone(),
+            accepted: scene,
+            probes: vec![
+                ProbeDefinition {
+                    id: ProbeId(1),
+                    name: "Focal profile".into(),
+                    color: [94, 220, 195],
+                    enabled: true,
+                    target: ProbeTarget::Segment {
+                        start: Point2::new(center.x + RADIUS - 0.025, -0.28),
+                        end: Point2::new(center.x + RADIUS - 0.025, 0.28),
+                        preset: ProbeSamplingPreset::High,
+                    },
                 },
-            },
-            ProbeDefinition {
-                id: ProbeId(2),
-                name: "Focus energy".into(),
-                color: [248, 196, 112],
-                enabled: true,
-                target: ProbeTarget::AreaDisk {
-                    center: Point2::new(center.x + RADIUS - 0.025, 0.0),
-                    radius: 0.065,
+                ProbeDefinition {
+                    id: ProbeId(2),
+                    name: "Focus energy".into(),
+                    color: [248, 196, 112],
+                    enabled: true,
+                    target: ProbeTarget::AreaDisk {
+                        center: Point2::new(center.x + RADIUS - 0.025, 0.0),
+                        radius: 0.065,
+                    },
                 },
-            },
-        ],
-        source: SourceSettings::default(),
-        far_field: Default::default(),
-    }
-}
-
-fn phased_array_simulation() -> ExampleSimulation {
-    ExampleSimulation {
-        source: SourceSettings::default(),
-        material_overlay: MaterialOverlay::Property(MaterialProperty::VolumeSource),
-        material_overlay_opacity: 0.62,
-        show_amr_target: false,
-    }
+            ],
+            source: SourceSettings::default(),
+            far_field: Default::default(),
+        },
+        presentation: Default::default(),
+    };
+    document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
+    document.presentation.material_overlay_opacity = 0.55;
+    document
 }
 
 fn phased_array() -> Document {
@@ -570,16 +572,23 @@ fn phased_array() -> Document {
             },
         });
     }
-    Document {
-        draft: scene.clone(),
-        accepted: scene,
-        probes: vec![],
-        source: SourceSettings::default(),
-        far_field: FarFieldSettings {
-            enabled: true,
-            inset: 0.08,
+    let mut document = Document {
+        model: DocumentModel {
+            draft: scene.clone(),
+            accepted: scene,
+            probes: vec![],
+            source: SourceSettings::default(),
+            far_field: FarFieldSettings {
+                enabled: true,
+                inset: 0.08,
+            },
         },
-    }
+        presentation: Default::default(),
+    };
+    document.presentation.material_overlay =
+        MaterialOverlay::Property(MaterialProperty::VolumeSource);
+    document.presentation.material_overlay_opacity = 0.62;
+    document
 }
 
 fn obstacle_array() -> Document {
@@ -587,8 +596,8 @@ fn obstacle_array() -> Document {
         persistence::parse_document(include_bytes!("../../../examples/eight-obstacles.json"))
             .expect("bundled obstacle example must remain valid");
     let boundaries = OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
-    document.draft.outer_boundaries = boundaries;
-    document.accepted.outer_boundaries = boundaries;
+    document.model.draft.outer_boundaries = boundaries;
+    document.model.accepted.outer_boundaries = boundaries;
     document
 }
 
@@ -658,14 +667,14 @@ mod tests {
     #[test]
     fn bundled_examples_are_structurally_valid_and_exportable() {
         assert_eq!(catalog().len(), 7);
-        assert_eq!(catalog()[0].document.probes.len(), 1);
+        assert_eq!(catalog()[0].document.model.probes.len(), 1);
         for example in catalog() {
             assert!(
-                example.document.accepted.structure_valid(),
+                example.document.model.accepted.structure_valid(),
                 "{}",
                 example.name
             );
-            let svg = scene_svg(&example.document.accepted);
+            let svg = scene_svg(&example.document.model.accepted);
             assert!(svg.starts_with("<svg"));
             assert!(svg.ends_with("</svg>"));
             let mut candidate = persistence::candidate(example.document.clone());
@@ -675,10 +684,10 @@ mod tests {
                 }
             };
             assert_eq!(loaded, example.document, "{}", example.name);
-            assert_eq!(example.document.source, example.simulation.source);
             let driven_boundary = OuterSide::ALL.into_iter().any(|side| {
                 example
                     .document
+                    .model
                     .accepted
                     .outer_boundaries
                     .get(side)
@@ -687,17 +696,18 @@ mod tests {
             });
             let driven_region = example
                 .document
+                .model
                 .accepted
                 .volume_sources
                 .iter()
                 .any(|source| source.enabled && source.signal.amplitude != 0.0);
             assert!(
-                example.simulation.source.enabled || driven_boundary || driven_region,
+                example.document.model.source.enabled || driven_boundary || driven_region,
                 "{} has no active driver",
                 example.name
             );
             if matches!(
-                example.simulation.material_overlay,
+                example.document.presentation.material_overlay,
                 MaterialOverlay::Property(_)
             ) {
                 let preview = example
@@ -733,13 +743,20 @@ mod tests {
                 .iter()
                 .find(|example| example.name == name)
                 .unwrap();
-            let scene = &example.document.accepted;
+            let scene = &example.document.model.accepted;
             assert!(scene.has_varying_materials());
             assert!(matches!(
-                example.simulation.material_overlay,
+                example.document.presentation.material_overlay,
                 MaterialOverlay::Property(MaterialProperty::WaveSpeed)
             ));
-            assert!(example.document.probes.iter().all(ProbeDefinition::valid));
+            assert!(
+                example
+                    .document
+                    .model
+                    .probes
+                    .iter()
+                    .all(ProbeDefinition::valid)
+            );
             let region = RegionId(2);
             for point in [center, edge] {
                 let coefficients = scene.material_at(region, point).unwrap();
@@ -830,7 +847,7 @@ mod tests {
             .iter()
             .find(|example| example.name == "Phased array")
             .unwrap();
-        let scene = &example.document.accepted;
+        let scene = &example.document.model.accepted;
         let mesh = Arc::new(
             mesh_scene(
                 scene,
@@ -865,7 +882,7 @@ mod tests {
     fn double_slit_has_a_practical_explicit_time_step() {
         let document = double_slit();
         let mesh = mesh_scene(
-            &document.accepted,
+            &document.model.accepted,
             1,
             MeshingOptions {
                 curve_tolerance: 1.5e-3,
@@ -891,8 +908,8 @@ mod tests {
             .fold(f64::INFINITY, f64::min);
         let operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
             &mesh,
-            &document.accepted,
-            document.accepted.outer_boundaries,
+            &document.model.accepted,
+            document.model.accepted.outer_boundaries,
         )
         .unwrap();
         assert!(

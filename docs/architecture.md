@@ -156,23 +156,30 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON version 15 remains the single persistence representation. Version 15
-adds region-owned volume sources and their profiles, parameters, and harmonic
-signals to both draft and accepted scenes. Version 14 stores constant/formula
-coefficient variants, material parameters, and every region's material frame.
-Older scalar coefficients migrate as constants; older
-interior regions receive a centered, attached, world-unit frame. File loading, bundled
-examples, crash recovery, and shared links all pass through the same structural
-decoder and bounded accepted-scene validator before replacing the editor document.
-The document includes probes, point-source configuration, and far-field
-settings alongside draft and accepted geometry, so every persistence route and
-Undo/Redo sees the same state. Examples carry names and descriptions and render their thumbnails directly
-from the accepted spline geometry. Spatial-material examples overlay a cached,
-bounded sampling of their initial property view in the thumbnail. Each catalog
-entry can supply either a point source or driven boundary, probes, and an
-initial material-overlay preset. Opening one is a single undoable document change
-and starts a fresh zero field; it does not transfer the
-field from the previously open scene. Ordinary edits and AMR retain their normal
+Scene JSON version 16 remains the single persistence representation. A `Document`
+owns one `DocumentModel` plus `PresentationSettings`. The model contains the draft
+and accepted scenes, probes, point-source configuration, and far-field settings; it
+is also the exact snapshot type stored by Undo/Redo. Presentation contains the View
+inspector's visibility, field-intensity, and material-overlay controls. It travels
+through scene files, examples, shared links, and recovery, but stays outside history,
+so model edits never rewind the user's current view. Camera, selection, open panels,
+floating-window positions, solver state, and derived render caches remain transient.
+
+Version 16 adds presentation settings. Version 15 adds region-owned volume sources
+and their profiles, parameters, and harmonic signals to both draft and accepted
+scenes. Version 14 stores constant/formula coefficient variants, material parameters,
+and every region's material frame. Older scalar coefficients migrate as constants;
+older interior regions receive a centered, attached, world-unit frame, and versions
+before 16 receive default presentation settings. File loading, bundled examples,
+crash recovery, and shared links all pass through the same structural decoder and
+bounded accepted-scene validator before replacing the editor document. Examples
+carry names and descriptions and render their thumbnails directly from the accepted
+spline geometry. Spatial-material examples overlay a cached, bounded sampling of
+their initial property view in the thumbnail. Each catalog entry supplies a complete
+document and can include a point source or driven boundary, probes, and an initial
+material-overlay preset. Opening one is a single model-history action, installs its
+presentation preset, and starts a fresh zero field; it does not transfer the field
+from the previously open scene. Ordinary edits and AMR retain their normal
 field-preserving handoff.
 Autosave retains both the accepted scene and any invalid editable draft, writing to
 browser local storage or an atomic per-user native recovery file after a short

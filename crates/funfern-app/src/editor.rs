@@ -10,6 +10,130 @@ pub enum GeometryControl {
 pub const MAX_PROBES: usize = 16;
 pub const MAX_SEGMENT_PROBE_POINTS: usize = 512;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialOverlay {
+    Off,
+    Regions,
+    Property(MaterialProperty),
+}
+
+impl MaterialOverlay {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Regions => "Material regions",
+            Self::Property(property) => property.label(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialProperty {
+    Density,
+    Stiffness,
+    Damping,
+    WaveSpeed,
+    Impedance,
+    VolumeSource,
+}
+
+impl MaterialProperty {
+    pub const ALL: [Self; 6] = [
+        Self::Density,
+        Self::Stiffness,
+        Self::Damping,
+        Self::WaveSpeed,
+        Self::Impedance,
+        Self::VolumeSource,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Density => "Density",
+            Self::Stiffness => "Stiffness",
+            Self::Damping => "Damping",
+            Self::WaveSpeed => "Wave speed",
+            Self::Impedance => "Impedance",
+            Self::VolumeSource => "Volume source",
+        }
+    }
+
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Density => 0,
+            Self::Stiffness => 1,
+            Self::Damping => 2,
+            Self::WaveSpeed => 3,
+            Self::Impedance => 4,
+            Self::VolumeSource => 5,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PresentationSettings {
+    pub grid: bool,
+    pub control_polygons: bool,
+    pub handles: bool,
+    pub accepted_reference: bool,
+    pub boundary_conditions: bool,
+    pub mesh: bool,
+    pub mesh_boundaries: bool,
+    pub adaptation_target: bool,
+    pub point_probes: bool,
+    pub line_probes: bool,
+    pub boundary_probes: bool,
+    pub area_probes: bool,
+    pub far_field_contour: bool,
+    pub field: bool,
+    pub field_gain: f32,
+    pub material_overlay: MaterialOverlay,
+    pub material_overlay_opacity: f32,
+    pub material_overlay_auto_range: bool,
+    pub material_overlay_logarithmic: bool,
+    pub material_overlay_manual_min: f64,
+    pub material_overlay_manual_max: f64,
+}
+
+impl PresentationSettings {
+    pub fn valid(self) -> bool {
+        self.field_gain.is_finite()
+            && (0.25..=12.0).contains(&self.field_gain)
+            && self.material_overlay_opacity.is_finite()
+            && (0.05..=1.0).contains(&self.material_overlay_opacity)
+            && self.material_overlay_manual_min.is_finite()
+            && self.material_overlay_manual_max.is_finite()
+    }
+}
+
+impl Default for PresentationSettings {
+    fn default() -> Self {
+        Self {
+            grid: true,
+            control_polygons: true,
+            handles: true,
+            accepted_reference: true,
+            boundary_conditions: false,
+            mesh: false,
+            mesh_boundaries: true,
+            adaptation_target: false,
+            point_probes: true,
+            line_probes: true,
+            boundary_probes: true,
+            area_probes: true,
+            far_field_contour: true,
+            field: true,
+            field_gain: 2.0,
+            material_overlay: MaterialOverlay::Regions,
+            material_overlay_opacity: 0.48,
+            material_overlay_auto_range: true,
+            material_overlay_logarithmic: false,
+            material_overlay_manual_min: 0.0,
+            material_overlay_manual_max: 1.0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SourceSettings {
     pub enabled: bool,
@@ -217,15 +341,17 @@ fn outer_condition_from_face(condition: FaceBoundaryCondition) -> OuterBoundaryC
     }
 }
 
+/// Persisted state changed by editor commands and captured verbatim by history.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Document {
+pub struct DocumentModel {
     pub draft: Scene,
     pub accepted: Scene,
     pub probes: Vec<ProbeDefinition>,
     pub source: SourceSettings,
     pub far_field: FarFieldSettings,
 }
-impl Default for Document {
+
+impl Default for DocumentModel {
     fn default() -> Self {
         let scene = Scene::initial();
         Self {
@@ -237,6 +363,13 @@ impl Default for Document {
         }
     }
 }
+
+/// A portable model together with its persisted, non-undoable presentation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Document {
+    pub model: DocumentModel,
+    pub presentation: PresentationSettings,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub enum Acceptance {
     Pending,
@@ -247,9 +380,9 @@ pub struct Editor {
     pub document: Document,
     pub revision: u64,
     pub acceptance: Acceptance,
-    undo: Vec<Document>,
-    redo: Vec<Document>,
-    before: Option<Document>,
+    undo: Vec<DocumentModel>,
+    redo: Vec<DocumentModel>,
+    before: Option<DocumentModel>,
     job: Option<ValidationJob>,
     next_obstacle_id: u64,
     next_internal_boundary_id: u64,
@@ -305,7 +438,13 @@ impl Editor {
         let old_role = obstacle.role;
         let exterior = old_role.exterior();
         if matches!(old_role, LoopRole::Hole { .. }) && kind != LoopKind::Hole {
-            if self.document.draft.material(new_region_material).is_none() {
+            if self
+                .document
+                .model
+                .draft
+                .material(new_region_material)
+                .is_none()
+            {
                 return Err("Choose an existing interior material".into());
             }
             let frame = frame_for_spline(&obstacle.spline)?;
@@ -321,12 +460,13 @@ impl Editor {
             };
             self.begin();
             self.remap_loop_probe_role(id, old_role, role);
-            self.document.draft.regions.push(Region {
+            self.document.model.draft.regions.push(Region {
                 id: interior,
                 material: new_region_material,
                 frame,
             });
             self.document
+                .model
                 .draft
                 .obstacles
                 .iter_mut()
@@ -341,12 +481,14 @@ impl Editor {
         if kind == LoopKind::Hole
             && (self
                 .document
+                .model
                 .draft
                 .obstacles
                 .iter()
                 .any(|child| child.id != id && child.role.exterior() == interior)
                 || self
                     .document
+                    .model
                     .draft
                     .internal_boundaries
                     .iter()
@@ -368,14 +510,17 @@ impl Editor {
         if kind == LoopKind::Hole {
             self.delete_area_probes_for_region(interior);
             self.document
+                .model
                 .draft
                 .volume_sources
                 .retain(|source| source.region != interior);
             self.document
+                .model
                 .draft
                 .regions
                 .retain(|region| region.id != interior);
             self.document
+                .model
                 .draft
                 .obstacles
                 .iter_mut()
@@ -384,6 +529,7 @@ impl Editor {
                 .role = LoopRole::Hole { exterior };
         } else {
             self.document
+                .model
                 .draft
                 .obstacles
                 .iter_mut()
@@ -406,7 +552,7 @@ impl Editor {
     ) -> Result<FaceBoundaryCondition, String> {
         match target {
             BoundaryFaceTarget::Outer(side) => {
-                Ok(match self.document.draft.outer_boundaries.get(side) {
+                Ok(match self.document.model.draft.outer_boundaries.get(side) {
                     OuterBoundaryCondition::Reflecting => FaceBoundaryCondition::Reflecting,
                     OuterBoundaryCondition::FirstOrderOutgoing => {
                         FaceBoundaryCondition::Impedance { ratio: 1.0 }
@@ -471,7 +617,7 @@ impl Editor {
         }
         let changed = targets.iter().any(|target| match target {
             BoundaryFaceTarget::Outer(side) => {
-                self.document.draft.outer_boundaries.get(*side)
+                self.document.model.draft.outer_boundaries.get(*side)
                     != outer_condition_from_face(condition)
             }
             BoundaryFaceTarget::Hole(id, span) => {
@@ -493,11 +639,12 @@ impl Editor {
         for target in targets {
             match target {
                 BoundaryFaceTarget::Outer(side) => {
-                    self.document.draft.outer_boundaries.sides[side.index()] =
+                    self.document.model.draft.outer_boundaries.sides[side.index()] =
                         outer_condition_from_face(condition);
                 }
                 BoundaryFaceTarget::Hole(id, span) => {
                     self.document
+                        .model
                         .draft
                         .obstacles
                         .iter_mut()
@@ -508,6 +655,7 @@ impl Editor {
                 BoundaryFaceTarget::Baffle(id, span, side) => {
                     let law = &mut self
                         .document
+                        .model
                         .draft
                         .internal_boundaries
                         .iter_mut()
@@ -562,6 +710,7 @@ impl Editor {
         for (id, span) in spans {
             let law = &mut self
                 .document
+                .model
                 .draft
                 .internal_boundaries
                 .iter_mut()
@@ -617,6 +766,7 @@ impl Editor {
             match *control {
                 GeometryControl::Loop(id, index) => self
                     .document
+                    .model
                     .draft
                     .obstacles
                     .iter_mut()
@@ -627,6 +777,7 @@ impl Editor {
                     .map_err(|error| error.to_string())?,
                 GeometryControl::Baffle(id, index) => self
                     .document
+                    .model
                     .draft
                     .internal_boundaries
                     .iter_mut()
@@ -639,6 +790,7 @@ impl Editor {
         }
         for (region_id, frame) in frame_updates {
             self.document
+                .model
                 .draft
                 .regions
                 .iter_mut()
@@ -655,11 +807,11 @@ impl Editor {
         updates: &[(GeometryControl, Point2)],
     ) -> Vec<(RegionId, MaterialFrame)> {
         let mut result = Vec::new();
-        for obstacle in &self.document.draft.obstacles {
+        for obstacle in &self.document.model.draft.obstacles {
             let Some(region_id) = obstacle.role.interior() else {
                 continue;
             };
-            let Some(region) = self.document.draft.region(region_id) else {
+            let Some(region) = self.document.model.draft.region(region_id) else {
                 continue;
             };
             if region.frame.attachment != MaterialFrameAttachment::FollowRegion {
@@ -705,11 +857,11 @@ impl Editor {
         if !condition.valid() {
             return Err("Boundary signal values must be finite and frequency nonnegative".into());
         }
-        if self.document.draft.outer_boundaries.get(side) == condition {
+        if self.document.model.draft.outer_boundaries.get(side) == condition {
             return Ok(());
         }
         self.begin();
-        self.document.draft.outer_boundaries.sides[side.index()] = condition;
+        self.document.model.draft.outer_boundaries.sides[side.index()] = condition;
         self.changed();
         self.commit();
         Ok(())
@@ -717,7 +869,7 @@ impl Editor {
 
     pub fn begin(&mut self) {
         if self.before.is_none() {
-            self.before = Some(self.document.clone())
+            self.before = Some(self.document.model.clone())
         }
     }
     pub fn editing(&self) -> bool {
@@ -730,7 +882,7 @@ impl Editor {
     }
     pub fn commit(&mut self) {
         if let Some(before) = self.before.take()
-            && before != self.document
+            && before != self.document.model
         {
             self.undo.push(before);
             if self.undo.len() > 100 {
@@ -741,9 +893,9 @@ impl Editor {
     }
     pub fn cancel(&mut self) {
         if let Some(before) = self.before.take() {
-            let geometry_changed =
-                before.draft != self.document.draft || before.accepted != self.document.accepted;
-            self.document = before;
+            let geometry_changed = before.draft != self.document.model.draft
+                || before.accepted != self.document.model.accepted;
+            self.document.model = before;
             if geometry_changed {
                 self.changed();
             }
@@ -755,10 +907,10 @@ impl Editor {
             return;
         }
         if let Some(doc) = self.undo.pop() {
-            self.redo.push(self.document.clone());
-            let geometry_changed =
-                doc.draft != self.document.draft || doc.accepted != self.document.accepted;
-            self.document = doc;
+            self.redo.push(self.document.model.clone());
+            let geometry_changed = doc.draft != self.document.model.draft
+                || doc.accepted != self.document.model.accepted;
+            self.document.model = doc;
             if geometry_changed {
                 self.changed();
             }
@@ -769,10 +921,10 @@ impl Editor {
             return;
         }
         if let Some(doc) = self.redo.pop() {
-            self.undo.push(self.document.clone());
-            let geometry_changed =
-                doc.draft != self.document.draft || doc.accepted != self.document.accepted;
-            self.document = doc;
+            self.undo.push(self.document.model.clone());
+            let geometry_changed = doc.draft != self.document.model.draft
+                || doc.accepted != self.document.model.accepted;
+            self.document.model = doc;
             if geometry_changed {
                 self.changed();
             }
@@ -783,7 +935,7 @@ impl Editor {
     }
     pub fn revert(&mut self) {
         self.begin();
-        self.document.draft = self.document.accepted.clone();
+        self.document.model.draft = self.document.model.accepted.clone();
         self.changed();
         self.commit();
     }
@@ -791,9 +943,9 @@ impl Editor {
         if self.acceptance != Acceptance::Pending {
             return;
         }
-        let job = self
-            .job
-            .get_or_insert_with(|| ValidationJob::new(self.document.draft.clone(), self.revision));
+        let job = self.job.get_or_insert_with(|| {
+            ValidationJob::new(self.document.model.draft.clone(), self.revision)
+        });
         if let Some(result) = job.advance(budget) {
             self.apply_validation(result);
             self.job = None;
@@ -806,24 +958,31 @@ impl Editor {
         if let Some(issue) = result.issue {
             self.acceptance = Acceptance::Invalid(issue)
         } else {
-            self.document.accepted = self.document.draft.clone();
+            self.document.model.accepted = self.document.model.draft.clone();
             if self
                 .document
+                .model
                 .accepted
-                .region(self.document.source.region)
+                .region(self.document.model.source.region)
                 .is_none()
             {
-                self.document.source.region = BACKGROUND_REGION;
+                self.document.model.source.region = BACKGROUND_REGION;
             }
             self.acceptance = Acceptance::Valid;
         }
     }
     pub fn obstacle(&self, id: ObstacleId) -> Option<&Obstacle> {
-        self.document.draft.obstacles.iter().find(|o| o.id == id)
+        self.document
+            .model
+            .draft
+            .obstacles
+            .iter()
+            .find(|o| o.id == id)
     }
 
     pub fn internal_boundary(&self, id: InternalBoundaryId) -> Option<&InternalBoundary> {
         self.document
+            .model
             .draft
             .internal_boundaries
             .iter()
@@ -835,10 +994,11 @@ impl Editor {
         spline: OpenCubicSpline,
         region: RegionId,
     ) -> Result<InternalBoundaryId, String> {
-        if self.document.draft.region(region).is_none() {
+        if self.document.model.draft.region(region).is_none() {
             return Err("Missing containing region".into());
         }
-        if self.document.draft.obstacles.len() + self.document.draft.internal_boundaries.len()
+        if self.document.model.draft.obstacles.len()
+            + self.document.model.draft.internal_boundaries.len()
             >= MAX_OBSTACLES
         {
             return Err("Maximum 32 geometric features".into());
@@ -850,6 +1010,7 @@ impl Editor {
             .ok_or("Internal-boundary IDs exhausted")?;
         self.begin();
         self.document
+            .model
             .draft
             .internal_boundaries
             .push(InternalBoundary {
@@ -871,6 +1032,7 @@ impl Editor {
     ) -> Result<(), String> {
         let boundary = self
             .document
+            .model
             .draft
             .internal_boundaries
             .iter_mut()
@@ -891,6 +1053,7 @@ impl Editor {
         self.begin();
         self.delete_boundary_probes_for(BoundaryProbeFeature::Baffle(id));
         self.document
+            .model
             .draft
             .internal_boundaries
             .retain(|boundary| boundary.id != id);
@@ -903,7 +1066,8 @@ impl Editor {
         id: InternalBoundaryId,
         offset: Point2,
     ) -> Result<InternalBoundaryId, String> {
-        if self.document.draft.obstacles.len() + self.document.draft.internal_boundaries.len()
+        if self.document.model.draft.obstacles.len()
+            + self.document.model.draft.internal_boundaries.len()
             >= MAX_OBSTACLES
         {
             return Err("Maximum 32 geometric features".into());
@@ -931,6 +1095,7 @@ impl Editor {
             .ok_or("Internal-boundary IDs exhausted")?;
         self.begin();
         self.document
+            .model
             .draft
             .internal_boundaries
             .push(InternalBoundary {
@@ -967,6 +1132,7 @@ impl Editor {
         }
         self.begin();
         self.document
+            .model
             .draft
             .internal_boundaries
             .iter_mut()
@@ -1016,6 +1182,7 @@ impl Editor {
                 );
                 let boundary = self
                     .document
+                    .model
                     .draft
                     .internal_boundaries
                     .iter_mut()
@@ -1072,6 +1239,7 @@ impl Editor {
         }
         self.begin();
         self.document
+            .model
             .draft
             .internal_boundaries
             .iter_mut()
@@ -1090,7 +1258,8 @@ impl Editor {
         id: InternalBoundaryId,
         breakpoint: usize,
     ) -> Result<InternalBoundaryId, String> {
-        if self.document.draft.obstacles.len() + self.document.draft.internal_boundaries.len()
+        if self.document.model.draft.obstacles.len()
+            + self.document.model.draft.internal_boundaries.len()
             >= MAX_OBSTACLES
         {
             return Err("Maximum 32 geometric features".into());
@@ -1116,7 +1285,7 @@ impl Editor {
             .ok_or("Internal-boundary IDs exhausted")?;
         self.begin();
         let old_total = source_spline.intervals().len();
-        self.document.probes.retain_mut(|probe| {
+        self.document.model.probes.retain_mut(|probe| {
             let ProbeTarget::Boundary(mut target) = probe.target else {
                 return true;
             };
@@ -1165,6 +1334,7 @@ impl Editor {
         });
         let boundary = self
             .document
+            .model
             .draft
             .internal_boundaries
             .iter_mut()
@@ -1173,6 +1343,7 @@ impl Editor {
         boundary.spline = left;
         boundary.span_laws = left_laws;
         self.document
+            .model
             .draft
             .internal_boundaries
             .push(InternalBoundary {
@@ -1253,7 +1424,7 @@ impl Editor {
         let mut laws = a.span_laws;
         laws.extend(b.span_laws);
         self.begin();
-        self.document.probes.retain_mut(|probe| {
+        self.document.model.probes.retain_mut(|probe| {
             let ProbeTarget::Boundary(mut target) = probe.target else {
                 return true;
             };
@@ -1290,6 +1461,7 @@ impl Editor {
         });
         let kept = self
             .document
+            .model
             .draft
             .internal_boundaries
             .iter_mut()
@@ -1298,6 +1470,7 @@ impl Editor {
         kept.spline = spline;
         kept.span_laws = laws;
         self.document
+            .model
             .draft
             .internal_boundaries
             .retain(|boundary| boundary.id != second);
@@ -1365,6 +1538,7 @@ impl Editor {
         );
         let boundary = self
             .document
+            .model
             .draft
             .internal_boundaries
             .iter_mut()
@@ -1394,6 +1568,7 @@ impl Editor {
         }
         let boundary = self
             .document
+            .model
             .draft
             .internal_boundaries
             .iter()
@@ -1409,6 +1584,7 @@ impl Editor {
         self.begin();
         let boundary = self
             .document
+            .model
             .draft
             .internal_boundaries
             .iter_mut()
@@ -1422,6 +1598,7 @@ impl Editor {
     pub fn set_point(&mut self, id: ObstacleId, index: usize, p: Point2) -> Result<(), String> {
         let o = self
             .document
+            .model
             .draft
             .obstacles
             .iter_mut()
@@ -1450,10 +1627,10 @@ impl Editor {
         material: MaterialId,
         wall: bool,
     ) -> Result<ObstacleId, String> {
-        if self.document.draft.region(exterior).is_none() {
+        if self.document.model.draft.region(exterior).is_none() {
             return Err("Missing exterior region".into());
         }
-        if self.document.draft.material(material).is_none() {
+        if self.document.model.draft.material(material).is_none() {
             return Err("Missing material".into());
         }
         let interior = RegionId(self.next_region_id);
@@ -1468,7 +1645,7 @@ impl Editor {
         };
         let frame = frame_for_spline(&spline)?;
         self.begin();
-        self.document.draft.regions.push(Region {
+        self.document.model.draft.regions.push(Region {
             id: interior,
             material,
             frame,
@@ -1510,13 +1687,13 @@ impl Editor {
         spline: PeriodicCubicSpline,
         role: LoopRole,
     ) -> Result<ObstacleId, String> {
-        if self.document.draft.obstacles.len() >= MAX_OBSTACLES {
+        if self.document.model.draft.obstacles.len() >= MAX_OBSTACLES {
             return Err("Maximum 32 obstacles".into());
         }
-        if self.document.draft.region(role.exterior()).is_none()
+        if self.document.model.draft.region(role.exterior()).is_none()
             || role
                 .interior()
-                .is_some_and(|id| self.document.draft.region(id).is_none())
+                .is_some_and(|id| self.document.model.draft.region(id).is_none())
         {
             return Err("Loop references a missing region".into());
         }
@@ -1526,6 +1703,7 @@ impl Editor {
             .checked_add(1)
             .ok_or("Obstacle IDs exhausted")?;
         self.document
+            .model
             .draft
             .obstacles
             .push(Obstacle::with_role(id, spline, role));
@@ -1536,30 +1714,33 @@ impl Editor {
         self.delete_boundary_probes_for(BoundaryProbeFeature::Loop(id));
         let removed = self
             .document
+            .model
             .draft
             .obstacles
             .iter()
             .find(|loop_| loop_.id == id)
             .map(|loop_| loop_.role);
-        self.document.draft.obstacles.retain(|o| o.id != id);
+        self.document.model.draft.obstacles.retain(|o| o.id != id);
         if let Some(role) = removed
             && let Some(interior) = role.interior()
         {
             self.delete_area_probes_for_region(interior);
             self.document
+                .model
                 .draft
                 .volume_sources
                 .retain(|source| source.region != interior);
             let exterior = role.exterior();
-            for child in &mut self.document.draft.obstacles {
+            for child in &mut self.document.model.draft.obstacles {
                 child.role = replace_exterior(child.role, interior, exterior);
             }
-            for boundary in &mut self.document.draft.internal_boundaries {
+            for boundary in &mut self.document.model.draft.internal_boundaries {
                 if boundary.region == interior {
                     boundary.region = exterior;
                 }
             }
             self.document
+                .model
                 .draft
                 .regions
                 .retain(|region| region.id != interior);
@@ -1573,7 +1754,8 @@ impl Editor {
         id: ObstacleId,
         offset: Point2,
     ) -> Result<ObstacleId, String> {
-        if self.document.draft.obstacles.len() + self.document.draft.internal_boundaries.len()
+        if self.document.model.draft.obstacles.len()
+            + self.document.model.draft.internal_boundaries.len()
             >= MAX_OBSTACLES
         {
             return Err("Maximum 32 geometric features".into());
@@ -1598,6 +1780,7 @@ impl Editor {
         let role = if let Some(interior) = source.role.interior() {
             let old_region = self
                 .document
+                .model
                 .draft
                 .region(interior)
                 .cloned()
@@ -1612,14 +1795,16 @@ impl Editor {
             if frame.attachment == MaterialFrameAttachment::FollowRegion {
                 frame.origin = frame.origin + offset;
             }
-            self.document.draft.regions.push(Region {
+            self.document.model.draft.regions.push(Region {
                 id: new_region,
                 material: old_region.material,
                 frame,
             });
-            if let Some(mut volume_source) = self.document.draft.volume_source(interior).cloned() {
+            if let Some(mut volume_source) =
+                self.document.model.draft.volume_source(interior).cloned()
+            {
                 volume_source.region = new_region;
-                self.document.draft.volume_sources.push(volume_source);
+                self.document.model.draft.volume_sources.push(volume_source);
             }
             match source.role {
                 LoopRole::MaterialInterface { exterior, .. } => LoopRole::MaterialInterface {
@@ -1636,7 +1821,7 @@ impl Editor {
             self.begin();
             source.role
         };
-        self.document.draft.obstacles.push(Obstacle {
+        self.document.model.draft.obstacles.push(Obstacle {
             id: new_id,
             spline,
             role,
@@ -1648,7 +1833,7 @@ impl Editor {
     }
 
     pub fn add_material(&mut self) -> Result<MaterialId, String> {
-        if self.document.draft.materials.len() >= MAX_MATERIALS {
+        if self.document.model.draft.materials.len() >= MAX_MATERIALS {
             return Err("Maximum 32 materials".into());
         }
         let id = MaterialId(self.next_material_id);
@@ -1665,7 +1850,7 @@ impl Editor {
             [153, 86, 111],
             [102, 130, 67],
         ];
-        self.document.draft.materials.push(Material {
+        self.document.model.draft.materials.push(Material {
             id,
             name: format!("Material {}", id.0),
             mass_density: ScalarField::constant(1.0),
@@ -1685,6 +1870,7 @@ impl Editor {
         }
         if self
             .document
+            .model
             .draft
             .regions
             .iter()
@@ -1694,6 +1880,7 @@ impl Editor {
         }
         self.begin();
         self.document
+            .model
             .draft
             .materials
             .retain(|material| material.id != id);
@@ -1707,11 +1894,12 @@ impl Editor {
         region_id: RegionId,
         material_id: MaterialId,
     ) -> Result<(), String> {
-        if self.document.draft.material(material_id).is_none() {
+        if self.document.model.draft.material(material_id).is_none() {
             return Err("Missing material".into());
         }
         let current = self
             .document
+            .model
             .draft
             .regions
             .iter()
@@ -1722,6 +1910,7 @@ impl Editor {
         }
         self.begin();
         self.document
+            .model
             .draft
             .regions
             .iter_mut()
@@ -1742,6 +1931,7 @@ impl Editor {
         let material_id = material.id;
         let current = self
             .document
+            .model
             .draft
             .material(material_id)
             .ok_or("Missing material")?;
@@ -1751,6 +1941,7 @@ impl Editor {
         self.begin();
         *self
             .document
+            .model
             .draft
             .materials
             .iter_mut()
@@ -1766,7 +1957,7 @@ impl Editor {
         region: RegionId,
         source: Option<VolumeSource>,
     ) -> Result<(), String> {
-        if self.document.draft.region(region).is_none() {
+        if self.document.model.draft.region(region).is_none() {
             return Err("Missing region".into());
         }
         if let Some(source) = &source
@@ -1774,23 +1965,24 @@ impl Editor {
         {
             return Err("Volume-source values or parameters are invalid".into());
         }
-        let current = self.document.draft.volume_source(region);
+        let current = self.document.model.draft.volume_source(region);
         if current == source.as_ref() {
             return Ok(());
         }
         if current.is_none()
             && source.is_some()
-            && self.document.draft.volume_sources.len() >= MAX_VOLUME_SOURCES
+            && self.document.model.draft.volume_sources.len() >= MAX_VOLUME_SOURCES
         {
             return Err(format!("Maximum {MAX_VOLUME_SOURCES} volume sources"));
         }
         self.begin();
         self.document
+            .model
             .draft
             .volume_sources
             .retain(|candidate| candidate.region != region);
         if let Some(source) = source {
-            self.document.draft.volume_sources.push(source);
+            self.document.model.draft.volume_sources.push(source);
         }
         self.changed();
         self.commit();
@@ -1824,6 +2016,7 @@ impl Editor {
         }
         let region = self
             .document
+            .model
             .draft
             .region(region_id)
             .ok_or("Missing region")?;
@@ -1840,6 +2033,7 @@ impl Editor {
             return Ok(());
         }
         self.document
+            .model
             .draft
             .regions
             .iter_mut()
@@ -1856,6 +2050,7 @@ impl Editor {
         }
         let owner = self
             .document
+            .model
             .draft
             .obstacles
             .iter()
@@ -1863,6 +2058,7 @@ impl Editor {
             .ok_or("Region has no owning loop")?;
         let mut frame = self
             .document
+            .model
             .draft
             .region(region_id)
             .ok_or("Missing region")?
@@ -1918,6 +2114,7 @@ impl Editor {
         );
         let obstacle = self
             .document
+            .model
             .draft
             .obstacles
             .iter_mut()
@@ -1955,6 +2152,7 @@ impl Editor {
                 );
                 let obstacle = self
                     .document
+                    .model
                     .draft
                     .obstacles
                     .iter_mut()
@@ -2010,6 +2208,7 @@ impl Editor {
         }
         self.begin();
         self.document
+            .model
             .draft
             .obstacles
             .iter_mut()
@@ -2095,6 +2294,7 @@ impl Editor {
         self.begin();
         for (id, spline) in loop_updates {
             self.document
+                .model
                 .draft
                 .obstacles
                 .iter_mut()
@@ -2104,6 +2304,7 @@ impl Editor {
         }
         for (id, spline) in baffle_updates {
             self.document
+                .model
                 .draft
                 .internal_boundaries
                 .iter_mut()
@@ -2138,6 +2339,7 @@ impl Editor {
         }
         self.begin();
         self.document
+            .model
             .draft
             .obstacles
             .iter_mut()
@@ -2153,7 +2355,7 @@ impl Editor {
         if !position.finite() {
             return Err("Probe position must be finite".into());
         }
-        if self.document.probes.len() >= MAX_PROBES {
+        if self.document.model.probes.len() >= MAX_PROBES {
             return Err(format!("Maximum {MAX_PROBES} probes"));
         }
         let id = ProbeId(self.next_probe_id);
@@ -2172,7 +2374,7 @@ impl Editor {
             [153, 203, 103],
         ];
         self.begin();
-        self.document.probes.push(ProbeDefinition {
+        self.document.model.probes.push(ProbeDefinition {
             id,
             name: format!("Probe {}", id.0),
             color: COLORS[(id.0.saturating_sub(1) as usize) % COLORS.len()],
@@ -2192,7 +2394,7 @@ impl Editor {
         if !start.finite() || !end.finite() || (end - start).norm() < 1.0e-6 {
             return Err("Line probe endpoints must be distinct and finite".into());
         }
-        if self.document.probes.len() >= MAX_PROBES {
+        if self.document.model.probes.len() >= MAX_PROBES {
             return Err(format!("Maximum {MAX_PROBES} probes"));
         }
         if self.segment_probe_points() + ProbeSamplingPreset::Medium.spatial_points()
@@ -2218,7 +2420,7 @@ impl Editor {
             [153, 203, 103],
         ];
         self.begin();
-        self.document.probes.push(ProbeDefinition {
+        self.document.model.probes.push(ProbeDefinition {
             id,
             name: format!("Line probe {}", id.0),
             color: COLORS[(id.0.saturating_sub(1) as usize) % COLORS.len()],
@@ -2234,7 +2436,7 @@ impl Editor {
         mut target: BoundaryProbeTarget,
     ) -> Result<ProbeId, String> {
         self.validate_boundary_probe(target)?;
-        if self.document.probes.len() >= MAX_PROBES {
+        if self.document.model.probes.len() >= MAX_PROBES {
             return Err(format!("Maximum {MAX_PROBES} probes"));
         }
         if self.segment_probe_points() + target.preset.spatial_points() > MAX_SEGMENT_PROBE_POINTS {
@@ -2265,7 +2467,7 @@ impl Editor {
             [153, 203, 103],
         ];
         self.begin();
-        self.document.probes.push(ProbeDefinition {
+        self.document.model.probes.push(ProbeDefinition {
             id,
             name: format!("Boundary probe {}", id.0),
             color: COLORS[(id.0.saturating_sub(1) as usize) % COLORS.len()],
@@ -2285,7 +2487,7 @@ impl Editor {
     }
 
     pub fn create_area_region_probe(&mut self, region: RegionId) -> Result<ProbeId, String> {
-        if self.document.draft.region(region).is_none() {
+        if self.document.model.draft.region(region).is_none() {
             return Err("Area probe references a missing region".into());
         }
         self.create_area_probe(ProbeTarget::AreaRegion { region })
@@ -2305,7 +2507,7 @@ impl Editor {
         if !valid {
             return Err("Area probe target must be valid".into());
         }
-        if self.document.probes.len() >= MAX_PROBES {
+        if self.document.model.probes.len() >= MAX_PROBES {
             return Err(format!("Maximum {MAX_PROBES} probes"));
         }
         let id = ProbeId(self.next_probe_id);
@@ -2324,7 +2526,7 @@ impl Editor {
             [153, 203, 103],
         ];
         self.begin();
-        self.document.probes.push(ProbeDefinition {
+        self.document.model.probes.push(ProbeDefinition {
             id,
             name: format!("Area probe {}", id.0),
             color: COLORS[(id.0.saturating_sub(1) as usize) % COLORS.len()],
@@ -2339,11 +2541,11 @@ impl Editor {
         if !settings.valid() {
             return Err("Far-field inset must be finite and between 0 and 1".into());
         }
-        if self.document.far_field == settings {
+        if self.document.model.far_field == settings {
             return Ok(());
         }
         self.begin();
-        self.document.far_field = settings;
+        self.document.model.far_field = settings;
         self.commit();
         Ok(())
     }
@@ -2353,6 +2555,7 @@ impl Editor {
             BoundaryProbeFeature::Outer => Some(4),
             BoundaryProbeFeature::Loop(id) => self
                 .document
+                .model
                 .draft
                 .obstacles
                 .iter()
@@ -2360,6 +2563,7 @@ impl Editor {
                 .map(|obstacle| obstacle.spline.intervals().len()),
             BoundaryProbeFeature::Baffle(id) => self
                 .document
+                .model
                 .draft
                 .internal_boundaries
                 .iter()
@@ -2392,6 +2596,7 @@ impl Editor {
             BoundaryProbeFeature::Loop(id) => {
                 match self
                     .document
+                    .model
                     .draft
                     .obstacles
                     .iter()
@@ -2414,19 +2619,19 @@ impl Editor {
     }
 
     fn delete_boundary_probes_for(&mut self, feature: BoundaryProbeFeature) {
-        self.document.probes.retain(|probe| {
+        self.document.model.probes.retain(|probe| {
             !matches!(probe.target, ProbeTarget::Boundary(target) if target.feature == feature)
         });
     }
 
     fn delete_area_probes_for_region(&mut self, region: RegionId) {
-        self.document.probes.retain(
+        self.document.model.probes.retain(
             |probe| !matches!(probe.target, ProbeTarget::AreaRegion { region: id } if id == region),
         );
     }
 
     fn remap_loop_probe_role(&mut self, id: ObstacleId, old: LoopRole, new: LoopRole) {
-        self.document.probes.retain_mut(|probe| {
+        self.document.model.probes.retain_mut(|probe| {
             let ProbeTarget::Boundary(mut target) = probe.target else {
                 return true;
             };
@@ -2469,7 +2674,7 @@ impl Editor {
         new_total: usize,
         mut map: impl FnMut(usize) -> Vec<usize>,
     ) {
-        self.document.probes.retain_mut(|probe| {
+        self.document.model.probes.retain_mut(|probe| {
             let ProbeTarget::Boundary(mut target) = probe.target else {
                 return true;
             };
@@ -2491,6 +2696,7 @@ impl Editor {
 
     fn segment_probe_points(&self) -> usize {
         self.document
+            .model
             .probes
             .iter()
             .map(|probe| match probe.target {
@@ -2512,13 +2718,14 @@ impl Editor {
             self.validate_boundary_probe(target)?;
         }
         if let ProbeTarget::AreaRegion { region } = probe.target
-            && self.document.draft.region(region).is_none()
+            && self.document.model.draft.region(region).is_none()
         {
             return Err("Area probe references a missing region".into());
         }
         let id = probe.id;
         let current = self
             .document
+            .model
             .probes
             .iter()
             .find(|candidate| candidate.id == id)
@@ -2549,6 +2756,7 @@ impl Editor {
         self.begin();
         *self
             .document
+            .model
             .probes
             .iter_mut()
             .find(|candidate| candidate.id == id)
@@ -2558,11 +2766,17 @@ impl Editor {
     }
 
     pub fn delete_probe(&mut self, id: ProbeId) -> Result<(), String> {
-        if !self.document.probes.iter().any(|probe| probe.id == id) {
+        if !self
+            .document
+            .model
+            .probes
+            .iter()
+            .any(|probe| probe.id == id)
+        {
             return Err("Missing probe".into());
         }
         self.begin();
-        self.document.probes.retain(|probe| probe.id != id);
+        self.document.model.probes.retain(|probe| probe.id != id);
         self.commit();
         Ok(())
     }
@@ -2576,60 +2790,67 @@ impl Editor {
         self.changed();
     }
 
-    /// Installs a validated example as one undoable document action.
+    /// Installs a validated document with its model as one history action.
     pub fn replace_validated_with_history(&mut self, document: Document) {
-        if self.document == document {
-            return;
-        }
+        let model_changed = self.document.model != document.model;
         self.commit();
-        self.undo.push(self.document.clone());
-        if self.undo.len() > 100 {
-            self.undo.remove(0);
+        if model_changed {
+            self.undo.push(self.document.model.clone());
+            if self.undo.len() > 100 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
         }
-        self.redo.clear();
         self.before = None;
         self.install_document(document);
-        self.changed();
+        if model_changed {
+            self.changed();
+        }
     }
 
     fn install_document(&mut self, document: Document) {
         self.next_obstacle_id = document
+            .model
             .draft
             .obstacles
             .iter()
-            .chain(&document.accepted.obstacles)
+            .chain(&document.model.accepted.obstacles)
             .map(|o| o.id.0)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
         self.next_region_id = document
+            .model
             .draft
             .regions
             .iter()
-            .chain(&document.accepted.regions)
+            .chain(&document.model.accepted.regions)
             .map(|region| region.id.0)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
         self.next_internal_boundary_id = document
+            .model
             .draft
             .internal_boundaries
             .iter()
-            .chain(&document.accepted.internal_boundaries)
+            .chain(&document.model.accepted.internal_boundaries)
             .map(|boundary| boundary.id.0)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
         self.next_material_id = document
+            .model
             .draft
             .materials
             .iter()
-            .chain(&document.accepted.materials)
+            .chain(&document.model.accepted.materials)
             .map(|material| material.id.0)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
         self.next_probe_id = document
+            .model
             .probes
             .iter()
             .map(|probe| probe.id.0)

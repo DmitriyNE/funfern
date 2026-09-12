@@ -243,8 +243,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   file. Copy scene link embeds compressed, validated scene data in a `#scene=v1.…`
   URL fragment; while that fragment is active, later autosaves keep it current.
   The catalog includes ready-to-run GRIN rod and circular Luneburg profiles with
-  their drivers, probes, and wave-speed view presets. Camera and selection are not
-  saved. With no shared scene or autosave to restore, startup opens the first
+  their drivers, probes, and wave-speed view presets. View toggles, field intensity,
+  and material-overlay settings travel through files, links, recovery, and examples.
+  Camera, selection, open panels, and floating-window layout are not saved. With no
+  shared scene or autosave to restore, startup opens the first
   bundled example.
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
   constrained mesh and its labeled outer, hole, interface, closed-wall, and baffle
@@ -316,9 +318,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   stable boundary ID and left/right face on the old mesh during transfer.
 
 Scenes allow 32 geometric features, 32 materials, one volume source per region, and
-128 controls per curve. Version 15 JSON stores the complete boundary laws,
+128 controls per curve. Version 16 JSON stores the complete boundary laws,
 constant/formula materials and region frames, and region-owned volume sources in
-both draft and accepted scenes. Versions 2–14 remain compatible,
+both draft and accepted scenes, plus presentation settings. Versions 2–15 remain compatible,
 and version 1 files migrate their loops to background holes. Legacy baffles that
 combined a thin-gap spring with face laws load with the thin-gap law taking
 precedence. JSON files are capped at 2 MiB and require finite coordinates. The editor uses a fixed
