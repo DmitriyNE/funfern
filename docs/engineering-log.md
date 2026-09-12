@@ -60,7 +60,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Plot dragging now accumulates egui's per-frame pointer deltas instead of treating
   each delta as the displacement from the gesture origin. The historical window no
   longer springs back when the pointer pauses, and it stays fixed as new samples
-  arrive. Zooming out to the full retained window returns to Live automatically.
+  arrive. Dragging follows grabbed-content semantics: left moves toward the future
+  and right moves into history. Zooming out to the full retained window returns to
+  Live automatically.
   Regression checks cover multi-frame time-window dragging and moving the floating
   window.
 - All 207 workspace tests and Clippy with warnings denied pass. The release Metal

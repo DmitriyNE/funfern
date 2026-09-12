@@ -3386,7 +3386,7 @@ impl Playground {
                             self.probe_history_seconds,
                         );
                     }
-                    ui.small("Drag left for earlier time · wheel to zoom");
+                    ui.small("Drag right for earlier time · wheel to zoom");
                 });
             if clear {
                 self.clear_probe_trace(id);
@@ -3437,7 +3437,7 @@ impl Playground {
         }
         if response.dragged() {
             let delta = response.drag_delta().x as f64;
-            view.end_time += delta / rect.width() as f64 * visible_span;
+            view.end_time -= delta / rect.width() as f64 * visible_span;
         }
         if response.hovered() {
             let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
@@ -10437,7 +10437,7 @@ mod tests {
                 modifiers: Modifiers::NONE,
             },
         ]);
-        let halfway = start - egui::vec2(50.0, 0.0);
+        let halfway = start + egui::vec2(50.0, 0.0);
         h.frame(vec![Event::PointerMoved(halfway)]);
         let halfway_end = h.state.probe_views[&id].end_time;
         assert!(halfway_end < 10.0);
@@ -10448,7 +10448,7 @@ mod tests {
         h.frame(vec![Event::PointerMoved(halfway)]);
         assert_eq!(h.state.probe_views[&id].end_time, halfway_end);
 
-        let end = start - egui::vec2(100.0, 0.0);
+        let end = start + egui::vec2(100.0, 0.0);
         h.frame(vec![Event::PointerMoved(end)]);
         h.frame(vec![Event::PointerButton {
             pos: end,
