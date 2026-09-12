@@ -1,5 +1,9 @@
 /target/
 /dist/
+/node_modules/
+/.playwright-browsers/
+/playwright-report/
+/test-results/
 /.playwright-mcp/
 /funfern-fixed.png
 .DS_Store

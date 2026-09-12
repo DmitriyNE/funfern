@@ -336,6 +336,9 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo build -p funfern-app --locked
 trunk build --release
+npm ci
+npx playwright install chromium
+npm run test:browser
 cargo run -p funfern-core --release --example mesh_timing -- --slices
 cargo run -p funfern-core --release --example mesh_timing -- --wave --slices
 cargo run -p funfern-core --release --example mesh_edit_timing -- --paced
@@ -347,10 +350,16 @@ cargo run -p funfern-app --release --locked -- --wave-transfer-check
 cargo run -p funfern-app --release --locked -- --amr-check
 ```
 
-GitHub Actions runs formatting, Clippy, the workspace tests, and native and WASM
-release builds for pull requests and pushes to `main`. A successful `main` run
-publishes the browser bundle to <https://dmitriyne.github.io/funfern/>. The Pages
-source is configured as **GitHub Actions** in the repository settings.
+Set `PLAYWRIGHT_CHANNEL=chrome` to run the smoke test with an installed Google
+Chrome instead of Playwright's pinned Chromium.
+
+GitHub Actions runs formatting, Clippy, the workspace tests, native and WASM
+release builds, and a Chromium WebGPU smoke test for pull requests and pushes to
+`main`. The smoke test rejects browser rendering failures, checks that the canvas
+continues to change, and verifies that its backing render target follows a viewport
+resize. A successful `main` run publishes the browser bundle to
+<https://dmitriyne.github.io/funfern/>. The Pages source is configured as
+**GitHub Actions** in the repository settings.
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,

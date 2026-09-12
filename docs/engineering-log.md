@@ -62,6 +62,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - The shaders now derive the same NaN payload from their runtime invocation index.
   Readback filtering and gap semantics are unchanged. A local release WASM build
   starts in Chromium with every probe pipeline accepted.
+- Added a small Playwright Chromium/WebGPU smoke suite. It watches all console
+  levels for Bevy rendering failures, requires a WebGPU adapter, confirms that the
+  canvas advances, and checks that resize updates the backing render target. CI
+  runs it against the root release bundle before producing the Pages-path bundle.
 
 ## 2026-09-12 — Region-owned volume sources
 
