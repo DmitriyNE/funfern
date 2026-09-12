@@ -69,12 +69,13 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 
 ## Edit
 
-- **UI shell:** the top bar keeps Undo/Redo, scene files, Fit View, four
+- **UI shell:** the top bar keeps Undo/Redo, scene files, Fit View, five
   hideable inspector panels, Draw, and wave playback controls visible;
   the solver starts running once its initial mesh is ready. Edit contains
   selection, transforms, topology, and boundary tools; View contains visual
   overlays and field intensity; Simulation contains mesh and solver settings;
-  Materials contains the material library. The lower-right status control shows
+  Materials contains the material library; Probes contains receivers and recording
+  controls. The lower-right status control shows
   FPS, solver steps per second, DOFs, mesh size, and solver dt; clicking it opens
   the full frame, mesh, handoff, and solver diagnostics. Narrow windows collapse
   document and inspector actions into compact menus.
@@ -158,6 +159,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   viewport clicks and can be toggled off with the same selected button, the
   viewport Done action, or Escape. Pulse strength/width and continuous-source
   position, frequency, strength, width, and region are editable in Simulation.
+- **Point probes:** add persistent point receivers from Probes, then click repeatedly
+  in the viewport. Markers can be selected, dragged, moved numerically, renamed,
+  colored, disabled, cleared, or deleted. Each probe opens a floating readout with
+  field, velocity, and local energy-density traces on a shared simulation-time
+  window. Sampling follows solver time rather than browser frame rate. Definitions
+  are saved and undoable; recorded traces are transient.
 - **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered
   on the cursor. Fit View frames the fixed square. Panel scrolling and text
   editing do not manipulate the viewport.

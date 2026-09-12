@@ -34,6 +34,28 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Probe foundation and point receivers
+
+- Added Probes as a fifth hideable inspector with persistent point placement,
+  direct marker dragging, numeric editing, naming/color, recording controls, and
+  one closeable floating readout per probe.
+- Point readouts show solver-time field, centered velocity, and material-aware
+  local energy density. Definitions participate in Undo/Redo, scene files, links,
+  examples, and autosave; recorded samples remain transient.
+- Added a dependency-free enriched-quadratic point stencil in core. Points outside
+  the domain or directly on two-trace boundaries remain visible but inactive with
+  a concrete status.
+- Added a separate portable GPU probe pipeline and bounded ring. Sampling cadence
+  follows solver steps rather than rendered frames, stale generations are rejected,
+  and ordinary remesh/AMR handoffs retain host history while recompiling stencils.
+- All 202 workspace tests and Clippy with warnings denied pass. The release Metal
+  GPU check on an Apple M1 Max exercised 9,690 DOFs at `dt=0.0030078`, produced
+  finite nonnegative probe energy, matched the f64 field within `1.30e-6` relative
+  L2 error, and advanced at 18.9 simulated seconds per wall second. Native release
+  compilation and the release Trunk/WASM build pass.
+- Curve, region, selected-geometry, and far-field targets remain later probe slices;
+  the panel and per-probe readout dispatch are structured to accept them.
+
 ## 2026-09-12 — Examples, recovery, export, and shareable scenes
 
 - Added an Examples gallery with live vector thumbnails, names, and short

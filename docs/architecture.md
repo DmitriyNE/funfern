@@ -34,12 +34,12 @@ viewport rectangle with the camera and editor.
 
 The application shell is canvas-first: a top action bar owns document, view,
 inspector, Draw, and wave playback actions, while a hideable contextual right
-inspector exposes one of four panels: Edit, View, Simulation, or Materials. The
+inspector exposes one of five panels: Edit, View, Simulation, Materials, or Probes. The
 solver starts in the running state after its initial operator is committed.
 Selection remains contextual rather than introducing separate selection modes.
 Draw opens a transient role/primitive popover: holes and interfaces offer Circle
 and Custom, while baffles offer Straight and Custom. A single `InteractionMode`
-owns draw, pulse-placement, and source-placement state. Placement modes are shown
+owns draw, pulse-placement, source-placement, and point-probe placement state. Placement modes are shown
 over the viewport and survive inspector changes; preset geometry is deliberately
 one-shot, while pulse and source placement remain active until toggled off, ended
 with the overlay, or cancelled with Escape.
@@ -52,6 +52,14 @@ frame statistics. Mesh/solver errors open diagnostics and light the warning mark
 ordinary rebuilding does neither. Validation, mesh, and handoff stages share the
 middle of the status strip, while successful document and handoff actions appear as
 short-lived notices.
+
+Probe definitions are application-document data with stable IDs and participate in
+the same bounded snapshot history as geometry. They are serialized in scene files,
+shared links, and recovery data; sampled traces and floating-window layout remain
+transient. The Probes inspector owns creation, configuration, and the receiver list,
+while each receiver has one independent closeable readout window. The target model
+and readout dispatch are intended to extend to curve, region, selected-geometry, and
+far-field receivers without adding another inspector.
 
 Control handles are exclusive selections. Boundary spans support click, Shift
 toggle, Command/Ctrl whole-curve selection, and marquee selection with optional
@@ -437,6 +445,16 @@ The operator, state, source, and controls use Bevy's render-world buffers and it
 existing wgpu device. State remains GPU-resident; asynchronous readback supplies
 the egui field colors and energy diagnostic. Each readback carries a GPU-written
 step marker so stale asynchronous results cannot be mistaken for a newer level.
+
+Point probes compile to seven-node enriched-quadratic interpolation stencils with
+separate gradient weights. A small compute pipeline samples the centered
+displacement and velocity at uniform solver-step intervals and evaluates local
+energy density as `rho v²/2 + k |grad u|²/2`. It writes a bounded time-stamped ring
+through a separate five-binding layout, preserving the eight-storage-binding limit
+of the wave pipeline. Host history survives ordinary remesh and AMR handoffs;
+stencils are rebuilt against each committed operator. Reset and fresh scene loads
+clear samples. Locations on duplicated or material-interface traces are inactive
+until moved away because their pointwise gradient or field side is ambiguous.
 
 The previous h≈0.16 overlay was an editor preview. Wave benchmarks start with
 h≤0.04 and h≤0.02, corresponding to 10 and 20 maximum-edge lengths per reference

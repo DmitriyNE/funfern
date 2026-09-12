@@ -1,6 +1,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::wave_gpu::forcing_weights;
-use crate::wave_gpu::{PulseSettings, SourceSettings, WaveDisplay, WaveGpuRequest, WaveTransfer};
+use crate::wave_gpu::{
+    PointProbeRecord, ProbeDisplay, PulseSettings, SourceSettings, WaveDisplay, WaveGpuRequest,
+    WaveTransfer,
+};
 use crate::{
     examples,
     files::{self, FileEvent, SaveKind},
@@ -14,7 +17,10 @@ use bevy_egui::{
     egui::{self, Color32, Pos2, Rect, Stroke},
 };
 use funfern_app::{
-    editor::{Acceptance, BoundaryFaceTarget, Editor, GeometryControl, LoopKind},
+    editor::{
+        Acceptance, BoundaryFaceTarget, Editor, GeometryControl, LoopKind, ProbeDefinition,
+        ProbeId, ProbeTarget,
+    },
     persistence::{self, LoadCandidate},
 };
 use funfern_core::*;
@@ -47,6 +53,8 @@ enum InteractionMode {
     },
     PlacePulse,
     MoveSource,
+    PlaceProbe,
+    MoveProbe(ProbeId),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FocusedFeature {
@@ -73,9 +81,16 @@ enum InspectorPanel {
     View,
     Simulation,
     Materials,
+    Probes,
 }
 impl InspectorPanel {
-    const ALL: [Self; 4] = [Self::Edit, Self::View, Self::Simulation, Self::Materials];
+    const ALL: [Self; 5] = [
+        Self::Edit,
+        Self::View,
+        Self::Simulation,
+        Self::Materials,
+        Self::Probes,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
@@ -83,8 +98,30 @@ impl InspectorPanel {
             Self::View => "View",
             Self::Simulation => "Simulation",
             Self::Materials => "Materials",
+            Self::Probes => "Probes",
         }
     }
+}
+
+#[derive(Clone, Default)]
+struct ProbeTrace {
+    samples: VecDeque<PointProbeRecord>,
+    dropped: u64,
+    accept_after: f64,
+}
+
+#[derive(Clone)]
+struct CompiledProbeState {
+    generation: u64,
+    revision: u64,
+    mesh_revision: u64,
+    probes: Vec<ProbeDefinition>,
+    sample_rate: f64,
+    time_step: f64,
+}
+
+struct ProbeDrag {
+    id: ProbeId,
 }
 #[derive(Clone, Copy, Default, PartialEq)]
 enum SpanSelectionFilter {
@@ -248,6 +285,18 @@ pub struct Playground {
     performance_open: bool,
     performance_history: VecDeque<f32>,
     performance_warning_active: bool,
+    selected_probe: Option<ProbeId>,
+    probe_windows: BTreeSet<ProbeId>,
+    probe_traces: BTreeMap<ProbeId, ProbeTrace>,
+    probe_status: BTreeMap<ProbeId, String>,
+    probe_observed: Vec<ProbeDefinition>,
+    probe_compiled: Option<CompiledProbeState>,
+    probe_display_readback: u64,
+    probe_sample_rate: f64,
+    probe_history_seconds: f64,
+    show_probe_markers: bool,
+    probe_drag: Option<ProbeDrag>,
+    probe_name_edit: Option<(ProbeId, String)>,
     creation_role: CreationRole,
     material_selection: MaterialId,
     material_name_edit: Option<(MaterialId, String)>,
@@ -389,6 +438,18 @@ impl Default for Playground {
             performance_open: false,
             performance_history: VecDeque::with_capacity(90),
             performance_warning_active: false,
+            selected_probe: None,
+            probe_windows: BTreeSet::new(),
+            probe_traces: BTreeMap::new(),
+            probe_status: BTreeMap::new(),
+            probe_observed: vec![],
+            probe_compiled: None,
+            probe_display_readback: 0,
+            probe_sample_rate: 120.0,
+            probe_history_seconds: 10.0,
+            show_probe_markers: true,
+            probe_drag: None,
+            probe_name_edit: None,
             creation_role: CreationRole::Hole,
             material_selection: DEFAULT_MATERIAL,
             material_name_edit: None,
@@ -543,6 +604,180 @@ impl Playground {
             .as_deref()
             .filter(|operator| display.current.len() == operator.degrees_of_freedom())
     }
+
+    fn reconcile_probe_definitions(&mut self) {
+        let current = self.editor.document.probes.clone();
+        for probe in &current {
+            if let Some(previous) = self
+                .probe_observed
+                .iter()
+                .find(|candidate| candidate.id == probe.id)
+                && previous.target != probe.target
+            {
+                self.clear_probe_trace(probe.id);
+            }
+        }
+        let ids = current
+            .iter()
+            .map(|probe| probe.id)
+            .collect::<BTreeSet<_>>();
+        self.probe_traces.retain(|id, _| ids.contains(id));
+        self.probe_status.retain(|id, _| ids.contains(id));
+        self.probe_windows.retain(|id| ids.contains(id));
+        if self.selected_probe.is_some_and(|id| !ids.contains(&id)) {
+            self.selected_probe = None;
+        }
+        self.probe_observed = current;
+    }
+
+    fn ingest_probe_samples(&mut self, display: &ProbeDisplay) {
+        self.reconcile_probe_definitions();
+        let Some(compiled) = &self.probe_compiled else {
+            return;
+        };
+        if display.generation != compiled.generation
+            || display.revision != compiled.revision
+            || display.readbacks == self.probe_display_readback
+        {
+            return;
+        }
+        self.probe_display_readback = display.readbacks;
+        for probe in &self.editor.document.probes {
+            if !probe.enabled || self.probe_status.contains_key(&probe.id) {
+                continue;
+            }
+            let incoming = display
+                .records
+                .iter()
+                .filter(|record| record.probe_id == probe.id.0)
+                .copied()
+                .collect::<Vec<_>>();
+            if incoming.is_empty() {
+                continue;
+            }
+            let trace = self.probe_traces.entry(probe.id).or_default();
+            let last = trace
+                .samples
+                .back()
+                .map(|sample| sample.time)
+                .unwrap_or(trace.accept_after);
+            let fresh = incoming
+                .into_iter()
+                .filter(|sample| sample.time > last + 1.0e-7)
+                .collect::<Vec<_>>();
+            if !trace.samples.is_empty()
+                && let Some(first) = fresh.first()
+            {
+                let expected = 1.0 / self.probe_sample_rate;
+                if first.time - last > expected * 2.5 {
+                    trace.dropped = trace.dropped.saturating_add(
+                        ((first.time - last) / expected).floor().max(1.0) as u64 - 1,
+                    );
+                }
+            }
+            trace.samples.extend(fresh);
+            if let Some(newest) = trace.samples.back().map(|sample| sample.time) {
+                let oldest = newest - self.probe_history_seconds;
+                while trace
+                    .samples
+                    .front()
+                    .is_some_and(|sample| sample.time < oldest)
+                {
+                    trace.samples.pop_front();
+                }
+            }
+        }
+    }
+
+    fn refresh_probe_gpu(
+        &mut self,
+        request: &mut WaveGpuRequest,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+    ) {
+        if self.simulation_candidate.is_some() || !request.ready() {
+            return;
+        }
+        let (Some(mesh), Some(operator)) = (&self.wave_mesh, &self.wave_operator) else {
+            return;
+        };
+        let probes = self.editor.document.probes.clone();
+        let unchanged = self.probe_compiled.as_ref().is_some_and(|compiled| {
+            compiled.generation == request.generation()
+                && compiled.mesh_revision == mesh.mesh_revision
+                && compiled.probes == probes
+                && compiled.sample_rate == self.probe_sample_rate
+                && compiled.time_step == self.wave_time_step
+        });
+        if unchanged {
+            return;
+        }
+        self.probe_status.clear();
+        let compiled = probes
+            .iter()
+            .map(|probe| {
+                let stencil = if !probe.enabled {
+                    None
+                } else {
+                    match probe.target {
+                        ProbeTarget::Point(position) => QuadraticPointStencil::build(
+                            mesh,
+                            operator,
+                            &self.mesh_committed_scene,
+                            position,
+                        )
+                        .map_err(|error| error.to_string())
+                        .ok(),
+                    }
+                };
+                if probe.enabled && stencil.is_none() {
+                    let reason = match probe.target {
+                        ProbeTarget::Point(position) => QuadraticPointStencil::build(
+                            mesh,
+                            operator,
+                            &self.mesh_committed_scene,
+                            position,
+                        )
+                        .err()
+                        .map_or_else(|| "Probe is inactive".into(), |error| error.to_string()),
+                    };
+                    self.probe_status.insert(probe.id, reason);
+                }
+                (probe.id.0, stencil)
+            })
+            .collect::<Vec<_>>();
+        match request.update_point_probes(
+            assets,
+            commands,
+            &compiled,
+            self.probe_sample_rate,
+            self.wave_time_offset,
+            self.wave_time_step,
+        ) {
+            Ok(()) => {
+                self.probe_display_readback = 0;
+                self.probe_compiled = Some(CompiledProbeState {
+                    generation: request.generation(),
+                    revision: request.probe_revision(),
+                    mesh_revision: mesh.mesh_revision,
+                    probes,
+                    sample_rate: self.probe_sample_rate,
+                    time_step: self.wave_time_step,
+                });
+            }
+            Err(error) => {
+                for probe in &probes {
+                    self.probe_status.insert(probe.id, error.clone());
+                }
+                self.probe_compiled = None;
+            }
+        }
+    }
+
+    fn clear_all_probe_traces(&mut self) {
+        self.probe_traces.clear();
+        self.probe_display_readback = 0;
+    }
     fn world(&self, p: Pos2, r: Rect) -> Point2 {
         Point2::new(
             self.center.x + (p.x - r.center().x) as f64 / self.scale,
@@ -554,6 +789,9 @@ impl Playground {
         self.internal_selection = None;
         self.focused_feature = None;
         self.selected_spans.clear();
+        self.selected_probe = None;
+        self.probe_drag = None;
+        self.probe_name_edit = None;
         self.gizmo_pivot = None;
         self.pending_span_click = None;
         self.region_selection = BACKGROUND_REGION;
@@ -593,6 +831,7 @@ impl Playground {
     }
 
     fn select_control(&mut self, control: GeometryControl) {
+        self.selected_probe = None;
         self.selected_spans.clear();
         self.gizmo_pivot = None;
         self.pending_span_click = None;
@@ -647,6 +886,7 @@ impl Playground {
     }
 
     fn set_span_selection(&mut self, spans: Vec<GeometrySpan>) {
+        self.selected_probe = None;
         self.selected_spans.clear();
         let mut seen = BTreeSet::new();
         for span in spans {
@@ -1386,6 +1626,8 @@ impl Playground {
                         LoadMode::Undoable => self.editor.replace_validated_with_history(document),
                     }
                     self.clear_transient();
+                    self.clear_all_probe_traces();
+                    self.probe_compiled = None;
                     if let Some(simulation) = example_simulation {
                         self.wave_source = simulation.source;
                         self.wave_source_dirty = true;
@@ -2106,6 +2348,8 @@ impl Playground {
             self.wave_energy = None;
             self.wave_energy_step = 0;
             self.wave_error = None;
+            self.clear_all_probe_traces();
+            self.probe_compiled = None;
             self.solution_indicator_job = None;
             self.solution_indicator_result = None;
             self.solution_indicator_source = None;
@@ -3037,6 +3281,170 @@ impl Playground {
         self.performance_open = open;
     }
 
+    fn probe_readout_windows(&mut self, ctx: &egui::Context) {
+        let open_ids = self.probe_windows.iter().copied().collect::<Vec<_>>();
+        for id in open_ids {
+            let Some(probe) = self
+                .editor
+                .document
+                .probes
+                .iter()
+                .find(|probe| probe.id == id)
+                .cloned()
+            else {
+                self.probe_windows.remove(&id);
+                continue;
+            };
+            let samples = self
+                .probe_traces
+                .get(&id)
+                .map(|trace| trace.samples.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let status = self.probe_status.get(&id).cloned();
+            let dropped = self.probe_traces.get(&id).map_or(0, |trace| trace.dropped);
+            let mut open = true;
+            let mut clear = false;
+            egui::Window::new(format!("{} · point probe", probe.name))
+                .id(egui::Id::new(("probe_readout", id.0)))
+                .open(&mut open)
+                .default_width(430.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    let ProbeTarget::Point(position) = probe.target;
+                    ui.horizontal(|ui| {
+                        let color =
+                            Color32::from_rgb(probe.color[0], probe.color[1], probe.color[2]);
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 5.0, color);
+                        ui.monospace(format!("x {:+.4} · y {:+.4}", position.x, position.y));
+                        if ui.small_button("Clear").clicked() {
+                            clear = true;
+                        }
+                    });
+                    if let Some(status) = &status {
+                        ui.colored_label(GOLD, status);
+                    }
+                    if dropped > 0 {
+                        ui.colored_label(GOLD, format!("{dropped} samples were skipped"));
+                    }
+                    Self::probe_plot(
+                        ui,
+                        "Field",
+                        &samples,
+                        |sample| sample.displacement,
+                        Color32::from_rgb(72, 166, 255),
+                    );
+                    Self::probe_plot(
+                        ui,
+                        "Velocity",
+                        &samples,
+                        |sample| sample.velocity,
+                        Color32::from_rgb(91, 220, 194),
+                    );
+                    Self::probe_plot(
+                        ui,
+                        "Local energy density",
+                        &samples,
+                        |sample| sample.energy_density,
+                        GOLD,
+                    );
+                });
+            if clear {
+                self.clear_probe_trace(id);
+            }
+            if !open {
+                self.probe_windows.remove(&id);
+            }
+        }
+    }
+
+    fn probe_plot(
+        ui: &mut egui::Ui,
+        label: &str,
+        samples: &[PointProbeRecord],
+        value: impl Fn(&PointProbeRecord) -> f64,
+        color: Color32,
+    ) {
+        ui.small(label);
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(120.0), 92.0),
+            egui::Sense::hover(),
+        );
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        ui.painter().rect_stroke(
+            rect,
+            2.0,
+            Stroke::new(1.0, Color32::from_rgb(55, 69, 80)),
+            egui::StrokeKind::Inside,
+        );
+        if samples.len() < 2 {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Waiting for samples",
+                egui::FontId::monospace(11.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+            return;
+        }
+        let minimum_time = samples.first().unwrap().time;
+        let maximum_time = samples.last().unwrap().time;
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+        for sample in samples {
+            let sample = value(sample);
+            minimum = minimum.min(sample);
+            maximum = maximum.max(sample);
+        }
+        if !minimum.is_finite() || !maximum.is_finite() {
+            return;
+        }
+        if (maximum - minimum).abs() < 1.0e-15 {
+            let padding = maximum.abs().max(1.0) * 0.05;
+            minimum -= padding;
+            maximum += padding;
+        }
+        let time_span = (maximum_time - minimum_time).max(f64::MIN_POSITIVE);
+        let value_span = maximum - minimum;
+        let points = samples
+            .iter()
+            .map(|sample| {
+                egui::pos2(
+                    egui::lerp(
+                        rect.left()..=rect.right(),
+                        ((sample.time - minimum_time) / time_span) as f32,
+                    ),
+                    egui::lerp(
+                        rect.bottom()..=rect.top(),
+                        ((value(sample) - minimum) / value_span) as f32,
+                    ),
+                )
+            })
+            .collect();
+        ui.painter()
+            .add(egui::Shape::line(points, Stroke::new(1.4, color)));
+        ui.painter().text(
+            rect.left_top() + egui::vec2(4.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            format!("{maximum:+.3e}"),
+            egui::FontId::monospace(9.0),
+            Color32::from_rgb(142, 161, 175),
+        );
+        ui.painter().text(
+            rect.left_bottom() + egui::vec2(4.0, -3.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{minimum:+.3e}"),
+            egui::FontId::monospace(9.0),
+            Color32::from_rgb(142, 161, 175),
+        );
+        response.on_hover_text(format!(
+            "Simulation time {:.4}–{:.4}",
+            minimum_time, maximum_time
+        ));
+    }
+
     fn panel(&mut self, ui: &mut egui::Ui) {
         self.reconcile_selection();
         if self.automated_benchmark {
@@ -3047,6 +3455,7 @@ impl Playground {
             Some(InspectorPanel::View) => self.view_panel(ui),
             Some(InspectorPanel::Simulation) => self.simulation_panel(ui),
             Some(InspectorPanel::Materials) => self.materials_panel(ui),
+            Some(InspectorPanel::Probes) => self.probes_panel(ui),
             Some(InspectorPanel::Edit) | None => self.edit_panel(ui),
         }
     }
@@ -3366,6 +3775,220 @@ impl Playground {
                 }
             }
         }
+    }
+
+    fn probes_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        self.panel_header(ui, "Probes");
+        ui.horizontal(|ui| {
+            let placing = self.interaction_mode == InteractionMode::PlaceProbe;
+            if ui
+                .add(egui::Button::new("+ Point probe").selected(placing))
+                .on_hover_text(
+                    "Click repeatedly in the viewport; click again or press Esc to finish",
+                )
+                .clicked()
+            {
+                self.interaction_mode = if placing {
+                    InteractionMode::Select
+                } else {
+                    InteractionMode::PlaceProbe
+                };
+            }
+            if ui.button("Clear all").clicked() {
+                for probe in self.editor.document.probes.clone() {
+                    self.clear_probe_trace(probe.id);
+                }
+            }
+        });
+        ui.checkbox(&mut self.show_probe_markers, "Show markers");
+        ui.add(
+            egui::Slider::new(&mut self.probe_sample_rate, 30.0..=480.0)
+                .logarithmic(true)
+                .integer()
+                .text("samples / sim s"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.probe_history_seconds, 2.0..=60.0)
+                .logarithmic(true)
+                .text("history (sim s)"),
+        );
+        ui.separator();
+
+        let probes = self.editor.document.probes.clone();
+        if probes.is_empty() {
+            ui.label("No probes");
+        }
+        for probe in &probes {
+            let selected = self.selected_probe == Some(probe.id);
+            ui.horizontal(|ui| {
+                let color = Color32::from_rgb(probe.color[0], probe.color[1], probe.color[2]);
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 5.0, color);
+                if ui
+                    .selectable_label(selected, &probe.name)
+                    .on_hover_text("Point probe")
+                    .clicked()
+                {
+                    self.select_probe(probe.id);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let open = self.probe_windows.contains(&probe.id);
+                    if ui
+                        .small_button(if open { "Close" } else { "Plot" })
+                        .clicked()
+                    {
+                        if open {
+                            self.probe_windows.remove(&probe.id);
+                        } else {
+                            self.probe_windows.insert(probe.id);
+                        }
+                    }
+                });
+            });
+            if let Some(status) = self.probe_status.get(&probe.id) {
+                ui.small(status);
+            } else if let Some(sample) = self
+                .probe_traces
+                .get(&probe.id)
+                .and_then(|trace| trace.samples.back())
+            {
+                ui.small(format!(
+                    "u {:+.3e} · energy {:.3e}",
+                    sample.displacement, sample.energy_density
+                ));
+            } else {
+                ui.small(if probe.enabled {
+                    "Waiting for samples"
+                } else {
+                    "Disabled"
+                });
+            }
+        }
+
+        let Some(id) = self.selected_probe else {
+            return;
+        };
+        let Some(mut probe) = self
+            .editor
+            .document
+            .probes
+            .iter()
+            .find(|probe| probe.id == id)
+            .cloned()
+        else {
+            self.selected_probe = None;
+            return;
+        };
+        ui.separator();
+        ui.label("Selected point probe");
+        if !matches!(self.probe_name_edit.as_ref(), Some((candidate, _)) if *candidate == id) {
+            self.probe_name_edit = Some((id, probe.name.clone()));
+        }
+        let mut commit_name = None;
+        if let Some((_, name)) = self.probe_name_edit.as_mut() {
+            let response = ui.add(egui::TextEdit::singleline(name).hint_text("Probe name"));
+            if response.lost_focus() && !name.trim().is_empty() && name.len() <= 64 {
+                commit_name = Some(name.clone());
+            }
+        }
+        if let Some(name) = commit_name {
+            probe.name = name;
+            let result = self.editor.update_probe(probe.clone());
+            self.error(result);
+            self.probe_name_edit = None;
+        }
+        let mut enabled = probe.enabled;
+        if ui.checkbox(&mut enabled, "Recording").changed() {
+            probe.enabled = enabled;
+            let result = self.editor.update_probe(probe.clone());
+            self.error(result);
+        }
+        ui.horizontal(|ui| {
+            ui.label("Color");
+            if ui.color_edit_button_srgb(&mut probe.color).changed() {
+                let result = self.editor.update_probe(probe.clone());
+                self.error(result);
+            }
+        });
+        let ProbeTarget::Point(mut position) = probe.target;
+        ui.horizontal(|ui| {
+            ui.label("Position");
+            ui.add(
+                egui::DragValue::new(&mut position.x)
+                    .speed(0.005)
+                    .prefix("x ")
+                    .update_while_editing(false),
+            );
+            ui.add(
+                egui::DragValue::new(&mut position.y)
+                    .speed(0.005)
+                    .prefix("y ")
+                    .update_while_editing(false),
+            );
+        });
+        if position
+            != match probe.target {
+                ProbeTarget::Point(point) => point,
+            }
+        {
+            probe.target = ProbeTarget::Point(position);
+            self.clear_probe_trace(id);
+            let result = self.editor.update_probe(probe.clone());
+            self.error(result);
+        }
+        ui.horizontal(|ui| {
+            let moving = self.interaction_mode == InteractionMode::MoveProbe(id);
+            if ui
+                .add(egui::Button::new("Move in viewport").selected(moving))
+                .clicked()
+            {
+                self.interaction_mode = if moving {
+                    InteractionMode::Select
+                } else {
+                    InteractionMode::MoveProbe(id)
+                };
+            }
+            if ui.button("Clear trace").clicked() {
+                self.clear_probe_trace(id);
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Open readout").clicked() {
+                self.probe_windows.insert(id);
+            }
+            if ui.button("Delete probe").clicked() {
+                let result = self.editor.delete_probe(id);
+                self.error(result);
+                self.probe_windows.remove(&id);
+                self.probe_traces.remove(&id);
+                self.probe_status.remove(&id);
+                self.selected_probe = None;
+                self.interaction_mode = InteractionMode::Select;
+            }
+        });
+    }
+
+    fn select_probe(&mut self, id: ProbeId) {
+        self.selected_probe = Some(id);
+        self.selection = None;
+        self.internal_selection = None;
+        self.selected_spans.clear();
+        self.focused_feature = None;
+    }
+
+    fn clear_probe_trace(&mut self, id: ProbeId) {
+        let current_time =
+            self.wave_time_offset + self.wave_completed_steps as f64 * self.wave_time_step;
+        let trace = self.probe_traces.entry(id).or_default();
+        let newest = trace
+            .samples
+            .back()
+            .map_or(trace.accept_after, |sample| sample.time);
+        trace.samples.clear();
+        trace.dropped = 0;
+        trace.accept_after = current_time.max(newest);
     }
 
     fn simulation_panel(&mut self, ui: &mut egui::Ui) {
@@ -4614,15 +5237,19 @@ impl Playground {
             } else if self.interaction_mode != InteractionMode::Select {
                 egui::CursorIcon::Crosshair
             } else if let Some(point) = pointer {
-                match self.hit_gizmo(point, r) {
-                    Some(GizmoHit::Scale) => egui::CursorIcon::ResizeNwSe,
-                    Some(_) => egui::CursorIcon::Grab,
-                    None if self.hit_handle(point, r).is_some()
-                        || self.hit_internal_handle(point, r).is_some() =>
-                    {
-                        egui::CursorIcon::Grab
+                if self.hit_probe(point, r).is_some() {
+                    egui::CursorIcon::Grab
+                } else {
+                    match self.hit_gizmo(point, r) {
+                        Some(GizmoHit::Scale) => egui::CursorIcon::ResizeNwSe,
+                        Some(_) => egui::CursorIcon::Grab,
+                        None if self.hit_handle(point, r).is_some()
+                            || self.hit_internal_handle(point, r).is_some() =>
+                        {
+                            egui::CursorIcon::Grab
+                        }
+                        None => egui::CursorIcon::Default,
                     }
-                    None => egui::CursorIcon::Default,
                 }
             } else {
                 egui::CursorIcon::Default
@@ -4631,6 +5258,7 @@ impl Playground {
         }
         if enabled {
             if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                let probe_drag = self.probe_drag.take();
                 let drag = self.drag.take();
                 match &drag {
                     Some(Drag::Translate { gizmo_before, .. }) => {
@@ -4643,7 +5271,7 @@ impl Playground {
                     _ => {}
                 }
                 self.pending_span_click = None;
-                if drag.is_some() || self.editor.editing() {
+                if probe_drag.is_some() || drag.is_some() || self.editor.editing() {
                     self.editor.cancel();
                 } else {
                     self.custom.clear();
@@ -4672,6 +5300,14 @@ impl Playground {
                     if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
                         self.custom.pop();
                     }
+                } else if ctx.input(|i| i.key_pressed(egui::Key::Delete))
+                    && let Some(id) = self.selected_probe
+                {
+                    let result = self.editor.delete_probe(id);
+                    self.error(result);
+                    self.probe_windows.remove(&id);
+                    self.probe_traces.remove(&id);
+                    self.selected_probe = None;
                 } else if ctx.input(|i| i.key_pressed(egui::Key::Delete))
                     && let Some((id, Some(index))) = self.selection
                 {
@@ -4731,7 +5367,11 @@ impl Playground {
                 } else if primary && self.interaction_mode == InteractionMode::Select {
                     self.refresh_curves();
                     let modifiers = ctx.input(|input| input.modifiers);
-                    if let Some((id, index)) = self.hit_handle(p, r) {
+                    if let Some(id) = self.hit_probe(p, r) {
+                        self.select_probe(id);
+                        self.editor.begin();
+                        self.probe_drag = Some(ProbeDrag { id });
+                    } else if let Some((id, index)) = self.hit_handle(p, r) {
                         let control = GeometryControl::Loop(id, index);
                         self.select_control(control);
                         if let Some(point) = self.editor.control_point(control) {
@@ -4866,6 +5506,27 @@ impl Playground {
                         + Point2::new(-delta.x as f64 / self.scale, delta.y as f64 / self.scale);
                 } else if response.dragged_by(egui::PointerButton::Primary) {
                     let world = self.world(p, r);
+                    if let Some(probe_drag) = self.probe_drag.as_mut() {
+                        let position =
+                            if self.snap_to_grid || ctx.input(|input| input.modifiers.shift) {
+                                Point2::new(
+                                    (world.x / self.snap_step).round() * self.snap_step,
+                                    (world.y / self.snap_step).round() * self.snap_step,
+                                )
+                            } else {
+                                world
+                            };
+                        if let Some(probe) = self
+                            .editor
+                            .document
+                            .probes
+                            .iter_mut()
+                            .find(|probe| probe.id == probe_drag.id)
+                        {
+                            probe.target = ProbeTarget::Point(position);
+                            self.probe_traces.remove(&probe_drag.id);
+                        }
+                    }
                     let snap_to_grid =
                         self.snap_to_grid || ctx.input(|input| input.modifiers.shift);
                     let snap_step = self.snap_step;
@@ -5061,12 +5722,37 @@ impl Playground {
                                 .unwrap_or(RegionId(0));
                             self.wave_source_dirty = true;
                         }
+                        InteractionMode::PlaceProbe => {
+                            let result = self.editor.create_point_probe(self.world(p, r));
+                            if let Some(id) = self.error(result) {
+                                self.select_probe(id);
+                                self.probe_windows.insert(id);
+                            }
+                        }
+                        InteractionMode::MoveProbe(id) => {
+                            if let Some(mut probe) = self
+                                .editor
+                                .document
+                                .probes
+                                .iter()
+                                .find(|probe| probe.id == id)
+                                .cloned()
+                            {
+                                probe.target = ProbeTarget::Point(self.world(p, r));
+                                self.clear_probe_trace(id);
+                                let result = self.editor.update_probe(probe);
+                                self.error(result);
+                            }
+                        }
                         InteractionMode::Select => {}
                     }
                 }
             }
         }
         if !ctx.input(|i| i.pointer.primary_down()) {
+            if self.probe_drag.take().is_some() {
+                self.editor.commit();
+            }
             let drag = self.drag.take();
             let moved = matches!(
                 &drag,
@@ -5714,6 +6400,10 @@ impl Playground {
                         Stroke::new(1.5, GOLD),
                     );
                 }
+                InteractionMode::PlaceProbe | InteractionMode::MoveProbe(_) => {
+                    painter.circle_filled(pointer, 5.0, Color32::from_rgb(16, 23, 31));
+                    painter.circle_stroke(pointer, 7.0, Stroke::new(2.0, SELECT));
+                }
                 _ => {}
             }
         }
@@ -5734,6 +6424,33 @@ impl Playground {
                 ],
                 Stroke::new(1.0, GOLD),
             );
+        }
+        if self.show_probe_markers {
+            for probe in &self.editor.document.probes {
+                let ProbeTarget::Point(position) = probe.target;
+                let center = self.screen(position, r);
+                let selected = self.selected_probe == Some(probe.id);
+                let color = if self.probe_status.contains_key(&probe.id) {
+                    RED
+                } else if !probe.enabled {
+                    Color32::from_rgb(112, 130, 143)
+                } else {
+                    Color32::from_rgb(probe.color[0], probe.color[1], probe.color[2])
+                };
+                painter.circle_filled(center, if selected { 6.0 } else { 4.5 }, color);
+                painter.circle_stroke(
+                    center,
+                    if selected { 9.0 } else { 7.0 },
+                    Stroke::new(if selected { 2.0 } else { 1.3 }, Color32::WHITE),
+                );
+                painter.text(
+                    center + egui::vec2(10.0, -10.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    probe.id.0.to_string(),
+                    egui::FontId::monospace(10.0),
+                    color,
+                );
+            }
         }
         if let Some(texture) = &self.logo_texture {
             let width = (r.width() * 0.22)
@@ -5776,6 +6493,8 @@ impl Playground {
             ),
             InteractionMode::PlacePulse => ("Placing pulse", "Click repeatedly to inject"),
             InteractionMode::MoveSource => ("Moving source", "Click to reposition"),
+            InteractionMode::PlaceProbe => ("Placing point probes", "Click repeatedly to add"),
+            InteractionMode::MoveProbe(_) => ("Moving point probe", "Click to reposition"),
         };
         egui::Area::new("interaction_mode_overlay".into())
             .fixed_pos(viewport.left_top() + egui::vec2(12.0, 12.0))
@@ -5796,7 +6515,10 @@ impl Playground {
                         }
                         let cancel_label = if matches!(
                             self.interaction_mode,
-                            InteractionMode::PlacePulse | InteractionMode::MoveSource
+                            InteractionMode::PlacePulse
+                                | InteractionMode::MoveSource
+                                | InteractionMode::PlaceProbe
+                                | InteractionMode::MoveProbe(_)
                         ) {
                             "Done"
                         } else {
@@ -5919,6 +6641,15 @@ impl Playground {
             .filter(|x| x.2 <= 10.0)
             .min_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(id, i, _)| (id, i))
+    }
+    fn hit_probe(&self, point: Pos2, viewport: Rect) -> Option<ProbeId> {
+        if !self.show_probe_markers {
+            return None;
+        }
+        self.editor.document.probes.iter().rev().find_map(|probe| {
+            let ProbeTarget::Point(position) = probe.target;
+            (self.screen(position, viewport).distance(point) <= 10.0).then_some(probe.id)
+        })
     }
     fn hit_internal_handle(&self, p: Pos2, r: Rect) -> Option<(InternalBoundaryId, usize)> {
         if !self.handles {
@@ -6396,12 +7127,14 @@ fn automatic_adaptation_work_limit(mesh: &TriMesh, topology_budget: usize) -> us
         .max(MeshAdaptationOptions::default().max_work_units)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn frame(
     mut contexts: EguiContexts,
     mut state: ResMut<Playground>,
     time: Res<Time>,
     mut request: ResMut<WaveGpuRequest>,
     display: Res<WaveDisplay>,
+    probe_display: Res<ProbeDisplay>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut commands: Commands,
 ) -> Result {
@@ -6427,6 +7160,7 @@ pub fn frame(
     }
     state.frame_ms = state.frame_ms * 0.95 + time.delta_secs() * 1000.0 * 0.05;
     state.update_files();
+    state.ingest_probe_samples(&probe_display);
     let mut root = egui::Ui::new(
         ctx.clone(),
         "root".into(),
@@ -6445,6 +7179,7 @@ pub fn frame(
         &mut commands,
         time.delta_secs_f64(),
     );
+    state.refresh_probe_gpu(&mut request, &mut assets, &mut commands);
     state.refresh_solution_amr(&request, &display);
     Ok(())
 }
@@ -6486,6 +7221,7 @@ pub fn mesh_benchmark_scene() -> Playground {
         .replace_validated(funfern_app::editor::Document {
             draft: scene.clone(),
             accepted: scene,
+            probes: vec![],
         });
     state
 }
@@ -6494,6 +7230,7 @@ pub fn mesh_benchmark_scene() -> Playground {
 pub fn wave_gpu_check_scene() -> Playground {
     let mut state = Playground {
         automated_benchmark: true,
+        wave_running: false,
         ..Default::default()
     };
     let scene = Scene {
@@ -6562,6 +7299,13 @@ pub fn wave_gpu_check_scene() -> Playground {
         .replace_validated(funfern_app::editor::Document {
             draft: scene.clone(),
             accepted: scene,
+            probes: vec![ProbeDefinition {
+                id: ProbeId(1),
+                name: "GPU check".into(),
+                color: [63, 144, 239],
+                enabled: true,
+                target: ProbeTarget::Point(Point2::new(-0.2, 0.42)),
+            }],
         });
     state
 }
@@ -6887,6 +7631,7 @@ pub fn wave_gpu_benchmark(
     mut state: ResMut<Playground>,
     mut request: ResMut<WaveGpuRequest>,
     display: Res<WaveDisplay>,
+    probe_display: Res<ProbeDisplay>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut exit: MessageWriter<bevy::app::AppExit>,
 ) {
@@ -6922,6 +7667,8 @@ pub fn wave_gpu_benchmark(
         if state.wave_boundary_committed != target || state.simulation_candidate.is_some() {
             return;
         }
+        state.wave_running = false;
+        state.wave_accumulator = 0.0;
         let Some(operator) = &state.wave_operator else {
             return;
         };
@@ -6997,6 +7744,8 @@ pub fn wave_gpu_benchmark(
         || display.generation != benchmark.generation
         || display.current.len() != benchmark.expected_current.len()
         || display.auxiliary.len() != benchmark.expected_auxiliary.len()
+        || probe_display.generation != benchmark.generation
+        || probe_display.records.is_empty()
     {
         return;
     }
@@ -7072,6 +7821,13 @@ pub fn wave_gpu_benchmark(
         simulated_seconds_per_wall_second = 128.0 * state.wave_time_step / solve_seconds,
         "Wave GPU check complete"
     );
+    let probe_finite = probe_display.records.iter().all(|record| {
+        record.time.is_finite()
+            && record.displacement.is_finite()
+            && record.velocity.is_finite()
+            && record.energy_density.is_finite()
+            && record.energy_density >= 0.0
+    });
     if let Some((node, actual, expected, point, dirichlet, neumann)) = max_difference {
         info!(
             node,
@@ -7088,6 +7844,7 @@ pub fn wave_gpu_benchmark(
         && previous_error <= 2.0e-4
         && auxiliary_error <= 2.0e-4
         && isolated_peak <= 1.0e-7
+        && probe_finite
     {
         exit.write(bevy::app::AppExit::Success);
     } else {
@@ -7966,6 +8723,7 @@ impl Playground {
         state.add_geometry_popover(root.ctx());
         state.example_gallery(root.ctx());
         state.performance_window(root.ctx());
+        state.probe_readout_windows(root.ctx());
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(root, |ui| state.viewport(ui, wave_display))
@@ -9319,6 +10077,68 @@ mod tests {
         assert_eq!(h.state.inspector_panel, Some(InspectorPanel::Simulation));
         h.click_text("Materials");
         assert_eq!(h.state.inspector_panel, Some(InspectorPanel::Materials));
+        h.click_text("Probes");
+        assert_eq!(h.state.inspector_panel, Some(InspectorPanel::Probes));
+    }
+
+    #[test]
+    fn point_probe_placement_and_drag_are_persistent_and_undoable() {
+        let mut h = Harness::new();
+        h.click_text("Probes");
+        h.click_text("+ Point probe");
+        assert_eq!(h.state.interaction_mode, InteractionMode::PlaceProbe);
+        let position = Point2::new(0.45, -0.35);
+        h.click(h.point(position));
+        assert_eq!(h.state.editor.document.probes.len(), 1);
+        assert_eq!(h.state.interaction_mode, InteractionMode::PlaceProbe);
+        assert_eq!(h.state.editor.history_len(), (1, 0));
+        let id = h.state.editor.document.probes[0].id;
+        h.state.probe_windows.clear();
+        h.state.interaction_mode = InteractionMode::Select;
+        let target = Point2::new(0.55, -0.2);
+        h.drag_with_modifiers(h.point(position), h.point(target), Modifiers::NONE);
+        assert_eq!(h.state.selected_probe, Some(id));
+        let ProbeTarget::Point(actual) = h.state.editor.document.probes[0].target;
+        assert!((actual - target).norm() < 1.0e-6);
+        assert_eq!(h.state.editor.history_len(), (2, 0));
+        h.state.editor.undo();
+        let ProbeTarget::Point(actual) = h.state.editor.document.probes[0].target;
+        assert!((actual - position).norm() < 1.0e-6);
+    }
+
+    #[test]
+    fn clearing_a_probe_does_not_reimport_the_gpu_ring() {
+        let mut state = Playground::default();
+        let id = state
+            .editor
+            .create_point_probe(Point2::new(0.4, 0.4))
+            .unwrap();
+        state.probe_compiled = Some(CompiledProbeState {
+            generation: 3,
+            revision: 5,
+            mesh_revision: 1,
+            probes: state.editor.document.probes.clone(),
+            sample_rate: 120.0,
+            time_step: 0.01,
+        });
+        let mut display = ProbeDisplay {
+            generation: 3,
+            revision: 5,
+            records: vec![PointProbeRecord {
+                probe_id: id.0,
+                time: 0.5,
+                displacement: 1.0,
+                velocity: 2.0,
+                energy_density: 3.0,
+            }],
+            readbacks: 1,
+        };
+        state.ingest_probe_samples(&display);
+        assert_eq!(state.probe_traces[&id].samples.len(), 1);
+        state.clear_probe_trace(id);
+        display.readbacks += 1;
+        state.ingest_probe_samples(&display);
+        assert!(state.probe_traces[&id].samples.is_empty());
     }
 
     #[test]

@@ -107,6 +107,7 @@ fn double_slit() -> Document {
     Document {
         draft: scene.clone(),
         accepted: scene,
+        probes: vec![],
     }
 }
 
@@ -140,6 +141,7 @@ fn material_lens() -> Document {
     Document {
         draft: scene.clone(),
         accepted: scene,
+        probes: vec![],
     }
 }
 

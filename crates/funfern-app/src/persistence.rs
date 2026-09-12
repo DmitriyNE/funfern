@@ -1,4 +1,4 @@
-use crate::editor::Document;
+use crate::editor::{Document, MAX_PROBES, ProbeDefinition, ProbeId, ProbeTarget};
 use funfern_core::*;
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +34,24 @@ struct FileV2 {
     domain: [f64; 4],
     draft: StoredScene,
     accepted: StoredScene,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    probes: Vec<StoredProbe>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredProbe {
+    id: u64,
+    name: String,
+    color: [u8; 3],
+    enabled: bool,
+    target: StoredProbeTarget,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredProbeTarget {
+    Point { position: [f64; 2] },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -557,11 +575,54 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 8,
+        version: 9,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
+        probes: document
+            .probes
+            .iter()
+            .map(|probe| StoredProbe {
+                id: probe.id.0,
+                name: probe.name.clone(),
+                color: probe.color,
+                enabled: probe.enabled,
+                target: match probe.target {
+                    ProbeTarget::Point(position) => StoredProbeTarget::Point {
+                        position: [position.x, position.y],
+                    },
+                },
+            })
+            .collect(),
     }
+}
+
+fn decode_probes(stored: Vec<StoredProbe>) -> Result<Vec<ProbeDefinition>, String> {
+    if stored.len() > MAX_PROBES {
+        return Err(format!("Scene contains more than {MAX_PROBES} probes"));
+    }
+    let probes = stored
+        .into_iter()
+        .map(|probe| ProbeDefinition {
+            id: ProbeId(probe.id),
+            name: probe.name,
+            color: probe.color,
+            enabled: probe.enabled,
+            target: match probe.target {
+                StoredProbeTarget::Point { position } => {
+                    ProbeTarget::Point(Point2::new(position[0], position[1]))
+                }
+            },
+        })
+        .collect::<Vec<_>>();
+    if probes.iter().any(|probe| !probe.valid()) {
+        return Err("Scene contains an invalid probe".into());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    if probes.iter().any(|probe| !ids.insert(probe.id)) {
+        return Err("Scene contains duplicate probe IDs".into());
+    }
+    Ok(probes)
 }
 
 /// Structural parsing only. UI advances LoadCandidate across frames before replacing.
@@ -584,9 +645,10 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
             Document {
                 draft: decode_v1(file.draft)?,
                 accepted: decode_v1(file.accepted)?,
+                probes: vec![],
             }
         }
-        2..=8 => {
+        2..=9 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
@@ -604,6 +666,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                     header.version >= 6,
                     header.version < 7,
                 )?,
+                probes: decode_probes(file.probes)?,
             }
         }
         _ => return Err("Unsupported scene version".into()),

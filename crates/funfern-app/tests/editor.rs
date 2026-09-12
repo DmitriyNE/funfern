@@ -213,7 +213,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 9.into(),
+            0 => value["version"] = 10.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -290,7 +290,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        8
+        9
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -985,6 +985,7 @@ fn validated_example_replacement_is_one_undoable_action() {
     let example = Document {
         draft: scene.clone(),
         accepted: scene,
+        probes: vec![],
     };
 
     editor.replace_validated_with_history(example.clone());
@@ -992,4 +993,50 @@ fn validated_example_replacement_is_one_undoable_action() {
     assert_eq!(editor.history_len(), (1, 0));
     editor.undo();
     assert_eq!(editor.document, before);
+}
+
+#[test]
+fn point_probes_are_undoable_and_persist_without_affecting_geometry_acceptance() {
+    let mut editor = Editor::default();
+    let revision = editor.revision;
+    let id = editor.create_point_probe(Point2::new(0.25, -0.4)).unwrap();
+    assert_eq!(editor.revision, revision);
+    assert_eq!(editor.acceptance, Acceptance::Valid);
+    assert_eq!(editor.history_len(), (1, 0));
+
+    let mut probe = editor.document.probes[0].clone();
+    probe.name = "Receiver".into();
+    probe.target = ProbeTarget::Point(Point2::new(-0.2, 0.3));
+    editor.update_probe(probe.clone()).unwrap();
+    assert_eq!(editor.history_len(), (2, 0));
+    editor.undo();
+    assert_eq!(editor.document.probes[0].name, format!("Probe {}", id.0));
+    editor.redo();
+    assert_eq!(editor.document.probes[0], probe);
+
+    let json = save(&editor.document).unwrap();
+    let decoded = decode(json.as_bytes()).unwrap();
+    assert_eq!(decoded.probes, [probe]);
+    assert_eq!(decoded.draft, editor.document.draft);
+    assert_eq!(decoded.accepted, editor.document.accepted);
+
+    editor.delete_probe(id).unwrap();
+    assert!(editor.document.probes.is_empty());
+    editor.undo();
+    assert_eq!(editor.document.probes.len(), 1);
+}
+
+#[test]
+fn malformed_or_duplicate_point_probes_are_rejected() {
+    let mut editor = Editor::default();
+    editor.create_point_probe(Point2::new(0.2, 0.3)).unwrap();
+    let json = save(&editor.document).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value["probes"][0]["id"] = 0.into();
+    assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
+
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let duplicate = value["probes"][0].clone();
+    value["probes"].as_array_mut().unwrap().push(duplicate);
+    assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
 }

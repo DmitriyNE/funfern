@@ -28,11 +28,13 @@ use bevy::{
     },
 };
 use funfern_core::{
-    BoundarySignal, OuterBoundaryConditions, Point2, QuadraticTransferMap, QuadraticWaveOperator,
-    QuadraticWaveState, RegionId, TriMesh,
+    BoundarySignal, OuterBoundaryConditions, Point2, QuadraticPointStencil, QuadraticTransferMap,
+    QuadraticWaveOperator, QuadraticWaveState, RegionId, TriMesh,
 };
 
 const WORKGROUP_SIZE: u32 = 128;
+pub const MAX_POINT_PROBES: usize = 16;
+const PROBE_RING_FRAMES: usize = 2048;
 const WAVE_STORAGE_BINDINGS: usize = 8;
 const TRANSFER_STORAGE_BINDINGS: usize = 8;
 const WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT: usize = 8;
@@ -134,6 +136,21 @@ struct WaveBufferHandles {
     pulse_weights: Arc<[f32]>,
 }
 
+#[derive(Clone)]
+struct ProbeBufferHandles {
+    stencils: Handle<ShaderBuffer>,
+    control: Handle<ShaderBuffer>,
+    output: Handle<ShaderBuffer>,
+    ids: Arc<[u64]>,
+    sample_stride: u64,
+}
+
+impl ProbeBufferHandles {
+    fn all(&self) -> [&Handle<ShaderBuffer>; 3] {
+        [&self.stencils, &self.control, &self.output]
+    }
+}
+
 impl WaveBufferHandles {
     fn all(&self) -> [&Handle<ShaderBuffer>; WAVE_STORAGE_BINDINGS] {
         [
@@ -160,6 +177,9 @@ pub struct WaveGpuRequest {
     stats: Arc<WaveGpuStats>,
     readback_entity: Option<Entity>,
     transfer: Option<WaveTransferHandles>,
+    probes: Option<ProbeBufferHandles>,
+    probe_revision: u64,
+    probe_readback_entity: Option<Entity>,
 }
 
 impl Default for WaveGpuRequest {
@@ -174,6 +194,9 @@ impl Default for WaveGpuRequest {
             stats: Arc::new(WaveGpuStats::default()),
             readback_entity: None,
             transfer: None,
+            probes: None,
+            probe_revision: 0,
+            probe_readback_entity: None,
         }
     }
 }
@@ -189,6 +212,87 @@ impl WaveGpuRequest {
 
     pub fn stats(&self) -> &Arc<WaveGpuStats> {
         &self.stats
+    }
+
+    pub fn probe_revision(&self) -> u64 {
+        self.probe_revision
+    }
+
+    pub fn update_point_probes(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        probes: &[(u64, Option<QuadraticPointStencil>)],
+        sample_rate: f64,
+        time_offset: f64,
+        time_step: f64,
+    ) -> Result<(), String> {
+        if probes.len() > MAX_POINT_PROBES
+            || !sample_rate.is_finite()
+            || !(30.0..=480.0).contains(&sample_rate)
+            || !time_offset.is_finite()
+            || !time_step.is_finite()
+            || time_step <= 0.0
+        {
+            return Err("Invalid point-probe recorder settings".into());
+        }
+        self.clear_probe_buffers(assets, commands);
+        if probes.is_empty() {
+            return Ok(());
+        }
+        let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
+        let stencils = probes
+            .iter()
+            .map(|(_, stencil)| gpu_probe_stencil(*stencil))
+            .collect::<Vec<_>>();
+        let control = GpuProbeControl {
+            values: Vec4::new(
+                sample_stride as f32,
+                PROBE_RING_FRAMES as f32,
+                probes.len() as f32,
+                time_offset as f32,
+            ),
+        };
+        let output = vec![
+            GpuProbeSample {
+                values: Vec4::splat(f32::NAN),
+            };
+            PROBE_RING_FRAMES * MAX_POINT_PROBES
+        ];
+        let handles = ProbeBufferHandles {
+            stencils: assets.add(ShaderBuffer::from(stencils)),
+            control: assets.add(ShaderBuffer::from(control)),
+            output: assets.add(ShaderBuffer::from(output)),
+            ids: probes.iter().map(|(id, _)| *id).collect(),
+            sample_stride,
+        };
+        self.probe_revision = self.probe_revision.wrapping_add(1).max(1);
+        self.probe_readback_entity = Some(
+            commands
+                .spawn((
+                    Readback::buffer(handles.output.clone()),
+                    ProbeReadbackTag {
+                        generation: self.generation,
+                        revision: self.probe_revision,
+                        ids: handles.ids.clone(),
+                    },
+                ))
+                .id(),
+        );
+        self.probes = Some(handles);
+        Ok(())
+    }
+
+    fn clear_probe_buffers(&mut self, assets: &mut Assets<ShaderBuffer>, commands: &mut Commands) {
+        if let Some(handles) = self.probes.take() {
+            for handle in handles.all() {
+                assets.remove(handle.id());
+            }
+        }
+        if let Some(entity) = self.probe_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
+        self.probe_revision = self.probe_revision.wrapping_add(1).max(1);
     }
 
     pub fn ready(&self) -> bool {
@@ -315,6 +419,7 @@ impl WaveGpuRequest {
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
     ) -> Result<(), String> {
+        self.clear_probe_buffers(assets, commands);
         let transfer = self
             .transfer
             .take()
@@ -358,6 +463,7 @@ impl WaveGpuRequest {
         dof_count: u32,
         transfer: Option<WaveTransferHandles>,
     ) {
+        self.clear_probe_buffers(assets, commands);
         let expects_transfer = transfer.is_some();
         if let Some(entity) = self.readback_entity.take() {
             commands.entity(entity).despawn();
@@ -920,6 +1026,30 @@ struct WaveReadbackTag {
     expects_transfer: bool,
 }
 
+#[derive(Component)]
+struct ProbeReadbackTag {
+    generation: u64,
+    revision: u64,
+    ids: Arc<[u64]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointProbeRecord {
+    pub probe_id: u64,
+    pub time: f64,
+    pub displacement: f64,
+    pub velocity: f64,
+    pub energy_density: f64,
+}
+
+#[derive(Resource, Default)]
+pub struct ProbeDisplay {
+    pub generation: u64,
+    pub revision: u64,
+    pub records: Vec<PointProbeRecord>,
+    pub readbacks: u64,
+}
+
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuParameters {
     time_data: Vec4,
@@ -972,6 +1102,69 @@ struct GpuMatrixEntry {
 struct GpuState {
     levels: Vec4,
     auxiliary: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuProbeStencil {
+    nodes_a: UVec4,
+    nodes_b: UVec4,
+    weights_a: Vec4,
+    weights_b: Vec4,
+    gradient_x_a: Vec4,
+    gradient_x_b: Vec4,
+    gradient_y_a: Vec4,
+    gradient_y_b: Vec4,
+    material: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuProbeControl {
+    values: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuProbeSample {
+    values: Vec4,
+}
+
+fn gpu_probe_stencil(stencil: Option<QuadraticPointStencil>) -> GpuProbeStencil {
+    let Some(stencil) = stencil else {
+        return GpuProbeStencil::default();
+    };
+    let nodes = stencil.nodes;
+    let weights = stencil.value_weights.map(|value| value as f32);
+    let gradient_x = stencil.gradient_weights.map(|value| value.x as f32);
+    let gradient_y = stencil.gradient_weights.map(|value| value.y as f32);
+    GpuProbeStencil {
+        nodes_a: UVec4::new(nodes[0], nodes[1], nodes[2], nodes[3]),
+        nodes_b: UVec4::new(nodes[4], nodes[5], nodes[6], 0),
+        weights_a: Vec4::from_array([weights[0], weights[1], weights[2], weights[3]]),
+        weights_b: Vec4::from_array([weights[4], weights[5], weights[6], 0.0]),
+        gradient_x_a: Vec4::from_array([
+            gradient_x[0],
+            gradient_x[1],
+            gradient_x[2],
+            gradient_x[3],
+        ]),
+        gradient_x_b: Vec4::from_array([gradient_x[4], gradient_x[5], gradient_x[6], 0.0]),
+        gradient_y_a: Vec4::from_array([
+            gradient_y[0],
+            gradient_y[1],
+            gradient_y[2],
+            gradient_y[3],
+        ]),
+        gradient_y_b: Vec4::from_array([gradient_y[4], gradient_y[5], gradient_y[6], 0.0]),
+        material: Vec4::new(
+            stencil.mass_density as f32,
+            stencil.stiffness as f32,
+            1.0,
+            0.0,
+        ),
+    }
+}
+
+fn probe_sample_due(completed_step: u64, stride: u64) -> bool {
+    stride > 0 && completed_step.is_multiple_of(stride)
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -1034,16 +1227,57 @@ fn receive_readback(
     display.readbacks = display.readbacks.saturating_add(1);
 }
 
+fn receive_probe_readback(
+    event: On<ReadbackComplete>,
+    tags: Query<&ProbeReadbackTag>,
+    mut display: ResMut<ProbeDisplay>,
+) {
+    let Ok(tag) = tags.get(event.entity) else {
+        return;
+    };
+    let samples: Vec<GpuProbeSample> = event.to_shader_type();
+    if samples.len() != PROBE_RING_FRAMES * MAX_POINT_PROBES {
+        return;
+    }
+    let mut records = Vec::new();
+    for frame in 0..PROBE_RING_FRAMES {
+        for (slot, id) in tag.ids.iter().copied().enumerate() {
+            let value = samples[frame * MAX_POINT_PROBES + slot].values;
+            if value.is_finite() {
+                records.push(PointProbeRecord {
+                    probe_id: id,
+                    time: value.w as f64,
+                    displacement: value.x as f64,
+                    velocity: value.y as f64,
+                    energy_density: value.z as f64,
+                });
+            }
+        }
+    }
+    records.sort_by(|a, b| {
+        a.time
+            .total_cmp(&b.time)
+            .then_with(|| a.probe_id.cmp(&b.probe_id))
+    });
+    display.generation = tag.generation;
+    display.revision = tag.revision;
+    display.records = records;
+    display.readbacks = display.readbacks.saturating_add(1);
+}
+
 pub struct WaveGpuPlugin;
 
 impl Plugin for WaveGpuPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "wave.wgsl");
+        embedded_asset!(app, "probe.wgsl");
         embedded_asset!(app, "wave_transfer_old.wgsl");
         embedded_asset!(app, "wave_transfer_new.wgsl");
         app.init_resource::<WaveGpuRequest>()
             .init_resource::<WaveDisplay>()
+            .init_resource::<ProbeDisplay>()
             .add_observer(receive_readback)
+            .add_observer(receive_probe_readback)
             .add_plugins(ExtractResourcePlugin::<WaveGpuRequest>::default());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -1052,7 +1286,8 @@ impl Plugin for WaveGpuPlugin {
             .add_systems(RenderStartup, init_pipeline)
             .add_systems(
                 Render,
-                prepare_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                (prepare_bind_group, prepare_probe_bind_group)
+                    .in_set(RenderSystems::PrepareBindGroups),
             )
             .add_systems(RenderGraph, compute_wave.before(camera_driver));
     }
@@ -1061,6 +1296,7 @@ impl Plugin for WaveGpuPlugin {
 #[derive(Resource)]
 struct WavePipeline {
     layout: BindGroupLayoutDescriptor,
+    probe_layout: BindGroupLayoutDescriptor,
     transfer_old_layout: BindGroupLayoutDescriptor,
     transfer_new_layout: BindGroupLayoutDescriptor,
     step: CachedComputePipelineId,
@@ -1070,6 +1306,7 @@ struct WavePipeline {
     transfer_old: CachedComputePipelineId,
     transfer_boundary: CachedComputePipelineId,
     transfer_new: CachedComputePipelineId,
+    probe: CachedComputePipelineId,
 }
 
 fn init_pipeline(
@@ -1104,6 +1341,26 @@ fn init_pipeline(
     let step = pipeline_cache.queue_compute_pipeline(pipeline("advance_wave"));
     let rotate = pipeline_cache.queue_compute_pipeline(pipeline("rotate"));
     let inject = pipeline_cache.queue_compute_pipeline(pipeline("inject"));
+    let probe_layout = BindGroupLayoutDescriptor::new(
+        "wave point-probe buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only::<GpuParameters>(false),
+                storage_buffer_read_only::<Vec<GpuState>>(false),
+                storage_buffer_read_only::<Vec<GpuProbeStencil>>(false),
+                storage_buffer_read_only::<GpuProbeControl>(false),
+                storage_buffer::<Vec<GpuProbeSample>>(false),
+            ),
+        ),
+    );
+    let probe = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some(Cow::Borrowed("wave point probes")),
+        layout: vec![probe_layout.clone()],
+        shader: load_embedded_asset!(asset_server.as_ref(), "probe.wgsl"),
+        entry_point: Some(Cow::Borrowed("sample_probes")),
+        ..default()
+    });
     let transfer_old_layout = BindGroupLayoutDescriptor::new(
         "wave old-state transfer buffers",
         &BindGroupLayoutEntries::sequential(
@@ -1177,6 +1434,7 @@ fn init_pipeline(
     ));
     commands.insert_resource(WavePipeline {
         layout,
+        probe_layout,
         transfer_old_layout,
         transfer_new_layout,
         step,
@@ -1186,6 +1444,7 @@ fn init_pipeline(
         transfer_old,
         transfer_boundary,
         transfer_new,
+        probe,
     });
 }
 
@@ -1204,6 +1463,66 @@ struct WaveTransferBindGroups {
     generation: u64,
     old: BindGroup,
     new: BindGroup,
+}
+
+#[derive(Resource)]
+struct ProbeBindGroup {
+    generation: u64,
+    revision: u64,
+    bind_group: BindGroup,
+}
+
+fn prepare_probe_bind_group(
+    mut commands: Commands,
+    request: Option<Res<WaveGpuRequest>>,
+    existing: Option<Res<ProbeBindGroup>>,
+    pipeline: Res<WavePipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+) {
+    let Some(request) = request else {
+        return;
+    };
+    let Some(probes) = &request.probes else {
+        if existing.is_some() {
+            commands.remove_resource::<ProbeBindGroup>();
+        }
+        return;
+    };
+    if existing.as_ref().is_some_and(|group| {
+        group.generation == request.generation && group.revision == request.probe_revision
+    }) {
+        return;
+    }
+    let Some(wave) = &request.buffers else {
+        return;
+    };
+    let (Some(parameters), Some(state), Some(stencils), Some(control), Some(output)) = (
+        gpu_buffers.get(&wave.parameters),
+        gpu_buffers.get(&wave.state),
+        gpu_buffers.get(&probes.stencils),
+        gpu_buffers.get(&probes.control),
+        gpu_buffers.get(&probes.output),
+    ) else {
+        return;
+    };
+    let bind_group = render_device.create_bind_group(
+        Some("wave point-probe bind group"),
+        &pipeline_cache.get_bind_group_layout(&pipeline.probe_layout),
+        &BindGroupEntries::sequential((
+            parameters.buffer.as_entire_buffer_binding(),
+            state.buffer.as_entire_buffer_binding(),
+            stencils.buffer.as_entire_buffer_binding(),
+            control.buffer.as_entire_buffer_binding(),
+            output.buffer.as_entire_buffer_binding(),
+        )),
+    );
+    commands.insert_resource(ProbeBindGroup {
+        generation: request.generation,
+        revision: request.probe_revision,
+        bind_group,
+    });
 }
 
 fn prepare_bind_group(
@@ -1348,6 +1667,7 @@ fn compute_wave(
     request: Option<Res<WaveGpuRequest>>,
     group: Option<ResMut<WaveBindGroup>>,
     transfer_groups: Option<Res<WaveTransferBindGroups>>,
+    probe_group: Option<Res<ProbeBindGroup>>,
     pipeline: Res<WavePipeline>,
     pipeline_cache: Res<PipelineCache>,
 ) {
@@ -1458,11 +1778,31 @@ fn compute_wave(
         pass.dispatch_workgroups(workgroups, 1, 1);
         group.pulse_serial = request.pulse_serial;
     }
-    for _ in 0..pending {
+    let probe_pipeline = probe_group
+        .as_ref()
+        .filter(|probe_group| {
+            probe_group.generation == request.generation
+                && probe_group.revision == request.probe_revision
+        })
+        .and_then(|_| pipeline_cache.get_compute_pipeline(pipeline.probe));
+    for offset in 0..pending {
         pass.set_pipeline(step);
         pass.dispatch_workgroups(workgroups, 1, 1);
         pass.set_pipeline(rotate);
         pass.dispatch_workgroups(workgroups, 1, 1);
+        let step_after = group.completed_steps + offset + 1;
+        if request
+            .probes
+            .as_ref()
+            .is_some_and(|probes| probe_sample_due(step_after, probes.sample_stride))
+            && let (Some(probe_pipeline), Some(probe_group)) =
+                (probe_pipeline, probe_group.as_ref())
+        {
+            pass.set_pipeline(probe_pipeline);
+            pass.set_bind_group(0, &probe_group.bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_bind_group(0, &group.bind_group, &[]);
+        }
     }
     drop(pass);
     group.completed_steps += pending;
@@ -1564,5 +1904,31 @@ mod tests {
         assert!(weights[left] > 0.4);
         assert_eq!(weights[right], 0.0);
         assert_eq!(mesh.vertices[left].point, mesh.vertices[right].point);
+    }
+
+    #[test]
+    fn solver_clock_sampling_is_independent_of_frame_batches() {
+        let sample_steps = |batches: &[u64], stride: u64| {
+            let mut completed = 0;
+            let mut samples = Vec::new();
+            for batch in batches {
+                for offset in 0..*batch {
+                    let step = completed + offset + 1;
+                    if probe_sample_due(step, stride) {
+                        samples.push(step);
+                    }
+                }
+                completed += batch;
+            }
+            samples
+        };
+        assert_eq!(
+            sample_steps(&[64, 36], 7),
+            sample_steps(&[3, 19, 1, 40, 37], 7)
+        );
+        assert_eq!(
+            sample_steps(&[100], 7),
+            (7..=98).step_by(7).collect::<Vec<_>>()
+        );
     }
 }

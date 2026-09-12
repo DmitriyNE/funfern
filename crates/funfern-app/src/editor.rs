@@ -6,6 +6,36 @@ pub enum GeometryControl {
     Baffle(InternalBoundaryId, usize),
 }
 
+pub const MAX_PROBES: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProbeId(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ProbeTarget {
+    Point(Point2),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProbeDefinition {
+    pub id: ProbeId,
+    pub name: String,
+    pub color: [u8; 3],
+    pub enabled: bool,
+    pub target: ProbeTarget,
+}
+
+impl ProbeDefinition {
+    pub fn valid(&self) -> bool {
+        self.id.0 > 0
+            && !self.name.trim().is_empty()
+            && self.name.len() <= 64
+            && match self.target {
+                ProbeTarget::Point(point) => point.finite(),
+            }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoopKind {
     Hole,
@@ -34,6 +64,7 @@ fn outer_condition_from_face(condition: FaceBoundaryCondition) -> OuterBoundaryC
 pub struct Document {
     pub draft: Scene,
     pub accepted: Scene,
+    pub probes: Vec<ProbeDefinition>,
 }
 impl Default for Document {
     fn default() -> Self {
@@ -41,6 +72,7 @@ impl Default for Document {
         Self {
             draft: scene.clone(),
             accepted: scene,
+            probes: vec![],
         }
     }
 }
@@ -62,6 +94,7 @@ pub struct Editor {
     next_internal_boundary_id: u64,
     next_region_id: u64,
     next_material_id: u64,
+    next_probe_id: u64,
 }
 impl Default for Editor {
     fn default() -> Self {
@@ -77,6 +110,7 @@ impl Default for Editor {
             next_internal_boundary_id: 1,
             next_region_id: 2,
             next_material_id: 2,
+            next_probe_id: 1,
         }
     }
 }
@@ -471,8 +505,12 @@ impl Editor {
     }
     pub fn cancel(&mut self) {
         if let Some(before) = self.before.take() {
+            let geometry_changed =
+                before.draft != self.document.draft || before.accepted != self.document.accepted;
             self.document = before;
-            self.changed();
+            if geometry_changed {
+                self.changed();
+            }
         }
     }
     pub fn undo(&mut self) {
@@ -482,8 +520,12 @@ impl Editor {
         }
         if let Some(doc) = self.undo.pop() {
             self.redo.push(self.document.clone());
+            let geometry_changed =
+                doc.draft != self.document.draft || doc.accepted != self.document.accepted;
             self.document = doc;
-            self.changed();
+            if geometry_changed {
+                self.changed();
+            }
         }
     }
     pub fn redo(&mut self) {
@@ -492,8 +534,12 @@ impl Editor {
         }
         if let Some(doc) = self.redo.pop() {
             self.undo.push(self.document.clone());
+            let geometry_changed =
+                doc.draft != self.document.draft || doc.accepted != self.document.accepted;
             self.document = doc;
-            self.changed();
+            if geometry_changed {
+                self.changed();
+            }
         }
     }
     pub fn history_len(&self) -> (usize, usize) {
@@ -1573,6 +1619,76 @@ impl Editor {
         self.commit();
         Ok(())
     }
+
+    pub fn create_point_probe(&mut self, position: Point2) -> Result<ProbeId, String> {
+        if !position.finite() {
+            return Err("Probe position must be finite".into());
+        }
+        if self.document.probes.len() >= MAX_PROBES {
+            return Err(format!("Maximum {MAX_PROBES} probes"));
+        }
+        let id = ProbeId(self.next_probe_id);
+        self.next_probe_id = self
+            .next_probe_id
+            .checked_add(1)
+            .ok_or("Probe IDs exhausted")?;
+        const COLORS: [[u8; 3]; 8] = [
+            [63, 144, 239],
+            [244, 105, 122],
+            [78, 201, 176],
+            [245, 183, 69],
+            [164, 126, 232],
+            [70, 190, 232],
+            [230, 125, 67],
+            [153, 203, 103],
+        ];
+        self.begin();
+        self.document.probes.push(ProbeDefinition {
+            id,
+            name: format!("Probe {}", id.0),
+            color: COLORS[(id.0.saturating_sub(1) as usize) % COLORS.len()],
+            enabled: true,
+            target: ProbeTarget::Point(position),
+        });
+        self.commit();
+        Ok(id)
+    }
+
+    pub fn update_probe(&mut self, probe: ProbeDefinition) -> Result<(), String> {
+        if !probe.valid() {
+            return Err("Probe name and position must be valid".into());
+        }
+        let id = probe.id;
+        let current = self
+            .document
+            .probes
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .ok_or("Missing probe")?;
+        if current == &probe {
+            return Ok(());
+        }
+        self.begin();
+        *self
+            .document
+            .probes
+            .iter_mut()
+            .find(|candidate| candidate.id == id)
+            .unwrap() = probe;
+        self.commit();
+        Ok(())
+    }
+
+    pub fn delete_probe(&mut self, id: ProbeId) -> Result<(), String> {
+        if !self.document.probes.iter().any(|probe| probe.id == id) {
+            return Err("Missing probe".into());
+        }
+        self.begin();
+        self.document.probes.retain(|probe| probe.id != id);
+        self.commit();
+        Ok(())
+    }
+
     /// Caller must validate the accepted scene before replacement.
     pub fn replace_validated(&mut self, document: Document) {
         self.install_document(document);
@@ -1632,6 +1748,13 @@ impl Editor {
             .iter()
             .chain(&document.accepted.materials)
             .map(|material| material.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.next_probe_id = document
+            .probes
+            .iter()
+            .map(|probe| probe.id.0)
             .max()
             .unwrap_or(0)
             .saturating_add(1);
