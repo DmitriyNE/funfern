@@ -130,7 +130,6 @@ struct ProbeViewState {
     field: bool,
     velocity: bool,
     energy: bool,
-    drag_start_end: Option<f64>,
 }
 
 impl ProbeViewState {
@@ -142,7 +141,6 @@ impl ProbeViewState {
             field: true,
             velocity: true,
             energy: true,
-            drag_start_end: None,
         }
     }
 }
@@ -3436,15 +3434,10 @@ impl Playground {
         let visible_span = maximum_time - minimum_time;
         if response.drag_started() {
             view.live = false;
-            view.drag_start_end = Some(maximum_time);
         }
         if response.dragged() {
-            let start_end = view.drag_start_end.get_or_insert(maximum_time);
-            view.end_time =
-                *start_end + response.drag_delta().x as f64 / rect.width() as f64 * visible_span;
-        }
-        if response.drag_stopped() {
-            view.drag_start_end = None;
+            let delta = response.drag_delta().x as f64;
+            view.end_time += delta / rect.width() as f64 * visible_span;
         }
         if response.hovered() {
             let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
@@ -3458,7 +3451,13 @@ impl Playground {
                 let first = samples.first().unwrap().time;
                 let last = samples.last().unwrap().time;
                 let zoomed_span = view.span.min(last - first);
-                view.end_time = anchored_time + (1.0 - fraction) * zoomed_span;
+                let fullest_span = maximum_span.min(last - first);
+                if view.span >= fullest_span * (1.0 - 1.0e-9) {
+                    view.live = true;
+                    view.end_time = last;
+                } else {
+                    view.end_time = anchored_time + (1.0 - fraction) * zoomed_span;
+                }
             }
         }
         (minimum_time, maximum_time) = Self::probe_time_window(samples, view).unwrap();
@@ -10429,7 +10428,34 @@ mod tests {
             .unwrap_or_else(|| panic!("texts: {:?}", h.texts))
             .1;
         let start = egui::pos2(field_label.left() + 180.0, field_label.bottom() + 46.0);
-        h.drag_with_modifiers(start, start + egui::vec2(-100.0, 0.0), Modifiers::NONE);
+        h.frame(vec![
+            Event::PointerMoved(start),
+            Event::PointerButton {
+                pos: start,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        let halfway = start - egui::vec2(50.0, 0.0);
+        h.frame(vec![Event::PointerMoved(halfway)]);
+        let halfway_end = h.state.probe_views[&id].end_time;
+        assert!(halfway_end < 10.0);
+
+        // A held pointer commonly has frames with no movement. The old code
+        // interpreted the zero per-frame delta as zero total displacement and
+        // sprang back to the starting time here.
+        h.frame(vec![Event::PointerMoved(halfway)]);
+        assert_eq!(h.state.probe_views[&id].end_time, halfway_end);
+
+        let end = start - egui::vec2(100.0, 0.0);
+        h.frame(vec![Event::PointerMoved(end)]);
+        h.frame(vec![Event::PointerButton {
+            pos: end,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
 
         let view = &h.state.probe_views[&id];
         assert!(!view.live);
@@ -10450,6 +10476,18 @@ mod tests {
             });
         h.frame(vec![]);
         assert!((h.state.probe_views[&id].end_time - panned_end).abs() < 1.0e-12);
+
+        h.frame(vec![
+            Event::PointerMoved(start),
+            Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -1_000.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        assert!(h.state.probe_views[&id].live);
+        assert_eq!(h.state.probe_views[&id].end_time, 10.1);
     }
 
     #[test]
