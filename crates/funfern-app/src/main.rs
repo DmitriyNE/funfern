@@ -1,5 +1,6 @@
 mod examples;
 mod files;
+mod material_overlay;
 mod recovery;
 mod sharing;
 mod ui;

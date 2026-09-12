@@ -1754,6 +1754,20 @@ impl Editor {
         region_id: RegionId,
         frame: MaterialFrame,
     ) -> Result<(), String> {
+        if self.region_frame_matches(region_id, frame)? {
+            return Ok(());
+        }
+        self.begin();
+        self.set_region_frame_during_edit(region_id, frame)?;
+        self.commit();
+        Ok(())
+    }
+
+    fn region_frame_matches(
+        &self,
+        region_id: RegionId,
+        frame: MaterialFrame,
+    ) -> Result<bool, String> {
         if !frame.valid()
             || (region_id == BACKGROUND_REGION
                 && frame.attachment != MaterialFrameAttachment::World)
@@ -1765,10 +1779,18 @@ impl Editor {
             .draft
             .region(region_id)
             .ok_or("Missing region")?;
-        if region.frame == frame {
+        Ok(region.frame == frame)
+    }
+
+    /// Update a material frame inside a caller-owned edit transaction.
+    pub fn set_region_frame_during_edit(
+        &mut self,
+        region_id: RegionId,
+        frame: MaterialFrame,
+    ) -> Result<(), String> {
+        if self.region_frame_matches(region_id, frame)? {
             return Ok(());
         }
-        self.begin();
         self.document
             .draft
             .regions
@@ -1777,7 +1799,6 @@ impl Editor {
             .unwrap()
             .frame = frame;
         self.changed();
-        self.commit();
         Ok(())
     }
 

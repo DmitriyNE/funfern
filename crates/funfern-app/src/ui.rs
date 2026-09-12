@@ -9,6 +9,10 @@ use crate::wave_gpu::{
 use crate::{
     examples,
     files::{self, FileEvent, SaveKind},
+    material_overlay::{
+        self, MaterialOverlay, MaterialOverlayJob, MaterialOverlaySnapshot, MaterialProperty,
+        OverlayKey, OverlayRange,
+    },
     recovery, sharing,
 };
 use bevy::platform::time::Instant;
@@ -551,6 +555,23 @@ enum GizmoHit {
     Rotate,
     Scale,
 }
+enum MaterialFrameDrag {
+    Origin {
+        region: RegionId,
+        start: MaterialFrame,
+        pointer_offset: Point2,
+    },
+    Rotate {
+        region: RegionId,
+        start: MaterialFrame,
+        pointer_angle: f64,
+    },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaterialFrameGizmoHit {
+    Origin,
+    Rotate,
+}
 struct Curve {
     id: ObstacleId,
     samples: Vec<Sample>,
@@ -641,6 +662,7 @@ pub struct Playground {
     pending_span_click: Option<PendingSpanClick>,
     custom: Vec<Point2>,
     drag: Option<Drag>,
+    material_frame_drag: Option<MaterialFrameDrag>,
     transform_translation: Point2,
     transform_rotation_degrees: f64,
     transform_scale: f64,
@@ -723,7 +745,15 @@ pub struct Playground {
     mesh_max_slice_ms: f64,
     show_mesh: bool,
     show_mesh_boundary: bool,
-    show_materials: bool,
+    material_overlay: MaterialOverlay,
+    material_overlay_opacity: f32,
+    material_overlay_auto_range: bool,
+    material_overlay_logarithmic: bool,
+    material_overlay_manual_min: f64,
+    material_overlay_manual_max: f64,
+    material_overlay_job: Option<MaterialOverlayJob>,
+    material_overlay_snapshot: Option<MaterialOverlaySnapshot>,
+    material_overlay_error: Option<String>,
     show_field: bool,
     field_gain: f32,
     wave_mesh: Option<Arc<TriMesh>>,
@@ -818,6 +848,7 @@ impl Default for Playground {
             pending_span_click: None,
             custom: vec![],
             drag: None,
+            material_frame_drag: None,
             transform_translation: Point2::default(),
             transform_rotation_degrees: 0.0,
             transform_scale: 1.0,
@@ -900,7 +931,15 @@ impl Default for Playground {
             mesh_max_slice_ms: 0.0,
             show_mesh: false,
             show_mesh_boundary: true,
-            show_materials: true,
+            material_overlay: MaterialOverlay::Regions,
+            material_overlay_opacity: 0.48,
+            material_overlay_auto_range: true,
+            material_overlay_logarithmic: false,
+            material_overlay_manual_min: 0.0,
+            material_overlay_manual_max: 1.0,
+            material_overlay_job: None,
+            material_overlay_snapshot: None,
+            material_overlay_error: None,
             show_field: true,
             field_gain: 2.0,
             wave_mesh: None,
@@ -1732,6 +1771,7 @@ impl Playground {
         self.pending_span_click = None;
         self.region_selection = BACKGROUND_REGION;
         self.drag = None;
+        self.material_frame_drag = None;
         self.panning = false;
         self.custom.clear();
         self.interaction_mode = InteractionMode::Select;
@@ -5488,7 +5528,42 @@ impl Playground {
         ui.checkbox(&mut self.polygon, "Control polygons");
         ui.checkbox(&mut self.handles, "Handles");
         ui.checkbox(&mut self.reference, "Accepted reference");
-        ui.checkbox(&mut self.show_materials, "Material regions");
+        egui::ComboBox::from_label("Material overlay")
+            .selected_text(self.material_overlay.label())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.material_overlay, MaterialOverlay::Off, "Off");
+                ui.selectable_value(
+                    &mut self.material_overlay,
+                    MaterialOverlay::Regions,
+                    "Material regions",
+                );
+                ui.separator();
+                for property in MaterialProperty::ALL {
+                    ui.selectable_value(
+                        &mut self.material_overlay,
+                        MaterialOverlay::Property(property),
+                        property.label(),
+                    );
+                }
+            });
+        if matches!(self.material_overlay, MaterialOverlay::Property(_)) {
+            ui.add(
+                egui::Slider::new(&mut self.material_overlay_opacity, 0.05..=1.0)
+                    .text("overlay opacity"),
+            );
+            ui.checkbox(&mut self.material_overlay_auto_range, "Automatic range");
+            ui.checkbox(&mut self.material_overlay_logarithmic, "Log scale");
+            if !self.material_overlay_auto_range {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.material_overlay_manual_min).prefix("Min "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut self.material_overlay_manual_max).prefix("Max "),
+                    );
+                });
+            }
+        }
         ui.checkbox(&mut self.show_boundary_conditions, "Boundary conditions");
         if self.show_boundary_conditions {
             for (label, color) in [
@@ -5571,7 +5646,10 @@ impl Playground {
             self.polygon = true;
             self.handles = true;
             self.reference = true;
-            self.show_materials = true;
+            self.material_overlay = MaterialOverlay::Regions;
+            self.material_overlay_opacity = 0.48;
+            self.material_overlay_auto_range = true;
+            self.material_overlay_logarithmic = false;
             self.show_boundary_conditions = false;
             self.show_mesh = false;
             self.show_mesh_boundary = true;
@@ -5652,11 +5730,15 @@ impl Playground {
             .draft
             .region(self.region_selection)
             .copied()
+            && self
+                .editor
+                .document
+                .draft
+                .material(region.material)
+                .is_some_and(Material::varying)
         {
-            ui.add_space(4.0);
-            ui.label("Material frame").on_hover_text(
-                "A rigid origin and angle for local material coordinates; x, y, and r use world units.",
-            );
+            ui.separator();
+            ui.label("Profile placement");
             let mut frame = region.frame;
             let mut angle_degrees = frame.angle_radians.to_degrees();
             let mut changed = false;
@@ -5690,7 +5772,7 @@ impl Playground {
                 .changed();
             frame.angle_radians = angle_degrees.to_radians();
             if region.id == BACKGROUND_REGION {
-                ui.small("World frame");
+                ui.small("Attached to world");
             } else {
                 let previous = frame.attachment;
                 egui::ComboBox::from_label("Attachment")
@@ -7871,7 +7953,236 @@ impl Playground {
         .any(egui::Response::changed)
     }
 
+    fn refresh_material_overlay(&mut self) {
+        if !matches!(self.material_overlay, MaterialOverlay::Property(_)) {
+            return;
+        }
+        let (Some(mesh), Some(operator)) = (&self.mesh, &self.wave_operator) else {
+            return;
+        };
+        let scene = if self
+            .editor
+            .document
+            .accepted
+            .geometry_eq(&self.mesh_committed_scene)
+        {
+            self.editor.document.accepted.clone()
+        } else {
+            self.mesh_committed_scene.clone()
+        };
+        let key = OverlayKey {
+            mesh_revision: mesh.mesh_revision,
+            scene,
+        };
+        if self
+            .material_overlay_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.key == key)
+        {
+            self.material_overlay_job = None;
+            return;
+        }
+        if !self
+            .material_overlay_job
+            .as_ref()
+            .is_some_and(|job| job.key() == &key)
+        {
+            match MaterialOverlayJob::new(mesh.clone(), operator.clone(), key.scene.clone()) {
+                Ok(job) => {
+                    self.material_overlay_job = Some(job);
+                    self.material_overlay_error = None;
+                }
+                Err(error) => {
+                    self.material_overlay_job = None;
+                    self.material_overlay_error = Some(error);
+                    return;
+                }
+            }
+        }
+        if let Some(snapshot) = self
+            .material_overlay_job
+            .as_mut()
+            .and_then(|job| job.advance(2_048))
+        {
+            if snapshot.key == key {
+                self.material_overlay_snapshot = Some(snapshot);
+                self.material_overlay_error = None;
+            }
+            self.material_overlay_job = None;
+        }
+    }
+
+    fn material_overlay_range(&self, property: MaterialProperty) -> Option<OverlayRange> {
+        if self.material_overlay_auto_range {
+            self.material_overlay_snapshot
+                .as_ref()?
+                .range(property, self.material_overlay_logarithmic)
+        } else if self.material_overlay_manual_min.is_finite()
+            && self.material_overlay_manual_max.is_finite()
+            && self.material_overlay_manual_min < self.material_overlay_manual_max
+            && (!self.material_overlay_logarithmic || self.material_overlay_manual_min > 0.0)
+        {
+            Some(OverlayRange {
+                minimum: self.material_overlay_manual_min,
+                maximum: self.material_overlay_manual_max,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn draw_material_overlay_legend(
+        &self,
+        painter: &egui::Painter,
+        viewport: Rect,
+        pointer: Option<Pos2>,
+    ) {
+        let MaterialOverlay::Property(property) = self.material_overlay else {
+            return;
+        };
+        let snapshot = self.material_overlay_snapshot.as_ref();
+        let range = self.material_overlay_range(property);
+        let hovered = pointer
+            .filter(|point| viewport.contains(*point))
+            .and_then(|point| {
+                let world = self.world(point, viewport);
+                let region = self
+                    .mesh
+                    .as_ref()
+                    .and_then(|mesh| mesh_region_at(mesh, world))?;
+                let sample = snapshot
+                    .map(|snapshot| material_overlay::sample(&snapshot.key.scene, region, world))?;
+                Some((world, sample))
+            });
+        let height = if hovered.is_some() { 112.0 } else { 54.0 };
+        let rect = Rect::from_min_size(
+            viewport.left_top() + egui::vec2(12.0, 12.0),
+            egui::vec2(258.0, height),
+        );
+        painter.rect_filled(rect, 5.0, Color32::from_rgba_unmultiplied(8, 13, 18, 220));
+        painter.text(
+            rect.left_top() + egui::vec2(8.0, 7.0),
+            egui::Align2::LEFT_TOP,
+            format!(
+                "{} · {}",
+                property.label(),
+                if self.material_overlay_logarithmic {
+                    "log"
+                } else {
+                    "linear"
+                }
+            ),
+            egui::FontId::proportional(12.0),
+            Color32::from_rgb(215, 226, 232),
+        );
+        let bar = Rect::from_min_size(
+            rect.left_top() + egui::vec2(8.0, 27.0),
+            egui::vec2(242.0, 9.0),
+        );
+        if let Some(range) = range {
+            for index in 0..64 {
+                let strip = Rect::from_min_max(
+                    egui::pos2(bar.left() + bar.width() * index as f32 / 64.0, bar.top()),
+                    egui::pos2(
+                        bar.left() + bar.width() * (index + 1) as f32 / 64.0,
+                        bar.bottom(),
+                    ),
+                );
+                painter.rect_filled(
+                    strip,
+                    0.0,
+                    material_property_color(index as f32 / 63.0, 255),
+                );
+            }
+            painter.text(
+                bar.left_bottom() + egui::vec2(0.0, 3.0),
+                egui::Align2::LEFT_TOP,
+                format_value(range.minimum),
+                egui::FontId::monospace(10.0),
+                Color32::GRAY,
+            );
+            painter.text(
+                bar.right_bottom() + egui::vec2(0.0, 3.0),
+                egui::Align2::RIGHT_TOP,
+                format_value(range.maximum),
+                egui::FontId::monospace(10.0),
+                Color32::GRAY,
+            );
+        } else {
+            painter.text(
+                bar.center(),
+                egui::Align2::CENTER_CENTER,
+                "No valid range",
+                egui::FontId::proportional(11.0),
+                RED,
+            );
+        }
+        if let Some(job) = &self.material_overlay_job {
+            let (done, total) = job.progress();
+            painter.text(
+                rect.right_top() + egui::vec2(-8.0, 7.0),
+                egui::Align2::RIGHT_TOP,
+                format!("sampling {done}/{total}"),
+                egui::FontId::proportional(10.0),
+                GOLD,
+            );
+        } else if let Some(error) = &self.material_overlay_error {
+            painter.text(
+                rect.right_top() + egui::vec2(-8.0, 7.0),
+                egui::Align2::RIGHT_TOP,
+                error,
+                egui::FontId::proportional(10.0),
+                RED,
+            );
+        } else if let Some(invalid) = snapshot
+            .map(|snapshot| snapshot.invalid_count(property))
+            .filter(|count| *count > 0)
+        {
+            painter.text(
+                rect.right_top() + egui::vec2(-8.0, 7.0),
+                egui::Align2::RIGHT_TOP,
+                format!("{invalid} invalid"),
+                egui::FontId::proportional(10.0),
+                RED,
+            );
+        }
+        if let Some((world, sample)) = hovered {
+            let value = sample
+                .value(property)
+                .map(format_value)
+                .unwrap_or_else(|error| format!("Error: {error}"));
+            let lines = [
+                format!(
+                    "{} · region {} · {}",
+                    sample.material_name, sample.region.0, value
+                ),
+                format!("world ({:.3}, {:.3})", world.x, world.y),
+                format!(
+                    "local x {:.3}  y {:.3}  r {:.3}  θ {:.1}°",
+                    sample.coordinates.x,
+                    sample.coordinates.y,
+                    sample.coordinates.r,
+                    sample.coordinates.theta.to_degrees()
+                ),
+            ];
+            for (index, line) in lines.into_iter().enumerate() {
+                painter.text(
+                    rect.left_top() + egui::vec2(8.0, 57.0 + index as f32 * 16.0),
+                    egui::Align2::LEFT_TOP,
+                    line,
+                    egui::FontId::monospace(10.0),
+                    if value.starts_with("Error") {
+                        RED
+                    } else {
+                        Color32::from_rgb(184, 201, 211)
+                    },
+                );
+            }
+        }
+    }
+
     fn viewport(&mut self, ui: &mut egui::Ui, wave_display: Option<&WaveDisplay>) -> Rect {
+        self.refresh_material_overlay();
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let r = response.rect;
@@ -7891,7 +8202,9 @@ impl Playground {
             } else if self.interaction_mode != InteractionMode::Select {
                 egui::CursorIcon::Crosshair
             } else if let Some(point) = pointer {
-                if self.hit_far_field(point, r) {
+                if self.hit_material_frame_gizmo(point, r).is_some() {
+                    egui::CursorIcon::Grab
+                } else if self.hit_far_field(point, r) {
                     egui::CursorIcon::PointingHand
                 } else if self.hit_source(point, r) || self.hit_probe(point, r).is_some() {
                     egui::CursorIcon::Grab
@@ -7921,6 +8234,7 @@ impl Playground {
                     && self.area_probe_center.take().is_some();
                 let source_dragging = std::mem::take(&mut self.source_dragging);
                 let probe_drag = self.probe_drag.take();
+                let material_frame_drag = self.material_frame_drag.take();
                 let drag = self.drag.take();
                 match &drag {
                     Some(Drag::Translate { gizmo_before, .. }) => {
@@ -7935,6 +8249,7 @@ impl Playground {
                 self.pending_span_click = None;
                 if source_dragging
                     || probe_drag.is_some()
+                    || material_frame_drag.is_some()
                     || drag.is_some()
                     || self.editor.editing()
                 {
@@ -8037,7 +8352,24 @@ impl Playground {
                 } else if primary && self.interaction_mode == InteractionMode::Select {
                     self.refresh_curves();
                     let modifiers = ctx.input(|input| input.modifiers);
-                    if self.hit_source(p, r) {
+                    if let Some(hit) = self.hit_material_frame_gizmo(p, r)
+                        && let Some((region, frame)) = self.selected_material_frame()
+                    {
+                        self.editor.begin();
+                        let relative = self.world(p, r) - frame.origin;
+                        self.material_frame_drag = Some(match hit {
+                            MaterialFrameGizmoHit::Origin => MaterialFrameDrag::Origin {
+                                region,
+                                start: frame,
+                                pointer_offset: frame.origin - self.world(p, r),
+                            },
+                            MaterialFrameGizmoHit::Rotate => MaterialFrameDrag::Rotate {
+                                region,
+                                start: frame,
+                                pointer_angle: relative.y.atan2(relative.x),
+                            },
+                        });
+                    } else if self.hit_source(p, r) {
                         self.editor.begin();
                         self.source_dragging = true;
                     } else if let Some(hit) = self.hit_probe(p, r) {
@@ -8266,6 +8598,46 @@ impl Playground {
                             .unwrap_or(BACKGROUND_REGION);
                         self.editor.document.source = self.wave_source;
                         self.wave_source_dirty = true;
+                    } else if let Some(material_drag) = self.material_frame_drag.as_ref() {
+                        let snap = |point: Point2| {
+                            if self.snap_to_grid || ctx.input(|input| input.modifiers.shift) {
+                                Point2::new(
+                                    (point.x / self.snap_step).round() * self.snap_step,
+                                    (point.y / self.snap_step).round() * self.snap_step,
+                                )
+                            } else {
+                                point
+                            }
+                        };
+                        let (region, frame) = match material_drag {
+                            MaterialFrameDrag::Origin {
+                                region,
+                                start,
+                                pointer_offset,
+                            } => {
+                                let mut frame = *start;
+                                frame.origin = snap(world + *pointer_offset);
+                                (*region, frame)
+                            }
+                            MaterialFrameDrag::Rotate {
+                                region,
+                                start,
+                                pointer_angle,
+                            } => {
+                                let relative = world - start.origin;
+                                let mut angle = start.angle_radians + relative.y.atan2(relative.x)
+                                    - *pointer_angle;
+                                if ctx.input(|input| input.modifiers.shift) {
+                                    let step = 15.0_f64.to_radians();
+                                    angle = (angle / step).round() * step;
+                                }
+                                let mut frame = *start;
+                                frame.angle_radians = angle;
+                                (*region, frame)
+                            }
+                        };
+                        let result = self.editor.set_region_frame_during_edit(region, frame);
+                        self.error(result);
                     } else if let Some(probe_drag) = self.probe_drag.as_ref() {
                         let snap = |point: Point2| {
                             if self.snap_to_grid || ctx.input(|input| input.modifiers.shift) {
@@ -8485,6 +8857,7 @@ impl Playground {
                     && !space
                     && (self.hit_far_field(p, r)
                         || (!self.hit_source(p, r)
+                            && self.hit_material_frame_gizmo(p, r).is_none()
                             && self.hit_handle(p, r).is_none()
                             && self.hit_internal_handle(p, r).is_none()))
                 {
@@ -8615,6 +8988,9 @@ impl Playground {
             if self.probe_drag.take().is_some() {
                 self.editor.commit();
             }
+            if self.material_frame_drag.take().is_some() {
+                self.editor.commit();
+            }
             let drag = self.drag.take();
             let moved = matches!(
                 &drag,
@@ -8681,15 +9057,24 @@ impl Playground {
                 }
             }
         }
-        if self.show_materials
+        if self.material_overlay == MaterialOverlay::Regions
             && let Some(mesh) = &self.mesh
         {
+            let scene = if self
+                .editor
+                .document
+                .accepted
+                .geometry_eq(&self.mesh_committed_scene)
+            {
+                &self.editor.document.accepted
+            } else {
+                &self.mesh_committed_scene
+            };
             let mut regions = egui::Mesh::default();
             regions.reserve_vertices(mesh.triangles.len() * 3);
             regions.reserve_triangles(mesh.triangles.len());
             for triangle in &mesh.triangles {
-                let color = self
-                    .mesh_committed_scene
+                let color = scene
                     .region_material(triangle.region)
                     .map_or([70, 85, 96], |material| material.color);
                 let alpha = if triangle.region == self.region_selection {
@@ -8706,6 +9091,49 @@ impl Playground {
             }
             painter.add(egui::Shape::mesh(regions));
         }
+        if let MaterialOverlay::Property(property) = self.material_overlay
+            && let Some(snapshot) = &self.material_overlay_snapshot
+            && let Some(range) = self.material_overlay_range(property)
+        {
+            let alpha = (self.material_overlay_opacity * 255.0).round() as u8;
+            let mut values = egui::Mesh::default();
+            let mut invalid = egui::Mesh::default();
+            values.reserve_vertices(snapshot.samples.len());
+            values.reserve_triangles(snapshot.triangles.len());
+            for sample in &snapshot.samples {
+                let color = sample
+                    .value(property)
+                    .ok()
+                    .and_then(|value| {
+                        range
+                            .normalized(value, self.material_overlay_logarithmic)
+                            .map(|fraction| material_property_color(fraction, alpha))
+                    })
+                    .unwrap_or(Color32::from_rgba_unmultiplied(255, 106, 123, alpha));
+                values.colored_vertex(self.screen(sample.point, r), color);
+            }
+            for triangle in &snapshot.triangles {
+                let bad = triangle
+                    .iter()
+                    .any(|index| snapshot.samples[*index as usize].value(property).is_err());
+                if bad {
+                    let base = invalid.vertices.len() as u32;
+                    for index in triangle {
+                        invalid.colored_vertex(
+                            self.screen(snapshot.samples[*index as usize].point, r),
+                            Color32::from_rgba_unmultiplied(255, 73, 91, alpha.max(150)),
+                        );
+                    }
+                    invalid.add_triangle(base, base + 1, base + 2);
+                } else {
+                    values.add_triangle(triangle[0], triangle[1], triangle[2]);
+                }
+            }
+            painter.add(egui::Shape::mesh(values));
+            if !invalid.indices.is_empty() {
+                painter.add(egui::Shape::mesh(invalid));
+            }
+        }
         if self.show_field
             && let Some(display) = wave_display
             && display.generation > 0
@@ -8715,7 +9143,12 @@ impl Playground {
             field.reserve_vertices(operator.degrees_of_freedom());
             field.reserve_triangles(operator.element_nodes().len() * 6);
             for (point, value) in operator.node_points().iter().zip(&display.current) {
-                field.colored_vertex(self.screen(*point, r), field_color(*value, self.field_gain));
+                let color = if matches!(self.material_overlay, MaterialOverlay::Property(_)) {
+                    field_color_over_overlay(*value, self.field_gain)
+                } else {
+                    field_color(*value, self.field_gain)
+                };
+                field.colored_vertex(self.screen(*point, r), color);
             }
             for nodes in operator.element_nodes() {
                 for [a, b] in [[0, 3], [3, 1], [1, 4], [4, 2], [2, 5], [5, 0]] {
@@ -9147,6 +9580,37 @@ impl Playground {
                 Stroke::new(1.0, GOLD),
             );
         }
+        if let Some((_, frame)) = self.selected_material_frame() {
+            let center = self.screen(frame.origin, r);
+            let radius = 42.0;
+            let (sin, cos) = frame.angle_radians.sin_cos();
+            let x_end = center + egui::vec2((cos * 33.0) as f32, (-sin * 33.0) as f32);
+            let y_end = center + egui::vec2((-sin * 27.0) as f32, (-cos * 27.0) as f32);
+            painter.circle_stroke(center, radius, Stroke::new(1.5, TEAL));
+            painter.circle_filled(
+                center + egui::vec2((cos * radius as f64) as f32, (-sin * radius as f64) as f32),
+                4.0,
+                TEAL,
+            );
+            painter.line_segment([center, x_end], Stroke::new(2.0, RED));
+            painter.line_segment([center, y_end], Stroke::new(2.0, TEAL));
+            painter.circle_filled(center, 6.0, Color32::from_rgb(16, 23, 31));
+            painter.circle_stroke(center, 6.0, Stroke::new(2.0, GOLD));
+            painter.text(
+                x_end,
+                egui::Align2::LEFT_CENTER,
+                "x",
+                egui::FontId::monospace(11.0),
+                RED,
+            );
+            painter.text(
+                y_end,
+                egui::Align2::LEFT_CENTER,
+                "y",
+                egui::FontId::monospace(11.0),
+                TEAL,
+            );
+        }
         if !self.custom.is_empty() {
             let mut points = self.custom.clone();
             if over
@@ -9225,6 +9689,7 @@ impl Playground {
                 egui::StrokeKind::Inside,
             );
         }
+        self.draw_material_overlay_legend(&painter, r, pointer);
         if self.sampling_warning {
             painter.text(
                 r.left_bottom() + egui::vec2(18.0, -18.0),
@@ -9695,6 +10160,32 @@ impl Playground {
             Some(GizmoHit::Scale)
         } else if (distance - self.gizmo_radius(r, pivot)).abs() <= 7.0 {
             Some(GizmoHit::Rotate)
+        } else {
+            None
+        }
+    }
+
+    fn selected_material_frame(&self) -> Option<(RegionId, MaterialFrame)> {
+        if self.inspector_panel != Some(InspectorPanel::Materials) {
+            return None;
+        }
+        let region = self.editor.document.draft.region(self.region_selection)?;
+        self.editor
+            .document
+            .draft
+            .material(region.material)
+            .is_some_and(Material::varying)
+            .then_some((region.id, region.frame))
+    }
+
+    fn hit_material_frame_gizmo(&self, point: Pos2, r: Rect) -> Option<MaterialFrameGizmoHit> {
+        let (_, frame) = self.selected_material_frame()?;
+        let center = self.screen(frame.origin, r);
+        let distance = center.distance(point);
+        if distance <= 9.0 {
+            Some(MaterialFrameGizmoHit::Origin)
+        } else if (distance - 42.0).abs() <= 7.0 {
+            Some(MaterialFrameGizmoHit::Rotate)
         } else {
             None
         }
@@ -10171,6 +10662,53 @@ fn field_color(value: f32, gain: f32) -> Color32 {
         (neutral[2] + amount * (target[2] - neutral[2])) as u8,
         220,
     )
+}
+
+fn field_color_over_overlay(value: f32, gain: f32) -> Color32 {
+    let value = if value.is_finite() {
+        (value * gain).tanh()
+    } else {
+        0.0
+    };
+    let target = if value >= 0.0 {
+        [244, 105, 122]
+    } else {
+        [63, 144, 239]
+    };
+    Color32::from_rgba_unmultiplied(
+        target[0],
+        target[1],
+        target[2],
+        (value.abs() * 220.0).round() as u8,
+    )
+}
+
+fn material_property_color(fraction: f32, alpha: u8) -> Color32 {
+    const STOPS: [(f32, [u8; 3]); 5] = [
+        (0.0, [20, 34, 69]),
+        (0.25, [42, 91, 132]),
+        (0.5, [55, 168, 154]),
+        (0.75, [184, 205, 104]),
+        (1.0, [255, 211, 103]),
+    ];
+    let value = fraction.clamp(0.0, 1.0);
+    let (left, right) = STOPS
+        .windows(2)
+        .find_map(|pair| (value <= pair[1].0).then_some((pair[0], pair[1])))
+        .unwrap_or((STOPS[3], STOPS[4]));
+    let t = ((value - left.0) / (right.0 - left.0)).clamp(0.0, 1.0);
+    let channel = |index: usize| {
+        (left.1[index] as f32 + t * (right.1[index] as f32 - left.1[index] as f32)).round() as u8
+    };
+    Color32::from_rgba_unmultiplied(channel(0), channel(1), channel(2), alpha)
+}
+
+fn format_value(value: f64) -> String {
+    if value != 0.0 && !(1.0e-3..1.0e4).contains(&value.abs()) {
+        format!("{value:.3e}")
+    } else {
+        format!("{value:.4}")
+    }
 }
 
 fn boundary_condition_color(condition: FaceBoundaryCondition) -> Color32 {
@@ -15005,6 +15543,8 @@ mod tests {
         assert!(positive.r() > positive.b());
         assert!(negative.b() > negative.r());
         assert_eq!(field_color(f32::NAN, 2.0), field_color(0.0, 2.0));
+        assert_eq!(field_color_over_overlay(0.0, 2.0).a(), 0);
+        assert!(field_color_over_overlay(0.5, 2.0).a() > 0);
     }
 
     #[test]
@@ -15566,6 +16106,112 @@ mod tests {
         assert_eq!(
             aligned_indicator_auxiliary(&display, operator, 0.2, 0).unwrap(),
             vec![10.0; count]
+        );
+    }
+
+    #[test]
+    fn material_frame_gizmo_drag_moves_origin_in_one_history_entry() {
+        let mut h = Harness::new();
+        let formula = ScalarField::formula("1 + 0.1 * x").unwrap();
+        h.state.editor.document.draft.materials[0].stiffness = formula.clone();
+        h.state.editor.document.accepted.materials[0].stiffness = formula;
+        h.state.inspector_panel = Some(InspectorPanel::Materials);
+        h.frame(vec![]);
+        let start = h.point(Point2::new(0.0, 0.0));
+        let end = h.point(Point2::new(0.2, -0.1));
+        assert_eq!(
+            h.state.hit_material_frame_gizmo(start, h.rect),
+            Some(MaterialFrameGizmoHit::Origin)
+        );
+        h.drag_with_modifiers(start, end, Modifiers::NONE);
+        h.settle();
+        let frame = h
+            .state
+            .editor
+            .document
+            .accepted
+            .region(BACKGROUND_REGION)
+            .unwrap()
+            .frame;
+        assert!(
+            (frame.origin - Point2::new(0.2, -0.1)).norm() < 1.0e-6,
+            "origin={:?}",
+            frame.origin
+        );
+        assert_eq!(h.state.editor.history_len(), (1, 0));
+    }
+
+    #[test]
+    fn material_overlay_reuses_property_samples_and_replaces_stale_frame_data() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let mut material = h.state.editor.document.draft.materials[0].clone();
+        material.stiffness = ScalarField::formula("1 + 0.1 * x").unwrap();
+        h.state.editor.update_material(material).unwrap();
+        h.settle();
+        h.state.material_overlay = MaterialOverlay::Property(MaterialProperty::Stiffness);
+        for _ in 0..1_000 {
+            h.state.refresh_material_overlay();
+            if h.state.material_overlay_job.is_none() && h.state.material_overlay_snapshot.is_some()
+            {
+                break;
+            }
+        }
+        let first_key = h
+            .state
+            .material_overlay_snapshot
+            .as_ref()
+            .unwrap()
+            .key
+            .clone();
+        let samples = h
+            .state
+            .material_overlay_snapshot
+            .as_ref()
+            .unwrap()
+            .samples
+            .len();
+        h.state.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
+        h.state.refresh_material_overlay();
+        assert!(h.state.material_overlay_job.is_none());
+        assert_eq!(
+            h.state
+                .material_overlay_snapshot
+                .as_ref()
+                .unwrap()
+                .samples
+                .len(),
+            samples
+        );
+
+        h.state
+            .editor
+            .set_region_frame(
+                BACKGROUND_REGION,
+                MaterialFrame {
+                    origin: Point2::new(0.25, 0.0),
+                    ..MaterialFrame::world()
+                },
+            )
+            .unwrap();
+        h.settle();
+        h.state.refresh_material_overlay();
+        if h.state.material_overlay_job.is_some() {
+            assert_eq!(
+                h.state.material_overlay_snapshot.as_ref().unwrap().key,
+                first_key
+            );
+        }
+        for _ in 0..1_000 {
+            h.state.refresh_material_overlay();
+            if h.state.material_overlay_job.is_none() {
+                break;
+            }
+        }
+        assert_ne!(
+            h.state.material_overlay_snapshot.as_ref().unwrap().key,
+            first_key
         );
     }
 }

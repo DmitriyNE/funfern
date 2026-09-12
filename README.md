@@ -164,8 +164,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   scaling moves the frame with the object but does not rescale the profile. Unused
   non-default materials can be deleted. Clicking a filled region selects and
   highlights it. Material changes preserve the live field and reuse the committed
-  mesh. Automatic solution AMR pauses for varying materials until its estimator
-  accounts for coefficient gradients.
+  mesh. Profile placement appears for the selected subdomain and can be adjusted
+  numerically or with its viewport origin/rotation gizmo. View can overlay material
+  regions, density, stiffness, damping, wave speed, or impedance with linear/log and
+  automatic/manual range controls plus a local-coordinate hover readout. Automatic
+  solution AMR pauses for varying materials until its estimator accounts for
+  coefficient gradients.
 - **Simulation input:** Place pulse remains active for repeated viewport clicks and
   can be toggled off with the same selected button, the viewport Done action, or
   Escape. Drag the visible continuous-source marker directly to reposition it.

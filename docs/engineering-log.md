@@ -10,9 +10,6 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Add coefficient-aware AMR indicators before re-enabling automatic adaptation
   for spatial materials. Include coefficient-gradient residual terms and preserve
   the current bounded-work and coarsening behavior.
-- [ ] Add a material-profile viewport overlay and frame gizmo. Keep numeric frame
-  controls as the dependable baseline; the visual editor must retain rigid,
-  world-unit coordinates and avoid implying profile scale.
 - [ ] Add a polished Luneburg/GRIN catalog example after coefficient-aware AMR and
   profile visualization make its resolution and placement clear.
 - [ ] Add probe-data export for point, line, area, and far-field readouts. Preserve
@@ -57,6 +54,32 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
+
+## 2026-09-12 — Material profile placement and visualization
+
+- Moved region-owned material-frame controls under Profile placement for the
+  selected subdomain. They appear only for a varying assigned material; the
+  material Library remains concerned with reusable coefficient definitions.
+- Added a viewport frame gizmo with an origin handle, oriented axes, and rotation
+  ring. Origin and angle drags support grid/15-degree Shift snapping, Escape
+  cancellation, and one history entry per gesture. It intentionally has no scale:
+  local coordinates remain in world units.
+- Replaced the material-fill toggle with one overlay selector for material regions,
+  density, stiffness, damping, wave speed, or impedance. Property overlays provide
+  opacity, robust automatic or manual ranges, linear/log mapping, a viewport legend,
+  and local/world-coordinate hover readout.
+- Property rendering uses the quadratic operator's seven display nodes and six
+  subtriangles. Vertices are keyed by operator node and region, preventing values
+  from blending across material interfaces. Sampling and topology preparation are
+  cooperative and revision keyed; property switches reuse cached samples, stale
+  jobs are discarded, and the previous complete overlay remains visible during an
+  update. Runtime formula failures color only affected triangles red and do not
+  change solver acceptance.
+- All 269 workspace tests pass, including interface duplication, range and derived
+  property behavior, cache reuse/stale replacement, and frame-gizmo history.
+  Formatting, Clippy with warnings denied, native release compilation, and release
+  Trunk/WASM packaging pass. Interactive visual testing remains for the normal
+  product review pass.
 
 ## 2026-09-12 — Spatial scalar material profiles
 

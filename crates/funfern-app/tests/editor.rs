@@ -1508,3 +1508,26 @@ fn malformed_boundary_probe_is_rejected_without_replacement() {
     value["probes"][0]["target"]["start_span"] = 9.into();
     assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
 }
+
+#[test]
+fn material_frame_drag_is_one_history_entry_and_can_be_undone() {
+    let mut editor = Editor::default();
+    let original = editor.document.clone();
+    editor.begin();
+    for index in 1..=12 {
+        editor
+            .set_region_frame_during_edit(
+                BACKGROUND_REGION,
+                MaterialFrame {
+                    origin: Point2::new(index as f64 * 0.01, -0.2),
+                    angle_radians: index as f64 * 0.02,
+                    attachment: MaterialFrameAttachment::World,
+                },
+            )
+            .unwrap();
+    }
+    editor.commit();
+    assert_eq!(editor.history_len(), (1, 0));
+    editor.undo();
+    assert_eq!(editor.document, original);
+}

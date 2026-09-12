@@ -123,8 +123,15 @@ runtime values abort the candidate operator and leave the current solver running
 Internal walls require separate traces on their two sides and therefore a
 topology/DOF operation, not merely a coefficient label. Material-value changes
 reuse the current mesh and enter the same transactional operator replacement path
-as boundary changes. The current solution AMR indicator accepts uniform materials
-only; coefficient-gradient terms and visualization are a later slice.
+as boundary changes. The View inspector can render density, stiffness, damping,
+wave speed, or impedance on the quadratic display topology. Overlay vertices
+include region identity so a shared interface retains a sharp coefficient jump. A
+revision-keyed cooperative cache evaluates all properties once, allowing property
+switches without resampling; invalid samples are localized in red and never affect
+solver acceptance. Profile placement belongs to a region and has both numeric
+controls and a rigid origin/rotation viewport gizmo. The current solution AMR
+indicator accepts uniform materials only; coefficient-gradient terms remain a
+later slice.
 
 Boundary conditions attach to logical parameter spans rather than individual mesh
 segments. Sampling copies a span assignment onto every resulting constrained edge.
