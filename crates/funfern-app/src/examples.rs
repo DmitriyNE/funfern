@@ -355,8 +355,7 @@ fn material_lens() -> Document {
         },
         presentation: Default::default(),
     };
-    document.presentation.vector_overlay =
-        funfern_app::editor::VectorOverlay::ComplementaryFieldRate;
+    document.presentation.vector_overlay = funfern_app::editor::VectorOverlay::ComplementaryField;
     document
 }
 
@@ -535,8 +534,7 @@ fn luneburg_lens() -> Document {
     };
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
     document.presentation.material_overlay_opacity = 0.55;
-    document.presentation.vector_overlay =
-        funfern_app::editor::VectorOverlay::ComplementaryFieldRate;
+    document.presentation.vector_overlay = funfern_app::editor::VectorOverlay::ComplementaryField;
     document
 }
 

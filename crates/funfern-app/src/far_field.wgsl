@@ -6,6 +6,7 @@ struct Parameters {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
+    integral: vec4<f32>,
 }
 
 struct FarFieldStencil {

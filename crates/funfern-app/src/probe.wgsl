@@ -6,6 +6,7 @@ struct Parameters {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
+    integral: vec4<f32>,
 }
 
 struct ProbeStencil {
@@ -21,13 +22,15 @@ struct ProbeStencil {
 }
 
 struct ProbeControl {
-    // Sample stride, ring frames, active slots, unused.
+    // Sample stride, ring frames, active slots, EM mode.
     values: vec4<f32>,
 }
 
 struct ProbeSample {
-    // Displacement, velocity, local energy density, physical time.
-    values: vec4<f32>,
+    // Primary component, primary rate, energy density, physical time.
+    primary: vec4<f32>,
+    // Transverse-field magnitude, Poynting magnitude, unused, unused.
+    secondary: vec4<f32>,
 }
 
 @group(0) @binding(0) var<storage, read> parameters: Parameters;
@@ -74,16 +77,47 @@ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
         states[b.z].auxiliary.z,
         0.0,
     );
+    let integral_a = vec4<f32>(
+        states[a.x].integral.y,
+        states[a.y].integral.y,
+        states[a.z].integral.y,
+        states[a.w].integral.y,
+    );
+    let integral_b = vec4<f32>(
+        states[b.x].integral.y,
+        states[b.y].integral.y,
+        states[b.z].integral.y,
+        0.0,
+    );
     let displacement = weighted(displacement_a, displacement_b, stencil);
     let velocity = weighted(velocity_a, velocity_b, stencil);
     let gradient_x = dot(displacement_a, stencil.gradient_x_a)
         + dot(displacement_b, stencil.gradient_x_b);
     let gradient_y = dot(displacement_a, stencil.gradient_y_a)
         + dot(displacement_b, stencil.gradient_y_b);
-    let energy = 0.5 * (
-        stencil.material.x * velocity * velocity
-        + stencil.material.y * (gradient_x * gradient_x + gradient_y * gradient_y)
+    let integral_gradient_x = dot(integral_a, stencil.gradient_x_a)
+        + dot(integral_b, stencil.gradient_x_b);
+    let integral_gradient_y = dot(integral_a, stencil.gradient_y_a)
+        + dot(integral_b, stencil.gradient_y_b);
+    let electromagnetic = control.values.w > 0.5;
+    let primary_energy = select(
+        stencil.material.x * velocity * velocity,
+        stencil.material.x * displacement * displacement,
+        electromagnetic,
     );
+    let gradient_energy = select(
+        stencil.material.y * (gradient_x * gradient_x + gradient_y * gradient_y),
+        stencil.material.y * (integral_gradient_x * integral_gradient_x
+            + integral_gradient_y * integral_gradient_y),
+        electromagnetic,
+    );
+    let energy = 0.5 * (primary_energy + gradient_energy);
+    let transverse = select(
+        0.0,
+        stencil.material.y * length(vec2<f32>(integral_gradient_x, integral_gradient_y)),
+        electromagnetic,
+    );
+    let poynting = select(0.0, abs(displacement) * transverse, electromagnetic);
     let stride = u32(control.values.x);
     let frames = u32(control.values.y);
     let completed = u32(parameters.time_data.w);
@@ -92,5 +126,6 @@ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
     // The transferred solver clock is already continuous across buffer generations.
     // Auxiliary displacement and velocity describe the preceding centered level.
     let time = parameters.time_data.z - parameters.time_data.x;
-    output[index].values = vec4<f32>(displacement, velocity, energy, time);
+    output[index].primary = vec4<f32>(displacement, velocity, energy, time);
+    output[index].secondary = vec4<f32>(transverse, poynting, 0.0, 0.0);
 }

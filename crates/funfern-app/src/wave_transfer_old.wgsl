@@ -44,6 +44,7 @@ struct MatrixEntry {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
+    integral: vec4<f32>,
 }
 
 struct TransferEntry {
@@ -147,12 +148,14 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     var current = 0.0;
     var mapped_velocity = 0.0;
     var mapped_auxiliary = 0.0;
+    var mapped_integral = 0.0;
     for (var local = 0u; local < 4u; local += 1u) {
         let source_index = transfers[i].indices_a[local];
         let weight = transfers[i].weights_a[local];
         current += weight * states[source_index].levels.y;
         mapped_velocity += weight * states[source_index].levels.z;
         mapped_auxiliary += weight * states[source_index].auxiliary.x;
+        mapped_integral += weight * states[source_index].integral.x;
     }
     for (var local = 0u; local < 4u; local += 1u) {
         let source_index = transfers[i].indices_b[local];
@@ -160,9 +163,10 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
         current += weight * states[source_index].levels.y;
         mapped_velocity += weight * states[source_index].levels.z;
         mapped_auxiliary += weight * states[source_index].auxiliary.x;
+        mapped_integral += weight * states[source_index].integral.x;
     }
     mapped_auxiliary *= transfers[i].auxiliary.z;
-    transfers[i].mapped = vec4<f32>(mapped_velocity, current, mapped_auxiliary, 0.0);
+    transfers[i].mapped = vec4<f32>(mapped_velocity, current, mapped_auxiliary, mapped_integral);
     if i == 0u {
         transfers[0].auxiliary.x = parameters.time_data.z;
     }

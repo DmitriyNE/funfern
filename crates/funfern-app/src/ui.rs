@@ -445,24 +445,30 @@ impl ProbeHit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LineProbeQuantity {
     Field,
+    Transverse,
     Flux,
     Energy,
 }
 
 impl LineProbeQuantity {
-    const ALL: [Self; 3] = [Self::Field, Self::Flux, Self::Energy];
+    const ALL: [Self; 4] = [Self::Field, Self::Transverse, Self::Flux, Self::Energy];
 
     const fn label_for(self, physics: PhysicsModel) -> &'static str {
         match self {
             Self::Field => primary_field_label(physics),
-            Self::Flux => "Normal flux",
-            Self::Energy => "Energy",
+            Self::Transverse => transverse_field_magnitude_label(physics),
+            Self::Flux => match physics {
+                PhysicsModel::Mechanical => "Normal energy flux",
+                PhysicsModel::Electromagnetic { .. } => "Normal Poynting flux",
+            },
+            Self::Energy => "Energy density",
         }
     }
 
     const fn color(self) -> Color32 {
         match self {
             Self::Field => SELECT,
+            Self::Transverse => Color32::from_rgb(188, 139, 255),
             Self::Flux => TEAL,
             Self::Energy => GOLD,
         }
@@ -471,9 +477,14 @@ impl LineProbeQuantity {
     const fn offset(self) -> usize {
         match self {
             Self::Field => 0,
-            Self::Flux => 3,
-            Self::Energy => 6,
+            Self::Transverse => 3,
+            Self::Flux => 6,
+            Self::Energy => 9,
         }
+    }
+
+    const fn applies(self, physics: PhysicsModel) -> bool {
+        !matches!(self, Self::Transverse) || matches!(physics, PhysicsModel::Electromagnetic { .. })
     }
 }
 
@@ -510,13 +521,15 @@ struct ProbeViewState {
     end_time: f64,
     span: f64,
     field: bool,
-    velocity: bool,
+    secondary_field: bool,
+    poynting: bool,
     energy: bool,
     area_mean_field: bool,
     area_rms_field: bool,
+    area_rms_transverse: bool,
     area_mean_energy: bool,
     area_total_energy: bool,
-    line_plots: [bool; 9],
+    line_plots: [bool; 12],
     far_waterfall: bool,
     far_polar: bool,
     far_power: bool,
@@ -530,14 +543,21 @@ impl ProbeViewState {
             end_time: 0.0,
             span: span.min(2.0),
             field: true,
-            velocity: true,
+            secondary_field: false,
+            poynting: false,
             energy: true,
-            area_mean_field: true,
-            area_rms_field: false,
+            area_mean_field: false,
+            area_rms_field: true,
+            area_rms_transverse: false,
             area_mean_energy: false,
             area_total_energy: true,
             // Field vs arclength + waterfall, and the two useful integral traces.
-            line_plots: [true, true, false, false, false, true, false, false, true],
+            line_plots: [
+                true, true, false, // primary component
+                false, false, false, // transverse magnitude
+                false, false, true, // normal power
+                false, false, true, // energy
+            ],
             far_waterfall: true,
             far_polar: true,
             far_power: true,
@@ -1788,9 +1808,16 @@ impl Playground {
                 &point_probes,
                 self.probe_sample_rate,
                 self.wave_time_step,
+                self.mesh_committed_scene.physics,
             )
             .and_then(|()| {
-                request.update_curve_probes(assets, commands, &curve_probes, self.wave_time_step)
+                request.update_curve_probes(
+                    assets,
+                    commands,
+                    &curve_probes,
+                    self.wave_time_step,
+                    self.mesh_committed_scene.physics,
+                )
             })
             .and_then(|()| {
                 request.update_area_probes(
@@ -1799,6 +1826,7 @@ impl Playground {
                     &area_probes,
                     self.probe_sample_rate.min(120.0),
                     self.wave_time_step,
+                    self.mesh_committed_scene.physics,
                 )
             });
         if let Err(error) = probe_result {
@@ -3591,6 +3619,7 @@ impl Playground {
                 && request.ready()
                 && display.generation == request.generation()
                 && display.current.len() == candidate.operator.degrees_of_freedom()
+                && display.indicator_integral.len() == candidate.operator.degrees_of_freedom()
         });
         if candidate_ready {
             let candidate = self.simulation_candidate.take().unwrap();
@@ -3893,6 +3922,8 @@ impl Playground {
                     .wave_operator
                     .as_ref()
                     .map_or(0, |operator| operator.degrees_of_freedom())
+            && (matches!(self.mesh_committed_scene.physics, PhysicsModel::Mechanical)
+                || display.indicator_integral.len() == display.current.len())
             && display.completed_steps != self.wave_energy_step
             && let Some(operator) = &self.wave_operator
         {
@@ -3903,12 +3934,27 @@ impl Playground {
                 .iter()
                 .map(|value| *value as f64)
                 .collect();
-            match operator.discrete_energy_with_auxiliary(
-                &current,
-                &previous,
-                &auxiliary,
-                self.wave_time_step,
-            ) {
+            let energy = match self.mesh_committed_scene.physics {
+                PhysicsModel::Mechanical => operator.discrete_energy_with_auxiliary(
+                    &current,
+                    &previous,
+                    &auxiliary,
+                    self.wave_time_step,
+                ),
+                PhysicsModel::Electromagnetic { .. } => operator.electromagnetic_energy(
+                    &display
+                        .indicator_displacement
+                        .iter()
+                        .map(|value| *value as f64)
+                        .collect::<Vec<_>>(),
+                    &display
+                        .indicator_integral
+                        .iter()
+                        .map(|value| *value as f64)
+                        .collect::<Vec<_>>(),
+                ),
+            };
+            match energy {
                 Ok(energy) => {
                     self.wave_energy = Some(energy);
                     self.wave_energy_step = display.completed_steps;
@@ -4555,7 +4601,10 @@ impl Playground {
                             };
                             ui.small(format!("{throughput:.2} simulated s / wall s"));
                             if let Some(energy) = self.wave_energy {
-                                ui.small(format!("Discrete energy {energy:.6e}"));
+                                ui.small(format!(
+                                    "{} {energy:.6e}",
+                                    total_energy_label(self.mesh_committed_scene.physics)
+                                ));
                             }
                         } else {
                             ui.small("Waiting for an accepted mesh and wave operator.");
@@ -4625,6 +4674,7 @@ impl Playground {
                         displacement: 0.0,
                         velocity: 0.0,
                         energy_density: 0.0,
+                        ..Default::default()
                     })
                     .collect::<Vec<_>>()
             });
@@ -4670,7 +4720,18 @@ impl Playground {
                             }
                         }
                         if segment_length.is_some() {
-                            let active = view.line_plots.iter().filter(|enabled| **enabled).count();
+                            let active = LineProbeQuantity::ALL
+                                .into_iter()
+                                .filter(|quantity| quantity.applies(physics))
+                                .flat_map(|quantity| {
+                                    LineProbeRepresentation::ALL.into_iter().map(
+                                        move |representation| {
+                                            quantity.offset() + representation.offset()
+                                        },
+                                    )
+                                })
+                                .filter(|index| view.line_plots[*index])
+                                .count();
                             egui::containers::menu::MenuButton::new(format!("Plots ({active})"))
                                 .config(
                                     egui::containers::menu::MenuConfig::new().close_behavior(
@@ -4688,6 +4749,9 @@ impl Playground {
                                             }
                                             ui.end_row();
                                             for quantity in LineProbeQuantity::ALL {
+                                                if !quantity.applies(physics) {
+                                                    continue;
+                                                }
                                                 ui.label(quantity.label_for(physics));
                                                 for representation in LineProbeRepresentation::ALL {
                                                     let index =
@@ -4713,6 +4777,8 @@ impl Playground {
                             let active = [
                                 view.area_mean_field,
                                 view.area_rms_field,
+                                view.area_rms_transverse
+                                    && matches!(physics, PhysicsModel::Electromagnetic { .. }),
                                 view.area_mean_energy,
                                 view.area_total_energy,
                             ]
@@ -4734,13 +4800,54 @@ impl Playground {
                                         &mut view.area_rms_field,
                                         format!("RMS {}", primary_field_label(physics)),
                                     );
+                                    if matches!(physics, PhysicsModel::Electromagnetic { .. }) {
+                                        ui.checkbox(
+                                            &mut view.area_rms_transverse,
+                                            format!(
+                                                "RMS {}",
+                                                transverse_field_magnitude_label(physics)
+                                            ),
+                                        );
+                                    }
                                     ui.checkbox(&mut view.area_mean_energy, "Mean energy density");
                                     ui.checkbox(&mut view.area_total_energy, "Total energy");
                                 });
                         } else {
-                            ui.checkbox(&mut view.field, primary_field_label(physics));
-                            ui.checkbox(&mut view.velocity, primary_field_rate_label(physics));
-                            ui.checkbox(&mut view.energy, "Energy");
+                            let electromagnetic =
+                                matches!(physics, PhysicsModel::Electromagnetic { .. });
+                            let active = [
+                                view.field,
+                                view.secondary_field,
+                                view.poynting && electromagnetic,
+                                view.energy,
+                            ]
+                            .into_iter()
+                            .filter(|enabled| *enabled)
+                            .count();
+                            egui::containers::menu::MenuButton::new(format!("Plots ({active})"))
+                                .config(
+                                    egui::containers::menu::MenuConfig::new().close_behavior(
+                                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                                    ),
+                                )
+                                .ui(ui, |ui| {
+                                    ui.checkbox(&mut view.field, primary_field_label(physics));
+                                    ui.checkbox(
+                                        &mut view.secondary_field,
+                                        match physics {
+                                            PhysicsModel::Mechanical => {
+                                                primary_field_rate_label(physics)
+                                            }
+                                            PhysicsModel::Electromagnetic { .. } => {
+                                                transverse_field_magnitude_label(physics)
+                                            }
+                                        },
+                                    );
+                                    if electromagnetic {
+                                        ui.checkbox(&mut view.poynting, "Poynting magnitude |S|");
+                                    }
+                                    ui.checkbox(&mut view.energy, "Energy density");
+                                });
                         }
                         if ui.small_button("Clear").clicked() {
                             clear = true;
@@ -4763,6 +4870,9 @@ impl Playground {
                         }
                         let length = segment_length.unwrap_or_default();
                         for quantity in LineProbeQuantity::ALL {
+                            if !quantity.applies(physics) {
+                                continue;
+                            }
                             if view.line_plots
                                 [quantity.offset() + LineProbeRepresentation::Arclength.offset()]
                             {
@@ -4804,6 +4914,8 @@ impl Playground {
                                         )
                                         .0,
                                         velocity: 0.0,
+                                        transverse_magnitude: 0.0,
+                                        poynting_magnitude: 0.0,
                                         energy_density: 0.0,
                                     })
                                     .collect::<Vec<_>>();
@@ -4829,13 +4941,36 @@ impl Playground {
                             self.probe_history_seconds,
                         );
                     }
-                    if segment_length.is_none() && !is_area && view.velocity {
+                    if segment_length.is_none() && !is_area && view.secondary_field {
                         Self::probe_plot(
                             ui,
-                            primary_field_rate_label(physics),
+                            match physics {
+                                PhysicsModel::Mechanical => primary_field_rate_label(physics),
+                                PhysicsModel::Electromagnetic { .. } => {
+                                    transverse_field_magnitude_label(physics)
+                                }
+                            },
                             &point_samples,
-                            |sample| sample.velocity,
+                            |sample| match physics {
+                                PhysicsModel::Mechanical => sample.velocity,
+                                PhysicsModel::Electromagnetic { .. } => sample.transverse_magnitude,
+                            },
                             Color32::from_rgb(91, 220, 194),
+                            &mut view,
+                            self.probe_history_seconds,
+                        );
+                    }
+                    if segment_length.is_none()
+                        && !is_area
+                        && view.poynting
+                        && matches!(physics, PhysicsModel::Electromagnetic { .. })
+                    {
+                        Self::probe_plot(
+                            ui,
+                            "Poynting magnitude |S|",
+                            &point_samples,
+                            |sample| sample.poynting_magnitude,
+                            RED,
                             &mut view,
                             self.probe_history_seconds,
                         );
@@ -4868,6 +5003,8 @@ impl Playground {
                                     time: sample.time,
                                     displacement: value(sample),
                                     velocity: 0.0,
+                                    transverse_magnitude: 0.0,
+                                    poynting_magnitude: 0.0,
                                     energy_density: 0.0,
                                 })
                                 .collect::<Vec<_>>()
@@ -4890,6 +5027,19 @@ impl Playground {
                                 &history(|s| s.rms_displacement),
                                 |s| s.displacement,
                                 TEAL,
+                                &mut view,
+                                self.probe_history_seconds,
+                            );
+                        }
+                        if view.area_rms_transverse
+                            && matches!(physics, PhysicsModel::Electromagnetic { .. })
+                        {
+                            Self::probe_plot(
+                                ui,
+                                &format!("RMS {}", transverse_field_magnitude_label(physics)),
+                                &history(|s| s.rms_transverse_magnitude),
+                                |s| s.displacement,
+                                Color32::from_rgb(188, 139, 255),
                                 &mut view,
                                 self.probe_history_seconds,
                             );
@@ -4951,6 +5101,7 @@ impl Playground {
                 displacement: 0.0,
                 velocity: 0.0,
                 energy_density: 0.0,
+                ..Default::default()
             })
             .collect::<Vec<_>>();
         let power = frames
@@ -4967,6 +5118,7 @@ impl Playground {
                     / FAR_FIELD_DIRECTIONS as f64,
                 velocity: 0.0,
                 energy_density: 0.0,
+                ..Default::default()
             })
             .collect::<Vec<_>>();
         let newest_time = frames.last().map(|frame| frame.time);
@@ -5343,6 +5495,7 @@ impl Playground {
     fn curve_probe_values(frame: &CurveProbeRecord, quantity: LineProbeQuantity) -> &[f32] {
         match quantity {
             LineProbeQuantity::Field => &frame.displacement,
+            LineProbeQuantity::Transverse => &frame.transverse_magnitude,
             LineProbeQuantity::Flux => &frame.normal_flux,
             LineProbeQuantity::Energy => &frame.energy_density,
         }
@@ -6040,14 +6193,14 @@ impl Playground {
                 if matches!(physics, PhysicsModel::Electromagnetic { .. }) {
                     ui.selectable_value(
                         &mut self.editor.document.presentation.vector_overlay,
-                        VectorOverlay::ComplementaryFieldRate,
-                        VectorOverlay::ComplementaryFieldRate.label(physics),
+                        VectorOverlay::ComplementaryField,
+                        VectorOverlay::ComplementaryField.label(physics),
                     );
                 }
                 ui.selectable_value(
                     &mut self.editor.document.presentation.vector_overlay,
                     VectorOverlay::RelativeEnergyFlow,
-                    "Relative energy flow",
+                    VectorOverlay::RelativeEnergyFlow.label(physics),
                 );
             });
         ui.add_enabled_ui(
@@ -6677,6 +6830,7 @@ impl Playground {
     }
 
     fn probes_panel(&mut self, ui: &mut egui::Ui) {
+        let physics = self.editor.document.model.accepted.physics;
         ui.add_space(6.0);
         self.panel_header(ui, "Probes");
         ui.horizontal_wrapped(|ui| {
@@ -6882,10 +7036,24 @@ impl Playground {
                             .get(&probe.id)
                             .and_then(|trace| trace.samples.back())
                         {
-                            ui.small(format!(
-                                "u {:+.3e} · energy {:.3e}",
-                                sample.displacement, sample.energy_density
-                            ));
+                            match physics {
+                                PhysicsModel::Mechanical => {
+                                    ui.small(format!(
+                                        "u {:+.3e} · energy {:.3e}",
+                                        sample.displacement, sample.energy_density
+                                    ));
+                                }
+                                PhysicsModel::Electromagnetic { .. } => {
+                                    ui.small(format!(
+                                        "{} {:+.3e} · {} {:.3e} · energy {:.3e}",
+                                        primary_field_label(physics),
+                                        sample.displacement,
+                                        transverse_field_magnitude_label(physics),
+                                        sample.transverse_magnitude,
+                                        sample.energy_density
+                                    ));
+                                }
+                            }
                         } else {
                             ui.small(if probe.enabled {
                                 "Waiting for samples"
@@ -6950,8 +7118,9 @@ impl Playground {
                             .and_then(|trace| trace.samples.back())
                         {
                             ui.small(format!(
-                                "mean u {:+.3e} · energy {:.3e} · {:.0}% coverage",
-                                sample.mean_displacement,
+                                "RMS {} {:.3e} · energy {:.3e} · {:.0}% coverage",
+                                primary_field_label(physics),
+                                sample.rms_displacement,
                                 sample.total_energy,
                                 sample.coverage * 100.0
                             ));
@@ -7283,7 +7452,7 @@ impl Playground {
             self.editor.set_physics(selected_physics);
             if selected_physics == PhysicsModel::Mechanical
                 && self.editor.document.presentation.vector_overlay
-                    == VectorOverlay::ComplementaryFieldRate
+                    == VectorOverlay::ComplementaryField
             {
                 self.editor.document.presentation.vector_overlay = VectorOverlay::Off;
             }
@@ -7510,7 +7679,10 @@ impl Playground {
                 self.wave_time_step,
             ));
             if let Some(energy) = self.wave_energy {
-                ui.small(format!("Discrete energy {energy:.6e}"));
+                ui.small(format!(
+                    "{} {energy:.6e}",
+                    total_energy_label(self.mesh_committed_scene.physics)
+                ));
             }
         } else if self.mesh.is_some() {
             ui.small("Preparing wave operator…");
@@ -11629,6 +11801,25 @@ const fn primary_field_rate_label(physics: PhysicsModel) -> &'static str {
     }
 }
 
+const fn total_energy_label(physics: PhysicsModel) -> &'static str {
+    match physics {
+        PhysicsModel::Mechanical => "Mechanical energy",
+        PhysicsModel::Electromagnetic { .. } => "Electromagnetic energy",
+    }
+}
+
+const fn transverse_field_magnitude_label(physics: PhysicsModel) -> &'static str {
+    match physics {
+        PhysicsModel::Mechanical => "",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        } => "Magnetic magnitude |H|",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => "Electric magnitude |E|",
+    }
+}
+
 fn material_coefficient_labels(physics: PhysicsModel) -> [&'static str; 3] {
     match physics {
         PhysicsModel::Mechanical => ["Density", "Stiffness", "Damping"],
@@ -11649,6 +11840,7 @@ fn vector_overlay_samples(
     if mesh.triangles.len() != operator.element_nodes().len()
         || display.indicator_displacement.len() != operator.degrees_of_freedom()
         || display.indicator_velocity.len() != operator.degrees_of_freedom()
+        || display.indicator_integral.len() != operator.degrees_of_freedom()
         || spacing <= 0.0
     {
         return vec![];
@@ -11688,7 +11880,7 @@ fn vector_overlay_samples(
     bins.into_iter()
         .filter_map(|(key, (element, screen, centroid, _))| {
             let triangle = &mesh.triangles[element];
-            let (_, gradient) = operator.element_value_and_gradient(
+            let (primary, gradient) = operator.element_value_and_gradient(
                 element,
                 &display.indicator_displacement,
                 [1.0 / 3.0; 3],
@@ -11696,6 +11888,11 @@ fn vector_overlay_samples(
             let (velocity, _) = operator.element_value_and_gradient(
                 element,
                 &display.indicator_velocity,
+                [1.0 / 3.0; 3],
+            )?;
+            let (_, integral_gradient) = operator.element_value_and_gradient(
+                element,
+                &display.indicator_integral,
                 [1.0 / 3.0; 3],
             )?;
             let region = scene.region(triangle.region)?;
@@ -11708,21 +11905,25 @@ fn vector_overlay_samples(
                 stiffness: raw.stiffness,
                 damping: raw.damping,
             };
+            let stiffness = scene.physics.wave_coefficients(properties).stiffness;
             let vector = match (mode, scene.physics) {
                 (
-                    VectorOverlay::ComplementaryFieldRate,
+                    VectorOverlay::ComplementaryField,
                     PhysicsModel::Electromagnetic {
                         polarization: ElectromagneticPolarization::Tm,
                     },
-                ) => Point2::new(-gradient.y, gradient.x) / raw.stiffness,
+                ) => Point2::new(-integral_gradient.y, integral_gradient.x) * stiffness,
                 (
-                    VectorOverlay::ComplementaryFieldRate,
+                    VectorOverlay::ComplementaryField,
                     PhysicsModel::Electromagnetic {
                         polarization: ElectromagneticPolarization::Te,
                     },
-                ) => Point2::new(gradient.y, -gradient.x) / raw.mass_density,
-                (VectorOverlay::RelativeEnergyFlow, _) => {
-                    gradient * (-scene.physics.wave_coefficients(properties).stiffness * velocity)
+                ) => Point2::new(integral_gradient.y, -integral_gradient.x) * stiffness,
+                (VectorOverlay::RelativeEnergyFlow, PhysicsModel::Electromagnetic { .. }) => {
+                    integral_gradient * (-stiffness * primary)
+                }
+                (VectorOverlay::RelativeEnergyFlow, PhysicsModel::Mechanical) => {
+                    gradient * (-stiffness * velocity)
                 }
                 _ => return None,
             };
@@ -12846,6 +13047,10 @@ pub fn wave_gpu_benchmark(
         record.time.is_finite()
             && record.displacement.is_finite()
             && record.velocity.is_finite()
+            && record.transverse_magnitude.is_finite()
+            && record.transverse_magnitude >= 0.0
+            && record.poynting_magnitude.is_finite()
+            && record.poynting_magnitude >= 0.0
             && record.energy_density.is_finite()
             && record.energy_density >= 0.0
     });
@@ -12854,14 +13059,21 @@ pub fn wave_gpu_benchmark(
             && record.displacement.len() == ProbeSamplingPreset::Medium.spatial_points()
             && record.energy_density.len() == record.displacement.len()
             && record.normal_flux.len() == record.displacement.len()
+            && record.transverse_magnitude.len() == record.displacement.len()
             && record
                 .displacement
                 .iter()
+                .zip(&record.transverse_magnitude)
                 .zip(&record.energy_density)
                 .zip(&record.normal_flux)
-                .all(|((field, energy), flux)| {
-                    field.is_finite() && energy.is_finite() && *energy >= 0.0 && flux.is_finite()
-                        || field.is_nan() && energy.is_nan() && flux.is_nan()
+                .all(|(((field, transverse), energy), flux)| {
+                    field.is_finite()
+                        && transverse.is_finite()
+                        && *transverse >= 0.0
+                        && energy.is_finite()
+                        && *energy >= 0.0
+                        && flux.is_finite()
+                        || field.is_nan() && transverse.is_nan() && energy.is_nan() && flux.is_nan()
                 })
     });
     let complete_line_records = curve_probe_display
@@ -12888,6 +13100,8 @@ pub fn wave_gpu_benchmark(
             && record.mean_displacement.is_finite()
             && record.rms_displacement.is_finite()
             && record.rms_displacement >= 0.0
+            && record.rms_transverse_magnitude.is_finite()
+            && record.rms_transverse_magnitude >= 0.0
             && record.mean_energy_density.is_finite()
             && record.mean_energy_density >= 0.0
             && record.total_energy.is_finite()
@@ -15597,10 +15811,11 @@ mod tests {
     }
 
     #[test]
-    fn area_readout_defaults_to_mean_field_and_total_energy() {
+    fn area_readout_defaults_to_rms_field_and_total_energy() {
         let view = ProbeViewState::new(10.0);
-        assert!(view.area_mean_field);
-        assert!(!view.area_rms_field);
+        assert!(!view.area_mean_field);
+        assert!(view.area_rms_field);
+        assert!(!view.area_rms_transverse);
         assert!(!view.area_mean_energy);
         assert!(view.area_total_energy);
     }
@@ -15611,6 +15826,7 @@ mod tests {
             probe_id: 1,
             time: 0.5,
             displacement: vec![0.0, 1.0, f32::NAN, 2.0, 4.0],
+            transverse_magnitude: vec![0.0, 1.0, f32::NAN, 2.0, 4.0],
             energy_density: vec![2.0, 4.0, f32::NAN, 8.0, 10.0],
             normal_flux: vec![1.0, 3.0, f32::NAN, -2.0, 2.0],
         };
@@ -15645,6 +15861,7 @@ mod tests {
                         probe_id: id.0,
                         time: index as f64 * 0.1,
                         displacement: vec![index as f32; 64],
+                        transverse_magnitude: vec![index as f32; 64],
                         energy_density: vec![index as f32; 64],
                         normal_flux: vec![index as f32; 64],
                     })
@@ -15686,7 +15903,7 @@ mod tests {
     }
 
     #[test]
-    fn line_probe_readout_defaults_to_four_of_nine_plots() {
+    fn line_probe_readout_defaults_to_four_of_twelve_plots() {
         let view = ProbeViewState::new(10.0);
         assert_eq!(
             view.line_plots.iter().filter(|enabled| **enabled).count(),
@@ -15756,6 +15973,7 @@ mod tests {
             probe_id: 1,
             time: 0.0,
             displacement: vec![1.0, 1.0, 1.0, 1.0],
+            transverse_magnitude: vec![0.0; 4],
             energy_density: vec![0.0; 4],
             normal_flux: vec![0.0; 4],
         };
@@ -15804,7 +16022,7 @@ mod tests {
         );
         assert!(h.texts.iter().any(|(text, _)| text == "Waterfall gain"));
 
-        let flux_waterfall = checkbox_position(&h.texts, "Normal flux", "Waterfall");
+        let flux_waterfall = checkbox_position(&h.texts, "Normal energy flux", "Waterfall");
         h.click(flux_waterfall);
         assert_eq!(
             h.state.probe_views[&id]
@@ -15904,6 +16122,7 @@ mod tests {
                 displacement: 0.0,
                 velocity: 0.0,
                 energy_density: 0.0,
+                ..Default::default()
             })
             .collect::<Vec<_>>();
         let mut view = ProbeViewState::new(2.0);
@@ -15943,6 +16162,7 @@ mod tests {
                 displacement: 1.0,
                 velocity: 2.0,
                 energy_density: 3.0,
+                ..Default::default()
             }],
             readbacks: 1,
         };
@@ -16143,6 +16363,7 @@ mod tests {
                     displacement: 1.0,
                     velocity: 2.0,
                     energy_density: 3.0,
+                    ..Default::default()
                 })
                 .collect(),
             readbacks,
@@ -16193,6 +16414,7 @@ mod tests {
                     time: *time,
                     mean_displacement: 1.0,
                     rms_displacement: 2.0,
+                    rms_transverse_magnitude: 2.5,
                     mean_energy_density: 3.0,
                     total_energy: 4.0,
                     covered_area: 0.1,
@@ -16226,6 +16448,7 @@ mod tests {
                 displacement: 0.0,
                 velocity: 0.0,
                 energy_density: 0.0,
+                ..Default::default()
             })
             .collect::<Vec<_>>();
         let mut view = ProbeViewState::new(10.0);
@@ -16267,6 +16490,7 @@ mod tests {
                         displacement: index as f64,
                         velocity: 0.0,
                         energy_density: 0.0,
+                        ..Default::default()
                     })
                     .collect(),
                 accept_after: 0.0,
@@ -16327,6 +16551,7 @@ mod tests {
                 displacement: 101.0,
                 velocity: 0.0,
                 energy_density: 0.0,
+                ..Default::default()
             });
         h.frame(vec![]);
         assert!((h.state.probe_views[&id].end_time - panned_end).abs() < 1.0e-12);
@@ -17073,7 +17298,7 @@ mod tests {
     }
 
     #[test]
-    fn vector_overlay_derives_tm_field_rate_and_relative_flow_from_p2_data() {
+    fn vector_overlay_derives_tm_field_and_poynting_flow_from_integrated_p2_data() {
         let mut h = Harness::new();
         build_mesh_candidate(&mut h.state);
         commit_mesh_without_gpu(&mut h.state);
@@ -17089,26 +17314,27 @@ mod tests {
                 .iter()
                 .map(|point| point.x as f32)
                 .collect(),
-            indicator_displacement: operator
+            indicator_displacement: vec![2.0; operator.degrees_of_freedom()],
+            indicator_velocity: vec![2.0; operator.degrees_of_freedom()],
+            indicator_integral: operator
                 .node_points()
                 .iter()
                 .map(|point| point.x as f32)
                 .collect(),
-            indicator_velocity: vec![2.0; operator.degrees_of_freedom()],
             ..Default::default()
         };
-        let field_rate = vector_overlay_samples(
+        let field = vector_overlay_samples(
             &scene,
             mesh,
             operator,
             &display,
-            VectorOverlay::ComplementaryFieldRate,
+            VectorOverlay::ComplementaryField,
             54.0,
             (Point2::default(), 280.0, h.rect),
         );
-        assert!(!field_rate.is_empty());
+        assert!(!field.is_empty());
         assert!(
-            field_rate.iter().all(|(_, _, vector)| {
+            field.iter().all(|(_, _, vector)| {
                 vector.x.abs() < 1.0e-5 && (vector.y - 1.0).abs() < 1.0e-5
             })
         );
@@ -17125,6 +17351,60 @@ mod tests {
         assert!(
             flow.iter().all(|(_, _, vector)| {
                 (vector.x + 2.0).abs() < 1.0e-5 && vector.y.abs() < 1.0e-5
+            })
+        );
+    }
+
+    #[test]
+    fn vector_overlay_derives_te_electric_field_with_permittivity_scaling() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let mesh = h.state.wave_mesh.as_ref().unwrap();
+        let operator = h.state.wave_operator.as_ref().unwrap();
+        let mut scene = h.state.mesh_committed_scene.clone();
+        scene.physics = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        scene.materials[0].mass_density = ScalarField::constant(4.0);
+        let display = WaveDisplay {
+            indicator_displacement: vec![2.0; operator.degrees_of_freedom()],
+            indicator_velocity: vec![0.0; operator.degrees_of_freedom()],
+            indicator_integral: operator
+                .node_points()
+                .iter()
+                .map(|point| point.x as f32)
+                .collect(),
+            ..Default::default()
+        };
+        let field = vector_overlay_samples(
+            &scene,
+            mesh,
+            operator,
+            &display,
+            VectorOverlay::ComplementaryField,
+            54.0,
+            (Point2::default(), 280.0, h.rect),
+        );
+        assert!(!field.is_empty());
+        assert!(
+            field.iter().all(|(_, _, vector)| {
+                vector.x.abs() < 1.0e-5 && (vector.y + 0.25).abs() < 1.0e-5
+            })
+        );
+        let flow = vector_overlay_samples(
+            &scene,
+            mesh,
+            operator,
+            &display,
+            VectorOverlay::RelativeEnergyFlow,
+            54.0,
+            (Point2::default(), 280.0, h.rect),
+        );
+        assert!(!flow.is_empty());
+        assert!(
+            flow.iter().all(|(_, _, vector)| {
+                (vector.x + 0.5).abs() < 1.0e-5 && vector.y.abs() < 1.0e-5
             })
         );
     }

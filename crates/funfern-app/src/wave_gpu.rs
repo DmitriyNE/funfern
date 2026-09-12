@@ -28,9 +28,10 @@ use bevy::{
     },
 };
 use funfern_core::{
-    CompiledVolumeSources, MAX_VOLUME_SOURCES, NO_VOLUME_SOURCE, OuterBoundaryConditions, Point2,
-    PointSource, QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil,
-    QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh,
+    CompiledVolumeSources, MAX_VOLUME_SOURCES, NO_VOLUME_SOURCE, OuterBoundaryConditions,
+    PhysicsModel, Point2, PointSource, QuadraticAreaElement, QuadraticAreaStencil,
+    QuadraticPointStencil, QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState,
+    RegionId, TimeSignal, TriMesh,
 };
 
 const WORKGROUP_SIZE: u32 = 128;
@@ -299,6 +300,7 @@ impl WaveGpuRequest {
         probes: &[(u64, Option<QuadraticPointStencil>)],
         sample_rate: f64,
         time_step: f64,
+        physics: PhysicsModel,
     ) -> Result<(), String> {
         if probes.len() > MAX_POINT_PROBES
             || !sample_rate.is_finite()
@@ -322,12 +324,13 @@ impl WaveGpuRequest {
                 sample_stride as f32,
                 PROBE_RING_FRAMES as f32,
                 probes.len() as f32,
-                0.0,
+                probe_physics_flag(physics),
             ),
         };
         let output = vec![
-            GpuProbeSample {
-                values: Vec4::splat(f32::NAN),
+            GpuPointProbeSample {
+                primary: Vec4::splat(f32::NAN),
+                secondary: Vec4::splat(f32::NAN),
             };
             PROBE_RING_FRAMES * MAX_POINT_PROBES
         ];
@@ -373,6 +376,7 @@ impl WaveGpuRequest {
         commands: &mut Commands,
         probes: &[CurveProbeInput],
         time_step: f64,
+        physics: PhysicsModel,
     ) -> Result<(), String> {
         if !time_step.is_finite() || time_step <= 0.0 {
             return Err("Invalid line-probe recorder timestep".into());
@@ -423,12 +427,13 @@ impl WaveGpuRequest {
                 point_count as f32,
                 CURVE_PROBE_RING_FRAMES as f32,
                 MAX_CURVE_PROBE_POINTS as f32,
-                0.0,
+                probe_physics_flag(physics),
             ),
         };
         let output = vec![
-            GpuProbeSample {
-                values: Vec4::splat(f32::NAN),
+            GpuCurveProbeSample {
+                primary: Vec4::splat(f32::NAN),
+                secondary: Vec4::splat(f32::NAN),
             };
             CURVE_PROBE_RING_FRAMES * MAX_CURVE_PROBE_POINTS
         ];
@@ -480,6 +485,7 @@ impl WaveGpuRequest {
         probes: &[AreaProbeInput],
         sample_rate: f64,
         time_step: f64,
+        physics: PhysicsModel,
     ) -> Result<(), String> {
         let contribution_count = probes
             .iter()
@@ -516,7 +522,7 @@ impl WaveGpuRequest {
                         .elements
                         .iter()
                         .copied()
-                        .map(gpu_area_probe_contribution),
+                        .map(|element| gpu_area_probe_contribution(element, physics)),
                 );
                 descriptors.push(GpuAreaProbeDescriptor {
                     offset_count: UVec4::new(offset, stencil.elements.len() as u32, 0, 0),
@@ -549,6 +555,10 @@ impl WaveGpuRequest {
                     .stiffness
                     .iter()
                     .any(|values| !values.is_finite())
+                || contribution
+                    .stiffness_squared
+                    .iter()
+                    .any(|values| !values.is_finite())
                 || !contribution.material_area.is_finite()
         }) || descriptors
             .iter()
@@ -564,11 +574,12 @@ impl WaveGpuRequest {
                 contribution_count as f32,
             ),
         };
-        let scratch = vec![GpuProbeSample::default(); contribution_count.max(1)];
+        let scratch = vec![GpuAreaProbeContributionSample::default(); contribution_count.max(1)];
         let output = vec![
             GpuAreaProbeSample {
                 primary: Vec4::splat(f32::NAN),
                 secondary: Vec4::splat(f32::NAN),
+                tertiary: Vec4::splat(f32::NAN),
             };
             AREA_PROBE_RING_FRAMES * MAX_POINT_PROBES
         ];
@@ -1285,6 +1296,7 @@ fn create_buffers(
                 if awaits_transfer { -1.0 } else { 0.0 },
             ),
             auxiliary: Vec4::new(*auxiliary as f32, 0.0, 0.0, *current as f32),
+            integral: Vec4::ZERO,
         })
         .collect::<Vec<_>>();
     Ok((
@@ -1601,6 +1613,8 @@ pub struct WaveDisplay {
     pub indicator_displacement: Vec<f32>,
     pub indicator_velocity: Vec<f32>,
     pub indicator_acceleration: Vec<f32>,
+    /// Time integral of the primary field aligned with the indicator fields.
+    pub indicator_integral: Vec<f32>,
     pub completed_steps: u64,
     pub readbacks: u64,
 }
@@ -1667,30 +1681,34 @@ struct FarFieldReadbackTag {
     revision: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PointProbeRecord {
     pub probe_id: u64,
     pub time: f64,
     pub displacement: f64,
     pub velocity: f64,
+    pub transverse_magnitude: f64,
+    pub poynting_magnitude: f64,
     pub energy_density: f64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CurveProbeRecord {
     pub probe_id: u64,
     pub time: f64,
     pub displacement: Vec<f32>,
+    pub transverse_magnitude: Vec<f32>,
     pub energy_density: Vec<f32>,
     pub normal_flux: Vec<f32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AreaProbeRecord {
     pub probe_id: u64,
     pub time: f64,
     pub mean_displacement: f64,
     pub rms_displacement: f64,
+    pub rms_transverse_magnitude: f64,
     pub mean_energy_density: f64,
     pub total_energy: f64,
     pub covered_area: f64,
@@ -1803,6 +1821,7 @@ struct GpuForcingWeights {
 struct GpuState {
     levels: Vec4,
     auxiliary: Vec4,
+    integral: Vec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -1829,6 +1848,18 @@ struct GpuProbeSample {
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
+struct GpuPointProbeSample {
+    primary: Vec4,
+    secondary: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuCurveProbeSample {
+    primary: Vec4,
+    secondary: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
 struct GpuCurveProbeStencil {
     nodes_a: UVec4,
     nodes_b: UVec4,
@@ -1851,6 +1882,7 @@ struct GpuAreaProbeContribution {
     mass: [Vec4; 7],
     density: [Vec4; 7],
     stiffness: [Vec4; 7],
+    stiffness_squared: [Vec4; 7],
     material_area: Vec4,
 }
 
@@ -1864,6 +1896,12 @@ struct GpuAreaProbeDescriptor {
 struct GpuAreaProbeSample {
     primary: Vec4,
     secondary: Vec4,
+    tertiary: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuAreaProbeContributionSample {
+    primary: Vec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -1921,6 +1959,13 @@ fn gpu_probe_stencil(stencil: Option<QuadraticPointStencil>) -> GpuProbeStencil 
     }
 }
 
+const fn probe_physics_flag(physics: PhysicsModel) -> f32 {
+    match physics {
+        PhysicsModel::Mechanical => 0.0,
+        PhysicsModel::Electromagnetic { .. } => 1.0,
+    }
+}
+
 fn gpu_curve_probe_stencil(
     sample: Option<(QuadraticPointStencil, Point2)>,
     stride: u64,
@@ -1954,7 +1999,10 @@ fn pack_area_matrix(values: [f64; 28]) -> [Vec4; 7] {
     })
 }
 
-fn gpu_area_probe_contribution(element: QuadraticAreaElement) -> GpuAreaProbeContribution {
+fn gpu_area_probe_contribution(
+    element: QuadraticAreaElement,
+    physics: PhysicsModel,
+) -> GpuAreaProbeContribution {
     let matrices = element.integrated_matrices();
     GpuAreaProbeContribution {
         nodes_a: UVec4::new(
@@ -1979,7 +2027,8 @@ fn gpu_area_probe_contribution(element: QuadraticAreaElement) -> GpuAreaProbeCon
         mass: pack_area_matrix(matrices.mass),
         density: pack_area_matrix(matrices.density),
         stiffness: pack_area_matrix(matrices.stiffness),
-        material_area: Vec4::new(0.0, 0.0, element.area as f32, 1.0),
+        stiffness_squared: pack_area_matrix(matrices.stiffness_squared),
+        material_area: Vec4::new(probe_physics_flag(physics), 0.0, element.area as f32, 1.0),
     }
 }
 
@@ -2034,10 +2083,9 @@ fn receive_readback(
     if states[0].levels.w < 0.0 {
         return;
     }
-    if states
-        .iter()
-        .any(|state| !state.levels.is_finite() || !state.auxiliary.is_finite())
-    {
+    if states.iter().any(|state| {
+        !state.levels.is_finite() || !state.auxiliary.is_finite() || !state.integral.is_finite()
+    }) {
         tag.stats.status.store(STATUS_ERROR, Ordering::Relaxed);
         return;
     }
@@ -2052,12 +2100,14 @@ fn receive_readback(
     display.indicator_displacement.clear();
     display.indicator_velocity.clear();
     display.indicator_acceleration.clear();
+    display.indicator_integral.clear();
     display.current.reserve(states.len());
     display.previous.reserve(states.len());
     display.auxiliary.reserve(states.len());
     display.indicator_displacement.reserve(states.len());
     display.indicator_velocity.reserve(states.len());
     display.indicator_acceleration.reserve(states.len());
+    display.indicator_integral.reserve(states.len());
     for state in states {
         display.current.push(state.levels.y);
         display.previous.push(state.levels.x);
@@ -2065,6 +2115,7 @@ fn receive_readback(
         display.indicator_acceleration.push(state.auxiliary.y);
         display.indicator_velocity.push(state.auxiliary.z);
         display.indicator_displacement.push(state.auxiliary.w);
+        display.indicator_integral.push(state.integral.y);
     }
     display.readbacks = display.readbacks.saturating_add(1);
 }
@@ -2077,21 +2128,23 @@ fn receive_probe_readback(
     let Ok(tag) = tags.get(event.entity) else {
         return;
     };
-    let samples: Vec<GpuProbeSample> = event.to_shader_type();
+    let samples: Vec<GpuPointProbeSample> = event.to_shader_type();
     if samples.len() != PROBE_RING_FRAMES * MAX_POINT_PROBES {
         return;
     }
     let mut records = Vec::new();
     for frame in 0..PROBE_RING_FRAMES {
         for (slot, id) in tag.ids.iter().copied().enumerate() {
-            let value = samples[frame * MAX_POINT_PROBES + slot].values;
-            if value.is_finite() {
+            let sample = samples[frame * MAX_POINT_PROBES + slot];
+            if sample.primary.is_finite() && sample.secondary.is_finite() {
                 records.push(PointProbeRecord {
                     probe_id: id,
-                    time: value.w as f64,
-                    displacement: value.x as f64,
-                    velocity: value.y as f64,
-                    energy_density: value.z as f64,
+                    time: sample.primary.w as f64,
+                    displacement: sample.primary.x as f64,
+                    velocity: sample.primary.y as f64,
+                    energy_density: sample.primary.z as f64,
+                    transverse_magnitude: sample.secondary.x as f64,
+                    poynting_magnitude: sample.secondary.y as f64,
                 });
             }
         }
@@ -2115,7 +2168,7 @@ fn receive_curve_probe_readback(
     let Ok(tag) = tags.get(event.entity) else {
         return;
     };
-    let samples: Vec<GpuProbeSample> = event.to_shader_type();
+    let samples: Vec<GpuCurveProbeSample> = event.to_shader_type();
     if samples.len() != CURVE_PROBE_RING_FRAMES * MAX_CURVE_PROBE_POINTS {
         return;
     }
@@ -2129,7 +2182,7 @@ fn receive_curve_probe_readback(
             };
             let Some(time) = values
                 .iter()
-                .map(|sample| sample.values.w)
+                .map(|sample| sample.primary.w)
                 .find(|time| time.is_finite())
             else {
                 continue;
@@ -2137,9 +2190,10 @@ fn receive_curve_probe_readback(
             records.push(CurveProbeRecord {
                 probe_id: descriptor.id,
                 time: time as f64,
-                displacement: values.iter().map(|sample| sample.values.x).collect(),
-                energy_density: values.iter().map(|sample| sample.values.y).collect(),
-                normal_flux: values.iter().map(|sample| sample.values.z).collect(),
+                displacement: values.iter().map(|sample| sample.primary.x).collect(),
+                transverse_magnitude: values.iter().map(|sample| sample.secondary.x).collect(),
+                energy_density: values.iter().map(|sample| sample.primary.y).collect(),
+                normal_flux: values.iter().map(|sample| sample.primary.z).collect(),
             });
         }
     }
@@ -2172,17 +2226,19 @@ fn receive_area_probe_readback(
             let sample = samples[frame * MAX_POINT_PROBES + slot];
             if sample.primary.is_finite()
                 && sample.secondary.is_finite()
-                && sample.secondary.w >= 0.5
+                && sample.tertiary.is_finite()
+                && sample.tertiary.x >= 0.5
             {
                 records.push(AreaProbeRecord {
                     probe_id: id,
-                    time: sample.secondary.z as f64,
+                    time: sample.secondary.w as f64,
                     mean_displacement: sample.primary.x as f64,
                     rms_displacement: sample.primary.y as f64,
-                    mean_energy_density: sample.primary.z as f64,
-                    total_energy: sample.primary.w as f64,
-                    covered_area: sample.secondary.x as f64,
-                    coverage: sample.secondary.y as f64,
+                    rms_transverse_magnitude: sample.primary.z as f64,
+                    mean_energy_density: sample.primary.w as f64,
+                    total_energy: sample.secondary.x as f64,
+                    covered_area: sample.secondary.y as f64,
+                    coverage: sample.secondary.z as f64,
                 });
             }
         }
@@ -2347,7 +2403,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuState>>(false),
                 storage_buffer_read_only::<Vec<GpuProbeStencil>>(false),
                 storage_buffer_read_only::<GpuProbeControl>(false),
-                storage_buffer::<Vec<GpuProbeSample>>(false),
+                storage_buffer::<Vec<GpuPointProbeSample>>(false),
             ),
         ),
     );
@@ -2367,7 +2423,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuState>>(false),
                 storage_buffer_read_only::<Vec<GpuCurveProbeStencil>>(false),
                 storage_buffer_read_only::<GpuProbeControl>(false),
-                storage_buffer::<Vec<GpuProbeSample>>(false),
+                storage_buffer::<Vec<GpuCurveProbeSample>>(false),
             ),
         ),
     );
@@ -2388,7 +2444,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuAreaProbeContribution>>(false),
                 storage_buffer_read_only::<Vec<GpuAreaProbeDescriptor>>(false),
                 storage_buffer_read_only::<GpuProbeControl>(false),
-                storage_buffer::<Vec<GpuProbeSample>>(false),
+                storage_buffer::<Vec<GpuAreaProbeContributionSample>>(false),
                 storage_buffer::<Vec<GpuAreaProbeSample>>(false),
             ),
         ),
@@ -3413,13 +3469,41 @@ mod tests {
         let shader = include_str!("probe.wgsl");
         assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
         assert!(!shader.contains("control.values.w + parameters.time_data.z"));
+        assert!(shader.contains("stencil.material.x * displacement * displacement"));
+        assert!(shader.contains("let poynting = select(0.0, abs(displacement) * transverse"));
+    }
+
+    #[test]
+    fn wave_integral_is_centered_and_transfers_with_the_primary_state() {
+        let wave = include_str!("wave.wgsl");
+        assert!(wave.contains("states[i].integral.y = states[i].integral.x"));
+        assert!(wave.contains("states[i].integral.x += 0.5 * parameters.time_data.x"));
+        let old_transfer = include_str!("wave_transfer_old.wgsl");
+        assert!(
+            old_transfer.contains("mapped_integral += weight * states[source_index].integral.x")
+        );
+        assert!(old_transfer.contains("mapped_auxiliary, mapped_integral"));
+        let new_transfer = include_str!("wave_transfer_new.wgsl");
+        assert!(new_transfer.contains(
+            "states[i].integral = vec4<f32>(transfers[i].mapped.w, transfers[i].mapped.w"
+        ));
+        for shader in [
+            include_str!("probe.wgsl"),
+            include_str!("curve_probe.wgsl"),
+            include_str!("area_probe.wgsl"),
+            include_str!("far_field.wgsl"),
+        ] {
+            assert!(shader.contains("integral: vec4<f32>"));
+        }
     }
 
     #[test]
     fn curve_probe_shader_records_profile_energy_flux_and_gaps() {
         let shader = include_str!("curve_probe.wgsl");
         assert!(shader.contains("let normal_gradient"));
-        assert!(shader.contains("let flux = -stencil.material.y * velocity * normal_gradient"));
+        assert!(shader.contains("-stencil.material.y * velocity * normal_gradient"));
+        assert!(shader.contains("-stencil.material.y * displacement * integral_normal_gradient"));
+        assert!(shader.contains("let transverse = select("));
         assert!(shader.contains("bitcast<f32>(0x7fc00000u | (point & 1u))"));
         assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
     }
@@ -3454,7 +3538,7 @@ mod tests {
             area: 0.5,
         };
         let matrices = element.integrated_matrices();
-        let uploaded = gpu_area_probe_contribution(element);
+        let uploaded = gpu_area_probe_contribution(element, PhysicsModel::Mechanical);
         assert_eq!(
             uploaded.field_a.to_array(),
             [
@@ -3491,6 +3575,10 @@ mod tests {
             &unpack(uploaded.stiffness)[..28],
             &matrices.stiffness.map(|v| v as f32)
         );
+        assert_eq!(
+            &unpack(uploaded.stiffness_squared)[..28],
+            &matrices.stiffness_squared.map(|v| v as f32)
+        );
     }
 
     #[test]
@@ -3498,8 +3586,13 @@ mod tests {
         let shader = include_str!("area_probe.wgsl");
         assert!(shader.contains("fn sample_area_elements"));
         assert!(shader.contains("fn reduce_area_probes"));
-        assert!(shader.contains("let mean = accumulated.x / covered_area"));
-        assert!(shader.contains("let rms = sqrt(max(accumulated.y / covered_area, 0.0))"));
+        assert!(shader.contains("let mean = accumulated_primary.x / covered_area"));
+        assert!(shader.contains("let rms = sqrt(max(accumulated_primary.y / covered_area, 0.0))"));
+        assert!(
+            shader.contains(
+                "let rms_transverse = sqrt(max(accumulated_primary.z / covered_area, 0.0))"
+            )
+        );
         assert!(shader.contains("bitcast<f32>(0x7fc00000u | (probe & 1u))"));
         assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
     }

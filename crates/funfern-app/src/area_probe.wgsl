@@ -6,6 +6,7 @@ struct Parameters {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
+    integral: vec4<f32>,
 }
 
 struct AreaContribution {
@@ -16,7 +17,8 @@ struct AreaContribution {
     mass: array<vec4<f32>, 7>,
     density: array<vec4<f32>, 7>,
     stiffness: array<vec4<f32>, 7>,
-    // Unused, unused, clipped element area, validity.
+    stiffness_squared: array<vec4<f32>, 7>,
+    // EM mode, unused, clipped element area, validity.
     material_area: vec4<f32>,
 }
 
@@ -32,16 +34,18 @@ struct ProbeControl {
     values: vec4<f32>,
 }
 
-struct ProbeSample {
-    // Integral of u, integral of u², total energy, covered area.
-    values: vec4<f32>,
+struct ContributionSample {
+    // Integral of u, integral of u², integral of transverse magnitude², energy.
+    primary: vec4<f32>,
 }
 
 struct AreaSample {
-    // Mean u, RMS u, mean energy density, total energy.
+    // Mean u, RMS u, RMS transverse magnitude, mean energy density.
     primary: vec4<f32>,
-    // Covered area, coverage, physical time, validity.
+    // Total energy, covered area, coverage, physical time.
     secondary: vec4<f32>,
+    // Validity, unused, unused, unused.
+    tertiary: vec4<f32>,
 }
 
 @group(0) @binding(0) var<storage, read> parameters: Parameters;
@@ -49,7 +53,7 @@ struct AreaSample {
 @group(0) @binding(2) var<storage, read> contributions: array<AreaContribution>;
 @group(0) @binding(3) var<storage, read> descriptors: array<AreaDescriptor>;
 @group(0) @binding(4) var<storage, read> control: ProbeControl;
-@group(0) @binding(5) var<storage, read_write> scratch: array<ProbeSample>;
+@group(0) @binding(5) var<storage, read_write> scratch: array<ContributionSample>;
 @group(0) @binding(6) var<storage, read_write> output: array<AreaSample>;
 
 fn packed(values: array<vec4<f32>, 7>, index: u32) -> f32 {
@@ -72,6 +76,7 @@ fn sample_area_elements(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let b = contribution.nodes_b;
     var u: array<f32, 7>;
     var v: array<f32, 7>;
+    var integral: array<f32, 7>;
     u[0] = states[a.x].auxiliary.w;
     u[1] = states[a.y].auxiliary.w;
     u[2] = states[a.z].auxiliary.w;
@@ -86,12 +91,21 @@ fn sample_area_elements(@builtin(global_invocation_id) invocation: vec3<u32>) {
     v[4] = states[b.x].auxiliary.z;
     v[5] = states[b.y].auxiliary.z;
     v[6] = states[b.z].auxiliary.z;
+    integral[0] = states[a.x].integral.y;
+    integral[1] = states[a.y].integral.y;
+    integral[2] = states[a.z].integral.y;
+    integral[3] = states[a.w].integral.y;
+    integral[4] = states[b.x].integral.y;
+    integral[5] = states[b.y].integral.y;
+    integral[6] = states[b.z].integral.y;
 
     let field = dot(vec4<f32>(u[0], u[1], u[2], u[3]), contribution.field_a)
         + dot(vec4<f32>(u[4], u[5], u[6], 0.0), contribution.field_b);
     var field_squared = 0.0;
-    var kinetic = 0.0;
-    var potential = 0.0;
+    var primary_energy = 0.0;
+    var gradient_energy = 0.0;
+    var transverse_squared = 0.0;
+    let electromagnetic = contribution.material_area.x > 0.5;
     var entry = 0u;
     for (var row = 0u; row < 7u; row += 1u) {
         for (var column = row; column < 7u; column += 1u) {
@@ -102,17 +116,24 @@ fn sample_area_elements(@builtin(global_invocation_id) invocation: vec3<u32>) {
             let mass = packed(contribution.mass, entry);
             let stiffness = packed(contribution.stiffness, entry);
             field_squared += symmetry * mass * u[row] * u[column];
-            kinetic += symmetry * packed(contribution.density, entry) * v[row] * v[column];
-            potential += symmetry * stiffness * u[row] * u[column];
+            primary_energy += symmetry * packed(contribution.density, entry)
+                * select(v[row] * v[column], u[row] * u[column], electromagnetic);
+            gradient_energy += symmetry * stiffness
+                * select(u[row] * u[column], integral[row] * integral[column], electromagnetic);
+            if electromagnetic {
+                transverse_squared += symmetry
+                    * packed(contribution.stiffness_squared, entry)
+                    * integral[row] * integral[column];
+            }
             entry += 1u;
         }
     }
-    let energy = 0.5 * (kinetic + potential);
-    scratch[element_index].values = vec4<f32>(
+    let energy = 0.5 * (primary_energy + gradient_energy);
+    scratch[element_index].primary = vec4<f32>(
         field,
         field_squared,
+        transverse_squared,
         energy,
-        contribution.material_area.z,
     );
 }
 
@@ -134,23 +155,26 @@ fn reduce_area_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
     let nan = bitcast<f32>(0x7fc00000u | (probe & 1u));
     if descriptor.offset_count.y == 0u || descriptor.areas.x <= 0.0 {
         output[output_index].primary = vec4<f32>(nan);
-        output[output_index].secondary = vec4<f32>(nan, nan, nan, 0.0);
+        output[output_index].secondary = vec4<f32>(nan);
+        output[output_index].tertiary = vec4<f32>(0.0);
         return;
     }
 
-    var accumulated = vec4<f32>(0.0);
+    var accumulated_primary = vec4<f32>(0.0);
     let end = descriptor.offset_count.x + descriptor.offset_count.y;
     for (var index = descriptor.offset_count.x; index < end; index += 1u) {
-        accumulated += scratch[index].values;
+        accumulated_primary += scratch[index].primary;
     }
     let covered_area = descriptor.areas.x;
     let target_area = descriptor.areas.y;
-    let mean = accumulated.x / covered_area;
-    let rms = sqrt(max(accumulated.y / covered_area, 0.0));
-    let total_energy = max(accumulated.z, 0.0);
+    let mean = accumulated_primary.x / covered_area;
+    let rms = sqrt(max(accumulated_primary.y / covered_area, 0.0));
+    let rms_transverse = sqrt(max(accumulated_primary.z / covered_area, 0.0));
+    let total_energy = max(accumulated_primary.w, 0.0);
     let mean_energy = total_energy / covered_area;
     let coverage = select(0.0, clamp(covered_area / target_area, 0.0, 1.0), target_area > 0.0);
     let time = parameters.time_data.z - parameters.time_data.x;
-    output[output_index].primary = vec4<f32>(mean, rms, mean_energy, total_energy);
-    output[output_index].secondary = vec4<f32>(covered_area, coverage, time, 1.0);
+    output[output_index].primary = vec4<f32>(mean, rms, rms_transverse, mean_energy);
+    output[output_index].secondary = vec4<f32>(total_energy, covered_area, coverage, time);
+    output[output_index].tertiary = vec4<f32>(1.0, 0.0, 0.0, 0.0);
 }

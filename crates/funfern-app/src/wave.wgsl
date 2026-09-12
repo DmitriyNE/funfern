@@ -50,6 +50,7 @@ struct MatrixEntry {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
+    integral: vec4<f32>,
 }
 
 @group(0) @binding(0) var<storage, read_write> parameters: Parameters;
@@ -110,6 +111,8 @@ fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let dt = parameters.time_data.x;
+    // Keep the readback value aligned with auxiliary.w/auxiliary.z at u^n.
+    states[i].integral.y = states[i].integral.x;
     let dirichlet = nodes[i].boundary.x;
     if dirichlet != 0u {
         let previous = signal_value(nodes[i].dirichlet_signal, parameters.time_data.z - dt);
@@ -173,6 +176,8 @@ fn rotate(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         states[i].auxiliary.x = 0.0;
     }
+    states[i].integral.x += 0.5 * parameters.time_data.x
+        * (states[i].levels.y + states[i].levels.z);
     states[i].levels.x = states[i].levels.y;
     states[i].levels.y = states[i].levels.z;
     if i == 0u {

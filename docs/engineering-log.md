@@ -54,6 +54,27 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-13 — Reconstructed EM fields and physical probe observables
+
+- Added one trapezoidally integrated primary-field value per GPU DOF. Ordinary
+  remesh and AMR transfer carry it with displacement and velocity, and fresh scenes
+  initialize it to zero.
+- Replaced the temporary EM time-derivative arrows with reconstructed transverse
+  fields: `H = (-A_y, A_x)/mu` for TM and `E = (A_y, -A_x)/epsilon` for TE. The EM
+  flow overlay now shows the Poynting vector `-k u grad(A)`.
+- Updated the EM energy diagnostic to `(m u² + k |grad A|²)/2`. Point probes expose
+  signed `E_z`/`H_z`, transverse magnitude, Poynting magnitude, and energy; curve
+  probes expose the same scalar observables with signed normal Poynting flux; area
+  probes add RMS transverse magnitude. Mechanical probe behavior remains unchanged,
+  and no Cartesian component or abstract complementary-field trace is exposed.
+- Kept the wave pipeline within WebGPU's eight-storage-binding budget by extending
+  the existing aligned state record. Added CPU formula, transfer, shader-source,
+  readback-layout, and UI regression coverage.
+- Verification passes: `cargo test --workspace --no-fail-fast`, warning-denied
+  Clippy for all workspace targets, the optimized native build and Metal pipeline
+  startup, and `trunk build --release`. Interactive browser checks remain local and
+  were not repeated for this slice.
+
 ## 2026-09-13 — Mechanical and TE/TM electromagnetic skins
 
 - Added an undoable scene physics model with Mechanical, EM/TM (`E_z`), and EM/TE

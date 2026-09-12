@@ -65,8 +65,8 @@ covers points, independent straight line segments, geometry-attached boundary ru
 free disks, and stable material regions. The far-field monitor is singleton
 document state rather than another selectable probe: it is enabled with one inset
 distance and derives its contour from the outer domain. Point readouts share one
-pan/zoom time window across their independently hideable field, velocity, and energy
-sections; Live mode follows the newest solver-clock sample. Probe timestamps come
+pan/zoom time window across their independently hideable observable sections; Live
+mode follows the newest solver-clock sample. Probe timestamps come
 directly from the solver's transferred absolute clock. The host handoff offset is
 only used to report progress since the generation-local step counter restarts.
 
@@ -206,13 +206,17 @@ scene layer: PEC is zero `E_z` for TM and zero normal `H_z` flux for TE; PMC is 
 dual. Assembly and the AMR boundary estimator resolve those semantic variants to
 the existing scalar Dirichlet or Neumann implementation before numerical work.
 
-The first vector display is derived on the CPU from the synchronized P2 readback.
-At element sample points it evaluates the quadratic gradient and shows
-`H_t = (-E_z,y, E_z,x)/mu` for TM or `E_t = (H_z,y, -H_z,x)/epsilon` for TE. A
-second mode shows the reduced scalar energy-flow direction `-k u_t grad(u)`.
-Screen bins bound arrow density and an exponential display filter reduces jitter.
-These arrows do not add solver unknowns or a WebGPU binding and are intentionally
-not presented as a simultaneous full-vector Maxwell state.
+The GPU state stores a time integral `A = integral(u dt)` beside each primary scalar
+DOF and advances it with the same trapezoidal rule used by the centered wave step.
+Transfer interpolates `A` with the displacement and velocity fields, so ordinary
+remeshing and AMR handoffs preserve the reconstructed EM field. At display sample
+points the CPU evaluates its quadratic gradient and reconstructs
+`H = (-A_y, A_x)/mu` for TM or `E = (A_y, -A_x)/epsilon` for TE. The corresponding
+Poynting vector is `S = -k u grad(A)`, where `k` is `1/mu` for TM or `1/epsilon`
+for TE. Screen bins bound arrow density and an exponential display filter reduces
+jitter. Mechanical scenes retain the prior `-k u_t grad(u)` energy-flow display.
+These arrows derive the transverse field belonging to one scalar polarization and
+are not presented as a simultaneous full-vector Maxwell state.
 Autosave retains both the accepted scene and any invalid editable draft, writing to
 browser local storage or an atomic per-user native recovery file after a short
 debounce. On browser startup, a `#scene=v1.…` fragment takes precedence over local
@@ -525,9 +529,10 @@ a near-degenerate element from silently reducing the timestep by many orders of
 magnitude. The f64 CPU implementation is the reference and conserves the scheme's
 discrete half-step energy to roundoff in the undamped test.
 
-The f32 GPU kernel stores both committed time levels and a scratch level in one
-storage buffer. Each solution-DOF invocation gathers its CSR row and writes only its
-own scratch value; a second dispatch rotates levels. This avoids scatter atomics.
+The f32 GPU kernel stores both committed time levels, a scratch level, and the
+trapezoidal primary-field integral in one storage buffer. Each solution-DOF
+invocation gathers its CSR row and writes only its own scratch value; a second
+dispatch advances the integral and rotates levels. This avoids scatter atomics.
 The operator, state, sources, and controls use Bevy's render-world buffers and its
 existing wgpu device. State remains GPU-resident; asynchronous readback supplies
 the egui field colors and energy diagnostic. Each readback carries a GPU-written
@@ -540,9 +545,12 @@ the volume signal table shares the existing forcing buffer. No second wgpu devic
 extra storage binding is needed.
 
 Point probes compile to seven-node enriched-quadratic interpolation stencils with
-separate gradient weights. A small compute pipeline samples the centered
-displacement and velocity at uniform solver-step intervals and evaluates local
-energy density as `rho v²/2 + k |grad u|²/2`. It writes a bounded time-stamped ring
+separate gradient weights. A small compute pipeline samples the centered primary
+field, its rate, and its time integral at uniform solver-step intervals. Mechanical
+readouts expose displacement, velocity, and
+`rho v²/2 + k |grad u|²/2`. EM readouts expose signed `E_z` or `H_z`, the
+transverse magnitude `k |grad A|`, Poynting magnitude `|u| k |grad A|`, and the
+physical energy density `(m u² + k |grad A|²)/2`. It writes a bounded time-stamped ring
 through a separate five-binding layout, preserving the eight-storage-binding limit
 of the wave pipeline. Host history survives ordinary remesh and AMR handoffs;
 stencils are rebuilt against each committed operator. Reset and fresh scene loads
@@ -553,9 +561,11 @@ Straight line and geometry-attached boundary probes use their own bounded
 five-binding compute recorder. Sampling
 presets pair 32/64/128 uniformly spaced enriched-quadratic stencils with 30/60/120
 samples per simulated second; all line probes share a 512-point document budget and
-a 64-frame GPU ring. Each valid point records displacement, local energy density,
-and signed energy flux `-k u_t grad(u) dot n`, where `n` is the left normal of the
-ordered start-to-end segment for free lines. Boundary probes compile directly from
+a 64-frame GPU ring. Each valid point records the primary field, transverse
+magnitude, local energy density, and directed flux. Mechanical flux is
+`-k u_t grad(u) dot n`; EM flux is the normal Poynting component
+`-k u grad(A) dot n`, where `n` is the left normal of the ordered start-to-end
+segment for free lines. Boundary probes compile directly from
 mesh boundary labels and parameter intervals, select one explicit physical trace,
 and carry an outward normal per sample. They store a contiguous spline-span run,
 follow topology edits by best-overlap remapping, and retain their probe ID through
@@ -564,10 +574,12 @@ integrate only adjacent valid samples and report their covered fraction. Line
 definitions survive history, files, links, and recovery while trace data remains
 transient like point-probe history.
 
-Line readouts form a 3×3 quantity/representation matrix: field, signed normal flux,
-and energy may each be shown versus arclength, as a time/arclength waterfall, or as
-an arclength integral versus time. A compact checkbox menu controls this matrix and
-starts with four views active. Every active view shares the same time window.
+Mechanical line readouts form a 3×3 quantity/representation matrix: field, signed
+normal energy flux, and energy may each be shown versus arclength, as a
+time/arclength waterfall, or as an arclength integral versus time. EM readouts add
+transverse-field magnitude and relabel directed flux as normal Poynting flux. A
+compact checkbox menu controls the combinations and starts with four views active.
+Every active view shares the same time window.
 Horizontal dragging pans time traces; vertical dragging pans waterfalls along their
 vertical time axis.
 
@@ -576,13 +588,15 @@ clipped element contributions. Region targets integrate complete mesh triangles;
 disk targets clip each triangle against a bounded, world-space approximation of the
 circle before applying a degree-six triangle rule. Each clipped quadratic element
 is uploaded as preintegrated field, symmetric mass, and symmetric stiffness weights.
-A first compute dispatch evaluates its field integral, squared-field integral,
-energy, and area; a second dispatch reduces the probe's contiguous contributions to
+A first compute dispatch evaluates its primary-field integral, squared-field
+integral, transverse-field squared integral, energy, and area; a second dispatch
+reduces the probe's contiguous contributions to
 one compact ring record. Readback size therefore depends on the 16-probe, 2048-frame
 ring rather than mesh density. The recorder runs at most 120 samples per simulated
 second and limits one compiled set to 200,000 element contributions. CPU and GPU
-paths report mean and RMS displacement, mean energy density, total energy, covered
-area, and geometric coverage. Definitions and host histories survive ordinary
+paths report mean and RMS primary field, mean energy density, total energy, covered
+area, and geometric coverage. EM records additionally report RMS transverse-field
+magnitude. Definitions and host histories survive ordinary
 solver handoffs; stencils rebuild for each committed mesh.
 
 The singleton far-field monitor derives a counterclockwise square contour from the

@@ -62,6 +62,8 @@ pub struct QuadraticAreaMatrices {
     pub density: [f64; QUADRATIC_AREA_MATRIX_ENTRIES],
     /// Symmetric upper triangle in the same order as `mass`.
     pub stiffness: [f64; QUADRATIC_AREA_MATRIX_ENTRIES],
+    /// Gradient matrix weighted by the square of the local stiffness coefficient.
+    pub stiffness_squared: [f64; QUADRATIC_AREA_MATRIX_ENTRIES],
 }
 
 impl QuadraticAreaElement {
@@ -71,6 +73,7 @@ impl QuadraticAreaElement {
             mass: [0.0; QUADRATIC_AREA_MATRIX_ENTRIES],
             density: [0.0; QUADRATIC_AREA_MATRIX_ENTRIES],
             stiffness: [0.0; QUADRATIC_AREA_MATRIX_ENTRIES],
+            stiffness_squared: [0.0; QUADRATIC_AREA_MATRIX_ENTRIES],
         };
         for ((local, weight), coefficients) in area_quadrature().into_iter().zip(self.coefficients)
         {
@@ -91,6 +94,10 @@ impl QuadraticAreaElement {
                 for (column, column_value) in values.iter().copied().enumerate().skip(row) {
                     result.mass[entry] += physical_weight * row_value * column_value;
                     result.stiffness[entry] += physical_weight
+                        * coefficients.stiffness
+                        * gradients[row].dot(gradients[column]);
+                    result.stiffness_squared[entry] += physical_weight
+                        * coefficients.stiffness
                         * coefficients.stiffness
                         * gradients[row].dot(gradients[column]);
                     result.density[entry] +=

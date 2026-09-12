@@ -49,7 +49,7 @@ pub enum MaterialProperty {
 pub enum VectorOverlay {
     #[default]
     Off,
-    ComplementaryFieldRate,
+    ComplementaryField,
     RelativeEnergyFlow,
 }
 
@@ -58,19 +58,20 @@ impl VectorOverlay {
         match (self, physics) {
             (Self::Off, _) => "Off",
             (
-                Self::ComplementaryFieldRate,
+                Self::ComplementaryField,
                 PhysicsModel::Electromagnetic {
                     polarization: ElectromagneticPolarization::Tm,
                 },
-            ) => "Magnetic-field rate ∂H/∂t",
+            ) => "Magnetic field H",
             (
-                Self::ComplementaryFieldRate,
+                Self::ComplementaryField,
                 PhysicsModel::Electromagnetic {
                     polarization: ElectromagneticPolarization::Te,
                 },
-            ) => "Electric-field rate ∂E/∂t",
-            (Self::ComplementaryFieldRate, PhysicsModel::Mechanical) => "Field-gradient rate",
-            (Self::RelativeEnergyFlow, _) => "Relative energy flow",
+            ) => "Electric field E",
+            (Self::ComplementaryField, PhysicsModel::Mechanical) => "Vector field",
+            (Self::RelativeEnergyFlow, PhysicsModel::Electromagnetic { .. }) => "Poynting flow",
+            (Self::RelativeEnergyFlow, PhysicsModel::Mechanical) => "Energy flow",
         }
     }
 }

@@ -180,11 +180,13 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   automatic/manual range controls plus a local-coordinate hover readout. Automatic
   solution AMR evaluates varying coefficients and their gradients directly.
 - **Vector view:** View can overlay arrows derived from the synchronized quadratic
-  field readback. EM scenes offer the exact complementary-field time derivative
-  (`∂H/∂t` for TM or `∂E/∂t` for TE) and a scalar relative-energy-flow view;
-  mechanical scenes offer the latter. Arrow spacing and gain are screen-space
-  presentation controls, with optional temporal smoothing. This remains a derived
-  view of one scalar polarization rather than a full vector Maxwell solve.
+  field readback. The solver integrates the primary scalar field in time, so TM
+  scenes show the reconstructed in-plane magnetic field `H`, TE scenes show the
+  in-plane electric field `E`, and either polarization can show the corresponding
+  Poynting vector. Mechanical scenes retain their energy-flow view. Arrow spacing
+  and gain are screen-space presentation controls, with optional temporal
+  smoothing. Each EM mode remains one scalar Maxwell polarization rather than a
+  simultaneous six-component field solve.
 - **Region sources:** the selected subdomain can own one distributed source,
   independent of its reusable passive material. Its signed spatial profile uses the
   same region-local world-unit coordinates and its own named parameters, multiplied
@@ -201,9 +203,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **Point probes:** add persistent point receivers from Probes, then click repeatedly
   in the viewport. Markers can be selected, dragged, renamed, colored, disabled,
   cleared, or deleted; double-clicking one opens its floating readout. Each readout
-  contains
-  field, velocity, and local energy-density traces on a shared simulation-time
-  window. Hide individual traces, drag right to inspect earlier samples, and scroll to
+  contains primary field, transverse-field magnitude, Poynting magnitude, and local
+  energy-density traces for EM scenes. Mechanical scenes expose displacement,
+  velocity, and energy density. Hide individual traces, drag right to inspect
+  earlier samples, and scroll to
   change the time span. The widest view returns to Live automatically; Live can also
   be selected directly. Sampling follows
   solver time rather than browser frame rate. Definitions are saved and undoable;
@@ -212,9 +215,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Drag either endpoint to reshape it or drag its body as one rigid object. The arrow
   shows the positive left normal; Flip direction reverses both the sampling order
   and flux sign. Low, Medium, and High presets record 32/64/128 spatial samples at
-  30/60/120 samples per simulated second. A compact Plots menu exposes field,
-  normal flux, and energy as a waterfall, versus arclength, or integrated versus
-  time: nine combinations in total. New readouts initially show field versus
+  30/60/120 samples per simulated second. A compact Plots menu exposes the signed
+  primary field, transverse-field magnitude, signed normal Poynting flux, and
+  energy as a waterfall, versus arclength, or integrated versus time. Mechanical
+  scenes retain field, normal energy flux, and energy. New readouts initially show field versus
   arclength, its waterfall, normal power, and integrated energy. All active views
   share one time window; drag waterfalls vertically and time traces horizontally.
   Portions outside the simulated domain or on a two-trace boundary appear as gaps;
@@ -227,9 +231,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   periodic sampling and integration without duplicating the seam.
 - **Area probes:** choose Disk for a two-click center/radius receiver, or Subdomain
   and click inside a material region. Drag a disk body to move it and its edge
-  handle to resize it. The GPU recorder reports mean and RMS field, mean energy
-  density, total energy, and target coverage; new readouts initially show mean
-  field and total energy. Area markers and region outlines have an independent
+  handle to resize it. In EM scenes the GPU recorder reports mean and RMS primary
+  field, RMS transverse-field magnitude, mean energy density, total energy, and
+  target coverage. Mechanical scenes retain their displacement and energy
+  quantities; new readouts initially show RMS primary field and total energy. Area
+  markers and region outlines have an independent
   View toggle. Definitions are saved and undoable while recorded histories remain
   transient across files and continuous across ordinary solver handoffs.
 - **Far field:** enable the outer-domain far field in Probes and adjust one inset.

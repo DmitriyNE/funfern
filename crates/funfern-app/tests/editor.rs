@@ -278,6 +278,13 @@ fn presentation_round_trips_and_older_scenes_receive_defaults() {
     let json = save(&document).unwrap();
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
+    let mut vector_document = document.clone();
+    vector_document.presentation.vector_overlay = VectorOverlay::ComplementaryField;
+    let current = save(&vector_document).unwrap();
+    assert!(current.contains("\"complementary_field_rate\""));
+    let alternate_name = current.replace("\"complementary_field_rate\"", "\"complementary_field\"");
+    assert_eq!(decode(alternate_name.as_bytes()).unwrap(), vector_document);
+
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
     set_file_version(&mut legacy, 15);
     let decoded = decode(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();

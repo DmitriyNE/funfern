@@ -44,6 +44,7 @@ struct MatrixEntry {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
+    integral: vec4<f32>,
 }
 
 struct TransferEntry {
@@ -162,6 +163,7 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
         aligned_velocity,
         aligned_current,
     );
+    states[i].integral = vec4<f32>(transfers[i].mapped.w, transfers[i].mapped.w, 0.0, 0.0);
     if i == 0u {
         parameters.time_data.z = time;
         parameters.time_data.w = 0.0;

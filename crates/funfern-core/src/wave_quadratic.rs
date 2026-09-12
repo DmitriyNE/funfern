@@ -697,7 +697,7 @@ impl QuadraticWaveOperator {
     }
 
     pub fn estimated_gpu_bytes(&self) -> usize {
-        self.row_offsets.len() * 4 + self.columns.len() * 12 + self.degrees_of_freedom() * 96
+        self.row_offsets.len() * 4 + self.columns.len() * 12 + self.degrees_of_freedom() * 112
     }
 
     pub fn discrete_energy(
@@ -746,6 +746,45 @@ impl QuadraticWaveOperator {
                 .map(|(value, force)| value * force)
                 .sum::<f64>();
         let energy = interior + boundary;
+        energy
+            .is_finite()
+            .then_some(energy)
+            .ok_or(WaveError::InvalidState)
+    }
+
+    /// Electromagnetic energy for a TE/TM primary component and the time integral
+    /// used to reconstruct its transverse counterpart.
+    pub fn electromagnetic_energy(
+        &self,
+        primary: &[f64],
+        integral: &[f64],
+    ) -> Result<f64, WaveError> {
+        if primary.len() != self.degrees_of_freedom() || integral.len() != self.degrees_of_freedom()
+        {
+            return Err(WaveError::SizeMismatch {
+                expected: self.degrees_of_freedom(),
+                actual: primary.len().min(integral.len()),
+            });
+        }
+        if primary
+            .iter()
+            .chain(integral)
+            .any(|value| !value.is_finite())
+        {
+            return Err(WaveError::InvalidState);
+        }
+        let integral_force = self.apply_stiffness(integral)?;
+        let primary_energy = primary
+            .iter()
+            .zip(&self.lumped_mass)
+            .map(|(value, mass)| 0.5 * mass * value * value)
+            .sum::<f64>();
+        let transverse_energy = integral
+            .iter()
+            .zip(integral_force)
+            .map(|(value, force)| 0.5 * value * force)
+            .sum::<f64>();
+        let energy = primary_energy + transverse_energy;
         energy
             .is_finite()
             .then_some(energy)
@@ -2394,6 +2433,27 @@ mod tests {
         let expected = 0.7 + 1.25 * centroid.x - 0.8 * centroid.y;
         assert!((value - expected).abs() < 2.0e-7);
         assert!((gradient - Point2::new(1.25, -0.8)).norm() < 2.0e-7);
+    }
+
+    #[test]
+    fn electromagnetic_energy_uses_primary_field_and_integrated_gradient() {
+        let mesh = square();
+        let operator = QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()).unwrap();
+        let primary = vec![2.0; operator.degrees_of_freedom()];
+        let integral = operator
+            .node_points()
+            .iter()
+            .map(|point| point.x)
+            .collect::<Vec<_>>();
+        let energy = operator
+            .electromagnetic_energy(&primary, &integral)
+            .unwrap();
+        assert!((energy - 2.5).abs() < 1.0e-12);
+        assert!(
+            operator
+                .electromagnetic_energy(&primary[..2], &integral)
+                .is_err()
+        );
     }
 
     #[test]

@@ -98,7 +98,8 @@ const fn default_vector_overlay_gain() -> f32 {
 enum StoredVectorOverlay {
     #[default]
     Off,
-    ComplementaryFieldRate,
+    #[serde(rename = "complementary_field_rate", alias = "complementary_field")]
+    ComplementaryField,
     RelativeEnergyFlow,
 }
 
@@ -1214,7 +1215,7 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
         field_gain: settings.field_gain,
         vector_overlay: match settings.vector_overlay {
             VectorOverlay::Off => StoredVectorOverlay::Off,
-            VectorOverlay::ComplementaryFieldRate => StoredVectorOverlay::ComplementaryFieldRate,
+            VectorOverlay::ComplementaryField => StoredVectorOverlay::ComplementaryField,
             VectorOverlay::RelativeEnergyFlow => StoredVectorOverlay::RelativeEnergyFlow,
         },
         vector_overlay_smoothed: settings.vector_overlay_smoothed,
@@ -1261,7 +1262,7 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
         field_gain: stored.field_gain,
         vector_overlay: match stored.vector_overlay {
             StoredVectorOverlay::Off => VectorOverlay::Off,
-            StoredVectorOverlay::ComplementaryFieldRate => VectorOverlay::ComplementaryFieldRate,
+            StoredVectorOverlay::ComplementaryField => VectorOverlay::ComplementaryField,
             StoredVectorOverlay::RelativeEnergyFlow => VectorOverlay::RelativeEnergyFlow,
         },
         vector_overlay_smoothed: stored.vector_overlay_smoothed,
