@@ -371,6 +371,29 @@ impl QuadraticWaveOperator {
             ));
         }
         let maximum_time_step = 2.0 / maximum_eigenvalue_bound.sqrt();
+        let minimum_edge_length = mesh
+            .triangles
+            .iter()
+            .flat_map(|triangle| {
+                let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+                [
+                    (points[1] - points[0]).norm(),
+                    (points[2] - points[1]).norm(),
+                    (points[0] - points[2]).norm(),
+                ]
+            })
+            .fold(f64::INFINITY, f64::min);
+        let maximum_wave_speed = coefficients_by_region
+            .values()
+            .map(|coefficients| (coefficients.stiffness / coefficients.mass_density).sqrt())
+            .fold(0.0_f64, f64::max);
+        if !minimum_edge_length.is_finite()
+            || maximum_time_step < minimum_edge_length / maximum_wave_speed * 1.0e-6
+        {
+            return Err(WaveError::InvalidMesh(
+                "a near-degenerate element collapses the explicit CFL timestep",
+            ));
+        }
         let element_nodes = local_nodes
             .into_iter()
             .map(|indices| indices.map(|index| index as u32))
@@ -2284,6 +2307,33 @@ mod tests {
         assert!(matches!(
             operator.apply_auxiliary_stiffness(&invalid),
             Err(WaveError::InvalidState)
+        ));
+
+        let sliver = TriMesh {
+            geometry_revision: 10,
+            mesh_revision: 10,
+            vertices: [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0e-12]]
+                .into_iter()
+                .map(|[x, y]| MeshVertex {
+                    point: Point2::new(x, y),
+                    boundary: None,
+                })
+                .collect(),
+            triangles: vec![MeshTriangle {
+                vertices: [0, 1, 2],
+                region: BACKGROUND_REGION,
+            }],
+            boundary_edges: vec![],
+            quality: MeshQuality {
+                minimum_angle_degrees: 0.0,
+                maximum_edge_length: 1.0,
+            },
+        };
+        assert!(matches!(
+            QuadraticWaveOperator::assemble(&sliver, WaveCoefficients::default()),
+            Err(WaveError::InvalidMesh(
+                "a near-degenerate element collapses the explicit CFL timestep"
+            ))
         ));
     }
 }

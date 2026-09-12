@@ -299,10 +299,14 @@ triangle fan on one bank is rewired to the duplicate; the two free tips stay
 shared. Both banks are labeled independently. Before insertion, a nearby free bulk
 vertex may be relocated onto the exact curve sample when every triangle in its fan
 remains positively oriented and in the assigned region. This prevents short edges
-caused by nearly coincident free and constrained vertices. Minimum-angle refinement
-is completed before the cut because a zero-thickness crack tip is a reentrant
-singular point; the final mesh reports the resulting tip quality instead of
-repeatedly refining the coincident faces.
+caused by nearly coincident free and constrained vertices. After each open segment
+is recovered, a free opposite vertex that would form a narrow trace sliver is moved
+away from the segment only if its complete fan remains positively oriented. The
+constraint itself never moves. Minimum-angle refinement is completed before the cut
+because a zero-thickness crack tip is a reentrant singular point; the final mesh
+reports the resulting tip quality instead of repeatedly refining the coincident
+faces. Final verification rejects area that is negligible relative to the
+triangle's longest edge.
 
 Quality refinement selects the worst size or angle violation from an ordered
 queue. Persistent edge adjacency and triangle quality entries are updated only
@@ -420,8 +424,11 @@ natural Neumann condition, so all mesh vertices remain DOFs. The centered update
 
 It is second order for zero damping and treats diagonal damping symmetrically. A
 Gershgorin bound on `M^-1 K` supplies `dt_max = 2/sqrt(bound)`; the app uses 90%
-of that bound. The f64 CPU implementation is the reference and conserves the
-scheme's discrete half-step energy to roundoff in the undamped test.
+of that bound. Quadratic assembly rejects a bound that is numerically absurd
+relative to the mesh's shortest edge and fastest material wave speed, preventing
+a near-degenerate element from silently reducing the timestep by many orders of
+magnitude. The f64 CPU implementation is the reference and conserves the scheme's
+discrete half-step energy to roundoff in the undamped test.
 
 The f32 GPU kernel stores both committed time levels and a scratch level in one
 storage buffer. Each solution-DOF invocation gathers its CSR row and writes only its

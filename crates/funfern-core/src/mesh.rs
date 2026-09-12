@@ -1210,11 +1210,78 @@ impl MeshBuilder {
         Ok(vertex)
     }
 
+    /// Moves an unconstrained vertex away from a recovered open constraint when
+    /// their separation would form a CFL-limiting sliver. The move is accepted
+    /// only while every triangle in the complete vertex fan stays oriented.
+    fn repair_constraint_edge_slivers(&mut self, requested: [usize; 2]) {
+        let key = edge_key(requested[0], requested[1]);
+        let adjacent = self.adjacency.get(&key).cloned().unwrap_or_default();
+        let a = self.point(requested[0]);
+        let b = self.point(requested[1]);
+        let edge = b - a;
+        let length = edge.norm();
+        if !length.is_finite() || length <= 0.0 {
+            return;
+        }
+        let protected = self
+            .internal_chains
+            .iter()
+            .flat_map(|chain| chain.iter().map(|(vertex, _)| *vertex))
+            .chain(self.internal_trace_vertices.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let normal = Point2::new(-edge.y, edge.x) / length;
+        let desired_altitude = (length * self.options.minimum_angle_degrees.to_radians().tan())
+            .min(self.options.target_edge_length * 0.3);
+
+        for (_, vertex) in adjacent {
+            if protected.contains(&vertex) || self.vertices[vertex].boundary.is_some() {
+                continue;
+            }
+            let point = self.point(vertex);
+            let fraction = (point - a).dot(edge) / edge.dot(edge);
+            if !(0.0..1.0).contains(&fraction) {
+                continue;
+            }
+            let signed_altitude = (point - a).dot(normal);
+            let altitude = signed_altitude.abs();
+            if altitude >= desired_altitude || signed_altitude == 0.0 {
+                continue;
+            }
+            let direction = signed_altitude.signum();
+            for step in [1.0, 0.75, 0.5, 0.25] {
+                let target_altitude = altitude + step * (desired_altitude - altitude);
+                let target = point + normal * direction * (target_altitude - altitude);
+                let incident = self.incident[vertex].iter().copied().collect::<Vec<_>>();
+                let valid = incident.iter().all(|triangle_index| {
+                    let triangle = self.triangles[*triangle_index];
+                    let points = triangle.vertices.map(|candidate| {
+                        if candidate == vertex {
+                            target
+                        } else {
+                            self.point(candidate)
+                        }
+                    });
+                    orient2d(points[0], points[1], points[2]) == PredicateSign::Positive
+                });
+                if !valid {
+                    continue;
+                }
+                self.vertices[vertex].point = target;
+                for triangle in incident {
+                    let unchanged = self.triangles[triangle];
+                    self.replace_triangle(triangle, unchanged);
+                }
+                break;
+            }
+        }
+    }
+
     /// Recovers one constrained segment by flipping one intersecting diagonal.
     /// Returns true once the requested edge exists.
     fn recover_constraint_edge(&mut self, requested: [usize; 2]) -> Result<bool, MeshError> {
         let requested_key = edge_key(requested[0], requested[1]);
         if self.adjacency.contains_key(&requested_key) {
+            self.repair_constraint_edge_slivers(requested);
             return Ok(true);
         }
         let a = self.point(requested[0]);
@@ -2377,6 +2444,12 @@ impl MeshingJob {
                         }
                     }
                     let q = b.triangle_quality(triangle);
+                    let twice_area = (v - a).cross(c - a).abs();
+                    if twice_area <= q.maximum_edge_length * q.maximum_edge_length * 1.0e-10 {
+                        return Err(MeshError::Topology(
+                            "mesh contains a scale-degenerate triangle near a constraint",
+                        ));
+                    }
                     quality.minimum_angle_degrees =
                         quality.minimum_angle_degrees.min(q.minimum_angle_degrees);
                     quality.maximum_edge_length =

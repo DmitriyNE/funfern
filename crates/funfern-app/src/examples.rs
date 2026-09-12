@@ -83,7 +83,7 @@ fn straight(id: u64, y0: f64, y1: f64) -> InternalBoundary {
     let controls = (0..4)
         .map(|index| {
             let y = y0 + (y1 - y0) * index as f64 / 3.0;
-            Point2::new(0.03 + 0.8 * y, y)
+            Point2::new(0.0, y)
         })
         .collect();
     InternalBoundary {
@@ -95,8 +95,6 @@ fn straight(id: u64, y0: f64, y1: f64) -> InternalBoundary {
 }
 
 fn double_slit() -> Document {
-    // A slight screen tilt avoids the background grid's exact symmetry lines.
-    // Near-coincident straight constraints need generic cleanup in the mesher.
     let scene = Scene {
         internal_boundaries: vec![
             straight(1, -0.9, -0.36),
