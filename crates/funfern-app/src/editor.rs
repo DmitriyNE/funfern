@@ -369,6 +369,10 @@ impl Editor {
             self.delete_area_probes_for_region(interior);
             self.document
                 .draft
+                .volume_sources
+                .retain(|source| source.region != interior);
+            self.document
+                .draft
                 .regions
                 .retain(|region| region.id != interior);
             self.document
@@ -1542,6 +1546,10 @@ impl Editor {
             && let Some(interior) = role.interior()
         {
             self.delete_area_probes_for_region(interior);
+            self.document
+                .draft
+                .volume_sources
+                .retain(|source| source.region != interior);
             let exterior = role.exterior();
             for child in &mut self.document.draft.obstacles {
                 child.role = replace_exterior(child.role, interior, exterior);
@@ -1609,6 +1617,10 @@ impl Editor {
                 material: old_region.material,
                 frame,
             });
+            if let Some(mut volume_source) = self.document.draft.volume_source(interior).cloned() {
+                volume_source.region = new_region;
+                self.document.draft.volume_sources.push(volume_source);
+            }
             match source.role {
                 LoopRole::MaterialInterface { exterior, .. } => LoopRole::MaterialInterface {
                     exterior,
@@ -1744,6 +1756,42 @@ impl Editor {
             .iter_mut()
             .find(|candidate| candidate.id == material_id)
             .unwrap() = material;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_volume_source(
+        &mut self,
+        region: RegionId,
+        source: Option<VolumeSource>,
+    ) -> Result<(), String> {
+        if self.document.draft.region(region).is_none() {
+            return Err("Missing region".into());
+        }
+        if let Some(source) = &source
+            && (source.region != region || !source.valid())
+        {
+            return Err("Volume-source values or parameters are invalid".into());
+        }
+        let current = self.document.draft.volume_source(region);
+        if current == source.as_ref() {
+            return Ok(());
+        }
+        if current.is_none()
+            && source.is_some()
+            && self.document.draft.volume_sources.len() >= MAX_VOLUME_SOURCES
+        {
+            return Err(format!("Maximum {MAX_VOLUME_SOURCES} volume sources"));
+        }
+        self.begin();
+        self.document
+            .draft
+            .volume_sources
+            .retain(|candidate| candidate.region != region);
+        if let Some(source) = source {
+            self.document.draft.volume_sources.push(source);
+        }
         self.changed();
         self.commit();
         Ok(())

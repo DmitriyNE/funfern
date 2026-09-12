@@ -192,6 +192,113 @@ fn material_scalar_editor(
     }
     changed
 }
+
+fn volume_source_scalar_editor(
+    ui: &mut egui::Ui,
+    region: RegionId,
+    field: &mut ScalarField,
+    parameters: &[MaterialParameter],
+    state: (&mut Option<(RegionId, String)>, &mut Option<String>),
+) -> bool {
+    let (edit, error) = state;
+    if !matches!(edit, Some((candidate, _)) if *candidate == region) {
+        *edit = None;
+        *error = None;
+    }
+    let mut formula_mode = matches!(field, ScalarField::Formula(_));
+    let was_formula = formula_mode;
+    ui.horizontal(|ui| {
+        ui.label("Profile");
+        egui::ComboBox::from_id_salt(("volume_source_field_mode", region.0))
+            .width(76.0)
+            .selected_text(if formula_mode { "Formula" } else { "Constant" })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut formula_mode, false, "Constant");
+                ui.selectable_value(&mut formula_mode, true, "Formula");
+            });
+    });
+    let mut changed = false;
+    if formula_mode != was_formula {
+        if formula_mode {
+            let source = format!("{}", field.constant_value().unwrap_or(1.0));
+            *field = ScalarField::formula(source.clone()).unwrap();
+            *edit = Some((region, source));
+            *error = None;
+            changed = true;
+        } else {
+            match field.evaluate(
+                MaterialCoordinates {
+                    x: 0.0,
+                    y: 0.0,
+                    r: 0.0,
+                    theta: 0.0,
+                },
+                parameters,
+            ) {
+                Ok(value) if value.is_finite() => {
+                    *field = ScalarField::constant(value);
+                    *edit = None;
+                    *error = None;
+                    changed = true;
+                }
+                Ok(_) => *error = Some("profile must be finite at the frame origin".into()),
+                Err(problem) => *error = Some(problem.to_string()),
+            }
+        }
+    }
+    match field {
+        ScalarField::Constant(value) => {
+            changed |= ui
+                .add(
+                    egui::DragValue::new(value)
+                        .speed(0.01)
+                        .range(-1.0e6..=1.0e6)
+                        .update_while_editing(false),
+                )
+                .changed();
+        }
+        ScalarField::Formula(formula) => {
+            if !matches!(edit, Some((candidate, _)) if *candidate == region) {
+                *edit = Some((region, formula.source().into()));
+            }
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut edit.as_mut().unwrap().1)
+                    .desired_width(ui.available_width())
+                    .hint_text("Expression"),
+            );
+            response.clone().on_hover_text(
+                "Local x, y, r use world units; theta uses radians. Parameters belong to this source.",
+            );
+            if response.lost_focus() {
+                let source = edit.as_ref().unwrap().1.clone();
+                match ScalarField::formula(source) {
+                    Ok(candidate) => match candidate.evaluate(
+                        MaterialCoordinates {
+                            x: 0.0,
+                            y: 0.0,
+                            r: 0.0,
+                            theta: 0.0,
+                        },
+                        parameters,
+                    ) {
+                        Ok(value) if value.is_finite() => {
+                            *field = candidate;
+                            *error = None;
+                            changed = true;
+                        }
+                        Ok(_) => *error = Some("profile must be finite at the frame origin".into()),
+                        Err(problem) => *error = Some(problem.to_string()),
+                    },
+                    Err(problem) => *error = Some(problem.to_string()),
+                }
+            }
+        }
+    }
+    if let Some(error) = error {
+        ui.colored_label(RED, error);
+    }
+    changed
+}
 #[derive(Clone, Copy)]
 enum LoadMode {
     Replace,
@@ -593,6 +700,7 @@ struct SimulationCandidate {
     max_edge: f64,
     low_quality: Vec<bool>,
     operator: Arc<QuadraticWaveOperator>,
+    volume_sources: CompiledVolumeSources,
     boundary: OuterBoundaryConditions,
     time_step: f64,
     transfer: Option<QuadraticTransferMap>,
@@ -602,6 +710,11 @@ struct SimulationCandidate {
     source_region: RegionId,
     adaptation_state: MeshAdaptationState,
     fresh: bool,
+}
+struct VolumeSourceCandidate {
+    revision: u64,
+    scene: Scene,
+    job: VolumeSourceCompileJob,
 }
 #[derive(Resource)]
 pub struct Playground {
@@ -650,6 +763,9 @@ pub struct Playground {
     material_formula_edits: [Option<(MaterialId, String)>; 3],
     material_formula_errors: [Option<String>; 3],
     material_parameter_name_edits: BTreeMap<(u64, usize), String>,
+    volume_source_formula_edit: Option<(RegionId, String)>,
+    volume_source_formula_error: Option<String>,
+    volume_source_parameter_name_edits: BTreeMap<(u64, usize), String>,
     loop_role_edit: Option<(ObstacleId, LoopKind)>,
     region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
@@ -705,6 +821,7 @@ pub struct Playground {
     keyboard_captured: bool,
     mesh: Option<Arc<TriMesh>>,
     simulation_candidate: Option<SimulationCandidate>,
+    volume_source_job: Option<VolumeSourceCandidate>,
     mesh_job: Option<MeshUpdateJob>,
     mesh_adaptation_job: Option<MeshAdaptationJob>,
     mesh_adaptation_automatic: bool,
@@ -834,6 +951,9 @@ impl Default for Playground {
             material_formula_edits: [None, None, None],
             material_formula_errors: [None, None, None],
             material_parameter_name_edits: BTreeMap::new(),
+            volume_source_formula_edit: None,
+            volume_source_formula_error: None,
+            volume_source_parameter_name_edits: BTreeMap::new(),
             loop_role_edit: None,
             region_selection: BACKGROUND_REGION,
             selection: None,
@@ -891,6 +1011,7 @@ impl Default for Playground {
             keyboard_captured: false,
             mesh: None,
             simulation_candidate: None,
+            volume_source_job: None,
             mesh_job: None,
             mesh_adaptation_job: None,
             mesh_adaptation_automatic: false,
@@ -2860,6 +2981,18 @@ impl Playground {
                                         });
                                     let adaptation_state = MeshAdaptationState::from_mesh(&mesh);
                                     let time_step = operator.recommended_time_step();
+                                    let operator = Arc::new(operator);
+                                    let volume_sources = match compile_volume_sources(
+                                        mesh.clone(),
+                                        operator.clone(),
+                                        self.mesh_source.clone(),
+                                    ) {
+                                        Ok(sources) => sources,
+                                        Err(error) => {
+                                            self.mesh_error = Some(error.to_string());
+                                            return;
+                                        }
+                                    };
                                     self.simulation_candidate = Some(SimulationCandidate {
                                         source_region: mesh_region_at(
                                             &mesh,
@@ -2870,7 +3003,8 @@ impl Playground {
                                         scene: self.mesh_source.clone(),
                                         max_edge: self.mesh_source_max_edge,
                                         low_quality,
-                                        operator: Arc::new(operator),
+                                        operator,
+                                        volume_sources,
                                         boundary: self.mesh_source.outer_boundaries,
                                         time_step,
                                         transfer,
@@ -2897,7 +3031,11 @@ impl Playground {
         if !geometry_changed
             && self.mesh_job.is_none()
             && self.simulation_candidate.is_none()
-            && (self.editor.document.accepted != self.mesh_committed_scene
+            && (!self
+                .editor
+                .document
+                .accepted
+                .operator_eq(&self.mesh_committed_scene)
                 || self.fresh_simulation_requested)
             && self.wave_failed_revision != Some(self.editor.revision)
             && let (Some(mesh), Some(source_operator)) =
@@ -2920,6 +3058,19 @@ impl Playground {
                     match transfer {
                         Ok(transfer) => {
                             let time_step = operator.recommended_time_step();
+                            let operator = Arc::new(operator);
+                            let volume_sources = match compile_volume_sources(
+                                mesh.clone(),
+                                operator.clone(),
+                                self.editor.document.accepted.clone(),
+                            ) {
+                                Ok(sources) => sources,
+                                Err(error) => {
+                                    self.wave_error = Some(error.to_string());
+                                    self.wave_failed_revision = Some(self.editor.revision);
+                                    return;
+                                }
+                            };
                             let exposed_nodes = transfer.as_ref().map_or(
                                 operator.degrees_of_freedom(),
                                 QuadraticTransferMap::exposed_nodes,
@@ -2931,7 +3082,8 @@ impl Playground {
                                 scene: self.editor.document.accepted.clone(),
                                 max_edge: self.mesh_committed_max_edge,
                                 low_quality: self.mesh_low_quality.clone(),
-                                operator: Arc::new(operator),
+                                operator,
+                                volume_sources,
                                 boundary: self.editor.document.accepted.outer_boundaries,
                                 time_step,
                                 exposed_nodes,
@@ -2982,6 +3134,7 @@ impl Playground {
             || self.mesh_job.is_some()
             || self.mesh_adaptation_job.is_some()
             || self.simulation_candidate.is_some()
+            || self.volume_source_job.is_some()
         {
             return Err("Another mesh transaction is active".into());
         }
@@ -3081,6 +3234,18 @@ impl Playground {
             operator.degrees_of_freedom(),
             QuadraticTransferMap::exposed_nodes,
         );
+        let operator = Arc::new(operator);
+        let volume_sources = match compile_volume_sources(
+            mesh.clone(),
+            operator.clone(),
+            self.mesh_committed_scene.clone(),
+        ) {
+            Ok(sources) => sources,
+            Err(error) => {
+                self.mesh_error = Some(error.to_string());
+                return;
+            }
+        };
         self.simulation_candidate = Some(SimulationCandidate {
             source_region: mesh_region_at(&mesh, self.wave_source.position)
                 .unwrap_or(BACKGROUND_REGION),
@@ -3089,7 +3254,8 @@ impl Playground {
             max_edge: self.mesh_committed_max_edge,
             low_quality,
             time_step: operator.recommended_time_step(),
-            operator: Arc::new(operator),
+            operator,
+            volume_sources,
             boundary: self.mesh_committed_scene.outer_boundaries,
             transfer,
             generation: None,
@@ -3131,6 +3297,7 @@ impl Playground {
             || self.mesh_job.is_some()
             || self.mesh_adaptation_job.is_some()
             || self.simulation_candidate.is_some()
+            || self.volume_source_job.is_some()
         {
             if self.editor.editing() || self.mesh_job.is_some() {
                 self.solution_indicator_job = None;
@@ -3138,6 +3305,8 @@ impl Playground {
                 self.amr_status = "geometry has priority";
             } else if self.mesh_adaptation_job.is_some() {
                 self.amr_status = "adapting mesh";
+            } else if self.volume_source_job.is_some() {
+                self.amr_status = "compiling source";
             } else {
                 self.amr_status = "handing off mesh";
             }
@@ -3391,18 +3560,19 @@ impl Playground {
                         + request.stats().completed_steps() as f64 * self.wave_time_step
                 };
                 let replacement = if candidate.fresh {
-                    request.replace(
+                    request.replace_with_volume_sources(
                         assets,
                         commands,
                         &candidate.mesh,
                         &candidate.operator,
                         candidate.time_step,
                         target_source,
+                        &candidate.volume_sources,
                     )
                 } else if let (Some(source_mesh), Some(source_operator), Some(map)) =
                     (&self.wave_mesh, &self.wave_operator, &candidate.transfer)
                 {
-                    request.replace_transferred(
+                    request.replace_transferred_with_volume_sources(
                         assets,
                         commands,
                         WaveTransfer {
@@ -3414,15 +3584,17 @@ impl Playground {
                             source: target_source,
                             map,
                         },
+                        &candidate.volume_sources,
                     )
                 } else {
-                    request.replace(
+                    request.replace_with_volume_sources(
                         assets,
                         commands,
                         &candidate.mesh,
                         &candidate.operator,
                         candidate.time_step,
                         target_source,
+                        &candidate.volume_sources,
                     )
                 };
                 match replacement {
@@ -3526,6 +3698,80 @@ impl Playground {
                 self.wave_error = Some("Candidate GPU initialization failed".into());
             }
             self.simulation_candidate = None;
+        }
+        let source_only_change = self.simulation_candidate.is_none()
+            && self.wave_failed_revision != Some(self.editor.revision)
+            && self
+                .editor
+                .document
+                .accepted
+                .operator_eq(&self.mesh_committed_scene)
+            && !self
+                .editor
+                .document
+                .accepted
+                .volume_sources_eq(&self.mesh_committed_scene);
+        if !source_only_change {
+            self.volume_source_job = None;
+        } else if let (Some(mesh), Some(operator)) =
+            (self.wave_mesh.as_ref(), self.wave_operator.as_ref())
+        {
+            let scene = self.editor.document.accepted.clone();
+            let revision = self.editor.revision;
+            if !self
+                .volume_source_job
+                .as_ref()
+                .is_some_and(|candidate| candidate.revision == revision && candidate.scene == scene)
+            {
+                match VolumeSourceCompileJob::new(mesh.clone(), operator.clone(), scene.clone()) {
+                    Ok(job) => {
+                        self.volume_source_job = Some(VolumeSourceCandidate {
+                            revision,
+                            scene,
+                            job,
+                        });
+                    }
+                    Err(error) => {
+                        self.wave_error = Some(error.to_string());
+                        self.wave_failed_revision = Some(revision);
+                    }
+                }
+            }
+            let result = self
+                .volume_source_job
+                .as_mut()
+                .and_then(|candidate| candidate.job.advance(4_096));
+            if let Some(result) = result {
+                let candidate = self.volume_source_job.take().unwrap();
+                if candidate.revision != self.editor.revision
+                    || candidate.scene != self.editor.document.accepted
+                {
+                    // The result belongs to an obsolete accepted scene.
+                } else {
+                    let result = match result {
+                        Ok(sources) => request.update_volume_sources(assets, operator, sources),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    match result {
+                        Ok(()) => {
+                            self.mesh_committed_scene = candidate.scene;
+                            self.wave_error = None;
+                            self.wave_failed_revision = None;
+                            self.solution_indicator_job = None;
+                            self.solution_indicator_result = None;
+                            self.solution_indicator_source = None;
+                            self.amr_last_analyzed_step = None;
+                            self.amr_coarsen_streak = 0;
+                            self.amr_status = "waiting for solution";
+                            self.notify("Volume source committed; live field preserved");
+                        }
+                        Err(error) => {
+                            self.wave_error = Some(error);
+                            self.wave_failed_revision = Some(self.editor.revision);
+                        }
+                    }
+                }
+            }
         }
         if self.wave_source_dirty && self.wave_operator.is_some() {
             let Some(mesh) = self.wave_mesh.as_deref() else {
@@ -5545,7 +5791,7 @@ impl Playground {
                     );
                 }
             });
-        if matches!(self.material_overlay, MaterialOverlay::Property(_)) {
+        if let MaterialOverlay::Property(property) = self.material_overlay {
             ui.add(
                 egui::Slider::new(&mut self.material_overlay_opacity, 0.05..=1.0)
                     .text("overlay opacity"),
@@ -5554,7 +5800,11 @@ impl Playground {
                 .on_hover_text(
                     "Trims outliers within each subdomain, then includes every subdomain in the color range",
                 );
-            ui.checkbox(&mut self.material_overlay_logarithmic, "Log scale");
+            if property == MaterialProperty::VolumeSource {
+                self.material_overlay_logarithmic = false;
+            } else {
+                ui.checkbox(&mut self.material_overlay_logarithmic, "Log scale");
+            }
             if !self.material_overlay_auto_range {
                 ui.horizontal(|ui| {
                     ui.add(
@@ -5726,18 +5976,209 @@ impl Playground {
                 self.error(result);
             }
         }
+        ui.separator();
+        ui.label("Region source");
+        let source_region = self.region_selection;
+        let existing_source = self
+            .editor
+            .document
+            .draft
+            .volume_source(source_region)
+            .cloned();
+        let mut source = existing_source.clone().unwrap_or(VolumeSource {
+            region: source_region,
+            enabled: true,
+            profile: ScalarField::constant(1.0),
+            parameters: vec![],
+            signal: BoundarySignal {
+                offset: 0.0,
+                amplitude: 12.0,
+                frequency_hz: 3.0,
+                phase_radians: 0.0,
+            },
+        });
+        let mut source_changed = false;
+        let mut present = existing_source.is_some();
+        if ui.checkbox(&mut present, "Volume source").changed() {
+            if present {
+                let result = self
+                    .editor
+                    .set_volume_source(source_region, Some(source.clone()));
+                self.error(result);
+            } else {
+                let result = self.editor.set_volume_source(source_region, None);
+                self.error(result);
+                self.volume_source_formula_edit = None;
+                self.volume_source_formula_error = None;
+            }
+        }
+        if present {
+            source_changed |= ui.checkbox(&mut source.enabled, "Enabled").changed();
+            ui.add_enabled_ui(source.enabled, |ui| {
+                source_changed |= volume_source_scalar_editor(
+                    ui,
+                    source_region,
+                    &mut source.profile,
+                    &source.parameters,
+                    (
+                        &mut self.volume_source_formula_edit,
+                        &mut self.volume_source_formula_error,
+                    ),
+                );
+                ui.label("Signal");
+                source_changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut source.signal.offset)
+                            .speed(0.05)
+                            .prefix("bias ")
+                            .update_while_editing(false),
+                    )
+                    .changed();
+                source_changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut source.signal.amplitude)
+                            .speed(0.1)
+                            .prefix("amplitude ")
+                            .update_while_editing(false),
+                    )
+                    .changed();
+                source_changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut source.signal.frequency_hz)
+                            .speed(0.05)
+                            .range(0.0..=1.0e6)
+                            .prefix("frequency ")
+                            .suffix(" Hz")
+                            .update_while_editing(false),
+                    )
+                    .changed();
+                let mut phase_degrees = source.signal.phase_radians.to_degrees();
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut phase_degrees)
+                            .speed(0.5)
+                            .prefix("phase ")
+                            .suffix("°")
+                            .update_while_editing(false),
+                    )
+                    .changed()
+                {
+                    source.signal.phase_radians = phase_degrees.to_radians();
+                    source_changed = true;
+                }
+                if source.varying() || !source.parameters.is_empty() {
+                    ui.label("Source parameters");
+                    let mut rename = None;
+                    let mut delete = None;
+                    for index in 0..source.parameters.len() {
+                        let key = (source_region.0, index);
+                        let current_name = source.parameters[index].name.clone();
+                        self.volume_source_parameter_name_edits
+                            .entry(key)
+                            .or_insert_with(|| current_name.clone());
+                        let referenced = source
+                            .profile
+                            .parameter_names()
+                            .any(|name| name == current_name);
+                        let mut lost_focus = false;
+                        ui.horizontal(|ui| {
+                            let response = ui.add(
+                                egui::TextEdit::singleline(
+                                    self.volume_source_parameter_name_edits
+                                        .get_mut(&key)
+                                        .unwrap(),
+                                )
+                                .desired_width(66.0),
+                            );
+                            lost_focus = response.lost_focus();
+                            source_changed |= ui
+                                .add(
+                                    egui::DragValue::new(&mut source.parameters[index].value)
+                                        .speed(0.01)
+                                        .update_while_editing(false),
+                                )
+                                .changed();
+                            if ui
+                                .add_enabled(!referenced, egui::Button::new("−"))
+                                .on_hover_text(if referenced {
+                                    "Parameter is used by the profile"
+                                } else {
+                                    "Delete parameter"
+                                })
+                                .clicked()
+                            {
+                                delete = Some(index);
+                            }
+                        });
+                        if lost_focus {
+                            rename = Some((
+                                index,
+                                self.volume_source_parameter_name_edits[&key].clone(),
+                            ));
+                        }
+                    }
+                    if let Some((index, name)) = rename
+                        && name != source.parameters[index].name
+                    {
+                        match source.rename_parameter(index, name) {
+                            Ok(()) => source_changed = true,
+                            Err(error) => self.message = error.to_string(),
+                        }
+                    }
+                    if let Some(index) = delete {
+                        source.parameters.remove(index);
+                        self.volume_source_parameter_name_edits
+                            .retain(|(id, _), _| *id != source_region.0);
+                        source_changed = true;
+                    }
+                    if source.parameters.len() < MAX_MATERIAL_PARAMETERS
+                        && ui.button("+ Source parameter").clicked()
+                    {
+                        let name = (1..)
+                            .map(|index| format!("p{index}"))
+                            .find(|name| {
+                                source
+                                    .parameters
+                                    .iter()
+                                    .all(|parameter| parameter.name != *name)
+                            })
+                            .unwrap();
+                        source
+                            .parameters
+                            .push(MaterialParameter { name, value: 1.0 });
+                        source_changed = true;
+                    }
+                } else if ui.button("+ Source parameter").clicked() {
+                    source.parameters.push(MaterialParameter {
+                        name: "p1".into(),
+                        value: 1.0,
+                    });
+                    source_changed = true;
+                }
+            });
+            if source_changed && source.valid() {
+                let result = self.editor.set_volume_source(source_region, Some(source));
+                self.error(result);
+            }
+        }
         if let Some(region) = self
             .editor
             .document
             .draft
             .region(self.region_selection)
             .copied()
-            && self
+            && (self
                 .editor
                 .document
                 .draft
                 .material(region.material)
                 .is_some_and(Material::varying)
+                || self
+                    .editor
+                    .document
+                    .draft
+                    .volume_source(region.id)
+                    .is_some_and(VolumeSource::varying))
         {
             ui.separator();
             ui.label("Profile placement");
@@ -6785,7 +7226,7 @@ impl Playground {
                     .text("simulation speed"),
             );
             let source_before = self.wave_source;
-            let enabled_response = ui.checkbox(&mut self.wave_source.enabled, "Continuous source");
+            let enabled_response = ui.checkbox(&mut self.wave_source.enabled, "Point source");
             let source_responses = ui.add_enabled_ui(self.wave_source.enabled, |ui| {
                 let mut responses = Vec::new();
                 let mut position = self.wave_source.position;
@@ -8093,7 +8534,7 @@ impl Playground {
                 painter.rect_filled(
                     strip,
                     0.0,
-                    material_property_color(index as f32 / 63.0, 255),
+                    overlay_property_color(property, index as f32 / 63.0, 255),
                 );
             }
             painter.text(
@@ -9109,7 +9550,7 @@ impl Playground {
                     .and_then(|value| {
                         range
                             .normalized(value, self.material_overlay_logarithmic)
-                            .map(|fraction| material_property_color(fraction, alpha))
+                            .map(|fraction| overlay_property_color(property, fraction, alpha))
                     })
                     .unwrap_or(Color32::from_rgba_unmultiplied(255, 106, 123, alpha));
                 values.colored_vertex(self.screen(sample.point, r), color);
@@ -10705,6 +11146,28 @@ fn material_property_color(fraction: f32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(channel(0), channel(1), channel(2), alpha)
 }
 
+fn overlay_property_color(property: MaterialProperty, fraction: f32, alpha: u8) -> Color32 {
+    if property != MaterialProperty::VolumeSource {
+        return material_property_color(fraction, alpha);
+    }
+    const STOPS: [(f32, [u8; 3]); 3] = [
+        (0.0, [63, 144, 239]),
+        (0.5, [24, 32, 39]),
+        (1.0, [244, 105, 122]),
+    ];
+    let value = fraction.clamp(0.0, 1.0);
+    let (left, right) = if value <= 0.5 {
+        (STOPS[0], STOPS[1])
+    } else {
+        (STOPS[1], STOPS[2])
+    };
+    let t = ((value - left.0) / (right.0 - left.0)).clamp(0.0, 1.0);
+    let channel = |index: usize| {
+        (left.1[index] as f32 + t * (right.1[index] as f32 - left.1[index] as f32)).round() as u8
+    };
+    Color32::from_rgba_unmultiplied(channel(0), channel(1), channel(2), alpha)
+}
+
 fn format_value(value: f64) -> String {
     if value != 0.0 && !(1.0e-3..1.0e4).contains(&value.abs()) {
         format!("{value:.3e}")
@@ -10790,6 +11253,11 @@ fn highest_forcing_frequency(scene: &Scene, source: SourceSettings) -> f64 {
         for law in &boundary.span_laws {
             include(law.left);
             include(law.right);
+        }
+    }
+    for source in &scene.volume_sources {
+        if source.enabled && source.signal.amplitude != 0.0 {
+            frequency = frequency.max(source.signal.frequency_hz);
         }
     }
     frequency
@@ -11068,6 +11536,18 @@ pub fn wave_gpu_check_scene() -> Playground {
                 },
             },
         ],
+        volume_sources: vec![VolumeSource {
+            region: BACKGROUND_REGION,
+            enabled: true,
+            profile: ScalarField::formula("1 + 0.2 * x").unwrap(),
+            parameters: vec![],
+            signal: BoundarySignal {
+                offset: 0.01,
+                amplitude: 0.08,
+                frequency_hz: 1.1,
+                phase_radians: 0.35,
+            },
+        }],
         outer_boundaries: OuterBoundaryConditions::default(),
     };
     state
@@ -11503,6 +11983,7 @@ pub struct WaveGpuBenchmark {
     expected_auxiliary: Vec<f64>,
     exterior_nodes: Vec<bool>,
     prepared: bool,
+    source_update_target: Option<VolumeSource>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -11517,6 +11998,7 @@ impl Default for WaveGpuBenchmark {
             expected_auxiliary: Vec::new(),
             exterior_nodes: Vec::new(),
             prepared: false,
+            source_update_target: None,
         }
     }
 }
@@ -11610,8 +12092,25 @@ pub fn wave_gpu_benchmark(
             .map(|weight| (amplitude * weight) as f64)
             .collect();
         cpu.add_displacement(&pulse).unwrap();
+        let volume_sources = compile_volume_sources(
+            mesh.clone(),
+            operator.clone(),
+            state.editor.document.accepted.clone(),
+        )
+        .unwrap();
+        let volume_source_peak = volume_sources
+            .acceleration(0.0)
+            .into_iter()
+            .map(f64::abs)
+            .fold(0.0, f64::max);
+        if volume_source_peak <= 1.0e-3 {
+            error!(volume_source_peak, "Wave GPU volume source did not compile");
+            exit.write(bevy::app::AppExit::error());
+            return;
+        }
         for _ in 0..1024 {
-            cpu.step(operator, &[]).unwrap();
+            cpu.step(operator, &volume_sources.acceleration(cpu.time()))
+                .unwrap();
         }
         benchmark.expected_current = cpu.current().to_vec();
         benchmark.expected_previous = cpu.previous().to_vec();
@@ -11637,6 +12136,7 @@ pub fn wave_gpu_benchmark(
             dt = state.wave_time_step,
             min_edge = minimum_edge,
             min_angle = mesh.quality.minimum_angle_degrees,
+            volume_source_peak,
             "Wave GPU check started"
         );
         return;
@@ -11677,6 +12177,27 @@ pub fn wave_gpu_benchmark(
     let current_error = error_norm(&display.current, &benchmark.expected_current);
     let previous_error = error_norm(&display.previous, &benchmark.expected_previous);
     let auxiliary_error = error_norm(&display.auxiliary, &benchmark.expected_auxiliary);
+    if let Some(target) = benchmark.source_update_target.as_ref() {
+        if state.editor.document.accepted.volume_source(target.region) != Some(target)
+            || state.mesh_committed_scene.volume_source(target.region) != Some(target)
+            || state.volume_source_job.is_some()
+        {
+            return;
+        }
+        let preserved = request.generation() == benchmark.generation
+            && request.stats().completed_steps() == 1024
+            && state.simulation_candidate.is_none()
+            && current_error <= 2.0e-4
+            && previous_error <= 2.0e-4
+            && auxiliary_error <= 2.0e-4;
+        info!(preserved, "Live volume-source buffer update check complete");
+        exit.write(if preserved {
+            bevy::app::AppExit::Success
+        } else {
+            bevy::app::AppExit::error()
+        });
+        return;
+    }
     let max_difference = display
         .current
         .iter()
@@ -11820,7 +12341,20 @@ pub fn wave_gpu_benchmark(
         && area_probe_valid
         && far_field_valid
     {
-        exit.write(bevy::app::AppExit::Success);
+        let mut target = state
+            .editor
+            .document
+            .accepted
+            .volume_source(BACKGROUND_REGION)
+            .unwrap()
+            .clone();
+        target.signal.amplitude *= 1.5;
+        target.signal.phase_radians += 0.2;
+        state
+            .editor
+            .set_volume_source(BACKGROUND_REGION, Some(target.clone()))
+            .unwrap();
+        benchmark.source_update_target = Some(target);
     } else {
         error!("Wave GPU result differs from the CPU reference");
         exit.write(bevy::app::AppExit::error());
@@ -12812,7 +13346,10 @@ fn paint_example_thumbnail(
                 } else {
                     0.5
                 };
-                mesh.colored_vertex(project(point), material_property_color(fraction, 255));
+                mesh.colored_vertex(
+                    project(point),
+                    overlay_property_color(preview.property, fraction, 255),
+                );
             }
             mesh.add_triangle(base, base + 1, base + 2);
         }
@@ -14096,9 +14633,13 @@ mod tests {
                 "missing {name}"
             );
         }
-        assert_eq!(examples::catalog().len(), 6);
-        for name in ["GRIN rod", "Luneburg lens"] {
-            assert!(examples::catalog().iter().any(|example| example.name == name));
+        assert_eq!(examples::catalog().len(), 7);
+        for name in ["GRIN rod", "Luneburg lens", "Phased array"] {
+            assert!(
+                examples::catalog()
+                    .iter()
+                    .any(|example| example.name == name)
+            );
         }
 
         build_mesh_candidate(&mut h.state);
@@ -15577,7 +16118,7 @@ mod tests {
         assert_eq!(h.state.editor.document, document);
 
         h.state.interaction_mode = InteractionMode::Select;
-        h.click_text("Continuous source");
+        h.click_text("Point source");
         assert!(h.state.wave_source.enabled);
         assert_eq!(h.state.editor.document.source, h.state.wave_source);
         let source = Point2::new(-0.55, 0.25);
@@ -15874,6 +16415,41 @@ mod tests {
         assert!(candidate.transfer.is_some());
         let new_mass: f64 = candidate.operator.lumped_mass().iter().sum();
         assert!((new_mass - 2.0 * old_mass).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn volume_source_change_skips_mesh_and_operator_handoffs() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let mesh = h.state.mesh.clone().unwrap();
+        let operator = h.state.wave_operator.clone().unwrap();
+        h.state
+            .editor
+            .set_volume_source(
+                BACKGROUND_REGION,
+                Some(VolumeSource {
+                    region: BACKGROUND_REGION,
+                    enabled: true,
+                    profile: ScalarField::formula("1 - 0.2 * r").unwrap(),
+                    parameters: vec![],
+                    signal: BoundarySignal {
+                        amplitude: 4.0,
+                        frequency_hz: 3.0,
+                        ..BoundarySignal::ZERO
+                    },
+                }),
+            )
+            .unwrap();
+        h.settle();
+        h.state.refresh_mesh();
+        assert!(h.state.mesh_job.is_none());
+        assert!(h.state.simulation_candidate.is_none());
+        assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &mesh));
+        assert!(Arc::ptr_eq(
+            h.state.wave_operator.as_ref().unwrap(),
+            &operator
+        ));
     }
 
     #[test]
@@ -16247,6 +16823,18 @@ mod tests {
             },
         };
         assert_eq!(highest_forcing_frequency(&scene, source), 4.0);
+        scene.volume_sources.push(VolumeSource {
+            region: BACKGROUND_REGION,
+            enabled: true,
+            profile: ScalarField::constant(1.0),
+            parameters: vec![],
+            signal: BoundarySignal {
+                amplitude: 1.0,
+                frequency_hz: 6.5,
+                ..BoundarySignal::ZERO
+            },
+        });
+        assert_eq!(highest_forcing_frequency(&scene, source), 6.5);
     }
 
     #[test]

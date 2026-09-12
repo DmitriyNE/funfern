@@ -7,6 +7,7 @@ use crate::{
 pub const MAX_OBSTACLES: usize = 32;
 pub const MAX_INTERNAL_BOUNDARIES: usize = 32;
 pub const MAX_MATERIALS: usize = 32;
+pub const MAX_VOLUME_SOURCES: usize = MAX_OBSTACLES + 1;
 pub const WORLD_TOLERANCE: f64 = 2.0e-4;
 pub const BACKGROUND_REGION: RegionId = RegionId(1);
 pub const DEFAULT_MATERIAL: MaterialId = MaterialId(1);
@@ -28,6 +29,71 @@ pub struct Material {
     pub damping: ScalarField,
     pub parameters: Vec<MaterialParameter>,
     pub color: [u8; 3],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VolumeSource {
+    pub region: RegionId,
+    pub enabled: bool,
+    pub profile: ScalarField,
+    pub parameters: Vec<MaterialParameter>,
+    pub signal: BoundarySignal,
+}
+
+impl VolumeSource {
+    pub fn valid(&self) -> bool {
+        let unique_parameters = self.parameters.len() <= MAX_MATERIAL_PARAMETERS
+            && self
+                .parameters
+                .iter()
+                .enumerate()
+                .all(|(index, parameter)| {
+                    parameter.valid()
+                        && !self.parameters[..index]
+                            .iter()
+                            .any(|previous| previous.name == parameter.name)
+                });
+        let references_exist = self.profile.parameter_names().all(|name| {
+            self.parameters
+                .iter()
+                .any(|parameter| parameter.name == name)
+        });
+        self.region.0 > 0
+            && unique_parameters
+            && references_exist
+            && self.signal.valid()
+            && self
+                .profile
+                .constant_value()
+                .is_none_or(|value| value.is_finite())
+    }
+
+    pub fn varying(&self) -> bool {
+        self.profile.constant_value().is_none()
+    }
+
+    pub fn evaluate(&self, frame: MaterialFrame, point: Point2) -> Result<f64, MaterialError> {
+        self.profile
+            .evaluate(frame.coordinates(point), &self.parameters)
+    }
+
+    pub fn rename_parameter(&mut self, index: usize, name: String) -> Result<(), MaterialError> {
+        if index >= self.parameters.len()
+            || !valid_identifier(&name)
+            || reserved_identifier(&name)
+            || self
+                .parameters
+                .iter()
+                .enumerate()
+                .any(|(other, parameter)| other != index && parameter.name == name)
+        {
+            return Err(MaterialError::InvalidValue);
+        }
+        let old = self.parameters[index].name.clone();
+        self.profile = self.profile.rename_parameter(&old, &name)?;
+        self.parameters[index].name = name;
+        Ok(())
+    }
 }
 
 impl Material {
@@ -332,6 +398,7 @@ pub struct Scene {
     pub internal_boundaries: Vec<InternalBoundary>,
     pub materials: Vec<Material>,
     pub regions: Vec<Region>,
+    pub volume_sources: Vec<VolumeSource>,
     pub outer_boundaries: crate::OuterBoundaryConditions,
 }
 
@@ -346,6 +413,7 @@ impl Default for Scene {
                 material: DEFAULT_MATERIAL,
                 frame: MaterialFrame::world(),
             }],
+            volume_sources: vec![],
             outer_boundaries: crate::OuterBoundaryConditions::default(),
         }
     }
@@ -368,6 +436,7 @@ impl Scene {
             || self.materials.len() > MAX_MATERIALS
             || self.regions.is_empty()
             || self.regions.len() > MAX_OBSTACLES + 1
+            || self.volume_sources.len() > MAX_VOLUME_SOURCES
             || !self.outer_boundaries.valid()
         {
             return false;
@@ -409,10 +478,22 @@ impl Scene {
                     .iter()
                     .any(|previous| previous.id == region.id)
         });
+        let unique_sources = self
+            .volume_sources
+            .iter()
+            .enumerate()
+            .all(|(index, source)| {
+                source.valid()
+                    && self.region(source.region).is_some()
+                    && !self.volume_sources[..index]
+                        .iter()
+                        .any(|previous| previous.region == source.region)
+            });
         if !unique_obstacles
             || !unique_materials
             || !unique_regions
             || !unique_boundaries
+            || !unique_sources
             || self.region(BACKGROUND_REGION).is_none()
         {
             return false;
@@ -463,6 +544,12 @@ impl Scene {
             .and_then(|region| self.material(region.material))
     }
 
+    pub fn volume_source(&self, region: RegionId) -> Option<&VolumeSource> {
+        self.volume_sources
+            .iter()
+            .find(|source| source.region == region)
+    }
+
     pub fn material_at(
         &self,
         region: RegionId,
@@ -479,6 +566,39 @@ impl Scene {
             self.material(region.material)
                 .is_some_and(Material::varying)
         })
+    }
+
+    /// Equality of everything that contributes to the mesh or wave operator.
+    /// Volume sources are compiled into independent forcing buffers.
+    pub fn operator_eq(&self, other: &Self) -> bool {
+        self.obstacles == other.obstacles
+            && self.internal_boundaries == other.internal_boundaries
+            && self.materials == other.materials
+            && self.regions.len() == other.regions.len()
+            && self
+                .regions
+                .iter()
+                .zip(&other.regions)
+                .all(|(left, right)| {
+                    left.id == right.id
+                        && left.material == right.material
+                        && (!(self.material(left.material).is_some_and(Material::varying)
+                            || other
+                                .material(right.material)
+                                .is_some_and(Material::varying))
+                            || left.frame == right.frame)
+                })
+            && self.outer_boundaries == other.outer_boundaries
+    }
+
+    /// Equality of region-source definitions and the frames used by their profiles.
+    pub fn volume_sources_eq(&self, other: &Self) -> bool {
+        self.volume_sources == other.volume_sources
+            && self.volume_sources.iter().all(|source| {
+                !source.varying()
+                    || self.region(source.region).map(|region| region.frame)
+                        == other.region(source.region).map(|region| region.frame)
+            })
     }
 
     /// Geometry and topology equality excludes names, colors, coefficients, and

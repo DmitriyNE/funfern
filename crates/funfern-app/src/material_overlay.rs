@@ -35,15 +35,17 @@ pub enum MaterialProperty {
     Damping,
     WaveSpeed,
     Impedance,
+    VolumeSource,
 }
 
 impl MaterialProperty {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Density,
         Self::Stiffness,
         Self::Damping,
         Self::WaveSpeed,
         Self::Impedance,
+        Self::VolumeSource,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -53,6 +55,7 @@ impl MaterialProperty {
             Self::Damping => "Damping",
             Self::WaveSpeed => "Wave speed",
             Self::Impedance => "Impedance",
+            Self::VolumeSource => "Volume source",
         }
     }
 
@@ -63,6 +66,7 @@ impl MaterialProperty {
             Self::Damping => 2,
             Self::WaveSpeed => 3,
             Self::Impedance => 4,
+            Self::VolumeSource => 5,
         }
     }
 }
@@ -107,8 +111,8 @@ pub struct OverlaySample {
     pub region: RegionId,
     pub material_name: String,
     pub coordinates: MaterialCoordinates,
-    values: [Option<f64>; 5],
-    errors: [Option<String>; 5],
+    values: [Option<f64>; 6],
+    errors: [Option<String>; 6],
 }
 
 impl OverlaySample {
@@ -123,8 +127,8 @@ pub struct MaterialOverlaySnapshot {
     pub key: OverlayKey,
     pub samples: Vec<OverlaySample>,
     pub triangles: Vec<[u32; 3]>,
-    linear_ranges: [Option<OverlayRange>; 5],
-    log_ranges: [Option<OverlayRange>; 5],
+    linear_ranges: [Option<OverlayRange>; 6],
+    log_ranges: [Option<OverlayRange>; 6],
 }
 
 impl MaterialOverlaySnapshot {
@@ -229,8 +233,8 @@ impl MaterialOverlayJob {
         if self.cursor != self.requests.len() {
             return None;
         }
-        let mut linear_ranges = [None; 5];
-        let mut log_ranges = [None; 5];
+        let mut linear_ranges = [None; 6];
+        let mut log_ranges = [None; 6];
         for property in MaterialProperty::ALL {
             let values = self.samples.iter().filter_map(|sample| {
                 sample
@@ -239,8 +243,18 @@ impl MaterialOverlayJob {
                     .map(|value| (sample.region, value))
             });
             linear_ranges[property.index()] = region_aware_robust_range(values.clone());
-            log_ranges[property.index()] =
-                region_aware_robust_range(values.filter(|(_, value)| *value > 0.0));
+            if property == MaterialProperty::VolumeSource {
+                if let Some(range) = linear_ranges[property.index()] {
+                    let magnitude = range.minimum.abs().max(range.maximum.abs()).max(1.0e-12);
+                    linear_ranges[property.index()] = Some(OverlayRange {
+                        minimum: -magnitude,
+                        maximum: magnitude,
+                    });
+                }
+            } else {
+                log_ranges[property.index()] =
+                    region_aware_robust_range(values.filter(|(_, value)| *value > 0.0));
+            }
         }
         Some(MaterialOverlaySnapshot {
             key: self.key.clone(),
@@ -266,8 +280,8 @@ pub fn sample(scene: &Scene, region_id: RegionId, point: funfern_core::Point2) -
     let Some(material) = scene.material(region.material) else {
         return failed_sample(point, region_id, "Missing material", coordinates);
     };
-    let mut values = [None; 5];
-    let mut errors: [Option<String>; 5] = std::array::from_fn(|_| None);
+    let mut values = [None; 6];
+    let mut errors: [Option<String>; 6] = std::array::from_fn(|_| None);
     let fields = [
         &material.mass_density,
         &material.stiffness,
@@ -309,6 +323,18 @@ pub fn sample(scene: &Scene, region_id: RegionId, point: funfern_core::Point2) -
             errors[4] = Some(error);
         }
     }
+    if let Some(source) = scene.volume_source(region_id) {
+        if source.enabled {
+            match source.evaluate(region.frame, point) {
+                Ok(profile) => values[5] = Some(profile * source.signal.amplitude),
+                Err(error) => errors[5] = Some(error.to_string()),
+            }
+        } else {
+            values[5] = Some(0.0);
+        }
+    } else {
+        values[5] = Some(0.0);
+    }
     OverlaySample {
         point,
         region: region_id,
@@ -330,7 +356,7 @@ fn failed_sample(
         region,
         material_name: "Missing".into(),
         coordinates,
-        values: [None; 5],
+        values: [None; 6],
         errors: std::array::from_fn(|_| Some(message.into())),
     }
 }
@@ -398,6 +424,27 @@ mod tests {
         let range = robust_range(&mut values).unwrap();
         assert!(range.maximum < 1000.0);
         assert_eq!(range.normalized(range.minimum, false), Some(0.0));
+    }
+
+    #[test]
+    fn volume_source_overlay_samples_peak_spatial_acceleration() {
+        let mut scene = Scene::default();
+        scene.volume_sources.push(funfern_core::VolumeSource {
+            region: funfern_core::BACKGROUND_REGION,
+            enabled: true,
+            profile: funfern_core::ScalarField::formula("2 * x").unwrap(),
+            parameters: vec![],
+            signal: funfern_core::BoundarySignal {
+                amplitude: -3.0,
+                ..funfern_core::BoundarySignal::ZERO
+            },
+        });
+        let sample = sample(
+            &scene,
+            funfern_core::BACKGROUND_REGION,
+            funfern_core::Point2::new(0.25, 0.0),
+        );
+        assert_eq!(sample.value(MaterialProperty::VolumeSource), Ok(-1.5));
     }
 
     #[test]

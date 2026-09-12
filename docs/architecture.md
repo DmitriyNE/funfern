@@ -42,7 +42,7 @@ and Custom, while baffles offer Straight and Custom. A single `InteractionMode`
 owns draw, pulse-placement, and probe placement state. Placement modes are shown
 over the viewport and survive inspector changes; preset geometry is deliberately
 one-shot, while pulse placement remains active until toggled off, ended with the
-overlay, or cancelled with Escape. The continuous source is manipulated directly
+overlay, or cancelled with Escape. The point source is manipulated directly
 through its viewport marker.
 
 The lower-right status control carries a compact performance summary (FPS, solver
@@ -136,6 +136,16 @@ and each element's active-frequency ceiling uses its slowest sampled wave speed.
 The element stiffness gradient is the piecewise-linear reconstruction from vertex
 samples, keeping the estimator dependency-free and convergent under refinement.
 
+A distributed source belongs to one region rather than to its reusable passive
+material. It combines a signed scalar profile over that region's rigid local frame
+and source-local parameters with `bias + amplitude sin(2 pi frequency t + phase)`.
+Quadratic element mass weights assemble the body acceleration into mass-normalized
+nodal weights. Compilation is resumable and source-only edits replace forcing
+buffers without changing the mesh, operator, solution levels, solver clock, or
+probe history. The current topology permits at most two sourced regions at a shared
+DOF; the compiler rejects higher-order junctions explicitly until point-sharing
+subdomains are supported.
+
 Boundary conditions attach to logical parameter spans rather than individual mesh
 segments. Sampling copies a span assignment onto every resulting constrained edge.
 Knot insertion can split an assignment exactly; removal, seam movement, and span
@@ -146,18 +156,20 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON version 14 remains the single persistence representation. Version 14
-stores constant/formula coefficient variants, material parameters, and every
-region's material frame. Older scalar coefficients migrate as constants; older
+Scene JSON version 15 remains the single persistence representation. Version 15
+adds region-owned volume sources and their profiles, parameters, and harmonic
+signals to both draft and accepted scenes. Version 14 stores constant/formula
+coefficient variants, material parameters, and every region's material frame.
+Older scalar coefficients migrate as constants; older
 interior regions receive a centered, attached, world-unit frame. File loading, bundled
 examples, crash recovery, and shared links all pass through the same structural
 decoder and bounded accepted-scene validator before replacing the editor document.
-The document includes probes, continuous-source configuration, and far-field
+The document includes probes, point-source configuration, and far-field
 settings alongside draft and accepted geometry, so every persistence route and
 Undo/Redo sees the same state. Examples carry names and descriptions and render their thumbnails directly
 from the accepted spline geometry. Spatial-material examples overlay a cached,
 bounded sampling of their initial property view in the thumbnail. Each catalog
-entry can supply either a continuous source or driven boundary, probes, and an
+entry can supply either a point source or driven boundary, probes, and an
 initial material-overlay preset. Opening one is a single undoable document change
 and starts a fresh zero field; it does not transfer the
 field from the previously open scene. Ordinary edits and AMR retain their normal
@@ -481,6 +493,10 @@ The operator, state, source, and controls use Bevy's render-world buffers and it
 existing wgpu device. State remains GPU-resident; asynchronous readback supplies
 the egui field colors and energy diagnostic. Each readback carries a GPU-written
 step marker so stale asynchronous results cannot be mistaken for a newer level.
+The wave layout already occupies WebGPU's portable eight-storage-binding budget.
+Volume-source channel IDs and two mass-normalized weights therefore share the
+existing point/pulse forcing-weight record, while a fixed signal table shares the
+existing forcing buffer. No second wgpu device or extra storage binding is needed.
 
 Point probes compile to seven-node enriched-quadratic interpolation stencils with
 separate gradient weights. A small compute pipeline samples the centered
@@ -602,7 +618,7 @@ with DOFs, memory, timestep, and phase/amplitude error.
 
 The application requests at most 16 substeps per display frame and reports achieved
 simulation time per wall time. Pulse injection modifies both stored levels equally,
-giving zero added velocity. The continuous source is a Gaussian nodal acceleration
+giving zero added velocity. The point source is a Gaussian nodal acceleration
 with a sinusoidal time factor; its default frequency is 2.5 cycles per dimensionless
 time, corresponding to wavelength 0.4 at wave speed one.
 
@@ -688,7 +704,7 @@ operator, damping, forcing, and timestep. It stores velocity in the old state's
 otherwise disposable scratch component. A second dispatch maps current displacement
 and velocity with seven basis weights. A third applies the new operator and forcing
 to initialize the new previous displacement consistently with the new timestep.
-The exact GPU clock is copied at commit, so a continuous source retains its phase.
+The exact GPU clock is copied at commit, so a point source retains its phase.
 Every pipeline stays within WebGPU's portable eight-storage-buffer-per-stage limit.
 
 Validate finite values, positive areas/masses, operator consistency, and admissible

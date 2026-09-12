@@ -166,15 +166,22 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   highlights it. Material changes preserve the live field and reuse the committed
   mesh. Profile placement appears for the selected subdomain and can be adjusted
   numerically or with its viewport origin/rotation gizmo. View can overlay material
-  regions, density, stiffness, damping, wave speed, or impedance with linear/log and
+  regions, density, stiffness, damping, wave speed, impedance, or volume-source
+  amplitude with linear/log and
   automatic/manual range controls plus a local-coordinate hover readout. Automatic
-  solution AMR pauses for varying materials until its estimator accounts for
-  coefficient gradients.
+  solution AMR evaluates varying coefficients and their gradients directly.
+- **Region sources:** the selected subdomain can own one distributed source,
+  independent of its reusable passive material. Its signed spatial profile uses the
+  same region-local world-unit coordinates and its own named parameters, multiplied
+  by a bias-plus-sinusoid signal with amplitude, frequency, and phase. Source-only
+  edits update GPU forcing in bounded slices and preserve the mesh, operator, live
+  field, solver clock, and probe traces. Region frames appear when either the passive
+  material or its source uses local coordinates.
 - **Simulation input:** Place pulse remains active for repeated viewport clicks and
   can be toggled off with the same selected button, the viewport Done action, or
-  Escape. Drag the visible continuous-source marker directly to reposition it.
-  Pulse strength/width and continuous-source position, frequency, strength, width,
-  and region are editable in Simulation. Continuous-source settings are included
+  Escape. Drag the visible point-source marker directly to reposition it.
+  Pulse strength/width and point-source position, frequency, strength, width,
+  and region are editable in Simulation. Point-source settings are included
   in scene files, shared links, examples, Undo/Redo, and autosave.
 - **Point probes:** add persistent point receivers from Probes, then click repeatedly
   in the viewport. Markers can be selected, dragged, renamed, colored, disabled,
@@ -277,7 +284,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Gaussian displacement with zero initial velocity. The optional continuous
   sinusoidal source is repositioned by dragging its viewport marker. Simulation speed is bounded to 16
   substeps per display frame. Field colors use an adjustable symmetric gain.
-  Pulses and continuous sources act only in their containing wall-separated
+  Pulses and point sources act only in their containing wall-separated
   region. With open baffles their Gaussian stencil uses mesh-path distance, so it
   goes around a free endpoint instead of jumping through coincident faces.
   The panel reports DOFs, GPU buffer size, operator-derived timestep, simulated
@@ -308,9 +315,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   candidate retains the previous simulation. Baffle trace nodes prefer the same
   stable boundary ID and left/right face on the old mesh during transfer.
 
-Scenes allow 32 geometric features, 32 materials, and 128 controls per curve.
-Version 7 JSON stores the complete outer, hole-span, and open-baffle laws together
-with draft and accepted material/region topology. Versions 2–6 remain compatible,
+Scenes allow 32 geometric features, 32 materials, one volume source per region, and
+128 controls per curve. Version 15 JSON stores the complete boundary laws,
+constant/formula materials and region frames, and region-owned volume sources in
+both draft and accepted scenes. Versions 2–14 remain compatible,
 and version 1 files migrate their loops to background holes. Legacy baffles that
 combined a thin-gap spring with face laws load with the thin-gap law taking
 precedence. JSON files are capped at 2 MiB and require finite coordinates. The editor uses a fixed

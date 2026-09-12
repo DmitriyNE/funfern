@@ -49,6 +49,42 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
+- [ ] Extend region sources beyond the initial bias-plus-sinusoid time law. Candidate
+  follow-ups include bounded time-envelope expressions, pulsed/chirped drives,
+  vector source terms when a vector field exists, and nonlinear field-dependent
+  source/material laws.
+
+## 2026-09-12 — Region-owned volume sources
+
+- Added one optional distributed source per subdomain. Each source has a signed
+  constant/formula profile over the region's rigid world-unit frame, its own named
+  parameters, enabled state, and harmonic bias/amplitude/frequency/phase signal.
+- Added a resumable mass-lumped compiler for the enriched quadratic basis. Source
+  profiles are integrated per triangle and normalized by assembled nodal mass, so
+  the GPU applies a body acceleration consistently across material density.
+- Source-only edits now compile cooperatively and replace only the forcing buffers,
+  preserving mesh, operator, solution levels, solver clock, playback, and probe
+  histories. Fresh/full/AMR candidates compile sources before their ordinary
+  transaction. Active source frequencies participate in the AMR wavelength guard.
+- Kept the wave pipeline at WebGPU's portable eight-storage-buffer limit by packing
+  two source channel/weight pairs into the existing point/pulse weight record and a
+  fixed signal table into the existing forcing buffer. Current topology allows no
+  more than two sourced regions at a DOF; a future point-junction topology extension
+  must revisit this representation.
+- Materials now configures sources for the selected subdomain. View adds a signed,
+  symmetric volume-source overlay, and Profile placement appears when either the
+  passive material or source uses local coordinates. Renamed the older continuous
+  Gaussian driver to **Point source** in the UI.
+- Scene JSON version 15 persists sources in both draft and accepted scenes through
+  files, shared links, recovery, examples, and history. Added a **Phased array**
+  example with five compact phase-ramped sources, source overlay, and far-field
+  monitor.
+- All **285 workspace tests**, formatting, warnings-denied Clippy, native release
+  compilation, and release Trunk/WASM packaging pass. The native production GPU
+  check exercised a nonzero spatial source on Apple M1 Max / Metal at 9,690 DOFs,
+  matched the f64 reference within 1.67e-4 relative L2, and confirmed that a live
+  source edit retained the solver generation, 1,024-step clock, and field. Interactive
+  browser review remains with the normal user testing pass.
 
 ## 2026-09-12 — GRIN rod and Luneburg examples
 

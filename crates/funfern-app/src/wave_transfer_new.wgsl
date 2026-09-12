@@ -22,6 +22,7 @@ struct Forcing {
     source: Source,
     pulse: Pulse,
     outer: array<BoundarySignal, 4>,
+    volume: array<BoundarySignal, 33>,
 }
 
 struct NodeData {

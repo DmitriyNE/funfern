@@ -891,6 +891,7 @@ mod tests {
                     frame: crate::MaterialFrame::world(),
                 },
             ],
+            volume_sources: vec![],
             outer_boundaries: OuterBoundaryConditions::default(),
         };
         let source_operator = QuadraticWaveOperator::assemble_scene(

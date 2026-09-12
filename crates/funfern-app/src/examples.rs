@@ -1,7 +1,8 @@
 use crate::material_overlay::{MaterialOverlay, MaterialProperty};
 use funfern_app::{
     editor::{
-        Document, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget, SourceSettings,
+        Document, FarFieldSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget,
+        SourceSettings,
     },
     persistence,
 };
@@ -21,6 +22,7 @@ pub struct ExamplePropertyPreview {
     pub triangles: Vec<ExamplePropertyTriangle>,
     pub minimum: f64,
     pub maximum: f64,
+    pub property: MaterialProperty,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +74,12 @@ pub fn catalog() -> &'static [ExampleScene] {
                 luneburg_simulation(),
             ),
             example(
+                "Phased array",
+                "Five compact region sources use a phase ramp to steer a radiated beam.",
+                phased_array(),
+                phased_array_simulation(),
+            ),
+            example(
                 "Obstacle array",
                 "A point source drives multiple scattering through eight reflecting obstacles.",
                 obstacle_array(),
@@ -110,7 +118,10 @@ fn property_preview(scene: &Scene, property: MaterialProperty) -> Option<Example
             continue;
         };
         let material = scene.region_material(interior)?;
-        if !material.varying() {
+        if property != MaterialProperty::VolumeSource && !material.varying() {
+            continue;
+        }
+        if property == MaterialProperty::VolumeSource && scene.volume_source(interior).is_none() {
             continue;
         }
         let polygon = (0..128)
@@ -172,6 +183,15 @@ fn property_preview(scene: &Scene, property: MaterialProperty) -> Option<Example
                             MaterialProperty::Impedance => {
                                 (coefficients.stiffness * coefficients.mass_density).sqrt()
                             }
+                            MaterialProperty::VolumeSource => scene
+                                .volume_source(interior)
+                                .filter(|source| source.enabled)
+                                .map_or(0.0, |source| {
+                                    source
+                                        .evaluate(scene.region(interior).unwrap().frame, point)
+                                        .ok()
+                                        .map_or(0.0, |profile| profile * source.signal.amplitude)
+                                }),
                         };
                         minimum = minimum.min(*value);
                         maximum = maximum.max(*value);
@@ -181,11 +201,17 @@ fn property_preview(scene: &Scene, property: MaterialProperty) -> Option<Example
             }
         }
     }
+    if property == MaterialProperty::VolumeSource {
+        let magnitude = minimum.abs().max(maximum.abs()).max(1.0e-12);
+        minimum = -magnitude;
+        maximum = magnitude;
+    }
     (!triangles.is_empty() && minimum.is_finite() && maximum.is_finite()).then_some(
         ExamplePropertyPreview {
             triangles,
             minimum,
             maximum,
+            property,
         },
     )
 }
@@ -488,6 +514,74 @@ fn luneburg_lens() -> Document {
     }
 }
 
+fn phased_array_simulation() -> ExampleSimulation {
+    ExampleSimulation {
+        source: SourceSettings::default(),
+        material_overlay: MaterialOverlay::Property(MaterialProperty::VolumeSource),
+        material_overlay_opacity: 0.62,
+        show_amr_target: false,
+    }
+}
+
+fn phased_array() -> Document {
+    const COUNT: usize = 5;
+    const RADIUS: f64 = 0.075;
+    const FREQUENCY: f64 = 3.0;
+    const STEERING_ANGLE: f64 = 20.0_f64.to_radians();
+    let mut scene = Scene {
+        outer_boundaries: OuterBoundaryConditions::uniform(
+            OuterBoundaryCondition::FirstOrderOutgoing,
+        ),
+        ..Default::default()
+    };
+    for index in 0..COUNT {
+        let region = RegionId(2 + index as u64);
+        let center = Point2::new(-0.48, (index as f64 - 2.0) * 0.20);
+        scene.regions.push(Region {
+            id: region,
+            material: DEFAULT_MATERIAL,
+            frame: MaterialFrame {
+                origin: center,
+                attachment: MaterialFrameAttachment::FollowRegion,
+                ..MaterialFrame::world()
+            },
+        });
+        scene.obstacles.push(Obstacle::with_role(
+            ObstacleId(1 + index as u64),
+            PeriodicCubicSpline::rounded(center, RADIUS),
+            LoopRole::MaterialInterface {
+                exterior: BACKGROUND_REGION,
+                interior: region,
+            },
+        ));
+        scene.volume_sources.push(VolumeSource {
+            region,
+            enabled: true,
+            profile: ScalarField::formula("smoothstep(0, 1, 1 - (r / R)^2)").unwrap(),
+            parameters: vec![MaterialParameter {
+                name: "R".into(),
+                value: RADIUS,
+            }],
+            signal: BoundarySignal {
+                offset: 0.0,
+                amplitude: 18.0,
+                frequency_hz: FREQUENCY,
+                phase_radians: -std::f64::consts::TAU * FREQUENCY * center.y * STEERING_ANGLE.sin(),
+            },
+        });
+    }
+    Document {
+        draft: scene.clone(),
+        accepted: scene,
+        probes: vec![],
+        source: SourceSettings::default(),
+        far_field: FarFieldSettings {
+            enabled: true,
+            inset: 0.08,
+        },
+    }
+}
+
 fn obstacle_array() -> Document {
     let mut document =
         persistence::parse_document(include_bytes!("../../../examples/eight-obstacles.json"))
@@ -563,7 +657,7 @@ mod tests {
 
     #[test]
     fn bundled_examples_are_structurally_valid_and_exportable() {
-        assert_eq!(catalog().len(), 6);
+        assert_eq!(catalog().len(), 7);
         assert_eq!(catalog()[0].document.probes.len(), 1);
         for example in catalog() {
             assert!(
@@ -591,8 +685,14 @@ mod tests {
                     .signal()
                     .is_some_and(|signal| signal.amplitude != 0.0)
             });
+            let driven_region = example
+                .document
+                .accepted
+                .volume_sources
+                .iter()
+                .any(|source| source.enabled && source.signal.amplitude != 0.0);
             assert!(
-                example.simulation.source.enabled || driven_boundary,
+                example.simulation.source.enabled || driven_boundary || driven_region,
                 "{} has no active driver",
                 example.name
             );
@@ -722,6 +822,43 @@ mod tests {
                 result.report.maximum_target
             );
         }
+    }
+
+    #[test]
+    fn phased_array_meshes_and_compiles_all_region_sources() {
+        let example = catalog()
+            .iter()
+            .find(|example| example.name == "Phased array")
+            .unwrap();
+        let scene = &example.document.accepted;
+        let mesh = Arc::new(
+            mesh_scene(
+                scene,
+                81,
+                MeshingOptions {
+                    target_edge_length: 0.08,
+                    minimum_angle_degrees: 10.0,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                scene,
+                scene.outer_boundaries,
+            )
+            .unwrap(),
+        );
+        let sources = compile_volume_sources(mesh, operator, scene.clone()).unwrap();
+        assert_eq!(sources.signals.len(), 5);
+        assert!(
+            sources
+                .acceleration(0.137)
+                .iter()
+                .any(|value| value.abs() > 1.0e-3)
+        );
     }
 
     #[test]

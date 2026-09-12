@@ -22,6 +22,13 @@ struct Forcing {
     source: Source,
     pulse: Pulse,
     outer: array<BoundarySignal, 4>,
+    volume: array<BoundarySignal, 33>,
+}
+
+struct ForcingWeights {
+    point_pulse: vec2<f32>,
+    channels: vec2<u32>,
+    volume: vec2<f32>,
 }
 
 struct NodeData {
@@ -51,7 +58,7 @@ struct State {
 @group(0) @binding(4) var<storage, read> matrix_over_mass: array<MatrixEntry>;
 @group(0) @binding(5) var<storage, read> nodes: array<NodeData>;
 @group(0) @binding(6) var<storage, read_write> states: array<State>;
-@group(0) @binding(7) var<storage, read> forcing_weights: array<vec2<f32>>;
+@group(0) @binding(7) var<storage, read> forcing_weights: array<ForcingWeights>;
 
 fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
     let first = node.x == region.x && node.y == region.y;
@@ -77,6 +84,20 @@ fn neumann_acceleration(i: u32, time: f32) -> f32 {
         * signal_value(nodes[i].face_neumann_signal_a, time);
     value += nodes[i].face_neumann_weights.y
         * signal_value(nodes[i].face_neumann_signal_b, time);
+    return value;
+}
+
+fn volume_acceleration(i: u32, time: f32) -> f32 {
+    let weights = forcing_weights[i];
+    var value = 0.0;
+    if weights.channels.x != 0u {
+        value += weights.volume.x
+            * signal_value(forcing.volume[weights.channels.x - 1u].values, time);
+    }
+    if weights.channels.y != 0u {
+        value += weights.volume.y
+            * signal_value(forcing.volume[weights.channels.y - 1u].values, time);
+    }
     return value;
 }
 
@@ -117,8 +138,9 @@ fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
     let acceleration = forcing.source.frequency_enabled.y
         * region_match(nodes[i].regions, forcing.source.region)
         * forcing.source.position_width_amplitude.w
-        * forcing_weights[i].x
+        * forcing_weights[i].point_pulse.x
         * sin(forcing.source.frequency_enabled.x * parameters.time_data.z)
+        + volume_acceleration(i, parameters.time_data.z)
         + neumann_acceleration(i, parameters.time_data.z);
     let previous = states[i].levels.x;
     let current = states[i].levels.y;
@@ -166,7 +188,7 @@ fn inject(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let addition = forcing.pulse.position_width_amplitude.w
         * region_match(nodes[i].regions, forcing.pulse.region)
-        * forcing_weights[i].y;
+        * forcing_weights[i].point_pulse.y;
     states[i].levels.x += addition;
     states[i].levels.y += addition;
     states[i].auxiliary.y = 0.0;

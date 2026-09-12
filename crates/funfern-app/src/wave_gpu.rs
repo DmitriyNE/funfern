@@ -29,7 +29,8 @@ use bevy::{
 };
 use funfern_app::editor::SourceSettings;
 use funfern_core::{
-    BoundarySignal, OuterBoundaryConditions, Point2, QuadraticAreaElement, QuadraticAreaStencil,
+    BoundarySignal, CompiledVolumeSources, MAX_VOLUME_SOURCES, NO_VOLUME_SOURCE,
+    OuterBoundaryConditions, Point2, QuadraticAreaElement, QuadraticAreaStencil,
     QuadraticPointStencil, QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState,
     RegionId, TriMesh,
 };
@@ -123,6 +124,7 @@ struct WaveBufferHandles {
     pulse: PulseSettings,
     source_weights: Arc<[f32]>,
     pulse_weights: Arc<[f32]>,
+    volume_sources: Arc<CompiledVolumeSources>,
 }
 
 #[derive(Clone)]
@@ -737,7 +739,8 @@ impl WaveGpuRequest {
         self.desired_steps = self.desired_steps.saturating_add(count);
     }
 
-    pub fn replace(
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_with_volume_sources(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
@@ -745,18 +748,27 @@ impl WaveGpuRequest {
         operator: &QuadraticWaveOperator,
         time_step: f64,
         source: SourceSettings,
+        volume_sources: &CompiledVolumeSources,
     ) -> Result<(), String> {
-        let (handles, dof_count) =
-            create_buffers(assets, mesh, operator, time_step, source, false)?;
+        let (handles, dof_count) = create_buffers(
+            assets,
+            mesh,
+            operator,
+            time_step,
+            source,
+            volume_sources,
+            false,
+        )?;
         self.install(assets, commands, handles, dof_count, None);
         Ok(())
     }
 
-    pub fn replace_transferred(
+    pub fn replace_transferred_with_volume_sources(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
         replacement: WaveTransfer<'_>,
+        volume_sources: &CompiledVolumeSources,
     ) -> Result<(), String> {
         if self.transfer.is_some() {
             return Err("A wave-state transfer is already pending".into());
@@ -824,6 +836,7 @@ impl WaveGpuRequest {
             target_operator,
             target_time_step,
             source,
+            volume_sources,
             true,
         )?;
         let transfer = WaveTransferHandles {
@@ -958,11 +971,13 @@ impl WaveGpuRequest {
         } else {
             0.0
         };
+        let volume = handles.volume_sources.acceleration(time);
         Some(
             handles
                 .source_weights
                 .iter()
-                .map(|weight| value * *weight as f64)
+                .zip(volume)
+                .map(|(weight, volume)| value * *weight as f64 + volume)
                 .collect(),
         )
     }
@@ -976,7 +991,20 @@ impl WaveGpuRequest {
         time_step: f64,
         source: SourceSettings,
     ) -> Result<(), String> {
-        self.replace(assets, commands, mesh, operator, time_step, source)
+        let volume_sources = self
+            .buffers
+            .as_ref()
+            .map(|handles| handles.volume_sources.as_ref().clone())
+            .unwrap_or_else(|| CompiledVolumeSources::empty(operator.degrees_of_freedom()));
+        self.replace_with_volume_sources(
+            assets,
+            commands,
+            mesh,
+            operator,
+            time_step,
+            source,
+            &volume_sources,
+        )
     }
 
     fn validate_inputs(
@@ -1014,10 +1042,12 @@ impl WaveGpuRequest {
             source,
             handles.pulse,
             operator.outer_boundaries(),
+            &handles.volume_sources,
         )?));
         let weights = assets.add(ShaderBuffer::from(zip_forcing_weights(
             &source_weights,
             &handles.pulse_weights,
+            &handles.volume_sources,
         )?));
         let old = std::mem::replace(&mut handles.forcing, forcing);
         assets.remove(old.id());
@@ -1025,6 +1055,41 @@ impl WaveGpuRequest {
         assets.remove(old.id());
         handles.source = source;
         handles.source_weights = source_weights.into();
+        self.buffer_revision = self.buffer_revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn update_volume_sources(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        operator: &QuadraticWaveOperator,
+        volume_sources: CompiledVolumeSources,
+    ) -> Result<(), String> {
+        if volume_sources.nodes.len() != operator.degrees_of_freedom()
+            || volume_sources.signals.len() > MAX_VOLUME_SOURCES
+        {
+            return Err("Compiled volume sources do not match the wave discretization".into());
+        }
+        let handles = self
+            .buffers
+            .as_mut()
+            .ok_or("The wave solver is not initialized")?;
+        let forcing = assets.add(ShaderBuffer::from(gpu_forcing(
+            handles.source,
+            handles.pulse,
+            operator.outer_boundaries(),
+            &volume_sources,
+        )?));
+        let weights = assets.add(ShaderBuffer::from(zip_forcing_weights(
+            &handles.source_weights,
+            &handles.pulse_weights,
+            &volume_sources,
+        )?));
+        let old = std::mem::replace(&mut handles.forcing, forcing);
+        assets.remove(old.id());
+        let old = std::mem::replace(&mut handles.forcing_weights, weights);
+        assets.remove(old.id());
+        handles.volume_sources = Arc::new(volume_sources);
         self.buffer_revision = self.buffer_revision.wrapping_add(1);
         Ok(())
     }
@@ -1055,10 +1120,12 @@ impl WaveGpuRequest {
             handles.source,
             pulse_settings,
             operator.outer_boundaries(),
+            &handles.volume_sources,
         )?));
         let weights = assets.add(ShaderBuffer::from(zip_forcing_weights(
             &handles.source_weights,
             &pulse_weights,
+            &handles.volume_sources,
         )?));
         let old = std::mem::replace(&mut handles.forcing, forcing);
         assets.remove(old.id());
@@ -1078,9 +1145,15 @@ fn create_buffers(
     operator: &QuadraticWaveOperator,
     time_step: f64,
     source: SourceSettings,
+    volume_sources: &CompiledVolumeSources,
     awaits_transfer: bool,
 ) -> Result<(WaveBufferHandles, u32), String> {
     WaveGpuRequest::validate_inputs(mesh, operator, time_step)?;
+    if volume_sources.nodes.len() != operator.degrees_of_freedom()
+        || volume_sources.signals.len() > MAX_VOLUME_SOURCES
+    {
+        return Err("Compiled volume sources do not match the wave discretization".into());
+    }
     let dof_count = u32::try_from(operator.degrees_of_freedom())
         .map_err(|_| "The wave discretization is too large for the GPU")?;
     let normalized = operator
@@ -1185,6 +1258,7 @@ fn create_buffers(
                 source,
                 pulse,
                 operator.outer_boundaries(),
+                volume_sources,
             )?)),
             row_offsets: assets.add(ShaderBuffer::from(operator.row_offsets().to_vec())),
             columns: assets.add(ShaderBuffer::from(operator.columns().to_vec())),
@@ -1194,11 +1268,13 @@ fn create_buffers(
             forcing_weights: assets.add(ShaderBuffer::from(zip_forcing_weights(
                 &source_weights,
                 &pulse_weights,
+                volume_sources,
             )?)),
             source,
             pulse,
             source_weights: source_weights.into(),
             pulse_weights: pulse_weights.into(),
+            volume_sources: Arc::new(volume_sources.clone()),
         },
         dof_count,
     ))
@@ -1238,6 +1314,7 @@ fn gpu_forcing(
     source: SourceSettings,
     pulse: PulseSettings,
     boundaries: OuterBoundaryConditions,
+    volume_sources: &CompiledVolumeSources,
 ) -> Result<GpuForcing, String> {
     let signals = boundaries
         .sides
@@ -1245,10 +1322,18 @@ fn gpu_forcing(
     if signals.iter().any(|values| !values.is_finite()) {
         return Err("Boundary signal values cannot be represented on the GPU".into());
     }
+    let mut volume = [GpuBoundarySignal::default(); MAX_VOLUME_SOURCES];
+    for (target, signal) in volume.iter_mut().zip(&volume_sources.signals) {
+        target.values = gpu_boundary_signal(*signal);
+        if !target.values.is_finite() {
+            return Err("Volume-source signal values cannot be represented on the GPU".into());
+        }
+    }
     Ok(GpuForcing {
         source: gpu_source(source),
         pulse: gpu_pulse(pulse),
         outer: signals.map(|values| GpuBoundarySignal { values }),
+        volume,
     })
 }
 
@@ -1261,15 +1346,42 @@ fn gpu_boundary_signal(signal: BoundarySignal) -> Vec4 {
     )
 }
 
-fn zip_forcing_weights(source: &[f32], pulse: &[f32]) -> Result<Vec<Vec2>, String> {
-    if source.len() != pulse.len() {
+fn zip_forcing_weights(
+    source: &[f32],
+    pulse: &[f32],
+    volume_sources: &CompiledVolumeSources,
+) -> Result<Vec<GpuForcingWeights>, String> {
+    if source.len() != pulse.len() || source.len() != volume_sources.nodes.len() {
         return Err("Source and pulse weights do not match the wave discretization".into());
     }
-    Ok(source
+    source
         .iter()
         .zip(pulse)
-        .map(|(&source, &pulse)| Vec2::new(source, pulse))
-        .collect())
+        .zip(&volume_sources.nodes)
+        .map(|((&source, &pulse), volume)| {
+            if volume.channels.iter().any(|channel| {
+                *channel != NO_VOLUME_SOURCE && *channel as usize >= volume_sources.signals.len()
+            }) {
+                return Err("Volume-source channel is out of range".into());
+            }
+            let channel = |channel: u32| {
+                if channel == NO_VOLUME_SOURCE {
+                    0
+                } else {
+                    channel + 1
+                }
+            };
+            let weights = Vec2::new(volume.weights[0] as f32, volume.weights[1] as f32);
+            if !weights.is_finite() {
+                return Err("Volume-source weights cannot be represented on the GPU".into());
+            }
+            Ok(GpuForcingWeights {
+                point_pulse: Vec2::new(source, pulse),
+                channels: UVec2::new(channel(volume.channels[0]), channel(volume.channels[1])),
+                volume: weights,
+            })
+        })
+        .collect()
 }
 
 fn node_regions(
@@ -1610,11 +1722,12 @@ struct GpuBoundarySignal {
     values: Vec4,
 }
 
-#[derive(Clone, Copy, Default, ShaderType)]
+#[derive(Clone, Copy, ShaderType)]
 struct GpuForcing {
     source: GpuSource,
     pulse: GpuPulse,
     outer: [GpuBoundarySignal; 4],
+    volume: [GpuBoundarySignal; MAX_VOLUME_SOURCES],
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -1632,6 +1745,13 @@ struct GpuNode {
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuMatrixEntry {
     coefficients: Vec2,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuForcingWeights {
+    point_pulse: Vec2,
+    channels: UVec2,
+    volume: Vec2,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -2158,7 +2278,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuMatrixEntry>>(false),
                 storage_buffer_read_only::<Vec<GpuNode>>(false),
                 storage_buffer::<Vec<GpuState>>(false),
-                storage_buffer_read_only::<Vec<Vec2>>(false),
+                storage_buffer_read_only::<Vec<GpuForcingWeights>>(false),
             ),
         ),
     );
@@ -3012,6 +3132,7 @@ fn compute_wave(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use funfern_core::VolumeSourceNode;
 
     #[test]
     fn source_upload_uses_angular_frequency_and_squared_width() {
@@ -3029,6 +3150,41 @@ mod tests {
         assert_eq!(source.position_width_amplitude.w, 7.0);
         assert!((source.frequency_enabled.x - 5.0 * std::f32::consts::PI).abs() < 1.0e-6);
         assert_eq!(source.frequency_enabled.y, 1.0);
+    }
+
+    #[test]
+    fn volume_sources_share_the_existing_forcing_weight_binding() {
+        let sources = CompiledVolumeSources {
+            signals: vec![BoundarySignal {
+                offset: -0.25,
+                amplitude: 3.0,
+                frequency_hz: 2.5,
+                phase_radians: 0.4,
+            }],
+            nodes: vec![VolumeSourceNode {
+                channels: [0, NO_VOLUME_SOURCE],
+                weights: [0.75, 0.0],
+            }],
+        };
+        let forcing = gpu_forcing(
+            SourceSettings::default(),
+            PulseSettings {
+                position: Point2::default(),
+                amplitude: 0.0,
+                width: 1.0,
+                region: funfern_core::BACKGROUND_REGION,
+            },
+            OuterBoundaryConditions::default(),
+            &sources,
+        )
+        .unwrap();
+        assert_eq!(forcing.volume[0].values.x, -0.25);
+        assert_eq!(forcing.volume[0].values.y, 3.0);
+        assert!((forcing.volume[0].values.z - 5.0 * std::f32::consts::PI).abs() < 1.0e-5);
+        let weights = zip_forcing_weights(&[0.2], &[0.3], &sources).unwrap();
+        assert_eq!(weights[0].point_pulse, Vec2::new(0.2, 0.3));
+        assert_eq!(weights[0].channels, UVec2::new(1, 0));
+        assert_eq!(weights[0].volume, Vec2::new(0.75, 0.0));
     }
 
     #[test]

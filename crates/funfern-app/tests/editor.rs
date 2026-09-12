@@ -268,7 +268,7 @@ fn area_probe_targets_and_far_field_settings_round_trip() {
         .unwrap();
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 14"));
+    assert!(json.contains("\"version\": 15"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
     assert_eq!(decoded.far_field.inset, 0.17);
@@ -352,7 +352,7 @@ fn continuous_source_round_trips_and_version_ten_uses_the_default() {
     };
     let json = save(&document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 14);
+    assert_eq!(value["version"], 15);
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
     value["version"] = 10.into();
@@ -368,6 +368,46 @@ fn continuous_source_round_trips_and_version_ten_uses_the_default() {
     malformed["source"]["region"] = 999.into();
     assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
 }
+
+#[test]
+fn volume_source_round_trips_and_is_one_undoable_region_edit() {
+    let mut editor = Editor::default();
+    let source = VolumeSource {
+        region: BACKGROUND_REGION,
+        enabled: true,
+        profile: ScalarField::formula("gain * cos(theta)").unwrap(),
+        parameters: vec![MaterialParameter {
+            name: "gain".into(),
+            value: 0.75,
+        }],
+        signal: BoundarySignal {
+            offset: 0.1,
+            amplitude: 4.0,
+            frequency_hz: 2.5,
+            phase_radians: 0.3,
+        },
+    };
+    editor
+        .set_volume_source(BACKGROUND_REGION, Some(source.clone()))
+        .unwrap();
+    settle(&mut editor);
+    assert_eq!(
+        editor.document.accepted.volume_source(BACKGROUND_REGION),
+        Some(&source)
+    );
+    editor.undo();
+    assert!(editor.document.draft.volume_sources.is_empty());
+    editor.redo();
+    settle(&mut editor);
+
+    let json = save(&editor.document).unwrap();
+    assert!(json.contains("\"version\": 15"));
+    assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
+
+    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+    legacy["version"] = 14.into();
+    assert!(decode(serde_json::to_string(&legacy).unwrap().as_bytes()).is_err());
+}
 #[test]
 fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     let e = Editor::default();
@@ -377,7 +417,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 15.into(),
+            0 => value["version"] = 16.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -454,7 +494,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        14
+        15
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -920,7 +960,7 @@ fn spatial_materials_parameters_and_frames_round_trip() {
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 14"));
+    assert!(json.contains("\"version\": 15"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1404,7 +1444,7 @@ fn boundary_probe_round_trips_and_tracks_periodic_insertion() {
     assert_eq!(target.spans(9), vec![7, 8, 0]);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 14"));
+    assert!(json.contains("\"version\": 15"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded.probes, editor.document.probes);
 

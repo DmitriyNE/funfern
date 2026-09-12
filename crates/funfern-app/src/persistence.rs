@@ -134,11 +134,24 @@ enum StoredProbeSamplingPreset {
 struct StoredScene {
     materials: Vec<StoredMaterial>,
     regions: Vec<StoredRegion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    volume_sources: Vec<StoredVolumeSource>,
     loops: Vec<StoredLoop>,
     #[serde(default)]
     internal_boundaries: Vec<StoredInternalBoundary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     outer_boundaries: Option<[StoredOuterBoundaryCondition; 4]>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredVolumeSource {
+    region: u64,
+    enabled: bool,
+    profile: StoredScalarField,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    parameters: Vec<StoredMaterialParameter>,
+    signal: StoredBoundarySignal,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -323,6 +336,24 @@ fn encode_scene(scene: &Scene) -> StoredScene {
                         }
                     },
                 }),
+            })
+            .collect(),
+        volume_sources: scene
+            .volume_sources
+            .iter()
+            .map(|source| StoredVolumeSource {
+                region: source.region.0,
+                enabled: source.enabled,
+                profile: encode_scalar_field(&source.profile),
+                parameters: source
+                    .parameters
+                    .iter()
+                    .map(|parameter| StoredMaterialParameter {
+                        name: parameter.name.clone(),
+                        value: parameter.value,
+                    })
+                    .collect(),
+                signal: encode_signal(source.signal),
             })
             .collect(),
         loops: scene
@@ -579,11 +610,13 @@ fn decode_scene(
     require_outer_boundaries: bool,
     normalize_legacy_parallel_gap: bool,
     require_material_frames: bool,
+    require_volume_sources: bool,
 ) -> Result<Scene, String> {
     if stored.loops.len() > MAX_OBSTACLES
         || stored.internal_boundaries.len() > MAX_INTERNAL_BOUNDARIES
         || stored.loops.len() + stored.internal_boundaries.len() > MAX_OBSTACLES
         || stored.materials.len() > MAX_MATERIALS
+        || stored.volume_sources.len() > MAX_VOLUME_SOURCES
     {
         return Err("Scene exceeds the loop or material limit".into());
     }
@@ -631,6 +664,29 @@ fn decode_scene(
                 id: RegionId(region.id),
                 material: MaterialId(region.material),
                 frame,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if !require_volume_sources && !stored.volume_sources.is_empty() {
+        return Err("Volume sources require scene version 15".into());
+    }
+    let volume_sources = stored
+        .volume_sources
+        .into_iter()
+        .map(|source| {
+            Ok(VolumeSource {
+                region: RegionId(source.region),
+                enabled: source.enabled,
+                profile: decode_scalar_field(source.profile, true)?,
+                parameters: source
+                    .parameters
+                    .into_iter()
+                    .map(|parameter| MaterialParameter {
+                        name: parameter.name,
+                        value: parameter.value,
+                    })
+                    .collect(),
+                signal: decode_signal(source.signal),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -763,6 +819,7 @@ fn decode_scene(
         internal_boundaries,
         materials,
         regions,
+        volume_sources,
         outer_boundaries,
     };
     if !scene.structure_valid() {
@@ -807,7 +864,7 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 14,
+        version: 15,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
@@ -1093,7 +1150,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 far_field: FarFieldSettings::default(),
             }
         }
-        2..=14 => {
+        2..=15 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
@@ -1104,6 +1161,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 header.version >= 6,
                 header.version < 7,
                 header.version >= 14,
+                header.version >= 15,
             )?;
             let accepted = decode_scene(
                 file.accepted,
@@ -1111,6 +1169,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 header.version >= 6,
                 header.version < 7,
                 header.version >= 14,
+                header.version >= 15,
             )?;
             let source = decode_source(file.source, &accepted)?;
             let probes = decode_probes(

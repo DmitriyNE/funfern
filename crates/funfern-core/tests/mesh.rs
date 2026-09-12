@@ -514,6 +514,7 @@ fn two_region_scene(role: impl FnOnce(RegionId, RegionId) -> LoopRole) -> Scene 
                 frame: MaterialFrame::world(),
             },
         ],
+        volume_sources: vec![],
         outer_boundaries: OuterBoundaryConditions::default(),
     }
 }
