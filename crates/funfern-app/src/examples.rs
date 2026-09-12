@@ -1,3 +1,4 @@
+use crate::wave_gpu::SourceSettings;
 use funfern_app::{editor::Document, persistence};
 use funfern_core::*;
 use std::sync::OnceLock;
@@ -6,6 +7,12 @@ pub struct ExampleScene {
     pub name: &'static str,
     pub description: &'static str,
     pub document: Document,
+    pub simulation: ExampleSimulation,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ExampleSimulation {
+    pub source: SourceSettings,
 }
 
 pub fn catalog() -> &'static [ExampleScene] {
@@ -14,29 +21,62 @@ pub fn catalog() -> &'static [ExampleScene] {
         vec![
             ExampleScene {
                 name: "Starter obstacle",
-                description: "A rounded reflecting obstacle in a second-order absorbing box.",
-                document: Document::default(),
+                description: "A point source scatters from a rounded obstacle above a reflecting floor.",
+                document: starter_obstacle(),
+                simulation: continuous_source(Point2::new(-0.55, 0.05), 2.5, 18.0, 0.06),
             },
             ExampleScene {
                 name: "Double slit",
-                description: "Three straight baffles form a simple two-aperture screen.",
+                description: "A point source illuminates two apertures in a reflecting waveguide.",
                 document: double_slit(),
+                simulation: continuous_source(Point2::new(-0.62, 0.0), 3.0, 20.0, 0.05),
             },
             ExampleScene {
                 name: "Material lens",
-                description: "A slower circular material region bends waves toward its axis.",
+                description: "A point source illuminates a slower circular material region with absorbing edges.",
                 document: material_lens(),
+                simulation: continuous_source(Point2::new(-0.72, 0.0), 3.5, 16.0, 0.045),
             },
             ExampleScene {
                 name: "Obstacle array",
-                description: "Eight reflecting obstacles exercise scattering and adaptive meshing.",
-                document: persistence::parse_document(include_bytes!(
-                    "../../../examples/eight-obstacles.json"
-                ))
-                .expect("bundled obstacle example must remain valid"),
+                description: "A point source drives multiple scattering through eight reflecting obstacles.",
+                document: obstacle_array(),
+                simulation: continuous_source(Point2::new(-0.92, 0.0), 3.0, 20.0, 0.045),
             },
         ]
     })
+}
+
+fn continuous_source(
+    position: Point2,
+    frequency_hz: f32,
+    amplitude: f32,
+    width: f32,
+) -> ExampleSimulation {
+    ExampleSimulation {
+        source: SourceSettings {
+            enabled: true,
+            position,
+            amplitude,
+            width,
+            frequency_hz,
+            region: BACKGROUND_REGION,
+        },
+    }
+}
+
+fn reflecting_channel() -> OuterBoundaryConditions {
+    let mut boundaries = OuterBoundaryConditions::default();
+    boundaries.sides[OuterSide::Bottom.index()] = OuterBoundaryCondition::Reflecting;
+    boundaries.sides[OuterSide::Top.index()] = OuterBoundaryCondition::Reflecting;
+    boundaries
+}
+
+fn starter_obstacle() -> Document {
+    let mut document = Document::default();
+    document.draft.outer_boundaries = reflecting_channel();
+    document.accepted.outer_boundaries = reflecting_channel();
+    document
 }
 
 fn straight(id: u64, y0: f64, y1: f64) -> InternalBoundary {
@@ -58,6 +98,7 @@ fn double_slit() -> Document {
             straight(2, -0.14, 0.14),
             straight(3, 0.36, 0.9),
         ],
+        outer_boundaries: reflecting_channel(),
         ..Default::default()
     };
     Document {
@@ -67,7 +108,12 @@ fn double_slit() -> Document {
 }
 
 fn material_lens() -> Document {
-    let mut scene = Scene::default();
+    let mut scene = Scene {
+        outer_boundaries: OuterBoundaryConditions::uniform(
+            OuterBoundaryCondition::FirstOrderOutgoing,
+        ),
+        ..Default::default()
+    };
     scene.materials.push(Material {
         id: MaterialId(2),
         name: "Slow lens".into(),
@@ -92,6 +138,16 @@ fn material_lens() -> Document {
         draft: scene.clone(),
         accepted: scene,
     }
+}
+
+fn obstacle_array() -> Document {
+    let mut document =
+        persistence::parse_document(include_bytes!("../../../examples/eight-obstacles.json"))
+            .expect("bundled obstacle example must remain valid");
+    let boundaries = OuterBoundaryConditions::uniform(OuterBoundaryCondition::FirstOrderOutgoing);
+    document.draft.outer_boundaries = boundaries;
+    document.accepted.outer_boundaries = boundaries;
+    document
 }
 
 pub fn scene_svg(scene: &Scene) -> String {
@@ -175,6 +231,13 @@ mod tests {
                 }
             };
             assert_eq!(loaded, example.document, "{}", example.name);
+            assert!(example.simulation.source.enabled, "{}", example.name);
+            assert_ne!(
+                example.document.accepted.outer_boundaries,
+                OuterBoundaryConditions::default(),
+                "{}",
+                example.name
+            );
         }
     }
 }

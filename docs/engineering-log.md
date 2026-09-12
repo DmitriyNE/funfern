@@ -37,6 +37,11 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   descriptions. Starter obstacle, double-slit baffles, a material lens, and the
   eight-obstacle scattering scene are bundled. Every accepted example passes the
   normal bounded validator, and opening one is a single undoable document action.
+- Made the bundled examples ready to run by pairing each scene with a tuned
+  continuous source and an intentional outer-boundary configuration. Opening an
+  example applies its source and reveals the boundary-law overlay. Gallery
+  thumbnails show both the source location and colored outer-edge laws; rows use
+  full-width separators instead of content-sized card frames.
 - Added debounced crash recovery for the complete draft/accepted document pair.
   Browser builds use local storage; native builds write and atomically rename a
   per-user recovery file. Startup restores recovery automatically unless a shared

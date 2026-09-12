@@ -292,6 +292,7 @@ pub struct Playground {
     load: Option<LoadCandidate>,
     load_mode: LoadMode,
     load_notice: &'static str,
+    load_example_simulation: Option<examples::ExampleSimulation>,
     startup_load_checked: bool,
     autosave_observed: funfern_app::editor::Document,
     autosave_due: Option<Instant>,
@@ -433,6 +434,7 @@ impl Default for Playground {
             load: None,
             load_mode: LoadMode::Replace,
             load_notice: "Scene loaded; history cleared",
+            load_example_simulation: None,
             startup_load_checked: false,
             autosave_observed: funfern_app::editor::Document::default(),
             autosave_due: None,
@@ -1373,6 +1375,7 @@ impl Playground {
             && let Some(result) = load.advance(12_000)
         {
             self.load = None;
+            let example_simulation = self.load_example_simulation.take();
             match result {
                 Ok(document) => {
                     match self.load_mode {
@@ -1380,6 +1383,12 @@ impl Playground {
                         LoadMode::Undoable => self.editor.replace_validated_with_history(document),
                     }
                     self.clear_transient();
+                    if let Some(simulation) = example_simulation {
+                        self.wave_source = simulation.source;
+                        self.wave_source_dirty = true;
+                        self.wave_pending_pulse = None;
+                        self.show_boundary_conditions = true;
+                    }
                     self.notify(self.load_notice);
                 }
                 Err(e) => self.message = e,
@@ -1392,7 +1401,17 @@ impl Playground {
         self.load = Some(load);
         self.load_mode = mode;
         self.load_notice = notice;
+        self.load_example_simulation = None;
         self.message.clear();
+    }
+
+    fn start_example_load(&mut self, example: &examples::ExampleScene) {
+        self.start_load(
+            persistence::candidate(example.document.clone()),
+            LoadMode::Undoable,
+            "Example opened; Undo restores the previous scene",
+        );
+        self.load_example_simulation = Some(example.simulation);
     }
 
     fn refresh_autosave(&mut self) {
@@ -2611,43 +2630,37 @@ impl Playground {
             .resizable(true)
             .default_width(560.0)
             .show(context, |ui| {
-                ui.label("Open an example as one undoable document change.");
+                ui.label("Choose a ready-to-run scene.");
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical()
                     .max_height(540.0)
                     .show(ui, |ui| {
                         for (index, example) in examples::catalog().iter().enumerate() {
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    let preview = paint_example_thumbnail(
-                                        ui,
-                                        &example.document.accepted,
-                                        egui::vec2(144.0, 144.0),
-                                    );
-                                    ui.vertical(|ui| {
-                                        ui.heading(example.name);
-                                        ui.set_max_width(320.0);
-                                        ui.label(example.description);
-                                        ui.add_space(8.0);
-                                        if ui.button("Open example").clicked() || preview.clicked()
-                                        {
-                                            selected = Some(index);
-                                        }
-                                    });
+                            ui.horizontal(|ui| {
+                                let preview =
+                                    paint_example_thumbnail(ui, example, egui::vec2(144.0, 144.0));
+                                ui.vertical(|ui| {
+                                    ui.heading(example.name);
+                                    ui.set_max_width(320.0);
+                                    ui.label(example.description);
+                                    ui.add_space(8.0);
+                                    if ui.button("Open example").clicked() || preview.clicked() {
+                                        selected = Some(index);
+                                    }
                                 });
                             });
-                            ui.add_space(6.0);
+                            if index + 1 < examples::catalog().len() {
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(8.0);
+                            }
                         }
                     });
             });
         self.examples_open = open;
         if let Some(index) = selected {
             let example = &examples::catalog()[index];
-            self.start_load(
-                persistence::candidate(example.document.clone()),
-                LoadMode::Undoable,
-                "Example opened; Undo restores the previous scene",
-            );
+            self.start_example_load(example);
             self.examples_open = false;
         }
     }
@@ -7913,7 +7926,12 @@ impl Playground {
     }
 }
 
-fn paint_example_thumbnail(ui: &mut egui::Ui, scene: &Scene, size: egui::Vec2) -> egui::Response {
+fn paint_example_thumbnail(
+    ui: &mut egui::Ui,
+    example: &examples::ExampleScene,
+    size: egui::Vec2,
+) -> egui::Response {
+    let scene = &example.document.accepted;
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let painter = ui.painter_at(rect);
     let background = scene
@@ -7975,6 +7993,40 @@ fn paint_example_thumbnail(ui: &mut egui::Ui, scene: &Scene, size: egui::Vec2) -
             })
             .collect();
         painter.add(egui::Shape::line(points, Stroke::new(2.0, TEAL)));
+    }
+    let side_points = [
+        (rect.left_bottom(), rect.right_bottom()),
+        (rect.right_bottom(), rect.right_top()),
+        (rect.right_top(), rect.left_top()),
+        (rect.left_top(), rect.left_bottom()),
+    ];
+    for side in OuterSide::ALL {
+        let (start, end) = side_points[side.index()];
+        painter.line_segment(
+            [start, end],
+            Stroke::new(
+                3.0,
+                outer_boundary_condition_color(scene.outer_boundaries.get(side)),
+            ),
+        );
+    }
+    if example.simulation.source.enabled {
+        let center = project(example.simulation.source.position);
+        painter.circle_stroke(center, 5.0, Stroke::new(1.8, GOLD));
+        painter.line_segment(
+            [
+                center + egui::vec2(-7.0, 0.0),
+                center + egui::vec2(7.0, 0.0),
+            ],
+            Stroke::new(1.0, GOLD),
+        );
+        painter.line_segment(
+            [
+                center + egui::vec2(0.0, -7.0),
+                center + egui::vec2(0.0, 7.0),
+            ],
+            Stroke::new(1.0, GOLD),
+        );
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -9151,6 +9203,16 @@ mod tests {
         h.click_text("Examples");
         assert!(h.state.examples_open);
         h.frame(vec![]);
+        assert!(
+            h.texts
+                .iter()
+                .any(|(text, _)| text == "Choose a ready-to-run scene.")
+        );
+        assert!(
+            !h.texts
+                .iter()
+                .any(|(text, _)| text.contains("undoable document change"))
+        );
         for name in ["Starter obstacle", "Double slit", "Material lens"] {
             assert!(
                 h.texts.iter().any(|(text, _)| text == name),
@@ -9161,11 +9223,8 @@ mod tests {
 
         let before = h.state.editor.document.clone();
         h.state.startup_load_checked = true;
-        h.state.start_load(
-            persistence::candidate(examples::catalog()[1].document.clone()),
-            LoadMode::Undoable,
-            "Example opened",
-        );
+        let expected_source = examples::catalog()[1].simulation.source;
+        h.state.start_example_load(&examples::catalog()[1]);
         for _ in 0..100 {
             h.state.update_files();
             if h.state.load.is_none() {
@@ -9173,6 +9232,14 @@ mod tests {
             }
         }
         assert_eq!(h.state.editor.document, examples::catalog()[1].document);
+        assert!(h.state.wave_source.enabled);
+        assert_eq!(h.state.wave_source.position, expected_source.position);
+        assert_eq!(
+            h.state.wave_source.frequency_hz,
+            expected_source.frequency_hz
+        );
+        assert!(h.state.wave_source_dirty);
+        assert!(h.state.show_boundary_conditions);
         assert_eq!(h.state.editor.history_len(), (1, 0));
         h.state.editor.undo();
         assert_eq!(h.state.editor.document, before);
