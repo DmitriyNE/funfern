@@ -501,6 +501,25 @@ paths report mean and RMS displacement, mean energy density, total energy, cover
 area, and geometric coverage. Definitions and host histories survive ordinary
 solver handoffs; stencils rebuild for each committed mesh.
 
+The singleton far-field monitor derives a counterclockwise square contour from the
+fixed outer domain and a document-level inset. It uses 256 midpoint samples with
+outward normals and accepts the configuration only when the contour encloses all
+modeled boundaries and every sample lies in the same lossless background region.
+For background speed `c`, the GPU records `u`, `u_t`, and `grad(u) dot n` at 60
+samples per simulated second. A second compute dispatch evaluates 96 directions
+with temporal interpolation of the retarded contour data and the directional
+Huygens integrand `grad(u) dot n - (n dot d) u_t / c`. The observation timestamp is
+delayed by the largest contour projection, so every direction refers to the same
+far time. The 512-frame raw ring must span the full propagation-delay range; an
+explicit configuration error replaces truncated output when it cannot.
+
+Only the compact 96-direction, 512-frame ring is read back. Its host history stays
+continuous across remesh and AMR generations when the inset and background wave
+speed remain compatible. The readout shares the other probes' time-navigation
+semantics across a direction/time waterfall, a normalized 40 dB polar pattern, and
+angularly integrated intensity versus time. The contour is derived display state,
+not selectable geometry, and its visibility has an independent View toggle.
+
 The previous h≈0.16 overlay was an editor preview. Wave benchmarks start with
 h≤0.04 and h≤0.02, corresponding to 10 and 20 maximum-edge lengths per reference
 wavelength 0.4 (five wavelengths across the box). P1 has one scalar spatial DOF

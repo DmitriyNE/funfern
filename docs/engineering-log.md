@@ -38,6 +38,25 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Automatic inset far-field monitor
+
+- Implemented the scene-level far-field switch as a derived square Huygens contour:
+  one inset controls 256 counterclockwise midpoint samples and no additional probe
+  geometry or selection mode is exposed. The contour must enclose modeled geometry
+  and remain entirely in the lossless background material.
+- Added two GPU passes at 60 samples per simulated second. The first stores field,
+  velocity, and outward normal derivative in a 512-frame contour ring; the second
+  interpolates retarded samples and integrates 96 observation directions. Only the
+  compact directional ring is read back, and an undersized delay window is reported
+  instead of silently truncating slow-background results.
+- Added a floating readout with a direction/time waterfall, synchronized angular
+  energy trace, and a normalized 40 dB polar pattern. The View inspector can hide
+  the derived contour, while compatible mesh and AMR handoffs preserve host history.
+- All 248 workspace tests pass. The native Metal check compiled and exercised all
+  recorder shaders on an Apple M1 Max with 9,690 DOFs: 1,024 steps and readback took
+  about 0.15 s after setup, producing finite 96-direction far-field records. Native
+  release compilation, Clippy, and release Trunk/WASM are checked for this slice.
+
 ## 2026-09-12 — Interactive GPU area probes
 
 - Added disk and subdomain creation to the Probes inspector. Disks use a two-click

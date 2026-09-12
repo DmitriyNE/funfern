@@ -2,8 +2,9 @@
 use crate::wave_gpu::forcing_weights;
 use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, AreaProbeRecord, CurveProbeDisplay, CurveProbeInput,
-    CurveProbeRecord, PointProbeRecord, ProbeDisplay, PulseSettings, WaveDisplay, WaveGpuRequest,
-    WaveTransfer,
+    CurveProbeRecord, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS, FarFieldDisplay,
+    FarFieldInput, FarFieldRecord, PointProbeRecord, ProbeDisplay, PulseSettings, WaveDisplay,
+    WaveGpuRequest, WaveTransfer,
 };
 use crate::{
     examples,
@@ -20,8 +21,8 @@ use bevy_egui::{
 use funfern_app::{
     editor::{
         Acceptance, BoundaryFaceTarget, BoundaryProbeFeature, BoundaryProbeSide,
-        BoundaryProbeTarget, Editor, GeometryControl, LoopKind, ProbeDefinition, ProbeId,
-        ProbeSamplingPreset, ProbeTarget, SourceSettings,
+        BoundaryProbeTarget, Editor, FarFieldSettings, GeometryControl, LoopKind, ProbeDefinition,
+        ProbeId, ProbeSamplingPreset, ProbeTarget, SourceSettings,
     },
     persistence::{self, LoadCandidate},
 };
@@ -124,6 +125,12 @@ struct AreaProbeTrace {
     accept_after: f64,
 }
 
+#[derive(Clone, Default)]
+struct FarFieldTrace {
+    frames: VecDeque<FarFieldRecord>,
+    accept_after: f64,
+}
+
 #[derive(Clone, Copy)]
 struct BoundaryPathSegment {
     label: BoundaryLabel,
@@ -146,10 +153,13 @@ struct CompiledProbeState {
     revision: u64,
     curve_revision: u64,
     area_revision: u64,
+    far_field_revision: u64,
     mesh_revision: u64,
     probes: Vec<ProbeDefinition>,
     sample_rate: f64,
     time_step: f64,
+    far_field: FarFieldSettings,
+    far_field_wave_speed: Option<f64>,
 }
 
 enum ProbeDrag {
@@ -468,6 +478,7 @@ pub struct Playground {
     probe_traces: BTreeMap<ProbeId, ProbeTrace>,
     curve_probe_traces: BTreeMap<ProbeId, CurveProbeTrace>,
     area_probe_traces: BTreeMap<ProbeId, AreaProbeTrace>,
+    far_field_trace: FarFieldTrace,
     curve_probe_metrics: BTreeMap<ProbeId, (f64, bool)>,
     probe_status: BTreeMap<ProbeId, String>,
     probe_observed: Vec<ProbeDefinition>,
@@ -475,12 +486,17 @@ pub struct Playground {
     probe_display_readback: u64,
     curve_probe_display_readback: u64,
     area_probe_display_readback: u64,
+    far_field_display_readback: u64,
+    far_field_status: Option<String>,
+    far_field_open: bool,
+    far_field_view: ProbeViewState,
     probe_sample_rate: f64,
     probe_history_seconds: f64,
     show_point_probes: bool,
     show_line_probes: bool,
     show_boundary_probes: bool,
     show_area_probes: bool,
+    show_far_field_contour: bool,
     probe_drag: Option<ProbeDrag>,
     source_dragging: bool,
     segment_probe_start: Option<Point2>,
@@ -633,6 +649,7 @@ impl Default for Playground {
             probe_traces: BTreeMap::new(),
             curve_probe_traces: BTreeMap::new(),
             area_probe_traces: BTreeMap::new(),
+            far_field_trace: FarFieldTrace::default(),
             curve_probe_metrics: BTreeMap::new(),
             probe_status: BTreeMap::new(),
             probe_observed: vec![],
@@ -640,12 +657,17 @@ impl Default for Playground {
             probe_display_readback: 0,
             curve_probe_display_readback: 0,
             area_probe_display_readback: 0,
+            far_field_display_readback: 0,
+            far_field_status: None,
+            far_field_open: false,
+            far_field_view: ProbeViewState::new(10.0),
             probe_sample_rate: 120.0,
             probe_history_seconds: 10.0,
             show_point_probes: true,
             show_line_probes: true,
             show_boundary_probes: true,
             show_area_probes: true,
+            show_far_field_contour: true,
             probe_drag: None,
             source_dragging: false,
             segment_probe_start: None,
@@ -1181,6 +1203,118 @@ impl Playground {
         Some((samples, path.length, path.closed))
     }
 
+    fn far_field_contour(inset: f64) -> Vec<(Point2, Point2)> {
+        let half_extent = 1.0 - inset;
+        let points_per_side = FAR_FIELD_CONTOUR_POINTS / 4;
+        let mut samples = Vec::with_capacity(FAR_FIELD_CONTOUR_POINTS);
+        for side in 0..4 {
+            for index in 0..points_per_side {
+                let fraction = (index as f64 + 0.5) / points_per_side as f64;
+                let along = -half_extent + 2.0 * half_extent * fraction;
+                let sample = match side {
+                    0 => (Point2::new(along, -half_extent), Point2::new(0.0, -1.0)),
+                    1 => (Point2::new(half_extent, along), Point2::new(1.0, 0.0)),
+                    2 => (Point2::new(-along, half_extent), Point2::new(0.0, 1.0)),
+                    _ => (Point2::new(-half_extent, -along), Point2::new(-1.0, 0.0)),
+                };
+                samples.push(sample);
+            }
+        }
+        samples
+    }
+
+    fn compile_far_field(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        scene: &Scene,
+        settings: FarFieldSettings,
+    ) -> Result<FarFieldInput, String> {
+        if !settings.valid() {
+            return Err("Far-field inset must lie between 0 and 1".into());
+        }
+        let half_extent = 1.0 - settings.inset;
+        let enclosed = |point: Point2| {
+            point.x.abs() < half_extent - 1.0e-6 && point.y.abs() < half_extent - 1.0e-6
+        };
+        if scene
+            .obstacles
+            .iter()
+            .flat_map(|loop_| loop_.spline.controls())
+            .chain(
+                scene
+                    .internal_boundaries
+                    .iter()
+                    .flat_map(|boundary| boundary.spline.controls()),
+            )
+            .any(|point| !enclosed(*point))
+        {
+            return Err("Decrease the inset: the contour must enclose all geometry".into());
+        }
+        let material = scene
+            .region_material(BACKGROUND_REGION)
+            .ok_or("The background material is missing")?;
+        if material.damping.abs() > 1.0e-12 {
+            return Err("Far-field projection requires a lossless background material".into());
+        }
+        let wave_speed = (material.stiffness / material.mass_density).sqrt();
+        if !wave_speed.is_finite() || wave_speed <= 0.0 {
+            return Err("The background wave speed is invalid".into());
+        }
+        let samples = Self::far_field_contour(settings.inset)
+            .into_iter()
+            .map(|(position, normal)| {
+                let stencil = QuadraticPointStencil::build(mesh, operator, scene, position)
+                    .map_err(|error| format!("Far-field contour is unavailable: {error}"))?;
+                if stencil.region != BACKGROUND_REGION {
+                    return Err("Far-field contour must stay in the background material".into());
+                }
+                Ok((stencil, position, normal))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(FarFieldInput {
+            samples,
+            wave_speed,
+            sample_spacing: 8.0 * half_extent / FAR_FIELD_CONTOUR_POINTS as f64,
+            delay_margin: std::f64::consts::SQRT_2 * half_extent / wave_speed,
+        })
+    }
+
+    fn ingest_far_field_samples(&mut self, display: &FarFieldDisplay) {
+        let Some(compiled) = &self.probe_compiled else {
+            return;
+        };
+        if display.generation != compiled.generation
+            || display.revision != compiled.far_field_revision
+            || display.readbacks == self.far_field_display_readback
+        {
+            return;
+        }
+        self.far_field_display_readback = display.readbacks;
+        let last = self
+            .far_field_trace
+            .frames
+            .back()
+            .map_or(self.far_field_trace.accept_after, |frame| frame.time);
+        self.far_field_trace.frames.extend(
+            display
+                .records
+                .iter()
+                .filter(|frame| frame.time > last + 1.0e-7)
+                .cloned(),
+        );
+        if let Some(newest) = self.far_field_trace.frames.back().map(|frame| frame.time) {
+            let oldest = newest - self.probe_history_seconds;
+            while self
+                .far_field_trace
+                .frames
+                .front()
+                .is_some_and(|frame| frame.time < oldest)
+            {
+                self.far_field_trace.frames.pop_front();
+            }
+        }
+    }
+
     fn refresh_probe_gpu(
         &mut self,
         request: &mut WaveGpuRequest,
@@ -1197,12 +1331,14 @@ impl Playground {
             return;
         };
         let probes = self.editor.document.probes.clone();
+        let far_field_settings = self.editor.document.far_field;
         let unchanged = self.probe_compiled.as_ref().is_some_and(|compiled| {
             compiled.generation == request.generation()
                 && compiled.mesh_revision == mesh.mesh_revision
                 && compiled.probes == probes
                 && compiled.sample_rate == self.probe_sample_rate
                 && compiled.time_step == self.wave_time_step
+                && compiled.far_field == far_field_settings
         });
         if unchanged {
             return;
@@ -1344,7 +1480,33 @@ impl Playground {
                 })
             })
             .collect::<Vec<_>>();
-        match request
+        self.far_field_status = None;
+        let far_field = if far_field_settings.enabled {
+            match Self::compile_far_field(
+                mesh,
+                operator,
+                &self.mesh_committed_scene,
+                far_field_settings,
+            ) {
+                Ok(input) => Some(input),
+                Err(error) => {
+                    self.far_field_status = Some(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let far_field_wave_speed = far_field.as_ref().map(|input| input.wave_speed);
+        let preserve_far_field = self.probe_compiled.as_ref().is_some_and(|compiled| {
+            compiled.far_field == far_field_settings
+                && compiled.far_field_wave_speed == far_field_wave_speed
+        });
+        if !preserve_far_field {
+            self.far_field_trace = FarFieldTrace::default();
+            self.far_field_view = ProbeViewState::new(self.probe_history_seconds);
+        }
+        let probe_result = request
             .update_point_probes(
                 assets,
                 commands,
@@ -1363,50 +1525,45 @@ impl Playground {
                     self.probe_sample_rate.min(120.0),
                     self.wave_time_step,
                 )
-            }) {
-            Ok(()) => {
-                self.probe_display_readback = 0;
-                self.curve_probe_display_readback = 0;
-                self.area_probe_display_readback = 0;
-                self.probe_compiled = Some(CompiledProbeState {
-                    generation: request.generation(),
-                    revision: request.probe_revision(),
-                    curve_revision: request.curve_probe_revision(),
-                    area_revision: request.area_probe_revision(),
-                    mesh_revision: mesh.mesh_revision,
-                    probes,
-                    sample_rate: self.probe_sample_rate,
-                    time_step: self.wave_time_step,
-                });
-            }
-            Err(error) => {
-                for probe in &probes {
-                    self.probe_status.insert(probe.id, error.clone());
-                }
-                self.probe_display_readback = 0;
-                self.curve_probe_display_readback = 0;
-                self.area_probe_display_readback = 0;
-                self.probe_compiled = Some(CompiledProbeState {
-                    generation: request.generation(),
-                    revision: request.probe_revision(),
-                    curve_revision: request.curve_probe_revision(),
-                    area_revision: request.area_probe_revision(),
-                    mesh_revision: mesh.mesh_revision,
-                    probes,
-                    sample_rate: self.probe_sample_rate,
-                    time_step: self.wave_time_step,
-                });
+            });
+        if let Err(error) = probe_result {
+            for probe in &probes {
+                self.probe_status.insert(probe.id, error.clone());
             }
         }
+        if let Err(error) =
+            request.update_far_field(assets, commands, far_field.as_ref(), self.wave_time_step)
+        {
+            self.far_field_status = Some(error);
+        }
+        self.probe_display_readback = 0;
+        self.curve_probe_display_readback = 0;
+        self.area_probe_display_readback = 0;
+        self.far_field_display_readback = 0;
+        self.probe_compiled = Some(CompiledProbeState {
+            generation: request.generation(),
+            revision: request.probe_revision(),
+            curve_revision: request.curve_probe_revision(),
+            area_revision: request.area_probe_revision(),
+            far_field_revision: request.far_field_revision(),
+            mesh_revision: mesh.mesh_revision,
+            probes,
+            sample_rate: self.probe_sample_rate,
+            time_step: self.wave_time_step,
+            far_field: far_field_settings,
+            far_field_wave_speed,
+        });
     }
 
     fn clear_all_probe_traces(&mut self) {
         self.probe_traces.clear();
         self.curve_probe_traces.clear();
         self.area_probe_traces.clear();
+        self.far_field_trace = FarFieldTrace::default();
         self.probe_display_readback = 0;
         self.curve_probe_display_readback = 0;
         self.area_probe_display_readback = 0;
+        self.far_field_display_readback = 0;
     }
     fn world(&self, p: Pos2, r: Rect) -> Point2 {
         Point2::new(
@@ -4300,6 +4457,317 @@ impl Playground {
         }
     }
 
+    fn far_field_readout_window(&mut self, ctx: &egui::Context) {
+        if !self.far_field_open {
+            return;
+        }
+        let frames = self
+            .far_field_trace
+            .frames
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let times = frames
+            .iter()
+            .map(|frame| PointProbeRecord {
+                probe_id: 0,
+                time: frame.time,
+                displacement: 0.0,
+                velocity: 0.0,
+                energy_density: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let energy = frames
+            .iter()
+            .map(|frame| PointProbeRecord {
+                probe_id: 0,
+                time: frame.time,
+                displacement: frame
+                    .intensity
+                    .iter()
+                    .map(|value| *value as f64)
+                    .sum::<f64>()
+                    * std::f64::consts::TAU
+                    / FAR_FIELD_DIRECTIONS as f64,
+                velocity: 0.0,
+                energy_density: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let newest_time = frames.last().map(|frame| frame.time);
+        if self.far_field_view.live
+            && let Some(time) = newest_time
+        {
+            self.far_field_view.end_time = time;
+        }
+        self.far_field_view.span = self
+            .far_field_view
+            .span
+            .clamp(0.02, self.probe_history_seconds);
+        let mut open = true;
+        let mut clear = false;
+        egui::Window::new("Outer-domain far field")
+            .id(egui::Id::new("far_field_readout"))
+            .open(&mut open)
+            .default_width(470.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new("Live").selected(self.far_field_view.live))
+                        .clicked()
+                    {
+                        self.far_field_view.live = true;
+                        if let Some(time) = newest_time {
+                            self.far_field_view.end_time = time;
+                        }
+                    }
+                    if ui.button("Clear").clicked() {
+                        clear = true;
+                    }
+                    ui.add(
+                        egui::Slider::new(&mut self.far_field_view.waterfall_gain, 0.2..=5.0)
+                            .logarithmic(true)
+                            .text("gain"),
+                    );
+                });
+                if let Some(status) = &self.far_field_status {
+                    ui.colored_label(RED, status);
+                    return;
+                }
+                Self::far_field_waterfall(
+                    ui,
+                    &frames,
+                    &times,
+                    &mut self.far_field_view,
+                    self.probe_history_seconds,
+                );
+                Self::far_field_polar(ui, &frames, &self.far_field_view);
+                Self::probe_plot(
+                    ui,
+                    "Angular energy",
+                    &energy,
+                    |sample| sample.displacement,
+                    GOLD,
+                    &mut self.far_field_view,
+                    self.probe_history_seconds,
+                );
+                ui.small("Drag through time · wheel to zoom · polar scale spans 40 dB");
+            });
+        if clear {
+            let time = self
+                .far_field_trace
+                .frames
+                .back()
+                .map_or(0.0, |frame| frame.time);
+            self.far_field_trace.frames.clear();
+            self.far_field_trace.accept_after = time;
+        }
+        self.far_field_open = open;
+    }
+
+    fn far_field_waterfall(
+        ui: &mut egui::Ui,
+        frames: &[FarFieldRecord],
+        times: &[PointProbeRecord],
+        view: &mut ProbeViewState,
+        maximum_span: f64,
+    ) {
+        ui.small("Direction × time");
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(120.0), 170.0),
+            egui::Sense::drag(),
+        );
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, view) else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Warming up the propagation delay",
+                egui::FontId::monospace(11.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+            return;
+        };
+        let span = maximum_time - minimum_time;
+        if response.drag_started() {
+            view.live = false;
+        }
+        if response.dragged() {
+            view.end_time += response.drag_delta().y as f64 / rect.height() as f64 * span;
+        }
+        if response.hovered() {
+            let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                view.live = false;
+                view.span = (span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+                if view.span >= maximum_span * (1.0 - 1.0e-9) {
+                    view.live = true;
+                }
+            }
+        }
+        let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, view) else {
+            return;
+        };
+        let visible = frames
+            .iter()
+            .filter(|frame| frame.time >= minimum_time && frame.time <= maximum_time)
+            .collect::<Vec<_>>();
+        let maximum = visible
+            .iter()
+            .flat_map(|frame| frame.amplitude.iter())
+            .copied()
+            .filter(|value| value.is_finite())
+            .map(f32::abs)
+            .fold(0.0, f32::max)
+            .max(1.0e-12)
+            / view.waterfall_gain;
+        for (row, frame) in visible.iter().enumerate() {
+            let top = egui::lerp(
+                rect.bottom()..=rect.top(),
+                (row + 1) as f32 / visible.len() as f32,
+            );
+            let bottom = egui::lerp(
+                rect.bottom()..=rect.top(),
+                row as f32 / visible.len() as f32,
+            );
+            for (column, value) in frame.amplitude.iter().copied().enumerate() {
+                let normalized = (value / maximum).clamp(-1.0, 1.0);
+                let color = if normalized >= 0.0 {
+                    Color32::from_rgb(
+                        (30.0 + normalized * 225.0) as u8,
+                        (45.0 + normalized * 90.0) as u8,
+                        (60.0 + normalized * 45.0) as u8,
+                    )
+                } else {
+                    let amount = -normalized;
+                    Color32::from_rgb(
+                        (30.0 + amount * 35.0) as u8,
+                        (45.0 + amount * 65.0) as u8,
+                        (60.0 + amount * 195.0) as u8,
+                    )
+                };
+                let left = egui::lerp(
+                    rect.left()..=rect.right(),
+                    column as f32 / FAR_FIELD_DIRECTIONS as f32,
+                );
+                let right = egui::lerp(
+                    rect.left()..=rect.right(),
+                    (column + 1) as f32 / FAR_FIELD_DIRECTIONS as f32,
+                );
+                ui.painter().rect_filled(
+                    Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom)),
+                    0.0,
+                    color,
+                );
+            }
+        }
+        for (x, label) in [(0.0, "0°"), (0.25, "90°"), (0.5, "180°"), (0.75, "270°")] {
+            ui.painter().text(
+                egui::pos2(
+                    egui::lerp(rect.left()..=rect.right(), x),
+                    rect.bottom() - 3.0,
+                ),
+                egui::Align2::LEFT_BOTTOM,
+                label,
+                egui::FontId::monospace(9.0),
+                Color32::WHITE,
+            );
+        }
+        ui.painter().text(
+            rect.left_top() + egui::vec2(4.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            format!("t={maximum_time:.3}"),
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
+        ui.painter().text(
+            rect.left_bottom() + egui::vec2(4.0, -15.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("t={minimum_time:.3}"),
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
+    }
+
+    fn far_field_polar(ui: &mut egui::Ui, frames: &[FarFieldRecord], view: &ProbeViewState) {
+        ui.small("Relative radiation pattern");
+        let size = ui.available_width().clamp(150.0, 270.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+        let center = rect.center();
+        let radius = 0.44 * size;
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        for fraction in [0.25, 0.5, 0.75, 1.0] {
+            ui.painter().circle_stroke(
+                center,
+                radius * fraction,
+                Stroke::new(0.7, Color32::from_rgb(55, 69, 80)),
+            );
+        }
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - radius, center.y),
+                egui::pos2(center.x + radius, center.y),
+            ],
+            Stroke::new(0.7, Color32::from_rgb(55, 69, 80)),
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x, center.y - radius),
+                egui::pos2(center.x, center.y + radius),
+            ],
+            Stroke::new(0.7, Color32::from_rgb(55, 69, 80)),
+        );
+        let Some(frame) = frames.iter().min_by(|a, b| {
+            (a.time - view.end_time)
+                .abs()
+                .total_cmp(&(b.time - view.end_time).abs())
+        }) else {
+            return;
+        };
+        let maximum = frame
+            .intensity
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(0.0_f32, f32::max)
+            .max(1.0e-30);
+        let mut points = frame
+            .intensity
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, value)| {
+                let db = 10.0 * (value.max(1.0e-30) / maximum).log10();
+                let radial = (1.0 + db / 40.0).clamp(0.0, 1.0);
+                let angle = std::f32::consts::TAU * index as f32 / FAR_FIELD_DIRECTIONS as f32;
+                center + egui::vec2(angle.cos(), -angle.sin()) * radius * radial
+            })
+            .collect::<Vec<_>>();
+        if let Some(first) = points.first().copied() {
+            points.push(first);
+        }
+        if points.len() > 2 {
+            ui.painter()
+                .add(egui::Shape::line(points, Stroke::new(2.0, TEAL)));
+        }
+        for (offset, align, label) in [
+            (egui::vec2(radius, 0.0), egui::Align2::RIGHT_BOTTOM, "0°"),
+            (egui::vec2(0.0, -radius), egui::Align2::LEFT_TOP, "90°"),
+            (egui::vec2(-radius, 0.0), egui::Align2::LEFT_BOTTOM, "180°"),
+            (egui::vec2(0.0, radius), egui::Align2::LEFT_BOTTOM, "270°"),
+        ] {
+            ui.painter().text(
+                center + offset,
+                align,
+                label,
+                egui::FontId::monospace(9.0),
+                Color32::from_rgb(142, 161, 175),
+            );
+        }
+    }
+
     fn curve_probe_values(frame: &CurveProbeRecord, quantity: LineProbeQuantity) -> &[f32] {
         match quantity {
             LineProbeQuantity::Field => &frame.displacement,
@@ -4809,6 +5277,7 @@ impl Playground {
         ui.checkbox(&mut self.show_line_probes, "Line probes");
         ui.checkbox(&mut self.show_boundary_probes, "Boundary probes");
         ui.checkbox(&mut self.show_area_probes, "Area probes");
+        ui.checkbox(&mut self.show_far_field_contour, "Far-field contour");
         ui.checkbox(&mut self.show_field, "Field colors");
         ui.add_enabled_ui(self.show_field, |ui| {
             ui.add(
@@ -4853,6 +5322,7 @@ impl Playground {
             self.show_line_probes = true;
             self.show_boundary_probes = true;
             self.show_area_probes = true;
+            self.show_far_field_contour = true;
             self.show_field = true;
             self.field_gain = 2.0;
         }
@@ -5127,6 +5597,7 @@ impl Playground {
                 for probe in self.editor.document.probes.clone() {
                     self.clear_probe_trace(probe.id);
                 }
+                self.far_field_trace = FarFieldTrace::default();
             }
         });
         let boundary_target = self.boundary_probe_target_from_selection();
@@ -5162,6 +5633,62 @@ impl Playground {
                 .logarithmic(true)
                 .text("history (sim s)"),
         );
+        ui.separator();
+
+        ui.label("Far field");
+        let mut far_field = self.editor.document.far_field;
+        let enabled_changed = ui
+            .checkbox(&mut far_field.enabled, "Outer-domain far field")
+            .changed();
+        let inset_changed = ui
+            .add_enabled(
+                far_field.enabled,
+                egui::DragValue::new(&mut far_field.inset)
+                    .speed(0.005)
+                    .range(0.01..=0.9)
+                    .prefix("inset ")
+                    .update_while_editing(false),
+            )
+            .changed();
+        if enabled_changed || inset_changed {
+            let result = self.editor.set_far_field(far_field);
+            self.error(result);
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(far_field.enabled, egui::Button::new("Open readout"))
+                .clicked()
+            {
+                self.far_field_open = true;
+            }
+            if ui
+                .add_enabled(
+                    far_field.enabled && !self.far_field_trace.frames.is_empty(),
+                    egui::Button::new("Clear"),
+                )
+                .clicked()
+            {
+                let time = self
+                    .far_field_trace
+                    .frames
+                    .back()
+                    .map_or(0.0, |frame| frame.time);
+                self.far_field_trace.frames.clear();
+                self.far_field_trace.accept_after = time;
+            }
+        });
+        if far_field.enabled {
+            if let Some(status) = &self.far_field_status {
+                ui.colored_label(RED, status);
+            } else if let Some(frame) = self.far_field_trace.frames.back() {
+                ui.small(format!(
+                    "{} directions · t {:.3}",
+                    FAR_FIELD_DIRECTIONS, frame.time
+                ));
+            } else {
+                ui.small("Warming up the propagation delay…");
+            }
+        }
         ui.separator();
 
         let probes = self.editor.document.probes.clone();
@@ -8317,6 +8844,28 @@ impl Playground {
                 _ => {}
             }
         }
+        if self.editor.document.far_field.enabled && self.show_far_field_contour {
+            let half_extent = 1.0 - self.editor.document.far_field.inset;
+            let corners = [
+                Point2::new(-half_extent, -half_extent),
+                Point2::new(half_extent, -half_extent),
+                Point2::new(half_extent, half_extent),
+                Point2::new(-half_extent, half_extent),
+                Point2::new(-half_extent, -half_extent),
+            ]
+            .map(|point| self.screen(point, r));
+            painter.add(egui::Shape::line(
+                corners.to_vec(),
+                Stroke::new(1.5, Color32::from_rgb(172, 122, 255)),
+            ));
+            painter.text(
+                corners[2] + egui::vec2(-4.0, 4.0),
+                egui::Align2::RIGHT_TOP,
+                "FF",
+                egui::FontId::monospace(9.0),
+                Color32::from_rgb(203, 177, 255),
+            );
+        }
         if self.wave_source.enabled {
             let center = self.screen(self.wave_source.position, r);
             painter.circle_stroke(center, 7.0, Stroke::new(2.0, GOLD));
@@ -9315,6 +9864,7 @@ pub fn frame(
     probe_display: Res<ProbeDisplay>,
     curve_probe_display: Res<CurveProbeDisplay>,
     area_probe_display: Res<AreaProbeDisplay>,
+    far_field_display: Res<FarFieldDisplay>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut commands: Commands,
 ) -> Result {
@@ -9343,6 +9893,7 @@ pub fn frame(
     state.ingest_probe_samples(&probe_display);
     state.ingest_curve_probe_samples(&curve_probe_display);
     state.ingest_area_probe_samples(&area_probe_display);
+    state.ingest_far_field_samples(&far_field_display);
     let mut root = egui::Ui::new(
         ctx.clone(),
         "root".into(),
@@ -9525,7 +10076,10 @@ pub fn wave_gpu_check_scene() -> Playground {
                 },
             ],
             source: SourceSettings::default(),
-            far_field: Default::default(),
+            far_field: FarFieldSettings {
+                enabled: true,
+                ..Default::default()
+            },
         });
     state
 }
@@ -9931,6 +10485,7 @@ pub fn wave_gpu_benchmark(
     probe_display: Res<ProbeDisplay>,
     curve_probe_display: Res<CurveProbeDisplay>,
     area_probe_display: Res<AreaProbeDisplay>,
+    far_field_display: Res<FarFieldDisplay>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut exit: MessageWriter<bevy::app::AppExit>,
 ) {
@@ -10007,7 +10562,7 @@ pub fn wave_gpu_benchmark(
             .map(|weight| (amplitude * weight) as f64)
             .collect();
         cpu.add_displacement(&pulse).unwrap();
-        for _ in 0..128 {
+        for _ in 0..1024 {
             cpu.step(operator, &[]).unwrap();
         }
         benchmark.expected_current = cpu.current().to_vec();
@@ -10016,7 +10571,7 @@ pub fn wave_gpu_benchmark(
         benchmark.generation = request.generation();
         benchmark.prepared = true;
         benchmark.solve_started = Some(Instant::now());
-        request.request_steps(128);
+        request.request_steps(1024);
         let minimum_edge = mesh
             .triangles
             .iter()
@@ -10038,8 +10593,8 @@ pub fn wave_gpu_benchmark(
         );
         return;
     }
-    if request.stats().completed_steps() < 128
-        || display.completed_steps < 128
+    if request.stats().completed_steps() < 1024
+        || display.completed_steps < 1024
         || display.generation != benchmark.generation
         || display.current.len() != benchmark.expected_current.len()
         || display.auxiliary.len() != benchmark.expected_auxiliary.len()
@@ -10049,6 +10604,8 @@ pub fn wave_gpu_benchmark(
         || curve_probe_display.records.is_empty()
         || area_probe_display.generation != benchmark.generation
         || area_probe_display.records.is_empty()
+        || far_field_display.generation != benchmark.generation
+        || far_field_display.records.is_empty()
     {
         return;
     }
@@ -10121,7 +10678,7 @@ pub fn wave_gpu_benchmark(
         isolated_peak,
         elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
         solve_readback_ms = solve_seconds * 1000.0,
-        simulated_seconds_per_wall_second = 128.0 * state.wave_time_step / solve_seconds,
+        simulated_seconds_per_wall_second = 1024.0 * state.wave_time_step / solve_seconds,
         "Wave GPU check complete"
     );
     let probe_finite = probe_display.records.iter().all(|record| {
@@ -10180,6 +10737,18 @@ pub fn wave_gpu_benchmark(
             && record.coverage > 0.0
             && record.coverage <= 1.0
     });
+    let far_field_valid = far_field_display.records.iter().all(|record| {
+        record.time.is_finite()
+            && record.amplitude.len() == FAR_FIELD_DIRECTIONS
+            && record.intensity.len() == FAR_FIELD_DIRECTIONS
+            && record
+                .amplitude
+                .iter()
+                .zip(&record.intensity)
+                .all(|(amplitude, intensity)| {
+                    amplitude.is_finite() && intensity.is_finite() && *intensity >= 0.0
+                })
+    });
     if let Some((node, actual, expected, point, dirichlet, neumann)) = max_difference {
         info!(
             node,
@@ -10201,6 +10770,7 @@ pub fn wave_gpu_benchmark(
         && complete_line
         && partial_line
         && area_probe_valid
+        && far_field_valid
     {
         exit.write(bevy::app::AppExit::Success);
     } else {
@@ -11142,6 +11712,7 @@ impl Playground {
         state.example_gallery(root.ctx());
         state.performance_window(root.ctx());
         state.probe_readout_windows(root.ctx());
+        state.far_field_readout_window(root.ctx());
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(root, |ui| state.viewport(ui, wave_display))
@@ -13018,10 +13589,13 @@ mod tests {
             revision: 5,
             curve_revision: 0,
             area_revision: 0,
+            far_field_revision: 0,
             mesh_revision: 1,
             probes: state.editor.document.probes.clone(),
             sample_rate: 120.0,
             time_step: 0.01,
+            far_field: FarFieldSettings::default(),
+            far_field_wave_speed: None,
         });
         let mut display = ProbeDisplay {
             generation: 3,
@@ -13044,6 +13618,133 @@ mod tests {
     }
 
     #[test]
+    fn far_field_contour_is_counterclockwise_with_outward_normals() {
+        let inset = 0.12;
+        let half_extent = 1.0 - inset;
+        let contour = Playground::far_field_contour(inset);
+        assert_eq!(contour.len(), FAR_FIELD_CONTOUR_POINTS);
+        assert_eq!(contour[0].1, Point2::new(0.0, -1.0));
+        assert_eq!(
+            contour[FAR_FIELD_CONTOUR_POINTS / 4].1,
+            Point2::new(1.0, 0.0)
+        );
+        assert_eq!(
+            contour[FAR_FIELD_CONTOUR_POINTS / 2].1,
+            Point2::new(0.0, 1.0)
+        );
+        assert_eq!(
+            contour[3 * FAR_FIELD_CONTOUR_POINTS / 4].1,
+            Point2::new(-1.0, 0.0)
+        );
+        assert!(contour[0].0.x < contour[1].0.x);
+        assert!(
+            contour[FAR_FIELD_CONTOUR_POINTS / 4].0.y
+                < contour[FAR_FIELD_CONTOUR_POINTS / 4 + 1].0.y
+        );
+        assert!(contour.iter().all(|(point, _)| {
+            (point.x.abs() - half_extent).abs() < 1.0e-12
+                || (point.y.abs() - half_extent).abs() < 1.0e-12
+        }));
+        let spacing = 8.0 * half_extent / FAR_FIELD_CONTOUR_POINTS as f64;
+        assert!((spacing - (contour[1].0 - contour[0].0).norm()).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn far_field_compile_checks_enclosure_and_lossless_background() {
+        let scene = Scene::default();
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.18,
+                minimum_angle_degrees: 10.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
+            &mesh,
+            &scene,
+            scene.outer_boundaries,
+        )
+        .unwrap();
+        let settings = FarFieldSettings {
+            enabled: true,
+            inset: 0.12,
+        };
+        let input = Playground::compile_far_field(&mesh, &operator, &scene, settings).unwrap();
+        assert_eq!(input.samples.len(), FAR_FIELD_CONTOUR_POINTS);
+        assert!((input.wave_speed - 1.0).abs() < 1.0e-12);
+
+        let mut damped = scene.clone();
+        damped.materials[0].damping = 0.1;
+        assert!(
+            Playground::compile_far_field(&mesh, &operator, &damped, settings)
+                .unwrap_err()
+                .contains("lossless")
+        );
+
+        let mut outside = scene.clone();
+        outside.obstacles.push(Obstacle::hole(
+            ObstacleId(9),
+            PeriodicCubicSpline::rounded(Point2::new(0.9, 0.0), 0.03),
+        ));
+        assert!(
+            Playground::compile_far_field(&mesh, &operator, &outside, settings)
+                .unwrap_err()
+                .contains("enclose")
+        );
+    }
+
+    #[test]
+    fn far_field_history_accepts_a_continuous_new_solver_generation() {
+        let mut state = Playground::default();
+        let compile = |generation, revision| CompiledProbeState {
+            generation,
+            revision: 0,
+            curve_revision: 0,
+            area_revision: 0,
+            far_field_revision: revision,
+            mesh_revision: generation,
+            probes: vec![],
+            sample_rate: 120.0,
+            time_step: 0.01,
+            far_field: FarFieldSettings {
+                enabled: true,
+                ..Default::default()
+            },
+            far_field_wave_speed: Some(1.0),
+        };
+        let display = |generation, revision, times: &[f64], readbacks| FarFieldDisplay {
+            generation,
+            revision,
+            records: times
+                .iter()
+                .map(|time| FarFieldRecord {
+                    time: *time,
+                    amplitude: vec![1.0; FAR_FIELD_DIRECTIONS],
+                    intensity: vec![1.0; FAR_FIELD_DIRECTIONS],
+                })
+                .collect(),
+            readbacks,
+        };
+        state.probe_compiled = Some(compile(3, 5));
+        state.ingest_far_field_samples(&display(3, 5, &[0.9, 1.0], 1));
+        state.probe_compiled = Some(compile(4, 7));
+        state.far_field_display_readback = 0;
+        state.ingest_far_field_samples(&display(4, 7, &[1.1, 1.2], 1));
+        assert_eq!(
+            state
+                .far_field_trace
+                .frames
+                .iter()
+                .map(|frame| frame.time)
+                .collect::<Vec<_>>(),
+            vec![0.9, 1.0, 1.1, 1.2]
+        );
+    }
+
+    #[test]
     fn probe_history_accepts_a_continuous_new_solver_generation() {
         let mut state = Playground::default();
         let id = state
@@ -13055,10 +13756,13 @@ mod tests {
             revision,
             curve_revision: 0,
             area_revision: 0,
+            far_field_revision: 0,
             mesh_revision: generation,
             probes,
             sample_rate: 120.0,
             time_step: 0.01,
+            far_field: FarFieldSettings::default(),
+            far_field_wave_speed: None,
         };
         let records = |generation, revision, times: &[f64], readbacks| ProbeDisplay {
             generation,
@@ -13103,10 +13807,13 @@ mod tests {
                 revision: 0,
                 curve_revision: 0,
                 area_revision,
+                far_field_revision: 0,
                 mesh_revision: generation,
                 probes,
                 sample_rate: 120.0,
                 time_step: 0.01,
+                far_field: FarFieldSettings::default(),
+                far_field_wave_speed: None,
             };
         let records = |generation, revision, times: &[f64], readbacks| AreaProbeDisplay {
             generation,

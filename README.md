@@ -196,6 +196,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   field and total energy. Area markers and region outlines have an independent
   View toggle. Definitions are saved and undoable while recorded histories remain
   transient across files and continuous across ordinary solver handoffs.
+- **Far field:** enable the outer-domain far field in Probes and adjust one inset.
+  Funfern derives a square Huygens contour from the domain, samples it on the GPU,
+  and projects the delayed field into 96 observation directions. Its floating
+  readout combines a direction/time waterfall, a 40 dB relative polar pattern,
+  and angular energy over time. The contour must enclose every modeled boundary
+  and stay in the lossless background material; View can hide its overlay.
 - **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered
   on the cursor. Fit View frames the fixed square. Panel scrolling and text
   editing do not manipulate the viewport.

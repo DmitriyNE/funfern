@@ -41,6 +41,10 @@ pub const MAX_CURVE_PROBE_POINTS: usize = 512;
 const CURVE_PROBE_RING_FRAMES: usize = 64;
 pub const MAX_AREA_PROBE_ELEMENTS: usize = 200_000;
 const AREA_PROBE_RING_FRAMES: usize = 2048;
+pub const FAR_FIELD_CONTOUR_POINTS: usize = 256;
+pub const FAR_FIELD_DIRECTIONS: usize = 96;
+const FAR_FIELD_RING_FRAMES: usize = 512;
+pub const FAR_FIELD_SAMPLE_RATE: f64 = 60.0;
 const WAVE_STORAGE_BINDINGS: usize = 8;
 const TRANSFER_STORAGE_BINDINGS: usize = 8;
 const AREA_PROBE_STORAGE_BINDINGS: usize = 7;
@@ -152,6 +156,21 @@ struct AreaProbeBufferHandles {
     contribution_count: u32,
 }
 
+#[derive(Clone)]
+struct FarFieldBufferHandles {
+    stencils: Handle<ShaderBuffer>,
+    control: Handle<ShaderBuffer>,
+    raw: Handle<ShaderBuffer>,
+    output: Handle<ShaderBuffer>,
+    sample_stride: u64,
+}
+
+impl FarFieldBufferHandles {
+    fn all(&self) -> [&Handle<ShaderBuffer>; 4] {
+        [&self.stencils, &self.control, &self.raw, &self.output]
+    }
+}
+
 impl AreaProbeBufferHandles {
     fn all(&self) -> [&Handle<ShaderBuffer>; 5] {
         [
@@ -211,6 +230,9 @@ pub struct WaveGpuRequest {
     area_probes: Option<AreaProbeBufferHandles>,
     area_probe_revision: u64,
     area_probe_readback_entity: Option<Entity>,
+    far_field: Option<FarFieldBufferHandles>,
+    far_field_revision: u64,
+    far_field_readback_entity: Option<Entity>,
 }
 
 impl Default for WaveGpuRequest {
@@ -234,6 +256,9 @@ impl Default for WaveGpuRequest {
             area_probes: None,
             area_probe_revision: 0,
             area_probe_readback_entity: None,
+            far_field: None,
+            far_field_revision: 0,
+            far_field_readback_entity: None,
         }
     }
 }
@@ -261,6 +286,10 @@ impl WaveGpuRequest {
 
     pub fn area_probe_revision(&self) -> u64 {
         self.area_probe_revision
+    }
+
+    pub fn far_field_revision(&self) -> u64 {
+        self.far_field_revision
     }
 
     pub fn update_point_probes(
@@ -582,6 +611,116 @@ impl WaveGpuRequest {
         self.area_probe_revision = self.area_probe_revision.wrapping_add(1).max(1);
     }
 
+    pub fn update_far_field(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        input: Option<&FarFieldInput>,
+        time_step: f64,
+    ) -> Result<(), String> {
+        self.clear_far_field_buffers(assets, commands);
+        let Some(input) = input else {
+            return Ok(());
+        };
+        if input.samples.len() != FAR_FIELD_CONTOUR_POINTS
+            || !input.wave_speed.is_finite()
+            || input.wave_speed <= 0.0
+            || !input.sample_spacing.is_finite()
+            || input.sample_spacing <= 0.0
+            || !input.delay_margin.is_finite()
+            || input.delay_margin <= 0.0
+            || !time_step.is_finite()
+            || time_step <= 0.0
+        {
+            return Err("Invalid far-field recorder settings".into());
+        }
+        let sample_stride = (1.0 / (FAR_FIELD_SAMPLE_RATE * time_step)).round().max(1.0) as u64;
+        let sample_time = sample_stride as f64 * time_step;
+        let stencils = input
+            .samples
+            .iter()
+            .copied()
+            .map(gpu_far_field_stencil)
+            .collect::<Vec<_>>();
+        if stencils.iter().any(|stencil| {
+            !stencil.weights_a.is_finite()
+                || !stencil.weights_b.is_finite()
+                || !stencil.gradient_x_a.is_finite()
+                || !stencil.gradient_x_b.is_finite()
+                || !stencil.gradient_y_a.is_finite()
+                || !stencil.gradient_y_b.is_finite()
+                || !stencil.position_normal.is_finite()
+        }) {
+            return Err("Far-field stencils cannot be represented on the GPU".into());
+        }
+        let maximum_history = (FAR_FIELD_RING_FRAMES - 2) as f64 * sample_time;
+        if 2.0 * input.delay_margin > maximum_history {
+            return Err(format!(
+                "Exterior wave speed is too low for the {:.1} s far-field delay window",
+                maximum_history
+            ));
+        }
+        let control = GpuFarFieldControl {
+            sampling: Vec4::new(
+                sample_stride as f32,
+                FAR_FIELD_RING_FRAMES as f32,
+                FAR_FIELD_CONTOUR_POINTS as f32,
+                FAR_FIELD_DIRECTIONS as f32,
+            ),
+            projection: Vec4::new(
+                input.wave_speed as f32,
+                input.sample_spacing as f32,
+                input.delay_margin as f32,
+                sample_time as f32,
+            ),
+        };
+        let raw = vec![
+            GpuProbeSample { values: Vec4::NAN };
+            FAR_FIELD_RING_FRAMES * FAR_FIELD_CONTOUR_POINTS
+        ];
+        let output = vec![
+            GpuProbeSample { values: Vec4::NAN };
+            FAR_FIELD_RING_FRAMES * FAR_FIELD_DIRECTIONS
+        ];
+        let handles = FarFieldBufferHandles {
+            stencils: assets.add(ShaderBuffer::from(stencils)),
+            control: assets.add(ShaderBuffer::from(control)),
+            raw: assets.add(ShaderBuffer::from(raw)),
+            output: assets.add(ShaderBuffer::from(output)),
+            sample_stride,
+        };
+        self.far_field_revision = self.far_field_revision.wrapping_add(1).max(1);
+        self.far_field_readback_entity = Some(
+            commands
+                .spawn((
+                    Readback::buffer(handles.output.clone()),
+                    FarFieldReadbackTag {
+                        generation: self.generation,
+                        revision: self.far_field_revision,
+                    },
+                ))
+                .id(),
+        );
+        self.far_field = Some(handles);
+        Ok(())
+    }
+
+    fn clear_far_field_buffers(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+    ) {
+        if let Some(handles) = self.far_field.take() {
+            for handle in handles.all() {
+                assets.remove(handle.id());
+            }
+        }
+        if let Some(entity) = self.far_field_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
+        self.far_field_revision = self.far_field_revision.wrapping_add(1).max(1);
+    }
+
     pub fn ready(&self) -> bool {
         self.buffers.is_some() && self.stats.status.load(Ordering::Relaxed) == STATUS_READY
     }
@@ -709,6 +848,7 @@ impl WaveGpuRequest {
         self.clear_probe_buffers(assets, commands);
         self.clear_curve_probe_buffers(assets, commands);
         self.clear_area_probe_buffers(assets, commands);
+        self.clear_far_field_buffers(assets, commands);
         let transfer = self
             .transfer
             .take()
@@ -755,6 +895,7 @@ impl WaveGpuRequest {
         self.clear_probe_buffers(assets, commands);
         self.clear_curve_probe_buffers(assets, commands);
         self.clear_area_probe_buffers(assets, commands);
+        self.clear_far_field_buffers(assets, commands);
         let expects_transfer = transfer.is_some();
         if let Some(entity) = self.readback_entity.take() {
             commands.entity(entity).despawn();
@@ -1337,6 +1478,14 @@ pub struct AreaProbeInput {
     pub stencil: Option<QuadraticAreaStencil>,
 }
 
+#[derive(Clone, Debug)]
+pub struct FarFieldInput {
+    pub samples: Vec<(QuadraticPointStencil, Point2, Point2)>,
+    pub wave_speed: f64,
+    pub sample_spacing: f64,
+    pub delay_margin: f64,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CurveProbeDescriptor {
     id: u64,
@@ -1356,6 +1505,12 @@ struct AreaProbeReadbackTag {
     generation: u64,
     revision: u64,
     ids: Arc<[u64]>,
+}
+
+#[derive(Component)]
+struct FarFieldReadbackTag {
+    generation: u64,
+    revision: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1388,6 +1543,13 @@ pub struct AreaProbeRecord {
     pub coverage: f64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct FarFieldRecord {
+    pub time: f64,
+    pub amplitude: Vec<f32>,
+    pub intensity: Vec<f32>,
+}
+
 #[derive(Resource, Default)]
 pub struct ProbeDisplay {
     pub generation: u64,
@@ -1409,6 +1571,14 @@ pub struct AreaProbeDisplay {
     pub generation: u64,
     pub revision: u64,
     pub records: Vec<AreaProbeRecord>,
+    pub readbacks: u64,
+}
+
+#[derive(Resource, Default)]
+pub struct FarFieldDisplay {
+    pub generation: u64,
+    pub revision: u64,
+    pub records: Vec<FarFieldRecord>,
     pub readbacks: u64,
 }
 
@@ -1526,6 +1696,25 @@ struct GpuAreaProbeSample {
     secondary: Vec4,
 }
 
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuFarFieldStencil {
+    nodes_a: UVec4,
+    nodes_b: UVec4,
+    weights_a: Vec4,
+    weights_b: Vec4,
+    gradient_x_a: Vec4,
+    gradient_x_b: Vec4,
+    gradient_y_a: Vec4,
+    gradient_y_b: Vec4,
+    position_normal: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuFarFieldControl {
+    sampling: Vec4,
+    projection: Vec4,
+}
+
 fn gpu_probe_stencil(stencil: Option<QuadraticPointStencil>) -> GpuProbeStencil {
     let Some(stencil) = stencil else {
         return GpuProbeStencil::default();
@@ -1624,6 +1813,28 @@ fn gpu_area_probe_contribution(element: QuadraticAreaElement) -> GpuAreaProbeCon
             element.stiffness as f32,
             element.area as f32,
             1.0,
+        ),
+    }
+}
+
+fn gpu_far_field_stencil(
+    (stencil, position, normal): (QuadraticPointStencil, Point2, Point2),
+) -> GpuFarFieldStencil {
+    let point = gpu_probe_stencil(Some(stencil));
+    GpuFarFieldStencil {
+        nodes_a: point.nodes_a,
+        nodes_b: point.nodes_b,
+        weights_a: point.weights_a,
+        weights_b: point.weights_b,
+        gradient_x_a: point.gradient_x_a,
+        gradient_x_b: point.gradient_x_b,
+        gradient_y_a: point.gradient_y_a,
+        gradient_y_b: point.gradient_y_b,
+        position_normal: Vec4::new(
+            position.x as f32,
+            position.y as f32,
+            normal.x as f32,
+            normal.y as f32,
         ),
     }
 }
@@ -1821,6 +2032,47 @@ fn receive_area_probe_readback(
     display.readbacks = display.readbacks.saturating_add(1);
 }
 
+fn receive_far_field_readback(
+    event: On<ReadbackComplete>,
+    tags: Query<&FarFieldReadbackTag>,
+    mut display: ResMut<FarFieldDisplay>,
+) {
+    let Ok(tag) = tags.get(event.entity) else {
+        return;
+    };
+    let samples: Vec<GpuProbeSample> = event.to_shader_type();
+    if samples.len() != FAR_FIELD_RING_FRAMES * FAR_FIELD_DIRECTIONS {
+        return;
+    }
+    let mut records = Vec::new();
+    for frame in 0..FAR_FIELD_RING_FRAMES {
+        let row = &samples[frame * FAR_FIELD_DIRECTIONS..(frame + 1) * FAR_FIELD_DIRECTIONS];
+        let Some(time) = row
+            .iter()
+            .map(|sample| sample.values.z)
+            .find(|time| time.is_finite())
+        else {
+            continue;
+        };
+        if row
+            .iter()
+            .any(|sample| !sample.values.is_finite() || sample.values.w < 0.5)
+        {
+            continue;
+        }
+        records.push(FarFieldRecord {
+            time: time as f64,
+            amplitude: row.iter().map(|sample| sample.values.x).collect(),
+            intensity: row.iter().map(|sample| sample.values.y).collect(),
+        });
+    }
+    records.sort_by(|a, b| a.time.total_cmp(&b.time));
+    display.generation = tag.generation;
+    display.revision = tag.revision;
+    display.records = records;
+    display.readbacks = display.readbacks.saturating_add(1);
+}
+
 pub struct WaveGpuPlugin;
 
 impl Plugin for WaveGpuPlugin {
@@ -1829,6 +2081,7 @@ impl Plugin for WaveGpuPlugin {
         embedded_asset!(app, "probe.wgsl");
         embedded_asset!(app, "curve_probe.wgsl");
         embedded_asset!(app, "area_probe.wgsl");
+        embedded_asset!(app, "far_field.wgsl");
         embedded_asset!(app, "wave_transfer_old.wgsl");
         embedded_asset!(app, "wave_transfer_new.wgsl");
         app.init_resource::<WaveGpuRequest>()
@@ -1836,10 +2089,12 @@ impl Plugin for WaveGpuPlugin {
             .init_resource::<ProbeDisplay>()
             .init_resource::<CurveProbeDisplay>()
             .init_resource::<AreaProbeDisplay>()
+            .init_resource::<FarFieldDisplay>()
             .add_observer(receive_readback)
             .add_observer(receive_probe_readback)
             .add_observer(receive_curve_probe_readback)
             .add_observer(receive_area_probe_readback)
+            .add_observer(receive_far_field_readback)
             .add_plugins(ExtractResourcePlugin::<WaveGpuRequest>::default());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -1853,6 +2108,7 @@ impl Plugin for WaveGpuPlugin {
                     prepare_probe_bind_group,
                     prepare_curve_probe_bind_group,
                     prepare_area_probe_bind_group,
+                    prepare_far_field_bind_group,
                 )
                     .in_set(RenderSystems::PrepareBindGroups),
             )
@@ -1866,6 +2122,7 @@ struct WavePipeline {
     probe_layout: BindGroupLayoutDescriptor,
     curve_probe_layout: BindGroupLayoutDescriptor,
     area_probe_layout: BindGroupLayoutDescriptor,
+    far_field_layout: BindGroupLayoutDescriptor,
     transfer_old_layout: BindGroupLayoutDescriptor,
     transfer_new_layout: BindGroupLayoutDescriptor,
     step: CachedComputePipelineId,
@@ -1879,6 +2136,8 @@ struct WavePipeline {
     curve_probe: CachedComputePipelineId,
     area_probe_elements: CachedComputePipelineId,
     area_probe_reduce: CachedComputePipelineId,
+    far_field_sample: CachedComputePipelineId,
+    far_field_project: CachedComputePipelineId,
 }
 
 fn init_pipeline(
@@ -1984,6 +2243,36 @@ fn init_pipeline(
         "wave area-probe reduction",
         "reduce_area_probes",
     ));
+    let far_field_layout = BindGroupLayoutDescriptor::new(
+        "wave far-field buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only::<GpuParameters>(false),
+                storage_buffer_read_only::<Vec<GpuState>>(false),
+                storage_buffer_read_only::<Vec<GpuFarFieldStencil>>(false),
+                storage_buffer_read_only::<GpuFarFieldControl>(false),
+                storage_buffer::<Vec<GpuProbeSample>>(false),
+                storage_buffer::<Vec<GpuProbeSample>>(false),
+            ),
+        ),
+    );
+    let far_field_shader = load_embedded_asset!(asset_server.as_ref(), "far_field.wgsl");
+    let far_field_pipeline = |label: &'static str, entry: &'static str| ComputePipelineDescriptor {
+        label: Some(Cow::Borrowed(label)),
+        layout: vec![far_field_layout.clone()],
+        shader: far_field_shader.clone(),
+        entry_point: Some(Cow::Borrowed(entry)),
+        ..default()
+    };
+    let far_field_sample = pipeline_cache.queue_compute_pipeline(far_field_pipeline(
+        "wave far-field contour sampler",
+        "sample_contour",
+    ));
+    let far_field_project = pipeline_cache.queue_compute_pipeline(far_field_pipeline(
+        "wave far-field projector",
+        "project_directions",
+    ));
     let transfer_old_layout = BindGroupLayoutDescriptor::new(
         "wave old-state transfer buffers",
         &BindGroupLayoutEntries::sequential(
@@ -2060,6 +2349,7 @@ fn init_pipeline(
         probe_layout,
         curve_probe_layout,
         area_probe_layout,
+        far_field_layout,
         transfer_old_layout,
         transfer_new_layout,
         step,
@@ -2073,6 +2363,8 @@ fn init_pipeline(
         curve_probe,
         area_probe_elements,
         area_probe_reduce,
+        far_field_sample,
+        far_field_project,
     });
 }
 
@@ -2112,6 +2404,64 @@ struct AreaProbeBindGroup {
     generation: u64,
     revision: u64,
     bind_group: BindGroup,
+}
+
+#[derive(Resource)]
+struct FarFieldBindGroup {
+    generation: u64,
+    revision: u64,
+    bind_group: BindGroup,
+}
+
+fn prepare_far_field_bind_group(
+    mut commands: Commands,
+    request: Option<Res<WaveGpuRequest>>,
+    existing: Option<Res<FarFieldBindGroup>>,
+    pipeline: Res<WavePipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+) {
+    let Some(request) = request else { return };
+    let Some(far_field) = &request.far_field else {
+        if existing.is_some() {
+            commands.remove_resource::<FarFieldBindGroup>();
+        }
+        return;
+    };
+    if existing.as_ref().is_some_and(|group| {
+        group.generation == request.generation && group.revision == request.far_field_revision
+    }) {
+        return;
+    }
+    let Some(wave) = &request.buffers else { return };
+    let (Some(parameters), Some(state), Some(stencils), Some(control), Some(raw), Some(output)) = (
+        gpu_buffers.get(&wave.parameters),
+        gpu_buffers.get(&wave.state),
+        gpu_buffers.get(&far_field.stencils),
+        gpu_buffers.get(&far_field.control),
+        gpu_buffers.get(&far_field.raw),
+        gpu_buffers.get(&far_field.output),
+    ) else {
+        return;
+    };
+    let bind_group = render_device.create_bind_group(
+        Some("wave far-field bind group"),
+        &pipeline_cache.get_bind_group_layout(&pipeline.far_field_layout),
+        &BindGroupEntries::sequential((
+            parameters.buffer.as_entire_buffer_binding(),
+            state.buffer.as_entire_buffer_binding(),
+            stencils.buffer.as_entire_buffer_binding(),
+            control.buffer.as_entire_buffer_binding(),
+            raw.buffer.as_entire_buffer_binding(),
+            output.buffer.as_entire_buffer_binding(),
+        )),
+    );
+    commands.insert_resource(FarFieldBindGroup {
+        generation: request.generation,
+        revision: request.far_field_revision,
+        bind_group,
+    });
 }
 
 fn prepare_area_probe_bind_group(
@@ -2424,6 +2774,7 @@ fn compute_wave(
     probe_group: Option<Res<ProbeBindGroup>>,
     curve_probe_group: Option<Res<CurveProbeBindGroup>>,
     area_probe_group: Option<Res<AreaProbeBindGroup>>,
+    far_field_group: Option<Res<FarFieldBindGroup>>,
     pipeline: Res<WavePipeline>,
     pipeline_cache: Res<PipelineCache>,
 ) {
@@ -2445,6 +2796,8 @@ fn compute_wave(
         pipeline.curve_probe,
         pipeline.area_probe_elements,
         pipeline.area_probe_reduce,
+        pipeline.far_field_sample,
+        pipeline.far_field_project,
     ];
     if pipelines.iter().any(|id| {
         matches!(
@@ -2564,6 +2917,18 @@ fn compute_wave(
                 pipeline_cache.get_compute_pipeline(pipeline.area_probe_reduce)?,
             ))
         });
+    let far_field_pipelines = far_field_group
+        .as_ref()
+        .filter(|far_field_group| {
+            far_field_group.generation == request.generation
+                && far_field_group.revision == request.far_field_revision
+        })
+        .and_then(|_| {
+            Some((
+                pipeline_cache.get_compute_pipeline(pipeline.far_field_sample)?,
+                pipeline_cache.get_compute_pipeline(pipeline.far_field_project)?,
+            ))
+        });
     for offset in 0..pending {
         pass.set_pipeline(step);
         pass.dispatch_workgroups(workgroups, 1, 1);
@@ -2614,6 +2979,20 @@ fn compute_wave(
             }
             pass.set_pipeline(reduce);
             pass.dispatch_workgroups(1, 1, 1);
+            pass.set_bind_group(0, &group.bind_group, &[]);
+        }
+        if request
+            .far_field
+            .as_ref()
+            .is_some_and(|far_field| probe_sample_due(step_after, far_field.sample_stride))
+            && let (Some((sample, project)), Some(far_field_group)) =
+                (far_field_pipelines, far_field_group.as_ref())
+        {
+            pass.set_bind_group(0, &far_field_group.bind_group, &[]);
+            pass.set_pipeline(sample);
+            pass.dispatch_workgroups((FAR_FIELD_CONTOUR_POINTS as u32).div_ceil(64), 1, 1);
+            pass.set_pipeline(project);
+            pass.dispatch_workgroups((FAR_FIELD_DIRECTIONS as u32).div_ceil(64), 1, 1);
             pass.set_bind_group(0, &group.bind_group, &[]);
         }
     }
@@ -2831,5 +3210,15 @@ mod tests {
         assert!(shader.contains("let mean = accumulated.x / covered_area"));
         assert!(shader.contains("let rms = sqrt(max(accumulated.y / covered_area, 0.0))"));
         assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
+    }
+
+    #[test]
+    fn far_field_shader_uses_retarded_time_and_huygens_data() {
+        let shader = include_str!("far_field.wgsl");
+        assert!(shader.contains("fn sample_contour"));
+        assert!(shader.contains("fn project_directions"));
+        assert!(shader.contains("let age = (margin - projection) / sample_interval;"));
+        assert!(shader.contains("sample.z - dot(normal, ray) * sample.y / wave_speed"));
+        assert!(shader.contains("amplitude * amplitude"));
     }
 }
