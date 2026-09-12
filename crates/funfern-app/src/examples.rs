@@ -133,6 +133,7 @@ fn double_slit() -> Document {
         accepted: scene,
         probes: vec![],
         source: SourceSettings::default(),
+        far_field: Default::default(),
     }
 }
 
@@ -168,6 +169,7 @@ fn material_lens() -> Document {
         accepted: scene,
         probes: vec![],
         source: SourceSettings::default(),
+        far_field: Default::default(),
     }
 }
 

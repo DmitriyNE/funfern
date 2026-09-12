@@ -1147,14 +1147,19 @@ impl Playground {
                     }
                     Some((probe.id.0, stencil))
                 }
-                ProbeTarget::Segment { .. } | ProbeTarget::Boundary(_) => None,
+                ProbeTarget::Segment { .. }
+                | ProbeTarget::Boundary(_)
+                | ProbeTarget::AreaDisk { .. }
+                | ProbeTarget::AreaRegion { .. } => None,
             })
             .collect::<Vec<_>>();
         let mut curve_metrics = BTreeMap::new();
         let curve_probes = probes
             .iter()
             .filter_map(|probe| match probe.target {
-                ProbeTarget::Point(_) => None,
+                ProbeTarget::Point(_)
+                | ProbeTarget::AreaDisk { .. }
+                | ProbeTarget::AreaRegion { .. } => None,
                 ProbeTarget::Segment { start, end, preset } => {
                     let count = preset.spatial_points();
                     let delta = end - start;
@@ -3827,6 +3832,7 @@ impl Playground {
                             .map(|path| (path.length, path.closed))
                     })
                 }
+                ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => None,
             };
             let segment_length = curve_metric.map(|metric| metric.0);
             let curve_closed = curve_metric.is_some_and(|metric| metric.1);
@@ -3863,6 +3869,7 @@ impl Playground {
                 ProbeTarget::Point(_) => "point probe",
                 ProbeTarget::Segment { .. } => "line probe",
                 ProbeTarget::Boundary(_) => "boundary probe",
+                ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => "area probe",
             };
             egui::Window::new(format!("{} · {kind}", probe.name))
                 .id(egui::Id::new(("probe_readout", id.0)))
@@ -4899,6 +4906,9 @@ impl Playground {
                         ProbeTarget::Point(_) => "Point probe",
                         ProbeTarget::Segment { .. } => "Line probe",
                         ProbeTarget::Boundary(_) => "Boundary probe",
+                        ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => {
+                            "Area probe"
+                        }
                     })
                     .clicked()
                 {
@@ -4989,6 +4999,13 @@ impl Playground {
                             });
                         }
                     }
+                    ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => {
+                        ui.small(if probe.enabled {
+                            "Area recording is not available yet"
+                        } else {
+                            "Disabled"
+                        });
+                    }
                 }
             }
         }
@@ -5012,6 +5029,7 @@ impl Playground {
             ProbeTarget::Point(_) => "Selected point probe",
             ProbeTarget::Segment { .. } => "Selected line probe",
             ProbeTarget::Boundary(_) => "Selected boundary probe",
+            ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => "Selected area probe",
         });
         if !matches!(self.probe_name_edit.as_ref(), Some((candidate, _)) if *candidate == id) {
             self.probe_name_edit = Some((id, probe.name.clone()));
@@ -7965,6 +7983,7 @@ impl Playground {
                         );
                         midpoint
                     }
+                    ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => continue,
                 };
                 painter.text(
                     label_at + egui::vec2(10.0, -10.0),
@@ -8231,6 +8250,7 @@ impl Playground {
                     (self.screen(badge, viewport).distance(point) <= 11.0)
                         .then_some(ProbeHit::Boundary(probe.id))
                 }
+                ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => None,
             })
     }
 
@@ -8239,6 +8259,7 @@ impl Playground {
             ProbeTarget::Point(_) => self.show_point_probes,
             ProbeTarget::Segment { .. } => self.show_line_probes,
             ProbeTarget::Boundary(_) => self.show_boundary_probes,
+            ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => false,
         }
     }
     fn hit_internal_handle(&self, p: Pos2, r: Rect) -> Option<(InternalBoundaryId, usize)> {
@@ -8815,6 +8836,7 @@ pub fn mesh_benchmark_scene() -> Playground {
             accepted: scene,
             probes: vec![],
             source: SourceSettings::default(),
+            far_field: Default::default(),
         });
     state
 }
@@ -8924,6 +8946,7 @@ pub fn wave_gpu_check_scene() -> Playground {
                 },
             ],
             source: SourceSettings::default(),
+            far_field: Default::default(),
         });
     state
 }

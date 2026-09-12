@@ -134,6 +134,7 @@ fn outer_side_conditions_are_undoable_and_round_trip_with_time_signals() {
 
     let mut version_five: serde_json::Value = serde_json::from_str(&json).unwrap();
     version_five["version"] = 5.into();
+    version_five.as_object_mut().unwrap().remove("far_field");
     for scene in ["draft", "accepted"] {
         version_five[scene]
             .as_object_mut()
@@ -243,6 +244,85 @@ fn line_probes_are_undoable_bounded_and_round_trip() {
 }
 
 #[test]
+fn area_probe_targets_and_far_field_settings_round_trip() {
+    let mut editor = Editor::default();
+    let disk = editor
+        .create_area_disk_probe(Point2::new(0.35, -0.2), 0.18)
+        .unwrap();
+    let region = editor
+        .create_region_loop(
+            PeriodicCubicSpline::rounded(Point2::new(0.55, 0.45), 0.12),
+            BACKGROUND_REGION,
+            DEFAULT_MATERIAL,
+            false,
+        )
+        .unwrap();
+    settle(&mut editor);
+    let interior = editor.obstacle(region).unwrap().role.interior().unwrap();
+    let attached = editor.create_area_region_probe(interior).unwrap();
+    editor
+        .set_far_field(FarFieldSettings {
+            enabled: true,
+            inset: 0.17,
+        })
+        .unwrap();
+
+    let json = save(&editor.document).unwrap();
+    assert!(json.contains("\"version\": 13"));
+    let decoded = decode(json.as_bytes()).unwrap();
+    assert_eq!(decoded, editor.document);
+    assert_eq!(decoded.far_field.inset, 0.17);
+    assert!(matches!(
+        decoded
+            .probes
+            .iter()
+            .find(|probe| probe.id == disk)
+            .unwrap()
+            .target,
+        ProbeTarget::AreaDisk { radius, .. } if radius == 0.18
+    ));
+
+    editor.delete_obstacle(region);
+    assert!(editor.document.probes.iter().any(|probe| probe.id == disk));
+    assert!(
+        !editor
+            .document
+            .probes
+            .iter()
+            .any(|probe| probe.id == attached)
+    );
+    editor.undo();
+    assert!(
+        editor
+            .document
+            .probes
+            .iter()
+            .any(|probe| probe.id == attached)
+    );
+}
+
+#[test]
+fn malformed_area_and_far_field_targets_are_rejected() {
+    let mut editor = Editor::default();
+    editor
+        .create_area_disk_probe(Point2::new(0.2, 0.1), 0.2)
+        .unwrap();
+    let json = save(&editor.document).unwrap();
+    let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    malformed["probes"][0]["target"]["radius"] = 0.into();
+    assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
+
+    malformed = serde_json::from_str(&json).unwrap();
+    malformed["far_field"]["inset"] = 1.into();
+    assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
+
+    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+    legacy["version"] = 12.into();
+    legacy.as_object_mut().unwrap().remove("far_field");
+    assert!(decode(serde_json::to_string(&legacy).unwrap().as_bytes()).is_err());
+}
+
+#[test]
 fn version_nine_point_probes_remain_loadable() {
     let mut editor = Editor::default();
     editor.create_point_probe(Point2::new(0.1, -0.2)).unwrap();
@@ -250,6 +330,7 @@ fn version_nine_point_probes_remain_loadable() {
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
     value["version"] = 9.into();
     value.as_object_mut().unwrap().remove("source");
+    value.as_object_mut().unwrap().remove("far_field");
     assert_eq!(
         decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap(),
         editor.document
@@ -271,11 +352,12 @@ fn continuous_source_round_trips_and_version_ten_uses_the_default() {
     };
     let json = save(&document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 12);
+    assert_eq!(value["version"], 13);
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
     value["version"] = 10.into();
     value.as_object_mut().unwrap().remove("source");
+    value.as_object_mut().unwrap().remove("far_field");
     let legacy = decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
     assert_eq!(legacy.source, SourceSettings::default());
 
@@ -295,7 +377,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 13.into(),
+            0 => value["version"] = 14.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -372,7 +454,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        12
+        13
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -381,6 +463,7 @@ fn open_internal_boundary_round_trip_and_history() {
 
     let mut parallel_gap: serde_json::Value = serde_json::from_str(&json).unwrap();
     parallel_gap["version"] = 6.into();
+    parallel_gap.as_object_mut().unwrap().remove("far_field");
     for scene in ["draft", "accepted"] {
         parallel_gap[scene]["internal_boundaries"][0]["span_laws"][0]["left"] =
             serde_json::json!({ "kind": "impedance", "ratio": 1.25 });
@@ -390,6 +473,7 @@ fn open_internal_boundary_round_trip_and_history() {
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
     legacy["version"] = 3.into();
+    legacy.as_object_mut().unwrap().remove("far_field");
     for scene in ["draft", "accepted"] {
         let stored = &mut legacy[scene]["internal_boundaries"][0];
         stored.as_object_mut().unwrap().remove("span_laws");
@@ -707,6 +791,7 @@ fn hole_span_conditions_round_trip_follow_seam_insertion_and_guard_removal() {
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
     legacy["version"] = 4.into();
+    legacy.as_object_mut().unwrap().remove("far_field");
     for scene in ["draft", "accepted"] {
         legacy[scene]["loops"][0]
             .as_object_mut()
@@ -1069,6 +1154,7 @@ fn validated_example_replacement_is_one_undoable_action() {
         accepted: scene,
         probes: vec![],
         source: SourceSettings::default(),
+        far_field: Default::default(),
     };
 
     editor.replace_validated_with_history(example.clone());
@@ -1167,7 +1253,7 @@ fn boundary_probe_round_trips_and_tracks_periodic_insertion() {
     assert_eq!(target.spans(9), vec![7, 8, 0]);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 12"));
+    assert!(json.contains("\"version\": 13"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded.probes, editor.document.probes);
 

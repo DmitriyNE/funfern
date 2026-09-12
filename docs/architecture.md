@@ -59,9 +59,10 @@ the same bounded snapshot history as geometry. They are serialized in scene file
 shared links, and recovery data; sampled traces and floating-window layout remain
 transient. The Probes inspector owns creation, configuration, and the receiver list,
 while each receiver has one independent closeable readout window. The target model
-and readout dispatch cover points and independent straight line segments and can
-extend to region, selected-geometry, and far-field receivers without adding another
-inspector. Point readouts share one
+covers points, independent straight line segments, geometry-attached boundary runs,
+free disks, and stable material regions. The far-field monitor is singleton
+document state rather than another selectable probe: it is enabled with one inset
+distance and derives its contour from the outer domain. Point readouts share one
 pan/zoom time window across their independently hideable field, velocity, and energy
 sections; Live mode follows the newest solver-clock sample. Probe timestamps come
 directly from the solver's transferred absolute clock. The host handoff offset is
@@ -123,12 +124,12 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON version 12 remains the single persistence representation. File loading, bundled
+Scene JSON version 13 remains the single persistence representation. File loading, bundled
 examples, crash recovery, and shared links all pass through the same structural
 decoder and bounded accepted-scene validator before replacing the editor document.
-The document includes probes and continuous-source configuration alongside draft
-and accepted geometry, so every persistence route and Undo/Redo sees the same
-state. Examples carry names and descriptions and render their thumbnails directly
+The document includes probes, continuous-source configuration, and far-field
+settings alongside draft and accepted geometry, so every persistence route and
+Undo/Redo sees the same state. Examples carry names and descriptions and render their thumbnails directly
 from the accepted spline geometry. Their documents also provide a continuous
 source and deliberate boundary configuration. Opening one is a single
 undoable document change and starts a fresh zero field; it does not transfer the
@@ -485,6 +486,13 @@ an arclength integral versus time. A compact checkbox menu controls this matrix 
 starts with four views active. Every active view shares the same time window.
 Horizontal dragging pans time traces; vertical dragging pans waterfalls along their
 vertical time axis.
+
+Area probes compile either a free disk or one stable material region into compact
+clipped element contributions. Region targets integrate complete mesh triangles;
+disk targets clip each triangle against a bounded, world-space approximation of the
+circle before applying a degree-six triangle rule. The CPU reference reports mean
+and RMS displacement, mean energy density, total energy, covered area, and geometric
+coverage. GPU reduction and interactive area-probe rendering are a following slice.
 
 The previous h≈0.16 overlay was an editor preview. Wave benchmarks start with
 h≤0.04 and h≤0.02, corresponding to 10 and 20 maximum-edge lengths per reference

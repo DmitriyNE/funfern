@@ -1,7 +1,7 @@
 use crate::editor::{
-    BoundaryProbeFeature, BoundaryProbeSide, BoundaryProbeTarget, Document, MAX_PROBES,
-    MAX_SEGMENT_PROBE_POINTS, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget,
-    SourceSettings,
+    BoundaryProbeFeature, BoundaryProbeSide, BoundaryProbeTarget, Document, FarFieldSettings,
+    MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, ProbeDefinition, ProbeId, ProbeSamplingPreset,
+    ProbeTarget, SourceSettings,
 };
 use funfern_core::*;
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,15 @@ struct FileV2 {
     probes: Vec<StoredProbe>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<StoredSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    far_field: Option<StoredFarField>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredFarField {
+    enabled: bool,
+    inset: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -84,6 +93,13 @@ enum StoredProbeTarget {
         side: StoredBoundaryProbeSide,
         reversed: bool,
         preset: StoredProbeSamplingPreset,
+    },
+    AreaDisk {
+        center: [f64; 2],
+        radius: f64,
+    },
+    AreaRegion {
+        region: u64,
     },
 }
 
@@ -634,7 +650,7 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 12,
+        version: 13,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
@@ -678,6 +694,13 @@ fn encode_document(document: &Document) -> FileV2 {
                         reversed: target.reversed,
                         preset: encode_probe_preset(target.preset),
                     },
+                    ProbeTarget::AreaDisk { center, radius } => StoredProbeTarget::AreaDisk {
+                        center: [center.x, center.y],
+                        radius,
+                    },
+                    ProbeTarget::AreaRegion { region } => {
+                        StoredProbeTarget::AreaRegion { region: region.0 }
+                    }
                 },
             })
             .collect(),
@@ -688,6 +711,10 @@ fn encode_document(document: &Document) -> FileV2 {
             width: document.source.width,
             frequency_hz: document.source.frequency_hz,
             region: document.source.region.0,
+        }),
+        far_field: Some(StoredFarField {
+            enabled: document.far_field.enabled,
+            inset: document.far_field.inset,
         }),
     }
 }
@@ -733,64 +760,89 @@ fn decode_probes(
     stored: Vec<StoredProbe>,
     draft: &Scene,
     allow_boundary: bool,
+    allow_area: bool,
 ) -> Result<Vec<ProbeDefinition>, String> {
     if stored.len() > MAX_PROBES {
         return Err(format!("Scene contains more than {MAX_PROBES} probes"));
     }
     let probes = stored
         .into_iter()
-        .map(|probe| ProbeDefinition {
-            id: ProbeId(probe.id),
-            name: probe.name,
-            color: probe.color,
-            enabled: probe.enabled,
-            target: match probe.target {
-                StoredProbeTarget::Point { position } => {
-                    ProbeTarget::Point(Point2::new(position[0], position[1]))
-                }
-                StoredProbeTarget::Segment { start, end, preset } => ProbeTarget::Segment {
-                    start: Point2::new(start[0], start[1]),
-                    end: Point2::new(end[0], end[1]),
-                    preset: decode_probe_preset(preset),
+        .map(|probe| -> Result<ProbeDefinition, String> {
+            Ok(ProbeDefinition {
+                id: ProbeId(probe.id),
+                name: probe.name,
+                color: probe.color,
+                enabled: probe.enabled,
+                target: match probe.target {
+                    StoredProbeTarget::Point { position } => {
+                        ProbeTarget::Point(Point2::new(position[0], position[1]))
+                    }
+                    StoredProbeTarget::Segment { start, end, preset } => ProbeTarget::Segment {
+                        start: Point2::new(start[0], start[1]),
+                        end: Point2::new(end[0], end[1]),
+                        preset: decode_probe_preset(preset),
+                    },
+                    StoredProbeTarget::Boundary {
+                        feature,
+                        start_span,
+                        span_count,
+                        whole,
+                        side,
+                        reversed,
+                        preset,
+                    } => ProbeTarget::Boundary(BoundaryProbeTarget {
+                        feature: match feature {
+                            StoredBoundaryProbeFeature::Outer => BoundaryProbeFeature::Outer,
+                            StoredBoundaryProbeFeature::Loop { id } => {
+                                BoundaryProbeFeature::Loop(ObstacleId(id))
+                            }
+                            StoredBoundaryProbeFeature::Baffle { id } => {
+                                BoundaryProbeFeature::Baffle(InternalBoundaryId(id))
+                            }
+                        },
+                        start_span,
+                        span_count,
+                        whole,
+                        side: match side {
+                            StoredBoundaryProbeSide::Domain => BoundaryProbeSide::Domain,
+                            StoredBoundaryProbeSide::Exterior => BoundaryProbeSide::Exterior,
+                            StoredBoundaryProbeSide::Interior => BoundaryProbeSide::Interior,
+                            StoredBoundaryProbeSide::Left => BoundaryProbeSide::Left,
+                            StoredBoundaryProbeSide::Right => BoundaryProbeSide::Right,
+                        },
+                        reversed,
+                        preset: decode_probe_preset(preset),
+                    }),
+                    StoredProbeTarget::AreaDisk { center, radius } => {
+                        if !allow_area {
+                            return Err("Area probes require scene version 13".into());
+                        }
+                        ProbeTarget::AreaDisk {
+                            center: Point2::new(center[0], center[1]),
+                            radius,
+                        }
+                    }
+                    StoredProbeTarget::AreaRegion { region } => {
+                        if !allow_area {
+                            return Err("Area probes require scene version 13".into());
+                        }
+                        ProbeTarget::AreaRegion {
+                            region: RegionId(region),
+                        }
+                    }
                 },
-                StoredProbeTarget::Boundary {
-                    feature,
-                    start_span,
-                    span_count,
-                    whole,
-                    side,
-                    reversed,
-                    preset,
-                } => ProbeTarget::Boundary(BoundaryProbeTarget {
-                    feature: match feature {
-                        StoredBoundaryProbeFeature::Outer => BoundaryProbeFeature::Outer,
-                        StoredBoundaryProbeFeature::Loop { id } => {
-                            BoundaryProbeFeature::Loop(ObstacleId(id))
-                        }
-                        StoredBoundaryProbeFeature::Baffle { id } => {
-                            BoundaryProbeFeature::Baffle(InternalBoundaryId(id))
-                        }
-                    },
-                    start_span,
-                    span_count,
-                    whole,
-                    side: match side {
-                        StoredBoundaryProbeSide::Domain => BoundaryProbeSide::Domain,
-                        StoredBoundaryProbeSide::Exterior => BoundaryProbeSide::Exterior,
-                        StoredBoundaryProbeSide::Interior => BoundaryProbeSide::Interior,
-                        StoredBoundaryProbeSide::Left => BoundaryProbeSide::Left,
-                        StoredBoundaryProbeSide::Right => BoundaryProbeSide::Right,
-                    },
-                    reversed,
-                    preset: decode_probe_preset(preset),
-                }),
-            },
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     if probes.iter().any(|probe| !probe.valid()) {
         return Err("Scene contains an invalid probe".into());
     }
     for probe in &probes {
+        if let ProbeTarget::AreaRegion { region } = probe.target
+            && draft.region(region).is_none()
+        {
+            return Err("Area probe references a missing region".into());
+        }
         let ProbeTarget::Boundary(target) = probe.target else {
             continue;
         };
@@ -844,6 +896,7 @@ fn decode_probes(
             ProbeTarget::Segment { preset, .. }
             | ProbeTarget::Boundary(BoundaryProbeTarget { preset, .. }) => preset.spatial_points(),
             ProbeTarget::Point(_) => 0,
+            ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => 0,
         })
         .sum::<usize>();
     if segment_points > MAX_SEGMENT_PROBE_POINTS {
@@ -880,9 +933,10 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 accepted: decode_v1(file.accepted)?,
                 probes: vec![],
                 source: SourceSettings::default(),
+                far_field: FarFieldSettings::default(),
             }
         }
-        2..=12 => {
+        2..=13 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
@@ -900,12 +954,29 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 header.version < 7,
             )?;
             let source = decode_source(file.source, &accepted)?;
-            let probes = decode_probes(file.probes, &draft, header.version >= 12)?;
+            let probes = decode_probes(
+                file.probes,
+                &draft,
+                header.version >= 12,
+                header.version >= 13,
+            )?;
+            let far_field = match file.far_field {
+                Some(stored) if header.version >= 13 => FarFieldSettings {
+                    enabled: stored.enabled,
+                    inset: stored.inset,
+                },
+                Some(_) => return Err("Far-field settings require scene version 13".into()),
+                None => FarFieldSettings::default(),
+            };
+            if !far_field.valid() {
+                return Err("Scene contains invalid far-field settings".into());
+            }
             Document {
                 draft,
                 accepted,
                 probes,
                 source,
+                far_field,
             }
         }
         _ => return Err("Unsupported scene version".into()),

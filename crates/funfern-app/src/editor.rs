@@ -47,6 +47,29 @@ impl Default for SourceSettings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProbeId(pub u64);
 
+pub const DEFAULT_FAR_FIELD_INSET: f64 = 0.12;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FarFieldSettings {
+    pub enabled: bool,
+    pub inset: f64,
+}
+
+impl FarFieldSettings {
+    pub fn valid(self) -> bool {
+        self.inset.is_finite() && self.inset > 0.0 && self.inset < 1.0
+    }
+}
+
+impl Default for FarFieldSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            inset: DEFAULT_FAR_FIELD_INSET,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundaryProbeFeature {
     Outer,
@@ -104,6 +127,13 @@ pub enum ProbeTarget {
         preset: ProbeSamplingPreset,
     },
     Boundary(BoundaryProbeTarget),
+    AreaDisk {
+        center: Point2,
+        radius: f64,
+    },
+    AreaRegion {
+        region: RegionId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -152,6 +182,13 @@ impl ProbeDefinition {
                     start.finite() && end.finite() && (end - start).norm() >= 1.0e-6
                 }
                 ProbeTarget::Boundary(target) => target.span_count > 0,
+                ProbeTarget::AreaDisk { center, radius } => {
+                    center.finite()
+                        && radius.is_finite()
+                        && radius > 0.0
+                        && (std::f64::consts::PI * radius * radius).is_finite()
+                }
+                ProbeTarget::AreaRegion { region } => region.0 > 0,
             }
     }
 }
@@ -186,6 +223,7 @@ pub struct Document {
     pub accepted: Scene,
     pub probes: Vec<ProbeDefinition>,
     pub source: SourceSettings,
+    pub far_field: FarFieldSettings,
 }
 impl Default for Document {
     fn default() -> Self {
@@ -195,6 +233,7 @@ impl Default for Document {
             accepted: scene,
             probes: vec![],
             source: SourceSettings::default(),
+            far_field: FarFieldSettings::default(),
         }
     }
 }
@@ -325,6 +364,7 @@ impl Editor {
         };
         self.remap_loop_probe_role(id, old_role, new_role);
         if kind == LoopKind::Hole {
+            self.delete_area_probes_for_region(interior);
             self.document
                 .draft
                 .regions
@@ -1440,6 +1480,7 @@ impl Editor {
         if let Some(role) = removed
             && let Some(interior) = role.interior()
         {
+            self.delete_area_probes_for_region(interior);
             let exterior = role.exterior();
             for child in &mut self.document.draft.obstacles {
                 child.role = replace_exterior(child.role, interior, exterior);
@@ -2046,6 +2087,78 @@ impl Editor {
         Ok(id)
     }
 
+    pub fn create_area_disk_probe(
+        &mut self,
+        center: Point2,
+        radius: f64,
+    ) -> Result<ProbeId, String> {
+        self.create_area_probe(ProbeTarget::AreaDisk { center, radius })
+    }
+
+    pub fn create_area_region_probe(&mut self, region: RegionId) -> Result<ProbeId, String> {
+        if self.document.draft.region(region).is_none() {
+            return Err("Area probe references a missing region".into());
+        }
+        self.create_area_probe(ProbeTarget::AreaRegion { region })
+    }
+
+    fn create_area_probe(&mut self, target: ProbeTarget) -> Result<ProbeId, String> {
+        let valid = match target {
+            ProbeTarget::AreaDisk { center, radius } => {
+                center.finite()
+                    && radius.is_finite()
+                    && radius > 0.0
+                    && (std::f64::consts::PI * radius * radius).is_finite()
+            }
+            ProbeTarget::AreaRegion { region } => region.0 > 0,
+            _ => false,
+        };
+        if !valid {
+            return Err("Area probe target must be valid".into());
+        }
+        if self.document.probes.len() >= MAX_PROBES {
+            return Err(format!("Maximum {MAX_PROBES} probes"));
+        }
+        let id = ProbeId(self.next_probe_id);
+        self.next_probe_id = self
+            .next_probe_id
+            .checked_add(1)
+            .ok_or("Probe IDs exhausted")?;
+        const COLORS: [[u8; 3]; 8] = [
+            [63, 144, 239],
+            [244, 105, 122],
+            [78, 201, 176],
+            [245, 183, 69],
+            [164, 126, 232],
+            [70, 190, 232],
+            [230, 125, 67],
+            [153, 203, 103],
+        ];
+        self.begin();
+        self.document.probes.push(ProbeDefinition {
+            id,
+            name: format!("Area probe {}", id.0),
+            color: COLORS[(id.0.saturating_sub(1) as usize) % COLORS.len()],
+            enabled: true,
+            target,
+        });
+        self.commit();
+        Ok(id)
+    }
+
+    pub fn set_far_field(&mut self, settings: FarFieldSettings) -> Result<(), String> {
+        if !settings.valid() {
+            return Err("Far-field inset must be finite and between 0 and 1".into());
+        }
+        if self.document.far_field == settings {
+            return Ok(());
+        }
+        self.begin();
+        self.document.far_field = settings;
+        self.commit();
+        Ok(())
+    }
+
     pub fn boundary_feature_span_count(&self, feature: BoundaryProbeFeature) -> Option<usize> {
         match feature {
             BoundaryProbeFeature::Outer => Some(4),
@@ -2115,6 +2228,12 @@ impl Editor {
         self.document.probes.retain(|probe| {
             !matches!(probe.target, ProbeTarget::Boundary(target) if target.feature == feature)
         });
+    }
+
+    fn delete_area_probes_for_region(&mut self, region: RegionId) {
+        self.document.probes.retain(
+            |probe| !matches!(probe.target, ProbeTarget::AreaRegion { region: id } if id == region),
+        );
     }
 
     fn remap_loop_probe_role(&mut self, id: ObstacleId, old: LoopRole, new: LoopRole) {
@@ -2191,6 +2310,7 @@ impl Editor {
                     preset.spatial_points()
                 }
                 ProbeTarget::Point(_) => 0,
+                ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => 0,
             })
             .sum()
     }
@@ -2201,6 +2321,11 @@ impl Editor {
         }
         if let ProbeTarget::Boundary(target) = probe.target {
             self.validate_boundary_probe(target)?;
+        }
+        if let ProbeTarget::AreaRegion { region } = probe.target
+            && self.document.draft.region(region).is_none()
+        {
+            return Err("Area probe references a missing region".into());
         }
         let id = probe.id;
         let current = self
@@ -2216,11 +2341,13 @@ impl Editor {
                     preset.spatial_points()
                 }
                 ProbeTarget::Point(_) => 0,
+                ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => 0,
             };
         let replacement_points = match probe.target {
             ProbeTarget::Segment { preset, .. }
             | ProbeTarget::Boundary(BoundaryProbeTarget { preset, .. }) => preset.spatial_points(),
             ProbeTarget::Point(_) => 0,
+            ProbeTarget::AreaDisk { .. } | ProbeTarget::AreaRegion { .. } => 0,
         };
         if points_without_current + replacement_points > MAX_SEGMENT_PROBE_POINTS {
             return Err(format!(

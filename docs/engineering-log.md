@@ -38,6 +38,24 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Area-probe and far-field document foundation
+
+- Added free-disk and stable-region area targets to the document model. Region
+  attachments are removed atomically when their owning region disappears; disk and
+  region creation, updates, deletion, and attachment lifecycle use normal snapshot
+  history.
+- Added a dependency-free enriched-quadratic area integration reference. It clips
+  partial disks in world space, applies degree-six quadrature, and reports mean and
+  RMS displacement, mean and total energy, covered area, and geometric coverage.
+- Far field is represented as one scene-level enable switch and inset value with a
+  `0.12` default, ready for the derived outer contour in the recorder/UI slice.
+- Scene JSON is version 13. Area targets and far-field settings round-trip through
+  every existing persistence path; versions 1–12 load with the disabled default.
+- GPU area reduction, viewport creation/editing, readouts, and the automatic
+  far-field contour remain the next parts of this milestone.
+- All 238 workspace tests, formatting, Clippy with warnings denied, native release
+  compilation, and the release Trunk/WASM build pass.
+
 ## 2026-09-12 — Geometry-attached boundary probes
 
 - Added probes from one contiguous selected run on the outer boundary, a closed
