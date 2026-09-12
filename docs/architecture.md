@@ -520,9 +520,11 @@ Only the compact 96-direction, 512-frame ring is read back. Its host history sta
 continuous across remesh and AMR generations when the inset and background wave
 speed remain compatible. The readout shares the other probes' time-navigation
 semantics across a direction/time waterfall, normalized 40 dB instantaneous and
-visible-window-averaged polar patterns, and angularly integrated intensity versus
-time. The contour is derived display state,
-not selectable geometry, and its visibility has an independent View toggle.
+visible-window-averaged polar patterns, and radiated power versus time. The power
+trace is the directional intensity integrated over observation angle, so it remains
+a relative nondimensional quantity rather than an absolutely calibrated flux. The
+contour is derived display state, not selectable geometry, and its visibility has an
+independent View toggle.
 
 The previous h≈0.16 overlay was an editor preview. Wave benchmarks start with
 h≤0.04 and h≤0.02, corresponding to 10 and 20 maximum-edge lengths per reference

@@ -200,7 +200,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Funfern derives a square Huygens contour from the domain, samples it on the GPU,
   and projects the delayed field into 96 observation directions. Its floating
   readout combines a direction/time waterfall, matching 40 dB instantaneous and
-  visible-window-averaged polar patterns, and angular energy over time. Double-click
+  visible-window-averaged polar patterns, and radiated power over time. Double-click
   the contour or its `FF` badge to open it. The contour must enclose every modeled boundary
   and stay in the lossless background material; View can hide its overlay.
 - **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered

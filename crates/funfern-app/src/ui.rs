@@ -288,6 +288,9 @@ struct ProbeViewState {
     area_mean_energy: bool,
     area_total_energy: bool,
     line_plots: [bool; 9],
+    far_waterfall: bool,
+    far_polar: bool,
+    far_power: bool,
     waterfall_gain: f32,
 }
 
@@ -306,6 +309,9 @@ impl ProbeViewState {
             area_total_energy: true,
             // Field vs arclength + waterfall, and the two useful integral traces.
             line_plots: [true, true, false, false, false, true, false, false, true],
+            far_waterfall: true,
+            far_polar: true,
+            far_power: true,
             waterfall_gain: 1.0,
         }
     }
@@ -4491,7 +4497,7 @@ impl Playground {
                 energy_density: 0.0,
             })
             .collect::<Vec<_>>();
-        let energy = frames
+        let power = frames
             .iter()
             .map(|frame| PointProbeRecord {
                 probe_id: 0,
@@ -4538,55 +4544,94 @@ impl Playground {
                     if ui.button("Clear").clicked() {
                         clear = true;
                     }
-                    ui.add(
-                        egui::Slider::new(&mut self.far_field_view.waterfall_gain, 0.2..=5.0)
+                    let active = [
+                        self.far_field_view.far_waterfall,
+                        self.far_field_view.far_polar,
+                        self.far_field_view.far_power,
+                    ]
+                    .into_iter()
+                    .filter(|enabled| *enabled)
+                    .count();
+                    egui::containers::menu::MenuButton::new(format!("Plots ({active})"))
+                        .config(
+                            egui::containers::menu::MenuConfig::new()
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+                        )
+                        .ui(ui, |ui| {
+                            ui.checkbox(&mut self.far_field_view.far_waterfall, "Waterfall");
+                            ui.checkbox(
+                                &mut self.far_field_view.far_polar,
+                                "Polar patterns",
+                            );
+                            ui.checkbox(
+                                &mut self.far_field_view.far_power,
+                                "Radiated power",
+                            )
+                            .on_hover_text(
+                                "Directional intensity integrated over observation angle",
+                            );
+                        });
+                    if self.far_field_view.far_waterfall {
+                        ui.add(
+                            egui::Slider::new(
+                                &mut self.far_field_view.waterfall_gain,
+                                0.2..=5.0,
+                            )
                             .logarithmic(true)
                             .text("gain"),
-                    );
+                        );
+                    }
                 });
                 if let Some(status) = &self.far_field_status {
                     ui.colored_label(RED, status);
                     return;
                 }
-                Self::far_field_waterfall(
-                    ui,
-                    &frames,
-                    &times,
-                    &mut self.far_field_view,
-                    self.probe_history_seconds,
-                );
-                let instantaneous = frames
-                    .iter()
-                    .min_by(|a, b| {
-                        (a.time - self.far_field_view.end_time)
-                            .abs()
-                            .total_cmp(&(b.time - self.far_field_view.end_time).abs())
-                    })
-                    .map(|frame| frame.intensity.clone())
-                    .unwrap_or_default();
-                let averaged = Self::far_field_average(&frames, &times, &self.far_field_view);
-                ui.small("Relative radiation pattern · 40 dB");
-                ui.columns(2, |columns| {
-                    Self::far_field_polar(
-                        &mut columns[0],
-                        "Instantaneous",
-                        &instantaneous,
+                if self.far_field_view.far_waterfall {
+                    Self::far_field_waterfall(
+                        ui,
+                        &frames,
+                        &times,
+                        &mut self.far_field_view,
+                        self.probe_history_seconds,
                     );
-                    Self::far_field_polar(
-                        &mut columns[1],
-                        "Time-averaged",
-                        &averaged,
+                }
+                if self.far_field_view.far_polar {
+                    let instantaneous = frames
+                        .iter()
+                        .min_by(|a, b| {
+                            (a.time - self.far_field_view.end_time)
+                                .abs()
+                                .total_cmp(&(b.time - self.far_field_view.end_time).abs())
+                        })
+                        .map(|frame| frame.intensity.clone())
+                        .unwrap_or_default();
+                    let averaged =
+                        Self::far_field_average(&frames, &times, &self.far_field_view);
+                    ui.small("Relative radiation pattern · 40 dB");
+                    ui.columns(2, |columns| {
+                        Self::far_field_polar(
+                            &mut columns[0],
+                            "Instantaneous",
+                            &instantaneous,
+                        );
+                        Self::far_field_polar(
+                            &mut columns[1],
+                            "Time-averaged",
+                            &averaged,
+                        );
+                    });
+                }
+                if self.far_field_view.far_power {
+                    Self::probe_plot(
+                        ui,
+                        "Radiated power",
+                        &power,
+                        |sample| sample.displacement,
+                        GOLD,
+                        &mut self.far_field_view,
+                        self.probe_history_seconds,
                     );
-                });
-                Self::probe_plot(
-                    ui,
-                    "Angular energy",
-                    &energy,
-                    |sample| sample.displacement,
-                    GOLD,
-                    &mut self.far_field_view,
-                    self.probe_history_seconds,
-                );
+                }
                 ui.small(
                     "Drag through time · wheel to zoom · average follows the visible window · polar scale spans 40 dB",
                 );
@@ -13661,6 +13706,35 @@ mod tests {
 
         h.key(Key::Escape, Modifiers::NONE);
         assert!(!h.texts.iter().any(|(text, _)| text == "Waterfall gain"));
+    }
+
+    #[test]
+    fn far_field_plot_picker_stays_open_and_defaults_to_all_views() {
+        let mut h = Harness::new();
+        h.state
+            .editor
+            .set_far_field(FarFieldSettings {
+                enabled: true,
+                inset: 0.12,
+            })
+            .unwrap();
+        h.state.far_field_open = true;
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(
+            h.texts.iter().any(|(text, _)| text == "Plots (3)"),
+            "{:?}",
+            h.texts.iter().map(|(text, _)| text).collect::<Vec<_>>()
+        );
+
+        h.click_text("Plots (3)");
+        h.frame(vec![]);
+        assert!(h.texts.iter().any(|(text, _)| text == "Polar patterns"));
+        h.click_text("Polar patterns");
+        assert!(!h.state.far_field_view.far_polar);
+        assert!(h.state.far_field_view.far_waterfall);
+        assert!(h.state.far_field_view.far_power);
+        assert!(h.texts.iter().any(|(text, _)| text == "Polar patterns"));
     }
 
     #[test]

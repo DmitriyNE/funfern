@@ -53,12 +53,13 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   interpolates retarded samples and integrates 96 observation directions. Only the
   compact directional ring is read back, and an undersized delay window is reported
   instead of silently truncating slow-background results.
-- Added a floating readout with a direction/time waterfall, synchronized angular
-  energy trace, and equal-width 40 dB instantaneous and visible-window-averaged
-  polar patterns. Double-clicking the contour or `FF` badge opens the readout. The
-  View inspector can hide the derived contour, while compatible mesh and AMR
-  handoffs preserve host history.
-- All 251 workspace tests pass. The native Metal check compiled and exercised all
+- Added a floating readout with a direction/time waterfall, synchronized
+  radiated-power trace, and equal-width 40 dB instantaneous and
+  visible-window-averaged polar patterns. A persistent three-item picker controls
+  those views. Double-clicking the contour or `FF` badge opens the readout. The View
+  inspector can hide the derived contour, while compatible mesh and AMR handoffs
+  preserve host history.
+- All 252 workspace tests pass. The native Metal check compiled and exercised all
   recorder shaders on an Apple M1 Max with 9,690 DOFs: 1,024 steps and readback took
   about 0.15 s after setup, producing finite 96-direction far-field records. Native
   release compilation, Clippy, and release Trunk/WASM are checked for this slice.
