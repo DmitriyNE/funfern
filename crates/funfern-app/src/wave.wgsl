@@ -3,9 +3,14 @@ struct Parameters {
     count_data: vec4<u32>,
 }
 
+struct TimeSignal {
+    values: vec4<f32>,
+    extra: vec4<f32>,
+}
+
 struct Source {
-    position_width_amplitude: vec4<f32>,
-    frequency_enabled: vec4<f32>,
+    position_width_enabled: vec4<f32>,
+    signal: TimeSignal,
     region: vec4<u32>,
 }
 
@@ -14,15 +19,11 @@ struct Pulse {
     region: vec4<u32>,
 }
 
-struct BoundarySignal {
-    values: vec4<f32>,
-}
-
 struct Forcing {
     source: Source,
     pulse: Pulse,
-    outer: array<BoundarySignal, 4>,
-    volume: array<BoundarySignal, 33>,
+    outer: array<TimeSignal, 4>,
+    volume: array<TimeSignal, 33>,
 }
 
 struct ForcingWeights {
@@ -36,9 +37,9 @@ struct NodeData {
     regions: vec4<u32>,
     boundary: vec4<u32>,
     neumann_weights: vec4<f32>,
-    dirichlet_signal: vec4<f32>,
-    face_neumann_signal_a: vec4<f32>,
-    face_neumann_signal_b: vec4<f32>,
+    dirichlet_signal: TimeSignal,
+    face_neumann_signal_a: TimeSignal,
+    face_neumann_signal_b: TimeSignal,
     face_neumann_weights: vec4<f32>,
 }
 
@@ -67,12 +68,13 @@ fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
     return select(0.0, 1.0, first || second);
 }
 
-fn signal_value(signal: vec4<f32>, time: f32) -> f32 {
-    return signal.x + signal.y * sin(signal.z * time + signal.w);
+fn signal_value(signal: TimeSignal, time: f32) -> f32 {
+    return signal.values.x
+        + signal.values.y * sin(signal.values.z * time + signal.values.w);
 }
 
 fn boundary_value(side: u32, time: f32) -> f32 {
-    return signal_value(forcing.outer[side].values, time);
+    return signal_value(forcing.outer[side], time);
 }
 
 fn neumann_acceleration(i: u32, time: f32) -> f32 {
@@ -92,11 +94,11 @@ fn volume_acceleration(i: u32, time: f32) -> f32 {
     var value = 0.0;
     if weights.channels.x != 0u {
         value += weights.volume.x
-            * signal_value(forcing.volume[weights.channels.x - 1u].values, time);
+            * signal_value(forcing.volume[weights.channels.x - 1u], time);
     }
     if weights.channels.y != 0u {
         value += weights.volume.y
-            * signal_value(forcing.volume[weights.channels.y - 1u].values, time);
+            * signal_value(forcing.volume[weights.channels.y - 1u], time);
     }
     return value;
 }
@@ -135,11 +137,10 @@ fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let dt2 = parameters.time_data.y;
     let gamma = nodes[i].position_damping.z;
-    let acceleration = forcing.source.frequency_enabled.y
+    let acceleration = forcing.source.position_width_enabled.w
         * region_match(nodes[i].regions, forcing.source.region)
-        * forcing.source.position_width_amplitude.w
         * forcing_weights[i].point_pulse.x
-        * sin(forcing.source.frequency_enabled.x * parameters.time_data.z)
+        * signal_value(forcing.source.signal, parameters.time_data.z)
         + volume_acceleration(i, parameters.time_data.z)
         + neumann_acceleration(i, parameters.time_data.z);
     let previous = states[i].levels.x;

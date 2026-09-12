@@ -54,6 +54,27 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-13 — Unified time signals and point-source ownership
+
+- Added a dependency-free `TimeSignal` to the numerical core and use it for point
+  sources, region sources, and prescribed Dirichlet/Neumann data. The first tagged
+  variant is harmonic with bias, amplitude, frequency, and phase; pulse placement
+  remains a distinct initial-condition action.
+- Moved the point-source definition into the core and replaced its dedicated
+  amplitude/frequency controls with the same signal editor used by volume and
+  boundary drives. The AMR wavelength guard now obtains active bandwidth through
+  the shared signal interface.
+- Unified the GPU representation into one fixed-size signal record with reserved
+  parameter space and no additional storage binding. Temporal-only point and volume
+  edits replace forcing data while retaining their spatial weights and the live
+  solver state.
+- Scene JSON version 17 tags signal variants and nests the point-source signal.
+  Version 16 point, volume, and boundary encodings migrate through the same decoder.
+- Verification passes: formatting, warnings-denied Clippy, all **293 workspace
+  tests**, native release compilation, release Trunk/WASM packaging, the native
+  Metal mixed-source reference check at 9,690 DOFs, and the Chromium/WebGPU startup,
+  frame-advance, and resize smoke test.
+
 ## 2026-09-12 — Unified document ownership and persisted presentation
 
 - Replaced the parallel example simulation preset with a complete `Document`.

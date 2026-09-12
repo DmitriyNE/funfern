@@ -1260,10 +1260,10 @@ fn quadrature() -> [([f64; 3], f64); 6] {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, BoundarySignal, InternalBoundary, InternalBoundaryLaw, Material,
-        MaterialId, MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshQuality,
-        MeshTriangle, MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition,
-        OuterBoundaryConditions, OuterSide, Region, mesh_scene,
+        BACKGROUND_REGION, InternalBoundary, InternalBoundaryLaw, Material, MaterialId,
+        MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshQuality, MeshTriangle,
+        MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition,
+        OuterBoundaryConditions, OuterSide, Region, TimeSignal, mesh_scene,
     };
 
     fn square() -> Arc<TriMesh> {
@@ -1361,11 +1361,8 @@ mod tests {
         (mesh, operator, scene)
     }
 
-    fn constant_signal(value: f64) -> BoundarySignal {
-        BoundarySignal {
-            offset: value,
-            ..BoundarySignal::ZERO
-        }
+    fn constant_signal(value: f64) -> TimeSignal {
+        TimeSignal::harmonic(value, 0.0, 1.0, 0.0)
     }
 
     fn test_boundary_nodes(
@@ -1520,7 +1517,7 @@ mod tests {
     fn dirichlet_mismatch_is_diagnostic_only() {
         let scene = Scene {
             outer_boundaries: OuterBoundaryConditions::uniform(OuterBoundaryCondition::Dirichlet {
-                signal: BoundarySignal::ZERO,
+                signal: TimeSignal::ZERO,
             }),
             ..Scene::default()
         };

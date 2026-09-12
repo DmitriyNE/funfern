@@ -29,7 +29,6 @@ use funfern_app::{
         Acceptance, BoundaryFaceTarget, BoundaryProbeFeature, BoundaryProbeSide,
         BoundaryProbeTarget, Editor, FarFieldSettings, GeometryControl, LoopKind,
         PresentationSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget,
-        SourceSettings,
     },
     persistence::{self, LoadCandidate},
 };
@@ -869,7 +868,7 @@ pub struct Playground {
     wave_pending_pulse: Option<Point2>,
     pulse_amplitude: f32,
     pulse_width: f32,
-    wave_source: SourceSettings,
+    wave_source: PointSource,
     wave_source_dirty: bool,
     wave_prepare_ms: f64,
     wave_active_wall_seconds: f64,
@@ -1038,7 +1037,7 @@ impl Default for Playground {
             wave_pending_pulse: None,
             pulse_amplitude: 0.65,
             pulse_width: 0.06,
-            wave_source: SourceSettings::default(),
+            wave_source: PointSource::default(),
             wave_source_dirty: false,
             wave_prepare_ms: 0.0,
             wave_active_wall_seconds: 0.0,
@@ -3673,7 +3672,43 @@ impl Playground {
                 .model
                 .accepted
                 .volume_sources_eq(&self.mesh_committed_scene);
-        if !source_only_change {
+        let temporal_source_change = source_only_change
+            && self
+                .editor
+                .document
+                .model
+                .accepted
+                .volume_source_carriers_eq(&self.mesh_committed_scene);
+        if temporal_source_change {
+            self.volume_source_job = None;
+            if let Some(operator) = self.wave_operator.as_ref() {
+                let scene = self.editor.document.model.accepted.clone();
+                let signals = scene
+                    .volume_sources
+                    .iter()
+                    .filter(|source| source.enabled)
+                    .map(|source| source.signal)
+                    .collect();
+                match request.update_volume_source_signals(assets, operator, signals) {
+                    Ok(()) => {
+                        self.mesh_committed_scene = scene;
+                        self.wave_error = None;
+                        self.wave_failed_revision = None;
+                        self.solution_indicator_job = None;
+                        self.solution_indicator_result = None;
+                        self.solution_indicator_source = None;
+                        self.amr_last_analyzed_step = None;
+                        self.amr_coarsen_streak = 0;
+                        self.amr_status = "waiting for solution";
+                        self.notify("Volume source signal committed; live field preserved");
+                    }
+                    Err(error) => {
+                        self.wave_error = Some(error);
+                        self.wave_failed_revision = Some(self.editor.revision);
+                    }
+                }
+            }
+        } else if !source_only_change {
             self.volume_source_job = None;
         } else if let (Some(mesh), Some(operator)) =
             (self.wave_mesh.as_ref(), self.wave_operator.as_ref())
@@ -5845,13 +5880,13 @@ impl Playground {
                 (
                     "Driven Neumann",
                     boundary_condition_color(FaceBoundaryCondition::Neumann {
-                        signal: BoundarySignal::ZERO,
+                        signal: TimeSignal::ZERO,
                     }),
                 ),
                 (
                     "Driven Dirichlet",
                     boundary_condition_color(FaceBoundaryCondition::Dirichlet {
-                        signal: BoundarySignal::ZERO,
+                        signal: TimeSignal::ZERO,
                     }),
                 ),
                 ("Thin gap", Color32::from_rgb(215, 123, 244)),
@@ -6012,7 +6047,7 @@ impl Playground {
             enabled: true,
             profile: ScalarField::constant(1.0),
             parameters: vec![],
-            signal: BoundarySignal {
+            signal: TimeSignal::Harmonic {
                 offset: 0.0,
                 amplitude: 12.0,
                 frequency_hz: 3.0,
@@ -6041,46 +6076,9 @@ impl Playground {
                     ),
                 );
                 ui.label("Signal");
-                source_changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut source.signal.offset)
-                            .speed(0.05)
-                            .prefix("bias ")
-                            .update_while_editing(false),
-                    )
-                    .changed();
-                source_changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut source.signal.amplitude)
-                            .speed(0.1)
-                            .prefix("amplitude ")
-                            .update_while_editing(false),
-                    )
-                    .changed();
-                source_changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut source.signal.frequency_hz)
-                            .speed(0.05)
-                            .range(0.0..=1.0e6)
-                            .prefix("frequency ")
-                            .suffix(" Hz")
-                            .update_while_editing(false),
-                    )
-                    .changed();
-                let mut phase_degrees = source.signal.phase_radians.to_degrees();
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut phase_degrees)
-                            .speed(0.5)
-                            .prefix("phase ")
-                            .suffix("°")
-                            .update_while_editing(false),
-                    )
-                    .changed()
-                {
-                    source.signal.phase_radians = phase_degrees.to_radians();
-                    source_changed = true;
-                }
+                source_changed |= Self::time_signal_editor(ui, &mut source.signal)
+                    .iter()
+                    .any(egui::Response::changed);
                 if source.varying() || !source.parameters.is_empty() {
                     ui.label("Source parameters");
                     let mut rename = None;
@@ -7278,23 +7276,15 @@ impl Playground {
                         .and_then(|mesh| mesh_region_at(mesh, position))
                         .unwrap_or(BACKGROUND_REGION);
                 }
-                responses.extend([
-                    ui.add(
-                        egui::Slider::new(&mut self.wave_source.frequency_hz, 0.25..=8.0)
-                            .logarithmic(true)
-                            .text("source frequency"),
-                    ),
-                    ui.add(
-                        egui::Slider::new(&mut self.wave_source.amplitude, 1.0..=50.0)
-                            .logarithmic(true)
-                            .text("source strength"),
-                    ),
+                ui.label("Signal");
+                responses.extend(Self::time_signal_editor(ui, &mut self.wave_source.signal));
+                responses.push(
                     ui.add(
                         egui::Slider::new(&mut self.wave_source.width, 0.005..=0.3)
                             .logarithmic(true)
                             .text("source width"),
                     ),
-                ]);
+                );
                 ui.small(format!("Region {}", self.wave_source.region.0));
                 responses
             });
@@ -7305,7 +7295,7 @@ impl Playground {
                     self.wave_source_dirty = true;
                 } else {
                     self.wave_source = source_before;
-                    self.message = "Continuous-source values must be finite".into();
+                    self.message = "Point-source values must be finite".into();
                 }
             }
             if enabled_response.changed()
@@ -8326,7 +8316,7 @@ impl Playground {
         };
         let signal = common
             .and_then(FaceBoundaryCondition::signal)
-            .unwrap_or(BoundarySignal::ZERO);
+            .unwrap_or(TimeSignal::ZERO);
         let mut selected = None;
         ui.label("Condition");
         egui::ComboBox::from_id_salt("selected_boundary_condition")
@@ -8374,7 +8364,9 @@ impl Playground {
             ui.small("Outer edges use the matched ratio 1.0.");
         } else if let Some(condition) = &mut condition
             && let Some(mut signal) = condition.signal()
-            && Self::boundary_signal_editor(ui, &mut signal)
+            && Self::time_signal_editor(ui, &mut signal)
+                .iter()
+                .any(egui::Response::changed)
         {
             *condition = match condition {
                 FaceBoundaryCondition::Neumann { .. } => FaceBoundaryCondition::Neumann { signal },
@@ -8388,38 +8380,44 @@ impl Playground {
         if changed { condition } else { None }
     }
 
-    fn boundary_signal_editor(ui: &mut egui::Ui, signal: &mut BoundarySignal) -> bool {
+    fn time_signal_editor(ui: &mut egui::Ui, signal: &mut TimeSignal) -> Vec<egui::Response> {
         ui.small("value(t) = offset + amplitude · sin(2π f t + phase)");
-        [
+        let (offset, amplitude, frequency_hz, phase_radians) = signal.harmonic_parameters_mut();
+        let mut phase_degrees = phase_radians.to_degrees();
+        let mut responses = vec![
             ui.add(
-                egui::DragValue::new(&mut signal.offset)
+                egui::DragValue::new(offset)
                     .speed(0.01)
                     .prefix("offset ")
                     .update_while_editing(false),
             ),
             ui.add(
-                egui::DragValue::new(&mut signal.amplitude)
+                egui::DragValue::new(amplitude)
                     .speed(0.01)
                     .prefix("amplitude ")
                     .update_while_editing(false),
             ),
             ui.add(
-                egui::DragValue::new(&mut signal.frequency_hz)
+                egui::DragValue::new(frequency_hz)
                     .speed(0.05)
                     .range(0.0..=1.0e6)
+                    .prefix("frequency ")
                     .suffix(" Hz")
                     .update_while_editing(false),
             ),
-            ui.add(
-                egui::DragValue::new(&mut signal.phase_radians)
-                    .speed(0.05)
-                    .prefix("phase ")
-                    .suffix(" rad")
-                    .update_while_editing(false),
-            ),
-        ]
-        .iter()
-        .any(egui::Response::changed)
+        ];
+        let phase_response = ui.add(
+            egui::DragValue::new(&mut phase_degrees)
+                .speed(0.5)
+                .prefix("phase ")
+                .suffix("°")
+                .update_while_editing(false),
+        );
+        if phase_response.changed() {
+            *phase_radians = phase_degrees.to_radians();
+        }
+        responses.push(phase_response);
+        responses
     }
 
     fn refresh_material_overlay(&mut self) {
@@ -11346,24 +11344,20 @@ fn mesh_region_at(mesh: &TriMesh, point: Point2) -> Option<RegionId> {
     })
 }
 
-fn highest_forcing_frequency(scene: &Scene, source: SourceSettings) -> f64 {
-    let mut frequency = if source.enabled && source.amplitude != 0.0 {
-        source.frequency_hz as f64
+fn highest_forcing_frequency(scene: &Scene, source: PointSource) -> f64 {
+    let mut frequency = if source.enabled {
+        source.signal.frequency_ceiling_hz()
     } else {
         0.0
     };
     for condition in scene.outer_boundaries.sides {
-        if let Some(signal) = condition.signal()
-            && signal.amplitude != 0.0
-        {
-            frequency = frequency.max(signal.frequency_hz);
+        if let Some(signal) = condition.signal() {
+            frequency = frequency.max(signal.frequency_ceiling_hz());
         }
     }
     let mut include = |condition: FaceBoundaryCondition| {
-        if let Some(signal) = condition.signal()
-            && signal.amplitude != 0.0
-        {
-            frequency = frequency.max(signal.frequency_hz);
+        if let Some(signal) = condition.signal() {
+            frequency = frequency.max(signal.frequency_ceiling_hz());
         }
     };
     for obstacle in &scene.obstacles {
@@ -11378,8 +11372,8 @@ fn highest_forcing_frequency(scene: &Scene, source: SourceSettings) -> f64 {
         }
     }
     for source in &scene.volume_sources {
-        if source.enabled && source.signal.amplitude != 0.0 {
-            frequency = frequency.max(source.signal.frequency_hz);
+        if source.enabled {
+            frequency = frequency.max(source.signal.frequency_ceiling_hz());
         }
     }
     frequency
@@ -11581,7 +11575,7 @@ pub fn mesh_benchmark_scene() -> Playground {
                 draft: scene.clone(),
                 accepted: scene,
                 probes: vec![],
-                source: SourceSettings::default(),
+                source: PointSource::default(),
                 far_field: Default::default(),
             },
             presentation: Default::default(),
@@ -11617,7 +11611,7 @@ pub fn wave_gpu_check_scene() -> Playground {
             region: BACKGROUND_REGION,
             span_laws: vec![InternalBoundaryLaw {
                 left: FaceBoundaryCondition::Dirichlet {
-                    signal: BoundarySignal {
+                    signal: TimeSignal::Harmonic {
                         offset: 0.01,
                         amplitude: 0.03,
                         frequency_hz: 1.25,
@@ -11625,10 +11619,11 @@ pub fn wave_gpu_check_scene() -> Playground {
                     },
                 },
                 right: FaceBoundaryCondition::Neumann {
-                    signal: BoundarySignal {
+                    signal: TimeSignal::Harmonic {
+                        offset: 0.0,
                         amplitude: 0.15,
                         frequency_hz: 0.75,
-                        ..BoundarySignal::ZERO
+                        phase_radians: 0.0,
                     },
                 },
                 coupling: InternalBoundaryCoupling::Independent,
@@ -11666,7 +11661,7 @@ pub fn wave_gpu_check_scene() -> Playground {
             enabled: true,
             profile: ScalarField::formula("1 + 0.2 * x").unwrap(),
             parameters: vec![],
-            signal: BoundarySignal {
+            signal: TimeSignal::Harmonic {
                 offset: 0.01,
                 amplitude: 0.08,
                 frequency_hz: 1.1,
@@ -11722,7 +11717,7 @@ pub fn wave_gpu_check_scene() -> Playground {
                         },
                     },
                 ],
-                source: SourceSettings::default(),
+                source: PointSource::default(),
                 far_field: FarFieldSettings {
                     enabled: true,
                     ..Default::default()
@@ -12155,7 +12150,7 @@ pub fn wave_gpu_benchmark(
     if !benchmark.prepared {
         let mut target = OuterBoundaryConditions::default();
         target.sides[OuterSide::Bottom.index()] = OuterBoundaryCondition::Dirichlet {
-            signal: BoundarySignal {
+            signal: TimeSignal::Harmonic {
                 offset: 0.02,
                 amplitude: 0.04,
                 frequency_hz: 2.0,
@@ -12163,10 +12158,11 @@ pub fn wave_gpu_benchmark(
             },
         };
         target.sides[OuterSide::Top.index()] = OuterBoundaryCondition::Neumann {
-            signal: BoundarySignal {
+            signal: TimeSignal::Harmonic {
+                offset: 0.0,
                 amplitude: 0.3,
                 frequency_hz: 1.5,
-                ..BoundarySignal::ZERO
+                phase_radians: 0.0,
             },
         };
         target.sides[OuterSide::Left.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
@@ -12214,11 +12210,12 @@ pub fn wave_gpu_benchmark(
                 }
             }
         }
-        let pulse: Vec<_> = forcing_weights(mesh, operator, position, width, BACKGROUND_REGION)
-            .unwrap()
-            .into_iter()
-            .map(|weight| (amplitude * weight) as f64)
-            .collect();
+        let pulse: Vec<_> =
+            forcing_weights(mesh, operator, position, width as f64, BACKGROUND_REGION)
+                .unwrap()
+                .into_iter()
+                .map(|weight| (amplitude * weight) as f64)
+                .collect();
         cpu.add_displacement(&pulse).unwrap();
         let volume_sources = compile_volume_sources(
             mesh.clone(),
@@ -12483,8 +12480,9 @@ pub fn wave_gpu_benchmark(
             .volume_source(BACKGROUND_REGION)
             .unwrap()
             .clone();
-        target.signal.amplitude *= 1.5;
-        target.signal.phase_radians += 0.2;
+        let (_, amplitude, _, phase_radians) = target.signal.harmonic_parameters_mut();
+        *amplitude *= 1.5;
+        *phase_radians += 0.2;
         state
             .editor
             .set_volume_source(BACKGROUND_REGION, Some(target.clone()))
@@ -12557,7 +12555,7 @@ pub fn wave_transfer_benchmark(
             let target =
                 OuterBoundaryConditions::uniform(OuterBoundaryCondition::SecondOrderOutgoing);
             let hole_dirichlet = FaceBoundaryCondition::Dirichlet {
-                signal: BoundarySignal {
+                signal: TimeSignal::Harmonic {
                     offset: 0.015,
                     amplitude: 0.025,
                     frequency_hz: 1.1,
@@ -12565,10 +12563,11 @@ pub fn wave_transfer_benchmark(
                 },
             };
             let hole_neumann = FaceBoundaryCondition::Neumann {
-                signal: BoundarySignal {
+                signal: TimeSignal::Harmonic {
+                    offset: 0.0,
                     amplitude: 0.12,
                     frequency_hz: 0.8,
-                    ..BoundarySignal::ZERO
+                    phase_radians: 0.0,
                 },
             };
             if state.editor.document.model.accepted.obstacles[0].span_conditions[0]
@@ -13556,7 +13555,7 @@ fn paint_example_thumbnail(
             .outer_boundaries
             .get(side)
             .signal()
-            .is_some_and(|signal| signal.amplitude != 0.0)
+            .is_some_and(|signal| signal.characteristic_amplitude() != 0.0)
         {
             let midpoint = start.lerp(end, 0.5);
             painter.circle_filled(midpoint, 4.0, GOLD);
@@ -13940,7 +13939,7 @@ mod tests {
                 .iter()
                 .all(|condition| *condition
                     == FaceBoundaryCondition::Dirichlet {
-                        signal: BoundarySignal::ZERO
+                        signal: TimeSignal::ZERO
                     })
         );
 
@@ -14805,10 +14804,7 @@ mod tests {
         assert_eq!(h.state.editor.document, examples::catalog()[1].document);
         assert!(h.state.wave_source.enabled);
         assert_eq!(h.state.wave_source.position, expected_source.position);
-        assert_eq!(
-            h.state.wave_source.frequency_hz,
-            expected_source.frequency_hz
-        );
+        assert_eq!(h.state.wave_source.signal, expected_source.signal);
         assert!(h.state.wave_source_dirty);
         assert!(h.state.fresh_simulation_requested);
         assert!(h.state.editor.document.presentation.boundary_conditions);
@@ -14870,8 +14866,8 @@ mod tests {
             first.document.model.source.position
         );
         assert_eq!(
-            h.state.wave_source.frequency_hz,
-            first.document.model.source.frequency_hz
+            h.state.wave_source.signal,
+            first.document.model.source.signal
         );
         assert!(h.state.wave_source.enabled);
         assert_eq!(h.state.editor.history_len(), (0, 0));
@@ -14879,17 +14875,16 @@ mod tests {
     }
 
     #[test]
-    fn loading_a_scene_restores_its_continuous_source() {
+    fn loading_a_scene_restores_its_point_source() {
         let mut h = Harness::new();
         h.state.startup_load_checked = true;
         let mut document = h.state.editor.document.clone();
-        document.model.source = SourceSettings {
+        document.model.source = PointSource {
             enabled: true,
             position: Point2::new(0.38, -0.26),
-            amplitude: 27.0,
             width: 0.04,
-            frequency_hz: 3.75,
             region: BACKGROUND_REGION,
+            signal: TimeSignal::harmonic(0.0, 27.0, 3.75, 0.0),
         };
         let bytes = persistence::save(&document).unwrap();
         h.state.start_load(
@@ -16265,7 +16260,7 @@ mod tests {
     }
 
     #[test]
-    fn pulse_is_transient_and_continuous_source_is_directly_draggable() {
+    fn pulse_is_transient_and_point_source_is_directly_draggable() {
         let mut h = Harness::new();
         build_mesh_candidate(&mut h.state);
         commit_mesh_without_gpu(&mut h.state);
@@ -16313,9 +16308,7 @@ mod tests {
         assert_eq!(h.state.editor.history_len(), (2, 0));
 
         h.key(Key::Z, Modifiers::COMMAND);
-        assert!(
-            (h.state.wave_source.position - SourceSettings::default().position).norm() < 1.0e-6
-        );
+        assert!((h.state.wave_source.position - PointSource::default().position).norm() < 1.0e-6);
         h.key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
         assert!((h.state.wave_source.position - source).norm() < 1.0e-6);
 
@@ -16604,10 +16597,11 @@ mod tests {
                     enabled: true,
                     profile: ScalarField::formula("1 - 0.2 * r").unwrap(),
                     parameters: vec![],
-                    signal: BoundarySignal {
+                    signal: TimeSignal::Harmonic {
+                        offset: 0.0,
                         amplitude: 4.0,
                         frequency_hz: 3.0,
-                        ..BoundarySignal::ZERO
+                        phase_radians: 0.0,
                     },
                 }),
             )
@@ -16966,31 +16960,33 @@ mod tests {
     fn wavelength_guard_uses_every_active_time_varying_driver() {
         let mut scene = Scene::initial();
         scene.outer_boundaries.sides[0] = OuterBoundaryCondition::Dirichlet {
-            signal: BoundarySignal {
+            signal: TimeSignal::Harmonic {
+                offset: 0.0,
                 amplitude: 1.0,
                 frequency_hz: 3.0,
-                ..BoundarySignal::ZERO
+                phase_radians: 0.0,
             },
         };
         scene.obstacles[0].span_conditions[0] = FaceBoundaryCondition::Neumann {
-            signal: BoundarySignal {
+            signal: TimeSignal::Harmonic {
+                offset: 0.0,
                 amplitude: 2.0,
                 frequency_hz: 5.0,
-                ..BoundarySignal::ZERO
+                phase_radians: 0.0,
             },
         };
-        let source = SourceSettings {
+        let source = PointSource {
             enabled: true,
-            amplitude: 1.0,
-            frequency_hz: 4.0,
-            ..SourceSettings::default()
+            signal: TimeSignal::harmonic(0.0, 1.0, 4.0, 0.0),
+            ..PointSource::default()
         };
         assert_eq!(highest_forcing_frequency(&scene, source), 5.0);
         scene.obstacles[0].span_conditions[0] = FaceBoundaryCondition::Neumann {
-            signal: BoundarySignal {
+            signal: TimeSignal::Harmonic {
+                offset: 0.0,
                 amplitude: 0.0,
                 frequency_hz: 9.0,
-                ..BoundarySignal::ZERO
+                phase_radians: 0.0,
             },
         };
         assert_eq!(highest_forcing_frequency(&scene, source), 4.0);
@@ -16999,10 +16995,11 @@ mod tests {
             enabled: true,
             profile: ScalarField::constant(1.0),
             parameters: vec![],
-            signal: BoundarySignal {
+            signal: TimeSignal::Harmonic {
+                offset: 0.0,
                 amplitude: 1.0,
                 frequency_hz: 6.5,
-                ..BoundarySignal::ZERO
+                phase_radians: 0.0,
             },
         });
         assert_eq!(highest_forcing_frequency(&scene, source), 6.5);

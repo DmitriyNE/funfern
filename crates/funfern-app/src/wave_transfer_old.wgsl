@@ -3,9 +3,14 @@ struct Parameters {
     count_data: vec4<u32>,
 }
 
+struct TimeSignal {
+    values: vec4<f32>,
+    extra: vec4<f32>,
+}
+
 struct Source {
-    position_width_amplitude: vec4<f32>,
-    frequency_enabled: vec4<f32>,
+    position_width_enabled: vec4<f32>,
+    signal: TimeSignal,
     region: vec4<u32>,
 }
 
@@ -14,15 +19,11 @@ struct Pulse {
     region: vec4<u32>,
 }
 
-struct BoundarySignal {
-    values: vec4<f32>,
-}
-
 struct Forcing {
     source: Source,
     pulse: Pulse,
-    outer: array<BoundarySignal, 4>,
-    volume: array<BoundarySignal, 33>,
+    outer: array<TimeSignal, 4>,
+    volume: array<TimeSignal, 33>,
 }
 
 struct NodeData {
@@ -30,9 +31,9 @@ struct NodeData {
     regions: vec4<u32>,
     boundary: vec4<u32>,
     neumann_weights: vec4<f32>,
-    dirichlet_signal: vec4<f32>,
-    face_neumann_signal_a: vec4<f32>,
-    face_neumann_signal_b: vec4<f32>,
+    dirichlet_signal: TimeSignal,
+    face_neumann_signal_a: TimeSignal,
+    face_neumann_signal_b: TimeSignal,
     face_neumann_weights: vec4<f32>,
 }
 
@@ -70,12 +71,13 @@ fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
     return select(0.0, 1.0, first || second);
 }
 
-fn signal_value(signal: vec4<f32>, time: f32) -> f32 {
-    return signal.x + signal.y * sin(signal.z * time + signal.w);
+fn signal_value(signal: TimeSignal, time: f32) -> f32 {
+    return signal.values.x
+        + signal.values.y * sin(signal.values.z * time + signal.values.w);
 }
 
 fn boundary_value(side: u32, time: f32) -> f32 {
-    return signal_value(forcing.outer[side].values, time);
+    return signal_value(forcing.outer[side], time);
 }
 
 fn neumann_acceleration(i: u32, time: f32) -> f32 {
@@ -91,13 +93,12 @@ fn neumann_acceleration(i: u32, time: f32) -> f32 {
 }
 
 fn source_acceleration(i: u32) -> f32 {
-    let delta = nodes[i].position_damping.xy - forcing.source.position_width_amplitude.xy;
-    let gaussian = exp(-0.5 * dot(delta, delta) / forcing.source.position_width_amplitude.z);
-    return forcing.source.frequency_enabled.y
+    let delta = nodes[i].position_damping.xy - forcing.source.position_width_enabled.xy;
+    let gaussian = exp(-0.5 * dot(delta, delta) / forcing.source.position_width_enabled.z);
+    return forcing.source.position_width_enabled.w
         * region_match(nodes[i].regions, forcing.source.region)
-        * forcing.source.position_width_amplitude.w
         * gaussian
-        * sin(forcing.source.frequency_enabled.x * parameters.time_data.z);
+        * signal_value(forcing.source.signal, parameters.time_data.z);
 }
 
 fn compute_velocity(i: u32) -> f32 {

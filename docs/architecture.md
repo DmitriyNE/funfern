@@ -140,9 +140,13 @@ A distributed source belongs to one region rather than to its reusable passive
 material. It combines a signed scalar profile over that region's rigid local frame
 and source-local parameters with `bias + amplitude sin(2 pi frequency t + phase)`.
 Quadratic element mass weights assemble the body acceleration into mass-normalized
-nodal weights. Compilation is resumable and source-only edits replace forcing
-buffers without changing the mesh, operator, solution levels, solver clock, or
-probe history. The current topology permits at most two sourced regions at a shared
+nodal weights. Point sources, distributed sources, and prescribed boundary data all
+own the same dependency-free `TimeSignal`; the initial harmonic variant keeps offset,
+amplitude, frequency, and phase together and leaves waveform extension independent
+of each spatial carrier. Compilation is resumable, and temporal-only source edits
+replace the forcing buffer while retaining compiled spatial weights, the mesh,
+operator, solution levels, solver clock, and probe history. The current topology
+permits at most two sourced regions at a shared
 DOF; the compiler rejects higher-order junctions explicitly until point-sharing
 subdomains are supported.
 
@@ -156,7 +160,7 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON version 16 remains the single persistence representation. A `Document`
+Scene JSON version 17 remains the single persistence representation. A `Document`
 owns one `DocumentModel` plus `PresentationSettings`. The model contains the draft
 and accepted scenes, probes, point-source configuration, and far-field settings; it
 is also the exact snapshot type stored by Undo/Redo. Presentation contains the View
@@ -165,7 +169,9 @@ through scene files, examples, shared links, and recovery, but stays outside his
 so model edits never rewind the user's current view. Camera, selection, open panels,
 floating-window positions, solver state, and derived render caches remain transient.
 
-Version 16 adds presentation settings. Version 15 adds region-owned volume sources
+Version 17 introduces the tagged shared time-signal representation and moves the
+point source into the numerical core alongside its spatial carrier. Version 16 adds
+presentation settings. Version 15 adds region-owned volume sources
 and their profiles, parameters, and harmonic signals to both draft and accepted
 scenes. Version 14 stores constant/formula coefficient variants, material parameters,
 and every region's material frame. Older scalar coefficients migrate as constants;
@@ -496,14 +502,16 @@ discrete half-step energy to roundoff in the undamped test.
 The f32 GPU kernel stores both committed time levels and a scratch level in one
 storage buffer. Each solution-DOF invocation gathers its CSR row and writes only its
 own scratch value; a second dispatch rotates levels. This avoids scatter atomics.
-The operator, state, source, and controls use Bevy's render-world buffers and its
+The operator, state, sources, and controls use Bevy's render-world buffers and its
 existing wgpu device. State remains GPU-resident; asynchronous readback supplies
 the egui field colors and energy diagnostic. Each readback carries a GPU-written
 step marker so stale asynchronous results cannot be mistaken for a newer level.
 The wave layout already occupies WebGPU's portable eight-storage-binding budget.
 Volume-source channel IDs and two mass-normalized weights therefore share the
-existing point/pulse forcing-weight record, while a fixed signal table shares the
-existing forcing buffer. No second wgpu device or extra storage binding is needed.
+existing point/pulse forcing-weight record. Point, volume, and boundary drives use
+one fixed-size GPU signal record with reserved space for later waveform parameters;
+the volume signal table shares the existing forcing buffer. No second wgpu device or
+extra storage binding is needed.
 
 Point probes compile to seven-node enriched-quadratic interpolation stencils with
 separate gradient weights. A small compute pipeline samples the centered
@@ -625,9 +633,10 @@ with DOFs, memory, timestep, and phase/amplitude error.
 
 The application requests at most 16 substeps per display frame and reports achieved
 simulation time per wall time. Pulse injection modifies both stored levels equally,
-giving zero added velocity. The point source is a Gaussian nodal acceleration
-with a sinusoidal time factor; its default frequency is 2.5 cycles per dimensionless
-time, corresponding to wavelength 0.4 at wave speed one.
+giving zero added velocity; it remains an initial-condition action rather than a
+time signal. The point source is a Gaussian nodal acceleration multiplied by its
+shared time signal. Its default frequency is 2.5 cycles per dimensionless time,
+corresponding to wavelength 0.4 at wave speed one.
 
 The old solver keeps running while a replacement mesh is prepared. Invalid drafts
 do not alter the active solver. Reset is explicit; accepted geometry edits carry
@@ -783,7 +792,7 @@ enforces those nodal values. Recovery never averages across a material region or
 duplicated baffle/wall trace.
 
 The relative indicator maps error to local edge length, caps that length by the
-shortest wavelength of every active continuous or driven-boundary source, and grades
+shortest wavelength of every active time-varying point, volume, or boundary drive, and grades
 neighboring targets. Quiet-element growth factors and collapse thresholds are paired
 so a low-error mesh can actually coarsen. Graded targets stay local to each source
 triangle instead of taking the minimum over an entire vertex star; evaluation still

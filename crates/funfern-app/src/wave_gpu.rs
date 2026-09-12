@@ -27,12 +27,10 @@ use bevy::{
         storage::{GpuShaderBuffer, ShaderBuffer},
     },
 };
-use funfern_app::editor::SourceSettings;
 use funfern_core::{
-    BoundarySignal, CompiledVolumeSources, MAX_VOLUME_SOURCES, NO_VOLUME_SOURCE,
-    OuterBoundaryConditions, Point2, QuadraticAreaElement, QuadraticAreaStencil,
-    QuadraticPointStencil, QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState,
-    RegionId, TriMesh,
+    CompiledVolumeSources, MAX_VOLUME_SOURCES, NO_VOLUME_SOURCE, OuterBoundaryConditions, Point2,
+    PointSource, QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil,
+    QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh,
 };
 
 const WORKGROUP_SIZE: u32 = 128;
@@ -73,7 +71,7 @@ pub struct WaveTransfer<'a> {
     pub target_mesh: &'a TriMesh,
     pub target_operator: &'a QuadraticWaveOperator,
     pub target_time_step: f64,
-    pub source: SourceSettings,
+    pub source: PointSource,
     pub map: &'a QuadraticTransferMap,
 }
 
@@ -120,7 +118,7 @@ struct WaveBufferHandles {
     nodes: Handle<ShaderBuffer>,
     state: Handle<ShaderBuffer>,
     forcing_weights: Handle<ShaderBuffer>,
-    source: SourceSettings,
+    source: PointSource,
     pulse: PulseSettings,
     source_weights: Arc<[f32]>,
     pulse_weights: Arc<[f32]>,
@@ -747,7 +745,7 @@ impl WaveGpuRequest {
         mesh: &TriMesh,
         operator: &QuadraticWaveOperator,
         time_step: f64,
-        source: SourceSettings,
+        source: PointSource,
         volume_sources: &CompiledVolumeSources,
     ) -> Result<(), String> {
         let (handles, dof_count) = create_buffers(
@@ -966,8 +964,7 @@ impl WaveGpuRequest {
         let handles = self.buffers.as_ref()?;
         let source = handles.source;
         let value = if source.enabled {
-            source.amplitude as f64
-                * (std::f64::consts::TAU * source.frequency_hz as f64 * time).sin()
+            source.signal.value(time)
         } else {
             0.0
         };
@@ -989,7 +986,7 @@ impl WaveGpuRequest {
         mesh: &TriMesh,
         operator: &QuadraticWaveOperator,
         time_step: f64,
-        source: SourceSettings,
+        source: PointSource,
     ) -> Result<(), String> {
         let volume_sources = self
             .buffers
@@ -1030,29 +1027,35 @@ impl WaveGpuRequest {
         assets: &mut Assets<ShaderBuffer>,
         mesh: &TriMesh,
         operator: &QuadraticWaveOperator,
-        source: SourceSettings,
+        source: PointSource,
     ) -> Result<(), String> {
         let handles = self
             .buffers
             .as_mut()
             .ok_or("The wave solver is not initialized")?;
-        let source_weights =
-            forcing_weights(mesh, operator, source.position, source.width, source.region)?;
+        let spatial_changed = !handles.source.spatial_eq(source);
+        let source_weights = if spatial_changed {
+            forcing_weights(mesh, operator, source.position, source.width, source.region)?
+        } else {
+            handles.source_weights.to_vec()
+        };
         let forcing = assets.add(ShaderBuffer::from(gpu_forcing(
             source,
             handles.pulse,
             operator.outer_boundaries(),
             &handles.volume_sources,
         )?));
-        let weights = assets.add(ShaderBuffer::from(zip_forcing_weights(
-            &source_weights,
-            &handles.pulse_weights,
-            &handles.volume_sources,
-        )?));
         let old = std::mem::replace(&mut handles.forcing, forcing);
         assets.remove(old.id());
-        let old = std::mem::replace(&mut handles.forcing_weights, weights);
-        assets.remove(old.id());
+        if spatial_changed {
+            let weights = assets.add(ShaderBuffer::from(zip_forcing_weights(
+                &source_weights,
+                &handles.pulse_weights,
+                &handles.volume_sources,
+            )?));
+            let old = std::mem::replace(&mut handles.forcing_weights, weights);
+            assets.remove(old.id());
+        }
         handles.source = source;
         handles.source_weights = source_weights.into();
         self.buffer_revision = self.buffer_revision.wrapping_add(1);
@@ -1094,6 +1097,39 @@ impl WaveGpuRequest {
         Ok(())
     }
 
+    pub fn update_volume_source_signals(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        operator: &QuadraticWaveOperator,
+        signals: Vec<TimeSignal>,
+    ) -> Result<(), String> {
+        let handles = self
+            .buffers
+            .as_mut()
+            .ok_or("The wave solver is not initialized")?;
+        if signals.len() != handles.volume_sources.signals.len()
+            || signals.len() > MAX_VOLUME_SOURCES
+            || signals.iter().any(|signal| !signal.valid())
+        {
+            return Err("Volume-source signals do not match the compiled carriers".into());
+        }
+        let volume_sources = CompiledVolumeSources {
+            signals,
+            nodes: handles.volume_sources.nodes.clone(),
+        };
+        let forcing = assets.add(ShaderBuffer::from(gpu_forcing(
+            handles.source,
+            handles.pulse,
+            operator.outer_boundaries(),
+            &volume_sources,
+        )?));
+        let old = std::mem::replace(&mut handles.forcing, forcing);
+        assets.remove(old.id());
+        handles.volume_sources = Arc::new(volume_sources);
+        self.buffer_revision = self.buffer_revision.wrapping_add(1);
+        Ok(())
+    }
+
     pub fn inject_pulse(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
@@ -1113,7 +1149,7 @@ impl WaveGpuRequest {
             mesh,
             operator,
             pulse_settings.position,
-            pulse_settings.width,
+            pulse_settings.width as f64,
             pulse_settings.region,
         )?;
         let forcing = assets.add(ShaderBuffer::from(gpu_forcing(
@@ -1144,7 +1180,7 @@ fn create_buffers(
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
     time_step: f64,
-    source: SourceSettings,
+    source: PointSource,
     volume_sources: &CompiledVolumeSources,
     awaits_transfer: bool,
 ) -> Result<(WaveBufferHandles, u32), String> {
@@ -1197,7 +1233,7 @@ fn create_buffers(
                 neumann_weights: Vec4::from_array(
                     operator.normalized_neumann_weights()[index].map(|value| value as f32),
                 ),
-                dirichlet_signal: gpu_boundary_signal(dirichlet.unwrap_or(BoundarySignal::ZERO)),
+                dirichlet_signal: gpu_boundary_signal(dirichlet.unwrap_or(TimeSignal::ZERO)),
                 face_neumann_signal_a: gpu_boundary_signal(face_loads[0].signal),
                 face_neumann_signal_b: gpu_boundary_signal(face_loads[1].signal),
                 face_neumann_weights: Vec4::new(
@@ -1231,7 +1267,7 @@ fn create_buffers(
         mesh,
         operator,
         Point2::default(),
-        0.06,
+        0.06_f64,
         funfern_core::BACKGROUND_REGION,
     )?;
     let initial =
@@ -1280,20 +1316,15 @@ fn create_buffers(
     ))
 }
 
-fn gpu_source(source: SourceSettings) -> GpuSource {
+fn gpu_source(source: PointSource) -> GpuSource {
     GpuSource {
-        position_width_amplitude: Vec4::new(
+        position_width_enabled: Vec4::new(
             source.position.x as f32,
             source.position.y as f32,
-            source.width * source.width,
-            source.amplitude,
-        ),
-        frequency_enabled: Vec4::new(
-            std::f32::consts::TAU * source.frequency_hz,
+            (source.width * source.width) as f32,
             if source.enabled { 1.0 } else { 0.0 },
-            0.0,
-            0.0,
         ),
+        signal: gpu_time_signal(source.signal),
         region: gpu_region_pair(source.region, RegionId(0)),
     }
 }
@@ -1311,39 +1342,47 @@ fn gpu_pulse(pulse: PulseSettings) -> GpuPulse {
 }
 
 fn gpu_forcing(
-    source: SourceSettings,
+    source: PointSource,
     pulse: PulseSettings,
     boundaries: OuterBoundaryConditions,
     volume_sources: &CompiledVolumeSources,
 ) -> Result<GpuForcing, String> {
     let signals = boundaries
         .sides
-        .map(|condition| gpu_boundary_signal(condition.signal().unwrap_or(BoundarySignal::ZERO)));
+        .map(|condition| gpu_boundary_signal(condition.signal().unwrap_or(TimeSignal::ZERO)));
     if signals.iter().any(|values| !values.is_finite()) {
         return Err("Boundary signal values cannot be represented on the GPU".into());
     }
-    let mut volume = [GpuBoundarySignal::default(); MAX_VOLUME_SOURCES];
+    let mut volume = [GpuTimeSignal::default(); MAX_VOLUME_SOURCES];
     for (target, signal) in volume.iter_mut().zip(&volume_sources.signals) {
-        target.values = gpu_boundary_signal(*signal);
-        if !target.values.is_finite() {
+        *target = gpu_boundary_signal(*signal);
+        if !target.is_finite() {
             return Err("Volume-source signal values cannot be represented on the GPU".into());
         }
     }
     Ok(GpuForcing {
         source: gpu_source(source),
         pulse: gpu_pulse(pulse),
-        outer: signals.map(|values| GpuBoundarySignal { values }),
+        outer: signals,
         volume,
     })
 }
 
-fn gpu_boundary_signal(signal: BoundarySignal) -> Vec4 {
-    Vec4::new(
-        signal.offset as f32,
-        signal.amplitude as f32,
-        (std::f64::consts::TAU * signal.frequency_hz) as f32,
-        signal.phase_radians as f32,
-    )
+fn gpu_boundary_signal(signal: TimeSignal) -> GpuTimeSignal {
+    gpu_time_signal(signal)
+}
+
+fn gpu_time_signal(signal: TimeSignal) -> GpuTimeSignal {
+    let [offset, amplitude, frequency_hz, phase_radians] = signal.harmonic_parameters();
+    GpuTimeSignal {
+        values: Vec4::new(
+            offset as f32,
+            amplitude as f32,
+            (std::f64::consts::TAU * frequency_hz) as f32,
+            phase_radians as f32,
+        ),
+        extra: Vec4::ZERO,
+    }
 }
 
 fn zip_forcing_weights(
@@ -1440,7 +1479,7 @@ pub(crate) fn forcing_weights(
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
     position: Point2,
-    width: f32,
+    width: f64,
     region: RegionId,
 ) -> Result<Vec<f32>, String> {
     if !position.finite() || !width.is_finite() || width <= 0.0 {
@@ -1452,7 +1491,6 @@ pub(crate) fn forcing_weights(
         .iter()
         .map(|regions| regions.contains(&region))
         .collect::<Vec<_>>();
-    let width = width as f64;
     if !mesh.boundary_edges.iter().any(|edge| {
         matches!(
             edge.label,
@@ -1706,8 +1744,8 @@ struct GpuParameters {
 
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuSource {
-    position_width_amplitude: Vec4,
-    frequency_enabled: Vec4,
+    position_width_enabled: Vec4,
+    signal: GpuTimeSignal,
     region: UVec4,
 }
 
@@ -1718,16 +1756,23 @@ struct GpuPulse {
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
-struct GpuBoundarySignal {
+struct GpuTimeSignal {
     values: Vec4,
+    extra: Vec4,
+}
+
+impl GpuTimeSignal {
+    fn is_finite(self) -> bool {
+        self.values.is_finite() && self.extra.is_finite()
+    }
 }
 
 #[derive(Clone, Copy, ShaderType)]
 struct GpuForcing {
     source: GpuSource,
     pulse: GpuPulse,
-    outer: [GpuBoundarySignal; 4],
-    volume: [GpuBoundarySignal; MAX_VOLUME_SOURCES],
+    outer: [GpuTimeSignal; 4],
+    volume: [GpuTimeSignal; MAX_VOLUME_SOURCES],
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -1736,9 +1781,9 @@ struct GpuNode {
     regions: UVec4,
     boundary: UVec4,
     neumann_weights: Vec4,
-    dirichlet_signal: Vec4,
-    face_neumann_signal_a: Vec4,
-    face_neumann_signal_b: Vec4,
+    dirichlet_signal: GpuTimeSignal,
+    face_neumann_signal_a: GpuTimeSignal,
+    face_neumann_signal_b: GpuTimeSignal,
     face_neumann_weights: Vec4,
 }
 
@@ -3136,26 +3181,28 @@ mod tests {
 
     #[test]
     fn source_upload_uses_angular_frequency_and_squared_width() {
-        let source = gpu_source(SourceSettings {
+        let source = gpu_source(PointSource {
             enabled: true,
             position: Point2::new(0.2, -0.3),
-            amplitude: 7.0,
             width: 0.04,
-            frequency_hz: 2.5,
             region: funfern_core::BACKGROUND_REGION,
+            signal: TimeSignal::harmonic(-0.2, 7.0, 2.5, 0.3),
         });
-        assert_eq!(source.position_width_amplitude.x, 0.2);
-        assert_eq!(source.position_width_amplitude.y, -0.3);
-        assert!((source.position_width_amplitude.z - 0.0016).abs() < 1.0e-9);
-        assert_eq!(source.position_width_amplitude.w, 7.0);
-        assert!((source.frequency_enabled.x - 5.0 * std::f32::consts::PI).abs() < 1.0e-6);
-        assert_eq!(source.frequency_enabled.y, 1.0);
+        assert_eq!(source.position_width_enabled.x, 0.2);
+        assert_eq!(source.position_width_enabled.y, -0.3);
+        assert!((source.position_width_enabled.z - 0.0016).abs() < 1.0e-9);
+        assert_eq!(source.position_width_enabled.w, 1.0);
+        assert_eq!(source.signal.values.x, -0.2);
+        assert_eq!(source.signal.values.y, 7.0);
+        assert!((source.signal.values.z - 5.0 * std::f32::consts::PI).abs() < 1.0e-6);
+        assert_eq!(source.signal.values.w, 0.3);
+        assert_eq!(source.signal.extra, Vec4::ZERO);
     }
 
     #[test]
     fn volume_sources_share_the_existing_forcing_weight_binding() {
         let sources = CompiledVolumeSources {
-            signals: vec![BoundarySignal {
+            signals: vec![TimeSignal::Harmonic {
                 offset: -0.25,
                 amplitude: 3.0,
                 frequency_hz: 2.5,
@@ -3167,7 +3214,7 @@ mod tests {
             }],
         };
         let forcing = gpu_forcing(
-            SourceSettings::default(),
+            PointSource::default(),
             PulseSettings {
                 position: Point2::default(),
                 amplitude: 0.0,
@@ -3185,6 +3232,86 @@ mod tests {
         assert_eq!(weights[0].point_pulse, Vec2::new(0.2, 0.3));
         assert_eq!(weights[0].channels, UVec2::new(1, 0));
         assert_eq!(weights[0].volume, Vec2::new(0.75, 0.0));
+    }
+
+    #[test]
+    fn temporal_source_updates_retain_spatial_weight_buffers() {
+        use funfern_core::{MeshingOptions, Scene, mesh_scene};
+
+        let scene = Scene::default();
+        let mesh = mesh_scene(
+            &scene,
+            3,
+            MeshingOptions {
+                target_edge_length: 0.4,
+                minimum_angle_degrees: 10.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            funfern_core::OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let volume_sources = CompiledVolumeSources {
+            signals: vec![TimeSignal::harmonic(0.0, 1.0, 2.0, 0.0)],
+            nodes: vec![VolumeSourceNode::default(); operator.degrees_of_freedom()],
+        };
+        let mut assets = Assets::<ShaderBuffer>::default();
+        let source = PointSource {
+            enabled: true,
+            ..Default::default()
+        };
+        let (handles, dof_count) = create_buffers(
+            &mut assets,
+            &mesh,
+            &operator,
+            operator.recommended_time_step(),
+            source,
+            &volume_sources,
+            false,
+        )
+        .unwrap();
+        let original_weights = handles.forcing_weights.id();
+        let original_forcing = handles.forcing.id();
+        let mut request = WaveGpuRequest {
+            buffers: Some(handles),
+            dof_count,
+            ..Default::default()
+        };
+
+        request
+            .update_source(
+                &mut assets,
+                &mesh,
+                &operator,
+                PointSource {
+                    signal: TimeSignal::harmonic(0.25, 3.0, 4.0, 0.5),
+                    ..source
+                },
+            )
+            .unwrap();
+        let handles = request.buffers.as_ref().unwrap();
+        assert_eq!(handles.forcing_weights.id(), original_weights);
+        assert_ne!(handles.forcing.id(), original_forcing);
+
+        let point_forcing = handles.forcing.id();
+        request
+            .update_volume_source_signals(
+                &mut assets,
+                &operator,
+                vec![TimeSignal::harmonic(-0.5, 2.5, 5.0, -0.25)],
+            )
+            .unwrap();
+        let handles = request.buffers.as_ref().unwrap();
+        assert_eq!(handles.forcing_weights.id(), original_weights);
+        assert_ne!(handles.forcing.id(), point_forcing);
+        assert_eq!(
+            handles.volume_sources.signals,
+            vec![TimeSignal::harmonic(-0.5, 2.5, 5.0, -0.25)]
+        );
     }
 
     #[test]

@@ -21,6 +21,34 @@ fn set_file_version(value: &mut serde_json::Value, version: u32) {
         value.as_object_mut().unwrap().remove("presentation");
     }
 }
+
+fn downgrade_time_signals_to_v16(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                downgrade_time_signals_to_v16(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if object.get("kind").and_then(serde_json::Value::as_str) == Some("harmonic") {
+                object.remove("kind");
+            }
+            for value in object.values_mut() {
+                downgrade_time_signals_to_v16(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn downgrade_document_to_v16(value: &mut serde_json::Value) {
+    set_file_version(value, 16);
+    let source = value["source"].as_object_mut().unwrap();
+    let signal = source.remove("signal").unwrap();
+    source.insert("amplitude".into(), signal["amplitude"].clone());
+    source.insert("frequency_hz".into(), signal["frequency_hz"].clone());
+    downgrade_time_signals_to_v16(value);
+}
 #[test]
 fn invalid_draft_persists_and_recovers() {
     let mut e = Editor::default();
@@ -109,7 +137,7 @@ fn stale_validation_cannot_accept_new_draft() {
 fn outer_side_conditions_are_undoable_and_round_trip_with_time_signals() {
     let mut editor = Editor::default();
     let original = editor.document.clone();
-    let signal = BoundarySignal {
+    let signal = TimeSignal::Harmonic {
         offset: 0.25,
         amplitude: 0.8,
         frequency_hz: 3.5,
@@ -339,7 +367,7 @@ fn area_probe_targets_and_far_field_settings_round_trip() {
         .unwrap();
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 16"));
+    assert!(json.contains("\"version\": 17"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
     assert_eq!(decoded.model.far_field.inset, 0.17);
@@ -419,32 +447,89 @@ fn version_nine_point_probes_remain_loadable() {
 }
 
 #[test]
-fn continuous_source_round_trips_and_version_ten_uses_the_default() {
+fn point_source_round_trips_and_version_ten_uses_the_default() {
     let mut document = Document::default();
-    document.model.source = SourceSettings {
+    document.model.source = PointSource {
         enabled: true,
         position: Point2::new(-0.37, 0.28),
-        amplitude: 23.0,
         width: 0.045,
-        frequency_hz: 3.25,
         region: BACKGROUND_REGION,
+        signal: TimeSignal::harmonic(0.0, 23.0, 3.25, 0.0),
     };
     let json = save(&document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 16);
+    assert_eq!(value["version"], 17);
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
     set_file_version(&mut value, 10);
     value.as_object_mut().unwrap().remove("source");
     value.as_object_mut().unwrap().remove("far_field");
     let legacy = decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
-    assert_eq!(legacy.model.source, SourceSettings::default());
+    assert_eq!(legacy.model.source, PointSource::default());
 
     let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
     malformed["source"]["width"] = 0.into();
     assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
     malformed = serde_json::from_str(&json).unwrap();
     malformed["source"]["region"] = 999.into();
+    assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
+}
+
+#[test]
+fn version_sixteen_migrates_point_volume_and_boundary_signals() {
+    let point_signal = TimeSignal::harmonic(0.0, 24.0, 3.5, 0.0);
+    let volume_signal = TimeSignal::harmonic(0.125, 4.5, 2.25, -0.375);
+    let boundary_signal = TimeSignal::harmonic(-0.25, 1.75, 1.5, 0.625);
+    let mut document = Document::default();
+    document.model.source = PointSource {
+        enabled: true,
+        position: Point2::new(-0.25, 0.5),
+        width: 0.0625,
+        region: BACKGROUND_REGION,
+        signal: point_signal,
+    };
+    for scene in [&mut document.model.draft, &mut document.model.accepted] {
+        scene.volume_sources.push(VolumeSource {
+            region: BACKGROUND_REGION,
+            enabled: true,
+            profile: ScalarField::constant(0.75),
+            parameters: Vec::new(),
+            signal: volume_signal,
+        });
+        scene.outer_boundaries.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Neumann {
+            signal: boundary_signal,
+        };
+    }
+
+    let json = save(&document).unwrap();
+    let current: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(current["source"]["signal"]["kind"], "harmonic");
+    assert_eq!(
+        current["accepted"]["volume_sources"][0]["signal"]["kind"],
+        "harmonic"
+    );
+
+    let mut legacy = current;
+    downgrade_document_to_v16(&mut legacy);
+    let migrated = decode(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();
+    assert_eq!(migrated, document);
+    assert_eq!(migrated.model.source.signal, point_signal);
+    assert_eq!(
+        migrated.model.accepted.volume_sources[0].signal,
+        volume_signal
+    );
+    assert_eq!(
+        migrated
+            .model
+            .accepted
+            .outer_boundaries
+            .get(OuterSide::Left)
+            .signal(),
+        Some(boundary_signal)
+    );
+
+    let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    malformed["source"]["signal"]["kind"] = "chirp".into();
     assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
 }
 
@@ -459,7 +544,7 @@ fn volume_source_round_trips_and_is_one_undoable_region_edit() {
             name: "gain".into(),
             value: 0.75,
         }],
-        signal: BoundarySignal {
+        signal: TimeSignal::Harmonic {
             offset: 0.1,
             amplitude: 4.0,
             frequency_hz: 2.5,
@@ -484,13 +569,33 @@ fn volume_source_round_trips_and_is_one_undoable_region_edit() {
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 16"));
+    assert!(json.contains("\"version\": 17"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
     set_file_version(&mut legacy, 14);
     assert!(decode(serde_json::to_string(&legacy).unwrap().as_bytes()).is_err());
 }
+
+#[test]
+fn temporal_volume_source_edits_reuse_the_spatial_carrier() {
+    let mut before = Scene::default();
+    before.volume_sources.push(VolumeSource {
+        region: BACKGROUND_REGION,
+        enabled: true,
+        profile: ScalarField::formula("1 - 0.25 * r").unwrap(),
+        parameters: Vec::new(),
+        signal: TimeSignal::harmonic(0.0, 2.0, 3.0, 0.0),
+    });
+    let mut after = before.clone();
+    after.volume_sources[0].signal = TimeSignal::harmonic(0.5, 4.0, 6.0, 0.25);
+    assert!(!before.volume_sources_eq(&after));
+    assert!(before.volume_source_carriers_eq(&after));
+
+    after.volume_sources[0].profile = ScalarField::constant(1.0);
+    assert!(!before.volume_source_carriers_eq(&after));
+}
+
 #[test]
 fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     let e = Editor::default();
@@ -500,7 +605,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 17.into(),
+            0 => value["version"] = 18.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -577,7 +682,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        16
+        17
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -681,7 +786,7 @@ fn continuity_split_merge_and_orientation_are_atomic_and_round_trip() {
         .unwrap();
     let law = InternalBoundaryLaw {
         left: FaceBoundaryCondition::Dirichlet {
-            signal: BoundarySignal::ZERO,
+            signal: TimeSignal::ZERO,
         },
         right: FaceBoundaryCondition::SecondOrderOutgoing,
         coupling: InternalBoundaryCoupling::Independent,
@@ -880,7 +985,7 @@ fn hole_span_conditions_round_trip_follow_seam_insertion_and_guard_removal() {
     let mut editor = Editor::default();
     let id = ObstacleId(1);
     let assigned = FaceBoundaryCondition::Dirichlet {
-        signal: BoundarySignal {
+        signal: TimeSignal::Harmonic {
             offset: 0.2,
             amplitude: 0.7,
             frequency_hz: 2.5,
@@ -1070,7 +1175,7 @@ fn spatial_materials_parameters_and_frames_round_trip() {
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 16"));
+    assert!(json.contains("\"version\": 17"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1372,7 +1477,7 @@ fn bulk_face_assignment_is_atomic_and_converts_thin_gaps() {
     let before = editor.document.clone();
     let history = editor.history_len().0;
     let condition = FaceBoundaryCondition::Dirichlet {
-        signal: BoundarySignal {
+        signal: TimeSignal::Harmonic {
             offset: 0.2,
             amplitude: 0.5,
             frequency_hz: 3.0,
@@ -1478,7 +1583,7 @@ fn validated_example_replacement_is_one_undoable_action() {
             draft: scene.clone(),
             accepted: scene,
             probes: vec![],
-            source: SourceSettings::default(),
+            source: PointSource::default(),
             far_field: Default::default(),
         },
         presentation: Default::default(),
@@ -1586,7 +1691,7 @@ fn boundary_probe_round_trips_and_tracks_periodic_insertion() {
     assert_eq!(target.spans(9), vec![7, 8, 0]);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 16"));
+    assert!(json.contains("\"version\": 17"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded.model.probes, editor.document.model.probes);
 

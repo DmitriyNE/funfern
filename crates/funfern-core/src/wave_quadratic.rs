@@ -1,15 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    BACKGROUND_REGION, BoundaryLabel, BoundarySignal, FaceBoundaryCondition,
-    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition,
-    OuterBoundaryConditions, OuterSide, Point2, RegionId, Scene, TriMesh, WaveCoefficients,
-    WaveError,
+    BACKGROUND_REGION, BoundaryLabel, FaceBoundaryCondition, InternalBoundaryCoupling,
+    InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition, OuterBoundaryConditions,
+    OuterSide, Point2, RegionId, Scene, TimeSignal, TriMesh, WaveCoefficients, WaveError,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BoundaryLoad {
-    pub signal: BoundarySignal,
+    pub signal: TimeSignal,
     pub normalized_weight: f64,
 }
 
@@ -29,7 +28,7 @@ pub struct QuadraticWaveOperator {
     auxiliary_stiffness: Vec<f64>,
     auxiliary_active: Vec<bool>,
     dirichlet_sides: Vec<Option<OuterSide>>,
-    dirichlet_signals: Vec<Option<BoundarySignal>>,
+    dirichlet_signals: Vec<Option<TimeSignal>>,
     normalized_neumann_weights: Vec<[f64; 4]>,
     face_neumann_loads: Vec<[BoundaryLoad; 2]>,
     lumped_mass: Vec<f64>,
@@ -468,7 +467,7 @@ impl QuadraticWaveOperator {
         &self.normalized_neumann_weights
     }
 
-    pub fn dirichlet_signals(&self) -> &[Option<BoundarySignal>] {
+    pub fn dirichlet_signals(&self) -> &[Option<TimeSignal>] {
         &self.dirichlet_signals
     }
 
@@ -999,7 +998,7 @@ struct BoundaryAssembly<'a> {
     rows: &'a mut [BTreeMap<usize, f64>],
     auxiliary_rows: &'a mut [BTreeMap<usize, f64>],
     auxiliary_active: &'a mut [bool],
-    dirichlet_signals: &'a mut [Option<BoundarySignal>],
+    dirichlet_signals: &'a mut [Option<TimeSignal>],
     face_neumann_loads: &'a mut [[BoundaryLoad; 2]],
     damping: &'a mut [f64],
 }
@@ -1282,9 +1281,9 @@ fn assemble_auxiliary_line(
 }
 
 fn assign_dirichlet(
-    signals: &mut [Option<BoundarySignal>],
+    signals: &mut [Option<TimeSignal>],
     node: usize,
-    signal: BoundarySignal,
+    signal: TimeSignal,
 ) -> Result<(), WaveError> {
     if let Some(previous) = signals[node]
         && previous != signal
@@ -1300,7 +1299,7 @@ fn assign_dirichlet(
 fn add_face_neumann_load(
     loads: &mut [[BoundaryLoad; 2]],
     node: usize,
-    signal: BoundarySignal,
+    signal: TimeSignal,
     weight: f64,
 ) -> Result<(), WaveError> {
     if let Some(load) = loads[node]
@@ -1859,16 +1858,13 @@ mod tests {
     #[test]
     fn mixed_outer_sides_apply_time_varying_dirichlet_and_neumann_data() {
         let mesh = square_with_outer_boundary();
-        let dirichlet = crate::BoundarySignal {
+        let dirichlet = crate::TimeSignal::Harmonic {
             offset: 0.2,
             amplitude: 0.3,
             frequency_hz: 1.25,
             phase_radians: 0.4,
         };
-        let neumann = crate::BoundarySignal {
-            offset: 0.7,
-            ..crate::BoundarySignal::ZERO
-        };
+        let neumann = crate::TimeSignal::harmonic(0.7, 0.0, 1.0, 0.0);
         let mut boundaries = OuterBoundaryConditions::default();
         boundaries.sides[OuterSide::Bottom.index()] =
             OuterBoundaryCondition::Dirichlet { signal: dirichlet };
@@ -1909,10 +1905,7 @@ mod tests {
 
         let mut contradictory = boundaries;
         contradictory.sides[OuterSide::Right.index()] = OuterBoundaryCondition::Dirichlet {
-            signal: crate::BoundarySignal {
-                offset: 9.0,
-                ..crate::BoundarySignal::ZERO
-            },
+            signal: crate::TimeSignal::harmonic(9.0, 0.0, 1.0, 0.0),
         };
         assert!(
             QuadraticWaveOperator::assemble_scene_with_boundaries(
@@ -2006,16 +1999,13 @@ mod tests {
 
     #[test]
     fn driven_conditions_apply_to_hole_and_baffle_faces() {
-        let dirichlet = BoundarySignal {
+        let dirichlet = TimeSignal::Harmonic {
             offset: 0.35,
             amplitude: 0.2,
             frequency_hz: 1.5,
             phase_radians: 0.4,
         };
-        let neumann = BoundarySignal {
-            offset: 1.25,
-            ..BoundarySignal::ZERO
-        };
+        let neumann = TimeSignal::harmonic(1.25, 0.0, 1.0, 0.0);
         let law = InternalBoundaryLaw {
             left: FaceBoundaryCondition::Dirichlet { signal: dirichlet },
             right: FaceBoundaryCondition::Neumann { signal: neumann },

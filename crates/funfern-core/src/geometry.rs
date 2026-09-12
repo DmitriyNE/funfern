@@ -1,7 +1,7 @@
 use crate::{
-    BoundarySignal, EvaluatedMaterial, MAX_MATERIAL_PARAMETERS, MaterialError, MaterialFrame,
+    EvaluatedMaterial, MAX_MATERIAL_PARAMETERS, MaterialError, MaterialFrame,
     MaterialFrameAttachment, MaterialParameter, OpenCubicSpline, OpenSampler, PeriodicCubicSpline,
-    Point2, Sample, Sampler, SamplingOptions, ScalarField, point_segment_distance,
+    Point2, Sample, Sampler, SamplingOptions, ScalarField, TimeSignal, point_segment_distance,
     reserved_identifier, valid_identifier,
 };
 pub const MAX_OBSTACLES: usize = 32;
@@ -37,7 +37,7 @@ pub struct VolumeSource {
     pub enabled: bool,
     pub profile: ScalarField,
     pub parameters: Vec<MaterialParameter>,
-    pub signal: BoundarySignal,
+    pub signal: TimeSignal,
 }
 
 impl VolumeSource {
@@ -276,11 +276,11 @@ pub enum FaceBoundaryCondition {
     SecondOrderOutgoing,
     /// Prescribed outward flux `stiffness * partial_n u = value(t)`.
     Neumann {
-        signal: BoundarySignal,
+        signal: TimeSignal,
     },
     /// Strongly prescribed displacement `u = value(t)`.
     Dirichlet {
-        signal: BoundarySignal,
+        signal: TimeSignal,
     },
 }
 
@@ -295,7 +295,7 @@ impl FaceBoundaryCondition {
         }
     }
 
-    pub fn signal(self) -> Option<BoundarySignal> {
+    pub fn signal(self) -> Option<TimeSignal> {
         match self {
             Self::Neumann { signal } | Self::Dirichlet { signal } => Some(signal),
             _ => None,
@@ -599,6 +599,25 @@ impl Scene {
                     || self.region(source.region).map(|region| region.frame)
                         == other.region(source.region).map(|region| region.frame)
             })
+    }
+
+    /// Equality of the source carriers compiled into nodal weights. Temporal
+    /// signal changes can reuse these weights and replace only forcing data.
+    pub fn volume_source_carriers_eq(&self, other: &Self) -> bool {
+        self.volume_sources.len() == other.volume_sources.len()
+            && self
+                .volume_sources
+                .iter()
+                .zip(&other.volume_sources)
+                .all(|(left, right)| {
+                    left.region == right.region
+                        && left.enabled == right.enabled
+                        && left.profile == right.profile
+                        && left.parameters == right.parameters
+                        && (!left.varying()
+                            || self.region(left.region).map(|region| region.frame)
+                                == other.region(right.region).map(|region| region.frame))
+                })
     }
 
     /// Geometry and topology equality excludes names, colors, coefficients, and

@@ -2,7 +2,6 @@ use crate::editor::{
     BoundaryProbeFeature, BoundaryProbeSide, BoundaryProbeTarget, Document, DocumentModel,
     FarFieldSettings, MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty,
     PresentationSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget,
-    SourceSettings,
 };
 use funfern_core::*;
 use serde::{Deserialize, Serialize};
@@ -103,7 +102,25 @@ struct StoredFarField {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredSource {
+#[serde(untagged)]
+enum StoredSource {
+    Current(StoredPointSourceV17),
+    Legacy(StoredPointSourceV16),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredPointSourceV17 {
+    enabled: bool,
+    position: [f64; 2],
+    width: f64,
+    region: u64,
+    signal: StoredTimeSignal,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredPointSourceV16 {
     enabled: bool,
     position: [f64; 2],
     amplitude: f32,
@@ -199,7 +216,7 @@ struct StoredVolumeSource {
     profile: StoredScalarField,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     parameters: Vec<StoredMaterialParameter>,
-    signal: StoredBoundarySignal,
+    signal: StoredTimeSignal,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -308,8 +325,8 @@ enum StoredFaceCondition {
     Reflecting,
     Impedance { ratio: f64 },
     SecondOrderOutgoing,
-    Neumann { signal: StoredBoundarySignal },
-    Dirichlet { signal: StoredBoundarySignal },
+    Neumann { signal: StoredTimeSignal },
+    Dirichlet { signal: StoredTimeSignal },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -318,13 +335,32 @@ enum StoredOuterBoundaryCondition {
     Reflecting,
     FirstOrderOutgoing,
     SecondOrderOutgoing,
-    Neumann { signal: StoredBoundarySignal },
-    Dirichlet { signal: StoredBoundarySignal },
+    Neumann { signal: StoredTimeSignal },
+    Dirichlet { signal: StoredTimeSignal },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredBoundarySignal {
+#[serde(untagged)]
+enum StoredTimeSignal {
+    Current(StoredTimeSignalV17),
+    Legacy(StoredHarmonicSignalV16),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredTimeSignalV17 {
+    Harmonic {
+        offset: f64,
+        amplitude: f64,
+        frequency_hz: f64,
+        phase_radians: f64,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredHarmonicSignalV16 {
     offset: f64,
     amplitude: f64,
     frequency_hz: f64,
@@ -504,21 +540,36 @@ fn decode_scalar_field(
     }
 }
 
-fn encode_signal(signal: BoundarySignal) -> StoredBoundarySignal {
-    StoredBoundarySignal {
-        offset: signal.offset,
-        amplitude: signal.amplitude,
-        frequency_hz: signal.frequency_hz,
-        phase_radians: signal.phase_radians,
-    }
+fn encode_signal(signal: TimeSignal) -> StoredTimeSignal {
+    let [offset, amplitude, frequency_hz, phase_radians] = signal.harmonic_parameters();
+    StoredTimeSignal::Current(StoredTimeSignalV17::Harmonic {
+        offset,
+        amplitude,
+        frequency_hz,
+        phase_radians,
+    })
 }
 
-fn decode_signal(signal: StoredBoundarySignal) -> BoundarySignal {
-    BoundarySignal {
-        offset: signal.offset,
-        amplitude: signal.amplitude,
-        frequency_hz: signal.frequency_hz,
-        phase_radians: signal.phase_radians,
+fn decode_signal(signal: StoredTimeSignal) -> TimeSignal {
+    let (offset, amplitude, frequency_hz, phase_radians) = match signal {
+        StoredTimeSignal::Current(StoredTimeSignalV17::Harmonic {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+        }) => (offset, amplitude, frequency_hz, phase_radians),
+        StoredTimeSignal::Legacy(StoredHarmonicSignalV16 {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+        }) => (offset, amplitude, frequency_hz, phase_radians),
+    };
+    TimeSignal::Harmonic {
+        offset,
+        amplitude,
+        frequency_hz,
+        phase_radians,
     }
 }
 
@@ -912,7 +963,7 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 16,
+        version: 17,
         domain: DOMAIN,
         draft: encode_scene(&document.model.draft),
         accepted: encode_scene(&document.model.accepted),
@@ -967,17 +1018,16 @@ fn encode_document(document: &Document) -> FileV2 {
                 },
             })
             .collect(),
-        source: Some(StoredSource {
+        source: Some(StoredSource::Current(StoredPointSourceV17 {
             enabled: document.model.source.enabled,
             position: [
                 document.model.source.position.x,
                 document.model.source.position.y,
             ],
-            amplitude: document.model.source.amplitude,
             width: document.model.source.width,
-            frequency_hz: document.model.source.frequency_hz,
             region: document.model.source.region.0,
-        }),
+            signal: encode_signal(document.model.source.signal),
+        })),
         far_field: Some(StoredFarField {
             enabled: document.model.far_field.enabled,
             inset: document.model.far_field.inset,
@@ -1085,23 +1135,36 @@ fn decode_probe_preset(preset: StoredProbeSamplingPreset) -> ProbeSamplingPreset
     }
 }
 
-fn decode_source(stored: Option<StoredSource>, accepted: &Scene) -> Result<SourceSettings, String> {
+fn decode_source(stored: Option<StoredSource>, accepted: &Scene) -> Result<PointSource, String> {
     let Some(stored) = stored else {
-        return Ok(SourceSettings::default());
+        return Ok(PointSource::default());
     };
-    let source = SourceSettings {
-        enabled: stored.enabled,
-        position: Point2::new(stored.position[0], stored.position[1]),
-        amplitude: stored.amplitude,
-        width: stored.width,
-        frequency_hz: stored.frequency_hz,
-        region: RegionId(stored.region),
+    let source = match stored {
+        StoredSource::Current(stored) => PointSource {
+            enabled: stored.enabled,
+            position: Point2::new(stored.position[0], stored.position[1]),
+            width: stored.width,
+            region: RegionId(stored.region),
+            signal: decode_signal(stored.signal),
+        },
+        StoredSource::Legacy(stored) => PointSource {
+            enabled: stored.enabled,
+            position: Point2::new(stored.position[0], stored.position[1]),
+            width: stored.width as f64,
+            region: RegionId(stored.region),
+            signal: TimeSignal::harmonic(
+                0.0,
+                stored.amplitude as f64,
+                stored.frequency_hz as f64,
+                0.0,
+            ),
+        },
     };
     if !source.valid() {
-        return Err("Scene contains invalid continuous-source settings".into());
+        return Err("Scene contains invalid point-source settings".into());
     }
     if accepted.region(source.region).is_none() {
-        return Err("Continuous source references a missing region".into());
+        return Err("Point source references a missing region".into());
     }
     Ok(source)
 }
@@ -1283,13 +1346,13 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                     draft: decode_v1(file.draft)?,
                     accepted: decode_v1(file.accepted)?,
                     probes: vec![],
-                    source: SourceSettings::default(),
+                    source: PointSource::default(),
                     far_field: FarFieldSettings::default(),
                 },
                 presentation: PresentationSettings::default(),
             }
         }
-        2..=16 => {
+        2..=17 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());

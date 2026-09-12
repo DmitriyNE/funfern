@@ -2,7 +2,7 @@ use crate::material_overlay::{MaterialOverlay, MaterialProperty};
 use funfern_app::{
     editor::{
         Document, DocumentModel, FarFieldSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset,
-        ProbeTarget, SourceSettings,
+        ProbeTarget,
     },
     persistence,
 };
@@ -37,7 +37,7 @@ pub fn catalog() -> &'static [ExampleScene] {
             example(
                 "Starter obstacle",
                 "A point source scatters from a rounded obstacle above a reflecting floor.",
-                with_continuous_source(
+                with_point_source(
                     starter_obstacle(),
                     Point2::new(-0.55, 0.05),
                     2.5,
@@ -48,7 +48,7 @@ pub fn catalog() -> &'static [ExampleScene] {
             example(
                 "Double slit",
                 "A point source illuminates two apertures in a reflecting waveguide.",
-                with_continuous_source(
+                with_point_source(
                     double_slit(),
                     Point2::new(-0.62, 0.0),
                     3.0,
@@ -59,7 +59,7 @@ pub fn catalog() -> &'static [ExampleScene] {
             example(
                 "Material lens",
                 "A point source illuminates a slower circular material region with absorbing edges.",
-                with_continuous_source(
+                with_point_source(
                     material_lens(),
                     Point2::new(-0.72, 0.0),
                     3.5,
@@ -85,7 +85,7 @@ pub fn catalog() -> &'static [ExampleScene] {
             example(
                 "Obstacle array",
                 "A point source drives multiple scattering through eight reflecting obstacles.",
-                with_continuous_source(
+                with_point_source(
                     obstacle_array(),
                     Point2::new(-0.92, 0.0),
                     3.0,
@@ -192,7 +192,9 @@ fn property_preview(scene: &Scene, property: MaterialProperty) -> Option<Example
                                     source
                                         .evaluate(scene.region(interior).unwrap().frame, point)
                                         .ok()
-                                        .map_or(0.0, |profile| profile * source.signal.amplitude)
+                                        .map_or(0.0, |profile| {
+                                            profile * source.signal.characteristic_amplitude()
+                                        })
                                 }),
                         };
                         minimum = minimum.min(*value);
@@ -229,20 +231,19 @@ fn point_in_polygon(point: Point2, polygon: &[Point2]) -> bool {
         })
 }
 
-fn with_continuous_source(
+fn with_point_source(
     mut document: Document,
     position: Point2,
     frequency_hz: f32,
     amplitude: f32,
     width: f32,
 ) -> Document {
-    document.model.source = SourceSettings {
+    document.model.source = PointSource {
         enabled: true,
         position,
-        amplitude,
-        width,
-        frequency_hz,
+        width: width as f64,
         region: BACKGROUND_REGION,
+        signal: TimeSignal::harmonic(0.0, amplitude as f64, frequency_hz as f64, 0.0),
     };
     document.presentation.material_overlay = MaterialOverlay::Off;
     document.presentation.material_overlay_opacity = 0.55;
@@ -300,7 +301,7 @@ fn double_slit() -> Document {
             draft: scene.clone(),
             accepted: scene,
             probes: vec![],
-            source: SourceSettings::default(),
+            source: PointSource::default(),
             far_field: Default::default(),
         },
         presentation: Default::default(),
@@ -344,7 +345,7 @@ fn material_lens() -> Document {
             draft: scene.clone(),
             accepted: scene,
             probes: vec![],
-            source: SourceSettings::default(),
+            source: PointSource::default(),
             far_field: Default::default(),
         },
         presentation: Default::default(),
@@ -418,18 +419,17 @@ fn grin_rod() -> Document {
                     preset: ProbeSamplingPreset::High,
                 },
             }],
-            source: SourceSettings::default(),
+            source: PointSource::default(),
             far_field: Default::default(),
         },
         presentation: Default::default(),
     };
-    document.model.source = SourceSettings {
+    document.model.source = PointSource {
         enabled: true,
         position: Point2::new(-0.56, 0.11),
-        amplitude: 16.0,
         width: 0.04,
-        frequency_hz: 4.0,
         region,
+        signal: TimeSignal::harmonic(0.0, 16.0, 4.0, 0.0),
     };
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
     document.presentation.material_overlay_opacity = 0.55;
@@ -444,7 +444,7 @@ fn luneburg_lens() -> Document {
     let center = Point2::new(0.08, 0.0);
     let mut scene = Scene::default();
     scene.outer_boundaries.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Dirichlet {
-        signal: BoundarySignal {
+        signal: TimeSignal::Harmonic {
             offset: 0.0,
             amplitude: 0.7,
             frequency_hz: 3.5,
@@ -515,7 +515,7 @@ fn luneburg_lens() -> Document {
                     },
                 },
             ],
-            source: SourceSettings::default(),
+            source: PointSource::default(),
             far_field: Default::default(),
         },
         presentation: Default::default(),
@@ -564,7 +564,7 @@ fn phased_array() -> Document {
                 name: "R".into(),
                 value: RADIUS,
             }],
-            signal: BoundarySignal {
+            signal: TimeSignal::Harmonic {
                 offset: 0.0,
                 amplitude: 18.0,
                 frequency_hz: FREQUENCY,
@@ -577,7 +577,7 @@ fn phased_array() -> Document {
             draft: scene.clone(),
             accepted: scene,
             probes: vec![],
-            source: SourceSettings::default(),
+            source: PointSource::default(),
             far_field: FarFieldSettings {
                 enabled: true,
                 inset: 0.08,
@@ -692,7 +692,7 @@ mod tests {
                     .outer_boundaries
                     .get(side)
                     .signal()
-                    .is_some_and(|signal| signal.amplitude != 0.0)
+                    .is_some_and(|signal| signal.characteristic_amplitude() != 0.0)
             });
             let driven_region = example
                 .document
@@ -700,7 +700,7 @@ mod tests {
                 .accepted
                 .volume_sources
                 .iter()
-                .any(|source| source.enabled && source.signal.amplitude != 0.0);
+                .any(|source| source.enabled && source.signal.characteristic_amplitude() != 0.0);
             assert!(
                 example.document.model.source.enabled || driven_boundary || driven_region,
                 "{} has no active driver",

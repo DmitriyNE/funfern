@@ -174,14 +174,14 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   independent of its reusable passive material. Its signed spatial profile uses the
   same region-local world-unit coordinates and its own named parameters, multiplied
   by a bias-plus-sinusoid signal with amplitude, frequency, and phase. Source-only
-  edits update GPU forcing in bounded slices and preserve the mesh, operator, live
-  field, solver clock, and probe traces. Region frames appear when either the passive
-  material or its source uses local coordinates.
+  edits preserve the mesh, operator, live field, solver clock, and probe traces;
+  temporal-only edits also reuse the compiled spatial weights. Region frames appear
+  when either the passive material or its source uses local coordinates.
 - **Simulation input:** Place pulse remains active for repeated viewport clicks and
   can be toggled off with the same selected button, the viewport Done action, or
   Escape. Drag the visible point-source marker directly to reposition it.
-  Pulse strength/width and point-source position, frequency, strength, width,
-  and region are editable in Simulation. Point-source settings are included
+  Pulse strength/width and point-source position, width, region, bias, amplitude,
+  frequency, and phase are editable in Simulation. Point-source settings are included
   in scene files, shared links, examples, Undo/Redo, and autosave.
 - **Point probes:** add persistent point receivers from Probes, then click repeatedly
   in the viewport. Markers can be selected, dragged, renamed, colored, disabled,
@@ -283,8 +283,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Refinement reacts immediately, while coarsening requires two quiet estimates and
   has its own transaction quota. The View panel can overlay the current target field.
 - **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
-  Gaussian displacement with zero initial velocity. The optional continuous
-  sinusoidal source is repositioned by dragging its viewport marker. Simulation speed is bounded to 16
+  Gaussian displacement with zero initial velocity. The optional point source is
+  repositioned by dragging its viewport marker. Simulation speed is bounded to 16
   substeps per display frame. Field colors use an adjustable symmetric gain.
   Pulses and point sources act only in their containing wall-separated
   region. With open baffles their Gaussian stencil uses mesh-path distance, so it
@@ -318,9 +318,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   stable boundary ID and left/right face on the old mesh during transfer.
 
 Scenes allow 32 geometric features, 32 materials, one volume source per region, and
-128 controls per curve. Version 16 JSON stores the complete boundary laws,
+128 controls per curve. Version 17 JSON stores the complete boundary laws,
 constant/formula materials and region frames, and region-owned volume sources in
-both draft and accepted scenes, plus presentation settings. Versions 2–15 remain compatible,
+both draft and accepted scenes, presentation settings, and a tagged shared time-signal
+representation for point, volume, and boundary drives. Versions 2–16 remain compatible,
 and version 1 files migrate their loops to background holes. Legacy baffles that
 combined a thin-gap spring with face laws load with the thin-gap law taking
 precedence. JSON files are capped at 2 MiB and require finite coordinates. The editor uses a fixed

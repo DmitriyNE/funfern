@@ -267,7 +267,7 @@ pub fn sample(scene: &Scene, region_id: RegionId, point: funfern_core::Point2) -
     if let Some(source) = scene.volume_source(region_id) {
         if source.enabled {
             match source.evaluate(region.frame, point) {
-                Ok(profile) => values[5] = Some(profile * source.signal.amplitude),
+                Ok(profile) => values[5] = Some(profile * source.signal.characteristic_amplitude()),
                 Err(error) => errors[5] = Some(error.to_string()),
             }
         } else {
@@ -375,9 +375,11 @@ mod tests {
             enabled: true,
             profile: funfern_core::ScalarField::formula("2 * x").unwrap(),
             parameters: vec![],
-            signal: funfern_core::BoundarySignal {
+            signal: funfern_core::TimeSignal::Harmonic {
+                offset: 0.0,
                 amplitude: -3.0,
-                ..funfern_core::BoundarySignal::ZERO
+                frequency_hz: 1.0,
+                phase_radians: 0.0,
             },
         });
         let sample = sample(

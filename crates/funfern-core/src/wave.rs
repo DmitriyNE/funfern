@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{OuterSide, Point2, TriMesh};
+use crate::{BACKGROUND_REGION, OuterSide, Point2, RegionId, TriMesh};
 
 /// Constant material coefficients for the scalar wave model
 /// `mass_density * u_tt + damping * u_t - div(stiffness * grad(u)) = f`.
@@ -21,36 +21,130 @@ impl Default for WaveCoefficients {
     }
 }
 
-/// A boundary value that is constant in space along one outer side and harmonic
-/// in time. Setting `amplitude` to zero gives a constant value.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct BoundarySignal {
-    pub offset: f64,
-    pub amplitude: f64,
-    pub frequency_hz: f64,
-    pub phase_radians: f64,
+/// A bounded temporal drive shared by point and region sources and prescribed
+/// boundary data. Additional waveform variants can extend this representation
+/// without changing the spatial source carriers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TimeSignal {
+    Harmonic {
+        offset: f64,
+        amplitude: f64,
+        frequency_hz: f64,
+        phase_radians: f64,
+    },
 }
 
-impl BoundarySignal {
-    pub const ZERO: Self = Self {
+impl TimeSignal {
+    pub const ZERO: Self = Self::Harmonic {
         offset: 0.0,
         amplitude: 0.0,
         frequency_hz: 1.0,
         phase_radians: 0.0,
     };
 
+    pub const fn harmonic(
+        offset: f64,
+        amplitude: f64,
+        frequency_hz: f64,
+        phase_radians: f64,
+    ) -> Self {
+        Self::Harmonic {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+        }
+    }
+
     pub fn valid(self) -> bool {
-        self.offset.is_finite()
-            && self.amplitude.is_finite()
-            && self.frequency_hz.is_finite()
-            && self.frequency_hz >= 0.0
-            && self.phase_radians.is_finite()
+        let Self::Harmonic {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+        } = self;
+        offset.is_finite()
+            && amplitude.is_finite()
+            && frequency_hz.is_finite()
+            && frequency_hz >= 0.0
+            && phase_radians.is_finite()
     }
 
     pub fn value(self, time: f64) -> f64 {
-        self.offset
-            + self.amplitude
-                * (std::f64::consts::TAU * self.frequency_hz * time + self.phase_radians).sin()
+        let Self::Harmonic {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+        } = self;
+        offset + amplitude * (std::f64::consts::TAU * frequency_hz * time + phase_radians).sin()
+    }
+
+    pub const fn harmonic_parameters(self) -> [f64; 4] {
+        let Self::Harmonic {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+        } = self;
+        [offset, amplitude, frequency_hz, phase_radians]
+    }
+
+    pub fn harmonic_parameters_mut(&mut self) -> (&mut f64, &mut f64, &mut f64, &mut f64) {
+        let Self::Harmonic {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+        } = self;
+        (offset, amplitude, frequency_hz, phase_radians)
+    }
+
+    pub fn frequency_ceiling_hz(self) -> f64 {
+        let [_, amplitude, frequency_hz, _] = self.harmonic_parameters();
+        if amplitude == 0.0 { 0.0 } else { frequency_hz }
+    }
+
+    pub fn characteristic_amplitude(self) -> f64 {
+        let [offset, amplitude, _, _] = self.harmonic_parameters();
+        if amplitude == 0.0 { offset } else { amplitude }
+    }
+}
+
+impl Default for TimeSignal {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointSource {
+    pub enabled: bool,
+    pub position: Point2,
+    pub width: f64,
+    pub region: RegionId,
+    pub signal: TimeSignal,
+}
+
+impl PointSource {
+    pub fn valid(self) -> bool {
+        self.position.finite() && self.width.is_finite() && self.width > 0.0 && self.signal.valid()
+    }
+
+    pub fn spatial_eq(self, other: Self) -> bool {
+        self.position == other.position && self.width == other.width && self.region == other.region
+    }
+}
+
+impl Default for PointSource {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            position: Point2::new(-0.45, 0.0),
+            width: 0.06,
+            region: BACKGROUND_REGION,
+            signal: TimeSignal::harmonic(0.0, 18.0, 2.5, 0.0),
+        }
     }
 }
 
@@ -63,9 +157,9 @@ pub enum OuterBoundaryCondition {
     /// Second-order Engquist-Majda condition using boundary memory `psi_t = u`.
     SecondOrderOutgoing,
     /// Prescribed outward flux `stiffness * partial_n u = value(t)`.
-    Neumann { signal: BoundarySignal },
+    Neumann { signal: TimeSignal },
     /// Strongly prescribed displacement `u = value(t)`.
-    Dirichlet { signal: BoundarySignal },
+    Dirichlet { signal: TimeSignal },
 }
 
 impl OuterBoundaryCondition {
@@ -79,7 +173,7 @@ impl OuterBoundaryCondition {
         }
     }
 
-    pub fn signal(self) -> Option<BoundarySignal> {
+    pub fn signal(self) -> Option<TimeSignal> {
         match self {
             Self::Neumann { signal } | Self::Dirichlet { signal } => Some(signal),
             _ => None,
@@ -87,7 +181,7 @@ impl OuterBoundaryCondition {
     }
 
     pub fn valid(self) -> bool {
-        self.signal().is_none_or(BoundarySignal::valid)
+        self.signal().is_none_or(TimeSignal::valid)
     }
 }
 
@@ -602,6 +696,54 @@ impl WaveState {
 mod tests {
     use super::*;
     use crate::{BACKGROUND_REGION, MeshQuality, MeshTriangle, MeshVertex};
+
+    #[test]
+    fn harmonic_time_signal_evaluates_and_reports_its_bandwidth() {
+        let signal = TimeSignal::harmonic(0.25, 2.0, 3.0, 0.5);
+        assert!(signal.valid());
+        assert!((signal.value(0.0) - (0.25 + 2.0 * 0.5_f64.sin())).abs() < 1.0e-14);
+        assert!(
+            (signal.value(0.125) - (0.25 + 2.0 * (0.375 * std::f64::consts::TAU + 0.5).sin()))
+                .abs()
+                < 1.0e-14
+        );
+        assert_eq!(signal.frequency_ceiling_hz(), 3.0);
+        assert_eq!(signal.characteristic_amplitude(), 2.0);
+
+        let constant = TimeSignal::harmonic(-0.4, 0.0, 8.0, 1.2);
+        assert_eq!(constant.value(10.0), -0.4);
+        assert_eq!(constant.frequency_ceiling_hz(), 0.0);
+        assert_eq!(constant.characteristic_amplitude(), -0.4);
+    }
+
+    #[test]
+    fn time_signal_and_point_source_validation_reject_malformed_values() {
+        assert!(!TimeSignal::harmonic(0.0, 1.0, -1.0, 0.0).valid());
+        assert!(!TimeSignal::harmonic(f64::NAN, 1.0, 1.0, 0.0).valid());
+        assert!(!TimeSignal::harmonic(0.0, 1.0, 1.0, f64::INFINITY).valid());
+
+        let source = PointSource {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(source.valid());
+        assert!(source.spatial_eq(PointSource {
+            enabled: false,
+            signal: TimeSignal::harmonic(1.0, 4.0, 7.0, 0.3),
+            ..source
+        }));
+        assert!(!source.spatial_eq(PointSource {
+            width: source.width * 2.0,
+            ..source
+        }));
+        assert!(
+            !PointSource {
+                width: 0.0,
+                ..source
+            }
+            .valid()
+        );
+    }
 
     fn grid(n: usize) -> TriMesh {
         let mut vertices = Vec::new();

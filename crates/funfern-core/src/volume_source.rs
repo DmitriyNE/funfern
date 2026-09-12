@@ -1,8 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use crate::{
-    BoundarySignal, Point2, QuadraticWaveOperator, RegionId, Scene, TriMesh, VolumeSource,
-};
+use crate::{Point2, QuadraticWaveOperator, RegionId, Scene, TimeSignal, TriMesh, VolumeSource};
 
 const MASS_WEIGHTS: [f64; 7] = [
     1.0 / 20.0,
@@ -32,7 +30,7 @@ impl Default for VolumeSourceNode {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledVolumeSources {
-    pub signals: Vec<BoundarySignal>,
+    pub signals: Vec<TimeSignal>,
     pub nodes: Vec<VolumeSourceNode>,
 }
 
@@ -349,7 +347,7 @@ mod tests {
             enabled: true,
             profile: ScalarField::constant(2.5),
             parameters: vec![],
-            signal: BoundarySignal {
+            signal: TimeSignal::Harmonic {
                 offset: 3.0,
                 amplitude: 0.0,
                 frequency_hz: 1.0,
@@ -374,7 +372,7 @@ mod tests {
             enabled: false,
             profile: ScalarField::formula("1 + x").unwrap(),
             parameters: vec![],
-            signal: BoundarySignal::ZERO,
+            signal: TimeSignal::ZERO,
         });
         let mut job = VolumeSourceCompileJob::new(mesh, operator, scene).unwrap();
         let mut slices = 0;
