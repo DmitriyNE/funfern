@@ -7,9 +7,6 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Add a polished Luneburg/GRIN catalog example and use it to decide whether
-  dormant spatial profiles need a permanent material-resolution floor in addition
-  to the solution residual and active-frequency wavelength ceiling.
 - [ ] Add probe-data export for point, line, area, and far-field readouts. Preserve
   timestamps, spatial or angular coordinates, quantity names, and coverage metadata
   in a simple format suitable for plotting outside Funfern.
@@ -52,6 +49,34 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
+
+## 2026-09-12 — GRIN rod and Luneburg examples
+
+- Added two ready-to-run spatial-material examples. **GRIN rod** uses the local
+  transverse coordinate to define an impedance-matched index profile, an off-axis
+  continuous source inside the guide, and a high-resolution output line probe.
+  **Luneburg lens** uses a radial profile in a region-attached frame, a driven left
+  Dirichlet edge as a plane-like incident wave, a focal line probe, and a focal
+  energy disk.
+- Both examples open with the wave-speed material overlay and a fresh zero field.
+  Example view settings now travel with the existing source preset without entering
+  scene persistence. Gallery thumbnails sample the profile itself and mark driven
+  boundary edges as well as point sources.
+- At the default AMR quality, the active-frequency wavelength ceiling already
+  produces local target ranges of **0.0312–0.0500** for the 4 Hz GRIN rod and
+  **0.0404–0.0571** for the 3.5 Hz Luneburg lens from an initially dormant field.
+  Their coarse test meshes contain 3,115 and 3,121 triangles with recommended
+  explicit steps of 4.26e-3 and 6.28e-3 respectively. This is sufficient to wake
+  spatial resolution before wave energy arrives, so no separate permanent
+  coefficient-gradient floor was added.
+- Automated checks cover structural/persistence round trips, active drivers,
+  impedance matching, center/edge wave speeds, probes, thumbnail data, initial
+  overlay state, practical time steps, and dormant-field AMR targets.
+- All 278 workspace tests, warnings-denied Clippy, native release compilation, and
+  release Trunk/WASM packaging pass. The production native AMR check also completed
+  on Apple M1 Max / Metal in 4.80 s with finite spatial-material estimates and two
+  continuous field handoffs. Interactive visual review remains with the normal
+  product testing pass.
 
 ## 2026-09-12 — Coefficient-aware solution AMR
 

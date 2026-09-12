@@ -155,9 +155,11 @@ decoder and bounded accepted-scene validator before replacing the editor documen
 The document includes probes, continuous-source configuration, and far-field
 settings alongside draft and accepted geometry, so every persistence route and
 Undo/Redo sees the same state. Examples carry names and descriptions and render their thumbnails directly
-from the accepted spline geometry. Their documents also provide a continuous
-source and deliberate boundary configuration. Opening one is a single
-undoable document change and starts a fresh zero field; it does not transfer the
+from the accepted spline geometry. Spatial-material examples overlay a cached,
+bounded sampling of their initial property view in the thumbnail. Each catalog
+entry can supply either a continuous source or driven boundary, probes, and an
+initial material-overlay preset. Opening one is a single undoable document change
+and starts a fresh zero field; it does not transfer the
 field from the previously open scene. Ordinary edits and AMR retain their normal
 field-preserving handoff.
 Autosave retains both the accepted scene and any invalid editable draft, writing to

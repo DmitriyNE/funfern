@@ -2615,6 +2615,11 @@ impl Playground {
                         self.wave_pending_pulse = None;
                         self.fresh_simulation_requested = true;
                         self.show_boundary_conditions = true;
+                        self.material_overlay = simulation.material_overlay;
+                        self.material_overlay_opacity = simulation.material_overlay_opacity;
+                        self.material_overlay_auto_range = true;
+                        self.material_overlay_logarithmic = false;
+                        self.show_amr_target = simulation.show_amr_target;
                     }
                     if !self.load_notice.is_empty() {
                         self.notify(self.load_notice);
@@ -12794,6 +12799,25 @@ fn paint_example_thumbnail(
             ),
         )
     };
+    if let Some(preview) = &example.property_preview {
+        let span = preview.maximum - preview.minimum;
+        let mut mesh = egui::Mesh::default();
+        mesh.reserve_vertices(preview.triangles.len() * 3);
+        mesh.reserve_triangles(preview.triangles.len());
+        for triangle in &preview.triangles {
+            let base = mesh.vertices.len() as u32;
+            for (&point, &value) in triangle.points.iter().zip(&triangle.values) {
+                let fraction = if span > 0.0 {
+                    ((value - preview.minimum) / span).clamp(0.0, 1.0) as f32
+                } else {
+                    0.5
+                };
+                mesh.colored_vertex(project(point), material_property_color(fraction, 255));
+            }
+            mesh.add_triangle(base, base + 1, base + 2);
+        }
+        painter.add(egui::Shape::mesh(mesh));
+    }
     for obstacle in &scene.obstacles {
         let points = (0..=64)
             .map(|index| {
@@ -12813,11 +12837,17 @@ fn paint_example_thumbnail(
                 })
                 .unwrap_or(background),
         };
-        painter.add(egui::Shape::convex_polygon(
-            points,
-            fill,
-            Stroke::new(1.5, TEAL),
-        ));
+        if example.property_preview.is_some()
+            && matches!(obstacle.role, LoopRole::MaterialInterface { .. })
+        {
+            painter.add(egui::Shape::line(points, Stroke::new(1.5, TEAL)));
+        } else {
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                fill,
+                Stroke::new(1.5, TEAL),
+            ));
+        }
     }
     for boundary in &scene.internal_boundaries {
         let points = (0..=48)
@@ -12846,6 +12876,16 @@ fn paint_example_thumbnail(
                 outer_boundary_condition_color(scene.outer_boundaries.get(side)),
             ),
         );
+        if scene
+            .outer_boundaries
+            .get(side)
+            .signal()
+            .is_some_and(|signal| signal.amplitude != 0.0)
+        {
+            let midpoint = start.lerp(end, 0.5);
+            painter.circle_filled(midpoint, 4.0, GOLD);
+            painter.circle_stroke(midpoint, 7.0, Stroke::new(1.0, GOLD));
+        }
     }
     if example.simulation.source.enabled {
         let center = project(example.simulation.source.position);
@@ -14056,7 +14096,10 @@ mod tests {
                 "missing {name}"
             );
         }
-        assert_eq!(examples::catalog().len(), 4);
+        assert_eq!(examples::catalog().len(), 6);
+        for name in ["GRIN rod", "Luneburg lens"] {
+            assert!(examples::catalog().iter().any(|example| example.name == name));
+        }
 
         build_mesh_candidate(&mut h.state);
         commit_mesh_without_gpu(&mut h.state);
@@ -14089,6 +14132,24 @@ mod tests {
 
         h.state.editor.undo();
         assert_eq!(h.state.editor.document, before);
+
+        let grin = examples::catalog()
+            .iter()
+            .find(|example| example.name == "GRIN rod")
+            .unwrap();
+        h.state.start_example_load(grin);
+        for _ in 0..100 {
+            h.state.update_files();
+            if h.state.load.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            h.state.material_overlay,
+            MaterialOverlay::Property(MaterialProperty::WaveSpeed)
+        );
+        assert_eq!(h.state.material_overlay_opacity, 0.55);
+        assert!(!h.state.show_amr_target);
     }
 
     #[test]

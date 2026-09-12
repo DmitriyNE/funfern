@@ -235,8 +235,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   restore on startup from browser local storage or the native per-user recovery
   file. Copy scene link embeds compressed, validated scene data in a `#scene=v1.…`
   URL fragment; while that fragment is active, later autosaves keep it current.
-  Camera and selection are not saved. With no shared scene or autosave to restore,
-  startup opens the first bundled example.
+  The catalog includes ready-to-run GRIN rod and circular Luneburg profiles with
+  their drivers, probes, and wave-speed view presets. Camera and selection are not
+  saved. With no shared scene or autosave to restore, startup opens the first
+  bundled example.
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
   constrained mesh and its labeled outer, hole, interface, closed-wall, and baffle
   edges. Elements below 15° are
