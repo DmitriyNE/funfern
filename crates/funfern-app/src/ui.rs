@@ -5998,23 +5998,16 @@ impl Playground {
             },
         });
         let mut source_changed = false;
-        let mut present = existing_source.is_some();
-        if ui.checkbox(&mut present, "Volume source").changed() {
-            if present {
-                let result = self
-                    .editor
-                    .set_volume_source(source_region, Some(source.clone()));
-                self.error(result);
-            } else {
-                let result = self.editor.set_volume_source(source_region, None);
-                self.error(result);
-                self.volume_source_formula_edit = None;
-                self.volume_source_formula_error = None;
-            }
+        let configured = existing_source.is_some();
+        let mut enabled = existing_source
+            .as_ref()
+            .is_some_and(|source| source.enabled);
+        if ui.checkbox(&mut enabled, "Volume source").changed() {
+            source.enabled = enabled;
+            source_changed = true;
         }
-        if present {
-            source_changed |= ui.checkbox(&mut source.enabled, "Enabled").changed();
-            ui.add_enabled_ui(source.enabled, |ui| {
+        if configured || enabled {
+            ui.add_enabled_ui(enabled, |ui| {
                 source_changed |= volume_source_scalar_editor(
                     ui,
                     source_region,
