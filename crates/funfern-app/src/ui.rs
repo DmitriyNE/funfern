@@ -123,6 +123,29 @@ struct CompiledProbeState {
 struct ProbeDrag {
     id: ProbeId,
 }
+
+#[derive(Clone)]
+struct ProbeViewState {
+    live: bool,
+    end_time: f64,
+    span: f64,
+    field: bool,
+    velocity: bool,
+    energy: bool,
+}
+
+impl ProbeViewState {
+    fn new(span: f64) -> Self {
+        Self {
+            live: true,
+            end_time: 0.0,
+            span,
+            field: true,
+            velocity: true,
+            energy: true,
+        }
+    }
+}
 #[derive(Clone, Copy, Default, PartialEq)]
 enum SpanSelectionFilter {
     #[default]
@@ -287,6 +310,7 @@ pub struct Playground {
     performance_warning_active: bool,
     selected_probe: Option<ProbeId>,
     probe_windows: BTreeSet<ProbeId>,
+    probe_views: BTreeMap<ProbeId, ProbeViewState>,
     probe_traces: BTreeMap<ProbeId, ProbeTrace>,
     probe_status: BTreeMap<ProbeId, String>,
     probe_observed: Vec<ProbeDefinition>,
@@ -440,6 +464,7 @@ impl Default for Playground {
             performance_warning_active: false,
             selected_probe: None,
             probe_windows: BTreeSet::new(),
+            probe_views: BTreeMap::new(),
             probe_traces: BTreeMap::new(),
             probe_status: BTreeMap::new(),
             probe_observed: vec![],
@@ -624,6 +649,7 @@ impl Playground {
         self.probe_traces.retain(|id, _| ids.contains(id));
         self.probe_status.retain(|id, _| ids.contains(id));
         self.probe_windows.retain(|id| ids.contains(id));
+        self.probe_views.retain(|id, _| ids.contains(id));
         if self.selected_probe.is_some_and(|id| !ids.contains(&id)) {
             self.selected_probe = None;
         }
@@ -3302,6 +3328,16 @@ impl Playground {
                 .unwrap_or_default();
             let status = self.probe_status.get(&id).cloned();
             let dropped = self.probe_traces.get(&id).map_or(0, |trace| trace.dropped);
+            let mut view = self
+                .probe_views
+                .remove(&id)
+                .unwrap_or_else(|| ProbeViewState::new(self.probe_history_seconds));
+            if view.live
+                && let Some(sample) = samples.last()
+            {
+                view.end_time = sample.time;
+            }
+            view.span = view.span.clamp(0.02, self.probe_history_seconds);
             let mut open = true;
             let mut clear = false;
             egui::Window::new(format!("{} · point probe", probe.name))
@@ -3322,33 +3358,61 @@ impl Playground {
                             clear = true;
                         }
                     });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new("Live").selected(view.live))
+                            .on_hover_text("Follow the newest sample")
+                            .clicked()
+                        {
+                            view.live = true;
+                            if let Some(sample) = samples.last() {
+                                view.end_time = sample.time;
+                            }
+                        }
+                        ui.checkbox(&mut view.field, "Field");
+                        ui.checkbox(&mut view.velocity, "Velocity");
+                        ui.checkbox(&mut view.energy, "Energy");
+                    });
                     if let Some(status) = &status {
                         ui.colored_label(GOLD, status);
                     }
                     if dropped > 0 {
                         ui.colored_label(GOLD, format!("{dropped} samples were skipped"));
                     }
-                    Self::probe_plot(
-                        ui,
-                        "Field",
-                        &samples,
-                        |sample| sample.displacement,
-                        Color32::from_rgb(72, 166, 255),
-                    );
-                    Self::probe_plot(
-                        ui,
-                        "Velocity",
-                        &samples,
-                        |sample| sample.velocity,
-                        Color32::from_rgb(91, 220, 194),
-                    );
-                    Self::probe_plot(
-                        ui,
-                        "Local energy density",
-                        &samples,
-                        |sample| sample.energy_density,
-                        GOLD,
-                    );
+                    if view.field {
+                        Self::probe_plot(
+                            ui,
+                            "Field",
+                            &samples,
+                            |sample| sample.displacement,
+                            Color32::from_rgb(72, 166, 255),
+                            &mut view,
+                            self.probe_history_seconds,
+                        );
+                    }
+                    if view.velocity {
+                        Self::probe_plot(
+                            ui,
+                            "Velocity",
+                            &samples,
+                            |sample| sample.velocity,
+                            Color32::from_rgb(91, 220, 194),
+                            &mut view,
+                            self.probe_history_seconds,
+                        );
+                    }
+                    if view.energy {
+                        Self::probe_plot(
+                            ui,
+                            "Local energy density",
+                            &samples,
+                            |sample| sample.energy_density,
+                            GOLD,
+                            &mut view,
+                            self.probe_history_seconds,
+                        );
+                    }
+                    ui.small("Drag a plot to inspect earlier time · wheel to zoom");
                 });
             if clear {
                 self.clear_probe_trace(id);
@@ -3356,6 +3420,7 @@ impl Playground {
             if !open {
                 self.probe_windows.remove(&id);
             }
+            self.probe_views.insert(id, view);
         }
     }
 
@@ -3365,11 +3430,13 @@ impl Playground {
         samples: &[PointProbeRecord],
         value: impl Fn(&PointProbeRecord) -> f64,
         color: Color32,
+        view: &mut ProbeViewState,
+        maximum_span: f64,
     ) {
         ui.small(label);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width().max(120.0), 92.0),
-            egui::Sense::hover(),
+            egui::Sense::drag(),
         );
         ui.painter()
             .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
@@ -3379,7 +3446,29 @@ impl Playground {
             Stroke::new(1.0, Color32::from_rgb(55, 69, 80)),
             egui::StrokeKind::Inside,
         );
-        if samples.len() < 2 {
+        if response.dragged() {
+            view.live = false;
+            let pointer_delta = ui.ctx().input(|input| input.pointer.delta().x);
+            view.end_time -= pointer_delta as f64 / rect.width() as f64 * view.span;
+            if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
+                view.end_time = view
+                    .end_time
+                    .clamp((first.time + view.span).min(last.time), last.time);
+            }
+        }
+        if response.hovered() {
+            let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                view.span = (view.span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+            }
+        }
+        let minimum_time = view.end_time - view.span;
+        let maximum_time = view.end_time;
+        let visible = samples
+            .iter()
+            .filter(|sample| sample.time >= minimum_time && sample.time <= maximum_time)
+            .collect::<Vec<_>>();
+        if visible.len() < 2 {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -3389,11 +3478,9 @@ impl Playground {
             );
             return;
         }
-        let minimum_time = samples.first().unwrap().time;
-        let maximum_time = samples.last().unwrap().time;
         let mut minimum = f64::INFINITY;
         let mut maximum = f64::NEG_INFINITY;
-        for sample in samples {
+        for sample in &visible {
             let sample = value(sample);
             minimum = minimum.min(sample);
             maximum = maximum.max(sample);
@@ -3406,9 +3493,9 @@ impl Playground {
             minimum -= padding;
             maximum += padding;
         }
-        let time_span = (maximum_time - minimum_time).max(f64::MIN_POSITIVE);
+        let time_span = view.span.max(f64::MIN_POSITIVE);
         let value_span = maximum - minimum;
-        let points = samples
+        let points = visible
             .iter()
             .map(|sample| {
                 egui::pos2(

@@ -59,7 +59,9 @@ shared links, and recovery data; sampled traces and floating-window layout remai
 transient. The Probes inspector owns creation, configuration, and the receiver list,
 while each receiver has one independent closeable readout window. The target model
 and readout dispatch are intended to extend to curve, region, selected-geometry, and
-far-field receivers without adding another inspector.
+far-field receivers without adding another inspector. Point readouts share one
+pan/zoom time window across their independently hideable field, velocity, and energy
+sections; Live mode follows the newest solver-clock sample.
 
 Control handles are exclusive selections. Boundary spans support click, Shift
 toggle, Command/Ctrl whole-curve selection, and marquee selection with optional

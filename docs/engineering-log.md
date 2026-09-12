@@ -40,8 +40,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   direct marker dragging, numeric editing, naming/color, recording controls, and
   one closeable floating readout per probe.
 - Point readouts show solver-time field, centered velocity, and material-aware
-  local energy density. Definitions participate in Undo/Redo, scene files, links,
-  examples, and autosave; recorded samples remain transient.
+  local energy density. Their sections are independently hideable and share a
+  draggable, wheel-zoomable time window with an explicit Live follow mode.
+  Definitions participate in Undo/Redo, scene files, links, examples, and autosave;
+  recorded samples remain transient.
 - Added a dependency-free enriched-quadratic point stencil in core. Points outside
   the domain or directly on two-trace boundaries remain visible but inactive with
   a concrete status.
