@@ -232,14 +232,15 @@ impl MaterialOverlayJob {
         let mut linear_ranges = [None; 5];
         let mut log_ranges = [None; 5];
         for property in MaterialProperty::ALL {
-            let mut values = self
-                .samples
-                .iter()
-                .filter_map(|sample| sample.value(property).ok())
-                .collect::<Vec<_>>();
-            linear_ranges[property.index()] = robust_range(&mut values);
-            values.retain(|value| *value > 0.0);
-            log_ranges[property.index()] = robust_range(&mut values);
+            let values = self.samples.iter().filter_map(|sample| {
+                sample
+                    .value(property)
+                    .ok()
+                    .map(|value| (sample.region, value))
+            });
+            linear_ranges[property.index()] = region_aware_robust_range(values.clone());
+            log_ranges[property.index()] =
+                region_aware_robust_range(values.filter(|(_, value)| *value > 0.0));
         }
         Some(MaterialOverlaySnapshot {
             key: self.key.clone(),
@@ -359,6 +360,25 @@ fn robust_range(values: &mut Vec<f64>) -> Option<OverlayRange> {
     }
 }
 
+fn region_aware_robust_range(
+    values: impl IntoIterator<Item = (RegionId, f64)>,
+) -> Option<OverlayRange> {
+    let mut values_by_region = BTreeMap::<RegionId, Vec<f64>>::new();
+    for (region, value) in values {
+        if value.is_finite() {
+            values_by_region.entry(region).or_default().push(value);
+        }
+    }
+
+    values_by_region
+        .values_mut()
+        .filter_map(robust_range)
+        .reduce(|combined, region| OverlayRange {
+            minimum: combined.minimum.min(region.minimum),
+            maximum: combined.maximum.max(region.maximum),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +398,24 @@ mod tests {
         let range = robust_range(&mut values).unwrap();
         assert!(range.maximum < 1000.0);
         assert_eq!(range.normalized(range.minimum, false), Some(0.0));
+    }
+
+    #[test]
+    fn automatic_range_keeps_small_regions_visible() {
+        let dominant_region = RegionId(1);
+        let small_region = RegionId(2);
+        let values = (0..1000)
+            .map(|index| (dominant_region, 1.0 + f64::from(index) * 1.0e-4))
+            .chain((0..8).map(|_| (small_region, 10.0)))
+            .collect::<Vec<_>>();
+
+        let mut globally_weighted = values.iter().map(|(_, value)| *value).collect();
+        let old_range = robust_range(&mut globally_weighted).unwrap();
+        let range = region_aware_robust_range(values).unwrap();
+
+        assert!(old_range.maximum < 2.0);
+        assert!(range.minimum <= 1.01);
+        assert!(range.maximum >= 10.0);
     }
 
     #[test]

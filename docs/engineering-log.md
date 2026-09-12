@@ -55,6 +55,17 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Region-aware material-overlay ranges
+
+- Fixed automatic property scaling when one subdomain occupies only a small part
+  of the mesh. Robust outlier trimming now happens independently within every
+  subdomain, and the resulting ranges are combined, so sample-count weighting can
+  no longer discard an entire small region and clamp it to an endpoint color.
+- Linear and logarithmic views use the same region-aware policy; manual ranges are
+  unchanged.
+- All 271 workspace tests, Clippy with warnings denied, native release compilation,
+  and release Trunk/WASM packaging pass.
+
 ## 2026-09-12 — Persistent adaptation-target display
 
 - Fixed the adaptation-target overlay disappearing at every automatic AMR commit.

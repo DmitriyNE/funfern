@@ -5553,7 +5553,10 @@ impl Playground {
                 egui::Slider::new(&mut self.material_overlay_opacity, 0.05..=1.0)
                     .text("overlay opacity"),
             );
-            ui.checkbox(&mut self.material_overlay_auto_range, "Automatic range");
+            ui.checkbox(&mut self.material_overlay_auto_range, "Automatic range")
+                .on_hover_text(
+                    "Trims outliers within each subdomain, then includes every subdomain in the color range",
+                );
             ui.checkbox(&mut self.material_overlay_logarithmic, "Log scale");
             if !self.material_overlay_auto_range {
                 ui.horizontal(|ui| {
