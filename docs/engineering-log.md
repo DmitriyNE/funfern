@@ -54,6 +54,14 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-13 — Browser smoke test moved out of CI
+
+- Removed Playwright, Chromium installation, and the WebGPU smoke test from the
+  GitHub Actions job. GitHub-hosted Linux runners can return no WebGPU adapter, which
+  made an otherwise valid build fail before Pages deployment.
+- Kept the smoke suite and `npm run test:browser` as a local hardware-backed check.
+  CI still builds the release WASM bundle before publishing from `main`.
+
 ## 2026-09-13 — Unified time signals and point-source ownership
 
 - Added a dependency-free `TimeSignal` to the numerical core and use it for point
@@ -105,8 +113,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   starts in Chromium with every probe pipeline accepted.
 - Added a small Playwright Chromium/WebGPU smoke suite. It watches all console
   levels for Bevy rendering failures, requires a WebGPU adapter, confirms that the
-  canvas advances, and checks that resize updates the backing render target. CI
-  runs it against the root release bundle before producing the Pages-path bundle.
+  canvas advances, and checks that resize updates the backing render target. Run it
+  locally against the root release bundle on a machine with a WebGPU adapter.
 
 ## 2026-09-12 — Region-owned volume sources
 

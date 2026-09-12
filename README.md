@@ -356,9 +356,10 @@ cargo run -p funfern-app --release --locked -- --amr-check
 Set `PLAYWRIGHT_CHANNEL=chrome` to run the smoke test with an installed Google
 Chrome instead of Playwright's pinned Chromium.
 
-GitHub Actions runs formatting, Clippy, the workspace tests, native and WASM
-release builds, and a Chromium WebGPU smoke test for pull requests and pushes to
-`main`. The smoke test rejects browser rendering failures, checks that the canvas
+GitHub Actions runs formatting, Clippy, the workspace tests, and native and WASM
+release builds for pull requests and pushes to `main`. The Playwright smoke test is
+a local hardware-backed check because GitHub-hosted runners do not expose a usable
+WebGPU adapter. It rejects browser rendering failures, checks that the canvas
 continues to change, and verifies that its backing render target follows a viewport
 resize. A successful `main` run publishes the browser bundle to
 <https://dmitriyne.github.io/funfern/>. The Pages source is configured as

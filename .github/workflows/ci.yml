@@ -86,23 +86,8 @@ jobs:
       - name: Build native release
         run: cargo build --release -p funfern-app --locked
 
-      - name: Install Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Install browser-test dependencies
-        run: npm ci
-
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
-
       - name: Build browser release
         run: NO_COLOR=true trunk build --release --locked
-
-      - name: Run browser smoke tests
-        run: npm run test:browser
 
       - name: Configure GitHub Pages
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
