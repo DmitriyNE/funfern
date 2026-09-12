@@ -38,6 +38,33 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Straight line probes
+
+- Added independent two-click line probes with endpoint editing, rigid body dragging,
+  a visible positive-normal arrow, direction reversal, names/colors, and the same
+  history, file, link, example, and autosave behavior as point probes.
+- Added Low, Medium, and High sampling presets: 32 points at 30 Hz, 64 at 60 Hz,
+  and 128 at 120 Hz. Documents remain limited to 16 total probes and 512 line
+  sample points. Scene JSON is now version 10; version 9 point-probe files remain
+  loadable.
+- Added a separate bounded GPU line recorder with enriched-quadratic displacement,
+  material-aware energy density, and signed normal energy flux. Its 64-frame ring
+  is independent of the longer point-probe ring. Partial domain or ambiguous-trace
+  coverage produces spatial gaps while valid intervals continue recording.
+- Line readouts provide current field profile, waterfall, mean energy, and signed
+  normal-power history. Aggregates use trapezoidal integration over adjacent valid
+  samples and display the valid coverage fraction. All time plots share the existing
+  pan, zoom, and Live behavior; waterfall intensity has an independent gain control.
+- Automated coverage includes two-click placement, rigid dragging as one undoable
+  action, partial-coverage aggregation, format migration/round-trip, shader clock,
+  flux/gap output, and independent preset strides. The native GPU check now also
+  requires a finite 64-point line-probe readback.
+- All 217 workspace tests and Clippy with warnings denied pass. The release native
+  Metal check executed both recorder pipelines on an Apple M1 Max with 9,690 DOFs,
+  `dt=0.0030078`, finite complete 64-point frames, expected NaN gaps on a partially
+  outside line, and `1.30e-6` field relative L2 error. Native release compilation
+  and the release Trunk/WASM build pass.
+
 ## 2026-09-12 — Probe foundation and point receivers
 
 - Added Probes as a fifth hideable inspector with persistent point placement,
@@ -81,7 +108,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   finite nonnegative probe energy, matched the f64 field within `1.30e-6` relative
   L2 error, and advanced at 18.9 simulated seconds per wall second. Native release
   compilation and the release Trunk/WASM build pass.
-- Curve, region, selected-geometry, and far-field targets remain later probe slices;
+- Region, selected-geometry, and far-field targets remain later probe slices;
   the panel and per-probe readout dispatch are structured to accept them.
 
 ## 2026-09-12 — Examples, recovery, export, and shareable scenes

@@ -170,6 +170,14 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   be selected directly. Sampling follows
   solver time rather than browser frame rate. Definitions are saved and undoable;
   recorded traces are transient.
+- **Line probes:** place an independent straight sampling segment with two clicks.
+  Drag either endpoint to reshape it or drag its body as one rigid object. The arrow
+  shows the positive left normal; Flip direction reverses both the sampling order
+  and flux sign. Low, Medium, and High presets record 32/64/128 spatial samples at
+  30/60/120 samples per simulated second. Floating readouts provide the current
+  field profile, a time waterfall, mean energy density, and signed normal power.
+  Portions outside the simulated domain or on a two-trace boundary appear as gaps;
+  the remaining coverage still contributes to the readout.
 - **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered
   on the cursor. Fit View frames the fixed square. Panel scrolling and text
   editing do not manipulate the viewport.

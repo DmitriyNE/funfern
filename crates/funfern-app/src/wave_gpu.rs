@@ -35,6 +35,8 @@ use funfern_core::{
 const WORKGROUP_SIZE: u32 = 128;
 pub const MAX_POINT_PROBES: usize = 16;
 const PROBE_RING_FRAMES: usize = 2048;
+pub const MAX_CURVE_PROBE_POINTS: usize = 512;
+const CURVE_PROBE_RING_FRAMES: usize = 64;
 const WAVE_STORAGE_BINDINGS: usize = 8;
 const TRANSFER_STORAGE_BINDINGS: usize = 8;
 const WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT: usize = 8;
@@ -145,6 +147,22 @@ struct ProbeBufferHandles {
     sample_stride: u64,
 }
 
+#[derive(Clone)]
+struct CurveProbeBufferHandles {
+    stencils: Handle<ShaderBuffer>,
+    control: Handle<ShaderBuffer>,
+    output: Handle<ShaderBuffer>,
+    descriptors: Arc<[CurveProbeDescriptor]>,
+    sample_strides: Arc<[u64]>,
+    point_count: u32,
+}
+
+impl CurveProbeBufferHandles {
+    fn all(&self) -> [&Handle<ShaderBuffer>; 3] {
+        [&self.stencils, &self.control, &self.output]
+    }
+}
+
 impl ProbeBufferHandles {
     fn all(&self) -> [&Handle<ShaderBuffer>; 3] {
         [&self.stencils, &self.control, &self.output]
@@ -180,6 +198,9 @@ pub struct WaveGpuRequest {
     probes: Option<ProbeBufferHandles>,
     probe_revision: u64,
     probe_readback_entity: Option<Entity>,
+    curve_probes: Option<CurveProbeBufferHandles>,
+    curve_probe_revision: u64,
+    curve_probe_readback_entity: Option<Entity>,
 }
 
 impl Default for WaveGpuRequest {
@@ -197,6 +218,9 @@ impl Default for WaveGpuRequest {
             probes: None,
             probe_revision: 0,
             probe_readback_entity: None,
+            curve_probes: None,
+            curve_probe_revision: 0,
+            curve_probe_readback_entity: None,
         }
     }
 }
@@ -216,6 +240,10 @@ impl WaveGpuRequest {
 
     pub fn probe_revision(&self) -> u64 {
         self.probe_revision
+    }
+
+    pub fn curve_probe_revision(&self) -> u64 {
+        self.curve_probe_revision
     }
 
     pub fn update_point_probes(
@@ -291,6 +319,108 @@ impl WaveGpuRequest {
             commands.entity(entity).despawn();
         }
         self.probe_revision = self.probe_revision.wrapping_add(1).max(1);
+    }
+
+    pub fn update_curve_probes(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        probes: &[CurveProbeInput],
+        time_step: f64,
+    ) -> Result<(), String> {
+        if !time_step.is_finite() || time_step <= 0.0 {
+            return Err("Invalid line-probe recorder timestep".into());
+        }
+        let point_count = probes
+            .iter()
+            .map(|probe| probe.stencils.len())
+            .sum::<usize>();
+        if point_count > MAX_CURVE_PROBE_POINTS
+            || probes.iter().any(|probe| {
+                probe.stencils.len() < 2
+                    || !probe.sample_rate.is_finite()
+                    || !(30.0..=120.0).contains(&probe.sample_rate)
+                    || !probe.normal.finite()
+            })
+        {
+            return Err("Invalid line-probe recorder settings".into());
+        }
+        self.clear_curve_probe_buffers(assets, commands);
+        if probes.is_empty() {
+            return Ok(());
+        }
+        let mut stencils = Vec::with_capacity(point_count);
+        let mut descriptors = Vec::with_capacity(probes.len());
+        let mut sample_strides = Vec::with_capacity(probes.len());
+        for probe in probes {
+            let offset = stencils.len() as u32;
+            let stride = (1.0 / (probe.sample_rate * time_step)).round().max(1.0) as u64;
+            stencils.extend(
+                probe
+                    .stencils
+                    .iter()
+                    .map(|stencil| gpu_curve_probe_stencil(*stencil, probe.normal, stride)),
+            );
+            descriptors.push(CurveProbeDescriptor {
+                id: probe.id,
+                offset,
+                count: probe.stencils.len() as u32,
+            });
+            sample_strides.push(stride);
+        }
+        let control = GpuProbeControl {
+            values: Vec4::new(
+                point_count as f32,
+                CURVE_PROBE_RING_FRAMES as f32,
+                MAX_CURVE_PROBE_POINTS as f32,
+                0.0,
+            ),
+        };
+        let output = vec![
+            GpuProbeSample {
+                values: Vec4::splat(f32::NAN),
+            };
+            CURVE_PROBE_RING_FRAMES * MAX_CURVE_PROBE_POINTS
+        ];
+        let handles = CurveProbeBufferHandles {
+            stencils: assets.add(ShaderBuffer::from(stencils)),
+            control: assets.add(ShaderBuffer::from(control)),
+            output: assets.add(ShaderBuffer::from(output)),
+            descriptors: descriptors.into(),
+            sample_strides: sample_strides.into(),
+            point_count: point_count as u32,
+        };
+        self.curve_probe_revision = self.curve_probe_revision.wrapping_add(1).max(1);
+        self.curve_probe_readback_entity = Some(
+            commands
+                .spawn((
+                    Readback::buffer(handles.output.clone()),
+                    CurveProbeReadbackTag {
+                        generation: self.generation,
+                        revision: self.curve_probe_revision,
+                        descriptors: handles.descriptors.clone(),
+                    },
+                ))
+                .id(),
+        );
+        self.curve_probes = Some(handles);
+        Ok(())
+    }
+
+    fn clear_curve_probe_buffers(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+    ) {
+        if let Some(handles) = self.curve_probes.take() {
+            for handle in handles.all() {
+                assets.remove(handle.id());
+            }
+        }
+        if let Some(entity) = self.curve_probe_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
+        self.curve_probe_revision = self.curve_probe_revision.wrapping_add(1).max(1);
     }
 
     pub fn ready(&self) -> bool {
@@ -418,6 +548,7 @@ impl WaveGpuRequest {
         commands: &mut Commands,
     ) -> Result<(), String> {
         self.clear_probe_buffers(assets, commands);
+        self.clear_curve_probe_buffers(assets, commands);
         let transfer = self
             .transfer
             .take()
@@ -462,6 +593,7 @@ impl WaveGpuRequest {
         transfer: Option<WaveTransferHandles>,
     ) {
         self.clear_probe_buffers(assets, commands);
+        self.clear_curve_probe_buffers(assets, commands);
         let expects_transfer = transfer.is_some();
         if let Some(entity) = self.readback_entity.take() {
             commands.entity(entity).despawn();
@@ -1031,6 +1163,28 @@ struct ProbeReadbackTag {
     ids: Arc<[u64]>,
 }
 
+#[derive(Clone, Debug)]
+pub struct CurveProbeInput {
+    pub id: u64,
+    pub normal: Point2,
+    pub sample_rate: f64,
+    pub stencils: Vec<Option<QuadraticPointStencil>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CurveProbeDescriptor {
+    id: u64,
+    offset: u32,
+    count: u32,
+}
+
+#[derive(Component)]
+struct CurveProbeReadbackTag {
+    generation: u64,
+    revision: u64,
+    descriptors: Arc<[CurveProbeDescriptor]>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointProbeRecord {
     pub probe_id: u64,
@@ -1040,11 +1194,28 @@ pub struct PointProbeRecord {
     pub energy_density: f64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CurveProbeRecord {
+    pub probe_id: u64,
+    pub time: f64,
+    pub displacement: Vec<f32>,
+    pub energy_density: Vec<f32>,
+    pub normal_flux: Vec<f32>,
+}
+
 #[derive(Resource, Default)]
 pub struct ProbeDisplay {
     pub generation: u64,
     pub revision: u64,
     pub records: Vec<PointProbeRecord>,
+    pub readbacks: u64,
+}
+
+#[derive(Resource, Default)]
+pub struct CurveProbeDisplay {
+    pub generation: u64,
+    pub revision: u64,
+    pub records: Vec<CurveProbeRecord>,
     pub readbacks: u64,
 }
 
@@ -1125,6 +1296,20 @@ struct GpuProbeSample {
     values: Vec4,
 }
 
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuCurveProbeStencil {
+    nodes_a: UVec4,
+    nodes_b: UVec4,
+    weights_a: Vec4,
+    weights_b: Vec4,
+    gradient_x_a: Vec4,
+    gradient_x_b: Vec4,
+    gradient_y_a: Vec4,
+    gradient_y_b: Vec4,
+    material: Vec4,
+    normal_stride_valid: Vec4,
+}
+
 fn gpu_probe_stencil(stencil: Option<QuadraticPointStencil>) -> GpuProbeStencil {
     let Some(stencil) = stencil else {
         return GpuProbeStencil::default();
@@ -1157,6 +1342,31 @@ fn gpu_probe_stencil(stencil: Option<QuadraticPointStencil>) -> GpuProbeStencil 
             stencil.stiffness as f32,
             1.0,
             0.0,
+        ),
+    }
+}
+
+fn gpu_curve_probe_stencil(
+    stencil: Option<QuadraticPointStencil>,
+    normal: Point2,
+    stride: u64,
+) -> GpuCurveProbeStencil {
+    let point = gpu_probe_stencil(stencil);
+    GpuCurveProbeStencil {
+        nodes_a: point.nodes_a,
+        nodes_b: point.nodes_b,
+        weights_a: point.weights_a,
+        weights_b: point.weights_b,
+        gradient_x_a: point.gradient_x_a,
+        gradient_x_b: point.gradient_x_b,
+        gradient_y_a: point.gradient_y_a,
+        gradient_y_b: point.gradient_y_b,
+        material: point.material,
+        normal_stride_valid: Vec4::new(
+            normal.x as f32,
+            normal.y as f32,
+            stride as f32,
+            f32::from(stencil.is_some()),
         ),
     }
 }
@@ -1263,19 +1473,69 @@ fn receive_probe_readback(
     display.readbacks = display.readbacks.saturating_add(1);
 }
 
+fn receive_curve_probe_readback(
+    event: On<ReadbackComplete>,
+    tags: Query<&CurveProbeReadbackTag>,
+    mut display: ResMut<CurveProbeDisplay>,
+) {
+    let Ok(tag) = tags.get(event.entity) else {
+        return;
+    };
+    let samples: Vec<GpuProbeSample> = event.to_shader_type();
+    if samples.len() != CURVE_PROBE_RING_FRAMES * MAX_CURVE_PROBE_POINTS {
+        return;
+    }
+    let mut records = Vec::new();
+    for descriptor in tag.descriptors.iter() {
+        for frame in 0..CURVE_PROBE_RING_FRAMES {
+            let base = frame * MAX_CURVE_PROBE_POINTS + descriptor.offset as usize;
+            let count = descriptor.count as usize;
+            let Some(values) = samples.get(base..base + count) else {
+                continue;
+            };
+            let Some(time) = values
+                .iter()
+                .map(|sample| sample.values.w)
+                .find(|time| time.is_finite())
+            else {
+                continue;
+            };
+            records.push(CurveProbeRecord {
+                probe_id: descriptor.id,
+                time: time as f64,
+                displacement: values.iter().map(|sample| sample.values.x).collect(),
+                energy_density: values.iter().map(|sample| sample.values.y).collect(),
+                normal_flux: values.iter().map(|sample| sample.values.z).collect(),
+            });
+        }
+    }
+    records.sort_by(|a, b| {
+        a.time
+            .total_cmp(&b.time)
+            .then_with(|| a.probe_id.cmp(&b.probe_id))
+    });
+    display.generation = tag.generation;
+    display.revision = tag.revision;
+    display.records = records;
+    display.readbacks = display.readbacks.saturating_add(1);
+}
+
 pub struct WaveGpuPlugin;
 
 impl Plugin for WaveGpuPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "wave.wgsl");
         embedded_asset!(app, "probe.wgsl");
+        embedded_asset!(app, "curve_probe.wgsl");
         embedded_asset!(app, "wave_transfer_old.wgsl");
         embedded_asset!(app, "wave_transfer_new.wgsl");
         app.init_resource::<WaveGpuRequest>()
             .init_resource::<WaveDisplay>()
             .init_resource::<ProbeDisplay>()
+            .init_resource::<CurveProbeDisplay>()
             .add_observer(receive_readback)
             .add_observer(receive_probe_readback)
+            .add_observer(receive_curve_probe_readback)
             .add_plugins(ExtractResourcePlugin::<WaveGpuRequest>::default());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -1284,7 +1544,11 @@ impl Plugin for WaveGpuPlugin {
             .add_systems(RenderStartup, init_pipeline)
             .add_systems(
                 Render,
-                (prepare_bind_group, prepare_probe_bind_group)
+                (
+                    prepare_bind_group,
+                    prepare_probe_bind_group,
+                    prepare_curve_probe_bind_group,
+                )
                     .in_set(RenderSystems::PrepareBindGroups),
             )
             .add_systems(RenderGraph, compute_wave.before(camera_driver));
@@ -1295,6 +1559,7 @@ impl Plugin for WaveGpuPlugin {
 struct WavePipeline {
     layout: BindGroupLayoutDescriptor,
     probe_layout: BindGroupLayoutDescriptor,
+    curve_probe_layout: BindGroupLayoutDescriptor,
     transfer_old_layout: BindGroupLayoutDescriptor,
     transfer_new_layout: BindGroupLayoutDescriptor,
     step: CachedComputePipelineId,
@@ -1305,6 +1570,7 @@ struct WavePipeline {
     transfer_boundary: CachedComputePipelineId,
     transfer_new: CachedComputePipelineId,
     probe: CachedComputePipelineId,
+    curve_probe: CachedComputePipelineId,
 }
 
 fn init_pipeline(
@@ -1357,6 +1623,26 @@ fn init_pipeline(
         layout: vec![probe_layout.clone()],
         shader: load_embedded_asset!(asset_server.as_ref(), "probe.wgsl"),
         entry_point: Some(Cow::Borrowed("sample_probes")),
+        ..default()
+    });
+    let curve_probe_layout = BindGroupLayoutDescriptor::new(
+        "wave line-probe buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only::<GpuParameters>(false),
+                storage_buffer_read_only::<Vec<GpuState>>(false),
+                storage_buffer_read_only::<Vec<GpuCurveProbeStencil>>(false),
+                storage_buffer_read_only::<GpuProbeControl>(false),
+                storage_buffer::<Vec<GpuProbeSample>>(false),
+            ),
+        ),
+    );
+    let curve_probe = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some(Cow::Borrowed("wave line probes")),
+        layout: vec![curve_probe_layout.clone()],
+        shader: load_embedded_asset!(asset_server.as_ref(), "curve_probe.wgsl"),
+        entry_point: Some(Cow::Borrowed("sample_curve_probes")),
         ..default()
     });
     let transfer_old_layout = BindGroupLayoutDescriptor::new(
@@ -1433,6 +1719,7 @@ fn init_pipeline(
     commands.insert_resource(WavePipeline {
         layout,
         probe_layout,
+        curve_probe_layout,
         transfer_old_layout,
         transfer_new_layout,
         step,
@@ -1443,6 +1730,7 @@ fn init_pipeline(
         transfer_boundary,
         transfer_new,
         probe,
+        curve_probe,
     });
 }
 
@@ -1468,6 +1756,62 @@ struct ProbeBindGroup {
     generation: u64,
     revision: u64,
     bind_group: BindGroup,
+}
+
+#[derive(Resource)]
+struct CurveProbeBindGroup {
+    generation: u64,
+    revision: u64,
+    bind_group: BindGroup,
+}
+
+fn prepare_curve_probe_bind_group(
+    mut commands: Commands,
+    request: Option<Res<WaveGpuRequest>>,
+    existing: Option<Res<CurveProbeBindGroup>>,
+    pipeline: Res<WavePipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+) {
+    let Some(request) = request else { return };
+    let Some(probes) = &request.curve_probes else {
+        if existing.is_some() {
+            commands.remove_resource::<CurveProbeBindGroup>();
+        }
+        return;
+    };
+    if existing.as_ref().is_some_and(|group| {
+        group.generation == request.generation && group.revision == request.curve_probe_revision
+    }) {
+        return;
+    }
+    let Some(wave) = &request.buffers else { return };
+    let (Some(parameters), Some(state), Some(stencils), Some(control), Some(output)) = (
+        gpu_buffers.get(&wave.parameters),
+        gpu_buffers.get(&wave.state),
+        gpu_buffers.get(&probes.stencils),
+        gpu_buffers.get(&probes.control),
+        gpu_buffers.get(&probes.output),
+    ) else {
+        return;
+    };
+    let bind_group = render_device.create_bind_group(
+        Some("wave line-probe bind group"),
+        &pipeline_cache.get_bind_group_layout(&pipeline.curve_probe_layout),
+        &BindGroupEntries::sequential((
+            parameters.buffer.as_entire_buffer_binding(),
+            state.buffer.as_entire_buffer_binding(),
+            stencils.buffer.as_entire_buffer_binding(),
+            control.buffer.as_entire_buffer_binding(),
+            output.buffer.as_entire_buffer_binding(),
+        )),
+    );
+    commands.insert_resource(CurveProbeBindGroup {
+        generation: request.generation,
+        revision: request.curve_probe_revision,
+        bind_group,
+    });
 }
 
 fn prepare_probe_bind_group(
@@ -1660,12 +2004,14 @@ fn prepare_bind_group(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_wave(
     mut render_context: RenderContext,
     request: Option<Res<WaveGpuRequest>>,
     group: Option<ResMut<WaveBindGroup>>,
     transfer_groups: Option<Res<WaveTransferBindGroups>>,
     probe_group: Option<Res<ProbeBindGroup>>,
+    curve_probe_group: Option<Res<CurveProbeBindGroup>>,
     pipeline: Res<WavePipeline>,
     pipeline_cache: Res<PipelineCache>,
 ) {
@@ -1683,6 +2029,8 @@ fn compute_wave(
         pipeline.transfer_old,
         pipeline.transfer_boundary,
         pipeline.transfer_new,
+        pipeline.probe,
+        pipeline.curve_probe,
     ];
     if pipelines.iter().any(|id| {
         matches!(
@@ -1783,6 +2131,13 @@ fn compute_wave(
                 && probe_group.revision == request.probe_revision
         })
         .and_then(|_| pipeline_cache.get_compute_pipeline(pipeline.probe));
+    let curve_probe_pipeline = curve_probe_group
+        .as_ref()
+        .filter(|curve_probe_group| {
+            curve_probe_group.generation == request.generation
+                && curve_probe_group.revision == request.curve_probe_revision
+        })
+        .and_then(|_| pipeline_cache.get_compute_pipeline(pipeline.curve_probe));
     for offset in 0..pending {
         pass.set_pipeline(step);
         pass.dispatch_workgroups(workgroups, 1, 1);
@@ -1799,6 +2154,21 @@ fn compute_wave(
             pass.set_pipeline(probe_pipeline);
             pass.set_bind_group(0, &probe_group.bind_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
+            pass.set_bind_group(0, &group.bind_group, &[]);
+        }
+        if request.curve_probes.as_ref().is_some_and(|probes| {
+            probes
+                .sample_strides
+                .iter()
+                .any(|stride| probe_sample_due(step_after, *stride))
+        }) && let (Some(curve_probe_pipeline), Some(curve_probe_group), Some(curve_probes)) = (
+            curve_probe_pipeline,
+            curve_probe_group.as_ref(),
+            request.curve_probes.as_ref(),
+        ) {
+            pass.set_pipeline(curve_probe_pipeline);
+            pass.set_bind_group(0, &curve_probe_group.bind_group, &[]);
+            pass.dispatch_workgroups(curve_probes.point_count.div_ceil(64), 1, 1);
             pass.set_bind_group(0, &group.bind_group, &[]);
         }
     }
@@ -1935,5 +2305,25 @@ mod tests {
         let shader = include_str!("probe.wgsl");
         assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
         assert!(!shader.contains("control.values.w + parameters.time_data.z"));
+    }
+
+    #[test]
+    fn curve_probe_shader_records_profile_energy_flux_and_gaps() {
+        let shader = include_str!("curve_probe.wgsl");
+        assert!(shader.contains("let normal_gradient"));
+        assert!(shader.contains("let flux = -stencil.material.y * velocity * normal_gradient"));
+        assert!(shader.contains("bitcast<f32>(0x7fc00000u)"));
+        assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
+    }
+
+    #[test]
+    fn curve_probe_presets_have_independent_solver_step_strides() {
+        let time_step = 0.001;
+        let strides =
+            [30.0, 60.0, 120.0].map(|rate| (1.0_f64 / (rate * time_step)).round().max(1.0) as u64);
+        assert_eq!(strides, [33, 17, 8]);
+        assert!(probe_sample_due(264, strides[0]));
+        assert!(!probe_sample_due(264, strides[1]));
+        assert!(probe_sample_due(264, strides[2]));
     }
 }

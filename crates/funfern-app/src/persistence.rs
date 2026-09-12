@@ -1,4 +1,7 @@
-use crate::editor::{Document, MAX_PROBES, ProbeDefinition, ProbeId, ProbeTarget};
+use crate::editor::{
+    Document, MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, ProbeDefinition, ProbeId, ProbeSamplingPreset,
+    ProbeTarget,
+};
 use funfern_core::*;
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +54,22 @@ struct StoredProbe {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StoredProbeTarget {
-    Point { position: [f64; 2] },
+    Point {
+        position: [f64; 2],
+    },
+    Segment {
+        start: [f64; 2],
+        end: [f64; 2],
+        preset: StoredProbeSamplingPreset,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredProbeSamplingPreset {
+    Low,
+    Medium,
+    High,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -575,7 +593,7 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 9,
+        version: 10,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
@@ -590,6 +608,15 @@ fn encode_document(document: &Document) -> FileV2 {
                 target: match probe.target {
                     ProbeTarget::Point(position) => StoredProbeTarget::Point {
                         position: [position.x, position.y],
+                    },
+                    ProbeTarget::Segment { start, end, preset } => StoredProbeTarget::Segment {
+                        start: [start.x, start.y],
+                        end: [end.x, end.y],
+                        preset: match preset {
+                            ProbeSamplingPreset::Low => StoredProbeSamplingPreset::Low,
+                            ProbeSamplingPreset::Medium => StoredProbeSamplingPreset::Medium,
+                            ProbeSamplingPreset::High => StoredProbeSamplingPreset::High,
+                        },
                     },
                 },
             })
@@ -612,11 +639,32 @@ fn decode_probes(stored: Vec<StoredProbe>) -> Result<Vec<ProbeDefinition>, Strin
                 StoredProbeTarget::Point { position } => {
                     ProbeTarget::Point(Point2::new(position[0], position[1]))
                 }
+                StoredProbeTarget::Segment { start, end, preset } => ProbeTarget::Segment {
+                    start: Point2::new(start[0], start[1]),
+                    end: Point2::new(end[0], end[1]),
+                    preset: match preset {
+                        StoredProbeSamplingPreset::Low => ProbeSamplingPreset::Low,
+                        StoredProbeSamplingPreset::Medium => ProbeSamplingPreset::Medium,
+                        StoredProbeSamplingPreset::High => ProbeSamplingPreset::High,
+                    },
+                },
             },
         })
         .collect::<Vec<_>>();
     if probes.iter().any(|probe| !probe.valid()) {
         return Err("Scene contains an invalid probe".into());
+    }
+    let segment_points = probes
+        .iter()
+        .map(|probe| match probe.target {
+            ProbeTarget::Segment { preset, .. } => preset.spatial_points(),
+            ProbeTarget::Point(_) => 0,
+        })
+        .sum::<usize>();
+    if segment_points > MAX_SEGMENT_PROBE_POINTS {
+        return Err(format!(
+            "Line probes exceed the {MAX_SEGMENT_PROBE_POINTS}-point sampling budget"
+        ));
     }
     let mut ids = std::collections::BTreeSet::new();
     if probes.iter().any(|probe| !ids.insert(probe.id)) {
@@ -648,7 +696,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 probes: vec![],
             }
         }
-        2..=9 => {
+        2..=10 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());

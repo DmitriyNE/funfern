@@ -19,6 +19,7 @@ pub struct QuadraticPointStencil {
 pub struct PointProbeSample {
     pub displacement: f64,
     pub velocity: f64,
+    pub gradient: Point2,
     pub energy_density: f64,
 }
 
@@ -157,6 +158,7 @@ impl QuadraticPointStencil {
         Ok(PointProbeSample {
             displacement: field,
             velocity: speed,
+            gradient,
             energy_density,
         })
     }
@@ -233,6 +235,7 @@ mod tests {
         let sample = stencil.sample(&displacement, &velocity).unwrap();
         assert!((sample.displacement - 1.1).abs() < 1.0e-12);
         assert!((sample.velocity - 4.0).abs() < 1.0e-12);
+        assert!((sample.gradient - Point2::new(2.0, -1.0)).norm() < 1.0e-12);
         assert!((sample.energy_density - (0.5 * 2.0 * 16.0 + 0.5 * 3.0 * 5.0)).abs() < 1.0e-11);
     }
 

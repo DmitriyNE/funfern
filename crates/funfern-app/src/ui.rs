@@ -1,8 +1,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::wave_gpu::forcing_weights;
 use crate::wave_gpu::{
-    PointProbeRecord, ProbeDisplay, PulseSettings, SourceSettings, WaveDisplay, WaveGpuRequest,
-    WaveTransfer,
+    CurveProbeDisplay, CurveProbeInput, CurveProbeRecord, PointProbeRecord, ProbeDisplay,
+    PulseSettings, SourceSettings, WaveDisplay, WaveGpuRequest, WaveTransfer,
 };
 use crate::{
     examples,
@@ -19,7 +19,7 @@ use bevy_egui::{
 use funfern_app::{
     editor::{
         Acceptance, BoundaryFaceTarget, Editor, GeometryControl, LoopKind, ProbeDefinition,
-        ProbeId, ProbeTarget,
+        ProbeId, ProbeSamplingPreset, ProbeTarget,
     },
     persistence::{self, LoadCandidate},
 };
@@ -54,6 +54,7 @@ enum InteractionMode {
     PlacePulse,
     MoveSource,
     PlaceProbe,
+    PlaceSegmentProbe,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FocusedFeature {
@@ -108,18 +109,52 @@ struct ProbeTrace {
     accept_after: f64,
 }
 
+#[derive(Clone, Default)]
+struct CurveProbeTrace {
+    frames: VecDeque<CurveProbeRecord>,
+    accept_after: f64,
+}
+
 #[derive(Clone)]
 struct CompiledProbeState {
     generation: u64,
     revision: u64,
+    curve_revision: u64,
     mesh_revision: u64,
     probes: Vec<ProbeDefinition>,
     sample_rate: f64,
     time_step: f64,
 }
 
-struct ProbeDrag {
-    id: ProbeId,
+enum ProbeDrag {
+    Point {
+        id: ProbeId,
+    },
+    SegmentEndpoint {
+        id: ProbeId,
+        start_endpoint: bool,
+    },
+    SegmentBody {
+        id: ProbeId,
+        anchor: Point2,
+        start: Point2,
+        end: Point2,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ProbeHit {
+    Point(ProbeId),
+    SegmentEndpoint(ProbeId, bool),
+    SegmentBody(ProbeId),
+}
+
+impl ProbeHit {
+    const fn id(self) -> ProbeId {
+        match self {
+            Self::Point(id) | Self::SegmentEndpoint(id, _) | Self::SegmentBody(id) => id,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -130,6 +165,10 @@ struct ProbeViewState {
     field: bool,
     velocity: bool,
     energy: bool,
+    profile: bool,
+    waterfall: bool,
+    normal_power: bool,
+    waterfall_gain: f32,
 }
 
 impl ProbeViewState {
@@ -141,6 +180,10 @@ impl ProbeViewState {
             field: true,
             velocity: true,
             energy: true,
+            profile: true,
+            waterfall: true,
+            normal_power: true,
+            waterfall_gain: 1.0,
         }
     }
 }
@@ -310,14 +353,17 @@ pub struct Playground {
     probe_windows: BTreeSet<ProbeId>,
     probe_views: BTreeMap<ProbeId, ProbeViewState>,
     probe_traces: BTreeMap<ProbeId, ProbeTrace>,
+    curve_probe_traces: BTreeMap<ProbeId, CurveProbeTrace>,
     probe_status: BTreeMap<ProbeId, String>,
     probe_observed: Vec<ProbeDefinition>,
     probe_compiled: Option<CompiledProbeState>,
     probe_display_readback: u64,
+    curve_probe_display_readback: u64,
     probe_sample_rate: f64,
     probe_history_seconds: f64,
     show_probe_markers: bool,
     probe_drag: Option<ProbeDrag>,
+    segment_probe_start: Option<Point2>,
     probe_name_edit: Option<(ProbeId, String)>,
     creation_role: CreationRole,
     material_selection: MaterialId,
@@ -464,14 +510,17 @@ impl Default for Playground {
             probe_windows: BTreeSet::new(),
             probe_views: BTreeMap::new(),
             probe_traces: BTreeMap::new(),
+            curve_probe_traces: BTreeMap::new(),
             probe_status: BTreeMap::new(),
             probe_observed: vec![],
             probe_compiled: None,
             probe_display_readback: 0,
+            curve_probe_display_readback: 0,
             probe_sample_rate: 120.0,
             probe_history_seconds: 10.0,
             show_probe_markers: true,
             probe_drag: None,
+            segment_probe_start: None,
             probe_name_edit: None,
             creation_role: CreationRole::Hole,
             material_selection: DEFAULT_MATERIAL,
@@ -645,6 +694,7 @@ impl Playground {
             .map(|probe| probe.id)
             .collect::<BTreeSet<_>>();
         self.probe_traces.retain(|id, _| ids.contains(id));
+        self.curve_probe_traces.retain(|id, _| ids.contains(id));
         self.probe_status.retain(|id, _| ids.contains(id));
         self.probe_windows.retain(|id| ids.contains(id));
         self.probe_views.retain(|id, _| ids.contains(id));
@@ -703,6 +753,55 @@ impl Playground {
         }
     }
 
+    fn ingest_curve_probe_samples(&mut self, display: &CurveProbeDisplay) {
+        self.reconcile_probe_definitions();
+        let Some(compiled) = &self.probe_compiled else {
+            return;
+        };
+        if display.generation != compiled.generation
+            || display.revision != compiled.curve_revision
+            || display.readbacks == self.curve_probe_display_readback
+        {
+            return;
+        }
+        self.curve_probe_display_readback = display.readbacks;
+        for probe in &self.editor.document.probes {
+            if !probe.enabled || !matches!(probe.target, ProbeTarget::Segment { .. }) {
+                continue;
+            }
+            let incoming = display
+                .records
+                .iter()
+                .filter(|record| record.probe_id == probe.id.0)
+                .cloned()
+                .collect::<Vec<_>>();
+            if incoming.is_empty() {
+                continue;
+            }
+            let trace = self.curve_probe_traces.entry(probe.id).or_default();
+            let last = trace
+                .frames
+                .back()
+                .map(|sample| sample.time)
+                .unwrap_or(trace.accept_after);
+            trace.frames.extend(
+                incoming
+                    .into_iter()
+                    .filter(|sample| sample.time > last + 1.0e-7),
+            );
+            if let Some(newest) = trace.frames.back().map(|sample| sample.time) {
+                let oldest = newest - self.probe_history_seconds;
+                while trace
+                    .frames
+                    .front()
+                    .is_some_and(|sample| sample.time < oldest)
+                {
+                    trace.frames.pop_front();
+                }
+            }
+        }
+    }
+
     fn refresh_probe_gpu(
         &mut self,
         request: &mut WaveGpuRequest,
@@ -727,51 +826,95 @@ impl Playground {
             return;
         }
         self.probe_status.clear();
-        let compiled = probes
+        let point_probes = probes
             .iter()
-            .map(|probe| {
-                let stencil = if !probe.enabled {
-                    None
-                } else {
-                    match probe.target {
-                        ProbeTarget::Point(position) => QuadraticPointStencil::build(
+            .filter_map(|probe| match probe.target {
+                ProbeTarget::Point(position) => {
+                    let stencil = if probe.enabled {
+                        QuadraticPointStencil::build(
                             mesh,
                             operator,
                             &self.mesh_committed_scene,
                             position,
                         )
                         .map_err(|error| error.to_string())
-                        .ok(),
-                    }
-                };
-                if probe.enabled && stencil.is_none() {
-                    let reason = match probe.target {
-                        ProbeTarget::Point(position) => QuadraticPointStencil::build(
+                        .ok()
+                    } else {
+                        None
+                    };
+                    if probe.enabled && stencil.is_none() {
+                        let reason = QuadraticPointStencil::build(
                             mesh,
                             operator,
                             &self.mesh_committed_scene,
                             position,
                         )
                         .err()
-                        .map_or_else(|| "Probe is inactive".into(), |error| error.to_string()),
-                    };
-                    self.probe_status.insert(probe.id, reason);
+                        .map_or_else(|| "Probe is inactive".into(), |error| error.to_string());
+                        self.probe_status.insert(probe.id, reason);
+                    }
+                    Some((probe.id.0, stencil))
                 }
-                (probe.id.0, stencil)
+                ProbeTarget::Segment { .. } => None,
             })
             .collect::<Vec<_>>();
-        match request.update_point_probes(
-            assets,
-            commands,
-            &compiled,
-            self.probe_sample_rate,
-            self.wave_time_step,
-        ) {
+        let curve_probes = probes
+            .iter()
+            .filter_map(|probe| match probe.target {
+                ProbeTarget::Point(_) => None,
+                ProbeTarget::Segment { start, end, preset } => {
+                    let count = preset.spatial_points();
+                    let delta = end - start;
+                    let length = delta.norm();
+                    let normal = Point2::new(-delta.y / length, delta.x / length);
+                    let stencils = (0..count)
+                        .map(|index| {
+                            let fraction = index as f64 / (count - 1) as f64;
+                            let position = start + delta * fraction;
+                            probe
+                                .enabled
+                                .then(|| {
+                                    QuadraticPointStencil::build(
+                                        mesh,
+                                        operator,
+                                        &self.mesh_committed_scene,
+                                        position,
+                                    )
+                                    .ok()
+                                })
+                                .flatten()
+                        })
+                        .collect::<Vec<_>>();
+                    if probe.enabled && stencils.iter().all(Option::is_none) {
+                        self.probe_status
+                            .insert(probe.id, "Line probe does not intersect the mesh".into());
+                    }
+                    Some(CurveProbeInput {
+                        id: probe.id.0,
+                        normal,
+                        sample_rate: preset.sample_rate(),
+                        stencils,
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        match request
+            .update_point_probes(
+                assets,
+                commands,
+                &point_probes,
+                self.probe_sample_rate,
+                self.wave_time_step,
+            )
+            .and_then(|()| {
+                request.update_curve_probes(assets, commands, &curve_probes, self.wave_time_step)
+            }) {
             Ok(()) => {
                 self.probe_display_readback = 0;
                 self.probe_compiled = Some(CompiledProbeState {
                     generation: request.generation(),
                     revision: request.probe_revision(),
+                    curve_revision: request.curve_probe_revision(),
                     mesh_revision: mesh.mesh_revision,
                     probes,
                     sample_rate: self.probe_sample_rate,
@@ -789,7 +932,9 @@ impl Playground {
 
     fn clear_all_probe_traces(&mut self) {
         self.probe_traces.clear();
+        self.curve_probe_traces.clear();
         self.probe_display_readback = 0;
+        self.curve_probe_display_readback = 0;
     }
     fn world(&self, p: Pos2, r: Rect) -> Point2 {
         Point2::new(
@@ -804,6 +949,7 @@ impl Playground {
         self.selected_spans.clear();
         self.selected_probe = None;
         self.probe_drag = None;
+        self.segment_probe_start = None;
         self.probe_name_edit = None;
         self.gizmo_pivot = None;
         self.pending_span_click = None;
@@ -3337,25 +3483,59 @@ impl Playground {
                 self.probe_windows.remove(&id);
                 continue;
             };
-            let samples = self
+            let point_samples = self
                 .probe_traces
                 .get(&id)
                 .map(|trace| trace.samples.iter().copied().collect::<Vec<_>>())
                 .unwrap_or_default();
+            let curve_frames = self
+                .curve_probe_traces
+                .get(&id)
+                .map(|trace| trace.frames.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let segment_length = match probe.target {
+                ProbeTarget::Point(_) => None,
+                ProbeTarget::Segment { start, end, .. } => Some((end - start).norm()),
+            };
+            let aggregate_samples = segment_length.map_or_else(Vec::new, |length| {
+                curve_frames
+                    .iter()
+                    .map(|frame| {
+                        let (mean_energy, normal_power, _) =
+                            Self::curve_probe_aggregate(frame, length);
+                        PointProbeRecord {
+                            probe_id: frame.probe_id,
+                            time: frame.time,
+                            displacement: normal_power,
+                            velocity: 0.0,
+                            energy_density: mean_energy,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            });
             let status = self.probe_status.get(&id).cloned();
             let mut view = self
                 .probe_views
                 .remove(&id)
                 .unwrap_or_else(|| ProbeViewState::new(self.probe_history_seconds));
+            let newest_time = point_samples
+                .last()
+                .map(|sample| sample.time)
+                .or_else(|| curve_frames.last().map(|frame| frame.time));
             if view.live
-                && let Some(sample) = samples.last()
+                && let Some(time) = newest_time
             {
-                view.end_time = sample.time;
+                view.end_time = time;
             }
             view.span = view.span.clamp(0.02, self.probe_history_seconds);
             let mut open = true;
             let mut clear = false;
-            egui::Window::new(format!("{} · point probe", probe.name))
+            let kind = if segment_length.is_some() {
+                "line probe"
+            } else {
+                "point probe"
+            };
+            egui::Window::new(format!("{} · {kind}", probe.name))
                 .id(egui::Id::new(("probe_readout", id.0)))
                 .open(&mut open)
                 .default_width(430.0)
@@ -3368,13 +3548,20 @@ impl Playground {
                             .clicked()
                         {
                             view.live = true;
-                            if let Some(sample) = samples.last() {
-                                view.end_time = sample.time;
+                            if let Some(time) = newest_time {
+                                view.end_time = time;
                             }
                         }
-                        ui.checkbox(&mut view.field, "Field");
-                        ui.checkbox(&mut view.velocity, "Velocity");
-                        ui.checkbox(&mut view.energy, "Energy");
+                        if segment_length.is_some() {
+                            ui.checkbox(&mut view.profile, "Profile");
+                            ui.checkbox(&mut view.waterfall, "Waterfall");
+                            ui.checkbox(&mut view.energy, "Mean energy");
+                            ui.checkbox(&mut view.normal_power, "Normal power");
+                        } else {
+                            ui.checkbox(&mut view.field, "Field");
+                            ui.checkbox(&mut view.velocity, "Velocity");
+                            ui.checkbox(&mut view.energy, "Energy");
+                        }
                         if ui.small_button("Clear").clicked() {
                             clear = true;
                         }
@@ -3382,33 +3569,77 @@ impl Playground {
                     if let Some(status) = &status {
                         ui.colored_label(GOLD, status);
                     }
-                    if view.field {
+                    if segment_length.is_some() {
+                        if let Some(frame) = curve_frames.last() {
+                            let (_, _, coverage) = Self::curve_probe_aggregate(
+                                frame,
+                                segment_length.unwrap_or_default(),
+                            );
+                            if coverage < 0.999 {
+                                ui.small(format!("Valid coverage {:.0}%", coverage * 100.0));
+                            }
+                        }
+                        if view.profile {
+                            Self::curve_probe_profile(ui, &curve_frames, &view);
+                        }
+                        if view.waterfall {
+                            Self::curve_probe_waterfall(
+                                ui,
+                                &curve_frames,
+                                &aggregate_samples,
+                                &mut view,
+                                self.probe_history_seconds,
+                            );
+                        }
+                        if view.energy {
+                            Self::probe_plot(
+                                ui,
+                                "Mean energy density",
+                                &aggregate_samples,
+                                |sample| sample.energy_density,
+                                GOLD,
+                                &mut view,
+                                self.probe_history_seconds,
+                            );
+                        }
+                        if view.normal_power {
+                            Self::probe_plot(
+                                ui,
+                                "Signed normal power",
+                                &aggregate_samples,
+                                |sample| sample.displacement,
+                                TEAL,
+                                &mut view,
+                                self.probe_history_seconds,
+                            );
+                        }
+                    } else if view.field {
                         Self::probe_plot(
                             ui,
                             "Field",
-                            &samples,
+                            &point_samples,
                             |sample| sample.displacement,
                             Color32::from_rgb(72, 166, 255),
                             &mut view,
                             self.probe_history_seconds,
                         );
                     }
-                    if view.velocity {
+                    if segment_length.is_none() && view.velocity {
                         Self::probe_plot(
                             ui,
                             "Velocity",
-                            &samples,
+                            &point_samples,
                             |sample| sample.velocity,
                             Color32::from_rgb(91, 220, 194),
                             &mut view,
                             self.probe_history_seconds,
                         );
                     }
-                    if view.energy {
+                    if segment_length.is_none() && view.energy {
                         Self::probe_plot(
                             ui,
                             "Local energy density",
-                            &samples,
+                            &point_samples,
                             |sample| sample.energy_density,
                             GOLD,
                             &mut view,
@@ -3424,6 +3655,197 @@ impl Playground {
                 self.probe_windows.remove(&id);
             }
             self.probe_views.insert(id, view);
+        }
+    }
+
+    fn curve_probe_aggregate(frame: &CurveProbeRecord, length: f64) -> (f64, f64, f64) {
+        let intervals = frame.displacement.len().saturating_sub(1);
+        if intervals == 0 || !length.is_finite() {
+            return (f64::NAN, f64::NAN, 0.0);
+        }
+        let mut energy = 0.0;
+        let mut power = 0.0;
+        let mut valid = 0usize;
+        for index in 0..intervals {
+            let values = (
+                frame.energy_density[index] as f64,
+                frame.energy_density[index + 1] as f64,
+                frame.normal_flux[index] as f64,
+                frame.normal_flux[index + 1] as f64,
+            );
+            if values.0.is_finite()
+                && values.1.is_finite()
+                && values.2.is_finite()
+                && values.3.is_finite()
+            {
+                energy += 0.5 * (values.0 + values.1);
+                power += 0.5 * (values.2 + values.3);
+                valid += 1;
+            }
+        }
+        if valid == 0 {
+            return (f64::NAN, f64::NAN, 0.0);
+        }
+        (
+            energy / valid as f64,
+            power * length / intervals as f64,
+            valid as f64 / intervals as f64,
+        )
+    }
+
+    fn curve_probe_profile(ui: &mut egui::Ui, frames: &[CurveProbeRecord], view: &ProbeViewState) {
+        ui.small("Field profile");
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(120.0), 110.0),
+            egui::Sense::hover(),
+        );
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        let Some(frame) = frames.iter().min_by(|a, b| {
+            (a.time - view.end_time)
+                .abs()
+                .total_cmp(&(b.time - view.end_time).abs())
+        }) else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Waiting for samples",
+                egui::FontId::monospace(11.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+            return;
+        };
+        let maximum = frame
+            .displacement
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .map(f32::abs)
+            .fold(0.0, f32::max)
+            .max(1.0e-12);
+        let count = frame.displacement.len().max(2);
+        let mut run = Vec::new();
+        for (index, value) in frame.displacement.iter().copied().enumerate() {
+            if value.is_finite() {
+                run.push(egui::pos2(
+                    egui::lerp(
+                        rect.left()..=rect.right(),
+                        index as f32 / (count - 1) as f32,
+                    ),
+                    egui::lerp(rect.bottom()..=rect.top(), value / maximum * 0.5 + 0.5),
+                ));
+            } else if run.len() >= 2 {
+                ui.painter().add(egui::Shape::line(
+                    std::mem::take(&mut run),
+                    Stroke::new(1.5, SELECT),
+                ));
+            } else {
+                run.clear();
+            }
+        }
+        if run.len() >= 2 {
+            ui.painter()
+                .add(egui::Shape::line(run, Stroke::new(1.5, SELECT)));
+        }
+    }
+
+    fn curve_probe_waterfall(
+        ui: &mut egui::Ui,
+        frames: &[CurveProbeRecord],
+        times: &[PointProbeRecord],
+        view: &mut ProbeViewState,
+        maximum_span: f64,
+    ) {
+        ui.horizontal(|ui| {
+            ui.small("Field waterfall");
+            ui.add(
+                egui::Slider::new(&mut view.waterfall_gain, 0.1..=10.0)
+                    .logarithmic(true)
+                    .text("gain"),
+            );
+        });
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(120.0), 170.0),
+            egui::Sense::drag(),
+        );
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, view) else {
+            return;
+        };
+        let span = maximum_time - minimum_time;
+        if response.drag_started() {
+            view.live = false;
+        }
+        if response.dragged() {
+            view.end_time -= response.drag_delta().x as f64 / rect.width() as f64 * span;
+        }
+        if response.hovered() {
+            let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                view.live = false;
+                view.span = (span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+            }
+        }
+        let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, view) else {
+            return;
+        };
+        let visible = frames
+            .iter()
+            .filter(|frame| frame.time >= minimum_time && frame.time <= maximum_time)
+            .collect::<Vec<_>>();
+        let maximum = visible
+            .iter()
+            .flat_map(|frame| frame.displacement.iter())
+            .copied()
+            .filter(|value| value.is_finite())
+            .map(f32::abs)
+            .fold(0.0, f32::max)
+            .max(1.0e-12)
+            / view.waterfall_gain;
+        for (row, frame) in visible.iter().enumerate() {
+            let count = frame.displacement.len();
+            if count == 0 {
+                continue;
+            }
+            let top = egui::lerp(
+                rect.bottom()..=rect.top(),
+                (row + 1) as f32 / visible.len() as f32,
+            );
+            let bottom = egui::lerp(
+                rect.bottom()..=rect.top(),
+                row as f32 / visible.len() as f32,
+            );
+            for (column, value) in frame.displacement.iter().copied().enumerate() {
+                if !value.is_finite() {
+                    continue;
+                }
+                let normalized = (value / maximum).clamp(-1.0, 1.0);
+                let color = if normalized >= 0.0 {
+                    Color32::from_rgb(
+                        (30.0 + normalized * 225.0) as u8,
+                        (45.0 + normalized * 90.0) as u8,
+                        (60.0 + normalized * 45.0) as u8,
+                    )
+                } else {
+                    let amount = -normalized;
+                    Color32::from_rgb(
+                        (30.0 + amount * 35.0) as u8,
+                        (45.0 + amount * 65.0) as u8,
+                        (60.0 + amount * 195.0) as u8,
+                    )
+                };
+                let left = egui::lerp(rect.left()..=rect.right(), column as f32 / count as f32);
+                let right = egui::lerp(
+                    rect.left()..=rect.right(),
+                    (column + 1) as f32 / count as f32,
+                );
+                ui.painter().rect_filled(
+                    Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom)),
+                    0.0,
+                    color,
+                );
+            }
         }
     }
 
@@ -3926,6 +4348,19 @@ impl Playground {
                     InteractionMode::PlaceProbe
                 };
             }
+            let placing_line = self.interaction_mode == InteractionMode::PlaceSegmentProbe;
+            if ui
+                .add(egui::Button::new("+ Line probe").selected(placing_line))
+                .on_hover_text("Click a start point and an end point; repeat to add more")
+                .clicked()
+            {
+                self.segment_probe_start = None;
+                self.interaction_mode = if placing_line {
+                    InteractionMode::Select
+                } else {
+                    InteractionMode::PlaceSegmentProbe
+                };
+            }
             if ui.button("Clear all").clicked() {
                 for probe in self.editor.document.probes.clone() {
                     self.clear_probe_trace(probe.id);
@@ -3959,7 +4394,10 @@ impl Playground {
                 ui.painter().circle_filled(rect.center(), 5.0, color);
                 if ui
                     .selectable_label(selected, &probe.name)
-                    .on_hover_text("Point probe")
+                    .on_hover_text(match probe.target {
+                        ProbeTarget::Point(_) => "Point probe",
+                        ProbeTarget::Segment { .. } => "Line probe",
+                    })
                     .clicked()
                 {
                     self.select_probe(probe.id);
@@ -3980,21 +4418,47 @@ impl Playground {
             });
             if let Some(status) = self.probe_status.get(&probe.id) {
                 ui.small(status);
-            } else if let Some(sample) = self
-                .probe_traces
-                .get(&probe.id)
-                .and_then(|trace| trace.samples.back())
-            {
-                ui.small(format!(
-                    "u {:+.3e} · energy {:.3e}",
-                    sample.displacement, sample.energy_density
-                ));
             } else {
-                ui.small(if probe.enabled {
-                    "Waiting for samples"
-                } else {
-                    "Disabled"
-                });
+                match probe.target {
+                    ProbeTarget::Point(_) => {
+                        if let Some(sample) = self
+                            .probe_traces
+                            .get(&probe.id)
+                            .and_then(|trace| trace.samples.back())
+                        {
+                            ui.small(format!(
+                                "u {:+.3e} · energy {:.3e}",
+                                sample.displacement, sample.energy_density
+                            ));
+                        } else {
+                            ui.small(if probe.enabled {
+                                "Waiting for samples"
+                            } else {
+                                "Disabled"
+                            });
+                        }
+                    }
+                    ProbeTarget::Segment { start, end, .. } => {
+                        if let Some(frame) = self
+                            .curve_probe_traces
+                            .get(&probe.id)
+                            .and_then(|trace| trace.frames.back())
+                        {
+                            let (_, power, coverage) =
+                                Self::curve_probe_aggregate(frame, (end - start).norm());
+                            ui.small(format!(
+                                "power {power:+.3e} · {:.0}% coverage",
+                                coverage * 100.0
+                            ));
+                        } else {
+                            ui.small(if probe.enabled {
+                                "Waiting for samples"
+                            } else {
+                                "Disabled"
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -4013,7 +4477,10 @@ impl Playground {
             return;
         };
         ui.separator();
-        ui.label("Selected point probe");
+        ui.label(match probe.target {
+            ProbeTarget::Point(_) => "Selected point probe",
+            ProbeTarget::Segment { .. } => "Selected line probe",
+        });
         if !matches!(self.probe_name_edit.as_ref(), Some((candidate, _)) if *candidate == id) {
             self.probe_name_edit = Some((id, probe.name.clone()));
         }
@@ -4043,6 +4510,56 @@ impl Playground {
                 self.error(result);
             }
         });
+        if let ProbeTarget::Segment { start, end, preset } = probe.target {
+            let mut next_preset = preset;
+            egui::ComboBox::from_label("Sampling")
+                .selected_text(match preset {
+                    ProbeSamplingPreset::Low => "Low · 32 × 30 Hz",
+                    ProbeSamplingPreset::Medium => "Medium · 64 × 60 Hz",
+                    ProbeSamplingPreset::High => "High · 128 × 120 Hz",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut next_preset,
+                        ProbeSamplingPreset::Low,
+                        "Low · 32 × 30 Hz",
+                    );
+                    ui.selectable_value(
+                        &mut next_preset,
+                        ProbeSamplingPreset::Medium,
+                        "Medium · 64 × 60 Hz",
+                    );
+                    ui.selectable_value(
+                        &mut next_preset,
+                        ProbeSamplingPreset::High,
+                        "High · 128 × 120 Hz",
+                    );
+                });
+            if next_preset != preset {
+                probe.target = ProbeTarget::Segment {
+                    start,
+                    end,
+                    preset: next_preset,
+                };
+                let result = self.editor.update_probe(probe.clone());
+                self.error(result);
+                self.clear_probe_trace(id);
+            }
+            if ui
+                .button("Flip direction")
+                .on_hover_text("Reverse the line and its positive normal")
+                .clicked()
+            {
+                probe.target = ProbeTarget::Segment {
+                    start: end,
+                    end: start,
+                    preset: next_preset,
+                };
+                let result = self.editor.update_probe(probe.clone());
+                self.error(result);
+                self.clear_probe_trace(id);
+            }
+        }
         ui.horizontal(|ui| {
             if ui.button("Open readout").clicked() {
                 self.probe_windows.insert(id);
@@ -4052,6 +4569,7 @@ impl Playground {
                 self.error(result);
                 self.probe_windows.remove(&id);
                 self.probe_traces.remove(&id);
+                self.curve_probe_traces.remove(&id);
                 self.probe_status.remove(&id);
                 self.selected_probe = None;
                 self.interaction_mode = InteractionMode::Select;
@@ -4077,6 +4595,13 @@ impl Playground {
             .map_or(trace.accept_after, |sample| sample.time);
         trace.samples.clear();
         trace.accept_after = current_time.max(newest);
+        let curve = self.curve_probe_traces.entry(id).or_default();
+        let newest = curve
+            .frames
+            .back()
+            .map_or(curve.accept_after, |sample| sample.time);
+        curve.frames.clear();
+        curve.accept_after = current_time.max(newest);
     }
 
     fn simulation_panel(&mut self, ui: &mut egui::Ui) {
@@ -5346,6 +5871,9 @@ impl Playground {
         }
         if enabled {
             if !typing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                let cancelled_segment_start = self.interaction_mode
+                    == InteractionMode::PlaceSegmentProbe
+                    && self.segment_probe_start.take().is_some();
                 let probe_drag = self.probe_drag.take();
                 let drag = self.drag.take();
                 match &drag {
@@ -5361,7 +5889,7 @@ impl Playground {
                 self.pending_span_click = None;
                 if probe_drag.is_some() || drag.is_some() || self.editor.editing() {
                     self.editor.cancel();
-                } else {
+                } else if !cancelled_segment_start {
                     self.custom.clear();
                     self.interaction_mode = InteractionMode::Select;
                 }
@@ -5395,6 +5923,7 @@ impl Playground {
                     self.error(result);
                     self.probe_windows.remove(&id);
                     self.probe_traces.remove(&id);
+                    self.curve_probe_traces.remove(&id);
                     self.selected_probe = None;
                 } else if ctx.input(|i| i.key_pressed(egui::Key::Delete))
                     && let Some((id, Some(index))) = self.selection
@@ -5455,10 +5984,34 @@ impl Playground {
                 } else if primary && self.interaction_mode == InteractionMode::Select {
                     self.refresh_curves();
                     let modifiers = ctx.input(|input| input.modifiers);
-                    if let Some(id) = self.hit_probe(p, r) {
+                    if let Some(hit) = self.hit_probe(p, r) {
+                        let id = hit.id();
                         self.select_probe(id);
                         self.editor.begin();
-                        self.probe_drag = Some(ProbeDrag { id });
+                        self.probe_drag = Some(match hit {
+                            ProbeHit::Point(id) => ProbeDrag::Point { id },
+                            ProbeHit::SegmentEndpoint(id, start_endpoint) => {
+                                ProbeDrag::SegmentEndpoint { id, start_endpoint }
+                            }
+                            ProbeHit::SegmentBody(id) => {
+                                let probe = self
+                                    .editor
+                                    .document
+                                    .probes
+                                    .iter()
+                                    .find(|probe| probe.id == id)
+                                    .expect("hit probe exists");
+                                let ProbeTarget::Segment { start, end, .. } = probe.target else {
+                                    unreachable!()
+                                };
+                                ProbeDrag::SegmentBody {
+                                    id,
+                                    anchor: self.world(p, r),
+                                    start,
+                                    end,
+                                }
+                            }
+                        });
                     } else if let Some((id, index)) = self.hit_handle(p, r) {
                         let control = GeometryControl::Loop(id, index);
                         self.select_control(control);
@@ -5594,25 +6147,79 @@ impl Playground {
                         + Point2::new(-delta.x as f64 / self.scale, delta.y as f64 / self.scale);
                 } else if response.dragged_by(egui::PointerButton::Primary) {
                     let world = self.world(p, r);
-                    if let Some(probe_drag) = self.probe_drag.as_mut() {
-                        let position =
+                    if let Some(probe_drag) = self.probe_drag.as_ref() {
+                        let snap = |point: Point2| {
                             if self.snap_to_grid || ctx.input(|input| input.modifiers.shift) {
                                 Point2::new(
-                                    (world.x / self.snap_step).round() * self.snap_step,
-                                    (world.y / self.snap_step).round() * self.snap_step,
+                                    (point.x / self.snap_step).round() * self.snap_step,
+                                    (point.y / self.snap_step).round() * self.snap_step,
                                 )
                             } else {
-                                world
-                            };
-                        if let Some(probe) = self
-                            .editor
-                            .document
-                            .probes
-                            .iter_mut()
-                            .find(|probe| probe.id == probe_drag.id)
+                                point
+                            }
+                        };
+                        let (id, target) = match *probe_drag {
+                            ProbeDrag::Point { id } => (id, Some(ProbeTarget::Point(snap(world)))),
+                            ProbeDrag::SegmentEndpoint { id, start_endpoint } => {
+                                let target = self.editor.document.probes.iter().find_map(|probe| {
+                                    if probe.id != id {
+                                        return None;
+                                    }
+                                    let ProbeTarget::Segment { start, end, preset } = probe.target
+                                    else {
+                                        return None;
+                                    };
+                                    let (start, end) = if start_endpoint {
+                                        (snap(world), end)
+                                    } else {
+                                        (start, snap(world))
+                                    };
+                                    ((end - start).norm() >= 1.0e-6)
+                                        .then_some(ProbeTarget::Segment { start, end, preset })
+                                });
+                                (id, target)
+                            }
+                            ProbeDrag::SegmentBody {
+                                id,
+                                anchor,
+                                start,
+                                end,
+                            } => {
+                                let initial_center = (start + end) * 0.5;
+                                let center = snap(initial_center + world - anchor);
+                                let delta = center - initial_center;
+                                (
+                                    id,
+                                    Some(ProbeTarget::Segment {
+                                        start: start + delta,
+                                        end: end + delta,
+                                        preset: self
+                                            .editor
+                                            .document
+                                            .probes
+                                            .iter()
+                                            .find_map(|probe| {
+                                                (probe.id == id).then_some(probe.target)
+                                            })
+                                            .and_then(|target| match target {
+                                                ProbeTarget::Segment { preset, .. } => Some(preset),
+                                                _ => None,
+                                            })
+                                            .unwrap_or_default(),
+                                    }),
+                                )
+                            }
+                        };
+                        if let Some(target) = target
+                            && let Some(probe) = self
+                                .editor
+                                .document
+                                .probes
+                                .iter_mut()
+                                .find(|probe| probe.id == id)
                         {
-                            probe.target = ProbeTarget::Point(position);
-                            self.probe_traces.remove(&probe_drag.id);
+                            probe.target = target;
+                            self.clear_probe_trace(id);
                         }
                     }
                     let snap_to_grid =
@@ -5744,7 +6351,7 @@ impl Playground {
                     self.probe_drag = None;
                     self.drag = None;
                     self.pending_span_click = None;
-                    if let Some(id) = self.hit_probe(p, r) {
+                    if let Some(id) = self.hit_probe(p, r).map(ProbeHit::id) {
                         self.select_probe(id);
                         self.probe_windows.insert(id);
                     } else if let Some((id, t)) = self.hit_curve(p, r) {
@@ -5819,6 +6426,18 @@ impl Playground {
                             if let Some(id) = self.error(result) {
                                 self.select_probe(id);
                                 self.probe_windows.insert(id);
+                            }
+                        }
+                        InteractionMode::PlaceSegmentProbe => {
+                            let point = self.world(p, r);
+                            if let Some(start) = self.segment_probe_start.take() {
+                                let result = self.editor.create_segment_probe(start, point);
+                                if let Some(id) = self.error(result) {
+                                    self.select_probe(id);
+                                    self.probe_windows.insert(id);
+                                }
+                            } else {
+                                self.segment_probe_start = Some(point);
                             }
                         }
                         InteractionMode::Select => {}
@@ -6481,6 +7100,17 @@ impl Playground {
                     painter.circle_filled(pointer, 5.0, Color32::from_rgb(16, 23, 31));
                     painter.circle_stroke(pointer, 7.0, Stroke::new(2.0, SELECT));
                 }
+                InteractionMode::PlaceSegmentProbe => {
+                    if let Some(start) = self.segment_probe_start {
+                        painter.line_segment(
+                            [self.screen(start, r), pointer],
+                            Stroke::new(2.0, SELECT),
+                        );
+                        painter.circle_filled(self.screen(start, r), 4.0, SELECT);
+                    } else {
+                        painter.circle_stroke(pointer, 6.0, Stroke::new(2.0, SELECT));
+                    }
+                }
                 _ => {}
             }
         }
@@ -6504,8 +7134,6 @@ impl Playground {
         }
         if self.show_probe_markers {
             for probe in &self.editor.document.probes {
-                let ProbeTarget::Point(position) = probe.target;
-                let center = self.screen(position, r);
                 let selected = self.selected_probe == Some(probe.id);
                 let color = if self.probe_status.contains_key(&probe.id) {
                     RED
@@ -6514,14 +7142,45 @@ impl Playground {
                 } else {
                     Color32::from_rgb(probe.color[0], probe.color[1], probe.color[2])
                 };
-                painter.circle_filled(center, if selected { 6.0 } else { 4.5 }, color);
-                painter.circle_stroke(
-                    center,
-                    if selected { 9.0 } else { 7.0 },
-                    Stroke::new(if selected { 2.0 } else { 1.3 }, Color32::WHITE),
-                );
+                let label_at = match probe.target {
+                    ProbeTarget::Point(position) => {
+                        let center = self.screen(position, r);
+                        painter.circle_filled(center, if selected { 6.0 } else { 4.5 }, color);
+                        painter.circle_stroke(
+                            center,
+                            if selected { 9.0 } else { 7.0 },
+                            Stroke::new(if selected { 2.0 } else { 1.3 }, Color32::WHITE),
+                        );
+                        center
+                    }
+                    ProbeTarget::Segment { start, end, .. } => {
+                        let a = self.screen(start, r);
+                        let b = self.screen(end, r);
+                        painter.line_segment(
+                            [a, b],
+                            Stroke::new(if selected { 3.0 } else { 2.0 }, color),
+                        );
+                        let midpoint = a + (b - a) * 0.5;
+                        let direction = b - a;
+                        let length = direction.length().max(1.0);
+                        let normal = egui::vec2(direction.y, -direction.x) / length;
+                        let tip = midpoint + normal * 18.0;
+                        painter.arrow(midpoint, tip - midpoint, Stroke::new(1.5, color));
+                        if selected {
+                            for endpoint in [a, b] {
+                                painter.circle_filled(endpoint, 5.0, color);
+                                painter.circle_stroke(
+                                    endpoint,
+                                    7.0,
+                                    Stroke::new(1.5, Color32::WHITE),
+                                );
+                            }
+                        }
+                        midpoint
+                    }
+                };
                 painter.text(
-                    center + egui::vec2(10.0, -10.0),
+                    label_at + egui::vec2(10.0, -10.0),
                     egui::Align2::LEFT_BOTTOM,
                     probe.id.0.to_string(),
                     egui::FontId::monospace(10.0),
@@ -6571,6 +7230,14 @@ impl Playground {
             InteractionMode::PlacePulse => ("Placing pulse", "Click repeatedly to inject"),
             InteractionMode::MoveSource => ("Moving source", "Click to reposition"),
             InteractionMode::PlaceProbe => ("Placing point probes", "Click repeatedly to add"),
+            InteractionMode::PlaceSegmentProbe => (
+                "Placing line probes",
+                if self.segment_probe_start.is_some() {
+                    "Click the end point"
+                } else {
+                    "Click the start point"
+                },
+            ),
         };
         egui::Area::new("interaction_mode_overlay".into())
             .fixed_pos(viewport.left_top() + egui::vec2(12.0, 12.0))
@@ -6594,6 +7261,7 @@ impl Playground {
                             InteractionMode::PlacePulse
                                 | InteractionMode::MoveSource
                                 | InteractionMode::PlaceProbe
+                                | InteractionMode::PlaceSegmentProbe
                         ) {
                             "Done"
                         } else {
@@ -6601,6 +7269,7 @@ impl Playground {
                         };
                         if ui.button(cancel_label).clicked() {
                             self.custom.clear();
+                            self.segment_probe_start = None;
                             self.interaction_mode = InteractionMode::Select;
                         }
                     });
@@ -6717,14 +7386,38 @@ impl Playground {
             .min_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(id, i, _)| (id, i))
     }
-    fn hit_probe(&self, point: Pos2, viewport: Rect) -> Option<ProbeId> {
+    fn hit_probe(&self, point: Pos2, viewport: Rect) -> Option<ProbeHit> {
         if !self.show_probe_markers {
             return None;
         }
-        self.editor.document.probes.iter().rev().find_map(|probe| {
-            let ProbeTarget::Point(position) = probe.target;
-            (self.screen(position, viewport).distance(point) <= 10.0).then_some(probe.id)
-        })
+        self.editor
+            .document
+            .probes
+            .iter()
+            .rev()
+            .find_map(|probe| match probe.target {
+                ProbeTarget::Point(position) => (self.screen(position, viewport).distance(point)
+                    <= 10.0)
+                    .then_some(ProbeHit::Point(probe.id)),
+                ProbeTarget::Segment { start, end, .. } => {
+                    let a = self.screen(start, viewport);
+                    let b = self.screen(end, viewport);
+                    if a.distance(point) <= 10.0 {
+                        Some(ProbeHit::SegmentEndpoint(probe.id, true))
+                    } else if b.distance(point) <= 10.0 {
+                        Some(ProbeHit::SegmentEndpoint(probe.id, false))
+                    } else if point_segment_distance(
+                        Point2::new(point.x as f64, point.y as f64),
+                        Point2::new(a.x as f64, a.y as f64),
+                        Point2::new(b.x as f64, b.y as f64),
+                    ) <= 7.0
+                    {
+                        Some(ProbeHit::SegmentBody(probe.id))
+                    } else {
+                        None
+                    }
+                }
+            })
     }
     fn hit_internal_handle(&self, p: Pos2, r: Rect) -> Option<(InternalBoundaryId, usize)> {
         if !self.handles {
@@ -7210,6 +7903,7 @@ pub fn frame(
     mut request: ResMut<WaveGpuRequest>,
     display: Res<WaveDisplay>,
     probe_display: Res<ProbeDisplay>,
+    curve_probe_display: Res<CurveProbeDisplay>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut commands: Commands,
 ) -> Result {
@@ -7236,6 +7930,7 @@ pub fn frame(
     state.frame_ms = state.frame_ms * 0.95 + time.delta_secs() * 1000.0 * 0.05;
     state.update_files();
     state.ingest_probe_samples(&probe_display);
+    state.ingest_curve_probe_samples(&curve_probe_display);
     let mut root = egui::Ui::new(
         ctx.clone(),
         "root".into(),
@@ -7374,13 +8069,37 @@ pub fn wave_gpu_check_scene() -> Playground {
         .replace_validated(funfern_app::editor::Document {
             draft: scene.clone(),
             accepted: scene,
-            probes: vec![ProbeDefinition {
-                id: ProbeId(1),
-                name: "GPU check".into(),
-                color: [63, 144, 239],
-                enabled: true,
-                target: ProbeTarget::Point(Point2::new(-0.2, 0.42)),
-            }],
+            probes: vec![
+                ProbeDefinition {
+                    id: ProbeId(1),
+                    name: "GPU check".into(),
+                    color: [63, 144, 239],
+                    enabled: true,
+                    target: ProbeTarget::Point(Point2::new(-0.2, 0.42)),
+                },
+                ProbeDefinition {
+                    id: ProbeId(2),
+                    name: "GPU line check".into(),
+                    color: [78, 201, 176],
+                    enabled: true,
+                    target: ProbeTarget::Segment {
+                        start: Point2::new(-0.7, 0.42),
+                        end: Point2::new(0.7, 0.42),
+                        preset: ProbeSamplingPreset::Medium,
+                    },
+                },
+                ProbeDefinition {
+                    id: ProbeId(3),
+                    name: "GPU partial line check".into(),
+                    color: [244, 105, 122],
+                    enabled: true,
+                    target: ProbeTarget::Segment {
+                        start: Point2::new(-1.2, 0.7),
+                        end: Point2::new(1.2, 0.7),
+                        preset: ProbeSamplingPreset::Medium,
+                    },
+                },
+            ],
         });
     state
 }
@@ -7777,12 +8496,14 @@ impl Default for WaveGpuBenchmark {
 /// Native opt-in validation of the actual WGSL gather kernel against the f64
 /// reference on the same assembled mesh and conservative timestep.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 pub fn wave_gpu_benchmark(
     mut benchmark: ResMut<WaveGpuBenchmark>,
     mut state: ResMut<Playground>,
     mut request: ResMut<WaveGpuRequest>,
     display: Res<WaveDisplay>,
     probe_display: Res<ProbeDisplay>,
+    curve_probe_display: Res<CurveProbeDisplay>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut exit: MessageWriter<bevy::app::AppExit>,
 ) {
@@ -7897,6 +8618,8 @@ pub fn wave_gpu_benchmark(
         || display.auxiliary.len() != benchmark.expected_auxiliary.len()
         || probe_display.generation != benchmark.generation
         || probe_display.records.is_empty()
+        || curve_probe_display.generation != benchmark.generation
+        || curve_probe_display.records.is_empty()
     {
         return;
     }
@@ -7979,6 +8702,40 @@ pub fn wave_gpu_benchmark(
             && record.energy_density.is_finite()
             && record.energy_density >= 0.0
     });
+    let curve_probe_shape = curve_probe_display.records.iter().all(|record| {
+        record.time.is_finite()
+            && record.displacement.len() == ProbeSamplingPreset::Medium.spatial_points()
+            && record.energy_density.len() == record.displacement.len()
+            && record.normal_flux.len() == record.displacement.len()
+            && record
+                .displacement
+                .iter()
+                .zip(&record.energy_density)
+                .zip(&record.normal_flux)
+                .all(|((field, energy), flux)| {
+                    field.is_finite() && energy.is_finite() && *energy >= 0.0 && flux.is_finite()
+                        || field.is_nan() && energy.is_nan() && flux.is_nan()
+                })
+    });
+    let complete_line_records = curve_probe_display
+        .records
+        .iter()
+        .filter(|record| record.probe_id == 2)
+        .collect::<Vec<_>>();
+    let complete_line = !complete_line_records.is_empty()
+        && complete_line_records
+            .iter()
+            .all(|record| record.displacement.iter().all(|value| value.is_finite()));
+    let partial_line_records = curve_probe_display
+        .records
+        .iter()
+        .filter(|record| record.probe_id == 3)
+        .collect::<Vec<_>>();
+    let partial_line = !partial_line_records.is_empty()
+        && partial_line_records.iter().all(|record| {
+            record.displacement.iter().any(|value| value.is_finite())
+                && record.displacement.iter().any(|value| value.is_nan())
+        });
     if let Some((node, actual, expected, point, dirichlet, neumann)) = max_difference {
         info!(
             node,
@@ -7996,6 +8753,9 @@ pub fn wave_gpu_benchmark(
         && auxiliary_error <= 2.0e-4
         && isolated_peak <= 1.0e-7
         && probe_finite
+        && curve_probe_shape
+        && complete_line
+        && partial_line
     {
         exit.write(bevy::app::AppExit::Success);
     } else {
@@ -10369,12 +11129,82 @@ mod tests {
         let target = Point2::new(0.55, -0.2);
         h.drag_with_modifiers(h.point(position), h.point(target), Modifiers::NONE);
         assert_eq!(h.state.selected_probe, Some(id));
-        let ProbeTarget::Point(actual) = h.state.editor.document.probes[0].target;
+        let ProbeTarget::Point(actual) = h.state.editor.document.probes[0].target else {
+            panic!("expected point probe")
+        };
         assert!((actual - target).norm() < 1.0e-6);
         assert_eq!(h.state.editor.history_len(), (2, 0));
         h.state.editor.undo();
-        let ProbeTarget::Point(actual) = h.state.editor.document.probes[0].target;
+        let ProbeTarget::Point(actual) = h.state.editor.document.probes[0].target else {
+            panic!("expected point probe")
+        };
         assert!((actual - position).norm() < 1.0e-6);
+    }
+
+    #[test]
+    fn line_probe_placement_and_rigid_drag_are_undoable() {
+        let mut h = Harness::new();
+        h.click_text("Probes");
+        h.click_text("+ Line probe");
+        assert_eq!(h.state.interaction_mode, InteractionMode::PlaceSegmentProbe);
+        let start = Point2::new(-0.45, 0.45);
+        let end = Point2::new(0.45, 0.45);
+        h.click(h.point(start));
+        assert!(
+            h.state
+                .segment_probe_start
+                .is_some_and(|actual| (actual - start).norm() < 1.0e-6)
+        );
+        h.click(h.point(end));
+        assert_eq!(h.state.editor.document.probes.len(), 1);
+        assert_eq!(h.state.interaction_mode, InteractionMode::PlaceSegmentProbe);
+        assert_eq!(h.state.editor.history_len(), (1, 0));
+
+        h.click(h.point(Point2::new(-0.2, -0.5)));
+        h.key(Key::Escape, Modifiers::NONE);
+        assert_eq!(h.state.interaction_mode, InteractionMode::PlaceSegmentProbe);
+        assert!(h.state.segment_probe_start.is_none());
+        h.key(Key::Escape, Modifiers::NONE);
+        assert_eq!(h.state.interaction_mode, InteractionMode::Select);
+
+        let delta = Point2::new(0.1, -0.15);
+        h.drag_with_modifiers(
+            h.point((start + end) * 0.5),
+            h.point((start + end) * 0.5 + delta),
+            Modifiers::NONE,
+        );
+        let ProbeTarget::Segment {
+            start: moved_start,
+            end: moved_end,
+            preset,
+        } = h.state.editor.document.probes[0].target
+        else {
+            panic!("expected line probe")
+        };
+        assert!((moved_start - start - delta).norm() < 1.0e-6);
+        assert!((moved_end - end - delta).norm() < 1.0e-6);
+        assert_eq!(preset, ProbeSamplingPreset::Medium);
+        assert_eq!(h.state.editor.history_len(), (2, 0));
+        h.state.editor.undo();
+        assert!(matches!(
+            h.state.editor.document.probes[0].target,
+            ProbeTarget::Segment { start: actual, .. } if (actual - start).norm() < 1.0e-6
+        ));
+    }
+
+    #[test]
+    fn line_probe_aggregate_uses_only_contiguous_valid_intervals() {
+        let frame = CurveProbeRecord {
+            probe_id: 1,
+            time: 0.5,
+            displacement: vec![0.0, 1.0, f32::NAN, 2.0, 4.0],
+            energy_density: vec![2.0, 4.0, f32::NAN, 8.0, 10.0],
+            normal_flux: vec![1.0, 3.0, f32::NAN, -2.0, 2.0],
+        };
+        let (mean_energy, power, coverage) = Playground::curve_probe_aggregate(&frame, 2.0);
+        assert!((mean_energy - 6.0).abs() < 1.0e-12);
+        assert!((power - 1.0).abs() < 1.0e-12);
+        assert!((coverage - 0.5).abs() < 1.0e-12);
     }
 
     #[test]
@@ -10404,6 +11234,7 @@ mod tests {
         state.probe_compiled = Some(CompiledProbeState {
             generation: 3,
             revision: 5,
+            curve_revision: 0,
             mesh_revision: 1,
             probes: state.editor.document.probes.clone(),
             sample_rate: 120.0,
@@ -10439,6 +11270,7 @@ mod tests {
         let compile = |generation, revision, probes: Vec<ProbeDefinition>| CompiledProbeState {
             generation,
             revision,
+            curve_revision: 0,
             mesh_revision: generation,
             probes,
             sample_rate: 120.0,

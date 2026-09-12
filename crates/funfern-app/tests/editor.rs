@@ -204,6 +204,56 @@ fn scene_round_trip_keeps_nonuniform_knots_and_invalid_drafts() {
     assert!(!json.contains("selection"));
     assert!(!json.contains("revision"));
 }
+
+#[test]
+fn line_probes_are_undoable_bounded_and_round_trip() {
+    let mut editor = Editor::default();
+    let id = editor
+        .create_segment_probe(Point2::new(-0.5, 0.2), Point2::new(0.5, 0.2))
+        .unwrap();
+    assert_eq!(editor.history_len(), (1, 0));
+    let mut probe = editor.document.probes[0].clone();
+    probe.target = ProbeTarget::Segment {
+        start: Point2::new(0.5, 0.2),
+        end: Point2::new(-0.5, 0.2),
+        preset: ProbeSamplingPreset::High,
+    };
+    editor.update_probe(probe).unwrap();
+    let document = editor.document.clone();
+    assert_eq!(
+        decode(save(&document).unwrap().as_bytes()).unwrap(),
+        document
+    );
+    editor.undo();
+    assert_eq!(editor.document.probes[0].id, id);
+    editor.undo();
+    assert!(editor.document.probes.is_empty());
+
+    let mut invalid = document.clone();
+    invalid.probes[0].target = ProbeTarget::Segment {
+        start: Point2::default(),
+        end: Point2::default(),
+        preset: ProbeSamplingPreset::Medium,
+    };
+    assert!(
+        Editor::default()
+            .update_probe(invalid.probes[0].clone())
+            .is_err()
+    );
+}
+
+#[test]
+fn version_nine_point_probes_remain_loadable() {
+    let mut editor = Editor::default();
+    editor.create_point_probe(Point2::new(0.1, -0.2)).unwrap();
+    let json = save(&editor.document).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value["version"] = 9.into();
+    assert_eq!(
+        decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap(),
+        editor.document
+    );
+}
 #[test]
 fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     let e = Editor::default();
@@ -213,7 +263,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 10.into(),
+            0 => value["version"] = 11.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -290,7 +340,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        9
+        10
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -1038,5 +1088,27 @@ fn malformed_or_duplicate_point_probes_are_rejected() {
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let duplicate = value["probes"][0].clone();
     value["probes"].as_array_mut().unwrap().push(duplicate);
+    assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
+}
+
+#[test]
+fn malformed_or_oversized_line_probes_are_rejected() {
+    let mut editor = Editor::default();
+    editor
+        .create_segment_probe(Point2::new(-0.5, 0.0), Point2::new(0.5, 0.0))
+        .unwrap();
+    let json = save(&editor.document).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value["probes"][0]["target"]["end"] = value["probes"][0]["target"]["start"].clone();
+    assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
+
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value["probes"][0]["target"]["preset"] = "high".into();
+    let template = value["probes"][0].clone();
+    for id in 2..=5 {
+        let mut probe = template.clone();
+        probe["id"] = id.into();
+        value["probes"].as_array_mut().unwrap().push(probe);
+    }
     assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
 }

@@ -7,6 +7,7 @@ pub enum GeometryControl {
 }
 
 pub const MAX_PROBES: usize = 16;
+pub const MAX_SEGMENT_PROBE_POINTS: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProbeId(pub u64);
@@ -14,6 +15,37 @@ pub struct ProbeId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ProbeTarget {
     Point(Point2),
+    Segment {
+        start: Point2,
+        end: Point2,
+        preset: ProbeSamplingPreset,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProbeSamplingPreset {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl ProbeSamplingPreset {
+    pub const fn spatial_points(self) -> usize {
+        match self {
+            Self::Low => 32,
+            Self::Medium => 64,
+            Self::High => 128,
+        }
+    }
+
+    pub const fn sample_rate(self) -> f64 {
+        match self {
+            Self::Low => 30.0,
+            Self::Medium => 60.0,
+            Self::High => 120.0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +64,9 @@ impl ProbeDefinition {
             && self.name.len() <= 64
             && match self.target {
                 ProbeTarget::Point(point) => point.finite(),
+                ProbeTarget::Segment { start, end, .. } => {
+                    start.finite() && end.finite() && (end - start).norm() >= 1.0e-6
+                }
             }
     }
 }
@@ -1654,9 +1689,66 @@ impl Editor {
         Ok(id)
     }
 
+    pub fn create_segment_probe(&mut self, start: Point2, end: Point2) -> Result<ProbeId, String> {
+        let target = ProbeTarget::Segment {
+            start,
+            end,
+            preset: ProbeSamplingPreset::Medium,
+        };
+        if !start.finite() || !end.finite() || (end - start).norm() < 1.0e-6 {
+            return Err("Line probe endpoints must be distinct and finite".into());
+        }
+        if self.document.probes.len() >= MAX_PROBES {
+            return Err(format!("Maximum {MAX_PROBES} probes"));
+        }
+        if self.segment_probe_points() + ProbeSamplingPreset::Medium.spatial_points()
+            > MAX_SEGMENT_PROBE_POINTS
+        {
+            return Err(format!(
+                "Line probes are limited to {MAX_SEGMENT_PROBE_POINTS} sample points"
+            ));
+        }
+        let id = ProbeId(self.next_probe_id);
+        self.next_probe_id = self
+            .next_probe_id
+            .checked_add(1)
+            .ok_or("Probe IDs exhausted")?;
+        const COLORS: [[u8; 3]; 8] = [
+            [63, 144, 239],
+            [244, 105, 122],
+            [78, 201, 176],
+            [245, 183, 69],
+            [164, 126, 232],
+            [70, 190, 232],
+            [230, 125, 67],
+            [153, 203, 103],
+        ];
+        self.begin();
+        self.document.probes.push(ProbeDefinition {
+            id,
+            name: format!("Line probe {}", id.0),
+            color: COLORS[(id.0.saturating_sub(1) as usize) % COLORS.len()],
+            enabled: true,
+            target,
+        });
+        self.commit();
+        Ok(id)
+    }
+
+    fn segment_probe_points(&self) -> usize {
+        self.document
+            .probes
+            .iter()
+            .map(|probe| match probe.target {
+                ProbeTarget::Segment { preset, .. } => preset.spatial_points(),
+                ProbeTarget::Point(_) => 0,
+            })
+            .sum()
+    }
+
     pub fn update_probe(&mut self, probe: ProbeDefinition) -> Result<(), String> {
         if !probe.valid() {
-            return Err("Probe name and position must be valid".into());
+            return Err("Probe name and target must be valid".into());
         }
         let id = probe.id;
         let current = self
@@ -1665,6 +1757,20 @@ impl Editor {
             .iter()
             .find(|candidate| candidate.id == id)
             .ok_or("Missing probe")?;
+        let points_without_current = self.segment_probe_points()
+            - match current.target {
+                ProbeTarget::Segment { preset, .. } => preset.spatial_points(),
+                ProbeTarget::Point(_) => 0,
+            };
+        let replacement_points = match probe.target {
+            ProbeTarget::Segment { preset, .. } => preset.spatial_points(),
+            ProbeTarget::Point(_) => 0,
+        };
+        if points_without_current + replacement_points > MAX_SEGMENT_PROBE_POINTS {
+            return Err(format!(
+                "Line probes are limited to {MAX_SEGMENT_PROBE_POINTS} sample points"
+            ));
+        }
         if current == &probe {
             return Ok(());
         }

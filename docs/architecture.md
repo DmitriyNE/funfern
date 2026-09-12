@@ -39,10 +39,10 @@ solver starts in the running state after its initial operator is committed.
 Selection remains contextual rather than introducing separate selection modes.
 Draw opens a transient role/primitive popover: holes and interfaces offer Circle
 and Custom, while baffles offer Straight and Custom. A single `InteractionMode`
-owns draw, pulse-placement, source-placement, and point-probe placement state. Placement modes are shown
-over the viewport and survive inspector changes; preset geometry is deliberately
-one-shot, while pulse and source placement remain active until toggled off, ended
-with the overlay, or cancelled with Escape.
+owns draw, pulse-placement, source-placement, and probe placement state. Placement
+modes are shown over the viewport and survive inspector changes; preset geometry is
+deliberately one-shot, while pulse and source placement remain active until toggled
+off, ended with the overlay, or cancelled with Escape.
 
 The lower-right status control carries a compact performance summary (FPS, solver
 steps per second, DOFs, mesh size, and timestep). Detailed performance measurements
@@ -58,8 +58,9 @@ the same bounded snapshot history as geometry. They are serialized in scene file
 shared links, and recovery data; sampled traces and floating-window layout remain
 transient. The Probes inspector owns creation, configuration, and the receiver list,
 while each receiver has one independent closeable readout window. The target model
-and readout dispatch are intended to extend to curve, region, selected-geometry, and
-far-field receivers without adding another inspector. Point readouts share one
+and readout dispatch cover points and independent straight line segments and can
+extend to region, selected-geometry, and far-field receivers without adding another
+inspector. Point readouts share one
 pan/zoom time window across their independently hideable field, velocity, and energy
 sections; Live mode follows the newest solver-clock sample. Probe timestamps come
 directly from the solver's transferred absolute clock. The host handoff offset is
@@ -459,6 +460,16 @@ of the wave pipeline. Host history survives ordinary remesh and AMR handoffs;
 stencils are rebuilt against each committed operator. Reset and fresh scene loads
 clear samples. Locations on duplicated or material-interface traces are inactive
 until moved away because their pointwise gradient or field side is ambiguous.
+
+Straight line probes use their own bounded five-binding compute recorder. Sampling
+presets pair 32/64/128 uniformly spaced enriched-quadratic stencils with 30/60/120
+samples per simulated second; all line probes share a 512-point document budget and
+a 64-frame GPU ring. Each valid point records displacement, local energy density,
+and signed energy flux `-k u_t grad(u) dot n`, where `n` is the left normal of the
+ordered start-to-end segment. Invalid points remain NaN gaps. Trapezoidal aggregates
+integrate only adjacent valid samples and report their covered fraction. Line
+definitions survive history, files, links, and recovery while trace data remains
+transient like point-probe history.
 
 The previous h≈0.16 overlay was an editor preview. Wave benchmarks start with
 h≤0.04 and h≤0.02, corresponding to 10 and 20 maximum-edge lengths per reference
