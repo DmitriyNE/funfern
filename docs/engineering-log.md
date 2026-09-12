@@ -7,6 +7,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Design phone-adjusted interactions. The responsive toolbar is usable at phone
+  widths, but viewport editing still assumes a mouse: add touch selection, one-finger
+  object manipulation, unambiguous canvas pan/zoom gestures, larger hit targets, and
+  mobile-friendly numeric entry without covering the active geometry.
 - [ ] Diagnose and stabilize second-order outgoing conditions on curved hole or
   internal-boundary spans. They can inject energy and make the solution diverge;
   keep examples on reflecting or first-order curved faces until this is resolved.
