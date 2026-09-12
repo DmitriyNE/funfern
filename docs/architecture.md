@@ -123,7 +123,7 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON remains the single persistence representation. File loading, bundled
+Scene JSON version 12 remains the single persistence representation. File loading, bundled
 examples, crash recovery, and shared links all pass through the same structural
 decoder and bounded accepted-scene validator before replacing the editor document.
 The document includes probes and continuous-source configuration alongside draft
@@ -464,12 +464,17 @@ stencils are rebuilt against each committed operator. Reset and fresh scene load
 clear samples. Locations on duplicated or material-interface traces are inactive
 until moved away because their pointwise gradient or field side is ambiguous.
 
-Straight line probes use their own bounded five-binding compute recorder. Sampling
+Straight line and geometry-attached boundary probes use their own bounded
+five-binding compute recorder. Sampling
 presets pair 32/64/128 uniformly spaced enriched-quadratic stencils with 30/60/120
 samples per simulated second; all line probes share a 512-point document budget and
 a 64-frame GPU ring. Each valid point records displacement, local energy density,
 and signed energy flux `-k u_t grad(u) dot n`, where `n` is the left normal of the
-ordered start-to-end segment. Invalid points remain NaN gaps. Trapezoidal aggregates
+ordered start-to-end segment for free lines. Boundary probes compile directly from
+mesh boundary labels and parameter intervals, select one explicit physical trace,
+and carry an outward normal per sample. They store a contiguous spline-span run,
+follow topology edits by best-overlap remapping, and retain their probe ID through
+solver handoffs. Invalid points remain NaN gaps. Trapezoidal aggregates
 integrate only adjacent valid samples and report their covered fraction. Line
 definitions survive history, files, links, and recovery while trace data remains
 transient like point-probe history.

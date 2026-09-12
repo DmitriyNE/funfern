@@ -271,7 +271,7 @@ fn continuous_source_round_trips_and_version_ten_uses_the_default() {
     };
     let json = save(&document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 11);
+    assert_eq!(value["version"], 12);
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
     value["version"] = 10.into();
@@ -295,7 +295,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 12.into(),
+            0 => value["version"] = 13.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -372,7 +372,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        11
+        12
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -1143,5 +1143,131 @@ fn malformed_or_oversized_line_probes_are_rejected() {
         probe["id"] = id.into();
         value["probes"].as_array_mut().unwrap().push(probe);
     }
+    assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
+}
+
+#[test]
+fn boundary_probe_round_trips_and_tracks_periodic_insertion() {
+    let mut editor = Editor::default();
+    let id = editor
+        .create_boundary_probe(BoundaryProbeTarget {
+            feature: BoundaryProbeFeature::Loop(ObstacleId(1)),
+            start_span: 7,
+            span_count: 2,
+            whole: false,
+            side: BoundaryProbeSide::Domain,
+            reversed: false,
+            preset: ProbeSamplingPreset::Medium,
+        })
+        .unwrap();
+    editor.insert(ObstacleId(1), 7.5).unwrap();
+    let ProbeTarget::Boundary(target) = editor.document.probes[0].target else {
+        panic!("expected boundary probe")
+    };
+    assert_eq!(target.spans(9), vec![7, 8, 0]);
+
+    let json = save(&editor.document).unwrap();
+    assert!(json.contains("\"version\": 12"));
+    let decoded = decode(json.as_bytes()).unwrap();
+    assert_eq!(decoded.probes, editor.document.probes);
+
+    editor.delete_obstacle(ObstacleId(1));
+    assert!(editor.document.probes.is_empty());
+    editor.undo();
+    assert_eq!(editor.document.probes[0].id, id);
+}
+
+#[test]
+fn baffle_split_keeps_largest_attached_piece() {
+    let mut editor = Editor::default();
+    let spline = OpenCubicSpline::uniform(vec![
+        Point2::new(-0.8, 0.0),
+        Point2::new(-0.55, 0.0),
+        Point2::new(-0.25, 0.0),
+        Point2::new(0.1, 0.0),
+        Point2::new(0.45, 0.0),
+        Point2::new(0.8, 0.0),
+    ])
+    .unwrap();
+    let baffle = editor
+        .create_internal_boundary(spline, BACKGROUND_REGION)
+        .unwrap();
+    editor
+        .create_boundary_probe(BoundaryProbeTarget {
+            feature: BoundaryProbeFeature::Baffle(baffle),
+            start_span: 1,
+            span_count: 2,
+            whole: false,
+            side: BoundaryProbeSide::Right,
+            reversed: false,
+            preset: ProbeSamplingPreset::Low,
+        })
+        .unwrap();
+    let right = editor.split_internal_boundary(baffle, 1).unwrap();
+    let ProbeTarget::Boundary(target) = editor.document.probes[0].target else {
+        panic!("expected boundary probe")
+    };
+    assert_eq!(target.feature, BoundaryProbeFeature::Baffle(right));
+    assert_eq!(target.spans(2), vec![0, 1]);
+    assert_eq!(target.side, BoundaryProbeSide::Right);
+}
+
+#[test]
+fn baffle_merge_moves_attachment_into_retained_curve() {
+    let mut editor = Editor::default();
+    let make = |start: f64, end: f64| {
+        OpenCubicSpline::uniform(
+            (0..4)
+                .map(|index| Point2::new(start + (end - start) * index as f64 / 3.0, 0.55))
+                .collect(),
+        )
+        .unwrap()
+    };
+    let first = editor
+        .create_internal_boundary(make(-0.8, 0.0), BACKGROUND_REGION)
+        .unwrap();
+    let second = editor
+        .create_internal_boundary(make(0.0, 0.8), BACKGROUND_REGION)
+        .unwrap();
+    editor
+        .create_boundary_probe(BoundaryProbeTarget {
+            feature: BoundaryProbeFeature::Baffle(second),
+            start_span: 0,
+            span_count: 1,
+            whole: true,
+            side: BoundaryProbeSide::Left,
+            reversed: false,
+            preset: ProbeSamplingPreset::Low,
+        })
+        .unwrap();
+    editor
+        .merge_internal_boundaries(first, second, 1.0e-12)
+        .unwrap();
+    let ProbeTarget::Boundary(target) = editor.document.probes[0].target else {
+        panic!("expected boundary probe")
+    };
+    assert_eq!(target.feature, BoundaryProbeFeature::Baffle(first));
+    assert_eq!(target.start_span, 1);
+    assert_eq!(target.span_count, 1);
+    assert_eq!(target.side, BoundaryProbeSide::Left);
+}
+
+#[test]
+fn malformed_boundary_probe_is_rejected_without_replacement() {
+    let mut editor = Editor::default();
+    editor
+        .create_boundary_probe(BoundaryProbeTarget {
+            feature: BoundaryProbeFeature::Outer,
+            start_span: 0,
+            span_count: 1,
+            whole: false,
+            side: BoundaryProbeSide::Domain,
+            reversed: false,
+            preset: ProbeSamplingPreset::Low,
+        })
+        .unwrap();
+    let json = save(&editor.document).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    value["probes"][0]["target"]["start_span"] = 9.into();
     assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
 }

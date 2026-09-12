@@ -183,6 +183,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   share one time window; drag waterfalls vertically and time traces horizontally.
   Portions outside the simulated domain or on a two-trace boundary appear as gaps;
   the remaining coverage still contributes to the readout.
+- **Boundary probes:** select one contiguous run of outer, loop, or baffle spans and
+  choose **+ From selected spans** in Probes. The probe follows spline edits and
+  uses the same nine curve readouts. Choose the sampled trace for material
+  interfaces, walls, and baffles. Positive normal flux always points out of that
+  trace; Flip direction reverses only the arclength axis. Whole closed curves use
+  periodic sampling and integration without duplicating the seam.
 - **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered
   on the cursor. Fit View frames the fixed square. Panel scrolling and text
   editing do not manipulate the viewport.

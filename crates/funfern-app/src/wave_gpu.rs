@@ -311,14 +311,18 @@ impl WaveGpuRequest {
         }
         let point_count = probes
             .iter()
-            .map(|probe| probe.stencils.len())
+            .map(|probe| probe.samples.len())
             .sum::<usize>();
         if point_count > MAX_CURVE_PROBE_POINTS
             || probes.iter().any(|probe| {
-                probe.stencils.len() < 2
+                probe.samples.len() < 2
                     || !probe.sample_rate.is_finite()
                     || !(30.0..=120.0).contains(&probe.sample_rate)
-                    || !probe.normal.finite()
+                    || probe
+                        .samples
+                        .iter()
+                        .flatten()
+                        .any(|(_, normal)| !normal.finite())
             })
         {
             return Err("Invalid line-probe recorder settings".into());
@@ -335,14 +339,14 @@ impl WaveGpuRequest {
             let stride = (1.0 / (probe.sample_rate * time_step)).round().max(1.0) as u64;
             stencils.extend(
                 probe
-                    .stencils
+                    .samples
                     .iter()
-                    .map(|stencil| gpu_curve_probe_stencil(*stencil, probe.normal, stride)),
+                    .map(|sample| gpu_curve_probe_stencil(*sample, stride)),
             );
             descriptors.push(CurveProbeDescriptor {
                 id: probe.id,
                 offset,
-                count: probe.stencils.len() as u32,
+                count: probe.samples.len() as u32,
             });
             sample_strides.push(stride);
         }
@@ -1144,9 +1148,8 @@ struct ProbeReadbackTag {
 #[derive(Clone, Debug)]
 pub struct CurveProbeInput {
     pub id: u64,
-    pub normal: Point2,
     pub sample_rate: f64,
-    pub stencils: Vec<Option<QuadraticPointStencil>>,
+    pub samples: Vec<Option<(QuadraticPointStencil, Point2)>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1325,10 +1328,12 @@ fn gpu_probe_stencil(stencil: Option<QuadraticPointStencil>) -> GpuProbeStencil 
 }
 
 fn gpu_curve_probe_stencil(
-    stencil: Option<QuadraticPointStencil>,
-    normal: Point2,
+    sample: Option<(QuadraticPointStencil, Point2)>,
     stride: u64,
 ) -> GpuCurveProbeStencil {
+    let (stencil, normal) = sample
+        .map(|(stencil, normal)| (Some(stencil), normal))
+        .unwrap_or((None, Point2::default()));
     let point = gpu_probe_stencil(stencil);
     GpuCurveProbeStencil {
         nodes_a: point.nodes_a,

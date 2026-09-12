@@ -16,6 +16,14 @@ pub struct QuadraticPointStencil {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QuadraticBoundaryStencil {
+    pub stencil: QuadraticPointStencil,
+    pub point: Point2,
+    /// Unit normal pointing away from the sampled trace's adjacent element.
+    pub outward_normal: Point2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointProbeSample {
     pub displacement: f64,
     pub velocity: f64,
@@ -110,6 +118,24 @@ impl QuadraticPointStencil {
         let Some((triangle_index, region, barycentric, gradients)) = located else {
             return Err(PointProbeError::OutsideDomain);
         };
+        Self::from_element(
+            operator,
+            scene,
+            triangle_index,
+            region,
+            barycentric,
+            gradients,
+        )
+    }
+
+    fn from_element(
+        operator: &QuadraticWaveOperator,
+        scene: &Scene,
+        triangle_index: usize,
+        region: RegionId,
+        barycentric: [f64; 3],
+        gradients: [Point2; 3],
+    ) -> Result<Self, PointProbeError> {
         let material = scene
             .region_material(region)
             .ok_or(PointProbeError::InvalidMesh)?;
@@ -161,6 +187,113 @@ impl QuadraticPointStencil {
             gradient,
             energy_density,
         })
+    }
+}
+
+impl QuadraticBoundaryStencil {
+    pub fn build(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        scene: &Scene,
+        label: BoundaryLabel,
+        parameter: f64,
+        period: f64,
+        region: RegionId,
+    ) -> Result<Self, PointProbeError> {
+        if !parameter.is_finite()
+            || !period.is_finite()
+            || period <= 0.0
+            || mesh.geometry_revision != operator.geometry_revision()
+            || mesh.mesh_revision != operator.mesh_revision()
+            || mesh.triangles.len() != operator.element_nodes().len()
+        {
+            return Err(PointProbeError::InvalidMesh);
+        }
+        let mut located = None;
+        'edges: for edge in &mesh.boundary_edges {
+            if edge.label != label {
+                continue;
+            }
+            let denominator = edge.parameters[1] - edge.parameters[0];
+            if denominator.abs() <= f64::EPSILON {
+                continue;
+            }
+            for shift in -1..=1 {
+                let shifted = parameter + shift as f64 * period;
+                let fraction = (shifted - edge.parameters[0]) / denominator;
+                if !(-1.0e-9..=1.0 + 1.0e-9).contains(&fraction) {
+                    continue;
+                }
+                let fraction = fraction.clamp(0.0, 1.0);
+                let [a_index, b_index] = edge.vertices;
+                let (Some(a), Some(b)) = (mesh.vertices.get(a_index), mesh.vertices.get(b_index))
+                else {
+                    return Err(PointProbeError::InvalidMesh);
+                };
+                let point = a.point.lerp(b.point, fraction);
+                for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+                    if triangle.region != region
+                        || !triangle.vertices.contains(&a_index)
+                        || !triangle.vertices.contains(&b_index)
+                    {
+                        continue;
+                    }
+                    let [ia, ib, ic] = triangle.vertices;
+                    let (Some(pa), Some(pb), Some(pc)) = (
+                        mesh.vertices.get(ia),
+                        mesh.vertices.get(ib),
+                        mesh.vertices.get(ic),
+                    ) else {
+                        return Err(PointProbeError::InvalidMesh);
+                    };
+                    let twice_area = (pb.point - pa.point).cross(pc.point - pa.point);
+                    if !twice_area.is_finite() || twice_area <= 0.0 {
+                        return Err(PointProbeError::InvalidMesh);
+                    }
+                    let barycentric = [
+                        (pb.point - point).cross(pc.point - point) / twice_area,
+                        (pc.point - point).cross(pa.point - point) / twice_area,
+                        (pa.point - point).cross(pb.point - point) / twice_area,
+                    ];
+                    let gradients = [
+                        Point2::new(pb.point.y - pc.point.y, pc.point.x - pb.point.x) / twice_area,
+                        Point2::new(pc.point.y - pa.point.y, pa.point.x - pc.point.x) / twice_area,
+                        Point2::new(pa.point.y - pb.point.y, pb.point.x - pa.point.x) / twice_area,
+                    ];
+                    let mut tangent = b.point - a.point;
+                    if denominator < 0.0 {
+                        tangent = tangent * -1.0;
+                    }
+                    let length = tangent.norm();
+                    if length <= f64::EPSILON {
+                        return Err(PointProbeError::InvalidMesh);
+                    }
+                    tangent = tangent / length;
+                    let left = Point2::new(-tangent.y, tangent.x);
+                    let centroid = (pa.point + pb.point + pc.point) / 3.0;
+                    let outward_normal = if left.dot(centroid - point) <= 0.0 {
+                        left
+                    } else {
+                        left * -1.0
+                    };
+                    let stencil = QuadraticPointStencil::from_element(
+                        operator,
+                        scene,
+                        triangle_index,
+                        region,
+                        barycentric,
+                        gradients,
+                    )?;
+                    located = Some(Self {
+                        stencil,
+                        point,
+                        outward_normal,
+                    });
+                    break 'edges;
+                }
+            }
+        }
+        located.ok_or(PointProbeError::OutsideDomain)
     }
 }
 
@@ -237,6 +370,119 @@ mod tests {
         assert!((sample.velocity - 4.0).abs() < 1.0e-12);
         assert!((sample.gradient - Point2::new(2.0, -1.0)).norm() < 1.0e-12);
         assert!((sample.energy_density - (0.5 * 2.0 * 16.0 + 0.5 * 3.0 * 5.0)).abs() < 1.0e-11);
+    }
+
+    #[test]
+    fn boundary_stencil_uses_selected_edge_and_outward_normal() {
+        let (mut mesh, scene, operator) = fixture();
+        mesh.boundary_edges.push(BoundaryEdge {
+            vertices: [0, 1],
+            label: BoundaryLabel::Outer(crate::OuterSide::Bottom),
+            parameters: [0.0, 1.0],
+        });
+        let sample = QuadraticBoundaryStencil::build(
+            &mesh,
+            &operator,
+            &scene,
+            BoundaryLabel::Outer(crate::OuterSide::Bottom),
+            0.25,
+            1.0,
+            BACKGROUND_REGION,
+        )
+        .unwrap();
+        assert!((sample.point - Point2::new(0.25, 0.0)).norm() < 1.0e-12);
+        assert!((sample.outward_normal - Point2::new(0.0, -1.0)).norm() < 1.0e-12);
+        assert_eq!(sample.stencil.region, BACKGROUND_REGION);
+    }
+
+    #[test]
+    fn boundary_stencil_selects_material_interface_trace() {
+        let mut scene = Scene::initial();
+        let interior = RegionId(2);
+        scene.regions.push(Region {
+            id: interior,
+            material: DEFAULT_MATERIAL,
+        });
+        scene.obstacles[0].role = crate::LoopRole::MaterialInterface {
+            exterior: BACKGROUND_REGION,
+            interior,
+        };
+        let mesh = crate::mesh_scene(&scene, 4, crate::MeshingOptions::default()).unwrap();
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let parameter = 0.5;
+        let exterior = QuadraticBoundaryStencil::build(
+            &mesh,
+            &operator,
+            &scene,
+            BoundaryLabel::MaterialInterface(ObstacleId(1)),
+            parameter,
+            scene.obstacles[0].spline.period(),
+            BACKGROUND_REGION,
+        )
+        .unwrap();
+        let interior_sample = QuadraticBoundaryStencil::build(
+            &mesh,
+            &operator,
+            &scene,
+            BoundaryLabel::MaterialInterface(ObstacleId(1)),
+            parameter,
+            scene.obstacles[0].spline.period(),
+            interior,
+        )
+        .unwrap();
+        assert_eq!(exterior.stencil.region, BACKGROUND_REGION);
+        assert_eq!(interior_sample.stencil.region, interior);
+        assert!(exterior.outward_normal.dot(interior_sample.outward_normal) < -0.99);
+    }
+
+    #[test]
+    fn boundary_stencil_keeps_baffle_faces_distinct() {
+        let mut scene = Scene::default();
+        let spline = crate::OpenCubicSpline::uniform(vec![
+            Point2::new(-0.7, 0.0),
+            Point2::new(-0.25, 0.0),
+            Point2::new(0.25, 0.0),
+            Point2::new(0.7, 0.0),
+        ])
+        .unwrap();
+        let period = spline.period();
+        scene.internal_boundaries.push(crate::InternalBoundary {
+            id: crate::InternalBoundaryId(1),
+            spline,
+            region: BACKGROUND_REGION,
+            span_laws: vec![crate::InternalBoundaryLaw::REFLECTING],
+        });
+        let mesh = crate::mesh_scene(&scene, 5, crate::MeshingOptions::default()).unwrap();
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let sample = |side| {
+            QuadraticBoundaryStencil::build(
+                &mesh,
+                &operator,
+                &scene,
+                BoundaryLabel::InternalBoundary {
+                    id: crate::InternalBoundaryId(1),
+                    side,
+                },
+                period * 0.5,
+                period,
+                BACKGROUND_REGION,
+            )
+            .unwrap()
+        };
+        let left = sample(crate::InternalBoundarySide::Left);
+        let right = sample(crate::InternalBoundarySide::Right);
+        assert!(left.outward_normal.dot(right.outward_normal) < -0.99);
+        assert_ne!(left.stencil.nodes, right.stencil.nodes);
     }
 
     #[test]

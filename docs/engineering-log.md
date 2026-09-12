@@ -38,6 +38,27 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Geometry-attached boundary probes
+
+- Added probes from one contiguous selected run on the outer boundary, a closed
+  loop, or a baffle. Closed selections may cross the periodic seam or cover the
+  complete curve. Material interfaces, walls, and baffles expose one explicit
+  sampled trace.
+- Boundary samples compile from labeled mesh-edge parameter intervals into
+  side-aware quadratic stencils. Each point carries its own outward normal, so
+  signed flux keeps its physical meaning when the arclength direction is flipped.
+  Whole closed probes use periodic sampling and integration without a duplicate
+  seam point.
+- Attachments follow knot insertion/removal and baffle split/merge operations by
+  deterministic best-overlap remapping. Deleted geometry removes its probes in
+  the same history action. Runtime traces keep their IDs and time history through
+  accepted geometry and AMR handoffs.
+- Scene JSON is version 12. Boundary feature, span run, trace side, direction, and
+  sampling preset now round-trip through files, links, examples, autosave, and
+  Undo/Redo; versions 1–11 remain loadable.
+- All 232 workspace tests, formatting, Clippy with warnings denied, native release
+  compilation, and the release Trunk/WASM build pass.
+
 ## 2026-09-12 — Direct and persistent continuous source
 
 - Removed the separate Move source placement mode. An enabled continuous source is

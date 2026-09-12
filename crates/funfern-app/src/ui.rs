@@ -18,8 +18,9 @@ use bevy_egui::{
 };
 use funfern_app::{
     editor::{
-        Acceptance, BoundaryFaceTarget, Editor, GeometryControl, LoopKind, ProbeDefinition,
-        ProbeId, ProbeSamplingPreset, ProbeTarget, SourceSettings,
+        Acceptance, BoundaryFaceTarget, BoundaryProbeFeature, BoundaryProbeSide,
+        BoundaryProbeTarget, Editor, GeometryControl, LoopKind, ProbeDefinition, ProbeId,
+        ProbeSamplingPreset, ProbeTarget, SourceSettings,
     },
     persistence::{self, LoadCandidate},
 };
@@ -114,6 +115,22 @@ struct CurveProbeTrace {
     accept_after: f64,
 }
 
+#[derive(Clone, Copy)]
+struct BoundaryPathSegment {
+    label: BoundaryLabel,
+    parameter: [f64; 2],
+    period: f64,
+    region: RegionId,
+    points: [Point2; 2],
+}
+
+struct CompiledBoundaryPath {
+    segments: Vec<BoundaryPathSegment>,
+    length: f64,
+    closed: bool,
+}
+type CurveStencilSamples = Vec<Option<(QuadraticPointStencil, Point2)>>;
+
 #[derive(Clone)]
 struct CompiledProbeState {
     generation: u64,
@@ -146,12 +163,16 @@ enum ProbeHit {
     Point(ProbeId),
     SegmentEndpoint(ProbeId, bool),
     SegmentBody(ProbeId),
+    Boundary(ProbeId),
 }
 
 impl ProbeHit {
     const fn id(self) -> ProbeId {
         match self {
-            Self::Point(id) | Self::SegmentEndpoint(id, _) | Self::SegmentBody(id) => id,
+            Self::Point(id)
+            | Self::SegmentEndpoint(id, _)
+            | Self::SegmentBody(id)
+            | Self::Boundary(id) => id,
         }
     }
 }
@@ -412,6 +433,7 @@ pub struct Playground {
     probe_views: BTreeMap<ProbeId, ProbeViewState>,
     probe_traces: BTreeMap<ProbeId, ProbeTrace>,
     curve_probe_traces: BTreeMap<ProbeId, CurveProbeTrace>,
+    curve_probe_metrics: BTreeMap<ProbeId, (f64, bool)>,
     probe_status: BTreeMap<ProbeId, String>,
     probe_observed: Vec<ProbeDefinition>,
     probe_compiled: Option<CompiledProbeState>,
@@ -570,6 +592,7 @@ impl Default for Playground {
             probe_views: BTreeMap::new(),
             probe_traces: BTreeMap::new(),
             curve_probe_traces: BTreeMap::new(),
+            curve_probe_metrics: BTreeMap::new(),
             probe_status: BTreeMap::new(),
             probe_observed: vec![],
             probe_compiled: None,
@@ -745,6 +768,10 @@ impl Playground {
                 .iter()
                 .find(|candidate| candidate.id == probe.id)
                 && previous.target != probe.target
+                && !matches!(
+                    (previous.target, probe.target),
+                    (ProbeTarget::Boundary(_), ProbeTarget::Boundary(_))
+                )
             {
                 self.clear_probe_trace(probe.id);
             }
@@ -755,6 +782,7 @@ impl Playground {
             .collect::<BTreeSet<_>>();
         self.probe_traces.retain(|id, _| ids.contains(id));
         self.curve_probe_traces.retain(|id, _| ids.contains(id));
+        self.curve_probe_metrics.retain(|id, _| ids.contains(id));
         self.probe_status.retain(|id, _| ids.contains(id));
         self.probe_windows.retain(|id| ids.contains(id));
         self.probe_views.retain(|id, _| ids.contains(id));
@@ -826,7 +854,12 @@ impl Playground {
         }
         self.curve_probe_display_readback = display.readbacks;
         for probe in &self.editor.document.probes {
-            if !probe.enabled || !matches!(probe.target, ProbeTarget::Segment { .. }) {
+            if !probe.enabled
+                || !matches!(
+                    probe.target,
+                    ProbeTarget::Segment { .. } | ProbeTarget::Boundary(_)
+                )
+            {
                 continue;
             }
             let incoming = display
@@ -862,6 +895,198 @@ impl Playground {
         }
     }
 
+    fn boundary_probe_path(
+        scene: &Scene,
+        target: BoundaryProbeTarget,
+    ) -> Option<CompiledBoundaryPath> {
+        const PIECES_PER_SPAN: usize = 16;
+        let mut segments = Vec::new();
+        let (total, spans) = match target.feature {
+            BoundaryProbeFeature::Outer => (4, target.spans(4)),
+            BoundaryProbeFeature::Loop(id) => {
+                let loop_ = scene.obstacles.iter().find(|loop_| loop_.id == id)?;
+                let total = loop_.spline.intervals().len();
+                (total, target.spans(total))
+            }
+            BoundaryProbeFeature::Baffle(id) => {
+                let boundary = scene
+                    .internal_boundaries
+                    .iter()
+                    .find(|boundary| boundary.id == id)?;
+                let total = boundary.spline.intervals().len();
+                (total, target.spans(total))
+            }
+        };
+        if spans.is_empty() || spans.iter().any(|span| *span >= total) {
+            return None;
+        }
+        match target.feature {
+            BoundaryProbeFeature::Outer => {
+                let corners = [
+                    Point2::new(-1.0, -1.0),
+                    Point2::new(1.0, -1.0),
+                    Point2::new(1.0, 1.0),
+                    Point2::new(-1.0, 1.0),
+                ];
+                for span in spans {
+                    segments.push(BoundaryPathSegment {
+                        label: BoundaryLabel::Outer(OuterSide::ALL[span]),
+                        parameter: [0.0, 1.0],
+                        period: 1.0,
+                        region: BACKGROUND_REGION,
+                        points: [corners[span], corners[(span + 1) % 4]],
+                    });
+                }
+            }
+            BoundaryProbeFeature::Loop(id) => {
+                let loop_ = scene.obstacles.iter().find(|loop_| loop_.id == id)?;
+                let (label, region) = match (loop_.role, target.side) {
+                    (LoopRole::Hole { exterior }, BoundaryProbeSide::Domain) => {
+                        (BoundaryLabel::Obstacle(id), exterior)
+                    }
+                    (LoopRole::MaterialInterface { exterior, .. }, BoundaryProbeSide::Exterior) => {
+                        (BoundaryLabel::MaterialInterface(id), exterior)
+                    }
+                    (LoopRole::MaterialInterface { interior, .. }, BoundaryProbeSide::Interior) => {
+                        (BoundaryLabel::MaterialInterface(id), interior)
+                    }
+                    (LoopRole::Wall { exterior, .. }, BoundaryProbeSide::Exterior) => (
+                        BoundaryLabel::Wall {
+                            loop_id: id,
+                            side: BoundarySide::Exterior,
+                        },
+                        exterior,
+                    ),
+                    (LoopRole::Wall { interior, .. }, BoundaryProbeSide::Interior) => (
+                        BoundaryLabel::Wall {
+                            loop_id: id,
+                            side: BoundarySide::Interior,
+                        },
+                        interior,
+                    ),
+                    _ => return None,
+                };
+                for span in spans {
+                    let bounds = loop_.spline.span_bounds(span)?;
+                    for piece in 0..PIECES_PER_SPAN {
+                        let a = piece as f64 / PIECES_PER_SPAN as f64;
+                        let b = (piece + 1) as f64 / PIECES_PER_SPAN as f64;
+                        let parameters = [
+                            bounds[0] + (bounds[1] - bounds[0]) * a,
+                            bounds[0] + (bounds[1] - bounds[0]) * b,
+                        ];
+                        segments.push(BoundaryPathSegment {
+                            label,
+                            parameter: parameters,
+                            period: loop_.spline.period(),
+                            region,
+                            points: parameters.map(|parameter| loop_.spline.evaluate(parameter)),
+                        });
+                    }
+                }
+            }
+            BoundaryProbeFeature::Baffle(id) => {
+                let boundary = scene
+                    .internal_boundaries
+                    .iter()
+                    .find(|boundary| boundary.id == id)?;
+                let side = match target.side {
+                    BoundaryProbeSide::Left => InternalBoundarySide::Left,
+                    BoundaryProbeSide::Right => InternalBoundarySide::Right,
+                    _ => return None,
+                };
+                for span in spans {
+                    let start = boundary.spline.breakpoint(span)?;
+                    let end = boundary.spline.breakpoint(span + 1)?;
+                    for piece in 0..PIECES_PER_SPAN {
+                        let a = piece as f64 / PIECES_PER_SPAN as f64;
+                        let b = (piece + 1) as f64 / PIECES_PER_SPAN as f64;
+                        let parameters = [start + (end - start) * a, start + (end - start) * b];
+                        segments.push(BoundaryPathSegment {
+                            label: BoundaryLabel::InternalBoundary { id, side },
+                            parameter: parameters,
+                            period: boundary.spline.period(),
+                            region: boundary.region,
+                            points: parameters.map(|parameter| boundary.spline.evaluate(parameter)),
+                        });
+                    }
+                }
+            }
+        }
+        if target.reversed {
+            segments.reverse();
+            for segment in &mut segments {
+                segment.parameter.swap(0, 1);
+                segment.points.swap(0, 1);
+            }
+        }
+        let length = segments
+            .iter()
+            .map(|segment| (segment.points[1] - segment.points[0]).norm())
+            .sum::<f64>();
+        (length.is_finite() && length > 0.0).then_some(CompiledBoundaryPath {
+            segments,
+            length,
+            closed: target.whole
+                && matches!(
+                    target.feature,
+                    BoundaryProbeFeature::Outer | BoundaryProbeFeature::Loop(_)
+                ),
+        })
+    }
+
+    fn compile_boundary_probe(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        scene: &Scene,
+        target: BoundaryProbeTarget,
+    ) -> Option<(CurveStencilSamples, f64, bool)> {
+        let path = Self::boundary_probe_path(scene, target)?;
+        let count = target.preset.spatial_points();
+        let mut cumulative = Vec::with_capacity(path.segments.len() + 1);
+        cumulative.push(0.0);
+        for segment in &path.segments {
+            let next = cumulative.last().copied().unwrap()
+                + (segment.points[1] - segment.points[0]).norm();
+            cumulative.push(next);
+        }
+        let samples = (0..count)
+            .map(|index| {
+                let fraction = if path.closed {
+                    index as f64 / count as f64
+                } else {
+                    index as f64 / (count - 1) as f64
+                };
+                let distance = fraction * path.length;
+                let segment_index = cumulative
+                    .partition_point(|value| *value <= distance)
+                    .saturating_sub(1)
+                    .min(path.segments.len() - 1);
+                let segment = path.segments[segment_index];
+                let segment_length = cumulative[segment_index + 1] - cumulative[segment_index];
+                let local = if segment_length > 0.0 {
+                    (distance - cumulative[segment_index]) / segment_length
+                } else {
+                    0.0
+                };
+                let parameter = segment.parameter[0]
+                    + (segment.parameter[1] - segment.parameter[0]) * local.clamp(0.0, 1.0);
+                QuadraticBoundaryStencil::build(
+                    mesh,
+                    operator,
+                    scene,
+                    segment.label,
+                    parameter,
+                    segment.period,
+                    segment.region,
+                )
+                .ok()
+                .map(|sample| (sample.stencil, sample.outward_normal))
+            })
+            .collect();
+        Some((samples, path.length, path.closed))
+    }
+
     fn refresh_probe_gpu(
         &mut self,
         request: &mut WaveGpuRequest,
@@ -869,6 +1094,9 @@ impl Playground {
         commands: &mut Commands,
     ) {
         if self.simulation_candidate.is_some() || !request.ready() {
+            return;
+        }
+        if self.mesh_committed_scene != self.editor.document.accepted {
             return;
         }
         let (Some(mesh), Some(operator)) = (&self.wave_mesh, &self.wave_operator) else {
@@ -915,9 +1143,10 @@ impl Playground {
                     }
                     Some((probe.id.0, stencil))
                 }
-                ProbeTarget::Segment { .. } => None,
+                ProbeTarget::Segment { .. } | ProbeTarget::Boundary(_) => None,
             })
             .collect::<Vec<_>>();
+        let mut curve_metrics = BTreeMap::new();
         let curve_probes = probes
             .iter()
             .filter_map(|probe| match probe.target {
@@ -927,7 +1156,7 @@ impl Playground {
                     let delta = end - start;
                     let length = delta.norm();
                     let normal = Point2::new(-delta.y / length, delta.x / length);
-                    let stencils = (0..count)
+                    let samples = (0..count)
                         .map(|index| {
                             let fraction = index as f64 / (count - 1) as f64;
                             let position = start + delta * fraction;
@@ -943,21 +1172,50 @@ impl Playground {
                                     .ok()
                                 })
                                 .flatten()
+                                .map(|stencil| (stencil, normal))
                         })
                         .collect::<Vec<_>>();
-                    if probe.enabled && stencils.iter().all(Option::is_none) {
+                    if probe.enabled && samples.iter().all(Option::is_none) {
                         self.probe_status
                             .insert(probe.id, "Line probe does not intersect the mesh".into());
                     }
+                    curve_metrics.insert(probe.id, (length, false));
                     Some(CurveProbeInput {
                         id: probe.id.0,
-                        normal,
                         sample_rate: preset.sample_rate(),
-                        stencils,
+                        samples,
+                    })
+                }
+                ProbeTarget::Boundary(target) => {
+                    let compiled = Self::compile_boundary_probe(
+                        mesh,
+                        operator,
+                        &self.mesh_committed_scene,
+                        target,
+                    );
+                    let (samples, length, closed) = compiled.unwrap_or_else(|| {
+                        (vec![None; target.preset.spatial_points()], 0.0, false)
+                    });
+                    if probe.enabled && samples.iter().all(Option::is_none) {
+                        self.probe_status.insert(
+                            probe.id,
+                            "Boundary probe is unavailable on the committed mesh".into(),
+                        );
+                    }
+                    curve_metrics.insert(probe.id, (length, closed));
+                    Some(CurveProbeInput {
+                        id: probe.id.0,
+                        sample_rate: target.preset.sample_rate(),
+                        samples: if probe.enabled {
+                            samples
+                        } else {
+                            vec![None; target.preset.spatial_points()]
+                        },
                     })
                 }
             })
             .collect::<Vec<_>>();
+        self.curve_probe_metrics = curve_metrics;
         match request
             .update_point_probes(
                 assets,
@@ -3556,11 +3814,19 @@ impl Playground {
                 .get(&id)
                 .map(|trace| trace.frames.iter().cloned().collect::<Vec<_>>())
                 .unwrap_or_default();
-            let segment_length = match probe.target {
+            let curve_metric = match probe.target {
                 ProbeTarget::Point(_) => None,
-                ProbeTarget::Segment { start, end, .. } => Some((end - start).norm()),
+                ProbeTarget::Segment { start, end, .. } => Some(((end - start).norm(), false)),
+                ProbeTarget::Boundary(target) => {
+                    self.curve_probe_metrics.get(&id).copied().or_else(|| {
+                        Self::boundary_probe_path(&self.editor.document.draft, target)
+                            .map(|path| (path.length, path.closed))
+                    })
+                }
             };
-            let curve_times = segment_length.map_or_else(Vec::new, |_| {
+            let segment_length = curve_metric.map(|metric| metric.0);
+            let curve_closed = curve_metric.is_some_and(|metric| metric.1);
+            let curve_times = curve_metric.map_or_else(Vec::new, |_| {
                 curve_frames
                     .iter()
                     .map(|frame| PointProbeRecord {
@@ -3589,10 +3855,10 @@ impl Playground {
             view.span = view.span.clamp(0.02, self.probe_history_seconds);
             let mut open = true;
             let mut clear = false;
-            let kind = if segment_length.is_some() {
-                "line probe"
-            } else {
-                "point probe"
+            let kind = match probe.target {
+                ProbeTarget::Point(_) => "point probe",
+                ProbeTarget::Segment { .. } => "line probe",
+                ProbeTarget::Boundary(_) => "boundary probe",
             };
             egui::Window::new(format!("{} · {kind}", probe.name))
                 .id(egui::Id::new(("probe_readout", id.0)))
@@ -3669,6 +3935,7 @@ impl Playground {
                                 frame,
                                 segment_length.unwrap_or_default(),
                                 LineProbeQuantity::Field,
+                                curve_closed,
                             );
                             if coverage < 0.999 {
                                 ui.small(format!("Valid coverage {:.0}%", coverage * 100.0));
@@ -3708,7 +3975,10 @@ impl Playground {
                                         probe_id: frame.probe_id,
                                         time: frame.time,
                                         displacement: Self::curve_probe_integral(
-                                            frame, length, quantity,
+                                            frame,
+                                            length,
+                                            quantity,
+                                            curve_closed,
                                         )
                                         .0,
                                         velocity: 0.0,
@@ -3787,9 +4057,14 @@ impl Playground {
         frame: &CurveProbeRecord,
         length: f64,
         quantity: LineProbeQuantity,
+        closed: bool,
     ) -> (f64, f64) {
         let samples = Self::curve_probe_values(frame, quantity);
-        let intervals = samples.len().saturating_sub(1);
+        let intervals = if closed {
+            samples.len()
+        } else {
+            samples.len().saturating_sub(1)
+        };
         if intervals == 0 || !length.is_finite() {
             return (f64::NAN, 0.0);
         }
@@ -3797,7 +4072,7 @@ impl Playground {
         let mut valid = 0usize;
         for index in 0..intervals {
             let a = samples[index] as f64;
-            let b = samples[index + 1] as f64;
+            let b = samples[(index + 1) % samples.len()] as f64;
             if a.is_finite() && b.is_finite() {
                 integral += 0.5 * (a + b);
                 valid += 1;
@@ -4563,6 +4838,27 @@ impl Playground {
                 }
             }
         });
+        let boundary_target = self.boundary_probe_target_from_selection();
+        let response = ui.add_enabled(
+            boundary_target.is_some(),
+            egui::Button::new("+ From selected spans"),
+        );
+        if response.clicked()
+            && let Some(target) = boundary_target
+        {
+            match self.editor.create_boundary_probe(target) {
+                Ok(id) => {
+                    self.select_probe(id);
+                    self.probe_windows.insert(id);
+                }
+                Err(error) => {
+                    self.error::<()>(Err(error));
+                }
+            }
+        }
+        response.on_hover_text(
+            "Create a boundary probe from one contiguous span selection on one curve",
+        );
         ui.checkbox(&mut self.show_probe_markers, "Show markers");
         ui.add(
             egui::Slider::new(&mut self.probe_sample_rate, 30.0..=480.0)
@@ -4593,6 +4889,7 @@ impl Playground {
                     .on_hover_text(match probe.target {
                         ProbeTarget::Point(_) => "Point probe",
                         ProbeTarget::Segment { .. } => "Line probe",
+                        ProbeTarget::Boundary(_) => "Boundary probe",
                     })
                     .clicked()
                 {
@@ -4644,6 +4941,32 @@ impl Playground {
                                 frame,
                                 (end - start).norm(),
                                 LineProbeQuantity::Flux,
+                                false,
+                            );
+                            ui.small(format!(
+                                "power {power:+.3e} · {:.0}% coverage",
+                                coverage * 100.0
+                            ));
+                        } else {
+                            ui.small(if probe.enabled {
+                                "Waiting for samples"
+                            } else {
+                                "Disabled"
+                            });
+                        }
+                    }
+                    ProbeTarget::Boundary(_) => {
+                        if let (Some(frame), Some((length, closed))) = (
+                            self.curve_probe_traces
+                                .get(&probe.id)
+                                .and_then(|trace| trace.frames.back()),
+                            self.curve_probe_metrics.get(&probe.id).copied(),
+                        ) {
+                            let (power, coverage) = Self::curve_probe_integral(
+                                frame,
+                                length,
+                                LineProbeQuantity::Flux,
+                                closed,
                             );
                             ui.small(format!(
                                 "power {power:+.3e} · {:.0}% coverage",
@@ -4679,6 +5002,7 @@ impl Playground {
         ui.label(match probe.target {
             ProbeTarget::Point(_) => "Selected point probe",
             ProbeTarget::Segment { .. } => "Selected line probe",
+            ProbeTarget::Boundary(_) => "Selected boundary probe",
         });
         if !matches!(self.probe_name_edit.as_ref(), Some((candidate, _)) if *candidate == id) {
             self.probe_name_edit = Some((id, probe.name.clone()));
@@ -4754,6 +5078,103 @@ impl Playground {
                     end: start,
                     preset: next_preset,
                 };
+                let result = self.editor.update_probe(probe.clone());
+                self.error(result);
+                self.clear_probe_trace(id);
+            }
+        }
+        if let ProbeTarget::Boundary(mut target) = probe.target {
+            let mut changed = false;
+            let mut next_preset = target.preset;
+            egui::ComboBox::from_label("Sampling")
+                .selected_text(match target.preset {
+                    ProbeSamplingPreset::Low => "Low · 32 × 30 Hz",
+                    ProbeSamplingPreset::Medium => "Medium · 64 × 60 Hz",
+                    ProbeSamplingPreset::High => "High · 128 × 120 Hz",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut next_preset,
+                        ProbeSamplingPreset::Low,
+                        "Low · 32 × 30 Hz",
+                    );
+                    ui.selectable_value(
+                        &mut next_preset,
+                        ProbeSamplingPreset::Medium,
+                        "Medium · 64 × 60 Hz",
+                    );
+                    ui.selectable_value(
+                        &mut next_preset,
+                        ProbeSamplingPreset::High,
+                        "High · 128 × 120 Hz",
+                    );
+                });
+            if next_preset != target.preset {
+                target.preset = next_preset;
+                changed = true;
+            }
+            match target.feature {
+                BoundaryProbeFeature::Loop(id) => {
+                    if self.editor.obstacle(id).is_some_and(|loop_| {
+                        matches!(
+                            loop_.role,
+                            LoopRole::MaterialInterface { .. } | LoopRole::Wall { .. }
+                        )
+                    }) {
+                        let mut side = target.side;
+                        egui::ComboBox::from_label("Trace")
+                            .selected_text(match side {
+                                BoundaryProbeSide::Exterior => "Outside",
+                                BoundaryProbeSide::Interior => "Inside",
+                                _ => "Unavailable",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut side,
+                                    BoundaryProbeSide::Exterior,
+                                    "Outside",
+                                );
+                                ui.selectable_value(
+                                    &mut side,
+                                    BoundaryProbeSide::Interior,
+                                    "Inside",
+                                );
+                            });
+                        if side != target.side {
+                            target.side = side;
+                            changed = true;
+                        }
+                    }
+                }
+                BoundaryProbeFeature::Baffle(_) => {
+                    let mut side = target.side;
+                    egui::ComboBox::from_label("Trace")
+                        .selected_text(match side {
+                            BoundaryProbeSide::Left => "Left",
+                            BoundaryProbeSide::Right => "Right",
+                            _ => "Unavailable",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut side, BoundaryProbeSide::Left, "Left");
+                            ui.selectable_value(&mut side, BoundaryProbeSide::Right, "Right");
+                        });
+                    if side != target.side {
+                        target.side = side;
+                        changed = true;
+                    }
+                }
+                BoundaryProbeFeature::Outer => {}
+            }
+            if ui
+                .button("Flip direction")
+                .on_hover_text("Reverse the arclength axis; outward flux keeps its sign")
+                .clicked()
+            {
+                target.reversed = !target.reversed;
+                changed = true;
+            }
+            if changed {
+                probe.target = ProbeTarget::Boundary(target);
                 let result = self.editor.update_probe(probe.clone());
                 self.error(result);
                 self.clear_probe_trace(id);
@@ -5519,6 +5940,90 @@ impl Playground {
             .collect()
     }
 
+    fn boundary_probe_target_from_selection(&self) -> Option<BoundaryProbeTarget> {
+        let first = *self.selected_spans.first()?;
+        let (feature, total, closed, side) = match first {
+            GeometrySpan::Outer(_) => (
+                BoundaryProbeFeature::Outer,
+                4,
+                true,
+                BoundaryProbeSide::Domain,
+            ),
+            GeometrySpan::Loop(id, _) => {
+                let loop_ = self.editor.obstacle(id)?;
+                let side = match loop_.role {
+                    LoopRole::Hole { .. } => BoundaryProbeSide::Domain,
+                    LoopRole::MaterialInterface { .. } | LoopRole::Wall { .. } => {
+                        BoundaryProbeSide::Exterior
+                    }
+                };
+                (
+                    BoundaryProbeFeature::Loop(id),
+                    loop_.spline.intervals().len(),
+                    true,
+                    side,
+                )
+            }
+            GeometrySpan::Baffle(id, _) => (
+                BoundaryProbeFeature::Baffle(id),
+                self.editor.internal_boundary(id)?.spline.intervals().len(),
+                false,
+                match self.baffle_face {
+                    InternalBoundarySide::Left => BoundaryProbeSide::Left,
+                    InternalBoundarySide::Right => BoundaryProbeSide::Right,
+                },
+            ),
+        };
+        let mut indices = BTreeSet::new();
+        for span in &self.selected_spans {
+            let index = match (*span, feature) {
+                (GeometrySpan::Outer(side), BoundaryProbeFeature::Outer) => side.index(),
+                (GeometrySpan::Loop(id, index), BoundaryProbeFeature::Loop(expected))
+                    if id == expected =>
+                {
+                    index
+                }
+                (GeometrySpan::Baffle(id, index), BoundaryProbeFeature::Baffle(expected))
+                    if id == expected =>
+                {
+                    index
+                }
+                _ => return None,
+            };
+            if index >= total {
+                return None;
+            }
+            indices.insert(index);
+        }
+        let whole = indices.len() == total;
+        let start_span = if whole {
+            0
+        } else if closed {
+            (0..total).find(|index| {
+                indices.contains(index) && !indices.contains(&((*index + total - 1) % total))
+            })?
+        } else {
+            *indices.first()?
+        };
+        let contiguous = (0..indices.len()).all(|offset| {
+            let index = if closed {
+                (start_span + offset) % total
+            } else {
+                start_span + offset
+            };
+            indices.contains(&index)
+        });
+        contiguous.then_some(BoundaryProbeTarget {
+            feature,
+            start_span,
+            span_count: indices.len(),
+            whole,
+            side,
+            reversed: false,
+            preset: ProbeSamplingPreset::Medium,
+        })
+    }
+
     fn topology_inspector(&mut self, ui: &mut egui::Ui) {
         if self.selected_spans.is_empty() {
             return;
@@ -6195,31 +6700,37 @@ impl Playground {
                     } else if let Some(hit) = self.hit_probe(p, r) {
                         let id = hit.id();
                         self.select_probe(id);
-                        self.editor.begin();
-                        self.probe_drag = Some(match hit {
-                            ProbeHit::Point(id) => ProbeDrag::Point { id },
-                            ProbeHit::SegmentEndpoint(id, start_endpoint) => {
-                                ProbeDrag::SegmentEndpoint { id, start_endpoint }
-                            }
-                            ProbeHit::SegmentBody(id) => {
-                                let probe = self
-                                    .editor
-                                    .document
-                                    .probes
-                                    .iter()
-                                    .find(|probe| probe.id == id)
-                                    .expect("hit probe exists");
-                                let ProbeTarget::Segment { start, end, .. } = probe.target else {
-                                    unreachable!()
-                                };
-                                ProbeDrag::SegmentBody {
-                                    id,
-                                    anchor: self.world(p, r),
-                                    start,
-                                    end,
+                        if matches!(hit, ProbeHit::Boundary(_)) {
+                            self.probe_drag = None;
+                        } else {
+                            self.editor.begin();
+                            self.probe_drag = Some(match hit {
+                                ProbeHit::Point(id) => ProbeDrag::Point { id },
+                                ProbeHit::SegmentEndpoint(id, start_endpoint) => {
+                                    ProbeDrag::SegmentEndpoint { id, start_endpoint }
                                 }
-                            }
-                        });
+                                ProbeHit::SegmentBody(id) => {
+                                    let probe = self
+                                        .editor
+                                        .document
+                                        .probes
+                                        .iter()
+                                        .find(|probe| probe.id == id)
+                                        .expect("hit probe exists");
+                                    let ProbeTarget::Segment { start, end, .. } = probe.target
+                                    else {
+                                        unreachable!()
+                                    };
+                                    ProbeDrag::SegmentBody {
+                                        id,
+                                        anchor: self.world(p, r),
+                                        start,
+                                        end,
+                                    }
+                                }
+                                ProbeHit::Boundary(_) => unreachable!(),
+                            });
+                        }
                     } else if let Some((id, index)) = self.hit_handle(p, r) {
                         let control = GeometryControl::Loop(id, index);
                         self.select_control(control);
@@ -7399,6 +7910,49 @@ impl Playground {
                         }
                         midpoint
                     }
+                    ProbeTarget::Boundary(target) => {
+                        let Some(path) =
+                            Self::boundary_probe_path(&self.editor.document.draft, target)
+                        else {
+                            continue;
+                        };
+                        for segment in &path.segments {
+                            painter.line_segment(
+                                [
+                                    self.screen(segment.points[0], r),
+                                    self.screen(segment.points[1], r),
+                                ],
+                                Stroke::new(if selected { 4.0 } else { 2.5 }, color),
+                            );
+                        }
+                        let mut remaining = path.length * 0.5;
+                        let mut midpoint = self.screen(path.segments[0].points[0], r);
+                        for segment in &path.segments {
+                            let length = (segment.points[1] - segment.points[0]).norm();
+                            if remaining <= length {
+                                midpoint = self.screen(
+                                    segment.points[0].lerp(
+                                        segment.points[1],
+                                        if length > 0.0 {
+                                            remaining / length
+                                        } else {
+                                            0.0
+                                        },
+                                    ),
+                                    r,
+                                );
+                                break;
+                            }
+                            remaining -= length;
+                        }
+                        painter.circle_filled(midpoint, if selected { 7.0 } else { 5.5 }, color);
+                        painter.circle_stroke(
+                            midpoint,
+                            if selected { 9.0 } else { 7.5 },
+                            Stroke::new(1.5, Color32::WHITE),
+                        );
+                        midpoint
+                    }
                 };
                 painter.text(
                     label_at + egui::vec2(10.0, -10.0),
@@ -7644,6 +8198,28 @@ impl Playground {
                     } else {
                         None
                     }
+                }
+                ProbeTarget::Boundary(target) => {
+                    let path = Self::boundary_probe_path(&self.editor.document.draft, target)?;
+                    let mut remaining = path.length * 0.5;
+                    let mut badge = path.segments.first()?.points[0];
+                    for segment in path.segments {
+                        let length = (segment.points[1] - segment.points[0]).norm();
+                        if remaining <= length {
+                            badge = segment.points[0].lerp(
+                                segment.points[1],
+                                if length > 0.0 {
+                                    remaining / length
+                                } else {
+                                    0.0
+                                },
+                            );
+                            break;
+                        }
+                        remaining -= length;
+                    }
+                    (self.screen(badge, viewport).distance(point) <= 11.0)
+                        .then_some(ProbeHit::Boundary(probe.id))
                 }
             })
     }
@@ -11467,11 +12043,11 @@ mod tests {
             normal_flux: vec![1.0, 3.0, f32::NAN, -2.0, 2.0],
         };
         let (field, field_coverage) =
-            Playground::curve_probe_integral(&frame, 2.0, LineProbeQuantity::Field);
+            Playground::curve_probe_integral(&frame, 2.0, LineProbeQuantity::Field, false);
         let (power, coverage) =
-            Playground::curve_probe_integral(&frame, 2.0, LineProbeQuantity::Flux);
+            Playground::curve_probe_integral(&frame, 2.0, LineProbeQuantity::Flux, false);
         let (energy, energy_coverage) =
-            Playground::curve_probe_integral(&frame, 2.0, LineProbeQuantity::Energy);
+            Playground::curve_probe_integral(&frame, 2.0, LineProbeQuantity::Energy, false);
         assert!((field - 1.75).abs() < 1.0e-12);
         assert!((power - 1.0).abs() < 1.0e-12);
         assert!((energy - 6.0).abs() < 1.0e-12);
@@ -11557,6 +12133,64 @@ mod tests {
             view.line_plots
                 [LineProbeQuantity::Energy.offset() + LineProbeRepresentation::Integral.offset()]
         );
+    }
+
+    #[test]
+    fn boundary_probe_selection_requires_one_contiguous_curve_run() {
+        let mut state = Playground::default();
+        state.set_span_selection(vec![
+            GeometrySpan::Loop(ObstacleId(1), 7),
+            GeometrySpan::Loop(ObstacleId(1), 0),
+            GeometrySpan::Loop(ObstacleId(1), 1),
+        ]);
+        let target = state.boundary_probe_target_from_selection().unwrap();
+        assert_eq!(target.feature, BoundaryProbeFeature::Loop(ObstacleId(1)));
+        assert_eq!(target.start_span, 7);
+        assert_eq!(target.span_count, 3);
+        assert_eq!(target.side, BoundaryProbeSide::Domain);
+
+        state.set_span_selection(vec![
+            GeometrySpan::Loop(ObstacleId(1), 0),
+            GeometrySpan::Loop(ObstacleId(1), 2),
+        ]);
+        assert!(state.boundary_probe_target_from_selection().is_none());
+    }
+
+    #[test]
+    fn probes_panel_creates_boundary_probe_from_selected_spans() {
+        let mut h = Harness::new();
+        h.state.inspector_panel = Some(InspectorPanel::Probes);
+        h.state.set_span_selection(vec![
+            GeometrySpan::Loop(ObstacleId(1), 7),
+            GeometrySpan::Loop(ObstacleId(1), 0),
+        ]);
+        h.frame(vec![]);
+        h.click_text("+ From selected spans");
+        assert_eq!(h.state.editor.document.probes.len(), 1);
+        let ProbeTarget::Boundary(target) = h.state.editor.document.probes[0].target else {
+            panic!("expected boundary probe")
+        };
+        assert_eq!(target.spans(8), vec![7, 0]);
+        assert!(
+            h.state
+                .probe_windows
+                .contains(&h.state.editor.document.probes[0].id)
+        );
+    }
+
+    #[test]
+    fn closed_curve_integral_includes_the_periodic_seam() {
+        let frame = CurveProbeRecord {
+            probe_id: 1,
+            time: 0.0,
+            displacement: vec![1.0, 1.0, 1.0, 1.0],
+            energy_density: vec![0.0; 4],
+            normal_flux: vec![0.0; 4],
+        };
+        let (integral, coverage) =
+            Playground::curve_probe_integral(&frame, 2.5, LineProbeQuantity::Field, true);
+        assert!((integral - 2.5).abs() < 1.0e-12);
+        assert_eq!(coverage, 1.0);
     }
 
     #[test]

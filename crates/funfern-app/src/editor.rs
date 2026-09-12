@@ -1,4 +1,5 @@
 use funfern_core::*;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GeometryControl {
@@ -46,6 +47,54 @@ impl Default for SourceSettings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProbeId(pub u64);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryProbeFeature {
+    Outer,
+    Loop(ObstacleId),
+    Baffle(InternalBoundaryId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryProbeSide {
+    Domain,
+    Exterior,
+    Interior,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundaryProbeTarget {
+    pub feature: BoundaryProbeFeature,
+    pub start_span: usize,
+    pub span_count: usize,
+    pub whole: bool,
+    pub side: BoundaryProbeSide,
+    pub reversed: bool,
+    pub preset: ProbeSamplingPreset,
+}
+
+impl BoundaryProbeTarget {
+    pub fn spans(self, total: usize) -> Vec<usize> {
+        if total == 0 {
+            return vec![];
+        }
+        let count = if self.whole {
+            total
+        } else {
+            self.span_count.min(total)
+        };
+        (0..count)
+            .map(|offset| match self.feature {
+                BoundaryProbeFeature::Baffle(_) => self.start_span + offset,
+                BoundaryProbeFeature::Outer | BoundaryProbeFeature::Loop(_) => {
+                    (self.start_span + offset) % total
+                }
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ProbeTarget {
     Point(Point2),
@@ -54,6 +103,7 @@ pub enum ProbeTarget {
         end: Point2,
         preset: ProbeSamplingPreset,
     },
+    Boundary(BoundaryProbeTarget),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -101,6 +151,7 @@ impl ProbeDefinition {
                 ProbeTarget::Segment { start, end, .. } => {
                     start.finite() && end.finite() && (end - start).norm() >= 1.0e-6
                 }
+                ProbeTarget::Boundary(target) => target.span_count > 0,
             }
     }
 }
@@ -229,6 +280,7 @@ impl Editor {
                 LoopKind::Hole => unreachable!(),
             };
             self.begin();
+            self.remap_loop_probe_role(id, old_role, role);
             self.document.draft.regions.push(Region {
                 id: interior,
                 material: new_region_material,
@@ -262,6 +314,16 @@ impl Editor {
             return Err("Move or delete geometry inside this loop before making it a hole".into());
         }
         self.begin();
+        let new_role = if kind == LoopKind::Hole {
+            LoopRole::Hole { exterior }
+        } else {
+            match kind {
+                LoopKind::MaterialInterface => LoopRole::MaterialInterface { exterior, interior },
+                LoopKind::Wall => LoopRole::Wall { exterior, interior },
+                LoopKind::Hole => unreachable!(),
+            }
+        };
+        self.remap_loop_probe_role(id, old_role, new_role);
         if kind == LoopKind::Hole {
             self.document
                 .draft
@@ -724,6 +786,7 @@ impl Editor {
 
     pub fn delete_internal_boundary(&mut self, id: InternalBoundaryId) {
         self.begin();
+        self.delete_boundary_probes_for(BoundaryProbeFeature::Baffle(id));
         self.document
             .draft
             .internal_boundaries
@@ -833,6 +896,21 @@ impl Editor {
                 let inherited = span_laws[span];
                 span_laws.insert(span + 1, inherited);
                 self.begin();
+                let old_total = span_laws.len() - 1;
+                self.remap_boundary_probe_spans(
+                    BoundaryProbeFeature::Baffle(id),
+                    old_total,
+                    old_total + 1,
+                    |old| {
+                        if old < span {
+                            vec![old]
+                        } else if old == span {
+                            vec![span, span + 1]
+                        } else {
+                            vec![old + 1]
+                        }
+                    },
+                );
                 let boundary = self
                     .document
                     .draft
@@ -921,6 +999,7 @@ impl Editor {
         if breakpoint == 0 || breakpoint >= source.spline.intervals().len() {
             return Err("Choose an interior baffle knot".into());
         }
+        let source_spline = source.spline.clone();
         let (left, right) = source
             .spline
             .split(breakpoint)
@@ -933,6 +1012,54 @@ impl Editor {
             .checked_add(1)
             .ok_or("Internal-boundary IDs exhausted")?;
         self.begin();
+        let old_total = source_spline.intervals().len();
+        self.document.probes.retain_mut(|probe| {
+            let ProbeTarget::Boundary(mut target) = probe.target else {
+                return true;
+            };
+            if target.feature != BoundaryProbeFeature::Baffle(id) {
+                return true;
+            }
+            let selected = target.spans(old_total);
+            let left_score = selected
+                .iter()
+                .filter(|span| **span < breakpoint)
+                .map(|span| open_span_arc_length(&source_spline, *span))
+                .sum::<f64>();
+            let right_score = selected
+                .iter()
+                .filter(|span| **span >= breakpoint)
+                .map(|span| open_span_arc_length(&source_spline, *span))
+                .sum::<f64>();
+            let (feature, total, indices) = if left_score >= right_score && left_score > 0.0 {
+                (
+                    BoundaryProbeFeature::Baffle(id),
+                    breakpoint,
+                    selected
+                        .into_iter()
+                        .filter(|span| *span < breakpoint)
+                        .collect::<BTreeSet<_>>(),
+                )
+            } else if right_score > 0.0 {
+                (
+                    BoundaryProbeFeature::Baffle(new_id),
+                    old_total - breakpoint,
+                    selected
+                        .into_iter()
+                        .filter(|span| *span >= breakpoint)
+                        .map(|span| span - breakpoint)
+                        .collect::<BTreeSet<_>>(),
+                )
+            } else {
+                return false;
+            };
+            target.feature = feature;
+            if !set_boundary_probe_run(&mut target, total, &indices, false) {
+                return false;
+            }
+            probe.target = ProbeTarget::Boundary(target);
+            true
+        });
         let boundary = self
             .document
             .draft
@@ -1014,6 +1141,8 @@ impl Editor {
         if (a.spline.evaluate(a.spline.period()) - b.spline.evaluate(0.0)).norm() > tolerance {
             return Err("Nearest endpoints are too far apart to merge".into());
         }
+        let a_count = a.spline.intervals().len();
+        let b_count = b.spline.intervals().len();
         let spline = a
             .spline
             .join(b.spline, tolerance)
@@ -1021,6 +1150,41 @@ impl Editor {
         let mut laws = a.span_laws;
         laws.extend(b.span_laws);
         self.begin();
+        self.document.probes.retain_mut(|probe| {
+            let ProbeTarget::Boundary(mut target) = probe.target else {
+                return true;
+            };
+            let (old_total, offset, reversed) =
+                if target.feature == BoundaryProbeFeature::Baffle(first) {
+                    (a_count, 0, reverse_a)
+                } else if target.feature == BoundaryProbeFeature::Baffle(second) {
+                    (b_count, a_count, reverse_b)
+                } else {
+                    return true;
+                };
+            let indices = target
+                .spans(old_total)
+                .into_iter()
+                .map(|span| {
+                    let span = if reversed { old_total - 1 - span } else { span };
+                    span + offset
+                })
+                .collect::<BTreeSet<_>>();
+            target.feature = BoundaryProbeFeature::Baffle(first);
+            if reversed {
+                target.reversed = !target.reversed;
+                target.side = match target.side {
+                    BoundaryProbeSide::Left => BoundaryProbeSide::Right,
+                    BoundaryProbeSide::Right => BoundaryProbeSide::Left,
+                    side => side,
+                };
+            }
+            if !set_boundary_probe_run(&mut target, a_count + b_count, &indices, false) {
+                return false;
+            }
+            probe.target = ProbeTarget::Boundary(target);
+            true
+        });
         let kept = self
             .document
             .draft
@@ -1061,12 +1225,17 @@ impl Editor {
             return Err("Missing internal-boundary control".into());
         }
         let mut span_laws = boundary.span_laws.clone();
+        let old_span_count = span_laws.len();
+        let merge_left;
         if index <= 1 {
+            merge_left = 0;
             span_laws.remove(0);
         } else if index + 2 >= old_control_count {
+            merge_left = old_span_count - 2;
             span_laws.pop();
         } else {
             let left = (index - 2).min(span_laws.len() - 2);
+            merge_left = left;
             if span_laws[left] != span_laws[left + 1] {
                 return Err(
                     "Removal would merge spans with different boundary laws; make them equal first"
@@ -1077,6 +1246,20 @@ impl Editor {
         }
         spline.remove(index).map_err(|error| error.to_string())?;
         self.begin();
+        self.remap_boundary_probe_spans(
+            BoundaryProbeFeature::Baffle(id),
+            old_span_count,
+            old_span_count - 1,
+            |old| {
+                if old < merge_left {
+                    vec![old]
+                } else if old <= merge_left + 1 {
+                    vec![merge_left]
+                } else {
+                    vec![old - 1]
+                }
+            },
+        );
         let boundary = self
             .document
             .draft
@@ -1245,6 +1428,7 @@ impl Editor {
     }
     pub fn delete_obstacle(&mut self, id: ObstacleId) {
         self.begin();
+        self.delete_boundary_probes_for(BoundaryProbeFeature::Loop(id));
         let removed = self
             .document
             .draft
@@ -1481,6 +1665,27 @@ impl Editor {
         spline.remove(index).map_err(|e| e.to_string())?;
         span_conditions.remove(index);
         self.begin();
+        let old_span_count = span_conditions.len() + 1;
+        let previous = (index + old_span_count - 1) % old_span_count;
+        let merged = if index == 0 {
+            old_span_count - 2
+        } else {
+            index - 1
+        };
+        self.remap_boundary_probe_spans(
+            BoundaryProbeFeature::Loop(id),
+            old_span_count,
+            old_span_count - 1,
+            |old| {
+                if old == index || old == previous {
+                    vec![merged]
+                } else if old > index {
+                    vec![old - 1]
+                } else {
+                    vec![old]
+                }
+            },
+        );
         let obstacle = self
             .document
             .draft
@@ -1499,10 +1704,25 @@ impl Editor {
         let mut spline = obstacle.spline.clone();
         let span = spline.span_index(t).ok_or("Invalid spline parameter")?;
         let inherited = obstacle.span_conditions[span];
+        let old_total = obstacle.span_conditions.len();
         match spline.insert(t).map_err(|e| e.to_string())? {
             Insertion::Existing(i) => Ok(i),
             Insertion::Inserted(i) => {
                 self.begin();
+                self.remap_boundary_probe_spans(
+                    BoundaryProbeFeature::Loop(id),
+                    old_total,
+                    old_total + 1,
+                    |old| {
+                        if old < span {
+                            vec![old]
+                        } else if old == span {
+                            vec![span, span + 1]
+                        } else {
+                            vec![old + 1]
+                        }
+                    },
+                );
                 let obstacle = self
                     .document
                     .draft
@@ -1779,12 +1999,197 @@ impl Editor {
         Ok(id)
     }
 
+    pub fn create_boundary_probe(
+        &mut self,
+        mut target: BoundaryProbeTarget,
+    ) -> Result<ProbeId, String> {
+        self.validate_boundary_probe(target)?;
+        if self.document.probes.len() >= MAX_PROBES {
+            return Err(format!("Maximum {MAX_PROBES} probes"));
+        }
+        if self.segment_probe_points() + target.preset.spatial_points() > MAX_SEGMENT_PROBE_POINTS {
+            return Err(format!(
+                "Line probes are limited to {MAX_SEGMENT_PROBE_POINTS} sample points"
+            ));
+        }
+        let total = self.boundary_feature_span_count(target.feature).unwrap();
+        target.start_span %= total;
+        target.span_count = if target.whole {
+            total
+        } else {
+            target.span_count.min(total)
+        };
+        let id = ProbeId(self.next_probe_id);
+        self.next_probe_id = self
+            .next_probe_id
+            .checked_add(1)
+            .ok_or("Probe IDs exhausted")?;
+        const COLORS: [[u8; 3]; 8] = [
+            [63, 144, 239],
+            [244, 105, 122],
+            [78, 201, 176],
+            [245, 183, 69],
+            [164, 126, 232],
+            [70, 190, 232],
+            [230, 125, 67],
+            [153, 203, 103],
+        ];
+        self.begin();
+        self.document.probes.push(ProbeDefinition {
+            id,
+            name: format!("Boundary probe {}", id.0),
+            color: COLORS[(id.0.saturating_sub(1) as usize) % COLORS.len()],
+            enabled: true,
+            target: ProbeTarget::Boundary(target),
+        });
+        self.commit();
+        Ok(id)
+    }
+
+    pub fn boundary_feature_span_count(&self, feature: BoundaryProbeFeature) -> Option<usize> {
+        match feature {
+            BoundaryProbeFeature::Outer => Some(4),
+            BoundaryProbeFeature::Loop(id) => self
+                .document
+                .draft
+                .obstacles
+                .iter()
+                .find(|obstacle| obstacle.id == id)
+                .map(|obstacle| obstacle.spline.intervals().len()),
+            BoundaryProbeFeature::Baffle(id) => self
+                .document
+                .draft
+                .internal_boundaries
+                .iter()
+                .find(|boundary| boundary.id == id)
+                .map(|boundary| boundary.spline.intervals().len()),
+        }
+    }
+
+    pub fn validate_boundary_probe(&self, target: BoundaryProbeTarget) -> Result<(), String> {
+        let total = self
+            .boundary_feature_span_count(target.feature)
+            .ok_or("Boundary probe references a missing feature")?;
+        if total == 0
+            || target.start_span >= total
+            || target.span_count == 0
+            || target.span_count > total
+            || (matches!(target.feature, BoundaryProbeFeature::Baffle(_))
+                && target.start_span + target.span_count > total)
+        {
+            return Err("Boundary probe has an invalid span run".into());
+        }
+        let side_valid = match target.feature {
+            BoundaryProbeFeature::Outer => target.side == BoundaryProbeSide::Domain,
+            BoundaryProbeFeature::Baffle(_) => {
+                matches!(
+                    target.side,
+                    BoundaryProbeSide::Left | BoundaryProbeSide::Right
+                )
+            }
+            BoundaryProbeFeature::Loop(id) => {
+                match self
+                    .document
+                    .draft
+                    .obstacles
+                    .iter()
+                    .find(|obstacle| obstacle.id == id)
+                    .unwrap()
+                    .role
+                {
+                    LoopRole::Hole { .. } => target.side == BoundaryProbeSide::Domain,
+                    LoopRole::MaterialInterface { .. } | LoopRole::Wall { .. } => matches!(
+                        target.side,
+                        BoundaryProbeSide::Exterior | BoundaryProbeSide::Interior
+                    ),
+                }
+            }
+        };
+        if !side_valid {
+            return Err("Boundary probe side is incompatible with its feature".into());
+        }
+        Ok(())
+    }
+
+    fn delete_boundary_probes_for(&mut self, feature: BoundaryProbeFeature) {
+        self.document.probes.retain(|probe| {
+            !matches!(probe.target, ProbeTarget::Boundary(target) if target.feature == feature)
+        });
+    }
+
+    fn remap_loop_probe_role(&mut self, id: ObstacleId, old: LoopRole, new: LoopRole) {
+        self.document.probes.retain_mut(|probe| {
+            let ProbeTarget::Boundary(mut target) = probe.target else {
+                return true;
+            };
+            if target.feature != BoundaryProbeFeature::Loop(id) {
+                return true;
+            }
+            match (old, new, target.side) {
+                (
+                    LoopRole::Hole { .. },
+                    LoopRole::MaterialInterface { .. } | LoopRole::Wall { .. },
+                    BoundaryProbeSide::Domain,
+                ) => {
+                    target.side = BoundaryProbeSide::Exterior;
+                }
+                (
+                    LoopRole::MaterialInterface { .. } | LoopRole::Wall { .. },
+                    LoopRole::Hole { .. },
+                    BoundaryProbeSide::Exterior,
+                ) => {
+                    target.side = BoundaryProbeSide::Domain;
+                }
+                (
+                    LoopRole::MaterialInterface { .. } | LoopRole::Wall { .. },
+                    LoopRole::Hole { .. },
+                    BoundaryProbeSide::Interior,
+                ) => {
+                    return false;
+                }
+                _ => {}
+            }
+            probe.target = ProbeTarget::Boundary(target);
+            true
+        });
+    }
+
+    fn remap_boundary_probe_spans(
+        &mut self,
+        feature: BoundaryProbeFeature,
+        old_total: usize,
+        new_total: usize,
+        mut map: impl FnMut(usize) -> Vec<usize>,
+    ) {
+        self.document.probes.retain_mut(|probe| {
+            let ProbeTarget::Boundary(mut target) = probe.target else {
+                return true;
+            };
+            if target.feature != feature {
+                return true;
+            }
+            let mut selected = BTreeSet::new();
+            for old in target.spans(old_total) {
+                selected.extend(map(old).into_iter().filter(|index| *index < new_total));
+            }
+            let closed = !matches!(feature, BoundaryProbeFeature::Baffle(_));
+            if !set_boundary_probe_run(&mut target, new_total, &selected, closed) {
+                return false;
+            }
+            probe.target = ProbeTarget::Boundary(target);
+            true
+        });
+    }
+
     fn segment_probe_points(&self) -> usize {
         self.document
             .probes
             .iter()
             .map(|probe| match probe.target {
-                ProbeTarget::Segment { preset, .. } => preset.spatial_points(),
+                ProbeTarget::Segment { preset, .. }
+                | ProbeTarget::Boundary(BoundaryProbeTarget { preset, .. }) => {
+                    preset.spatial_points()
+                }
                 ProbeTarget::Point(_) => 0,
             })
             .sum()
@@ -1793,6 +2198,9 @@ impl Editor {
     pub fn update_probe(&mut self, probe: ProbeDefinition) -> Result<(), String> {
         if !probe.valid() {
             return Err("Probe name and target must be valid".into());
+        }
+        if let ProbeTarget::Boundary(target) = probe.target {
+            self.validate_boundary_probe(target)?;
         }
         let id = probe.id;
         let current = self
@@ -1803,11 +2211,15 @@ impl Editor {
             .ok_or("Missing probe")?;
         let points_without_current = self.segment_probe_points()
             - match current.target {
-                ProbeTarget::Segment { preset, .. } => preset.spatial_points(),
+                ProbeTarget::Segment { preset, .. }
+                | ProbeTarget::Boundary(BoundaryProbeTarget { preset, .. }) => {
+                    preset.spatial_points()
+                }
                 ProbeTarget::Point(_) => 0,
             };
         let replacement_points = match probe.target {
-            ProbeTarget::Segment { preset, .. } => preset.spatial_points(),
+            ProbeTarget::Segment { preset, .. }
+            | ProbeTarget::Boundary(BoundaryProbeTarget { preset, .. }) => preset.spatial_points(),
             ProbeTarget::Point(_) => 0,
         };
         if points_without_current + replacement_points > MAX_SEGMENT_PROBE_POINTS {
@@ -1910,6 +2322,77 @@ impl Editor {
             .saturating_add(1);
         self.document = document;
     }
+}
+
+fn set_boundary_probe_run(
+    target: &mut BoundaryProbeTarget,
+    total: usize,
+    selected: &BTreeSet<usize>,
+    closed: bool,
+) -> bool {
+    if total == 0 || selected.is_empty() {
+        return false;
+    }
+    if selected.len() == total {
+        target.start_span = 0;
+        target.span_count = total;
+        target.whole = true;
+        return true;
+    }
+    let mut runs = Vec::new();
+    if closed {
+        for start in 0..total {
+            if !selected.contains(&start) || selected.contains(&((start + total - 1) % total)) {
+                continue;
+            }
+            let mut count = 0;
+            while count < total && selected.contains(&((start + count) % total)) {
+                count += 1;
+            }
+            runs.push((count, start));
+        }
+    } else {
+        let mut index = 0;
+        while index < total {
+            if !selected.contains(&index) {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            while index < total && selected.contains(&index) {
+                index += 1;
+            }
+            runs.push((index - start, start));
+        }
+    }
+    let Some((count, start)) = runs
+        .into_iter()
+        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
+    else {
+        return false;
+    };
+    target.start_span = start;
+    target.span_count = count;
+    target.whole = false;
+    true
+}
+
+fn open_span_arc_length(spline: &OpenCubicSpline, span: usize) -> f64 {
+    let Some(start) = spline.breakpoint(span) else {
+        return 0.0;
+    };
+    let Some(end) = spline.breakpoint(span + 1) else {
+        return 0.0;
+    };
+    let mut length = 0.0;
+    let mut previous = spline.evaluate(start);
+    for piece in 1..=16 {
+        let parameter = start + (end - start) * piece as f64 / 16.0;
+        let point = spline.evaluate(parameter);
+        length += (point - previous).norm();
+        previous = point;
+    }
+    length
 }
 
 fn replace_exterior(role: LoopRole, from: RegionId, to: RegionId) -> LoopRole {
