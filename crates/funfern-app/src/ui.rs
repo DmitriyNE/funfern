@@ -1584,6 +1584,10 @@ impl Playground {
         if !self.startup_load_checked {
             self.startup_load_checked = true;
             if !self.automated_benchmark {
+                // Establish the first catalog entry as the startup baseline. A
+                // valid shared scene or recovery document replaces this pending
+                // load before validation advances below.
+                self.start_initial_example_load();
                 if let Some(result) = sharing::initial_fragment() {
                     self.share_fragment_active = true;
                     match result.and_then(|bytes| persistence::parse(&bytes)) {
@@ -1648,7 +1652,9 @@ impl Playground {
                         self.fresh_simulation_requested = true;
                         self.show_boundary_conditions = true;
                     }
-                    self.notify(self.load_notice);
+                    if !self.load_notice.is_empty() {
+                        self.notify(self.load_notice);
+                    }
                 }
                 Err(e) => self.message = e,
             }
@@ -1669,6 +1675,16 @@ impl Playground {
             persistence::candidate(example.document.clone()),
             LoadMode::Undoable,
             "Example opened; Undo restores the previous scene",
+        );
+        self.load_example_simulation = Some(example.simulation);
+    }
+
+    fn start_initial_example_load(&mut self) {
+        let example = &examples::catalog()[0];
+        self.start_load(
+            persistence::candidate(example.document.clone()),
+            LoadMode::Replace,
+            "",
         );
         self.load_example_simulation = Some(example.simulation);
     }
@@ -2702,149 +2718,162 @@ impl Playground {
         self.file_busy = true;
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let compact = ui.available_width() < 1100.0;
-        ui.horizontal_centered(|ui| {
-            let (undo, redo) = self.editor.history_len();
-            if ui
-                .add_enabled(undo > 0, egui::Button::new("Undo"))
-                .clicked()
-            {
-                self.editor.undo();
-                self.clear_transient();
-            }
-            if ui
-                .add_enabled(redo > 0, egui::Button::new("Redo"))
-                .clicked()
-            {
-                self.editor.redo();
-                self.clear_transient();
-            }
-            ui.separator();
-            let file_enabled = !self.file_busy && self.load.is_none() && !self.automated_benchmark;
-            if compact {
-                ui.add_enabled_ui(file_enabled, |ui| {
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Save").clicked() {
-                            self.save_scene();
-                            ui.close();
-                        }
-                        if ui.button("Load").clicked() {
-                            self.load_scene();
-                            ui.close();
-                        }
-                        if ui.button("Examples").clicked() {
-                            self.examples_open = true;
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button("Copy scene link").clicked() {
-                            self.copy_scene_link(ui.ctx());
-                            ui.close();
-                        }
-                        if ui.button("Export scene SVG").clicked() {
-                            self.export_scene_svg();
-                            ui.close();
-                        }
-                    });
-                });
-            } else {
-                if ui
-                    .add_enabled(file_enabled, egui::Button::new("Save"))
-                    .clicked()
-                {
-                    self.save_scene();
-                }
-                if ui
-                    .add_enabled(file_enabled, egui::Button::new("Load"))
-                    .clicked()
-                {
-                    self.load_scene();
-                }
-                if ui
-                    .add_enabled(file_enabled, egui::Button::new("Examples"))
-                    .clicked()
-                {
-                    self.examples_open = true;
-                }
-                ui.add_enabled_ui(file_enabled, |ui| {
-                    ui.menu_button("Export", |ui| {
-                        if ui.button("Copy scene link").clicked() {
-                            self.copy_scene_link(ui.ctx());
-                            ui.close();
-                        }
-                        if ui.button("Scene SVG").clicked() {
-                            self.export_scene_svg();
-                            ui.close();
-                        }
-                    });
-                });
-            }
-            if ui.button("Fit view").clicked() {
-                self.fit = true;
-            }
-            ui.separator();
-            if compact {
-                let label = self.inspector_panel.map_or("Panels", |panel| panel.label());
-                ui.menu_button(label, |ui| {
-                    for panel in InspectorPanel::ALL {
-                        if ui
-                            .selectable_label(self.inspector_panel == Some(panel), panel.label())
-                            .clicked()
-                        {
-                            self.select_inspector_panel(panel);
-                            ui.close();
-                        }
+    fn top_file_controls(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let (undo, redo) = self.editor.history_len();
+        if ui
+            .add_enabled(undo > 0, egui::Button::new("Undo"))
+            .clicked()
+        {
+            self.editor.undo();
+            self.clear_transient();
+        }
+        if ui
+            .add_enabled(redo > 0, egui::Button::new("Redo"))
+            .clicked()
+        {
+            self.editor.redo();
+            self.clear_transient();
+        }
+        ui.separator();
+        let file_enabled = !self.file_busy && self.load.is_none() && !self.automated_benchmark;
+        if compact {
+            ui.add_enabled_ui(file_enabled, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Save").clicked() {
+                        self.save_scene();
+                        ui.close();
+                    }
+                    if ui.button("Load").clicked() {
+                        self.load_scene();
+                        ui.close();
+                    }
+                    if ui.button("Examples").clicked() {
+                        self.examples_open = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Copy scene link").clicked() {
+                        self.copy_scene_link(ui.ctx());
+                        ui.close();
+                    }
+                    if ui.button("Export scene SVG").clicked() {
+                        self.export_scene_svg();
+                        ui.close();
                     }
                 });
-            } else {
+            });
+        } else {
+            if ui
+                .add_enabled(file_enabled, egui::Button::new("Save"))
+                .clicked()
+            {
+                self.save_scene();
+            }
+            if ui
+                .add_enabled(file_enabled, egui::Button::new("Load"))
+                .clicked()
+            {
+                self.load_scene();
+            }
+            if ui
+                .add_enabled(file_enabled, egui::Button::new("Examples"))
+                .clicked()
+            {
+                self.examples_open = true;
+            }
+            ui.add_enabled_ui(file_enabled, |ui| {
+                ui.menu_button("Export", |ui| {
+                    if ui.button("Copy scene link").clicked() {
+                        self.copy_scene_link(ui.ctx());
+                        ui.close();
+                    }
+                    if ui.button("Scene SVG").clicked() {
+                        self.export_scene_svg();
+                        ui.close();
+                    }
+                });
+            });
+        }
+        if ui.button("Fit view").clicked() {
+            self.fit = true;
+        }
+    }
+
+    fn top_editor_controls(&mut self, ui: &mut egui::Ui, compact: bool) {
+        if compact {
+            ui.menu_button("Panels", |ui| {
                 for panel in InspectorPanel::ALL {
                     if ui
                         .selectable_label(self.inspector_panel == Some(panel), panel.label())
                         .clicked()
                     {
                         self.select_inspector_panel(panel);
+                        ui.close();
                     }
                 }
-            }
-            let drawing = matches!(
-                self.interaction_mode,
-                InteractionMode::DrawPreset { .. } | InteractionMode::DrawCustom { .. }
-            );
-            let draw_response =
-                ui.add(egui::Button::new("+ Draw").selected(drawing || self.add_geometry_open));
-            self.add_geometry_anchor = draw_response.rect.left_bottom() + egui::vec2(0.0, 4.0);
-            if draw_response.clicked() {
-                if drawing || self.add_geometry_open {
-                    self.interaction_mode = InteractionMode::Select;
-                    self.custom.clear();
-                    self.add_geometry_open = false;
-                } else {
-                    self.inspector_panel = Some(InspectorPanel::Edit);
-                    self.add_geometry_open = true;
+            });
+        } else {
+            for panel in InspectorPanel::ALL {
+                if ui
+                    .selectable_label(self.inspector_panel == Some(panel), panel.label())
+                    .clicked()
+                {
+                    self.select_inspector_panel(panel);
                 }
             }
+        }
+        let drawing = matches!(
+            self.interaction_mode,
+            InteractionMode::DrawPreset { .. } | InteractionMode::DrawCustom { .. }
+        );
+        let draw_response =
+            ui.add(egui::Button::new("+ Draw").selected(drawing || self.add_geometry_open));
+        self.add_geometry_anchor = draw_response.rect.left_bottom() + egui::vec2(0.0, 4.0);
+        if draw_response.clicked() {
+            if drawing || self.add_geometry_open {
+                self.interaction_mode = InteractionMode::Select;
+                self.custom.clear();
+                self.add_geometry_open = false;
+            } else {
+                self.inspector_panel = Some(InspectorPanel::Edit);
+                self.add_geometry_open = true;
+            }
+        }
+    }
+
+    fn top_playback_controls(&mut self, ui: &mut egui::Ui) {
+        let wave_available = self.wave_operator.is_some();
+        ui.add_enabled_ui(wave_available, |ui| {
+            if ui.button("Reset").clicked() {
+                self.wave_reset_requested = true;
+            }
+            if ui
+                .add_enabled(!self.wave_running, egui::Button::new("Step"))
+                .on_hover_text("Pause the simulation to advance one solver step")
+                .clicked()
+            {
+                self.wave_step_requested = true;
+            }
+            if ui
+                .button(if self.wave_running { "Pause" } else { "Run" })
+                .clicked()
+            {
+                self.wave_running = !self.wave_running;
+            }
+        });
+        ui.separator();
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let width = ui.available_width();
+        let compact_files = width < 1100.0;
+        let compact_panels = width < 950.0;
+        ui.horizontal_centered(|ui| {
+            self.top_file_controls(ui, compact_files);
+            ui.separator();
+            self.top_editor_controls(ui, compact_panels);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let wave_available = self.wave_operator.is_some();
-                ui.add_enabled_ui(wave_available, |ui| {
-                    if ui.button("Reset").clicked() {
-                        self.wave_reset_requested = true;
-                    }
-                    if ui
-                        .add_enabled(!self.wave_running, egui::Button::new("Step"))
-                        .on_hover_text("Pause the simulation to advance one solver step")
-                        .clicked()
-                    {
-                        self.wave_step_requested = true;
-                    }
-                    if ui
-                        .button(if self.wave_running { "Pause" } else { "Run" })
-                        .clicked()
-                    {
-                        self.wave_running = !self.wave_running;
-                    }
-                });
-                ui.separator();
+                self.top_playback_controls(ui);
             });
         });
     }
@@ -5712,9 +5741,13 @@ impl Playground {
                     && self.hit_internal_handle(p, r).is_none()
                 {
                     self.editor.commit();
+                    self.probe_drag = None;
                     self.drag = None;
                     self.pending_span_click = None;
-                    if let Some((id, t)) = self.hit_curve(p, r) {
+                    if let Some(id) = self.hit_probe(p, r) {
+                        self.select_probe(id);
+                        self.probe_windows.insert(id);
+                    } else if let Some((id, t)) = self.hit_curve(p, r) {
                         let result = self.editor.insert(id, t);
                         if let Some(index) = self.error(result) {
                             self.select_control(GeometryControl::Loop(id, index));
@@ -10236,6 +10269,68 @@ mod tests {
     }
 
     #[test]
+    fn clean_startup_loads_the_first_catalog_example() {
+        let mut h = Harness::new();
+        h.state.startup_load_checked = true;
+        h.state.start_initial_example_load();
+        for _ in 0..100 {
+            h.state.update_files();
+            if h.state.load.is_none() {
+                break;
+            }
+        }
+        let first = &examples::catalog()[0];
+        assert_eq!(h.state.editor.document, first.document);
+        assert_eq!(
+            h.state.wave_source.position,
+            first.simulation.source.position
+        );
+        assert_eq!(
+            h.state.wave_source.frequency_hz,
+            first.simulation.source.frequency_hz
+        );
+        assert!(h.state.wave_source.enabled);
+        assert_eq!(h.state.editor.history_len(), (0, 0));
+        assert_eq!(h.state.editor.document.probes.len(), 1);
+    }
+
+    #[test]
+    fn top_bar_progressively_compacts_file_and_panel_controls() {
+        let mut h = Harness::new();
+        h.state.inspector_panel = None;
+        h.size = egui::vec2(760.0, 800.0);
+        h.frame(vec![]);
+        h.frame(vec![]);
+        assert!(h.texts.iter().any(|(text, _)| text == "File"));
+        assert!(h.texts.iter().any(|(text, _)| text == "Panels"));
+        assert!(h.texts.iter().any(|(text, _)| text == "+ Draw"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Save"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Edit"));
+        assert!(h.rect.top() < 50.0, "viewport={:?}", h.rect);
+        let draw = h.texts.iter().find(|(text, _)| text == "+ Draw").unwrap().1;
+        let pause = h.texts.iter().find(|(text, _)| text == "Pause").unwrap().1;
+        assert!(draw.right() < pause.left(), "draw={draw:?} pause={pause:?}");
+
+        h.size = egui::vec2(1000.0, 800.0);
+        h.frame(vec![]);
+        assert!(h.texts.iter().any(|(text, _)| text == "File"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Panels"));
+        for label in ["Edit", "View", "Simulation", "Materials", "Probes"] {
+            assert!(h.texts.iter().any(|(text, _)| text == label));
+        }
+        let draw = h.texts.iter().find(|(text, _)| text == "+ Draw").unwrap().1;
+        let pause = h.texts.iter().find(|(text, _)| text == "Pause").unwrap().1;
+        assert!(draw.right() < pause.left(), "draw={draw:?} pause={pause:?}");
+
+        h.size = egui::vec2(1200.0, 800.0);
+        h.frame(vec![]);
+        assert!(!h.texts.iter().any(|(text, _)| text == "File"));
+        for label in ["Save", "Load", "Examples", "Export"] {
+            assert!(h.texts.iter().any(|(text, _)| text == label));
+        }
+    }
+
+    #[test]
     fn inspector_panel_switches_can_hide_and_restore_the_right_panel() {
         let mut h = Harness::new();
         h.click_text("Edit");
@@ -10280,6 +10375,23 @@ mod tests {
         h.state.editor.undo();
         let ProbeTarget::Point(actual) = h.state.editor.document.probes[0].target;
         assert!((actual - position).norm() < 1.0e-6);
+    }
+
+    #[test]
+    fn double_clicking_a_probe_marker_opens_its_readout() {
+        let mut h = Harness::new();
+        let position = Point2::new(0.45, -0.35);
+        let id = h.state.editor.create_point_probe(position).unwrap();
+        h.state.interaction_mode = InteractionMode::Select;
+        h.state.probe_windows.clear();
+        h.frame(vec![]);
+
+        let marker = h.point(position);
+        h.click(marker);
+        assert!(!h.state.probe_windows.contains(&id));
+        h.click(marker);
+        assert!(h.state.probe_windows.contains(&id));
+        assert_eq!(h.state.selected_probe, Some(id));
     }
 
     #[test]

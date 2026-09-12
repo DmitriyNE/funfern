@@ -65,7 +65,14 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   Live automatically.
   Regression checks cover multi-frame time-window dragging and moving the floating
   window.
-- All 207 workspace tests and Clippy with warnings denied pass. The release Metal
+- Probe markers open their floating readout on double-click. The starter example now
+  includes a receiver, and clean startup loads that catalog entry and its simulation
+  settings instead of maintaining a separate hardcoded initial scene.
+- The top toolbar now uses progressive single-row compaction. File operations fold
+  into File first; at narrower widths the five inspector switches fold into Panels.
+  Undo/Redo, Fit view, Panels, Draw, and playback remain directly reachable without
+  increasing the header height.
+- All 210 workspace tests and Clippy with warnings denied pass. The release Metal
   GPU check on an Apple M1 Max exercised 9,690 DOFs at `dt=0.0030078`, produced
   finite nonnegative probe energy, matched the f64 field within `1.30e-6` relative
   L2 error, and advanced at 18.9 simulated seconds per wall second. Native release

@@ -1,5 +1,8 @@
 use crate::wave_gpu::SourceSettings;
-use funfern_app::{editor::Document, persistence};
+use funfern_app::{
+    editor::{Document, ProbeDefinition, ProbeId, ProbeTarget},
+    persistence,
+};
 use funfern_core::*;
 use std::sync::OnceLock;
 
@@ -76,6 +79,13 @@ fn starter_obstacle() -> Document {
     let mut document = Document::default();
     document.draft.outer_boundaries = reflecting_channel();
     document.accepted.outer_boundaries = reflecting_channel();
+    document.probes.push(ProbeDefinition {
+        id: ProbeId(1),
+        name: "Receiver".into(),
+        color: [63, 144, 239],
+        enabled: true,
+        target: ProbeTarget::Point(Point2::new(0.5, 0.15)),
+    });
     document
 }
 
@@ -220,6 +230,7 @@ mod tests {
     #[test]
     fn bundled_examples_are_structurally_valid_and_exportable() {
         assert!(catalog().len() >= 4);
+        assert_eq!(catalog()[0].document.probes.len(), 1);
         for example in catalog() {
             assert!(
                 example.document.accepted.structure_valid(),

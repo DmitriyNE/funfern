@@ -77,8 +77,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Materials contains the material library; Probes contains receivers and recording
   controls. The lower-right status control shows
   FPS, solver steps per second, DOFs, mesh size, and solver dt; clicking it opens
-  the full frame, mesh, handoff, and solver diagnostics. Narrow windows collapse
-  document and inspector actions into compact menus.
+  the full frame, mesh, handoff, and solver diagnostics. As the window narrows, file
+  actions collapse into File first, followed by the inspector switches collapsing
+  into Panels. The essential editing and playback controls stay on one row.
 - **Select:** clicking a handle selects that one control for local reshaping.
   Clicking a curve selects its knot span; Shift-click toggles spans, and
   Ctrl/Cmd-click selects the complete curve. Shift-drag adds an unselected span
@@ -161,7 +162,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   position, frequency, strength, width, and region are editable in Simulation.
 - **Point probes:** add persistent point receivers from Probes, then click repeatedly
   in the viewport. Markers can be selected, dragged, renamed, colored, disabled,
-  cleared, or deleted. Each probe opens a floating readout with
+  cleared, or deleted; double-clicking one opens its floating readout. Each readout
+  contains
   field, velocity, and local energy-density traces on a shared simulation-time
   window. Hide individual traces, drag right to inspect earlier samples, and scroll to
   change the time span. The widest view returns to Live automatically; Live can also
@@ -186,7 +188,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   restore on startup from browser local storage or the native per-user recovery
   file. Copy scene link embeds compressed, validated scene data in a `#scene=v1.…`
   URL fragment; while that fragment is active, later autosaves keep it current.
-  Camera and selection are not saved.
+  Camera and selection are not saved. With no shared scene or autosave to restore,
+  startup opens the first bundled example.
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
   constrained mesh and its labeled outer, hole, interface, closed-wall, and baffle
   edges. Elements below 15° are
