@@ -52,6 +52,51 @@ pub struct QuadraticAreaElement {
     pub area: f64,
 }
 
+pub const QUADRATIC_AREA_MATRIX_ENTRIES: usize = 28;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct QuadraticAreaMatrices {
+    pub field: [f64; 7],
+    /// Symmetric upper triangle in row-major `(0,0), (0,1), ... (6,6)` order.
+    pub mass: [f64; QUADRATIC_AREA_MATRIX_ENTRIES],
+    /// Symmetric upper triangle in the same order as `mass`.
+    pub stiffness: [f64; QUADRATIC_AREA_MATRIX_ENTRIES],
+}
+
+impl QuadraticAreaElement {
+    pub fn integrated_matrices(self) -> QuadraticAreaMatrices {
+        let mut result = QuadraticAreaMatrices {
+            field: [0.0; 7],
+            mass: [0.0; QUADRATIC_AREA_MATRIX_ENTRIES],
+            stiffness: [0.0; QUADRATIC_AREA_MATRIX_ENTRIES],
+        };
+        for (local, weight) in area_quadrature() {
+            let barycentric = std::array::from_fn(|coordinate| {
+                self.barycentric_vertices[0][coordinate] * local[0]
+                    + self.barycentric_vertices[1][coordinate] * local[1]
+                    + self.barycentric_vertices[2][coordinate] * local[2]
+            });
+            let values = enriched_quadratic_basis(barycentric);
+            let gradients =
+                enriched_quadratic_basis_gradients(barycentric, self.barycentric_gradients);
+            let physical_weight = self.area * weight;
+            for (field, value) in result.field.iter_mut().zip(values) {
+                *field += physical_weight * value;
+            }
+            let mut entry = 0;
+            for (row, row_value) in values.iter().copied().enumerate() {
+                for (column, column_value) in values.iter().copied().enumerate().skip(row) {
+                    result.mass[entry] += physical_weight * row_value * column_value;
+                    result.stiffness[entry] +=
+                        physical_weight * gradients[row].dot(gradients[column]);
+                    entry += 1;
+                }
+            }
+        }
+        result
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuadraticAreaStencil {
     pub shape: AreaProbeShape,
@@ -397,31 +442,35 @@ impl QuadraticAreaStencil {
         for element in &self.elements {
             let local_displacement = element.nodes.map(|node| displacement[node as usize]);
             let local_velocity = element.nodes.map(|node| velocity[node as usize]);
-            for (local, weight) in area_quadrature() {
-                let barycentric = std::array::from_fn(|coordinate| {
-                    element.barycentric_vertices[0][coordinate] * local[0]
-                        + element.barycentric_vertices[1][coordinate] * local[1]
-                        + element.barycentric_vertices[2][coordinate] * local[2]
-                });
-                let value_weights = enriched_quadratic_basis(barycentric);
-                let gradient_weights =
-                    enriched_quadratic_basis_gradients(barycentric, element.barycentric_gradients);
-                let mut field = 0.0;
-                let mut speed = 0.0;
-                let mut gradient = Point2::default();
-                for node in 0..7 {
-                    field += value_weights[node] * local_displacement[node];
-                    speed += value_weights[node] * local_velocity[node];
-                    gradient = gradient + gradient_weights[node] * local_displacement[node];
-                }
-                let energy_density = 0.5
-                    * (element.mass_density * speed * speed
-                        + element.stiffness * gradient.dot(gradient));
-                let physical_weight = element.area * weight;
-                displacement_integral += physical_weight * field;
-                displacement_squared_integral += physical_weight * field * field;
-                total_energy += physical_weight * energy_density;
+            let matrices = element.integrated_matrices();
+            for (weight, value) in matrices.field.iter().zip(local_displacement) {
+                displacement_integral += weight * value;
             }
+            let mut field_squared = 0.0;
+            let mut speed_squared = 0.0;
+            let mut gradient_squared = 0.0;
+            let mut entry = 0;
+            for row in 0..7 {
+                for column in row..7 {
+                    let symmetry = if row == column { 1.0 } else { 2.0 };
+                    field_squared += symmetry
+                        * matrices.mass[entry]
+                        * local_displacement[row]
+                        * local_displacement[column];
+                    speed_squared += symmetry
+                        * matrices.mass[entry]
+                        * local_velocity[row]
+                        * local_velocity[column];
+                    gradient_squared += symmetry
+                        * matrices.stiffness[entry]
+                        * local_displacement[row]
+                        * local_displacement[column];
+                    entry += 1;
+                }
+            }
+            displacement_squared_integral += field_squared;
+            total_energy +=
+                0.5 * (element.mass_density * speed_squared + element.stiffness * gradient_squared);
         }
         let mean_displacement = displacement_integral / self.covered_area;
         let rms_displacement = (displacement_squared_integral / self.covered_area)

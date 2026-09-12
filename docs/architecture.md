@@ -490,9 +490,16 @@ vertical time axis.
 Area probes compile either a free disk or one stable material region into compact
 clipped element contributions. Region targets integrate complete mesh triangles;
 disk targets clip each triangle against a bounded, world-space approximation of the
-circle before applying a degree-six triangle rule. The CPU reference reports mean
-and RMS displacement, mean energy density, total energy, covered area, and geometric
-coverage. GPU reduction and interactive area-probe rendering are a following slice.
+circle before applying a degree-six triangle rule. Each clipped quadratic element
+is uploaded as preintegrated field, symmetric mass, and symmetric stiffness weights.
+A first compute dispatch evaluates its field integral, squared-field integral,
+energy, and area; a second dispatch reduces the probe's contiguous contributions to
+one compact ring record. Readback size therefore depends on the 16-probe, 2048-frame
+ring rather than mesh density. The recorder runs at most 120 samples per simulated
+second and limits one compiled set to 200,000 element contributions. CPU and GPU
+paths report mean and RMS displacement, mean energy density, total energy, covered
+area, and geometric coverage. Definitions and host histories survive ordinary
+solver handoffs; stencils rebuild for each committed mesh.
 
 The previous h≈0.16 overlay was an editor preview. Wave benchmarks start with
 h≤0.04 and h≤0.02, corresponding to 10 and 20 maximum-edge lengths per reference

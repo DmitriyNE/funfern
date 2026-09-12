@@ -38,6 +38,29 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Interactive GPU area probes
+
+- Added disk and subdomain creation to the Probes inspector. Disks use a two-click
+  center/radius workflow, then support direct body motion and a visible radius
+  handle. Subdomain targets are chosen by clicking inside a region and render their
+  owning outline; all area receivers share a separate View toggle.
+- Added area readouts for mean and RMS displacement, mean energy density, total
+  energy, and coverage. A compact persistent Plots menu starts with mean field and
+  total energy, and host traces remain continuous across ordinary solver and AMR
+  generations.
+- Added a two-stage GPU recorder. Clipped quadratic elements upload preintegrated
+  field, mass, and stiffness matrices; one dispatch evaluates element contributions
+  and another reduces each probe into a compact time-stamped ring. The path is
+  capped at 16 probes, 200,000 element contributions, 2048 frames, and 120 samples
+  per simulated second.
+- Extended the native GPU check scene with a disk receiver so runtime verification
+  covers WGSL compilation, reduction, physical values, and readback. Far-field
+  recording from the derived inset contour remains the next part of the milestone.
+- All 244 workspace tests pass. Formatting and Clippy with warnings denied pass,
+  as do native and release Trunk/WASM builds. The native Metal check exercised a
+  9,690-DOF mesh and all three recorder pipelines; 128 steps plus readback completed
+  in about 1.92 s with valid area coverage and finite nonnegative energy.
+
 ## 2026-09-12 — Area-probe and far-field document foundation
 
 - Added free-disk and stable-region area targets to the document model. Region

@@ -189,6 +189,13 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   interfaces, walls, and baffles. Positive normal flux always points out of that
   trace; Flip direction reverses only the arclength axis. Whole closed curves use
   periodic sampling and integration without duplicating the seam.
+- **Area probes:** choose Disk for a two-click center/radius receiver, or Subdomain
+  and click inside a material region. Drag a disk body to move it and its edge
+  handle to resize it. The GPU recorder reports mean and RMS field, mean energy
+  density, total energy, and target coverage; new readouts initially show mean
+  field and total energy. Area markers and region outlines have an independent
+  View toggle. Definitions are saved and undoable while recorded histories remain
+  transient across files and continuous across ordinary solver handoffs.
 - **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered
   on the cursor. Fit View frames the fixed square. Panel scrolling and text
   editing do not manipulate the viewport.

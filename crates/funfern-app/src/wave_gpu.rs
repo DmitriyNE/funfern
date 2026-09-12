@@ -29,8 +29,9 @@ use bevy::{
 };
 use funfern_app::editor::SourceSettings;
 use funfern_core::{
-    BoundarySignal, OuterBoundaryConditions, Point2, QuadraticPointStencil, QuadraticTransferMap,
-    QuadraticWaveOperator, QuadraticWaveState, RegionId, TriMesh,
+    BoundarySignal, OuterBoundaryConditions, Point2, QuadraticAreaElement, QuadraticAreaStencil,
+    QuadraticPointStencil, QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState,
+    RegionId, TriMesh,
 };
 
 const WORKGROUP_SIZE: u32 = 128;
@@ -38,12 +39,16 @@ pub const MAX_POINT_PROBES: usize = 16;
 const PROBE_RING_FRAMES: usize = 2048;
 pub const MAX_CURVE_PROBE_POINTS: usize = 512;
 const CURVE_PROBE_RING_FRAMES: usize = 64;
+pub const MAX_AREA_PROBE_ELEMENTS: usize = 200_000;
+const AREA_PROBE_RING_FRAMES: usize = 2048;
 const WAVE_STORAGE_BINDINGS: usize = 8;
 const TRANSFER_STORAGE_BINDINGS: usize = 8;
+const AREA_PROBE_STORAGE_BINDINGS: usize = 7;
 const WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT: usize = 8;
 const _: () = {
     assert!(WAVE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
     assert!(TRANSFER_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
+    assert!(AREA_PROBE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
 };
 const STATUS_READY: u8 = 1;
 const STATUS_ERROR: u8 = 2;
@@ -135,6 +140,30 @@ struct CurveProbeBufferHandles {
     point_count: u32,
 }
 
+#[derive(Clone)]
+struct AreaProbeBufferHandles {
+    contributions: Handle<ShaderBuffer>,
+    descriptors: Handle<ShaderBuffer>,
+    control: Handle<ShaderBuffer>,
+    scratch: Handle<ShaderBuffer>,
+    output: Handle<ShaderBuffer>,
+    ids: Arc<[u64]>,
+    sample_stride: u64,
+    contribution_count: u32,
+}
+
+impl AreaProbeBufferHandles {
+    fn all(&self) -> [&Handle<ShaderBuffer>; 5] {
+        [
+            &self.contributions,
+            &self.descriptors,
+            &self.control,
+            &self.scratch,
+            &self.output,
+        ]
+    }
+}
+
 impl CurveProbeBufferHandles {
     fn all(&self) -> [&Handle<ShaderBuffer>; 3] {
         [&self.stencils, &self.control, &self.output]
@@ -179,6 +208,9 @@ pub struct WaveGpuRequest {
     curve_probes: Option<CurveProbeBufferHandles>,
     curve_probe_revision: u64,
     curve_probe_readback_entity: Option<Entity>,
+    area_probes: Option<AreaProbeBufferHandles>,
+    area_probe_revision: u64,
+    area_probe_readback_entity: Option<Entity>,
 }
 
 impl Default for WaveGpuRequest {
@@ -199,6 +231,9 @@ impl Default for WaveGpuRequest {
             curve_probes: None,
             curve_probe_revision: 0,
             curve_probe_readback_entity: None,
+            area_probes: None,
+            area_probe_revision: 0,
+            area_probe_readback_entity: None,
         }
     }
 }
@@ -222,6 +257,10 @@ impl WaveGpuRequest {
 
     pub fn curve_probe_revision(&self) -> u64 {
         self.curve_probe_revision
+    }
+
+    pub fn area_probe_revision(&self) -> u64 {
+        self.area_probe_revision
     }
 
     pub fn update_point_probes(
@@ -405,6 +444,144 @@ impl WaveGpuRequest {
         self.curve_probe_revision = self.curve_probe_revision.wrapping_add(1).max(1);
     }
 
+    pub fn update_area_probes(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        probes: &[AreaProbeInput],
+        sample_rate: f64,
+        time_step: f64,
+    ) -> Result<(), String> {
+        let contribution_count = probes
+            .iter()
+            .filter_map(|probe| probe.stencil.as_ref())
+            .map(|stencil| stencil.elements.len())
+            .sum::<usize>();
+        self.clear_area_probe_buffers(assets, commands);
+        if probes.len() > MAX_POINT_PROBES {
+            return Err(format!("Maximum {MAX_POINT_PROBES} area probes"));
+        }
+        if contribution_count > MAX_AREA_PROBE_ELEMENTS {
+            return Err(format!(
+                "Area probes cover {contribution_count} element pieces; maximum is {MAX_AREA_PROBE_ELEMENTS}"
+            ));
+        }
+        if !sample_rate.is_finite()
+            || !(30.0..=120.0).contains(&sample_rate)
+            || !time_step.is_finite()
+            || time_step <= 0.0
+        {
+            return Err("Invalid area-probe recorder settings".into());
+        }
+        if probes.is_empty() {
+            return Ok(());
+        }
+        let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
+        let mut contributions = Vec::with_capacity(contribution_count.max(1));
+        let mut descriptors = Vec::with_capacity(probes.len());
+        for probe in probes {
+            let offset = contributions.len() as u32;
+            if let Some(stencil) = &probe.stencil {
+                contributions.extend(
+                    stencil
+                        .elements
+                        .iter()
+                        .copied()
+                        .map(gpu_area_probe_contribution),
+                );
+                descriptors.push(GpuAreaProbeDescriptor {
+                    offset_count: UVec4::new(offset, stencil.elements.len() as u32, 0, 0),
+                    areas: Vec4::new(
+                        stencil.covered_area as f32,
+                        stencil.target_area as f32,
+                        1.0,
+                        0.0,
+                    ),
+                });
+            } else {
+                descriptors.push(GpuAreaProbeDescriptor {
+                    offset_count: UVec4::new(offset, 0, 0, 0),
+                    areas: Vec4::ZERO,
+                });
+            }
+        }
+        if contributions.is_empty() {
+            contributions.push(GpuAreaProbeContribution::default());
+        }
+        if contributions.iter().any(|contribution| {
+            !contribution.field_a.is_finite()
+                || !contribution.field_b.is_finite()
+                || contribution.mass.iter().any(|values| !values.is_finite())
+                || contribution
+                    .stiffness
+                    .iter()
+                    .any(|values| !values.is_finite())
+                || !contribution.material_area.is_finite()
+        }) || descriptors
+            .iter()
+            .any(|descriptor| !descriptor.areas.is_finite())
+        {
+            return Err("Area-probe weights cannot be represented on the GPU".into());
+        }
+        let control = GpuProbeControl {
+            values: Vec4::new(
+                sample_stride as f32,
+                AREA_PROBE_RING_FRAMES as f32,
+                probes.len() as f32,
+                contribution_count as f32,
+            ),
+        };
+        let scratch = vec![GpuProbeSample::default(); contribution_count.max(1)];
+        let output = vec![
+            GpuAreaProbeSample {
+                primary: Vec4::splat(f32::NAN),
+                secondary: Vec4::splat(f32::NAN),
+            };
+            AREA_PROBE_RING_FRAMES * MAX_POINT_PROBES
+        ];
+        let handles = AreaProbeBufferHandles {
+            contributions: assets.add(ShaderBuffer::from(contributions)),
+            descriptors: assets.add(ShaderBuffer::from(descriptors)),
+            control: assets.add(ShaderBuffer::from(control)),
+            scratch: assets.add(ShaderBuffer::from(scratch)),
+            output: assets.add(ShaderBuffer::from(output)),
+            ids: probes.iter().map(|probe| probe.id).collect(),
+            sample_stride,
+            contribution_count: contribution_count as u32,
+        };
+        self.area_probe_revision = self.area_probe_revision.wrapping_add(1).max(1);
+        self.area_probe_readback_entity = Some(
+            commands
+                .spawn((
+                    Readback::buffer(handles.output.clone()),
+                    AreaProbeReadbackTag {
+                        generation: self.generation,
+                        revision: self.area_probe_revision,
+                        ids: handles.ids.clone(),
+                    },
+                ))
+                .id(),
+        );
+        self.area_probes = Some(handles);
+        Ok(())
+    }
+
+    fn clear_area_probe_buffers(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+    ) {
+        if let Some(handles) = self.area_probes.take() {
+            for handle in handles.all() {
+                assets.remove(handle.id());
+            }
+        }
+        if let Some(entity) = self.area_probe_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
+        self.area_probe_revision = self.area_probe_revision.wrapping_add(1).max(1);
+    }
+
     pub fn ready(&self) -> bool {
         self.buffers.is_some() && self.stats.status.load(Ordering::Relaxed) == STATUS_READY
     }
@@ -531,6 +708,7 @@ impl WaveGpuRequest {
     ) -> Result<(), String> {
         self.clear_probe_buffers(assets, commands);
         self.clear_curve_probe_buffers(assets, commands);
+        self.clear_area_probe_buffers(assets, commands);
         let transfer = self
             .transfer
             .take()
@@ -576,6 +754,7 @@ impl WaveGpuRequest {
     ) {
         self.clear_probe_buffers(assets, commands);
         self.clear_curve_probe_buffers(assets, commands);
+        self.clear_area_probe_buffers(assets, commands);
         let expects_transfer = transfer.is_some();
         if let Some(entity) = self.readback_entity.take() {
             commands.entity(entity).despawn();
@@ -1152,6 +1331,12 @@ pub struct CurveProbeInput {
     pub samples: Vec<Option<(QuadraticPointStencil, Point2)>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AreaProbeInput {
+    pub id: u64,
+    pub stencil: Option<QuadraticAreaStencil>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CurveProbeDescriptor {
     id: u64,
@@ -1164,6 +1349,13 @@ struct CurveProbeReadbackTag {
     generation: u64,
     revision: u64,
     descriptors: Arc<[CurveProbeDescriptor]>,
+}
+
+#[derive(Component)]
+struct AreaProbeReadbackTag {
+    generation: u64,
+    revision: u64,
+    ids: Arc<[u64]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1184,6 +1376,18 @@ pub struct CurveProbeRecord {
     pub normal_flux: Vec<f32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AreaProbeRecord {
+    pub probe_id: u64,
+    pub time: f64,
+    pub mean_displacement: f64,
+    pub rms_displacement: f64,
+    pub mean_energy_density: f64,
+    pub total_energy: f64,
+    pub covered_area: f64,
+    pub coverage: f64,
+}
+
 #[derive(Resource, Default)]
 pub struct ProbeDisplay {
     pub generation: u64,
@@ -1197,6 +1401,14 @@ pub struct CurveProbeDisplay {
     pub generation: u64,
     pub revision: u64,
     pub records: Vec<CurveProbeRecord>,
+    pub readbacks: u64,
+}
+
+#[derive(Resource, Default)]
+pub struct AreaProbeDisplay {
+    pub generation: u64,
+    pub revision: u64,
+    pub records: Vec<AreaProbeRecord>,
     pub readbacks: u64,
 }
 
@@ -1291,6 +1503,29 @@ struct GpuCurveProbeStencil {
     normal_stride_valid: Vec4,
 }
 
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuAreaProbeContribution {
+    nodes_a: UVec4,
+    nodes_b: UVec4,
+    field_a: Vec4,
+    field_b: Vec4,
+    mass: [Vec4; 7],
+    stiffness: [Vec4; 7],
+    material_area: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuAreaProbeDescriptor {
+    offset_count: UVec4,
+    areas: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuAreaProbeSample {
+    primary: Vec4,
+    secondary: Vec4,
+}
+
 fn gpu_probe_stencil(stencil: Option<QuadraticPointStencil>) -> GpuProbeStencil {
     let Some(stencil) = stencil else {
         return GpuProbeStencil::default();
@@ -1350,6 +1585,45 @@ fn gpu_curve_probe_stencil(
             normal.y as f32,
             stride as f32,
             f32::from(stencil.is_some()),
+        ),
+    }
+}
+
+fn pack_area_matrix(values: [f64; 28]) -> [Vec4; 7] {
+    std::array::from_fn(|group| {
+        Vec4::from_array(std::array::from_fn(|lane| values[group * 4 + lane] as f32))
+    })
+}
+
+fn gpu_area_probe_contribution(element: QuadraticAreaElement) -> GpuAreaProbeContribution {
+    let matrices = element.integrated_matrices();
+    GpuAreaProbeContribution {
+        nodes_a: UVec4::new(
+            element.nodes[0],
+            element.nodes[1],
+            element.nodes[2],
+            element.nodes[3],
+        ),
+        nodes_b: UVec4::new(element.nodes[4], element.nodes[5], element.nodes[6], 0),
+        field_a: Vec4::from_array([
+            matrices.field[0] as f32,
+            matrices.field[1] as f32,
+            matrices.field[2] as f32,
+            matrices.field[3] as f32,
+        ]),
+        field_b: Vec4::from_array([
+            matrices.field[4] as f32,
+            matrices.field[5] as f32,
+            matrices.field[6] as f32,
+            0.0,
+        ]),
+        mass: pack_area_matrix(matrices.mass),
+        stiffness: pack_area_matrix(matrices.stiffness),
+        material_area: Vec4::new(
+            element.mass_density as f32,
+            element.stiffness as f32,
+            element.area as f32,
+            1.0,
         ),
     }
 }
@@ -1503,6 +1777,50 @@ fn receive_curve_probe_readback(
     display.readbacks = display.readbacks.saturating_add(1);
 }
 
+fn receive_area_probe_readback(
+    event: On<ReadbackComplete>,
+    tags: Query<&AreaProbeReadbackTag>,
+    mut display: ResMut<AreaProbeDisplay>,
+) {
+    let Ok(tag) = tags.get(event.entity) else {
+        return;
+    };
+    let samples: Vec<GpuAreaProbeSample> = event.to_shader_type();
+    if samples.len() != AREA_PROBE_RING_FRAMES * MAX_POINT_PROBES {
+        return;
+    }
+    let mut records = Vec::new();
+    for frame in 0..AREA_PROBE_RING_FRAMES {
+        for (slot, id) in tag.ids.iter().copied().enumerate() {
+            let sample = samples[frame * MAX_POINT_PROBES + slot];
+            if sample.primary.is_finite()
+                && sample.secondary.is_finite()
+                && sample.secondary.w >= 0.5
+            {
+                records.push(AreaProbeRecord {
+                    probe_id: id,
+                    time: sample.secondary.z as f64,
+                    mean_displacement: sample.primary.x as f64,
+                    rms_displacement: sample.primary.y as f64,
+                    mean_energy_density: sample.primary.z as f64,
+                    total_energy: sample.primary.w as f64,
+                    covered_area: sample.secondary.x as f64,
+                    coverage: sample.secondary.y as f64,
+                });
+            }
+        }
+    }
+    records.sort_by(|a, b| {
+        a.time
+            .total_cmp(&b.time)
+            .then_with(|| a.probe_id.cmp(&b.probe_id))
+    });
+    display.generation = tag.generation;
+    display.revision = tag.revision;
+    display.records = records;
+    display.readbacks = display.readbacks.saturating_add(1);
+}
+
 pub struct WaveGpuPlugin;
 
 impl Plugin for WaveGpuPlugin {
@@ -1510,15 +1828,18 @@ impl Plugin for WaveGpuPlugin {
         embedded_asset!(app, "wave.wgsl");
         embedded_asset!(app, "probe.wgsl");
         embedded_asset!(app, "curve_probe.wgsl");
+        embedded_asset!(app, "area_probe.wgsl");
         embedded_asset!(app, "wave_transfer_old.wgsl");
         embedded_asset!(app, "wave_transfer_new.wgsl");
         app.init_resource::<WaveGpuRequest>()
             .init_resource::<WaveDisplay>()
             .init_resource::<ProbeDisplay>()
             .init_resource::<CurveProbeDisplay>()
+            .init_resource::<AreaProbeDisplay>()
             .add_observer(receive_readback)
             .add_observer(receive_probe_readback)
             .add_observer(receive_curve_probe_readback)
+            .add_observer(receive_area_probe_readback)
             .add_plugins(ExtractResourcePlugin::<WaveGpuRequest>::default());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -1531,6 +1852,7 @@ impl Plugin for WaveGpuPlugin {
                     prepare_bind_group,
                     prepare_probe_bind_group,
                     prepare_curve_probe_bind_group,
+                    prepare_area_probe_bind_group,
                 )
                     .in_set(RenderSystems::PrepareBindGroups),
             )
@@ -1543,6 +1865,7 @@ struct WavePipeline {
     layout: BindGroupLayoutDescriptor,
     probe_layout: BindGroupLayoutDescriptor,
     curve_probe_layout: BindGroupLayoutDescriptor,
+    area_probe_layout: BindGroupLayoutDescriptor,
     transfer_old_layout: BindGroupLayoutDescriptor,
     transfer_new_layout: BindGroupLayoutDescriptor,
     step: CachedComputePipelineId,
@@ -1554,6 +1877,8 @@ struct WavePipeline {
     transfer_new: CachedComputePipelineId,
     probe: CachedComputePipelineId,
     curve_probe: CachedComputePipelineId,
+    area_probe_elements: CachedComputePipelineId,
+    area_probe_reduce: CachedComputePipelineId,
 }
 
 fn init_pipeline(
@@ -1628,6 +1953,37 @@ fn init_pipeline(
         entry_point: Some(Cow::Borrowed("sample_curve_probes")),
         ..default()
     });
+    let area_probe_layout = BindGroupLayoutDescriptor::new(
+        "wave area-probe buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only::<GpuParameters>(false),
+                storage_buffer_read_only::<Vec<GpuState>>(false),
+                storage_buffer_read_only::<Vec<GpuAreaProbeContribution>>(false),
+                storage_buffer_read_only::<Vec<GpuAreaProbeDescriptor>>(false),
+                storage_buffer_read_only::<GpuProbeControl>(false),
+                storage_buffer::<Vec<GpuProbeSample>>(false),
+                storage_buffer::<Vec<GpuAreaProbeSample>>(false),
+            ),
+        ),
+    );
+    let area_shader = load_embedded_asset!(asset_server.as_ref(), "area_probe.wgsl");
+    let area_pipeline = |label: &'static str, entry: &'static str| ComputePipelineDescriptor {
+        label: Some(Cow::Borrowed(label)),
+        layout: vec![area_probe_layout.clone()],
+        shader: area_shader.clone(),
+        entry_point: Some(Cow::Borrowed(entry)),
+        ..default()
+    };
+    let area_probe_elements = pipeline_cache.queue_compute_pipeline(area_pipeline(
+        "wave area-probe elements",
+        "sample_area_elements",
+    ));
+    let area_probe_reduce = pipeline_cache.queue_compute_pipeline(area_pipeline(
+        "wave area-probe reduction",
+        "reduce_area_probes",
+    ));
     let transfer_old_layout = BindGroupLayoutDescriptor::new(
         "wave old-state transfer buffers",
         &BindGroupLayoutEntries::sequential(
@@ -1703,6 +2059,7 @@ fn init_pipeline(
         layout,
         probe_layout,
         curve_probe_layout,
+        area_probe_layout,
         transfer_old_layout,
         transfer_new_layout,
         step,
@@ -1714,6 +2071,8 @@ fn init_pipeline(
         transfer_new,
         probe,
         curve_probe,
+        area_probe_elements,
+        area_probe_reduce,
     });
 }
 
@@ -1746,6 +2105,75 @@ struct CurveProbeBindGroup {
     generation: u64,
     revision: u64,
     bind_group: BindGroup,
+}
+
+#[derive(Resource)]
+struct AreaProbeBindGroup {
+    generation: u64,
+    revision: u64,
+    bind_group: BindGroup,
+}
+
+fn prepare_area_probe_bind_group(
+    mut commands: Commands,
+    request: Option<Res<WaveGpuRequest>>,
+    existing: Option<Res<AreaProbeBindGroup>>,
+    pipeline: Res<WavePipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+) {
+    let Some(request) = request else { return };
+    let Some(probes) = &request.area_probes else {
+        if existing.is_some() {
+            commands.remove_resource::<AreaProbeBindGroup>();
+        }
+        return;
+    };
+    if existing.as_ref().is_some_and(|group| {
+        group.generation == request.generation && group.revision == request.area_probe_revision
+    }) {
+        return;
+    }
+    let Some(wave) = &request.buffers else { return };
+    let (
+        Some(parameters),
+        Some(state),
+        Some(contributions),
+        Some(descriptors),
+        Some(control),
+        Some(scratch),
+        Some(output),
+    ) = (
+        gpu_buffers.get(&wave.parameters),
+        gpu_buffers.get(&wave.state),
+        gpu_buffers.get(&probes.contributions),
+        gpu_buffers.get(&probes.descriptors),
+        gpu_buffers.get(&probes.control),
+        gpu_buffers.get(&probes.scratch),
+        gpu_buffers.get(&probes.output),
+    )
+    else {
+        return;
+    };
+    let bind_group = render_device.create_bind_group(
+        Some("wave area-probe bind group"),
+        &pipeline_cache.get_bind_group_layout(&pipeline.area_probe_layout),
+        &BindGroupEntries::sequential((
+            parameters.buffer.as_entire_buffer_binding(),
+            state.buffer.as_entire_buffer_binding(),
+            contributions.buffer.as_entire_buffer_binding(),
+            descriptors.buffer.as_entire_buffer_binding(),
+            control.buffer.as_entire_buffer_binding(),
+            scratch.buffer.as_entire_buffer_binding(),
+            output.buffer.as_entire_buffer_binding(),
+        )),
+    );
+    commands.insert_resource(AreaProbeBindGroup {
+        generation: request.generation,
+        revision: request.area_probe_revision,
+        bind_group,
+    });
 }
 
 fn prepare_curve_probe_bind_group(
@@ -1995,6 +2423,7 @@ fn compute_wave(
     transfer_groups: Option<Res<WaveTransferBindGroups>>,
     probe_group: Option<Res<ProbeBindGroup>>,
     curve_probe_group: Option<Res<CurveProbeBindGroup>>,
+    area_probe_group: Option<Res<AreaProbeBindGroup>>,
     pipeline: Res<WavePipeline>,
     pipeline_cache: Res<PipelineCache>,
 ) {
@@ -2014,6 +2443,8 @@ fn compute_wave(
         pipeline.transfer_new,
         pipeline.probe,
         pipeline.curve_probe,
+        pipeline.area_probe_elements,
+        pipeline.area_probe_reduce,
     ];
     if pipelines.iter().any(|id| {
         matches!(
@@ -2121,6 +2552,18 @@ fn compute_wave(
                 && curve_probe_group.revision == request.curve_probe_revision
         })
         .and_then(|_| pipeline_cache.get_compute_pipeline(pipeline.curve_probe));
+    let area_probe_pipelines = area_probe_group
+        .as_ref()
+        .filter(|area_probe_group| {
+            area_probe_group.generation == request.generation
+                && area_probe_group.revision == request.area_probe_revision
+        })
+        .and_then(|_| {
+            Some((
+                pipeline_cache.get_compute_pipeline(pipeline.area_probe_elements)?,
+                pipeline_cache.get_compute_pipeline(pipeline.area_probe_reduce)?,
+            ))
+        });
     for offset in 0..pending {
         pass.set_pipeline(step);
         pass.dispatch_workgroups(workgroups, 1, 1);
@@ -2152,6 +2595,25 @@ fn compute_wave(
             pass.set_pipeline(curve_probe_pipeline);
             pass.set_bind_group(0, &curve_probe_group.bind_group, &[]);
             pass.dispatch_workgroups(curve_probes.point_count.div_ceil(64), 1, 1);
+            pass.set_bind_group(0, &group.bind_group, &[]);
+        }
+        if request
+            .area_probes
+            .as_ref()
+            .is_some_and(|probes| probe_sample_due(step_after, probes.sample_stride))
+            && let (Some((elements, reduce)), Some(area_group), Some(area_probes)) = (
+                area_probe_pipelines,
+                area_probe_group.as_ref(),
+                request.area_probes.as_ref(),
+            )
+        {
+            pass.set_bind_group(0, &area_group.bind_group, &[]);
+            if area_probes.contribution_count > 0 {
+                pass.set_pipeline(elements);
+                pass.dispatch_workgroups(area_probes.contribution_count.div_ceil(64), 1, 1);
+            }
+            pass.set_pipeline(reduce);
+            pass.dispatch_workgroups(1, 1, 1);
             pass.set_bind_group(0, &group.bind_group, &[]);
         }
     }
@@ -2308,5 +2770,66 @@ mod tests {
         assert!(probe_sample_due(264, strides[0]));
         assert!(!probe_sample_due(264, strides[1]));
         assert!(probe_sample_due(264, strides[2]));
+    }
+
+    #[test]
+    fn area_probe_upload_preserves_integrated_element_matrices() {
+        let element = QuadraticAreaElement {
+            nodes: [0, 1, 2, 3, 4, 5, 6],
+            barycentric_vertices: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            barycentric_gradients: [
+                Point2::new(-1.0, -1.0),
+                Point2::new(1.0, 0.0),
+                Point2::new(0.0, 1.0),
+            ],
+            region: funfern_core::BACKGROUND_REGION,
+            mass_density: 2.0,
+            stiffness: 3.0,
+            area: 0.5,
+        };
+        let matrices = element.integrated_matrices();
+        let uploaded = gpu_area_probe_contribution(element);
+        assert_eq!(
+            uploaded.field_a.to_array(),
+            [
+                matrices.field[0] as f32,
+                matrices.field[1] as f32,
+                matrices.field[2] as f32,
+                matrices.field[3] as f32,
+            ]
+        );
+        assert_eq!(
+            uploaded.field_b.to_array(),
+            [
+                matrices.field[4] as f32,
+                matrices.field[5] as f32,
+                matrices.field[6] as f32,
+                0.0,
+            ]
+        );
+        let unpack = |blocks: [Vec4; 7]| {
+            blocks
+                .into_iter()
+                .flat_map(|block| block.to_array())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            &unpack(uploaded.mass)[..28],
+            &matrices.mass.map(|v| v as f32)
+        );
+        assert_eq!(
+            &unpack(uploaded.stiffness)[..28],
+            &matrices.stiffness.map(|v| v as f32)
+        );
+    }
+
+    #[test]
+    fn area_probe_shader_reduces_to_compact_physical_records() {
+        let shader = include_str!("area_probe.wgsl");
+        assert!(shader.contains("fn sample_area_elements"));
+        assert!(shader.contains("fn reduce_area_probes"));
+        assert!(shader.contains("let mean = accumulated.x / covered_area"));
+        assert!(shader.contains("let rms = sqrt(max(accumulated.y / covered_area, 0.0))"));
+        assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
     }
 }
