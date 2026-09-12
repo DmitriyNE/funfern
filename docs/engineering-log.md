@@ -54,6 +54,39 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-13 — Mechanical and TE/TM electromagnetic skins
+
+- Added an undoable scene physics model with Mechanical, EM/TM (`E_z`), and EM/TE
+  (`H_z`) modes. The scalar assembly maps EM permittivity, permeability, and loss
+  rate onto the existing mass, stiffness, and damping operator, so meshing,
+  stepping, transfer infrastructure, probes, and AMR continue to share one solver.
+- Added semantic PEC and PMC conditions for outer edges, holes, and both baffle
+  faces. Assembly and solution-error estimation resolve them consistently for the
+  selected polarization. Mechanical boundary choices retain their previous labels
+  and behavior.
+- Physics changes reuse identical mesh geometry but deliberately start a zero field;
+  transient probe histories, indicator work, and vector smoothing are cleared. This
+  avoids transferring a scalar state between incompatible physical meanings.
+- Material controls, overlays, point/curve/area readout vocabulary, and source labels
+  follow the active skin. Material property frames remain rigid and orthonormal in
+  world units; changing a skin reinterprets the three formulas without introducing
+  coordinate scale.
+- Added derived arrow overlays using the synchronized P2 displacement/velocity
+  readback: complementary-field rate for TM/TE and reduced relative energy flow.
+  Density and gain are screen-space controls; smoothing is presentation-only and no
+  new GPU shader or binding was added.
+- Scene JSON is version 18. New files store explicit physics and tagged mechanical
+  or electromagnetic material laws with physical property names. Version 17 and
+  older files migrate exactly to Mechanical; vector display settings round-trip as
+  presentation data.
+- Converted Material lens to a TM dielectric example and the radial Luneburg lens
+  to TE. Both enable complementary-field arrows by default while retaining their
+  existing scalar wave-speed behavior.
+- Verification passes: `cargo test --workspace`, Clippy for all workspace targets
+  with warnings denied, the optimized native build, and `trunk build --release`.
+  The native app initialized on Apple M1 Max / Metal. Interactive browser checks
+  remain a local manual step and were not repeated for this slice.
+
 ## 2026-09-13 — Browser smoke test moved out of CI
 
 - Removed Playwright, Chromium installation, and the WebGPU smoke test from the

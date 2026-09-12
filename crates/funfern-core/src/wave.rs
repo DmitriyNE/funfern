@@ -11,6 +11,71 @@ pub struct WaveCoefficients {
     pub damping: f64,
 }
 
+impl WaveCoefficients {
+    pub fn valid(self) -> bool {
+        self.mass_density.is_finite()
+            && self.mass_density > 0.0
+            && self.stiffness.is_finite()
+            && self.stiffness > 0.0
+            && self.damping.is_finite()
+            && self.damping >= 0.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PhysicsModel {
+    #[default]
+    Mechanical,
+    Electromagnetic {
+        polarization: ElectromagneticPolarization,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ElectromagneticPolarization {
+    #[default]
+    Tm,
+    Te,
+}
+
+impl PhysicsModel {
+    pub fn wave_coefficients(self, properties: WaveCoefficients) -> WaveCoefficients {
+        match self {
+            Self::Mechanical => properties,
+            Self::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            } => WaveCoefficients {
+                mass_density: properties.mass_density,
+                stiffness: properties.stiffness.recip(),
+                damping: properties.mass_density * properties.damping,
+            },
+            Self::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            } => WaveCoefficients {
+                mass_density: properties.stiffness,
+                stiffness: properties.mass_density.recip(),
+                damping: properties.stiffness * properties.damping,
+            },
+        }
+    }
+
+    pub fn wave_speed(self, properties: WaveCoefficients) -> f64 {
+        match self {
+            Self::Mechanical => (properties.stiffness / properties.mass_density).sqrt(),
+            Self::Electromagnetic { .. } => (properties.mass_density * properties.stiffness)
+                .sqrt()
+                .recip(),
+        }
+    }
+
+    pub fn impedance(self, properties: WaveCoefficients) -> f64 {
+        match self {
+            Self::Mechanical => (properties.mass_density * properties.stiffness).sqrt(),
+            Self::Electromagnetic { .. } => (properties.stiffness / properties.mass_density).sqrt(),
+        }
+    }
+}
+
 impl Default for WaveCoefficients {
     fn default() -> Self {
         Self {
@@ -156,6 +221,12 @@ pub enum OuterBoundaryCondition {
     FirstOrderOutgoing,
     /// Second-order Engquist-Majda condition using boundary memory `psi_t = u`.
     SecondOrderOutgoing,
+    /// A perfect electric wall. It resolves to zero primary field for TM and
+    /// zero normal flux for TE.
+    ElectricWall,
+    /// A perfect magnetic wall. It resolves to zero normal flux for TM and zero
+    /// primary field for TE.
+    MagneticWall,
     /// Prescribed outward flux `stiffness * partial_n u = value(t)`.
     Neumann { signal: TimeSignal },
     /// Strongly prescribed displacement `u = value(t)`.
@@ -168,6 +239,8 @@ impl OuterBoundaryCondition {
             Self::Reflecting => "Reflecting",
             Self::FirstOrderOutgoing => "First-order outgoing",
             Self::SecondOrderOutgoing => "Second-order auxiliary",
+            Self::ElectricWall => "Electric wall",
+            Self::MagneticWall => "Magnetic wall",
             Self::Neumann { .. } => "Prescribed Neumann",
             Self::Dirichlet { .. } => "Prescribed Dirichlet",
         }
@@ -182,6 +255,28 @@ impl OuterBoundaryCondition {
 
     pub fn valid(self) -> bool {
         self.signal().is_none_or(TimeSignal::valid)
+    }
+
+    pub fn resolved(self, physics: PhysicsModel) -> Self {
+        match (self, physics) {
+            (
+                Self::ElectricWall,
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                },
+            )
+            | (
+                Self::MagneticWall,
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Te,
+                },
+            )
+            | (Self::ElectricWall, PhysicsModel::Mechanical) => Self::Dirichlet {
+                signal: TimeSignal::ZERO,
+            },
+            (Self::ElectricWall | Self::MagneticWall, _) => Self::Reflecting,
+            _ => self,
+        }
     }
 }
 
@@ -958,6 +1053,72 @@ mod tests {
         assert!(matches!(
             WaveOperator::assemble(&broken, WaveCoefficients::default()),
             Err(WaveError::InvalidMesh(_))
+        ));
+    }
+
+    #[test]
+    fn scalar_skins_compile_material_properties_consistently() {
+        let raw = WaveCoefficients {
+            mass_density: 4.0,
+            stiffness: 9.0,
+            damping: 0.5,
+        };
+        assert_eq!(PhysicsModel::Mechanical.wave_coefficients(raw), raw);
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        assert_eq!(
+            tm.wave_coefficients(raw),
+            WaveCoefficients {
+                mass_density: 4.0,
+                stiffness: 1.0 / 9.0,
+                damping: 2.0,
+            }
+        );
+        assert_eq!(
+            te.wave_coefficients(raw),
+            WaveCoefficients {
+                mass_density: 9.0,
+                stiffness: 0.25,
+                damping: 4.5,
+            }
+        );
+        for physics in [tm, te] {
+            assert!((physics.wave_speed(raw) - 1.0 / 6.0).abs() < 1.0e-15);
+            assert!((physics.impedance(raw) - 1.5).abs() < 1.0e-15);
+        }
+    }
+
+    #[test]
+    fn electromagnetic_walls_resolve_for_tm_and_te() {
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        assert!(matches!(
+            OuterBoundaryCondition::ElectricWall.resolved(tm),
+            OuterBoundaryCondition::Dirichlet {
+                signal: TimeSignal::ZERO
+            }
+        ));
+        assert_eq!(
+            OuterBoundaryCondition::MagneticWall.resolved(tm),
+            OuterBoundaryCondition::Reflecting
+        );
+        assert_eq!(
+            OuterBoundaryCondition::ElectricWall.resolved(te),
+            OuterBoundaryCondition::Reflecting
+        );
+        assert!(matches!(
+            OuterBoundaryCondition::MagneticWall.resolved(te),
+            OuterBoundaryCondition::Dirichlet {
+                signal: TimeSignal::ZERO
+            }
         ));
     }
 }

@@ -81,7 +81,9 @@ fn main() {
                     OuterBoundaryCondition::SecondOrderOutgoing => 1.0 - 0.5 * angle.sin().powi(2),
                     OuterBoundaryCondition::Reflecting
                     | OuterBoundaryCondition::Neumann { .. }
-                    | OuterBoundaryCondition::Dirichlet { .. } => unreachable!(),
+                    | OuterBoundaryCondition::Dirichlet { .. }
+                    | OuterBoundaryCondition::ElectricWall
+                    | OuterBoundaryCondition::MagneticWall => unreachable!(),
                 };
                 let ideal = ((cosine - impedance) / (cosine + impedance)).abs();
                 println!(

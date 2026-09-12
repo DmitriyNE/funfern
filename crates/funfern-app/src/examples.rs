@@ -58,7 +58,7 @@ pub fn catalog() -> &'static [ExampleScene] {
             ),
             example(
                 "Material lens",
-                "A point source illuminates a slower circular material region with absorbing edges.",
+                "A TM electric-field source illuminates a slower dielectric region with absorbing edges.",
                 with_point_source(
                     material_lens(),
                     Point2::new(-0.72, 0.0),
@@ -74,7 +74,7 @@ pub fn catalog() -> &'static [ExampleScene] {
             ),
             example(
                 "Luneburg lens",
-                "A plane-like boundary wave focuses at the far rim of a radial index lens.",
+                "A TE magnetic-field wave focuses at the far rim of a radial-index lens.",
                 luneburg_lens(),
             ),
             example(
@@ -174,17 +174,19 @@ fn property_preview(scene: &Scene, property: MaterialProperty) -> Option<Example
                     }
                     let mut values = [0.0; 3];
                     for (value, point) in values.iter_mut().zip(points) {
-                        let coefficients = scene.material_at(interior, point).ok()?;
+                        let region = scene.region(interior)?;
+                        let raw = material.evaluate(region.frame, point).ok()?;
+                        let properties = WaveCoefficients {
+                            mass_density: raw.mass_density,
+                            stiffness: raw.stiffness,
+                            damping: raw.damping,
+                        };
                         *value = match property {
-                            MaterialProperty::Density => coefficients.mass_density,
-                            MaterialProperty::Stiffness => coefficients.stiffness,
-                            MaterialProperty::Damping => coefficients.damping,
-                            MaterialProperty::WaveSpeed => {
-                                (coefficients.stiffness / coefficients.mass_density).sqrt()
-                            }
-                            MaterialProperty::Impedance => {
-                                (coefficients.stiffness * coefficients.mass_density).sqrt()
-                            }
+                            MaterialProperty::Density => raw.mass_density,
+                            MaterialProperty::Stiffness => raw.stiffness,
+                            MaterialProperty::Damping => raw.damping,
+                            MaterialProperty::WaveSpeed => scene.physics.wave_speed(properties),
+                            MaterialProperty::Impedance => scene.physics.impedance(properties),
                             MaterialProperty::VolumeSource => scene
                                 .volume_source(interior)
                                 .filter(|source| source.enabled)
@@ -310,6 +312,9 @@ fn double_slit() -> Document {
 
 fn material_lens() -> Document {
     let mut scene = Scene {
+        physics: PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        },
         outer_boundaries: OuterBoundaryConditions::uniform(
             OuterBoundaryCondition::FirstOrderOutgoing,
         ),
@@ -318,8 +323,8 @@ fn material_lens() -> Document {
     scene.materials.push(Material {
         id: MaterialId(2),
         name: "Slow lens".into(),
-        mass_density: ScalarField::constant(1.0),
-        stiffness: ScalarField::constant(0.36),
+        mass_density: ScalarField::constant(1.0 / 0.36),
+        stiffness: ScalarField::constant(1.0),
         damping: ScalarField::constant(0.0),
         parameters: vec![],
         color: [61, 116, 139],
@@ -340,7 +345,7 @@ fn material_lens() -> Document {
             interior: RegionId(2),
         },
     ));
-    Document {
+    let mut document = Document {
         model: DocumentModel {
             draft: scene.clone(),
             accepted: scene,
@@ -349,7 +354,10 @@ fn material_lens() -> Document {
             far_field: Default::default(),
         },
         presentation: Default::default(),
-    }
+    };
+    document.presentation.vector_overlay =
+        funfern_app::editor::VectorOverlay::ComplementaryFieldRate;
+    document
 }
 
 fn grin_rod() -> Document {
@@ -442,7 +450,12 @@ fn luneburg_lens() -> Document {
     let region = RegionId(2);
     let material = MaterialId(2);
     let center = Point2::new(0.08, 0.0);
-    let mut scene = Scene::default();
+    let mut scene = Scene {
+        physics: PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        },
+        ..Default::default()
+    };
     scene.outer_boundaries.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Dirichlet {
         signal: TimeSignal::Harmonic {
             offset: 0.0,
@@ -454,8 +467,8 @@ fn luneburg_lens() -> Document {
     scene.materials.push(Material {
         id: material,
         name: "Luneburg profile".into(),
-        mass_density: ScalarField::formula("sqrt(max(2 - (r / R)^2, 1))").unwrap(),
-        stiffness: ScalarField::formula("1 / sqrt(max(2 - (r / R)^2, 1))").unwrap(),
+        mass_density: ScalarField::formula("max(2 - (r / R)^2, 1)").unwrap(),
+        stiffness: ScalarField::constant(1.0),
         damping: ScalarField::constant(0.0),
         parameters: vec![MaterialParameter {
             name: "R".into(),
@@ -522,6 +535,8 @@ fn luneburg_lens() -> Document {
     };
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);
     document.presentation.material_overlay_opacity = 0.55;
+    document.presentation.vector_overlay =
+        funfern_app::editor::VectorOverlay::ComplementaryFieldRate;
     document
 }
 
@@ -722,14 +737,15 @@ mod tests {
     }
 
     #[test]
-    fn spatial_examples_are_impedance_matched_and_amr_resolves_the_driver() {
-        for (name, center, edge, expected_center_speed, frequency) in [
+    fn spatial_examples_compile_their_physics_and_amr_resolves_the_driver() {
+        for (name, center, edge, expected_center_speed, frequency, physics) in [
             (
                 "GRIN rod",
                 Point2::new(0.0, 0.0),
                 Point2::new(0.0, 0.30),
                 0.625,
                 4.0,
+                PhysicsModel::Mechanical,
             ),
             (
                 "Luneburg lens",
@@ -737,6 +753,9 @@ mod tests {
                 Point2::new(0.51, 0.0),
                 1.0 / std::f64::consts::SQRT_2,
                 3.5,
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Te,
+                },
             ),
         ] {
             let example = catalog()
@@ -744,6 +763,7 @@ mod tests {
                 .find(|example| example.name == name)
                 .unwrap();
             let scene = &example.document.model.accepted;
+            assert_eq!(scene.physics, physics);
             assert!(scene.has_varying_materials());
             assert!(matches!(
                 example.document.presentation.material_overlay,
@@ -758,10 +778,6 @@ mod tests {
                     .all(ProbeDefinition::valid)
             );
             let region = RegionId(2);
-            for point in [center, edge] {
-                let coefficients = scene.material_at(region, point).unwrap();
-                assert!((coefficients.mass_density * coefficients.stiffness - 1.0).abs() < 1e-12);
-            }
             let center_coefficients = scene.material_at(region, center).unwrap();
             let center_speed =
                 (center_coefficients.stiffness / center_coefficients.mass_density).sqrt();
@@ -839,6 +855,19 @@ mod tests {
                 result.report.maximum_target
             );
         }
+        assert_eq!(
+            catalog()
+                .iter()
+                .find(|example| example.name == "Material lens")
+                .unwrap()
+                .document
+                .model
+                .accepted
+                .physics,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            }
+        );
     }
 
     #[test]

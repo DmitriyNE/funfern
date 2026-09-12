@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     BACKGROUND_REGION, BoundaryLabel, FaceBoundaryCondition, InternalBoundaryCoupling,
     InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition, OuterBoundaryConditions,
-    OuterSide, Point2, RegionId, Scene, TimeSignal, TriMesh, WaveCoefficients, WaveError,
+    OuterSide, PhysicsModel, Point2, RegionId, Scene, TimeSignal, TriMesh, WaveCoefficients,
+    WaveError,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -119,6 +120,12 @@ impl QuadraticWaveOperator {
         if !outer_boundaries.valid() {
             return Err(WaveError::InvalidCoefficients);
         }
+        let physics = scene.map_or(PhysicsModel::Mechanical, |scene| scene.physics);
+        let outer_boundaries = OuterBoundaryConditions {
+            sides: outer_boundaries
+                .sides
+                .map(|condition| condition.resolved(physics)),
+        };
         if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
             return Err(WaveError::InvalidMesh("the mesh is empty"));
         }
@@ -298,6 +305,9 @@ impl QuadraticWaveOperator {
                         let impedance = (values.mass_density * values.stiffness).sqrt();
                         damping[node] += impedance * weight;
                     }
+                }
+                OuterBoundaryCondition::ElectricWall | OuterBoundaryCondition::MagneticWall => {
+                    unreachable!()
                 }
             }
             if condition == OuterBoundaryCondition::SecondOrderOutgoing {
@@ -515,6 +525,46 @@ impl QuadraticWaveOperator {
 
     pub fn element_nodes(&self) -> &[[u32; 7]] {
         &self.element_nodes
+    }
+
+    /// Evaluates a nodal field and its world-space gradient in one element.
+    /// The barycentric coordinates refer to the element's three vertex nodes.
+    pub fn element_value_and_gradient(
+        &self,
+        element: usize,
+        nodal_values: &[f32],
+        barycentric: [f64; 3],
+    ) -> Option<(f64, Point2)> {
+        let nodes = *self.element_nodes.get(element)?;
+        if nodal_values.len() != self.node_points.len()
+            || barycentric.iter().any(|value| !value.is_finite())
+        {
+            return None;
+        }
+        let points = [
+            self.node_points[nodes[0] as usize],
+            self.node_points[nodes[1] as usize],
+            self.node_points[nodes[2] as usize],
+        ];
+        let twice_area = (points[1] - points[0]).cross(points[2] - points[0]);
+        if !twice_area.is_finite() || twice_area <= 0.0 {
+            return None;
+        }
+        let barycentric_gradients = [
+            Point2::new(points[1].y - points[2].y, points[2].x - points[1].x) / twice_area,
+            Point2::new(points[2].y - points[0].y, points[0].x - points[2].x) / twice_area,
+            Point2::new(points[0].y - points[1].y, points[1].x - points[0].x) / twice_area,
+        ];
+        let basis = enriched_quadratic_basis(barycentric);
+        let gradients = enriched_quadratic_basis_gradients(barycentric, barycentric_gradients);
+        let mut value = 0.0;
+        let mut gradient = Point2::default();
+        for local in 0..7 {
+            let nodal = nodal_values[nodes[local] as usize] as f64;
+            value += basis[local] * nodal;
+            gradient = gradient + gradients[local] * nodal;
+        }
+        (value.is_finite() && gradient.finite()).then_some((value, gradient))
     }
 
     pub fn degrees_of_freedom(&self) -> usize {
@@ -981,11 +1031,12 @@ impl CoefficientProvider<'_> {
                         }
                         Ok(value)
                     };
-                WaveCoefficients {
+                let properties = WaveCoefficients {
                     mass_density: evaluate(&material.mass_density, "density", true)?,
                     stiffness: evaluate(&material.stiffness, "stiffness", true)?,
                     damping: evaluate(&material.damping, "damping", false)?,
-                }
+                };
+                scene.physics.wave_coefficients(properties)
             }
         };
         validate_coefficients(values)?;
@@ -1063,7 +1114,13 @@ fn assemble_hole_boundary_conditions(
             )?,
             coefficients.at(exterior, mesh.vertices[b].point)?,
         ];
-        assemble_face_condition(condition, nodes, length, values, assembly)?;
+        assemble_face_condition(
+            condition.resolved(scene.physics),
+            nodes,
+            length,
+            values,
+            assembly,
+        )?;
     }
     Ok(())
 }
@@ -1139,7 +1196,13 @@ fn assemble_internal_boundary_laws(
                 assembly_point(nodes[2], mesh, midpoint, a, b),
             )?,
         ];
-        assemble_face_condition(condition, nodes, length, values, assembly)?;
+        assemble_face_condition(
+            condition.resolved(scene.physics),
+            nodes,
+            length,
+            values,
+            assembly,
+        )?;
         let (start, end) = if parameter_a < parameter_b {
             (parameter_a, parameter_b)
         } else {
@@ -1250,6 +1313,9 @@ fn assemble_face_condition(
             for node in nodes {
                 assign_dirichlet(assembly.dirichlet_signals, node, signal)?;
             }
+        }
+        FaceBoundaryCondition::ElectricWall | FaceBoundaryCondition::MagneticWall => {
+            unreachable!()
         }
     }
     Ok(())
@@ -1411,6 +1477,7 @@ mod tests {
 
     fn two_material_scene() -> Scene {
         Scene {
+            physics: PhysicsModel::Mechanical,
             obstacles: vec![Obstacle::with_role(
                 ObstacleId(1),
                 PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.2),
@@ -2305,6 +2372,53 @@ mod tests {
             .map(|(basis, x)| basis * x)
             .sum::<f64>();
         assert!((interpolated_x - barycentric[1]).abs() < 2.0e-15);
+    }
+
+    #[test]
+    fn public_element_sampler_reproduces_an_affine_value_and_gradient() {
+        let mesh = square();
+        let operator = QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()).unwrap();
+        let values = operator
+            .node_points()
+            .iter()
+            .map(|point| (0.7 + 1.25 * point.x - 0.8 * point.y) as f32)
+            .collect::<Vec<_>>();
+        let (value, gradient) = operator
+            .element_value_and_gradient(0, &values, [1.0 / 3.0; 3])
+            .unwrap();
+        let nodes = operator.element_nodes()[0];
+        let centroid = (operator.node_points()[nodes[0] as usize]
+            + operator.node_points()[nodes[1] as usize]
+            + operator.node_points()[nodes[2] as usize])
+            / 3.0;
+        let expected = 0.7 + 1.25 * centroid.x - 0.8 * centroid.y;
+        assert!((value - expected).abs() < 2.0e-7);
+        assert!((gradient - Point2::new(1.25, -0.8)).norm() < 2.0e-7);
+    }
+
+    #[test]
+    fn scene_assembly_compiles_tm_and_te_material_laws() {
+        let mesh = square();
+        let mut scene = Scene::default();
+        scene.materials[0].mass_density = crate::ScalarField::constant(4.0);
+        scene.materials[0].stiffness = crate::ScalarField::constant(9.0);
+        scene.materials[0].damping = crate::ScalarField::constant(0.5);
+        for (polarization, expected_mass, expected_damping) in [
+            (crate::ElectromagneticPolarization::Tm, 4.0, 2.0),
+            (crate::ElectromagneticPolarization::Te, 9.0, 4.5),
+        ] {
+            scene.physics = PhysicsModel::Electromagnetic { polarization };
+            let operator = QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &scene,
+                OuterBoundaryCondition::Reflecting,
+            )
+            .unwrap();
+            assert!((operator.lumped_mass().iter().sum::<f64>() - expected_mass).abs() < 1e-12);
+            assert!(
+                (operator.lumped_damping().iter().sum::<f64>() - expected_damping).abs() < 1e-12
+            );
+        }
     }
 
     #[test]

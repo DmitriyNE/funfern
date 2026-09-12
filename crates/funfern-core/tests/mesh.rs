@@ -492,6 +492,7 @@ fn medium(id: u64, name: &str, stiffness: f64, color: [u8; 3]) -> Material {
 
 fn two_region_scene(role: impl FnOnce(RegionId, RegionId) -> LoopRole) -> Scene {
     Scene {
+        physics: PhysicsModel::Mechanical,
         obstacles: vec![Obstacle::with_role(
             ObstacleId(20),
             PeriodicCubicSpline::rounded(Point2::default(), 0.42),

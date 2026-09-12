@@ -25,6 +25,14 @@ impl MaterialOverlay {
             Self::Property(property) => property.label(),
         }
     }
+
+    pub const fn label_for(self, physics: PhysicsModel) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Regions => "Material regions",
+            Self::Property(property) => property.label_for(physics),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +43,36 @@ pub enum MaterialProperty {
     WaveSpeed,
     Impedance,
     VolumeSource,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VectorOverlay {
+    #[default]
+    Off,
+    ComplementaryFieldRate,
+    RelativeEnergyFlow,
+}
+
+impl VectorOverlay {
+    pub const fn label(self, physics: PhysicsModel) -> &'static str {
+        match (self, physics) {
+            (Self::Off, _) => "Off",
+            (
+                Self::ComplementaryFieldRate,
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                },
+            ) => "Magnetic-field rate ∂H/∂t",
+            (
+                Self::ComplementaryFieldRate,
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Te,
+                },
+            ) => "Electric-field rate ∂E/∂t",
+            (Self::ComplementaryFieldRate, PhysicsModel::Mechanical) => "Field-gradient rate",
+            (Self::RelativeEnergyFlow, _) => "Relative energy flow",
+        }
+    }
 }
 
 impl MaterialProperty {
@@ -55,6 +93,20 @@ impl MaterialProperty {
             Self::WaveSpeed => "Wave speed",
             Self::Impedance => "Impedance",
             Self::VolumeSource => "Volume source",
+        }
+    }
+
+    pub const fn label_for(self, physics: PhysicsModel) -> &'static str {
+        match physics {
+            PhysicsModel::Mechanical => self.label(),
+            PhysicsModel::Electromagnetic { .. } => match self {
+                Self::Density => "Permittivity ε",
+                Self::Stiffness => "Permeability μ",
+                Self::Damping => "Loss rate α",
+                Self::WaveSpeed => "Wave speed",
+                Self::Impedance => "Wave impedance",
+                Self::VolumeSource => "Volume current",
+            },
         }
     }
 
@@ -87,6 +139,10 @@ pub struct PresentationSettings {
     pub far_field_contour: bool,
     pub field: bool,
     pub field_gain: f32,
+    pub vector_overlay: VectorOverlay,
+    pub vector_overlay_smoothed: bool,
+    pub vector_overlay_density: f32,
+    pub vector_overlay_gain: f32,
     pub material_overlay: MaterialOverlay,
     pub material_overlay_opacity: f32,
     pub material_overlay_auto_range: bool,
@@ -99,6 +155,10 @@ impl PresentationSettings {
     pub fn valid(self) -> bool {
         self.field_gain.is_finite()
             && (0.25..=12.0).contains(&self.field_gain)
+            && self.vector_overlay_density.is_finite()
+            && (28.0..=120.0).contains(&self.vector_overlay_density)
+            && self.vector_overlay_gain.is_finite()
+            && (0.1..=5.0).contains(&self.vector_overlay_gain)
             && self.material_overlay_opacity.is_finite()
             && (0.05..=1.0).contains(&self.material_overlay_opacity)
             && self.material_overlay_manual_min.is_finite()
@@ -124,6 +184,10 @@ impl Default for PresentationSettings {
             far_field_contour: true,
             field: true,
             field_gain: 2.0,
+            vector_overlay: VectorOverlay::Off,
+            vector_overlay_smoothed: true,
+            vector_overlay_density: 54.0,
+            vector_overlay_gain: 1.0,
             material_overlay: MaterialOverlay::Regions,
             material_overlay_opacity: 0.48,
             material_overlay_auto_range: true,
@@ -302,6 +366,8 @@ fn outer_condition_from_face(condition: FaceBoundaryCondition) -> OuterBoundaryC
         FaceBoundaryCondition::Reflecting => OuterBoundaryCondition::Reflecting,
         FaceBoundaryCondition::Impedance { .. } => OuterBoundaryCondition::FirstOrderOutgoing,
         FaceBoundaryCondition::SecondOrderOutgoing => OuterBoundaryCondition::SecondOrderOutgoing,
+        FaceBoundaryCondition::ElectricWall => OuterBoundaryCondition::ElectricWall,
+        FaceBoundaryCondition::MagneticWall => OuterBoundaryCondition::MagneticWall,
         FaceBoundaryCondition::Neumann { signal } => OuterBoundaryCondition::Neumann { signal },
         FaceBoundaryCondition::Dirichlet { signal } => OuterBoundaryCondition::Dirichlet { signal },
     }
@@ -375,6 +441,36 @@ impl Default for Editor {
     }
 }
 impl Editor {
+    pub fn set_physics(&mut self, physics: PhysicsModel) {
+        if self.document.model.draft.physics == physics {
+            return;
+        }
+        self.begin();
+        self.document.model.draft.physics = physics;
+        if physics == PhysicsModel::Mechanical {
+            self.document.model.draft.outer_boundaries.sides = self
+                .document
+                .model
+                .draft
+                .outer_boundaries
+                .sides
+                .map(|condition| condition.resolved(physics));
+            for obstacle in &mut self.document.model.draft.obstacles {
+                for condition in &mut obstacle.span_conditions {
+                    *condition = condition.resolved(physics);
+                }
+            }
+            for boundary in &mut self.document.model.draft.internal_boundaries {
+                for law in &mut boundary.span_laws {
+                    law.left = law.left.resolved(physics);
+                    law.right = law.right.resolved(physics);
+                }
+            }
+        }
+        self.changed();
+        self.commit();
+    }
+
     pub fn loop_kind(&self, id: ObstacleId) -> Option<LoopKind> {
         self.obstacle(id).map(|obstacle| match obstacle.role {
             LoopRole::Hole { .. } => LoopKind::Hole,
@@ -526,6 +622,8 @@ impl Editor {
                     OuterBoundaryCondition::SecondOrderOutgoing => {
                         FaceBoundaryCondition::SecondOrderOutgoing
                     }
+                    OuterBoundaryCondition::ElectricWall => FaceBoundaryCondition::ElectricWall,
+                    OuterBoundaryCondition::MagneticWall => FaceBoundaryCondition::MagneticWall,
                     OuterBoundaryCondition::Neumann { signal } => {
                         FaceBoundaryCondition::Neumann { signal }
                     }

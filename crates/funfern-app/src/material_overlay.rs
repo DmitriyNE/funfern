@@ -251,8 +251,13 @@ pub fn sample(scene: &Scene, region_id: RegionId, point: funfern_core::Point2) -
     }
     match (values[0], values[1]) {
         (Some(density), Some(stiffness)) => {
-            values[3] = Some((stiffness / density).sqrt());
-            values[4] = Some((stiffness * density).sqrt());
+            let properties = funfern_core::WaveCoefficients {
+                mass_density: density,
+                stiffness,
+                damping: values[2].unwrap_or(0.0),
+            };
+            values[3] = Some(scene.physics.wave_speed(properties));
+            values[4] = Some(scene.physics.impedance(properties));
         }
         _ => {
             let error = errors[0]
@@ -365,6 +370,29 @@ mod tests {
         let range = robust_range(&mut values).unwrap();
         assert!(range.maximum < 1000.0);
         assert_eq!(range.normalized(range.minimum, false), Some(0.0));
+    }
+
+    #[test]
+    fn electromagnetic_overlay_keeps_raw_properties_and_derives_c_and_z() {
+        let mut scene = Scene {
+            physics: funfern_core::PhysicsModel::Electromagnetic {
+                polarization: funfern_core::ElectromagneticPolarization::Tm,
+            },
+            ..Default::default()
+        };
+        scene.materials[0].mass_density = funfern_core::ScalarField::constant(4.0);
+        scene.materials[0].stiffness = funfern_core::ScalarField::constant(9.0);
+        scene.materials[0].damping = funfern_core::ScalarField::constant(0.25);
+        let sample = sample(
+            &scene,
+            funfern_core::BACKGROUND_REGION,
+            funfern_core::Point2::default(),
+        );
+        assert_eq!(sample.value(MaterialProperty::Density), Ok(4.0));
+        assert_eq!(sample.value(MaterialProperty::Stiffness), Ok(9.0));
+        assert_eq!(sample.value(MaterialProperty::Damping), Ok(0.25));
+        assert!((sample.value(MaterialProperty::WaveSpeed).unwrap() - 1.0 / 6.0).abs() < 1e-15);
+        assert!((sample.value(MaterialProperty::Impedance).unwrap() - 1.5).abs() < 1e-15);
     }
 
     #[test]

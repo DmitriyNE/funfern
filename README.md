@@ -2,9 +2,10 @@
 
 [![CI and Pages](https://github.com/DmitriyNE/funfern/actions/workflows/ci.yml/badge.svg)](https://github.com/DmitriyNE/funfern/actions/workflows/ci.yml)
 
-A browser finite-element wave playground with editable periodic and open cubic
-splines, material regions, holes and reflecting baffles, constrained triangle meshes,
-persistent invalid drafts, undo/redo, and versioned scene files.
+A browser finite-element wave playground with mechanical and TE/TM electromagnetic
+scalar skins, editable periodic and open cubic splines, material regions, holes and
+reflecting baffles, constrained triangle meshes, persistent invalid drafts,
+undo/redo, and versioned scene files.
 
 The production wave solver uses seven-node enriched quadratic, mass-lumped
 triangles on both an f64 CPU reference and an f32 WebGPU gather kernel. Geometry
@@ -132,6 +133,14 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   New scenes start with the second-order auxiliary condition on all four outer
   edges. View > Boundary conditions colors the assigned laws directly on the
   outer box, hole spans, and both baffle traces.
+- **Physics skins:** Simulation switches the shared scalar PDE between mechanical,
+  electromagnetic TM (`E_z`), and electromagnetic TE (`H_z`) views. Mechanical
+  materials expose density, stiffness, and damping. EM materials expose relative
+  permittivity `ε`, relative permeability `μ`, and a loss rate `α`; both
+  polarizations use `c = 1/sqrt(ε μ)` and `Z = sqrt(μ/ε)`. Perfect electric and
+  magnetic walls resolve to the appropriate zero-value or zero-flux scalar law for
+  the chosen polarization. Changing the skin is undoable, reuses unchanged mesh
+  geometry, and starts a fresh field so incompatible state is never transferred.
 - **Geometry role:** choose Hole, Interface, or Baffle from Draw before
   creating. An interface retains its interior and shares its finite-element trace
   with the exterior. A baffle is an open curve with two independent coincident
@@ -151,8 +160,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   A removal that would merge different span conditions is rejected until the two
   assignments agree. Shape-preserving insertion copies the split span assignment.
   Deleting an entire loop is a separate panel action.
-- **Materials:** create and name materials in the Library, edit positive mass
-  density and stiffness plus nonnegative volume damping, and assign them under
+- **Materials:** create and name materials in the Library, edit the three positive
+  or nonnegative properties named by the active physics skin, and assign them under
   Subdomain assignment. Each coefficient can be a constant or a formula. Formulas
   use local `x`, `y`, `r`, and `theta`, constants `pi` and `e`, named material
   parameters, arithmetic, powers, and `sqrt`, `abs`, `sin`, `cos`, `tan`, `exp`,
@@ -170,6 +179,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   amplitude with linear/log and
   automatic/manual range controls plus a local-coordinate hover readout. Automatic
   solution AMR evaluates varying coefficients and their gradients directly.
+- **Vector view:** View can overlay arrows derived from the synchronized quadratic
+  field readback. EM scenes offer the exact complementary-field time derivative
+  (`∂H/∂t` for TM or `∂E/∂t` for TE) and a scalar relative-energy-flow view;
+  mechanical scenes offer the latter. Arrow spacing and gain are screen-space
+  presentation controls, with optional temporal smoothing. This remains a derived
+  view of one scalar polarization rather than a full vector Maxwell solve.
 - **Region sources:** the selected subdomain can own one distributed source,
   independent of its reusable passive material. Its signed spatial profile uses the
   same region-local world-unit coordinates and its own named parameters, multiplied

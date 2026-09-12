@@ -2,6 +2,7 @@ use crate::editor::{
     BoundaryProbeFeature, BoundaryProbeSide, BoundaryProbeTarget, Document, DocumentModel,
     FarFieldSettings, MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty,
     PresentationSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget,
+    VectorOverlay,
 };
 use funfern_core::*;
 use serde::{Deserialize, Serialize};
@@ -66,12 +67,39 @@ struct StoredPresentation {
     far_field_contour: bool,
     field: bool,
     field_gain: f32,
+    #[serde(default)]
+    vector_overlay: StoredVectorOverlay,
+    #[serde(default = "default_vector_overlay_smoothed")]
+    vector_overlay_smoothed: bool,
+    #[serde(default = "default_vector_overlay_density")]
+    vector_overlay_density: f32,
+    #[serde(default = "default_vector_overlay_gain")]
+    vector_overlay_gain: f32,
     material_overlay: StoredMaterialOverlay,
     material_overlay_opacity: f32,
     material_overlay_auto_range: bool,
     material_overlay_logarithmic: bool,
     material_overlay_manual_min: f64,
     material_overlay_manual_max: f64,
+}
+
+const fn default_vector_overlay_smoothed() -> bool {
+    true
+}
+const fn default_vector_overlay_density() -> f32 {
+    54.0
+}
+const fn default_vector_overlay_gain() -> f32 {
+    1.0
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum StoredVectorOverlay {
+    #[default]
+    Off,
+    ComplementaryFieldRate,
+    RelativeEnergyFlow,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -197,6 +225,8 @@ enum StoredProbeSamplingPreset {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredScene {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    physics: Option<StoredPhysicsModel>,
     materials: Vec<StoredMaterial>,
     regions: Vec<StoredRegion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -224,12 +254,46 @@ struct StoredVolumeSource {
 struct StoredMaterial {
     id: u64,
     name: String,
-    mass_density: StoredScalarField,
-    stiffness: StoredScalarField,
-    damping: StoredScalarField,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    law: Option<StoredMaterialLaw>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mass_density: Option<StoredScalarField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stiffness: Option<StoredScalarField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    damping: Option<StoredScalarField>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     parameters: Vec<StoredMaterialParameter>,
     color: [u8; 3],
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredPhysicsModel {
+    Mechanical,
+    Electromagnetic { polarization: StoredPolarization },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredPolarization {
+    Tm,
+    Te,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredMaterialLaw {
+    Mechanical {
+        density: StoredScalarField,
+        stiffness: StoredScalarField,
+        damping: StoredScalarField,
+    },
+    Electromagnetic {
+        permittivity: StoredScalarField,
+        permeability: StoredScalarField,
+        loss_rate: StoredScalarField,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -325,6 +389,8 @@ enum StoredFaceCondition {
     Reflecting,
     Impedance { ratio: f64 },
     SecondOrderOutgoing,
+    ElectricWall,
+    MagneticWall,
     Neumann { signal: StoredTimeSignal },
     Dirichlet { signal: StoredTimeSignal },
 }
@@ -335,6 +401,8 @@ enum StoredOuterBoundaryCondition {
     Reflecting,
     FirstOrderOutgoing,
     SecondOrderOutgoing,
+    ElectricWall,
+    MagneticWall,
     Neumann { signal: StoredTimeSignal },
     Dirichlet { signal: StoredTimeSignal },
 }
@@ -384,15 +452,28 @@ enum StoredRole {
 
 fn encode_scene(scene: &Scene) -> StoredScene {
     StoredScene {
+        physics: Some(encode_physics(scene.physics)),
         materials: scene
             .materials
             .iter()
             .map(|material| StoredMaterial {
                 id: material.id.0,
                 name: material.name.clone(),
-                mass_density: encode_scalar_field(&material.mass_density),
-                stiffness: encode_scalar_field(&material.stiffness),
-                damping: encode_scalar_field(&material.damping),
+                law: Some(match scene.physics {
+                    PhysicsModel::Mechanical => StoredMaterialLaw::Mechanical {
+                        density: encode_scalar_field(&material.mass_density),
+                        stiffness: encode_scalar_field(&material.stiffness),
+                        damping: encode_scalar_field(&material.damping),
+                    },
+                    PhysicsModel::Electromagnetic { .. } => StoredMaterialLaw::Electromagnetic {
+                        permittivity: encode_scalar_field(&material.mass_density),
+                        permeability: encode_scalar_field(&material.stiffness),
+                        loss_rate: encode_scalar_field(&material.damping),
+                    },
+                }),
+                mass_density: None,
+                stiffness: None,
+                damping: None,
                 parameters: material
                     .parameters
                     .iter()
@@ -513,6 +594,30 @@ fn encode_scene(scene: &Scene) -> StoredScene {
     }
 }
 
+fn encode_physics(physics: PhysicsModel) -> StoredPhysicsModel {
+    match physics {
+        PhysicsModel::Mechanical => StoredPhysicsModel::Mechanical,
+        PhysicsModel::Electromagnetic { polarization } => StoredPhysicsModel::Electromagnetic {
+            polarization: match polarization {
+                ElectromagneticPolarization::Tm => StoredPolarization::Tm,
+                ElectromagneticPolarization::Te => StoredPolarization::Te,
+            },
+        },
+    }
+}
+
+fn decode_physics(physics: StoredPhysicsModel) -> PhysicsModel {
+    match physics {
+        StoredPhysicsModel::Mechanical => PhysicsModel::Mechanical,
+        StoredPhysicsModel::Electromagnetic { polarization } => PhysicsModel::Electromagnetic {
+            polarization: match polarization {
+                StoredPolarization::Tm => ElectromagneticPolarization::Tm,
+                StoredPolarization::Te => ElectromagneticPolarization::Te,
+            },
+        },
+    }
+}
+
 fn encode_scalar_field(field: &ScalarField) -> StoredScalarField {
     StoredScalarField::Field(match field {
         ScalarField::Constant(value) => StoredScalarFieldV14::Constant { value: *value },
@@ -582,6 +687,8 @@ fn encode_outer_condition(condition: OuterBoundaryCondition) -> StoredOuterBound
         OuterBoundaryCondition::SecondOrderOutgoing => {
             StoredOuterBoundaryCondition::SecondOrderOutgoing
         }
+        OuterBoundaryCondition::ElectricWall => StoredOuterBoundaryCondition::ElectricWall,
+        OuterBoundaryCondition::MagneticWall => StoredOuterBoundaryCondition::MagneticWall,
         OuterBoundaryCondition::Neumann { signal } => StoredOuterBoundaryCondition::Neumann {
             signal: encode_signal(signal),
         },
@@ -600,6 +707,8 @@ fn decode_outer_condition(condition: StoredOuterBoundaryCondition) -> OuterBound
         StoredOuterBoundaryCondition::SecondOrderOutgoing => {
             OuterBoundaryCondition::SecondOrderOutgoing
         }
+        StoredOuterBoundaryCondition::ElectricWall => OuterBoundaryCondition::ElectricWall,
+        StoredOuterBoundaryCondition::MagneticWall => OuterBoundaryCondition::MagneticWall,
         StoredOuterBoundaryCondition::Neumann { signal } => OuterBoundaryCondition::Neumann {
             signal: decode_signal(signal),
         },
@@ -614,6 +723,8 @@ fn encode_face_condition(condition: FaceBoundaryCondition) -> StoredFaceConditio
         FaceBoundaryCondition::Reflecting => StoredFaceCondition::Reflecting,
         FaceBoundaryCondition::Impedance { ratio } => StoredFaceCondition::Impedance { ratio },
         FaceBoundaryCondition::SecondOrderOutgoing => StoredFaceCondition::SecondOrderOutgoing,
+        FaceBoundaryCondition::ElectricWall => StoredFaceCondition::ElectricWall,
+        FaceBoundaryCondition::MagneticWall => StoredFaceCondition::MagneticWall,
         FaceBoundaryCondition::Neumann { signal } => StoredFaceCondition::Neumann {
             signal: encode_signal(signal),
         },
@@ -628,6 +739,8 @@ fn decode_face_condition(condition: StoredFaceCondition) -> FaceBoundaryConditio
         StoredFaceCondition::Reflecting => FaceBoundaryCondition::Reflecting,
         StoredFaceCondition::Impedance { ratio } => FaceBoundaryCondition::Impedance { ratio },
         StoredFaceCondition::SecondOrderOutgoing => FaceBoundaryCondition::SecondOrderOutgoing,
+        StoredFaceCondition::ElectricWall => FaceBoundaryCondition::ElectricWall,
+        StoredFaceCondition::MagneticWall => FaceBoundaryCondition::MagneticWall,
         StoredFaceCondition::Neumann { signal } => FaceBoundaryCondition::Neumann {
             signal: decode_signal(signal),
         },
@@ -710,6 +823,7 @@ fn decode_scene(
     normalize_legacy_parallel_gap: bool,
     require_material_frames: bool,
     require_volume_sources: bool,
+    require_physics: bool,
 ) -> Result<Scene, String> {
     if stored.loops.len() > MAX_OBSTACLES
         || stored.internal_boundaries.len() > MAX_INTERNAL_BOUNDARIES
@@ -719,16 +833,60 @@ fn decode_scene(
     {
         return Err("Scene exceeds the loop or material limit".into());
     }
+    let physics = match stored.physics {
+        Some(physics) => decode_physics(physics),
+        None if require_physics => return Err("Scene has no physics model".into()),
+        None => PhysicsModel::Mechanical,
+    };
     let materials = stored
         .materials
         .into_iter()
         .map(|material| {
+            let (mass_density, stiffness, damping) = match material.law {
+                Some(StoredMaterialLaw::Mechanical {
+                    density,
+                    stiffness,
+                    damping,
+                }) if physics == PhysicsModel::Mechanical => {
+                    if material.mass_density.is_some()
+                        || material.stiffness.is_some()
+                        || material.damping.is_some()
+                    {
+                        return Err("Material mixes version 18 and legacy coefficients".into());
+                    }
+                    (density, stiffness, damping)
+                }
+                Some(StoredMaterialLaw::Electromagnetic {
+                    permittivity,
+                    permeability,
+                    loss_rate,
+                }) if matches!(physics, PhysicsModel::Electromagnetic { .. }) => {
+                    if material.mass_density.is_some()
+                        || material.stiffness.is_some()
+                        || material.damping.is_some()
+                    {
+                        return Err("Material mixes version 18 and legacy coefficients".into());
+                    }
+                    (permittivity, permeability, loss_rate)
+                }
+                Some(_) => return Err("Material law does not match the scene physics".into()),
+                None if require_physics => return Err("Material has no version 18 law".into()),
+                None => (
+                    material
+                        .mass_density
+                        .ok_or("Legacy material has no density")?,
+                    material
+                        .stiffness
+                        .ok_or("Legacy material has no stiffness")?,
+                    material.damping.ok_or("Legacy material has no damping")?,
+                ),
+            };
             Ok(Material {
                 id: MaterialId(material.id),
                 name: material.name,
-                mass_density: decode_scalar_field(material.mass_density, require_material_frames)?,
-                stiffness: decode_scalar_field(material.stiffness, require_material_frames)?,
-                damping: decode_scalar_field(material.damping, require_material_frames)?,
+                mass_density: decode_scalar_field(mass_density, require_material_frames)?,
+                stiffness: decode_scalar_field(stiffness, require_material_frames)?,
+                damping: decode_scalar_field(damping, require_material_frames)?,
                 parameters: material
                     .parameters
                     .into_iter()
@@ -914,6 +1072,7 @@ fn decode_scene(
         }
     }
     let scene = Scene {
+        physics,
         obstacles,
         internal_boundaries,
         materials,
@@ -963,7 +1122,7 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 17,
+        version: 18,
         domain: DOMAIN,
         draft: encode_scene(&document.model.draft),
         accepted: encode_scene(&document.model.accepted),
@@ -1053,6 +1212,14 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
         far_field_contour: settings.far_field_contour,
         field: settings.field,
         field_gain: settings.field_gain,
+        vector_overlay: match settings.vector_overlay {
+            VectorOverlay::Off => StoredVectorOverlay::Off,
+            VectorOverlay::ComplementaryFieldRate => StoredVectorOverlay::ComplementaryFieldRate,
+            VectorOverlay::RelativeEnergyFlow => StoredVectorOverlay::RelativeEnergyFlow,
+        },
+        vector_overlay_smoothed: settings.vector_overlay_smoothed,
+        vector_overlay_density: settings.vector_overlay_density,
+        vector_overlay_gain: settings.vector_overlay_gain,
         material_overlay: match settings.material_overlay {
             MaterialOverlay::Off => StoredMaterialOverlay::Off,
             MaterialOverlay::Regions => StoredMaterialOverlay::Regions,
@@ -1092,6 +1259,14 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
         far_field_contour: stored.far_field_contour,
         field: stored.field,
         field_gain: stored.field_gain,
+        vector_overlay: match stored.vector_overlay {
+            StoredVectorOverlay::Off => VectorOverlay::Off,
+            StoredVectorOverlay::ComplementaryFieldRate => VectorOverlay::ComplementaryFieldRate,
+            StoredVectorOverlay::RelativeEnergyFlow => VectorOverlay::RelativeEnergyFlow,
+        },
+        vector_overlay_smoothed: stored.vector_overlay_smoothed,
+        vector_overlay_density: stored.vector_overlay_density,
+        vector_overlay_gain: stored.vector_overlay_gain,
         material_overlay: match stored.material_overlay {
             StoredMaterialOverlay::Off => MaterialOverlay::Off,
             StoredMaterialOverlay::Regions => MaterialOverlay::Regions,
@@ -1352,7 +1527,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 presentation: PresentationSettings::default(),
             }
         }
-        2..=17 => {
+        2..=18 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
@@ -1364,6 +1539,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 header.version < 7,
                 header.version >= 14,
                 header.version >= 15,
+                header.version >= 18,
             )?;
             let accepted = decode_scene(
                 file.accepted,
@@ -1372,6 +1548,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 header.version < 7,
                 header.version >= 14,
                 header.version >= 15,
+                header.version >= 18,
             )?;
             let source = decode_source(file.source, &accepted)?;
             let probes = decode_probes(

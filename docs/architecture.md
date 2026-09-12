@@ -10,6 +10,8 @@ implemented. The closed-wall representation is retained for scene compatibility,
 but the current editor does not offer it as a normal role. A first spatial
 edge-size adaptation transaction is implemented; user wavelength and active
 solution indicators drive bounded bidirectional refinement and coarsening.
+The same scalar weak form now has explicit Mechanical, electromagnetic TM (`E_z`),
+and electromagnetic TE (`H_z`) scene semantics.
 
 ## Responsibilities and dependencies
 
@@ -108,8 +110,12 @@ validated containment graph. Mesh triangles carry their owning region/material I
 while constrained edges carry their logical boundary/span ID and side information.
 Those labels survive remeshing even though numerical indices do not.
 
-Material interfaces use a conforming field with piecewise mass density, stiffness,
-and damping, giving the scalar weak-form transmission condition. Each scalar
+Material interfaces use a conforming scalar field with three piecewise material
+properties. Mechanical scenes interpret them as density `rho`, stiffness `k`, and
+damping `d`. EM scenes store permittivity `epsilon`, permeability `mu`, and reduced
+loss rate `alpha`, then compile TM to `(mass, stiffness, damping) =
+(epsilon, 1/mu, epsilon*alpha)` and TE to `(mu, 1/epsilon, mu*alpha)`. Both give
+`c = 1/sqrt(epsilon*mu)` and `Z = sqrt(mu/epsilon)`. Each scalar
 coefficient is either constant or a bounded compiled expression over local `x`,
 `y`, `r`, and `theta` plus material-level named parameters. The local coordinates
 always have world units. Their frame contains only an origin, an angle, and a
@@ -160,7 +166,7 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON version 17 remains the single persistence representation. A `Document`
+Scene JSON version 18 remains the single persistence representation. A `Document`
 owns one `DocumentModel` plus `PresentationSettings`. The model contains the draft
 and accepted scenes, probes, point-source configuration, and far-field settings; it
 is also the exact snapshot type stored by Undo/Redo. Presentation contains the View
@@ -169,6 +175,10 @@ through scene files, examples, shared links, and recovery, but stays outside his
 so model edits never rewind the user's current view. Camera, selection, open panels,
 floating-window positions, solver state, and derived render caches remain transient.
 
+Version 18 adds the scene physics model, polarization, explicit electric/magnetic
+wall variants, and a tagged material law whose serialized property names follow
+the active physics. Version-17 and older materials migrate exactly to Mechanical.
+It also persists the derived vector-overlay mode, smoothing, density, and gain.
 Version 17 introduces the tagged shared time-signal representation and moves the
 point source into the numerical core alongside its spatial carrier. Version 16 adds
 presentation settings. Version 15 adds region-owned volume sources
@@ -187,6 +197,22 @@ material-overlay preset. Opening one is a single model-history action, installs 
 presentation preset, and starts a fresh zero field; it does not transfer the field
 from the previously open scene. Ordinary edits and AMR retain their normal
 field-preserving handoff.
+
+Physics is part of the undoable `Scene` and operator equality, while geometry
+equality deliberately ignores it. A physics or polarization change therefore
+reassembles coefficients on the existing mesh, clears transient probe and vector
+history, and initializes a fresh zero field. EM wall semantics are explicit at the
+scene layer: PEC is zero `E_z` for TM and zero normal `H_z` flux for TE; PMC is the
+dual. Assembly and the AMR boundary estimator resolve those semantic variants to
+the existing scalar Dirichlet or Neumann implementation before numerical work.
+
+The first vector display is derived on the CPU from the synchronized P2 readback.
+At element sample points it evaluates the quadratic gradient and shows
+`H_t = (-E_z,y, E_z,x)/mu` for TM or `E_t = (H_z,y, -H_z,x)/epsilon` for TE. A
+second mode shows the reduced scalar energy-flow direction `-k u_t grad(u)`.
+Screen bins bound arrow density and an exponential display filter reduces jitter.
+These arrows do not add solver unknowns or a WebGPU binding and are intentionally
+not presented as a simultaneous full-vector Maxwell state.
 Autosave retains both the accepted scene and any invalid editable draft, writing to
 browser local storage or an atomic per-user native recovery file after a short
 debounce. On browser startup, a `#scene=v1.…` fragment takes precedence over local

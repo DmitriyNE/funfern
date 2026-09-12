@@ -261,6 +261,10 @@ fn presentation_round_trips_and_older_scenes_receive_defaults() {
             far_field_contour: false,
             field: false,
             field_gain: 7.5,
+            vector_overlay: VectorOverlay::RelativeEnergyFlow,
+            vector_overlay_smoothed: false,
+            vector_overlay_density: 72.0,
+            vector_overlay_gain: 1.7,
             material_overlay: MaterialOverlay::Property(MaterialProperty::Impedance),
             material_overlay_opacity: 0.73,
             material_overlay_auto_range: false,
@@ -283,6 +287,48 @@ fn presentation_round_trips_and_older_scenes_receive_defaults() {
     let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
     malformed["presentation"]["field_gain"] = 0.into();
     assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
+}
+
+#[test]
+fn physics_is_undoable_and_version_seventeen_migrates_exactly_to_mechanical() {
+    let mut editor = Editor::default();
+    let original = editor.document.model.clone();
+    editor.set_physics(PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    });
+    settle(&mut editor);
+    assert_eq!(editor.history_len(), (1, 0));
+    assert!(matches!(
+        editor.document.model.accepted.physics,
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm
+        }
+    ));
+    let json = save(&editor.document).unwrap();
+    assert!(json.contains("\"permittivity\""));
+    assert!(!json.contains("\"mass_density\""));
+    assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
+    editor.undo();
+    settle(&mut editor);
+    assert_eq!(editor.document.model, original);
+
+    let legacy = Document::default();
+    let mut value: serde_json::Value = serde_json::from_str(&save(&legacy).unwrap()).unwrap();
+    value["version"] = 17.into();
+    for scene_name in ["draft", "accepted"] {
+        let scene = value[scene_name].as_object_mut().unwrap();
+        scene.remove("physics");
+        for material in scene["materials"].as_array_mut().unwrap() {
+            let material = material.as_object_mut().unwrap();
+            let law = material.remove("law").unwrap();
+            let law = law.as_object().unwrap();
+            material.insert("mass_density".into(), law["density"].clone());
+            material.insert("stiffness".into(), law["stiffness"].clone());
+            material.insert("damping".into(), law["damping"].clone());
+        }
+    }
+    let migrated = decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+    assert_eq!(migrated, legacy);
 }
 
 #[test]
@@ -367,7 +413,7 @@ fn area_probe_targets_and_far_field_settings_round_trip() {
         .unwrap();
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 17"));
+    assert!(json.contains("\"version\": 18"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
     assert_eq!(decoded.model.far_field.inset, 0.17);
@@ -458,7 +504,7 @@ fn point_source_round_trips_and_version_ten_uses_the_default() {
     };
     let json = save(&document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 17);
+    assert_eq!(value["version"], 18);
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
     set_file_version(&mut value, 10);
@@ -569,7 +615,7 @@ fn volume_source_round_trips_and_is_one_undoable_region_edit() {
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 17"));
+    assert!(json.contains("\"version\": 18"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -605,7 +651,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 18.into(),
+            0 => value["version"] = 19.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -682,7 +728,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        17
+        18
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -1175,7 +1221,7 @@ fn spatial_materials_parameters_and_frames_round_trip() {
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 17"));
+    assert!(json.contains("\"version\": 18"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1691,7 +1737,7 @@ fn boundary_probe_round_trips_and_tracks_periodic_insertion() {
     assert_eq!(target.spans(9), vec![7, 8, 0]);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 17"));
+    assert!(json.contains("\"version\": 18"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded.model.probes, editor.document.model.probes);
 

@@ -29,6 +29,7 @@ use funfern_app::{
         Acceptance, BoundaryFaceTarget, BoundaryProbeFeature, BoundaryProbeSide,
         BoundaryProbeTarget, Editor, FarFieldSettings, GeometryControl, LoopKind,
         PresentationSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget,
+        VectorOverlay,
     },
     persistence::{self, LoadCandidate},
 };
@@ -451,9 +452,9 @@ enum LineProbeQuantity {
 impl LineProbeQuantity {
     const ALL: [Self; 3] = [Self::Field, Self::Flux, Self::Energy];
 
-    const fn label(self) -> &'static str {
+    const fn label_for(self, physics: PhysicsModel) -> &'static str {
         match self {
-            Self::Field => "Field",
+            Self::Field => primary_field_label(physics),
             Self::Flux => "Normal flux",
             Self::Energy => "Energy",
         }
@@ -854,6 +855,8 @@ pub struct Playground {
     material_overlay_job: Option<MaterialOverlayJob>,
     material_overlay_snapshot: Option<MaterialOverlaySnapshot>,
     material_overlay_error: Option<String>,
+    vector_overlay_average: BTreeMap<(i32, i32), Point2>,
+    vector_overlay_step: u64,
     wave_mesh: Option<Arc<TriMesh>>,
     wave_operator: Option<Arc<QuadraticWaveOperator>>,
     wave_boundary_committed: OuterBoundaryConditions,
@@ -1023,6 +1026,8 @@ impl Default for Playground {
             material_overlay_job: None,
             material_overlay_snapshot: None,
             material_overlay_error: None,
+            vector_overlay_average: BTreeMap::new(),
+            vector_overlay_step: u64::MAX,
             wave_mesh: None,
             wave_operator: None,
             wave_boundary_committed: OuterBoundaryConditions::default(),
@@ -1492,7 +1497,11 @@ impl Playground {
         if material.damping.abs() > 1.0e-12 {
             return Err("Far-field projection requires a lossless background material".into());
         }
-        let wave_speed = (material.stiffness / material.mass_density).sqrt();
+        let wave_speed = scene.physics.wave_speed(WaveCoefficients {
+            mass_density: material.mass_density,
+            stiffness: material.stiffness,
+            damping: material.damping,
+        });
         if !wave_speed.is_finite() || wave_speed <= 0.0 {
             return Err("The background wave speed is invalid".into());
         }
@@ -2822,6 +2831,18 @@ impl Playground {
     }
 
     fn refresh_mesh(&mut self) {
+        if self.editor.document.model.accepted.physics != self.mesh_committed_scene.physics
+            && !self.fresh_simulation_requested
+        {
+            self.fresh_simulation_requested = true;
+            self.clear_all_probe_traces();
+            self.probe_compiled = None;
+            self.solution_indicator_job = None;
+            self.solution_indicator_result = None;
+            self.solution_indicator_source = None;
+            self.vector_overlay_average.clear();
+            self.vector_overlay_step = u64::MAX;
+        }
         // Prepare from the displayed mesh's own scene, never an obsolete
         // in-flight request. Geometry edits are coalesced until the drag ends.
         let geometry_pending = !self
@@ -4548,6 +4569,7 @@ impl Playground {
     }
 
     fn probe_readout_windows(&mut self, ctx: &egui::Context) {
+        let physics = self.editor.document.model.accepted.physics;
         let open_ids = self.probe_windows.iter().copied().collect::<Vec<_>>();
         for id in open_ids {
             let Some(probe) = self
@@ -4666,14 +4688,14 @@ impl Playground {
                                             }
                                             ui.end_row();
                                             for quantity in LineProbeQuantity::ALL {
-                                                ui.label(quantity.label());
+                                                ui.label(quantity.label_for(physics));
                                                 for representation in LineProbeRepresentation::ALL {
                                                     let index =
                                                         quantity.offset() + representation.offset();
                                                     ui.checkbox(&mut view.line_plots[index], "")
                                                         .on_hover_text(format!(
                                                             "{} {}",
-                                                            quantity.label(),
+                                                            quantity.label_for(physics),
                                                             representation.label()
                                                         ));
                                                 }
@@ -4704,14 +4726,20 @@ impl Playground {
                                     ),
                                 )
                                 .ui(ui, |ui| {
-                                    ui.checkbox(&mut view.area_mean_field, "Mean field");
-                                    ui.checkbox(&mut view.area_rms_field, "RMS field");
+                                    ui.checkbox(
+                                        &mut view.area_mean_field,
+                                        format!("Mean {}", primary_field_label(physics)),
+                                    );
+                                    ui.checkbox(
+                                        &mut view.area_rms_field,
+                                        format!("RMS {}", primary_field_label(physics)),
+                                    );
                                     ui.checkbox(&mut view.area_mean_energy, "Mean energy density");
                                     ui.checkbox(&mut view.area_total_energy, "Total energy");
                                 });
                         } else {
-                            ui.checkbox(&mut view.field, "Field");
-                            ui.checkbox(&mut view.velocity, "Velocity");
+                            ui.checkbox(&mut view.field, primary_field_label(physics));
+                            ui.checkbox(&mut view.velocity, primary_field_rate_label(physics));
                             ui.checkbox(&mut view.energy, "Energy");
                         }
                         if ui.small_button("Clear").clicked() {
@@ -4744,6 +4772,7 @@ impl Playground {
                                     &view,
                                     quantity,
                                     length,
+                                    physics,
                                 );
                             }
                             if view.line_plots
@@ -4756,6 +4785,7 @@ impl Playground {
                                     &mut view,
                                     self.probe_history_seconds,
                                     quantity,
+                                    physics,
                                 );
                             }
                             if view.line_plots
@@ -4779,7 +4809,7 @@ impl Playground {
                                     .collect::<Vec<_>>();
                                 Self::probe_plot(
                                     ui,
-                                    &format!("{} ∫ ds", quantity.label()),
+                                    &format!("{} ∫ ds", quantity.label_for(physics)),
                                     &history,
                                     |sample| sample.displacement,
                                     quantity.color(),
@@ -4791,7 +4821,7 @@ impl Playground {
                     } else if !is_area && view.field {
                         Self::probe_plot(
                             ui,
-                            "Field",
+                            primary_field_label(physics),
                             &point_samples,
                             |sample| sample.displacement,
                             Color32::from_rgb(72, 166, 255),
@@ -4802,7 +4832,7 @@ impl Playground {
                     if segment_length.is_none() && !is_area && view.velocity {
                         Self::probe_plot(
                             ui,
-                            "Velocity",
+                            primary_field_rate_label(physics),
                             &point_samples,
                             |sample| sample.velocity,
                             Color32::from_rgb(91, 220, 194),
@@ -4845,7 +4875,7 @@ impl Playground {
                         if view.area_mean_field {
                             Self::probe_plot(
                                 ui,
-                                "Mean field",
+                                &format!("Mean {}", primary_field_label(physics)),
                                 &history(|s| s.mean_displacement),
                                 |s| s.displacement,
                                 SELECT,
@@ -4856,7 +4886,7 @@ impl Playground {
                         if view.area_rms_field {
                             Self::probe_plot(
                                 ui,
-                                "RMS field",
+                                &format!("RMS {}", primary_field_label(physics)),
                                 &history(|s| s.rms_displacement),
                                 |s| s.displacement,
                                 TEAL,
@@ -5358,8 +5388,9 @@ impl Playground {
         view: &ProbeViewState,
         quantity: LineProbeQuantity,
         length: f64,
+        physics: PhysicsModel,
     ) {
-        ui.small(format!("{} vs arclength", quantity.label()));
+        ui.small(format!("{} vs arclength", quantity.label_for(physics)));
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width().max(120.0), 110.0),
             egui::Sense::hover(),
@@ -5469,8 +5500,9 @@ impl Playground {
         view: &mut ProbeViewState,
         maximum_span: f64,
         quantity: LineProbeQuantity,
+        physics: PhysicsModel,
     ) {
-        ui.small(format!("{} waterfall", quantity.label()));
+        ui.small(format!("{} waterfall", quantity.label_for(physics)));
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width().max(120.0), 170.0),
             egui::Sense::drag(),
@@ -5779,7 +5811,13 @@ impl Playground {
             "Accepted reference",
         );
         egui::ComboBox::from_label("Material overlay")
-            .selected_text(self.editor.document.presentation.material_overlay.label())
+            .selected_text(
+                self.editor
+                    .document
+                    .presentation
+                    .material_overlay
+                    .label_for(self.editor.document.model.draft.physics),
+            )
             .show_ui(ui, |ui| {
                 ui.selectable_value(
                     &mut self.editor.document.presentation.material_overlay,
@@ -5796,7 +5834,7 @@ impl Playground {
                     ui.selectable_value(
                         &mut self.editor.document.presentation.material_overlay,
                         MaterialOverlay::Property(property),
-                        property.label(),
+                        property.label_for(self.editor.document.model.draft.physics),
                     );
                 }
             });
@@ -5864,11 +5902,23 @@ impl Playground {
             "Boundary conditions",
         );
         if self.editor.document.presentation.boundary_conditions {
-            for (label, color) in [
-                (
+            let mut entries = match self.editor.document.model.draft.physics {
+                PhysicsModel::Mechanical => vec![(
                     "Reflecting",
                     boundary_condition_color(FaceBoundaryCondition::Reflecting),
-                ),
+                )],
+                PhysicsModel::Electromagnetic { .. } => vec![
+                    (
+                        "Perfect electric wall (PEC)",
+                        boundary_condition_color(FaceBoundaryCondition::ElectricWall),
+                    ),
+                    (
+                        "Perfect magnetic wall (PMC)",
+                        boundary_condition_color(FaceBoundaryCondition::MagneticWall),
+                    ),
+                ],
+            };
+            entries.extend([
                 (
                     "First-order / impedance",
                     boundary_condition_color(FaceBoundaryCondition::Impedance { ratio: 1.0 }),
@@ -5890,7 +5940,8 @@ impl Playground {
                     }),
                 ),
                 ("Thin gap", Color32::from_rgb(215, 123, 244)),
-            ] {
+            ]);
+            for (label, color) in entries {
                 ui.horizontal(|ui| {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(18.0, 8.0), egui::Sense::hover());
@@ -5933,7 +5984,13 @@ impl Playground {
             &mut self.editor.document.presentation.far_field_contour,
             "Far-field contour",
         );
-        ui.checkbox(&mut self.editor.document.presentation.field, "Field colors");
+        ui.checkbox(
+            &mut self.editor.document.presentation.field,
+            format!(
+                "{} colors",
+                primary_field_label(self.editor.document.model.draft.physics)
+            ),
+        );
         ui.add_enabled_ui(self.editor.document.presentation.field, |ui| {
             ui.add(
                 egui::Slider::new(
@@ -5965,6 +6022,58 @@ impl Playground {
                 });
             });
         });
+        let physics = self.editor.document.model.draft.physics;
+        egui::ComboBox::from_label("Vector overlay")
+            .selected_text(
+                self.editor
+                    .document
+                    .presentation
+                    .vector_overlay
+                    .label(physics),
+            )
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.editor.document.presentation.vector_overlay,
+                    VectorOverlay::Off,
+                    "Off",
+                );
+                if matches!(physics, PhysicsModel::Electromagnetic { .. }) {
+                    ui.selectable_value(
+                        &mut self.editor.document.presentation.vector_overlay,
+                        VectorOverlay::ComplementaryFieldRate,
+                        VectorOverlay::ComplementaryFieldRate.label(physics),
+                    );
+                }
+                ui.selectable_value(
+                    &mut self.editor.document.presentation.vector_overlay,
+                    VectorOverlay::RelativeEnergyFlow,
+                    "Relative energy flow",
+                );
+            });
+        ui.add_enabled_ui(
+            self.editor.document.presentation.vector_overlay != VectorOverlay::Off,
+            |ui| {
+                ui.checkbox(
+                    &mut self.editor.document.presentation.vector_overlay_smoothed,
+                    "Temporal smoothing",
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.editor.document.presentation.vector_overlay_density,
+                        28.0..=120.0,
+                    )
+                    .text("arrow spacing"),
+                );
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.editor.document.presentation.vector_overlay_gain,
+                        0.1..=5.0,
+                    )
+                    .logarithmic(true)
+                    .text("arrow gain"),
+                );
+            },
+        );
         ui.add_space(8.0);
         if ui.button("Restore view defaults").clicked() {
             self.editor.document.presentation = PresentationSettings::default();
@@ -6033,7 +6142,15 @@ impl Playground {
             }
         }
         ui.separator();
-        ui.label("Region source");
+        let electromagnetic = matches!(
+            self.editor.document.model.draft.physics,
+            PhysicsModel::Electromagnetic { .. }
+        );
+        ui.label(if electromagnetic {
+            "Region current source"
+        } else {
+            "Region source"
+        });
         let source_region = self.region_selection;
         let existing_source = self
             .editor
@@ -6059,7 +6176,17 @@ impl Playground {
         let mut enabled = existing_source
             .as_ref()
             .is_some_and(|source| source.enabled);
-        if ui.checkbox(&mut enabled, "Volume source").changed() {
+        if ui
+            .checkbox(
+                &mut enabled,
+                if electromagnetic {
+                    "Volume current"
+                } else {
+                    "Volume source"
+                },
+            )
+            .changed()
+        {
             source.enabled = enabled;
             source_changed = true;
         }
@@ -6353,11 +6480,13 @@ impl Playground {
                 self.editor.commit();
                 self.material_name_edit = None;
             }
+            let physics = self.editor.document.model.draft.physics;
+            let coefficient_labels = material_coefficient_labels(physics);
             let mut values_changed = material_scalar_editor(
                 ui,
                 material.id,
                 0,
-                "Density",
+                coefficient_labels[0],
                 &mut material.mass_density,
                 &material.parameters,
                 (
@@ -6369,7 +6498,7 @@ impl Playground {
                 ui,
                 material.id,
                 1,
-                "Stiffness",
+                coefficient_labels[1],
                 &mut material.stiffness,
                 &material.parameters,
                 (
@@ -6381,7 +6510,7 @@ impl Playground {
                 ui,
                 material.id,
                 2,
-                "Damping",
+                coefficient_labels[2],
                 &mut material.damping,
                 &material.parameters,
                 (
@@ -6389,7 +6518,7 @@ impl Playground {
                     &mut self.material_formula_errors[2],
                 ),
             );
-            ui.small("Nondimensional coefficients");
+            ui.small("Nondimensional material properties");
             if values_changed && material.valid() {
                 let result = self.editor.update_material(material.clone());
                 self.error(result);
@@ -6506,10 +6635,21 @@ impl Playground {
                 .find(|region| region.material == material.id)
                 .map_or(MaterialFrame::world(), |region| region.frame);
             if let Ok(values) = material.evaluate(frame, frame.origin) {
+                let properties = WaveCoefficients {
+                    mass_density: values.mass_density,
+                    stiffness: values.stiffness,
+                    damping: values.damping,
+                };
                 ui.small(format!(
                     "wave speed at frame origin {:.3}",
-                    (values.stiffness / values.mass_density).sqrt()
+                    physics.wave_speed(properties)
                 ));
+                if matches!(physics, PhysicsModel::Electromagnetic { .. }) {
+                    ui.small(format!(
+                        "wave impedance at frame origin {:.3}",
+                        physics.impedance(properties)
+                    ));
+                }
             }
             if self.material_selection != DEFAULT_MATERIAL {
                 let material_in_use = self
@@ -7112,6 +7252,51 @@ impl Playground {
         ui.add_space(6.0);
         self.panel_header(ui, "Simulation");
         ui.add_space(8.0);
+        ui.label("Physics");
+        let current_physics = self.editor.document.model.draft.physics;
+        let mut selected_physics = current_physics;
+        egui::ComboBox::from_id_salt("physics_model")
+            .width(ui.available_width())
+            .selected_text(physics_label(current_physics))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut selected_physics,
+                    PhysicsModel::Mechanical,
+                    "Mechanical scalar",
+                );
+                ui.selectable_value(
+                    &mut selected_physics,
+                    PhysicsModel::Electromagnetic {
+                        polarization: ElectromagneticPolarization::Tm,
+                    },
+                    "Electromagnetic · TM (E out of plane)",
+                );
+                ui.selectable_value(
+                    &mut selected_physics,
+                    PhysicsModel::Electromagnetic {
+                        polarization: ElectromagneticPolarization::Te,
+                    },
+                    "Electromagnetic · TE (H out of plane)",
+                );
+            });
+        if selected_physics != current_physics {
+            self.editor.set_physics(selected_physics);
+            if selected_physics == PhysicsModel::Mechanical
+                && self.editor.document.presentation.vector_overlay
+                    == VectorOverlay::ComplementaryFieldRate
+            {
+                self.editor.document.presentation.vector_overlay = VectorOverlay::Off;
+            }
+            self.message = format!(
+                "{} selected; the mesh will be reused and the field restarted",
+                physics_label(selected_physics)
+            );
+        }
+        ui.small(format!(
+            "Primary field: {}",
+            primary_field_label(selected_physics)
+        ));
+        ui.add_space(8.0);
         ui.separator();
         ui.label("Mesh resolution");
         let resolution_name = |edge: f64| {
@@ -7247,7 +7432,17 @@ impl Playground {
                     .text("simulation speed"),
             );
             let source_before = self.wave_source;
-            let enabled_response = ui.checkbox(&mut self.wave_source.enabled, "Point source");
+            let enabled_response = ui.checkbox(
+                &mut self.wave_source.enabled,
+                if matches!(
+                    self.editor.document.model.draft.physics,
+                    PhysicsModel::Electromagnetic { .. }
+                ) {
+                    "Point current"
+                } else {
+                    "Point source"
+                },
+            );
             let source_responses = ui.add_enabled_ui(self.wave_source.enabled, |ui| {
                 let mut responses = Vec::new();
                 let mut position = self.wave_source.position;
@@ -8298,7 +8493,9 @@ impl Playground {
             .first()
             .copied()
             .filter(|first| conditions.iter().all(|condition| condition == first));
-        if let Some(condition) = Self::bulk_face_condition_editor(ui, common) {
+        if let Some(condition) =
+            Self::bulk_face_condition_editor(ui, common, self.editor.document.model.draft.physics)
+        {
             let result = self
                 .editor
                 .set_boundary_face_conditions(&targets, condition);
@@ -8309,6 +8506,7 @@ impl Playground {
     fn bulk_face_condition_editor(
         ui: &mut egui::Ui,
         common: Option<FaceBoundaryCondition>,
+        physics: PhysicsModel,
     ) -> Option<FaceBoundaryCondition> {
         let ratio = match common {
             Some(FaceBoundaryCondition::Impedance { ratio }) => ratio,
@@ -8321,13 +8519,31 @@ impl Playground {
         ui.label("Condition");
         egui::ComboBox::from_id_salt("selected_boundary_condition")
             .width(ui.available_width())
-            .selected_text(common.map_or("Mixed", FaceBoundaryCondition::label))
+            .selected_text(common.map_or("Mixed", |condition| {
+                face_condition_label(condition, physics)
+            }))
             .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut selected,
-                    Some(FaceBoundaryCondition::Reflecting),
-                    "Neumann · zero / reflecting",
-                );
+                match physics {
+                    PhysicsModel::Mechanical => {
+                        ui.selectable_value(
+                            &mut selected,
+                            Some(FaceBoundaryCondition::Reflecting),
+                            "Neumann · zero / reflecting",
+                        );
+                    }
+                    PhysicsModel::Electromagnetic { .. } => {
+                        ui.selectable_value(
+                            &mut selected,
+                            Some(FaceBoundaryCondition::ElectricWall),
+                            "Perfect electric wall (PEC)",
+                        );
+                        ui.selectable_value(
+                            &mut selected,
+                            Some(FaceBoundaryCondition::MagneticWall),
+                            "Perfect magnetic wall (PMC)",
+                        );
+                    }
+                }
                 ui.selectable_value(
                     &mut selected,
                     Some(FaceBoundaryCondition::Impedance { ratio }),
@@ -8584,7 +8800,7 @@ impl Playground {
             egui::Align2::LEFT_TOP,
             format!(
                 "{} · {}",
-                property.label(),
+                property.label_for(self.editor.document.model.draft.physics),
                 if self
                     .editor
                     .document
@@ -9699,6 +9915,29 @@ impl Playground {
                 }
             }
             painter.add(egui::Shape::mesh(field));
+        }
+        let vector_mode = self.editor.document.presentation.vector_overlay;
+        if vector_mode != VectorOverlay::Off
+            && self.simulation_candidate.is_none()
+            && let (Some(display), Some(mesh), Some(operator)) = (
+                wave_display,
+                self.wave_mesh.as_ref(),
+                self.wave_operator.as_ref(),
+            )
+        {
+            let samples = vector_overlay_samples(
+                &self.mesh_committed_scene,
+                mesh,
+                operator,
+                display,
+                vector_mode,
+                self.editor.document.presentation.vector_overlay_density,
+                (self.center, self.scale, r),
+            );
+            self.draw_vector_overlay(&painter, samples, display.completed_steps);
+        } else if vector_mode == VectorOverlay::Off {
+            self.vector_overlay_average.clear();
+            self.vector_overlay_step = u64::MAX;
         }
         if self.editor.document.presentation.adaptation_target
             && let (Some(mesh), Some(result)) = (&self.mesh, &self.solution_indicator_result)
@@ -10998,6 +11237,64 @@ impl Playground {
             })
     }
 
+    fn draw_vector_overlay(
+        &mut self,
+        painter: &egui::Painter,
+        mut samples: Vec<((i32, i32), Pos2, Point2)>,
+        completed_steps: u64,
+    ) {
+        let settings = self.editor.document.presentation;
+        if settings.vector_overlay_smoothed {
+            if self.vector_overlay_step != completed_steps {
+                let mut next = BTreeMap::new();
+                for (key, _, value) in &samples {
+                    let filtered = self
+                        .vector_overlay_average
+                        .get(key)
+                        .map_or(*value, |previous| *previous * 0.82 + *value * 0.18);
+                    next.insert(*key, filtered);
+                }
+                self.vector_overlay_average = next;
+                self.vector_overlay_step = completed_steps;
+            }
+            for (key, _, value) in &mut samples {
+                if let Some(filtered) = self.vector_overlay_average.get(key) {
+                    *value = *filtered;
+                }
+            }
+        } else {
+            self.vector_overlay_average.clear();
+            self.vector_overlay_step = completed_steps;
+        }
+        let mut magnitudes = samples
+            .iter()
+            .map(|(_, _, value)| value.norm())
+            .filter(|magnitude| magnitude.is_finite() && *magnitude > 0.0)
+            .collect::<Vec<_>>();
+        if magnitudes.is_empty() {
+            return;
+        }
+        magnitudes.sort_by(f64::total_cmp);
+        let reference = magnitudes[(magnitudes.len() - 1) * 9 / 10].max(1.0e-12);
+        let maximum_length = settings.vector_overlay_density * 0.46;
+        let scale = maximum_length as f64 * settings.vector_overlay_gain as f64 / reference;
+        for (_, origin, value) in samples {
+            let magnitude = value.norm();
+            if magnitude < reference * 0.015 || !magnitude.is_finite() {
+                continue;
+            }
+            let length = (magnitude * scale).min(maximum_length as f64) as f32;
+            let direction = egui::vec2(value.x as f32, -value.y as f32).normalized();
+            let tip = origin + direction * length;
+            let normal = egui::vec2(-direction.y, direction.x);
+            let head = 5.0_f32.min(length * 0.35);
+            let stroke = Stroke::new(1.45, Color32::from_rgba_unmultiplied(116, 232, 210, 220));
+            painter.line_segment([origin, tip], stroke);
+            painter.line_segment([tip, tip - direction * head + normal * head * 0.55], stroke);
+            painter.line_segment([tip, tip - direction * head - normal * head * 0.55], stroke);
+        }
+    }
+
     fn draw_curve(
         &self,
         painter: &egui::Painter,
@@ -11296,11 +11593,172 @@ fn format_value(value: f64) -> String {
     }
 }
 
+const fn physics_label(physics: PhysicsModel) -> &'static str {
+    match physics {
+        PhysicsModel::Mechanical => "Mechanical scalar",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        } => "Electromagnetic · TM",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => "Electromagnetic · TE",
+    }
+}
+
+const fn primary_field_label(physics: PhysicsModel) -> &'static str {
+    match physics {
+        PhysicsModel::Mechanical => "displacement u",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        } => "electric field E_z",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => "magnetic field H_z",
+    }
+}
+
+const fn primary_field_rate_label(physics: PhysicsModel) -> &'static str {
+    match physics {
+        PhysicsModel::Mechanical => "Velocity ∂u/∂t",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        } => "Electric-field rate ∂E_z/∂t",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => "Magnetic-field rate ∂H_z/∂t",
+    }
+}
+
+fn material_coefficient_labels(physics: PhysicsModel) -> [&'static str; 3] {
+    match physics {
+        PhysicsModel::Mechanical => ["Density", "Stiffness", "Damping"],
+        PhysicsModel::Electromagnetic { .. } => ["Permittivity ε", "Permeability μ", "Loss rate α"],
+    }
+}
+
+fn vector_overlay_samples(
+    scene: &Scene,
+    mesh: &TriMesh,
+    operator: &QuadraticWaveOperator,
+    display: &WaveDisplay,
+    mode: VectorOverlay,
+    spacing: f32,
+    view: (Point2, f64, Rect),
+) -> Vec<((i32, i32), Pos2, Point2)> {
+    let (view_center, view_scale, viewport) = view;
+    if mesh.triangles.len() != operator.element_nodes().len()
+        || display.indicator_displacement.len() != operator.degrees_of_freedom()
+        || display.indicator_velocity.len() != operator.degrees_of_freedom()
+        || spacing <= 0.0
+    {
+        return vec![];
+    }
+    let mut bins = BTreeMap::<(i32, i32), (usize, Pos2, Point2, f32)>::new();
+    for (element, triangle) in mesh.triangles.iter().enumerate() {
+        let points = triangle.vertices.map(|index| mesh.vertices[index].point);
+        let centroid = (points[0] + points[1] + points[2]) / 3.0;
+        let screen = Pos2::new(
+            viewport.center().x
+                + ((centroid.x - view_center.x) * view_scale).clamp(-1.0e7, 1.0e7) as f32,
+            viewport.center().y
+                - ((centroid.y - view_center.y) * view_scale).clamp(-1.0e7, 1.0e7) as f32,
+        );
+        if !viewport.contains(screen) {
+            continue;
+        }
+        let key = (
+            ((screen.x - viewport.left()) / spacing).floor() as i32,
+            ((screen.y - viewport.top()) / spacing).floor() as i32,
+        );
+        let cell_center = egui::pos2(
+            viewport.left() + (key.0 as f32 + 0.5) * spacing,
+            viewport.top() + (key.1 as f32 + 0.5) * spacing,
+        );
+        let distance = screen.distance_sq(cell_center);
+        match bins.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((element, screen, centroid, distance));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) if distance < entry.get().3 => {
+                entry.insert((element, screen, centroid, distance));
+            }
+            _ => {}
+        }
+    }
+    bins.into_iter()
+        .filter_map(|(key, (element, screen, centroid, _))| {
+            let triangle = &mesh.triangles[element];
+            let (_, gradient) = operator.element_value_and_gradient(
+                element,
+                &display.indicator_displacement,
+                [1.0 / 3.0; 3],
+            )?;
+            let (velocity, _) = operator.element_value_and_gradient(
+                element,
+                &display.indicator_velocity,
+                [1.0 / 3.0; 3],
+            )?;
+            let region = scene.region(triangle.region)?;
+            let material = scene.material(region.material)?;
+            let Ok(raw) = material.evaluate(region.frame, centroid) else {
+                return None;
+            };
+            let properties = WaveCoefficients {
+                mass_density: raw.mass_density,
+                stiffness: raw.stiffness,
+                damping: raw.damping,
+            };
+            let vector = match (mode, scene.physics) {
+                (
+                    VectorOverlay::ComplementaryFieldRate,
+                    PhysicsModel::Electromagnetic {
+                        polarization: ElectromagneticPolarization::Tm,
+                    },
+                ) => Point2::new(-gradient.y, gradient.x) / raw.stiffness,
+                (
+                    VectorOverlay::ComplementaryFieldRate,
+                    PhysicsModel::Electromagnetic {
+                        polarization: ElectromagneticPolarization::Te,
+                    },
+                ) => Point2::new(gradient.y, -gradient.x) / raw.mass_density,
+                (VectorOverlay::RelativeEnergyFlow, _) => {
+                    gradient * (-scene.physics.wave_coefficients(properties).stiffness * velocity)
+                }
+                _ => return None,
+            };
+            if !vector.finite() {
+                return None;
+            }
+            Some((key, screen, vector))
+        })
+        .collect()
+}
+
+fn face_condition_label(condition: FaceBoundaryCondition, physics: PhysicsModel) -> &'static str {
+    match (condition, physics) {
+        (
+            FaceBoundaryCondition::Reflecting,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+        ) => "Perfect magnetic wall (PMC)",
+        (
+            FaceBoundaryCondition::Reflecting,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            },
+        ) => "Perfect electric wall (PEC)",
+        _ => condition.label(),
+    }
+}
+
 fn boundary_condition_color(condition: FaceBoundaryCondition) -> Color32 {
     match condition {
         FaceBoundaryCondition::Reflecting => Color32::from_rgb(142, 161, 175),
         FaceBoundaryCondition::Impedance { .. } => Color32::from_rgb(63, 144, 239),
         FaceBoundaryCondition::SecondOrderOutgoing => Color32::from_rgb(155, 126, 222),
+        FaceBoundaryCondition::ElectricWall => Color32::from_rgb(244, 105, 122),
+        FaceBoundaryCondition::MagneticWall => Color32::from_rgb(78, 201, 176),
         FaceBoundaryCondition::Neumann { .. } => GOLD,
         FaceBoundaryCondition::Dirichlet { .. } => RED,
     }
@@ -11327,6 +11785,8 @@ fn outer_boundary_condition_color(condition: OuterBoundaryCondition) -> Color32 
         OuterBoundaryCondition::Reflecting => Color32::from_rgb(142, 161, 175),
         OuterBoundaryCondition::FirstOrderOutgoing => Color32::from_rgb(63, 144, 239),
         OuterBoundaryCondition::SecondOrderOutgoing => Color32::from_rgb(155, 126, 222),
+        OuterBoundaryCondition::ElectricWall => Color32::from_rgb(244, 105, 122),
+        OuterBoundaryCondition::MagneticWall => Color32::from_rgb(78, 201, 176),
         OuterBoundaryCondition::Neumann { .. } => GOLD,
         OuterBoundaryCondition::Dirichlet { .. } => RED,
     }
@@ -11591,6 +12051,7 @@ pub fn wave_gpu_check_scene() -> Playground {
         ..Default::default()
     };
     let scene = Scene {
+        physics: PhysicsModel::Mechanical,
         obstacles: vec![Obstacle::with_role(
             ObstacleId(1),
             PeriodicCubicSpline::rounded(Point2::default(), 0.30),
@@ -15196,7 +15657,7 @@ mod tests {
         let label = h
             .texts
             .iter()
-            .find(|(text, _)| text == "Field waterfall")
+            .find(|(text, _)| text == "displacement u waterfall")
             .unwrap_or_else(|| panic!("texts: {:?}", h.texts))
             .1;
         let start = egui::pos2(label.left() + 180.0, label.bottom() + 80.0);
@@ -15331,7 +15792,7 @@ mod tests {
             egui::pos2(column.left() + 8.0, row.center().y)
         };
 
-        let field_integral = checkbox_position(&h.texts, "Field", "∫ vs t");
+        let field_integral = checkbox_position(&h.texts, "displacement u", "∫ vs t");
         h.click(field_integral);
         assert_eq!(
             h.state.probe_views[&id]
@@ -15816,7 +16277,7 @@ mod tests {
         let field_label = h
             .texts
             .iter()
-            .filter(|(text, _)| text == "Field")
+            .filter(|(text, _)| text == "displacement u")
             .max_by(|(_, left), (_, right)| left.top().total_cmp(&right.top()))
             .unwrap_or_else(|| panic!("texts: {:?}", h.texts))
             .1;
@@ -16579,6 +17040,93 @@ mod tests {
         assert!(candidate.transfer.is_some());
         let new_mass: f64 = candidate.operator.lumped_mass().iter().sum();
         assert!((new_mass - 2.0 * old_mass).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn physics_change_reuses_mesh_and_prepares_a_fresh_field() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let mesh = h.state.mesh.clone().expect("initial accepted mesh");
+
+        h.state.editor.set_physics(PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        });
+        h.settle();
+        h.state.refresh_mesh();
+
+        let candidate = h
+            .state
+            .simulation_candidate
+            .as_ref()
+            .expect("physics candidate");
+        assert!(Arc::ptr_eq(&candidate.mesh, &mesh));
+        assert!(h.state.mesh_job.is_none());
+        assert!(candidate.fresh);
+        assert!(candidate.transfer.is_none());
+        assert_eq!(
+            candidate.scene.physics,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            }
+        );
+    }
+
+    #[test]
+    fn vector_overlay_derives_tm_field_rate_and_relative_flow_from_p2_data() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let mesh = h.state.wave_mesh.as_ref().unwrap();
+        let operator = h.state.wave_operator.as_ref().unwrap();
+        let mut scene = h.state.mesh_committed_scene.clone();
+        scene.physics = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let display = WaveDisplay {
+            current: operator
+                .node_points()
+                .iter()
+                .map(|point| point.x as f32)
+                .collect(),
+            indicator_displacement: operator
+                .node_points()
+                .iter()
+                .map(|point| point.x as f32)
+                .collect(),
+            indicator_velocity: vec![2.0; operator.degrees_of_freedom()],
+            ..Default::default()
+        };
+        let field_rate = vector_overlay_samples(
+            &scene,
+            mesh,
+            operator,
+            &display,
+            VectorOverlay::ComplementaryFieldRate,
+            54.0,
+            (Point2::default(), 280.0, h.rect),
+        );
+        assert!(!field_rate.is_empty());
+        assert!(
+            field_rate.iter().all(|(_, _, vector)| {
+                vector.x.abs() < 1.0e-5 && (vector.y - 1.0).abs() < 1.0e-5
+            })
+        );
+        let flow = vector_overlay_samples(
+            &scene,
+            mesh,
+            operator,
+            &display,
+            VectorOverlay::RelativeEnergyFlow,
+            54.0,
+            (Point2::default(), 280.0, h.rect),
+        );
+        assert!(!flow.is_empty());
+        assert!(
+            flow.iter().all(|(_, _, vector)| {
+                (vector.x + 2.0).abs() < 1.0e-5 && vector.y.abs() < 1.0e-5
+            })
+        );
     }
 
     #[test]

@@ -858,6 +858,7 @@ mod tests {
         let mut target = source.clone();
         target.geometry_revision = 8;
         let scene = Scene {
+            physics: crate::PhysicsModel::Mechanical,
             obstacles: vec![Obstacle::with_role(
                 ObstacleId(1),
                 PeriodicCubicSpline::rounded(Point2::new(0.2, 0.2), 0.1),

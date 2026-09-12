@@ -274,6 +274,8 @@ pub enum FaceBoundaryCondition {
     },
     /// Second-order local outgoing condition with a tangential auxiliary field.
     SecondOrderOutgoing,
+    ElectricWall,
+    MagneticWall,
     /// Prescribed outward flux `stiffness * partial_n u = value(t)`.
     Neumann {
         signal: TimeSignal,
@@ -290,6 +292,8 @@ impl FaceBoundaryCondition {
             Self::Reflecting => "Reflecting",
             Self::Impedance { .. } => "First-order outgoing",
             Self::SecondOrderOutgoing => "Second-order outgoing",
+            Self::ElectricWall => "Electric wall",
+            Self::MagneticWall => "Magnetic wall",
             Self::Neumann { .. } => "Prescribed Neumann",
             Self::Dirichlet { .. } => "Prescribed Dirichlet",
         }
@@ -304,9 +308,34 @@ impl FaceBoundaryCondition {
 
     pub fn valid(self) -> bool {
         match self {
-            Self::Reflecting | Self::SecondOrderOutgoing => true,
+            Self::Reflecting
+            | Self::SecondOrderOutgoing
+            | Self::ElectricWall
+            | Self::MagneticWall => true,
             Self::Impedance { ratio } => ratio.is_finite() && ratio > 0.0,
             Self::Neumann { signal } | Self::Dirichlet { signal } => signal.valid(),
+        }
+    }
+
+    pub fn resolved(self, physics: crate::PhysicsModel) -> Self {
+        match (self, physics) {
+            (
+                Self::ElectricWall,
+                crate::PhysicsModel::Electromagnetic {
+                    polarization: crate::ElectromagneticPolarization::Tm,
+                },
+            )
+            | (
+                Self::MagneticWall,
+                crate::PhysicsModel::Electromagnetic {
+                    polarization: crate::ElectromagneticPolarization::Te,
+                },
+            )
+            | (Self::ElectricWall, crate::PhysicsModel::Mechanical) => Self::Dirichlet {
+                signal: TimeSignal::ZERO,
+            },
+            (Self::ElectricWall | Self::MagneticWall, _) => Self::Reflecting,
+            _ => self,
         }
     }
 }
@@ -394,6 +423,7 @@ impl Obstacle {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Scene {
+    pub physics: crate::PhysicsModel,
     pub obstacles: Vec<Obstacle>,
     pub internal_boundaries: Vec<InternalBoundary>,
     pub materials: Vec<Material>,
@@ -405,6 +435,7 @@ pub struct Scene {
 impl Default for Scene {
     fn default() -> Self {
         Self {
+            physics: crate::PhysicsModel::Mechanical,
             obstacles: vec![],
             internal_boundaries: vec![],
             materials: vec![Material::default_medium()],
@@ -503,8 +534,8 @@ impl Scene {
                 crate::OuterBoundaryCondition::Dirichlet { signal: first },
                 crate::OuterBoundaryCondition::Dirichlet { signal: second },
             ) = (
-                self.outer_boundaries.sides[first],
-                self.outer_boundaries.sides[second],
+                self.outer_boundaries.sides[first].resolved(self.physics),
+                self.outer_boundaries.sides[second].resolved(self.physics),
             ) && first != second
             {
                 return false;
@@ -556,9 +587,23 @@ impl Scene {
         point: Point2,
     ) -> Result<EvaluatedMaterial, MaterialError> {
         let region = self.region(region).ok_or(MaterialError::InvalidValue)?;
-        self.material(region.material)
+        let properties = self
+            .material(region.material)
             .ok_or(MaterialError::InvalidValue)?
-            .evaluate(region.frame, point)
+            .evaluate(region.frame, point)?;
+        let values = self.physics.wave_coefficients(crate::WaveCoefficients {
+            mass_density: properties.mass_density,
+            stiffness: properties.stiffness,
+            damping: properties.damping,
+        });
+        values
+            .valid()
+            .then_some(crate::EvaluatedMaterial {
+                mass_density: values.mass_density,
+                stiffness: values.stiffness,
+                damping: values.damping,
+            })
+            .ok_or(MaterialError::InvalidValue)
     }
 
     pub fn has_varying_materials(&self) -> bool {
@@ -571,7 +616,8 @@ impl Scene {
     /// Equality of everything that contributes to the mesh or wave operator.
     /// Volume sources are compiled into independent forcing buffers.
     pub fn operator_eq(&self, other: &Self) -> bool {
-        self.obstacles == other.obstacles
+        self.physics == other.physics
+            && self.obstacles == other.obstacles
             && self.internal_boundaries == other.internal_boundaries
             && self.materials == other.materials
             && self.regions.len() == other.regions.len()

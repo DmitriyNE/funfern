@@ -548,7 +548,12 @@ impl SolutionIndicatorJob {
                 if region != crate::BACKGROUND_REGION {
                     return Err(SolutionIndicatorError::InvalidMesh);
                 }
-                let condition = match self.scene.outer_boundaries.get(side) {
+                let condition = match self
+                    .scene
+                    .outer_boundaries
+                    .get(side)
+                    .resolved(self.scene.physics)
+                {
                     OuterBoundaryCondition::Reflecting => FaceBoundaryCondition::Reflecting,
                     OuterBoundaryCondition::FirstOrderOutgoing => {
                         FaceBoundaryCondition::Impedance { ratio: 1.0 }
@@ -561,6 +566,9 @@ impl SolutionIndicatorJob {
                     }
                     OuterBoundaryCondition::Dirichlet { signal } => {
                         FaceBoundaryCondition::Dirichlet { signal }
+                    }
+                    OuterBoundaryCondition::ElectricWall | OuterBoundaryCondition::MagneticWall => {
+                        unreachable!()
                     }
                 };
                 (condition, None)
@@ -582,7 +590,10 @@ impl SolutionIndicatorJob {
                     .spline
                     .span_index(0.5 * (edge.parameters[0] + edge.parameters[1]))
                     .ok_or(SolutionIndicatorError::InvalidMesh)?;
-                (obstacle.span_conditions[span], None)
+                (
+                    obstacle.span_conditions[span].resolved(self.scene.physics),
+                    None,
+                )
             }
             BoundaryLabel::Wall { loop_id, side } => {
                 let obstacle = self
@@ -639,7 +650,7 @@ impl SolutionIndicatorJob {
                         Some((BoundaryPairKey { id, start, end }, slot, spring))
                     }
                 };
-                (condition, pair)
+                (condition.resolved(self.scene.physics), pair)
             }
             BoundaryLabel::MaterialInterface(_) => unreachable!(),
         };
@@ -975,6 +986,9 @@ impl SolutionIndicatorJob {
                     flux + impedance * velocity - auxiliary_scale * auxiliary_second
                 }
                 FaceBoundaryCondition::Dirichlet { .. } => unreachable!(),
+                FaceBoundaryCondition::ElectricWall | FaceBoundaryCondition::MagneticWall => {
+                    unreachable!()
+                }
             };
             if let Some((partner, spring)) = paired_nodes {
                 residual += spring
