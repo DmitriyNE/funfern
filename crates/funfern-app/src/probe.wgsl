@@ -21,7 +21,7 @@ struct ProbeStencil {
 }
 
 struct ProbeControl {
-    // Sample stride, ring frames, active slots, physical time offset.
+    // Sample stride, ring frames, active slots, unused.
     values: vec4<f32>,
 }
 
@@ -89,6 +89,8 @@ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
     let completed = u32(parameters.time_data.w);
     let frame = (completed / stride) % frames;
     let index = frame * 16u + probe;
-    let time = control.values.w + parameters.time_data.z - parameters.time_data.x;
+    // The transferred solver clock is already continuous across buffer generations.
+    // Auxiliary displacement and velocity describe the preceding centered level.
+    let time = parameters.time_data.z - parameters.time_data.x;
     output[index].values = vec4<f32>(displacement, velocity, energy, time);
 }

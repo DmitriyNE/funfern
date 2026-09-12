@@ -42,7 +42,8 @@ fn main() {
     }
     #[cfg(not(target_arch = "wasm32"))]
     if std::env::args().any(|arg| arg == "--wave-transfer-check") {
-        app.init_resource::<ui::WaveTransferBenchmark>()
+        app.insert_resource(ui::wave_transfer_check_scene())
+            .init_resource::<ui::WaveTransferBenchmark>()
             .add_systems(
                 EguiPrimaryContextPass,
                 ui::wave_transfer_benchmark.after(ui::frame),

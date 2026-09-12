@@ -224,13 +224,11 @@ impl WaveGpuRequest {
         commands: &mut Commands,
         probes: &[(u64, Option<QuadraticPointStencil>)],
         sample_rate: f64,
-        time_offset: f64,
         time_step: f64,
     ) -> Result<(), String> {
         if probes.len() > MAX_POINT_PROBES
             || !sample_rate.is_finite()
             || !(30.0..=480.0).contains(&sample_rate)
-            || !time_offset.is_finite()
             || !time_step.is_finite()
             || time_step <= 0.0
         {
@@ -250,7 +248,7 @@ impl WaveGpuRequest {
                 sample_stride as f32,
                 PROBE_RING_FRAMES as f32,
                 probes.len() as f32,
-                time_offset as f32,
+                0.0,
             ),
         };
         let output = vec![
@@ -1930,5 +1928,12 @@ mod tests {
             sample_steps(&[100], 7),
             (7..=98).step_by(7).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn probe_shader_uses_the_continuous_transferred_solver_clock() {
+        let shader = include_str!("probe.wgsl");
+        assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
+        assert!(!shader.contains("control.values.w + parameters.time_data.z"));
     }
 }

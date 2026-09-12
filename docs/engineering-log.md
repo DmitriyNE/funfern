@@ -50,7 +50,14 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Added a separate portable GPU probe pipeline and bounded ring. Sampling cadence
   follows solver steps rather than rendered frames, stale generations are rejected,
   and ordinary remesh/AMR handoffs retain host history while recompiling stencils.
-- All 203 workspace tests and Clippy with warnings denied pass. The release Metal
+- Fixed a handoff timestamp error where the probe recorder added the host handoff
+  offset to an already continuous transferred GPU clock. Depending on elapsed time,
+  this appeared as a gap after geometry remeshing or aged out the complete trace
+  after AMR. Both paths now append to the same continuous solver-time history.
+- Extended the native transfer and AMR checks to run with a live point recorder.
+  The two-handoff AMR check retained 147 samples with a largest rebind interval of
+  0.0273 simulation seconds and no clock discontinuity or history loss.
+- All 206 workspace tests and Clippy with warnings denied pass. The release Metal
   GPU check on an Apple M1 Max exercised 9,690 DOFs at `dt=0.0030078`, produced
   finite nonnegative probe energy, matched the f64 field within `1.30e-6` relative
   L2 error, and advanced at 18.9 simulated seconds per wall second. Native release

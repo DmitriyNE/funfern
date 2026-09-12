@@ -61,7 +61,9 @@ while each receiver has one independent closeable readout window. The target mod
 and readout dispatch are intended to extend to curve, region, selected-geometry, and
 far-field receivers without adding another inspector. Point readouts share one
 pan/zoom time window across their independently hideable field, velocity, and energy
-sections; Live mode follows the newest solver-clock sample.
+sections; Live mode follows the newest solver-clock sample. Probe timestamps come
+directly from the solver's transferred absolute clock. The host handoff offset is
+only used to report progress since the generation-local step counter restarts.
 
 Control handles are exclusive selections. Boundary spans support click, Shift
 toggle, Command/Ctrl whole-curve selection, and marquee selection with optional

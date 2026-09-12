@@ -767,7 +767,6 @@ impl Playground {
             commands,
             &compiled,
             self.probe_sample_rate,
-            self.wave_time_offset,
             self.wave_time_step,
         ) {
             Ok(()) => {
@@ -7356,12 +7355,31 @@ pub fn wave_gpu_check_scene() -> Playground {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn amr_check_scene() -> Playground {
-    Playground {
+    let mut state = Playground {
         automated_benchmark: true,
         mesh_max_edge: 0.16,
         wave_running: false,
         ..Default::default()
-    }
+    };
+    state
+        .editor
+        .create_point_probe(Point2::new(-0.25, 0.25))
+        .unwrap();
+    state
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn wave_transfer_check_scene() -> Playground {
+    let mut state = Playground {
+        automated_benchmark: true,
+        wave_running: false,
+        ..Default::default()
+    };
+    state
+        .editor
+        .create_point_probe(Point2::new(-0.55, 0.35))
+        .unwrap();
+    state
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -7375,6 +7393,7 @@ pub struct AmrBenchmark {
     first_triangles: usize,
     handoff_exposed_nodes: Option<usize>,
     simulation_time: f64,
+    probe_time_before: Option<f64>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -7389,6 +7408,7 @@ impl Default for AmrBenchmark {
             first_triangles: 0,
             handoff_exposed_nodes: None,
             simulation_time: 0.0,
+            probe_time_before: None,
         }
     }
 }
@@ -7459,6 +7479,10 @@ pub fn amr_benchmark(
                 || state.simulation_candidate.is_some()
                 || state.mesh_adaptation_job.is_some()
                 || state.solution_indicator_report.is_none()
+                || state
+                    .probe_compiled
+                    .as_ref()
+                    .is_none_or(|compiled| compiled.generation != request.generation())
             {
                 return;
             }
@@ -7506,6 +7530,16 @@ pub fn amr_benchmark(
             if !energy_estimated {
                 return;
             }
+            let Some(probe_time) = state
+                .probe_traces
+                .values()
+                .next()
+                .and_then(|trace| trace.samples.back())
+                .map(|sample| sample.time)
+            else {
+                return;
+            };
+            benchmark.probe_time_before = Some(probe_time);
             // A nonzero solution estimate has reached the automatic controller.
             // Let any transaction it opened finish, then use deterministic target
             // fields for the remaining topology invariants.
@@ -7576,6 +7610,42 @@ pub fn amr_benchmark(
             };
             let simulation_time = state.wave_time_offset
                 + request.stats().completed_steps() as f64 * state.wave_time_step;
+            let probe_times = state
+                .probe_traces
+                .values()
+                .next()
+                .map(|trace| {
+                    trace
+                        .samples
+                        .iter()
+                        .map(|sample| sample.time)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let largest_probe_gap = probe_times
+                .windows(2)
+                .map(|pair| pair[1] - pair[0])
+                .fold(0.0_f64, f64::max);
+            // Rebinding can miss several cadence slots while the new render-world
+            // bind group becomes visible. The retired double-offset path jumped
+            // by the complete elapsed simulation time instead.
+            let maximum_expected_probe_gap =
+                (8.0 / state.probe_sample_rate).max(4.0 * state.wave_time_step);
+            let probe_ready = state
+                .probe_compiled
+                .as_ref()
+                .is_some_and(|compiled| compiled.generation == request.generation())
+                && benchmark
+                    .probe_time_before
+                    .is_some_and(|before| probe_times.last().is_some_and(|time| *time > before));
+            if !probe_ready {
+                return;
+            }
+            let probe_continuous = benchmark.probe_time_before.is_some_and(|before| {
+                probe_times.contains(&before)
+                    && probe_times.last().is_some_and(|time| *time > before)
+                    && largest_probe_gap <= maximum_expected_probe_gap
+            });
             let valid = mesh.mesh_revision != benchmark.first_mesh_revision
                 && mesh.mesh_revision == operator.mesh_revision()
                 && mesh.mesh_revision == adaptation_state.mesh_revision
@@ -7591,6 +7661,7 @@ pub fn amr_benchmark(
                 && display.indicator_acceleration.len() == operator.degrees_of_freedom()
                 && display.current.iter().any(|value| value.abs() > 1.0e-7)
                 && simulation_time >= benchmark.simulation_time
+                && probe_continuous
                 && state.wave_running
                 && state.wave_error.is_none()
                 && state.mesh_error.is_none();
@@ -7623,6 +7694,10 @@ pub fn amr_benchmark(
                     .map_or(0.0, |report| report.maximum_dirichlet_mismatch),
                 dofs = operator.degrees_of_freedom(),
                 solver_dt = state.wave_time_step,
+                probe_samples = probe_times.len(),
+                largest_probe_gap,
+                maximum_expected_probe_gap,
+                probe_continuous,
                 elapsed_ms = benchmark.started.elapsed().as_secs_f64() * 1000.0,
                 "AMR check complete"
             );
@@ -7912,6 +7987,7 @@ pub struct WaveTransferBenchmark {
     transfer_started: Option<Instant>,
     boundary_started: Option<Instant>,
     material_started: Option<Instant>,
+    probe_time_before: f64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -7930,6 +8006,7 @@ impl Default for WaveTransferBenchmark {
             transfer_started: None,
             boundary_started: None,
             material_started: None,
+            probe_time_before: 0.0,
         }
     }
 }
@@ -7942,6 +8019,7 @@ pub fn wave_transfer_benchmark(
     mut state: ResMut<Playground>,
     mut request: ResMut<WaveGpuRequest>,
     display: Res<WaveDisplay>,
+    probe_display: Res<ProbeDisplay>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut exit: MessageWriter<bevy::app::AppExit>,
 ) {
@@ -7986,7 +8064,13 @@ pub fn wave_transfer_benchmark(
             if state.wave_boundary_committed != target || state.simulation_candidate.is_some() {
                 return;
             }
-            if !request.ready() || state.wave_operator.is_none() {
+            if !request.ready()
+                || state.wave_operator.is_none()
+                || state
+                    .probe_compiled
+                    .as_ref()
+                    .is_none_or(|compiled| compiled.generation != request.generation())
+            {
                 return;
             }
             state.wave_source.enabled = false;
@@ -8020,6 +8104,16 @@ pub fn wave_transfer_benchmark(
             {
                 return;
             }
+            let Some(probe_time) = state
+                .probe_traces
+                .values()
+                .next()
+                .and_then(|trace| trace.samples.back())
+                .map(|sample| sample.time)
+            else {
+                return;
+            };
+            benchmark.probe_time_before = probe_time;
             benchmark.source_current = display.current.iter().map(|value| *value as f64).collect();
             benchmark.source_auxiliary = display
                 .auxiliary
@@ -8542,7 +8636,7 @@ pub fn wave_transfer_benchmark(
             benchmark.generation = generation;
             benchmark.phase = 7;
         }
-        _ => {
+        7 => {
             let Some(operator) = &state.wave_operator else {
                 return;
             };
@@ -8581,9 +8675,48 @@ pub fn wave_transfer_benchmark(
                 && previous_error <= 3.0e-5
                 && operator.outer_boundary() == OuterBoundaryCondition::FirstOrderOutgoing
             {
-                exit.write(bevy::app::AppExit::Success);
+                request.request_steps(8);
+                benchmark.phase = 8;
             } else {
                 error!("Material GPU transaction differs from the f64 reference");
+                exit.write(bevy::app::AppExit::error());
+            }
+        }
+        _ => {
+            if request.stats().completed_steps() < 8
+                || probe_display.generation != benchmark.generation
+                || state
+                    .probe_compiled
+                    .as_ref()
+                    .is_none_or(|compiled| compiled.generation != benchmark.generation)
+            {
+                return;
+            }
+            let Some(trace) = state.probe_traces.values().next() else {
+                return;
+            };
+            let times = trace
+                .samples
+                .iter()
+                .map(|sample| sample.time)
+                .collect::<Vec<_>>();
+            let largest_gap = times
+                .windows(2)
+                .map(|pair| pair[1] - pair[0])
+                .fold(0.0_f64, f64::max);
+            let maximum_expected_gap =
+                (2.5 / state.probe_sample_rate).max(2.5 * state.wave_time_step);
+            let continued = times
+                .last()
+                .is_some_and(|time| *time > benchmark.probe_time_before);
+            info!(
+                samples = times.len(),
+                largest_gap, maximum_expected_gap, "Probe handoff clock check complete"
+            );
+            if continued && largest_gap <= maximum_expected_gap {
+                exit.write(bevy::app::AppExit::Success);
+            } else {
+                error!("Probe history did not remain continuous across solver handoffs");
                 exit.write(bevy::app::AppExit::error());
             }
         }
@@ -10186,6 +10319,51 @@ mod tests {
     }
 
     #[test]
+    fn probe_history_accepts_a_continuous_new_solver_generation() {
+        let mut state = Playground::default();
+        let id = state
+            .editor
+            .create_point_probe(Point2::new(0.4, 0.4))
+            .unwrap();
+        let compile = |generation, revision, probes: Vec<ProbeDefinition>| CompiledProbeState {
+            generation,
+            revision,
+            mesh_revision: generation,
+            probes,
+            sample_rate: 120.0,
+            time_step: 0.01,
+        };
+        let records = |generation, revision, times: &[f64], readbacks| ProbeDisplay {
+            generation,
+            revision,
+            records: times
+                .iter()
+                .map(|time| PointProbeRecord {
+                    probe_id: id.0,
+                    time: *time,
+                    displacement: 1.0,
+                    velocity: 2.0,
+                    energy_density: 3.0,
+                })
+                .collect(),
+            readbacks,
+        };
+
+        state.probe_compiled = Some(compile(3, 5, state.editor.document.probes.clone()));
+        state.ingest_probe_samples(&records(3, 5, &[0.9, 1.0], 1));
+        state.probe_compiled = Some(compile(4, 7, state.editor.document.probes.clone()));
+        state.probe_display_readback = 0;
+        state.ingest_probe_samples(&records(4, 7, &[1.1, 1.2], 1));
+
+        let times = state.probe_traces[&id]
+            .samples
+            .iter()
+            .map(|sample| sample.time)
+            .collect::<Vec<_>>();
+        assert_eq!(times, vec![0.9, 1.0, 1.1, 1.2]);
+    }
+
+    #[test]
     fn probe_time_window_fills_available_history_and_clamps_panning() {
         let samples = [0.0, 0.5, 1.0]
             .into_iter()
@@ -10215,6 +10393,48 @@ mod tests {
             Playground::probe_time_window(&samples, &mut view),
             Some((0.6, 1.0))
         );
+    }
+
+    #[test]
+    fn dragging_a_probe_plot_pans_the_shared_time_window() {
+        let mut h = Harness::new();
+        let id = h
+            .state
+            .editor
+            .create_point_probe(Point2::new(0.4, 0.4))
+            .unwrap();
+        h.state.probe_windows.insert(id);
+        h.state.probe_traces.insert(
+            id,
+            ProbeTrace {
+                samples: (0..=100)
+                    .map(|index| PointProbeRecord {
+                        probe_id: id.0,
+                        time: index as f64 * 0.1,
+                        displacement: index as f64,
+                        velocity: 0.0,
+                        energy_density: 0.0,
+                    })
+                    .collect(),
+                accept_after: 0.0,
+            },
+        );
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let field_label = h
+            .texts
+            .iter()
+            .filter(|(text, _)| text == "Field")
+            .max_by(|(_, left), (_, right)| left.top().total_cmp(&right.top()))
+            .unwrap_or_else(|| panic!("texts: {:?}", h.texts))
+            .1;
+        let start = egui::pos2(field_label.left() + 180.0, field_label.bottom() + 46.0);
+        h.drag_with_modifiers(start, start + egui::vec2(100.0, 0.0), Modifiers::NONE);
+
+        let view = &h.state.probe_views[&id];
+        assert!(!view.live);
+        assert!(view.end_time < 10.0);
+        assert!((view.end_time - 9.5).abs() < 0.15, "{}", view.end_time);
     }
 
     #[test]
