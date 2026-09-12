@@ -113,7 +113,11 @@ Scene JSON remains the single persistence representation. File loading, bundled
 examples, crash recovery, and shared links all pass through the same structural
 decoder and bounded accepted-scene validator before replacing the editor document.
 Examples carry names and descriptions and render their thumbnails directly from
-the accepted spline geometry; opening one is a single undoable document change.
+the accepted spline geometry. Their application-layer presets also provide a
+continuous source and deliberate boundary configuration. Opening one is a single
+undoable document change and starts a fresh zero field; it does not transfer the
+field from the previously open scene. Ordinary edits and AMR retain their normal
+field-preserving handoff.
 Autosave retains both the accepted scene and any invalid editable draft, writing to
 browser local storage or an atomic per-user native recovery file after a short
 debounce. On browser startup, a `#scene=v1.…` fragment takes precedence over local

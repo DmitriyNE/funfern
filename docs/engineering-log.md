@@ -7,6 +7,13 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Repair near-coincident open constraints generically. A straight baffle on a
+  background-grid symmetry line can leave a roundoff-area trace triangle after
+  the cut, collapsing the explicit CFL timestep even though its edge lengths are
+  ordinary. The double-slit example is tilted off the symmetry line meanwhile.
+- [ ] Diagnose and stabilize second-order outgoing conditions on curved hole or
+  internal-boundary spans. They can inject energy and make the solution diverge;
+  keep examples on reflecting or first-order curved faces until this is resolved.
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
 - [ ] Decide whether the load-compatible closed-wall role still warrants assigned
@@ -42,6 +49,14 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   example applies its source and reveals the boundary-law overlay. Gallery
   thumbnails show both the source location and colored outer-edge laws; rows use
   full-width separators instead of content-sized card frames.
+- Example loading now requests a fresh zero-field solver candidate instead of
+  building a transfer map from the previously open scene. This prevents unrelated
+  fields and velocities from contaminating the next example while leaving normal
+  edit and AMR handoffs unchanged.
+- Tilted the straight double-slit screen away from the background-grid symmetry
+  column. Its production `h=0.08` mesh now has an explicit timestep above `1e-3`
+  instead of the roundoff-sliver value near `1e-17`; a regression checks edge
+  length, minimum angle, and timestep.
 - Added debounced crash recovery for the complete draft/accepted document pair.
   Browser builds use local storage; native builds write and atomically rename a
   per-user recovery file. Startup restores recovery automatically unless a shared

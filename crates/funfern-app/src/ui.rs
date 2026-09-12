@@ -235,6 +235,7 @@ struct SimulationCandidate {
     exposed_nodes: usize,
     source_region: RegionId,
     adaptation_state: MeshAdaptationState,
+    fresh: bool,
 }
 #[derive(Resource)]
 pub struct Playground {
@@ -356,6 +357,7 @@ pub struct Playground {
     wave_speed: f64,
     wave_accumulator: f64,
     wave_reset_requested: bool,
+    fresh_simulation_requested: bool,
     wave_step_requested: bool,
     wave_pending_pulse: Option<Point2>,
     pulse_amplitude: f32,
@@ -498,6 +500,7 @@ impl Default for Playground {
             wave_speed: 1.0,
             wave_accumulator: 0.0,
             wave_reset_requested: false,
+            fresh_simulation_requested: false,
             wave_step_requested: false,
             wave_pending_pulse: None,
             pulse_amplitude: 0.65,
@@ -1387,6 +1390,7 @@ impl Playground {
                         self.wave_source = simulation.source;
                         self.wave_source_dirty = true;
                         self.wave_pending_pulse = None;
+                        self.fresh_simulation_requested = true;
                         self.show_boundary_conditions = true;
                     }
                     self.notify(self.load_notice);
@@ -1590,19 +1594,23 @@ impl Playground {
                         self.mesh_source.outer_boundaries,
                     ) {
                         Ok(operator) => {
-                            let transfer = self
-                                .wave_mesh
-                                .as_ref()
-                                .zip(self.wave_operator.as_ref())
-                                .map(|(source_mesh, source_operator)| {
-                                    QuadraticTransferMap::build(
-                                        source_mesh,
-                                        source_operator,
-                                        &mesh,
-                                        &operator,
-                                    )
-                                })
-                                .transpose();
+                            let fresh = self.fresh_simulation_requested;
+                            let transfer = if fresh {
+                                Ok(None)
+                            } else {
+                                self.wave_mesh
+                                    .as_ref()
+                                    .zip(self.wave_operator.as_ref())
+                                    .map(|(source_mesh, source_operator)| {
+                                        QuadraticTransferMap::build(
+                                            source_mesh,
+                                            source_operator,
+                                            &mesh,
+                                            &operator,
+                                        )
+                                    })
+                                    .transpose()
+                            };
                             match transfer {
                                 Ok(transfer) => {
                                     let exposed_nodes = transfer
@@ -1630,6 +1638,7 @@ impl Playground {
                                         simulation_time: 0.0,
                                         exposed_nodes,
                                         adaptation_state,
+                                        fresh,
                                     });
                                     self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
                                     self.mesh_error = None;
@@ -1648,7 +1657,8 @@ impl Playground {
         if !geometry_changed
             && self.mesh_job.is_none()
             && self.simulation_candidate.is_none()
-            && self.editor.document.accepted != self.mesh_committed_scene
+            && (self.editor.document.accepted != self.mesh_committed_scene
+                || self.fresh_simulation_requested)
             && let (Some(mesh), Some(source_operator)) =
                 (self.wave_mesh.as_ref(), self.wave_operator.as_ref())
         {
@@ -1659,9 +1669,20 @@ impl Playground {
                 self.editor.document.accepted.outer_boundaries,
             ) {
                 Ok(operator) => {
-                    match QuadraticTransferMap::identity_on_mesh(mesh, source_operator, &operator) {
+                    let fresh = self.fresh_simulation_requested;
+                    let transfer = if fresh {
+                        Ok(None)
+                    } else {
+                        QuadraticTransferMap::identity_on_mesh(mesh, source_operator, &operator)
+                            .map(Some)
+                    };
+                    match transfer {
                         Ok(transfer) => {
                             let time_step = operator.recommended_time_step();
+                            let exposed_nodes = transfer.as_ref().map_or(
+                                operator.degrees_of_freedom(),
+                                QuadraticTransferMap::exposed_nodes,
+                            );
                             self.simulation_candidate = Some(SimulationCandidate {
                                 source_region: mesh_region_at(mesh, self.wave_source.position)
                                     .unwrap_or(RegionId(0)),
@@ -1672,14 +1693,15 @@ impl Playground {
                                 operator: Arc::new(operator),
                                 boundary: self.editor.document.accepted.outer_boundaries,
                                 time_step,
-                                exposed_nodes: transfer.exposed_nodes(),
-                                transfer: Some(transfer),
+                                exposed_nodes,
+                                transfer,
                                 adaptation_state: self
                                     .mesh_adaptation_state
                                     .clone()
                                     .unwrap_or_else(|| MeshAdaptationState::from_mesh(mesh)),
                                 generation: None,
                                 simulation_time: 0.0,
+                                fresh,
                             });
                             self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
                             self.wave_error = None;
@@ -1826,6 +1848,7 @@ impl Playground {
             simulation_time: 0.0,
             exposed_nodes,
             adaptation_state: result.state,
+            fresh: false,
         });
         self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
         self.mesh_error = None;
@@ -2111,9 +2134,22 @@ impl Playground {
             if request.caught_up() {
                 let mut target_source = self.wave_source;
                 target_source.region = candidate.source_region;
-                candidate.simulation_time = self.wave_time_offset
-                    + request.stats().completed_steps() as f64 * self.wave_time_step;
-                let replacement = if let (Some(source_mesh), Some(source_operator), Some(map)) =
+                candidate.simulation_time = if candidate.fresh {
+                    0.0
+                } else {
+                    self.wave_time_offset
+                        + request.stats().completed_steps() as f64 * self.wave_time_step
+                };
+                let replacement = if candidate.fresh {
+                    request.replace(
+                        assets,
+                        commands,
+                        &candidate.mesh,
+                        &candidate.operator,
+                        candidate.time_step,
+                        target_source,
+                    )
+                } else if let (Some(source_mesh), Some(source_operator), Some(map)) =
                     (&self.wave_mesh, &self.wave_operator, &candidate.transfer)
                 {
                     request.replace_transferred(
@@ -2163,7 +2199,9 @@ impl Playground {
                 && candidate.max_edge == self.mesh_committed_max_edge;
             let scene_settings_changed = candidate.scene != self.mesh_committed_scene;
             let boundary_changed = candidate.boundary != self.wave_boundary_committed;
-            let commit_message = if same_mesh && scene_settings_changed && boundary_changed {
+            let commit_message = if candidate.fresh {
+                "Example simulation initialized with a fresh field".into()
+            } else if same_mesh && scene_settings_changed && boundary_changed {
                 "Scene settings and outer boundary committed; live field preserved".into()
             } else if same_mesh && scene_settings_changed {
                 "Scene settings committed; live field preserved".into()
@@ -2191,6 +2229,12 @@ impl Playground {
             self.wave_boundary_committed = candidate.boundary;
             self.wave_time_step = candidate.time_step;
             self.wave_time_offset = candidate.simulation_time;
+            if candidate.fresh {
+                self.wave_accumulator = 0.0;
+                self.wave_active_wall_seconds = 0.0;
+                self.wave_dispatches = 0;
+                self.wave_step_requested = false;
+            }
             self.wave_completed_steps = 0;
             self.wave_steps_per_second = 0.0;
             self.wave_rate_previous_completed = 0;
@@ -2198,6 +2242,9 @@ impl Playground {
             self.wave_energy_step = u64::MAX;
             self.wave_source_dirty = false;
             self.wave_source.region = candidate.source_region;
+            if candidate.fresh {
+                self.fresh_simulation_requested = false;
+            }
             self.solution_indicator_job = None;
             self.solution_indicator_result = None;
             self.solution_indicator_source = None;
@@ -9221,6 +9268,8 @@ mod tests {
         }
         assert_eq!(examples::catalog().len(), 4);
 
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
         let before = h.state.editor.document.clone();
         h.state.startup_load_checked = true;
         let expected_source = examples::catalog()[1].simulation.source;
@@ -9239,8 +9288,15 @@ mod tests {
             expected_source.frequency_hz
         );
         assert!(h.state.wave_source_dirty);
+        assert!(h.state.fresh_simulation_requested);
         assert!(h.state.show_boundary_conditions);
         assert_eq!(h.state.editor.history_len(), (1, 0));
+
+        build_mesh_candidate(&mut h.state);
+        let candidate = h.state.simulation_candidate.as_ref().unwrap();
+        assert!(candidate.fresh);
+        assert!(candidate.transfer.is_none());
+
         h.state.editor.undo();
         assert_eq!(h.state.editor.document, before);
     }

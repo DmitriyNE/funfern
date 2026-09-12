@@ -81,7 +81,10 @@ fn starter_obstacle() -> Document {
 
 fn straight(id: u64, y0: f64, y1: f64) -> InternalBoundary {
     let controls = (0..4)
-        .map(|index| Point2::new(0.0, y0 + (y1 - y0) * index as f64 / 3.0))
+        .map(|index| {
+            let y = y0 + (y1 - y0) * index as f64 / 3.0;
+            Point2::new(0.03 + 0.8 * y, y)
+        })
         .collect();
     InternalBoundary {
         id: InternalBoundaryId(id),
@@ -92,6 +95,8 @@ fn straight(id: u64, y0: f64, y1: f64) -> InternalBoundary {
 }
 
 fn double_slit() -> Document {
+    // A slight screen tilt avoids the background grid's exact symmetry lines.
+    // Near-coincident straight constraints need generic cleanup in the mesher.
     let scene = Scene {
         internal_boundaries: vec![
             straight(1, -0.9, -0.36),
@@ -239,5 +244,55 @@ mod tests {
                 example.name
             );
         }
+    }
+
+    #[test]
+    fn double_slit_has_a_practical_explicit_time_step() {
+        let document = double_slit();
+        let mesh = mesh_scene(
+            &document.accepted,
+            1,
+            MeshingOptions {
+                curve_tolerance: 1.5e-3,
+                target_edge_length: 0.08 / 1.05,
+                minimum_angle_degrees: 12.0,
+                max_vertices: 50_000,
+                max_triangles: 100_000,
+                max_refinement_steps: 50_000,
+            },
+        )
+        .unwrap();
+        let minimum_edge = mesh
+            .triangles
+            .iter()
+            .flat_map(|triangle| {
+                let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+                [
+                    (points[1] - points[0]).norm(),
+                    (points[2] - points[1]).norm(),
+                    (points[0] - points[2]).norm(),
+                ]
+            })
+            .fold(f64::INFINITY, f64::min);
+        let operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
+            &mesh,
+            &document.accepted,
+            document.accepted.outer_boundaries,
+        )
+        .unwrap();
+        assert!(
+            minimum_edge > 0.02,
+            "double-slit mesh contains an unexpectedly short edge: {minimum_edge:e}"
+        );
+        assert!(
+            mesh.quality.minimum_angle_degrees > 5.0,
+            "double-slit mesh contains a CFL-limiting sliver: {:.3}°",
+            mesh.quality.minimum_angle_degrees
+        );
+        assert!(
+            operator.recommended_time_step() > 1.0e-3,
+            "double-slit timestep is impractical: {:e}",
+            operator.recommended_time_step()
+        );
     }
 }
