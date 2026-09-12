@@ -160,8 +160,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   viewport Done action, or Escape. Pulse strength/width and continuous-source
   position, frequency, strength, width, and region are editable in Simulation.
 - **Point probes:** add persistent point receivers from Probes, then click repeatedly
-  in the viewport. Markers can be selected, dragged, moved numerically, renamed,
-  colored, disabled, cleared, or deleted. Each probe opens a floating readout with
+  in the viewport. Markers can be selected, dragged, renamed, colored, disabled,
+  cleared, or deleted. Each probe opens a floating readout with
   field, velocity, and local energy-density traces on a shared simulation-time
   window. Hide individual traces, drag a plot to inspect earlier samples, scroll to
   change the time span, and select Live to follow the solver again. Sampling follows

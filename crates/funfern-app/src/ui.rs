@@ -54,7 +54,6 @@ enum InteractionMode {
     PlacePulse,
     MoveSource,
     PlaceProbe,
-    MoveProbe(ProbeId),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FocusedFeature {
@@ -106,7 +105,6 @@ impl InspectorPanel {
 #[derive(Clone, Default)]
 struct ProbeTrace {
     samples: VecDeque<PointProbeRecord>,
-    dropped: u64,
     accept_after: f64,
 }
 
@@ -132,6 +130,7 @@ struct ProbeViewState {
     field: bool,
     velocity: bool,
     energy: bool,
+    drag_start_end: Option<f64>,
 }
 
 impl ProbeViewState {
@@ -139,10 +138,11 @@ impl ProbeViewState {
         Self {
             live: true,
             end_time: 0.0,
-            span,
+            span: span.min(2.0),
             field: true,
             velocity: true,
             energy: true,
+            drag_start_end: None,
         }
     }
 }
@@ -691,16 +691,6 @@ impl Playground {
                 .into_iter()
                 .filter(|sample| sample.time > last + 1.0e-7)
                 .collect::<Vec<_>>();
-            if !trace.samples.is_empty()
-                && let Some(first) = fresh.first()
-            {
-                let expected = 1.0 / self.probe_sample_rate;
-                if first.time - last > expected * 2.5 {
-                    trace.dropped = trace.dropped.saturating_add(
-                        ((first.time - last) / expected).floor().max(1.0) as u64 - 1,
-                    );
-                }
-            }
             trace.samples.extend(fresh);
             if let Some(newest) = trace.samples.back().map(|sample| sample.time) {
                 let oldest = newest - self.probe_history_seconds;
@@ -3327,7 +3317,6 @@ impl Playground {
                 .map(|trace| trace.samples.iter().copied().collect::<Vec<_>>())
                 .unwrap_or_default();
             let status = self.probe_status.get(&id).cloned();
-            let dropped = self.probe_traces.get(&id).map_or(0, |trace| trace.dropped);
             let mut view = self
                 .probe_views
                 .remove(&id)
@@ -3346,18 +3335,6 @@ impl Playground {
                 .default_width(430.0)
                 .resizable(true)
                 .show(ctx, |ui| {
-                    let ProbeTarget::Point(position) = probe.target;
-                    ui.horizontal(|ui| {
-                        let color =
-                            Color32::from_rgb(probe.color[0], probe.color[1], probe.color[2]);
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                        ui.painter().circle_filled(rect.center(), 5.0, color);
-                        ui.monospace(format!("x {:+.4} · y {:+.4}", position.x, position.y));
-                        if ui.small_button("Clear").clicked() {
-                            clear = true;
-                        }
-                    });
                     ui.horizontal(|ui| {
                         if ui
                             .add(egui::Button::new("Live").selected(view.live))
@@ -3372,12 +3349,12 @@ impl Playground {
                         ui.checkbox(&mut view.field, "Field");
                         ui.checkbox(&mut view.velocity, "Velocity");
                         ui.checkbox(&mut view.energy, "Energy");
+                        if ui.small_button("Clear").clicked() {
+                            clear = true;
+                        }
                     });
                     if let Some(status) = &status {
                         ui.colored_label(GOLD, status);
-                    }
-                    if dropped > 0 {
-                        ui.colored_label(GOLD, format!("{dropped} samples were skipped"));
                     }
                     if view.field {
                         Self::probe_plot(
@@ -3446,24 +3423,46 @@ impl Playground {
             Stroke::new(1.0, Color32::from_rgb(55, 69, 80)),
             egui::StrokeKind::Inside,
         );
-        if response.dragged() {
+        let Some((mut minimum_time, mut maximum_time)) = Self::probe_time_window(samples, view)
+        else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Waiting for samples",
+                egui::FontId::monospace(11.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+            return;
+        };
+        let visible_span = maximum_time - minimum_time;
+        if response.drag_started() {
             view.live = false;
-            let pointer_delta = ui.ctx().input(|input| input.pointer.delta().x);
-            view.end_time -= pointer_delta as f64 / rect.width() as f64 * view.span;
-            if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
-                view.end_time = view
-                    .end_time
-                    .clamp((first.time + view.span).min(last.time), last.time);
-            }
+            view.drag_start_end = Some(maximum_time);
+        }
+        if response.dragged() {
+            let start_end = view.drag_start_end.get_or_insert(maximum_time);
+            view.end_time =
+                *start_end - response.drag_delta().x as f64 / rect.width() as f64 * visible_span;
+        }
+        if response.drag_stopped() {
+            view.drag_start_end = None;
         }
         if response.hovered() {
             let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
             if wheel != 0.0 {
-                view.span = (view.span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+                let fraction = response.hover_pos().map_or(0.5, |position| {
+                    ((position.x - rect.left()) / rect.width()).clamp(0.0, 1.0)
+                }) as f64;
+                let anchored_time = minimum_time + fraction * visible_span;
+                view.live = false;
+                view.span = (visible_span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+                let first = samples.first().unwrap().time;
+                let last = samples.last().unwrap().time;
+                let zoomed_span = view.span.min(last - first);
+                view.end_time = anchored_time + (1.0 - fraction) * zoomed_span;
             }
         }
-        let minimum_time = view.end_time - view.span;
-        let maximum_time = view.end_time;
+        (minimum_time, maximum_time) = Self::probe_time_window(samples, view).unwrap();
         let visible = samples
             .iter()
             .filter(|sample| sample.time >= minimum_time && sample.time <= maximum_time)
@@ -3493,7 +3492,7 @@ impl Playground {
             minimum -= padding;
             maximum += padding;
         }
-        let time_span = view.span.max(f64::MIN_POSITIVE);
+        let time_span = (maximum_time - minimum_time).max(f64::MIN_POSITIVE);
         let value_span = maximum - minimum;
         let points = visible
             .iter()
@@ -3530,6 +3529,24 @@ impl Playground {
             "Simulation time {:.4}–{:.4}",
             minimum_time, maximum_time
         ));
+    }
+
+    fn probe_time_window(
+        samples: &[PointProbeRecord],
+        view: &mut ProbeViewState,
+    ) -> Option<(f64, f64)> {
+        let first = samples.first()?.time;
+        let last = samples.last()?.time;
+        let available = last - first;
+        if !available.is_finite() || available <= f64::EPSILON {
+            return None;
+        }
+        let span = view.span.min(available);
+        if view.live {
+            view.end_time = last;
+        }
+        view.end_time = view.end_time.clamp(first + span, last);
+        Some((view.end_time - span, view.end_time))
     }
 
     fn panel(&mut self, ui: &mut egui::Ui) {
@@ -3999,48 +4016,6 @@ impl Playground {
                 self.error(result);
             }
         });
-        let ProbeTarget::Point(mut position) = probe.target;
-        ui.horizontal(|ui| {
-            ui.label("Position");
-            ui.add(
-                egui::DragValue::new(&mut position.x)
-                    .speed(0.005)
-                    .prefix("x ")
-                    .update_while_editing(false),
-            );
-            ui.add(
-                egui::DragValue::new(&mut position.y)
-                    .speed(0.005)
-                    .prefix("y ")
-                    .update_while_editing(false),
-            );
-        });
-        if position
-            != match probe.target {
-                ProbeTarget::Point(point) => point,
-            }
-        {
-            probe.target = ProbeTarget::Point(position);
-            self.clear_probe_trace(id);
-            let result = self.editor.update_probe(probe.clone());
-            self.error(result);
-        }
-        ui.horizontal(|ui| {
-            let moving = self.interaction_mode == InteractionMode::MoveProbe(id);
-            if ui
-                .add(egui::Button::new("Move in viewport").selected(moving))
-                .clicked()
-            {
-                self.interaction_mode = if moving {
-                    InteractionMode::Select
-                } else {
-                    InteractionMode::MoveProbe(id)
-                };
-            }
-            if ui.button("Clear trace").clicked() {
-                self.clear_probe_trace(id);
-            }
-        });
         ui.horizontal(|ui| {
             if ui.button("Open readout").clicked() {
                 self.probe_windows.insert(id);
@@ -4074,7 +4049,6 @@ impl Playground {
             .back()
             .map_or(trace.accept_after, |sample| sample.time);
         trace.samples.clear();
-        trace.dropped = 0;
         trace.accept_after = current_time.max(newest);
     }
 
@@ -5816,21 +5790,6 @@ impl Playground {
                                 self.probe_windows.insert(id);
                             }
                         }
-                        InteractionMode::MoveProbe(id) => {
-                            if let Some(mut probe) = self
-                                .editor
-                                .document
-                                .probes
-                                .iter()
-                                .find(|probe| probe.id == id)
-                                .cloned()
-                            {
-                                probe.target = ProbeTarget::Point(self.world(p, r));
-                                self.clear_probe_trace(id);
-                                let result = self.editor.update_probe(probe);
-                                self.error(result);
-                            }
-                        }
                         InteractionMode::Select => {}
                     }
                 }
@@ -6487,7 +6446,7 @@ impl Playground {
                         Stroke::new(1.5, GOLD),
                     );
                 }
-                InteractionMode::PlaceProbe | InteractionMode::MoveProbe(_) => {
+                InteractionMode::PlaceProbe => {
                     painter.circle_filled(pointer, 5.0, Color32::from_rgb(16, 23, 31));
                     painter.circle_stroke(pointer, 7.0, Stroke::new(2.0, SELECT));
                 }
@@ -6581,7 +6540,6 @@ impl Playground {
             InteractionMode::PlacePulse => ("Placing pulse", "Click repeatedly to inject"),
             InteractionMode::MoveSource => ("Moving source", "Click to reposition"),
             InteractionMode::PlaceProbe => ("Placing point probes", "Click repeatedly to add"),
-            InteractionMode::MoveProbe(_) => ("Moving point probe", "Click to reposition"),
         };
         egui::Area::new("interaction_mode_overlay".into())
             .fixed_pos(viewport.left_top() + egui::vec2(12.0, 12.0))
@@ -6605,7 +6563,6 @@ impl Playground {
                             InteractionMode::PlacePulse
                                 | InteractionMode::MoveSource
                                 | InteractionMode::PlaceProbe
-                                | InteractionMode::MoveProbe(_)
                         ) {
                             "Done"
                         } else {
@@ -10226,6 +10183,38 @@ mod tests {
         display.readbacks += 1;
         state.ingest_probe_samples(&display);
         assert!(state.probe_traces[&id].samples.is_empty());
+    }
+
+    #[test]
+    fn probe_time_window_fills_available_history_and_clamps_panning() {
+        let samples = [0.0, 0.5, 1.0]
+            .into_iter()
+            .map(|time| PointProbeRecord {
+                probe_id: 1,
+                time,
+                displacement: 0.0,
+                velocity: 0.0,
+                energy_density: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let mut view = ProbeViewState::new(10.0);
+        assert_eq!(
+            Playground::probe_time_window(&samples, &mut view),
+            Some((0.0, 1.0))
+        );
+
+        view.live = false;
+        view.span = 0.4;
+        view.end_time = -20.0;
+        assert_eq!(
+            Playground::probe_time_window(&samples, &mut view),
+            Some((0.0, 0.4))
+        );
+        view.end_time = 20.0;
+        assert_eq!(
+            Playground::probe_time_window(&samples, &mut view),
+            Some((0.6, 1.0))
+        );
     }
 
     #[test]

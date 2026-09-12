@@ -37,7 +37,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 ## 2026-09-12 — Probe foundation and point receivers
 
 - Added Probes as a fifth hideable inspector with persistent point placement,
-  direct marker dragging, numeric editing, naming/color, recording controls, and
+  direct marker dragging, naming/color, recording controls, and
   one closeable floating readout per probe.
 - Point readouts show solver-time field, centered velocity, and material-aware
   local energy density. Their sections are independently hideable and share a
@@ -50,7 +50,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Added a separate portable GPU probe pipeline and bounded ring. Sampling cadence
   follows solver steps rather than rendered frames, stale generations are rejected,
   and ordinary remesh/AMR handoffs retain host history while recompiling stencils.
-- All 202 workspace tests and Clippy with warnings denied pass. The release Metal
+- All 203 workspace tests and Clippy with warnings denied pass. The release Metal
   GPU check on an Apple M1 Max exercised 9,690 DOFs at `dt=0.0030078`, produced
   finite nonnegative probe energy, matched the f64 field within `1.30e-6` relative
   L2 error, and advanced at 18.9 simulated seconds per wall second. Native release
