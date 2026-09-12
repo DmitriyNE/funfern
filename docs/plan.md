@@ -155,8 +155,10 @@ immutable spatial edge-size field. It preserves vertex lineage, applies generati
 cooldown, distinguishes mesh identity from geometry identity, and carries the live
 quadratic field through the normal atomic GPU handoff. The internal native check
 moves the target and requires refinement, coarsening, and zero exposed transfer
-nodes. User wavelength controls, active solution indicators, and visualization
-remain pending.
+nodes. A resumable solution indicator supplies recovery, strong cell, flux-jump,
+and physical-boundary residuals plus active-source wavelength limits. It samples
+spatial material profiles, includes variable-stiffness divergence, and drives an
+optional target-field overlay.
 
 - Implement local mesh motion, retriangulation, refinement, and coarsening, keeping
   full remeshing as a fallback.

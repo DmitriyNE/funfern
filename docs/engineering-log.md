@@ -7,11 +7,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Add coefficient-aware AMR indicators before re-enabling automatic adaptation
-  for spatial materials. Include coefficient-gradient residual terms and preserve
-  the current bounded-work and coarsening behavior.
-- [ ] Add a polished Luneburg/GRIN catalog example after coefficient-aware AMR and
-  profile visualization make its resolution and placement clear.
+- [ ] Add a polished Luneburg/GRIN catalog example and use it to decide whether
+  dormant spatial profiles need a permanent material-resolution floor in addition
+  to the solution residual and active-frequency wavelength ceiling.
 - [ ] Add probe-data export for point, line, area, and far-field readouts. Preserve
   timestamps, spatial or angular coordinates, quantity names, and coverage metadata
   in a simple format suitable for plotting outside Funfern.
@@ -54,6 +52,27 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
+
+## 2026-09-12 — Coefficient-aware solution AMR
+
+- Enabled automatic solution adaptation for spatial material profiles. The
+  resumable estimator caches density, stiffness, and damping at its element
+  quadrature points, reconstructs the world-space stiffness gradient from vertex
+  values, and adds `grad(k) · grad(u)` to the strong variable-coefficient residual.
+- Recovered fluxes, interior and material-interface jumps, energy normalization,
+  impedance/radiation faces, and thin-gap faces now use coefficients at their
+  corresponding element or edge locations. The wavelength ceiling uses the
+  slowest sampled wave speed in each element.
+- Material sampling has its own bounded phase and reports the failing region and
+  point without publishing a partial target. Existing work limits, grading,
+  refinement hysteresis, confirmed coarsening, and transaction handoffs are
+  unchanged.
+- The native production AMR check now runs with a radial density profile. On Apple
+  M1 Max / Metal it completed in 4.89 s, including a live spatial-material estimate,
+  two handoffs, 371 second-pass insertions, 282 collapses, and a continuous probe
+  trace; the longest indicator slice remained at 2.00 ms.
+- All 277 workspace tests, Clippy with warnings denied, native release compilation,
+  and release Trunk/WASM packaging pass.
 
 ## 2026-09-12 — Region-aware material-overlay ranges
 

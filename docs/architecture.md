@@ -129,9 +129,12 @@ include region identity so a shared interface retains a sharp coefficient jump. 
 revision-keyed cooperative cache evaluates all properties once, allowing property
 switches without resampling; invalid samples are localized in red and never affect
 solver acceptance. Profile placement belongs to a region and has both numeric
-controls and a rigid origin/rotation viewport gizmo. The current solution AMR
-indicator accepts uniform materials only; coefficient-gradient terms remain a
-later slice.
+controls and a rigid origin/rotation viewport gizmo. Solution AMR samples spatial
+coefficients at element and boundary quadrature points. Its strong residual includes
+the stiffness-gradient term, recovered and interface fluxes use local stiffness,
+and each element's active-frequency ceiling uses its slowest sampled wave speed.
+The element stiffness gradient is the piecewise-linear reconstruction from vertex
+samples, keeping the estimator dependency-free and convergent under refinement.
 
 Boundary conditions attach to logical parameter spans rather than individual mesh
 segments. Sampling copies a span assignment onto every resulting constrained edge.
@@ -764,8 +767,9 @@ select tolerance, elements per wavelength, topology budget, and maximum coarseni
 step. Advanced minimum/maximum limits keep capacity explicit and allow quiet regions
 to become coarser than the initial mesh.
 
-The app advances indicator and adaptation jobs in soft 2 ms slices, rejects stale
-mesh/GPU/settings generations, and waits between estimates. Refinement can start
+The app advances coefficient sampling, indicator, and adaptation jobs in soft 2 ms
+slices, rejects stale mesh/GPU/settings generations, and waits between estimates.
+Refinement can start
 after one estimate. Coarsening requires two consecutive estimates on the same mesh,
 and consumes at most half of one automatic transaction so refinement retains a
 separate topology budget. Geometry editing cancels estimator/adaptation preparation

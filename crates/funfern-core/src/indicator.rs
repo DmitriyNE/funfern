@@ -1,10 +1,11 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    BoundaryLabel, BoundarySide, FaceBoundaryCondition, InternalBoundaryCoupling,
-    InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField, OuterBoundaryCondition,
-    Point2, QuadraticWaveOperator, RegionId, Scene, TriMesh, enriched_quadratic_basis,
-    enriched_quadratic_basis_gradients, enriched_quadratic_basis_laplacians,
+    BoundaryLabel, BoundarySide, EvaluatedMaterial, FaceBoundaryCondition,
+    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField,
+    OuterBoundaryCondition, Point2, QuadraticWaveOperator, RegionId, Scene, TriMesh,
+    enriched_quadratic_basis, enriched_quadratic_basis_gradients,
+    enriched_quadratic_basis_laplacians,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -84,24 +85,37 @@ pub enum SolutionIndicatorError {
     InvalidMesh,
     InvalidOperator,
     InvalidScene,
+    MaterialEvaluation {
+        region: RegionId,
+        point: Point2,
+        reason: String,
+    },
     InvalidSnapshot,
     WorkLimit,
 }
 
 impl std::fmt::Display for SolutionIndicatorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::InvalidOptions => "Invalid solution-indicator options",
-                Self::InvalidMesh => "Invalid solution-indicator mesh",
-                Self::InvalidOperator => "Wave operator does not match the indicator mesh",
-                Self::InvalidScene => "Scene coefficients do not match the indicator mesh",
-                Self::InvalidSnapshot => "Invalid solution-indicator field snapshot",
-                Self::WorkLimit => "Solution-indicator work limit reached",
+        let message = match self {
+            Self::InvalidOptions => "Invalid solution-indicator options",
+            Self::InvalidMesh => "Invalid solution-indicator mesh",
+            Self::InvalidOperator => "Wave operator does not match the indicator mesh",
+            Self::InvalidScene => "Scene coefficients do not match the indicator mesh",
+            Self::InvalidSnapshot => "Invalid solution-indicator field snapshot",
+            Self::WorkLimit => "Solution-indicator work limit reached",
+            Self::MaterialEvaluation {
+                region,
+                point,
+                reason,
+            } => {
+                return write!(
+                    f,
+                    "Material in region {} is invalid at ({:.4}, {:.4}): {reason}",
+                    region.0, point.x, point.y
+                );
             }
-        )
+        };
+        f.write_str(message)
     }
 }
 
@@ -239,6 +253,14 @@ struct ElementEstimate {
     edge: f64,
 }
 
+#[derive(Clone, Copy)]
+struct ElementMaterialSamples {
+    vertex_stiffness: [f64; 3],
+    quadrature: [EvaluatedMaterial; 6],
+    stiffness_gradient: Point2,
+    minimum_wave_speed: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BoundaryPairKey {
     id: InternalBoundaryId,
@@ -249,10 +271,9 @@ struct BoundaryPairKey {
 #[derive(Clone, Copy)]
 struct BoundaryRecord {
     triangle: usize,
+    region: RegionId,
     nodes: [usize; 3],
     condition: FaceBoundaryCondition,
-    mass_density: f64,
-    stiffness: f64,
     pair: Option<(BoundaryPairKey, usize, f64)>,
 }
 
@@ -260,6 +281,7 @@ enum IndicatorPhase {
     Validate,
     BuildEdges(usize),
     BuildBoundary(usize),
+    SampleMaterials(usize),
     Recover(usize),
     Estimate(usize),
     Jump(usize),
@@ -281,6 +303,7 @@ pub struct SolutionIndicatorJob {
     edge_list: Vec<((usize, usize), Vec<usize>)>,
     boundary_records: Vec<BoundaryRecord>,
     boundary_pairs: BTreeMap<BoundaryPairKey, [Option<usize>; 2]>,
+    material_samples: Vec<Option<ElementMaterialSamples>>,
     recovery: BTreeMap<(usize, RegionId), Recovery>,
     estimates: Vec<ElementEstimate>,
     indicators: Vec<f64>,
@@ -310,6 +333,7 @@ impl SolutionIndicatorJob {
             edge_list: Vec::new(),
             boundary_records: Vec::new(),
             boundary_pairs: BTreeMap::new(),
+            material_samples: vec![None; count],
             recovery: BTreeMap::new(),
             estimates: vec![ElementEstimate::default(); count],
             indicators: vec![0.0; count],
@@ -329,6 +353,7 @@ impl SolutionIndicatorJob {
             IndicatorPhase::Validate
             | IndicatorPhase::BuildEdges(_)
             | IndicatorPhase::BuildBoundary(_) => "Preparing AMR estimate",
+            IndicatorPhase::SampleMaterials(_) => "Sampling material profiles",
             IndicatorPhase::Recover(_) => "Recovering wave gradients",
             IndicatorPhase::Estimate(_) | IndicatorPhase::Jump(_) | IndicatorPhase::Boundary(_) => {
                 "Estimating wave error"
@@ -394,6 +419,7 @@ impl SolutionIndicatorJob {
                 }
             }
             IndicatorPhase::BuildBoundary(index) => self.build_boundary(index)?,
+            IndicatorPhase::SampleMaterials(index) => self.sample_materials(index)?,
             IndicatorPhase::Recover(index) => self.recover(index)?,
             IndicatorPhase::Estimate(index) => self.estimate(index)?,
             IndicatorPhase::Jump(index) => self.jump(index)?,
@@ -445,7 +471,6 @@ impl SolutionIndicatorJob {
             return Err(SolutionIndicatorError::InvalidOperator);
         }
         if !self.scene.structure_valid()
-            || self.scene.has_varying_materials()
             || self
                 .mesh
                 .triangles
@@ -481,7 +506,7 @@ impl SolutionIndicatorJob {
 
     fn build_boundary(&mut self, index: usize) -> Result<(), SolutionIndicatorError> {
         if index == self.mesh.boundary_edges.len() {
-            self.phase = IndicatorPhase::Recover(0);
+            self.phase = IndicatorPhase::SampleMaterials(0);
             return Ok(());
         }
         let edge = self.mesh.boundary_edges[index];
@@ -512,11 +537,6 @@ impl SolutionIndicatorJob {
         }
         let triangle = sides[0];
         let region = self.mesh.triangles[triangle].region;
-        let material = self
-            .scene
-            .region_material(region)
-            .and_then(|material| material.uniform())
-            .ok_or(SolutionIndicatorError::InvalidScene)?;
         let raw_nodes = self.boundary_edge_nodes(triangle, edge.vertices)?;
         let nodes = if edge.parameters[0] < edge.parameters[1] {
             raw_nodes
@@ -611,11 +631,12 @@ impl SolutionIndicatorJob {
                             InternalBoundarySide::Left => 0,
                             InternalBoundarySide::Right => 1,
                         };
-                        Some((
-                            BoundaryPairKey { id, start, end },
-                            slot,
-                            stiffness_ratio * material.stiffness,
-                        ))
+                        let point = boundary
+                            .spline
+                            .evaluate(0.5 * (edge.parameters[0] + edge.parameters[1]));
+                        let spring =
+                            stiffness_ratio * self.material_at(boundary.region, point)?.stiffness;
+                        Some((BoundaryPairKey { id, start, end }, slot, spring))
                     }
                 };
                 (condition, pair)
@@ -625,10 +646,9 @@ impl SolutionIndicatorJob {
         let record_index = self.boundary_records.len();
         self.boundary_records.push(BoundaryRecord {
             triangle,
+            region,
             nodes,
             condition,
-            mass_density: material.mass_density,
-            stiffness: material.stiffness,
             pair,
         });
         if let Some((key, slot, _)) = pair {
@@ -638,6 +658,52 @@ impl SolutionIndicatorJob {
             }
         }
         self.phase = IndicatorPhase::BuildBoundary(index + 1);
+        Ok(())
+    }
+
+    fn sample_materials(&mut self, index: usize) -> Result<(), SolutionIndicatorError> {
+        if index == self.mesh.triangles.len() {
+            self.phase = IndicatorPhase::Recover(0);
+            return Ok(());
+        }
+        let triangle = self.mesh.triangles[index];
+        let geometry = element_geometry(&self.mesh, triangle.vertices)?;
+        let mut vertex_stiffness = [0.0; 3];
+        let mut minimum_wave_speed = f64::INFINITY;
+        for (local, point) in geometry.points.into_iter().enumerate() {
+            let material = self.material_at(triangle.region, point)?;
+            vertex_stiffness[local] = material.stiffness;
+            minimum_wave_speed =
+                minimum_wave_speed.min((material.stiffness / material.mass_density).sqrt());
+        }
+        let mut samples = [None; 6];
+        for (sample, (barycentric, _)) in samples.iter_mut().zip(quadrature()) {
+            let material = self.material_at(
+                triangle.region,
+                barycentric_point(geometry.points, barycentric),
+            )?;
+            minimum_wave_speed =
+                minimum_wave_speed.min((material.stiffness / material.mass_density).sqrt());
+            *sample = Some(material);
+        }
+        let [Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)] = samples else {
+            return Err(SolutionIndicatorError::InvalidScene);
+        };
+        let samples = [a, b, c, d, e, f];
+        let stiffness_gradient = geometry
+            .gradients
+            .into_iter()
+            .zip(vertex_stiffness)
+            .fold(Point2::default(), |gradient, (basis, stiffness)| {
+                gradient + basis * stiffness
+            });
+        self.material_samples[index] = Some(ElementMaterialSamples {
+            vertex_stiffness,
+            quadrature: samples,
+            stiffness_gradient,
+            minimum_wave_speed,
+        });
+        self.phase = IndicatorPhase::SampleMaterials(index + 1);
         Ok(())
     }
 
@@ -670,6 +736,20 @@ impl SolutionIndicatorJob {
         ])
     }
 
+    fn material_at(
+        &self,
+        region: RegionId,
+        point: Point2,
+    ) -> Result<EvaluatedMaterial, SolutionIndicatorError> {
+        self.scene.material_at(region, point).map_err(|error| {
+            SolutionIndicatorError::MaterialEvaluation {
+                region,
+                point,
+                reason: error.to_string(),
+            }
+        })
+    }
+
     fn recover(&mut self, index: usize) -> Result<(), SolutionIndicatorError> {
         if index == self.mesh.triangles.len() {
             self.phase = IndicatorPhase::Estimate(0);
@@ -678,11 +758,7 @@ impl SolutionIndicatorJob {
         let triangle = self.mesh.triangles[index];
         let geometry = element_geometry(&self.mesh, triangle.vertices)?;
         let nodes = self.operator.element_nodes()[index].map(|node| node as usize);
-        let material = self
-            .scene
-            .region_material(triangle.region)
-            .and_then(|material| material.uniform())
-            .ok_or(SolutionIndicatorError::InvalidScene)?;
+        let material = self.material_samples[index].ok_or(SolutionIndicatorError::InvalidScene)?;
         for local in 0..3 {
             let mut barycentric = [0.0; 3];
             barycentric[local] = 1.0;
@@ -693,9 +769,10 @@ impl SolutionIndicatorJob {
                 .recovery
                 .entry((triangle.vertices[local], triangle.region))
                 .or_default();
-            entry.displacement =
-                entry.displacement + displacement * (material.stiffness * geometry.area);
-            entry.velocity = entry.velocity + velocity * (material.stiffness * geometry.area);
+            entry.displacement = entry.displacement
+                + displacement * (material.vertex_stiffness[local] * geometry.area);
+            entry.velocity =
+                entry.velocity + velocity * (material.vertex_stiffness[local] * geometry.area);
             entry.weight += geometry.area;
         }
         self.phase = IndicatorPhase::Recover(index + 1);
@@ -710,11 +787,7 @@ impl SolutionIndicatorJob {
         let triangle = self.mesh.triangles[index];
         let geometry = element_geometry(&self.mesh, triangle.vertices)?;
         let nodes = self.operator.element_nodes()[index].map(|node| node as usize);
-        let material = self
-            .scene
-            .region_material(triangle.region)
-            .and_then(|material| material.uniform())
-            .ok_or(SolutionIndicatorError::InvalidScene)?;
+        let material = self.material_samples[index].ok_or(SolutionIndicatorError::InvalidScene)?;
         let omega = (std::f64::consts::TAU * self.options.forcing_frequency_hz).max(1.0);
         let recovered = triangle.vertices.map(|vertex| {
             let value = self.recovery[&(vertex, triangle.region)];
@@ -728,7 +801,9 @@ impl SolutionIndicatorJob {
             edge: geometry.maximum_edge,
             ..Default::default()
         };
-        for (barycentric, weight) in quadrature() {
+        for ((barycentric, weight), coefficients) in
+            quadrature().into_iter().zip(material.quadrature)
+        {
             let basis = enriched_quadratic_basis(barycentric);
             let gradients = enriched_quadratic_basis_gradients(barycentric, geometry.gradients);
             let laplacians = enriched_quadratic_basis_laplacians(barycentric, geometry.gradients);
@@ -745,22 +820,23 @@ impl SolutionIndicatorJob {
             let recovered_v = recovered[0].1 * barycentric[0]
                 + recovered[1].1 * barycentric[1]
                 + recovered[2].1 * barycentric[2];
-            let flux_u = grad_u * material.stiffness;
-            let flux_v = grad_v * material.stiffness;
+            let flux_u = grad_u * coefficients.stiffness;
+            let flux_v = grad_v * coefficients.stiffness;
             estimate.recovery += weight
                 * geometry.area
                 * ((flux_u - recovered_u).dot(flux_u - recovered_u)
                     + (flux_v - recovered_v).dot(flux_v - recovered_v) / (omega * omega))
-                / material.stiffness;
-            let residual = material.mass_density * (a - source) + material.damping * v
-                - material.stiffness * laplace_u;
+                / coefficients.stiffness;
+            let residual = coefficients.mass_density * (a - source) + coefficients.damping * v
+                - coefficients.stiffness * laplace_u
+                - material.stiffness_gradient.dot(grad_u);
             estimate.cell_residual +=
                 weight * geometry.area * geometry.maximum_edge.powi(2) * residual.powi(2)
-                    / material.stiffness;
+                    / coefficients.stiffness;
             estimate.energy += weight
                 * geometry.area
-                * (material.stiffness * grad_u.dot(grad_u)
-                    + material.mass_density * (omega * omega * u * u + v * v));
+                * (coefficients.stiffness * grad_u.dot(grad_u)
+                    + coefficients.mass_density * (omega * omega * u * u + v * v));
         }
         self.total_energy += estimate.energy;
         self.total_area += estimate.area;
@@ -781,7 +857,7 @@ impl SolutionIndicatorJob {
                 self.mesh.vertices[edge.1].point,
             ];
             let length = (points[1] - points[0]).norm();
-            let mut integral = 0.0;
+            let mut integrals = [0.0; 2];
             for (fraction, weight) in [
                 (0.112_701_665_379_258_3, 5.0 / 18.0),
                 (0.5, 8.0 / 18.0),
@@ -789,7 +865,8 @@ impl SolutionIndicatorJob {
             ] {
                 let point = points[0].lerp(points[1], fraction);
                 let mut jump = 0.0;
-                for triangle_index in sides {
+                let mut stiffnesses = [0.0; 2];
+                for (side, triangle_index) in sides.iter().enumerate() {
                     let triangle = self.mesh.triangles[*triangle_index];
                     let geometry = element_geometry(&self.mesh, triangle.vertices)?;
                     let barycentric = barycentric(point, geometry.points)
@@ -799,25 +876,16 @@ impl SolutionIndicatorJob {
                     let nodes =
                         self.operator.element_nodes()[*triangle_index].map(|node| node as usize);
                     let grad = gradient(&self.snapshot.displacement, nodes, gradients);
-                    let stiffness = self
-                        .scene
-                        .region_material(triangle.region)
-                        .and_then(|material| material.uniform())
-                        .ok_or(SolutionIndicatorError::InvalidScene)?
-                        .stiffness;
+                    let stiffness = self.material_at(triangle.region, point)?.stiffness;
+                    stiffnesses[side] = stiffness;
                     jump += stiffness * grad.dot(outward_normal(geometry.points, points));
                 }
-                integral += weight * length * jump * jump;
+                for (integral, stiffness) in integrals.iter_mut().zip(stiffnesses) {
+                    *integral += weight * length * jump * jump / stiffness;
+                }
             }
-            for triangle_index in sides {
-                let stiffness = self
-                    .scene
-                    .region_material(self.mesh.triangles[*triangle_index].region)
-                    .and_then(|material| material.uniform())
-                    .ok_or(SolutionIndicatorError::InvalidScene)?
-                    .stiffness;
-                self.estimates[*triangle_index].interior_jump +=
-                    0.5 * length * integral / stiffness;
+            for (triangle_index, integral) in sides.iter().zip(integrals) {
+                self.estimates[*triangle_index].interior_jump += 0.5 * length * integral;
             }
         }
         self.phase = IndicatorPhase::Jump(index + 1);
@@ -869,14 +937,20 @@ impl SolutionIndicatorJob {
         } else {
             None
         };
+        let middle_material =
+            self.material_at(record.region, edge_points[0].lerp(edge_points[1], 0.5))?;
+        let auxiliary_scale = 0.5
+            * middle_material.stiffness
+            * (middle_material.stiffness / middle_material.mass_density).sqrt();
         let mut integral = 0.0;
         for (fraction, weight) in line_quadrature() {
             let point = edge_points[0].lerp(edge_points[1], fraction);
+            let material = self.material_at(record.region, point)?;
             let barycentric =
                 barycentric(point, geometry.points).ok_or(SolutionIndicatorError::InvalidMesh)?;
             let gradients = enriched_quadratic_basis_gradients(barycentric, geometry.gradients);
             let nodes = self.operator.element_nodes()[record.triangle].map(|node| node as usize);
-            let flux = record.stiffness
+            let flux = material.stiffness
                 * gradient(&self.snapshot.displacement, nodes, gradients).dot(normal);
             let displacement = line_scalar(&self.snapshot.displacement, record.nodes, fraction);
             let velocity = line_scalar(&self.snapshot.velocity, record.nodes, fraction);
@@ -893,14 +967,12 @@ impl SolutionIndicatorJob {
                     flux - signal.value(self.snapshot.time)
                 }
                 FaceBoundaryCondition::Impedance { ratio } => {
-                    let impedance = ratio * (record.mass_density * record.stiffness).sqrt();
+                    let impedance = ratio * (material.mass_density * material.stiffness).sqrt();
                     flux + impedance * velocity
                 }
                 FaceBoundaryCondition::SecondOrderOutgoing => {
-                    let impedance = (record.mass_density * record.stiffness).sqrt();
-                    let wave_speed = (record.stiffness / record.mass_density).sqrt();
-                    flux + impedance * velocity
-                        - 0.5 * record.stiffness * wave_speed * auxiliary_second
+                    let impedance = (material.mass_density * material.stiffness).sqrt();
+                    flux + impedance * velocity - auxiliary_scale * auxiliary_second
                 }
                 FaceBoundaryCondition::Dirichlet { .. } => unreachable!(),
             };
@@ -908,9 +980,9 @@ impl SolutionIndicatorJob {
                 residual += spring
                     * (displacement - line_scalar(&self.snapshot.displacement, partner, fraction));
             }
-            integral += weight * length * residual * residual;
+            integral += weight * length * residual * residual / material.stiffness;
         }
-        self.estimates[record.triangle].boundary_residual += length * integral / record.stiffness;
+        self.estimates[record.triangle].boundary_residual += length * integral;
         self.report.boundary_edges_evaluated += 1;
         self.phase = IndicatorPhase::Boundary(index + 1);
         Ok(())
@@ -937,13 +1009,9 @@ impl SolutionIndicatorJob {
                 .sqrt()
                 .clamp(self.options.minimum_scale, self.options.maximum_scale)
         };
-        let material = self
-            .scene
-            .region_material(self.mesh.triangles[index].region)
-            .and_then(|material| material.uniform())
-            .ok_or(SolutionIndicatorError::InvalidScene)?;
+        let material = self.material_samples[index].ok_or(SolutionIndicatorError::InvalidScene)?;
         let wavelength_target = if self.options.forcing_frequency_hz > 0.0 {
-            (material.stiffness / material.mass_density).sqrt()
+            material.minimum_wave_speed
                 / (self.options.forcing_frequency_hz * self.options.elements_per_wavelength)
         } else {
             self.options.maximum_edge_length
@@ -1096,6 +1164,15 @@ fn gradient(values: &[f64], nodes: [usize; 7], basis: [Point2; 7]) -> Point2 {
         })
 }
 
+fn barycentric_point(points: [Point2; 3], weights: [f64; 3]) -> Point2 {
+    points
+        .into_iter()
+        .zip(weights)
+        .fold(Point2::default(), |point, (vertex, weight)| {
+            point + vertex * weight
+        })
+}
+
 fn line_scalar(values: &[f64], nodes: [usize; 3], fraction: f64) -> f64 {
     let basis = [
         (1.0 - fraction) * (1.0 - 2.0 * fraction),
@@ -1183,10 +1260,10 @@ fn quadrature() -> [([f64; 3], f64); 6] {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, BoundarySignal, InternalBoundary, InternalBoundaryLaw,
-        MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshQuality, MeshTriangle,
-        MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition,
-        OuterBoundaryConditions, OuterSide, mesh_scene,
+        BACKGROUND_REGION, BoundarySignal, InternalBoundary, InternalBoundaryLaw, Material,
+        MaterialId, MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshQuality,
+        MeshTriangle, MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition,
+        OuterBoundaryConditions, OuterSide, Region, mesh_scene,
     };
 
     fn square() -> Arc<TriMesh> {
@@ -1480,6 +1557,7 @@ mod tests {
     #[test]
     fn hole_impedance_contributes_to_its_adjacent_elements() {
         let mut scene = Scene::initial();
+        scene.materials[0].mass_density = crate::ScalarField::formula("1 + 0.1 * x").unwrap();
         scene.outer_boundaries =
             OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
         scene.obstacles[0]
@@ -1512,6 +1590,7 @@ mod tests {
             outer_boundaries: OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting),
             ..Scene::default()
         };
+        scene.materials[0].stiffness = crate::ScalarField::formula("1 + 0.1 * x").unwrap();
         scene.internal_boundaries.push(InternalBoundary {
             id: InternalBoundaryId(4),
             spline: OpenCubicSpline::uniform(vec![
@@ -1625,6 +1704,46 @@ mod tests {
             10_000,
         );
         assert_eq!(result.unwrap_err(), SolutionIndicatorError::InvalidMesh);
+    }
+
+    #[test]
+    fn spatial_material_interface_uses_each_sides_local_flux() {
+        let mut scene = Scene::initial();
+        let interior = RegionId(2);
+        scene.obstacles[0].role = LoopRole::MaterialInterface {
+            exterior: BACKGROUND_REGION,
+            interior,
+        };
+        scene.materials[0].stiffness = crate::ScalarField::formula("1 + 0.1 * x").unwrap();
+        scene.materials.push(Material {
+            id: MaterialId(2),
+            name: "Profile interior".into(),
+            mass_density: crate::ScalarField::constant(1.0),
+            stiffness: crate::ScalarField::formula("2 + 0.1 * x").unwrap(),
+            damping: crate::ScalarField::constant(0.0),
+            parameters: vec![],
+            color: [80, 120, 160],
+        });
+        scene.regions.push(Region {
+            id: interior,
+            material: MaterialId(2),
+            frame: crate::MaterialFrame::world(),
+        });
+        let (mesh, operator, scene) = meshed_setup(scene, 75);
+        let result = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator.clone(),
+                scene,
+                snapshot(&mesh, &operator, |point| point.x),
+                SolutionIndicatorOptions::default(),
+            ),
+            100,
+        )
+        .unwrap();
+
+        assert!(result.report.interior_jump_contribution > 0.0);
+        assert!(result.report.interior_jump_contribution.is_finite());
     }
 
     #[test]
@@ -1882,10 +2001,98 @@ mod tests {
     }
 
     #[test]
-    fn spatial_materials_wait_for_a_coefficient_aware_indicator() {
+    fn constant_formulas_match_uniform_material_indicator() {
+        let mesh = square();
+        let uniform_scene = Scene::default();
+        let uniform_operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &uniform_scene,
+                uniform_scene.outer_boundaries,
+            )
+            .unwrap(),
+        );
+        let state = snapshot(&mesh, &uniform_operator, |point| {
+            point.x * point.x + point.y
+        });
+        let uniform = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                uniform_operator,
+                uniform_scene,
+                state.clone(),
+                SolutionIndicatorOptions::default(),
+            ),
+            100,
+        )
+        .unwrap();
+
+        let mut formula_scene = Scene::default();
+        formula_scene.materials[0].mass_density = crate::ScalarField::formula("1").unwrap();
+        formula_scene.materials[0].stiffness = crate::ScalarField::formula("1").unwrap();
+        formula_scene.materials[0].damping = crate::ScalarField::formula("0").unwrap();
+        let formula_operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &formula_scene,
+                formula_scene.outer_boundaries,
+            )
+            .unwrap(),
+        );
+        let formula = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                formula_operator,
+                formula_scene,
+                state,
+                SolutionIndicatorOptions::default(),
+            ),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(formula.element_indicators, uniform.element_indicators);
+        assert_eq!(formula.element_targets, uniform.element_targets);
+    }
+
+    #[test]
+    fn stiffness_gradient_completes_the_manufactured_cell_residual_in_a_rotated_frame() {
         let mesh = square();
         let mut scene = Scene::default();
-        scene.materials[0].stiffness = crate::ScalarField::formula("1 + 0.1 * x").unwrap();
+        scene.materials[0].stiffness = crate::ScalarField::formula("1 + x").unwrap();
+        scene.regions[0].frame.angle_radians = std::f64::consts::FRAC_PI_2;
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &scene,
+                scene.outer_boundaries,
+            )
+            .unwrap(),
+        );
+        let mut state = snapshot(&mesh, &operator, |point| point.y);
+        state.acceleration.fill(1.0);
+        let result = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions::default(),
+            ),
+            1,
+        )
+        .unwrap();
+
+        assert!(result.report.recovery_contribution < 1.0e-20);
+        assert!(result.report.cell_residual_contribution < 1.0e-20);
+        assert!(result.report.interior_jump_contribution < 1.0e-20);
+    }
+
+    #[test]
+    fn spatial_wave_speed_caps_each_element_by_its_slowest_sample() {
+        let mesh = square();
+        let mut scene = Scene::default();
+        scene.materials[0].mass_density = crate::ScalarField::formula("1 + 3 * x").unwrap();
         let operator = Arc::new(
             QuadraticWaveOperator::assemble_scene_with_boundaries(
                 &mesh,
@@ -1895,19 +2102,114 @@ mod tests {
             .unwrap(),
         );
         let state = snapshot(&mesh, &operator, |_| 0.0);
-        assert_eq!(
-            run(
-                SolutionIndicatorJob::new(
-                    mesh,
-                    operator,
-                    scene,
-                    state,
-                    SolutionIndicatorOptions::default(),
-                ),
-                100,
+        let result = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions {
+                    minimum_edge_length: 0.005,
+                    maximum_edge_length: 2.0,
+                    forcing_frequency_hz: 10.0,
+                    elements_per_wavelength: 5.0,
+                    ..Default::default()
+                },
+            ),
+            100,
+        )
+        .unwrap();
+
+        assert!(
+            result
+                .element_targets
+                .iter()
+                .all(|target| *target <= 0.010_000_001)
+        );
+    }
+
+    #[test]
+    fn spatial_density_and_damping_enter_the_cell_residual() {
+        let mesh = square();
+        let uniform_scene = Scene::default();
+        let uniform_operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &uniform_scene,
+                uniform_scene.outer_boundaries,
             )
-            .unwrap_err(),
-            SolutionIndicatorError::InvalidScene
+            .unwrap(),
+        );
+        let mut uniform_state = snapshot(&mesh, &uniform_operator, |_| 0.0);
+        uniform_state.velocity.fill(1.0);
+        uniform_state.acceleration.fill(1.0);
+        let uniform = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                uniform_operator,
+                uniform_scene,
+                uniform_state,
+                SolutionIndicatorOptions::default(),
+            ),
+            100,
+        )
+        .unwrap();
+
+        let mut profile_scene = Scene::default();
+        profile_scene.materials[0].mass_density = crate::ScalarField::formula("1 + x").unwrap();
+        profile_scene.materials[0].damping = crate::ScalarField::formula("y").unwrap();
+        let profile_operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &profile_scene,
+                profile_scene.outer_boundaries,
+            )
+            .unwrap(),
+        );
+        let mut profile_state = snapshot(&mesh, &profile_operator, |_| 0.0);
+        profile_state.velocity.fill(1.0);
+        profile_state.acceleration.fill(1.0);
+        let profile = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                profile_operator,
+                profile_scene,
+                profile_state,
+                SolutionIndicatorOptions::default(),
+            ),
+            100,
+        )
+        .unwrap();
+
+        assert!(
+            profile.report.cell_residual_contribution > uniform.report.cell_residual_contribution
+        );
+    }
+
+    #[test]
+    fn material_sampling_failure_reports_region_and_point() {
+        let (mesh, operator, mut scene) = setup();
+        scene.materials[0].stiffness = crate::ScalarField::formula("1 / x").unwrap();
+        let state = snapshot(&mesh, &operator, |_| 0.0);
+        let error = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions::default(),
+            ),
+            100,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            SolutionIndicatorError::MaterialEvaluation {
+                region: BACKGROUND_REGION,
+                point: Point2::new(0.0, 0.0),
+                reason: "formula produced an invalid value".into(),
+            }
         );
     }
 }

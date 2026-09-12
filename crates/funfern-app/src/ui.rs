@@ -3122,14 +3122,6 @@ impl Playground {
             self.amr_status = "off";
             return;
         }
-        if self.mesh_committed_scene.has_varying_materials() {
-            self.solution_indicator_job = None;
-            self.solution_indicator_result = None;
-            self.solution_indicator_source = None;
-            self.amr_coarsen_streak = 0;
-            self.amr_status = "waiting for coefficient-aware AMR";
-            return;
-        }
         if self.editor.editing()
             || self.mesh_job.is_some()
             || self.mesh_adaptation_job.is_some()
@@ -11136,6 +11128,13 @@ pub fn amr_check_scene() -> Playground {
         wave_running: false,
         ..Default::default()
     };
+    for scene in [
+        &mut state.editor.document.draft,
+        &mut state.editor.document.accepted,
+    ] {
+        scene.materials[0].mass_density =
+            ScalarField::formula("1 + 0.35 * r^2").expect("valid AMR-check material profile");
+    }
     state
         .editor
         .create_point_probe(Point2::new(-0.25, 0.25))
@@ -15963,6 +15962,42 @@ mod tests {
                 "missing {label}"
             );
         }
+    }
+
+    #[test]
+    fn native_amr_check_scene_exercises_a_spatial_material_indicator() {
+        let mut state = amr_check_scene();
+        assert!(state.editor.document.accepted.has_varying_materials());
+        build_mesh_candidate(&mut state);
+        let candidate = state.simulation_candidate.as_ref().unwrap();
+        let dofs = candidate.operator.degrees_of_freedom();
+        let zeros = vec![0.0; dofs];
+        let snapshot = QuadraticSolutionSnapshot {
+            mesh_revision: candidate.mesh.mesh_revision,
+            displacement: zeros.clone(),
+            velocity: zeros.clone(),
+            acceleration: zeros.clone(),
+            auxiliary: zeros.clone(),
+            volume_acceleration: zeros,
+            time: 0.0,
+            time_step: candidate.time_step,
+        };
+        let mut job = SolutionIndicatorJob::new(
+            candidate.mesh.clone(),
+            candidate.operator.clone(),
+            candidate.scene.clone(),
+            snapshot,
+            state.solution_indicator_options(),
+        );
+        let result = loop {
+            if let Some(result) = job.advance(100) {
+                break result.unwrap();
+            }
+        };
+
+        assert_eq!(result.element_targets.len(), candidate.mesh.triangles.len());
+        assert!(result.report.minimum_target.is_finite());
+        assert!(result.report.maximum_target.is_finite());
     }
 
     #[test]
