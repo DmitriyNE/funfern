@@ -471,6 +471,13 @@ integrate only adjacent valid samples and report their covered fraction. Line
 definitions survive history, files, links, and recovery while trace data remains
 transient like point-probe history.
 
+Line readouts form a 3×3 quantity/representation matrix: field, signed normal flux,
+and energy may each be shown versus arclength, as a time/arclength waterfall, or as
+an arclength integral versus time. A compact checkbox menu controls this matrix and
+starts with four views active. Every active view shares the same time window.
+Horizontal dragging pans time traces; vertical dragging pans waterfalls along their
+vertical time axis.
+
 The previous h≈0.16 overlay was an editor preview. Wave benchmarks start with
 h≤0.04 and h≤0.02, corresponding to 10 and 20 maximum-edge lengths per reference
 wavelength 0.4 (five wavelengths across the box). P1 has one scalar spatial DOF

@@ -157,6 +157,68 @@ impl ProbeHit {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineProbeQuantity {
+    Field,
+    Flux,
+    Energy,
+}
+
+impl LineProbeQuantity {
+    const ALL: [Self; 3] = [Self::Field, Self::Flux, Self::Energy];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Field => "Field",
+            Self::Flux => "Normal flux",
+            Self::Energy => "Energy",
+        }
+    }
+
+    const fn color(self) -> Color32 {
+        match self {
+            Self::Field => SELECT,
+            Self::Flux => TEAL,
+            Self::Energy => GOLD,
+        }
+    }
+
+    const fn offset(self) -> usize {
+        match self {
+            Self::Field => 0,
+            Self::Flux => 3,
+            Self::Energy => 6,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineProbeRepresentation {
+    Arclength,
+    Waterfall,
+    Integral,
+}
+
+impl LineProbeRepresentation {
+    const ALL: [Self; 3] = [Self::Arclength, Self::Waterfall, Self::Integral];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Arclength => "vs s",
+            Self::Waterfall => "Waterfall",
+            Self::Integral => "∫ vs t",
+        }
+    }
+
+    const fn offset(self) -> usize {
+        match self {
+            Self::Arclength => 0,
+            Self::Waterfall => 1,
+            Self::Integral => 2,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ProbeViewState {
     live: bool,
@@ -165,9 +227,7 @@ struct ProbeViewState {
     field: bool,
     velocity: bool,
     energy: bool,
-    profile: bool,
-    waterfall: bool,
-    normal_power: bool,
+    line_plots: [bool; 9],
     waterfall_gain: f32,
 }
 
@@ -180,9 +240,8 @@ impl ProbeViewState {
             field: true,
             velocity: true,
             energy: true,
-            profile: true,
-            waterfall: true,
-            normal_power: true,
+            // Field vs arclength + waterfall, and the two useful integral traces.
+            line_plots: [true, true, false, false, false, true, false, false, true],
             waterfall_gain: 1.0,
         }
     }
@@ -3497,19 +3556,15 @@ impl Playground {
                 ProbeTarget::Point(_) => None,
                 ProbeTarget::Segment { start, end, .. } => Some((end - start).norm()),
             };
-            let aggregate_samples = segment_length.map_or_else(Vec::new, |length| {
+            let curve_times = segment_length.map_or_else(Vec::new, |_| {
                 curve_frames
                     .iter()
-                    .map(|frame| {
-                        let (mean_energy, normal_power, _) =
-                            Self::curve_probe_aggregate(frame, length);
-                        PointProbeRecord {
-                            probe_id: frame.probe_id,
-                            time: frame.time,
-                            displacement: normal_power,
-                            velocity: 0.0,
-                            energy_density: mean_energy,
-                        }
+                    .map(|frame| PointProbeRecord {
+                        probe_id: frame.probe_id,
+                        time: frame.time,
+                        displacement: 0.0,
+                        velocity: 0.0,
+                        energy_density: 0.0,
                     })
                     .collect::<Vec<_>>()
             });
@@ -3553,10 +3608,45 @@ impl Playground {
                             }
                         }
                         if segment_length.is_some() {
-                            ui.checkbox(&mut view.profile, "Profile");
-                            ui.checkbox(&mut view.waterfall, "Waterfall");
-                            ui.checkbox(&mut view.energy, "Mean energy");
-                            ui.checkbox(&mut view.normal_power, "Normal power");
+                            let active = view.line_plots.iter().filter(|enabled| **enabled).count();
+                            egui::containers::menu::MenuButton::new(format!("Plots ({active})"))
+                                .config(
+                                    egui::containers::menu::MenuConfig::new().close_behavior(
+                                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                                    ),
+                                )
+                                .ui(ui, |ui| {
+                                    egui::Grid::new(("line_probe_plots", id.0))
+                                        .num_columns(4)
+                                        .spacing(egui::vec2(12.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.label("");
+                                            for representation in LineProbeRepresentation::ALL {
+                                                ui.small(representation.label());
+                                            }
+                                            ui.end_row();
+                                            for quantity in LineProbeQuantity::ALL {
+                                                ui.label(quantity.label());
+                                                for representation in LineProbeRepresentation::ALL {
+                                                    let index =
+                                                        quantity.offset() + representation.offset();
+                                                    ui.checkbox(&mut view.line_plots[index], "")
+                                                        .on_hover_text(format!(
+                                                            "{} {}",
+                                                            quantity.label(),
+                                                            representation.label()
+                                                        ));
+                                                }
+                                                ui.end_row();
+                                            }
+                                        });
+                                    ui.separator();
+                                    ui.add(
+                                        egui::Slider::new(&mut view.waterfall_gain, 0.1..=10.0)
+                                            .logarithmic(true)
+                                            .text("Waterfall gain"),
+                                    );
+                                });
                         } else {
                             ui.checkbox(&mut view.field, "Field");
                             ui.checkbox(&mut view.velocity, "Velocity");
@@ -3571,47 +3661,66 @@ impl Playground {
                     }
                     if segment_length.is_some() {
                         if let Some(frame) = curve_frames.last() {
-                            let (_, _, coverage) = Self::curve_probe_aggregate(
+                            let (_, coverage) = Self::curve_probe_integral(
                                 frame,
                                 segment_length.unwrap_or_default(),
+                                LineProbeQuantity::Field,
                             );
                             if coverage < 0.999 {
                                 ui.small(format!("Valid coverage {:.0}%", coverage * 100.0));
                             }
                         }
-                        if view.profile {
-                            Self::curve_probe_profile(ui, &curve_frames, &view);
-                        }
-                        if view.waterfall {
-                            Self::curve_probe_waterfall(
-                                ui,
-                                &curve_frames,
-                                &aggregate_samples,
-                                &mut view,
-                                self.probe_history_seconds,
-                            );
-                        }
-                        if view.energy {
-                            Self::probe_plot(
-                                ui,
-                                "Mean energy density",
-                                &aggregate_samples,
-                                |sample| sample.energy_density,
-                                GOLD,
-                                &mut view,
-                                self.probe_history_seconds,
-                            );
-                        }
-                        if view.normal_power {
-                            Self::probe_plot(
-                                ui,
-                                "Signed normal power",
-                                &aggregate_samples,
-                                |sample| sample.displacement,
-                                TEAL,
-                                &mut view,
-                                self.probe_history_seconds,
-                            );
+                        let length = segment_length.unwrap_or_default();
+                        for quantity in LineProbeQuantity::ALL {
+                            if view.line_plots
+                                [quantity.offset() + LineProbeRepresentation::Arclength.offset()]
+                            {
+                                Self::curve_probe_profile(
+                                    ui,
+                                    &curve_frames,
+                                    &view,
+                                    quantity,
+                                    length,
+                                );
+                            }
+                            if view.line_plots
+                                [quantity.offset() + LineProbeRepresentation::Waterfall.offset()]
+                            {
+                                Self::curve_probe_waterfall(
+                                    ui,
+                                    &curve_frames,
+                                    &curve_times,
+                                    &mut view,
+                                    self.probe_history_seconds,
+                                    quantity,
+                                );
+                            }
+                            if view.line_plots
+                                [quantity.offset() + LineProbeRepresentation::Integral.offset()]
+                            {
+                                let history = curve_frames
+                                    .iter()
+                                    .map(|frame| PointProbeRecord {
+                                        probe_id: frame.probe_id,
+                                        time: frame.time,
+                                        displacement: Self::curve_probe_integral(
+                                            frame, length, quantity,
+                                        )
+                                        .0,
+                                        velocity: 0.0,
+                                        energy_density: 0.0,
+                                    })
+                                    .collect::<Vec<_>>();
+                                Self::probe_plot(
+                                    ui,
+                                    &format!("{} ∫ ds", quantity.label()),
+                                    &history,
+                                    |sample| sample.displacement,
+                                    quantity.color(),
+                                    &mut view,
+                                    self.probe_history_seconds,
+                                );
+                            }
                         }
                     } else if view.field {
                         Self::probe_plot(
@@ -3646,7 +3755,11 @@ impl Playground {
                             self.probe_history_seconds,
                         );
                     }
-                    ui.small("Drag right for earlier time · wheel to zoom");
+                    ui.small(if segment_length.is_some() {
+                        "Drag traces horizontally or waterfalls vertically · wheel to zoom"
+                    } else {
+                        "Drag right for earlier time · wheel to zoom"
+                    });
                 });
             if clear {
                 self.clear_probe_trace(id);
@@ -3658,43 +3771,51 @@ impl Playground {
         }
     }
 
-    fn curve_probe_aggregate(frame: &CurveProbeRecord, length: f64) -> (f64, f64, f64) {
-        let intervals = frame.displacement.len().saturating_sub(1);
-        if intervals == 0 || !length.is_finite() {
-            return (f64::NAN, f64::NAN, 0.0);
+    fn curve_probe_values(frame: &CurveProbeRecord, quantity: LineProbeQuantity) -> &[f32] {
+        match quantity {
+            LineProbeQuantity::Field => &frame.displacement,
+            LineProbeQuantity::Flux => &frame.normal_flux,
+            LineProbeQuantity::Energy => &frame.energy_density,
         }
-        let mut energy = 0.0;
-        let mut power = 0.0;
+    }
+
+    fn curve_probe_integral(
+        frame: &CurveProbeRecord,
+        length: f64,
+        quantity: LineProbeQuantity,
+    ) -> (f64, f64) {
+        let samples = Self::curve_probe_values(frame, quantity);
+        let intervals = samples.len().saturating_sub(1);
+        if intervals == 0 || !length.is_finite() {
+            return (f64::NAN, 0.0);
+        }
+        let mut integral = 0.0;
         let mut valid = 0usize;
         for index in 0..intervals {
-            let values = (
-                frame.energy_density[index] as f64,
-                frame.energy_density[index + 1] as f64,
-                frame.normal_flux[index] as f64,
-                frame.normal_flux[index + 1] as f64,
-            );
-            if values.0.is_finite()
-                && values.1.is_finite()
-                && values.2.is_finite()
-                && values.3.is_finite()
-            {
-                energy += 0.5 * (values.0 + values.1);
-                power += 0.5 * (values.2 + values.3);
+            let a = samples[index] as f64;
+            let b = samples[index + 1] as f64;
+            if a.is_finite() && b.is_finite() {
+                integral += 0.5 * (a + b);
                 valid += 1;
             }
         }
         if valid == 0 {
-            return (f64::NAN, f64::NAN, 0.0);
+            return (f64::NAN, 0.0);
         }
         (
-            energy / valid as f64,
-            power * length / intervals as f64,
+            integral * length / intervals as f64,
             valid as f64 / intervals as f64,
         )
     }
 
-    fn curve_probe_profile(ui: &mut egui::Ui, frames: &[CurveProbeRecord], view: &ProbeViewState) {
-        ui.small("Field profile");
+    fn curve_probe_profile(
+        ui: &mut egui::Ui,
+        frames: &[CurveProbeRecord],
+        view: &ProbeViewState,
+        quantity: LineProbeQuantity,
+        length: f64,
+    ) {
+        ui.small(format!("{} vs arclength", quantity.label()));
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width().max(120.0), 110.0),
             egui::Sense::hover(),
@@ -3715,29 +3836,56 @@ impl Playground {
             );
             return;
         };
-        let maximum = frame
-            .displacement
+        let samples = Self::curve_probe_values(frame, quantity);
+        let mut minimum = samples
             .iter()
             .copied()
             .filter(|value| value.is_finite())
-            .map(f32::abs)
-            .fold(0.0, f32::max)
-            .max(1.0e-12);
-        let count = frame.displacement.len().max(2);
+            .fold(f32::INFINITY, f32::min);
+        let mut maximum = samples
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !minimum.is_finite() || !maximum.is_finite() {
+            return;
+        }
+        if (maximum - minimum).abs() < 1.0e-12 {
+            let padding = maximum.abs().max(1.0) * 0.05;
+            minimum -= padding;
+            maximum += padding;
+        }
+        if minimum <= 0.0 && maximum >= 0.0 {
+            let zero = egui::lerp(
+                rect.bottom()..=rect.top(),
+                (0.0 - minimum) / (maximum - minimum),
+            );
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.left(), zero),
+                    egui::pos2(rect.right(), zero),
+                ],
+                Stroke::new(1.0, Color32::from_rgb(45, 57, 67)),
+            );
+        }
+        let count = samples.len().max(2);
         let mut run = Vec::new();
-        for (index, value) in frame.displacement.iter().copied().enumerate() {
+        for (index, value) in samples.iter().copied().enumerate() {
             if value.is_finite() {
                 run.push(egui::pos2(
                     egui::lerp(
                         rect.left()..=rect.right(),
                         index as f32 / (count - 1) as f32,
                     ),
-                    egui::lerp(rect.bottom()..=rect.top(), value / maximum * 0.5 + 0.5),
+                    egui::lerp(
+                        rect.bottom()..=rect.top(),
+                        (value - minimum) / (maximum - minimum),
+                    ),
                 ));
             } else if run.len() >= 2 {
                 ui.painter().add(egui::Shape::line(
                     std::mem::take(&mut run),
-                    Stroke::new(1.5, SELECT),
+                    Stroke::new(1.5, quantity.color()),
                 ));
             } else {
                 run.clear();
@@ -3745,8 +3893,29 @@ impl Playground {
         }
         if run.len() >= 2 {
             ui.painter()
-                .add(egui::Shape::line(run, Stroke::new(1.5, SELECT)));
+                .add(egui::Shape::line(run, Stroke::new(1.5, quantity.color())));
         }
+        ui.painter().text(
+            rect.left_top() + egui::vec2(4.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            format!("{maximum:+.3e}"),
+            egui::FontId::monospace(9.0),
+            Color32::from_rgb(142, 161, 175),
+        );
+        ui.painter().text(
+            rect.left_bottom() + egui::vec2(4.0, -3.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{minimum:+.3e} · s=0"),
+            egui::FontId::monospace(9.0),
+            Color32::from_rgb(142, 161, 175),
+        );
+        ui.painter().text(
+            rect.right_bottom() + egui::vec2(-4.0, -3.0),
+            egui::Align2::RIGHT_BOTTOM,
+            format!("s={length:.3}"),
+            egui::FontId::monospace(9.0),
+            Color32::from_rgb(142, 161, 175),
+        );
     }
 
     fn curve_probe_waterfall(
@@ -3755,15 +3924,9 @@ impl Playground {
         times: &[PointProbeRecord],
         view: &mut ProbeViewState,
         maximum_span: f64,
+        quantity: LineProbeQuantity,
     ) {
-        ui.horizontal(|ui| {
-            ui.small("Field waterfall");
-            ui.add(
-                egui::Slider::new(&mut view.waterfall_gain, 0.1..=10.0)
-                    .logarithmic(true)
-                    .text("gain"),
-            );
-        });
+        ui.small(format!("{} waterfall", quantity.label()));
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width().max(120.0), 170.0),
             egui::Sense::drag(),
@@ -3778,7 +3941,7 @@ impl Playground {
             view.live = false;
         }
         if response.dragged() {
-            view.end_time -= response.drag_delta().x as f64 / rect.width() as f64 * span;
+            view.end_time += response.drag_delta().y as f64 / rect.height() as f64 * span;
         }
         if response.hovered() {
             let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
@@ -3796,7 +3959,7 @@ impl Playground {
             .collect::<Vec<_>>();
         let maximum = visible
             .iter()
-            .flat_map(|frame| frame.displacement.iter())
+            .flat_map(|frame| Self::curve_probe_values(frame, quantity).iter())
             .copied()
             .filter(|value| value.is_finite())
             .map(f32::abs)
@@ -3804,7 +3967,8 @@ impl Playground {
             .max(1.0e-12)
             / view.waterfall_gain;
         for (row, frame) in visible.iter().enumerate() {
-            let count = frame.displacement.len();
+            let samples = Self::curve_probe_values(frame, quantity);
+            let count = samples.len();
             if count == 0 {
                 continue;
             }
@@ -3816,12 +3980,19 @@ impl Playground {
                 rect.bottom()..=rect.top(),
                 row as f32 / visible.len() as f32,
             );
-            for (column, value) in frame.displacement.iter().copied().enumerate() {
+            for (column, value) in samples.iter().copied().enumerate() {
                 if !value.is_finite() {
                     continue;
                 }
                 let normalized = (value / maximum).clamp(-1.0, 1.0);
-                let color = if normalized >= 0.0 {
+                let color = if quantity == LineProbeQuantity::Energy {
+                    let amount = normalized.max(0.0);
+                    Color32::from_rgb(
+                        (22.0 + amount * 233.0) as u8,
+                        (35.0 + amount * 155.0) as u8,
+                        (55.0 + amount * 55.0) as u8,
+                    )
+                } else if normalized >= 0.0 {
                     Color32::from_rgb(
                         (30.0 + normalized * 225.0) as u8,
                         (45.0 + normalized * 90.0) as u8,
@@ -3847,6 +4018,27 @@ impl Playground {
                 );
             }
         }
+        ui.painter().text(
+            rect.left_top() + egui::vec2(4.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            format!("t={maximum_time:.3}"),
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
+        ui.painter().text(
+            rect.left_bottom() + egui::vec2(4.0, -3.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("t={minimum_time:.3} · s=0"),
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
+        ui.painter().text(
+            rect.right_bottom() + egui::vec2(-4.0, -3.0),
+            egui::Align2::RIGHT_BOTTOM,
+            "s=L",
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
     }
 
     fn probe_plot(
@@ -4444,8 +4636,11 @@ impl Playground {
                             .get(&probe.id)
                             .and_then(|trace| trace.frames.back())
                         {
-                            let (_, power, coverage) =
-                                Self::curve_probe_aggregate(frame, (end - start).norm());
+                            let (power, coverage) = Self::curve_probe_integral(
+                                frame,
+                                (end - start).norm(),
+                                LineProbeQuantity::Flux,
+                            );
                             ui.small(format!(
                                 "power {power:+.3e} · {:.0}% coverage",
                                 coverage * 100.0
@@ -11160,6 +11355,7 @@ mod tests {
         assert_eq!(h.state.interaction_mode, InteractionMode::PlaceSegmentProbe);
         assert_eq!(h.state.editor.history_len(), (1, 0));
 
+        h.state.probe_windows.clear();
         h.click(h.point(Point2::new(-0.2, -0.5)));
         h.key(Key::Escape, Modifiers::NONE);
         assert_eq!(h.state.interaction_mode, InteractionMode::PlaceSegmentProbe);
@@ -11193,7 +11389,7 @@ mod tests {
     }
 
     #[test]
-    fn line_probe_aggregate_uses_only_contiguous_valid_intervals() {
+    fn line_probe_integrals_use_only_contiguous_valid_intervals() {
         let frame = CurveProbeRecord {
             probe_id: 1,
             time: 0.5,
@@ -11201,10 +11397,152 @@ mod tests {
             energy_density: vec![2.0, 4.0, f32::NAN, 8.0, 10.0],
             normal_flux: vec![1.0, 3.0, f32::NAN, -2.0, 2.0],
         };
-        let (mean_energy, power, coverage) = Playground::curve_probe_aggregate(&frame, 2.0);
-        assert!((mean_energy - 6.0).abs() < 1.0e-12);
+        let (field, field_coverage) =
+            Playground::curve_probe_integral(&frame, 2.0, LineProbeQuantity::Field);
+        let (power, coverage) =
+            Playground::curve_probe_integral(&frame, 2.0, LineProbeQuantity::Flux);
+        let (energy, energy_coverage) =
+            Playground::curve_probe_integral(&frame, 2.0, LineProbeQuantity::Energy);
+        assert!((field - 1.75).abs() < 1.0e-12);
         assert!((power - 1.0).abs() < 1.0e-12);
+        assert!((energy - 6.0).abs() < 1.0e-12);
+        assert!((field_coverage - 0.5).abs() < 1.0e-12);
         assert!((coverage - 0.5).abs() < 1.0e-12);
+        assert!((energy_coverage - 0.5).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn line_waterfall_pans_on_its_vertical_time_axis() {
+        let mut h = Harness::new();
+        let id = h
+            .state
+            .editor
+            .create_segment_probe(Point2::new(-0.5, 0.5), Point2::new(0.5, 0.5))
+            .unwrap();
+        h.state.probe_windows.insert(id);
+        h.state.curve_probe_traces.insert(
+            id,
+            CurveProbeTrace {
+                frames: (0..=100)
+                    .map(|index| CurveProbeRecord {
+                        probe_id: id.0,
+                        time: index as f64 * 0.1,
+                        displacement: vec![index as f32; 64],
+                        energy_density: vec![index as f32; 64],
+                        normal_flux: vec![index as f32; 64],
+                    })
+                    .collect(),
+                accept_after: 0.0,
+            },
+        );
+        h.frame(vec![]);
+        h.frame(vec![]);
+        let label = h
+            .texts
+            .iter()
+            .find(|(text, _)| text == "Field waterfall")
+            .unwrap_or_else(|| panic!("texts: {:?}", h.texts))
+            .1;
+        let start = egui::pos2(label.left() + 180.0, label.bottom() + 80.0);
+        h.frame(vec![
+            Event::PointerMoved(start),
+            Event::PointerButton {
+                pos: start,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        let horizontal = start + egui::vec2(60.0, 0.0);
+        h.frame(vec![Event::PointerMoved(horizontal)]);
+        assert!((h.state.probe_views[&id].end_time - 10.0).abs() < 1.0e-12);
+
+        let upward = horizontal + egui::vec2(0.0, -60.0);
+        h.frame(vec![Event::PointerMoved(upward)]);
+        assert!(h.state.probe_views[&id].end_time < 10.0);
+        h.frame(vec![Event::PointerButton {
+            pos: upward,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
+    }
+
+    #[test]
+    fn line_probe_readout_defaults_to_four_of_nine_plots() {
+        let view = ProbeViewState::new(10.0);
+        assert_eq!(
+            view.line_plots.iter().filter(|enabled| **enabled).count(),
+            4
+        );
+        assert!(view.line_plots[LineProbeQuantity::Field.offset()]);
+        assert!(
+            view.line_plots
+                [LineProbeQuantity::Field.offset() + LineProbeRepresentation::Waterfall.offset()]
+        );
+        assert!(
+            view.line_plots
+                [LineProbeQuantity::Flux.offset() + LineProbeRepresentation::Integral.offset()]
+        );
+        assert!(
+            view.line_plots
+                [LineProbeQuantity::Energy.offset() + LineProbeRepresentation::Integral.offset()]
+        );
+    }
+
+    #[test]
+    fn line_probe_plot_picker_stays_open_for_multiple_toggles() {
+        let mut h = Harness::new();
+        let id = h
+            .state
+            .editor
+            .create_segment_probe(Point2::new(-0.5, 0.5), Point2::new(0.5, 0.5))
+            .unwrap();
+        h.state.probe_windows.insert(id);
+        h.frame(vec![]);
+        h.click_text("Plots (4)");
+        h.frame(vec![]);
+
+        let checkbox_position = |texts: &[(String, Rect)], row: &str, column: &str| {
+            let row = texts
+                .iter()
+                .find(|(text, _)| text == row)
+                .unwrap_or_else(|| panic!("missing picker row in {texts:?}"))
+                .1;
+            let column = texts
+                .iter()
+                .find(|(text, _)| text == column)
+                .unwrap_or_else(|| panic!("missing picker column in {texts:?}"))
+                .1;
+            egui::pos2(column.left() + 8.0, row.center().y)
+        };
+
+        let field_integral = checkbox_position(&h.texts, "Field", "∫ vs t");
+        h.click(field_integral);
+        assert_eq!(
+            h.state.probe_views[&id]
+                .line_plots
+                .iter()
+                .filter(|enabled| **enabled)
+                .count(),
+            5
+        );
+        assert!(h.texts.iter().any(|(text, _)| text == "Waterfall gain"));
+
+        let flux_waterfall = checkbox_position(&h.texts, "Normal flux", "Waterfall");
+        h.click(flux_waterfall);
+        assert_eq!(
+            h.state.probe_views[&id]
+                .line_plots
+                .iter()
+                .filter(|enabled| **enabled)
+                .count(),
+            6
+        );
+        assert!(h.texts.iter().any(|(text, _)| text == "Waterfall gain"));
+
+        h.key(Key::Escape, Modifiers::NONE);
+        assert!(!h.texts.iter().any(|(text, _)| text == "Waterfall gain"));
     }
 
     #[test]

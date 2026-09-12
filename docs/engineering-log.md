@@ -38,6 +38,27 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Line-probe plot matrix
+
+- Replaced the four exposed line-readout toggles with a compact 3×3 Plots menu.
+  Field, signed normal flux, and energy can each be displayed versus arclength, as
+  a waterfall, or as an arclength integral versus time. The default remains four
+  plots: field profile and waterfall, normal power, and integrated energy. The
+  picker stays open while toggling plots or adjusting gain, and closes on an
+  outside click or Escape.
+- All nine views use the same time-window state. Waterfall dragging now follows its
+  vertical time axis; horizontal movement does not pan it. Time traces retain their
+  horizontal grabbed-content interaction, and arclength profiles follow the shared
+  selected time.
+- Replaced the previous mean-energy trace with the requested energy line integral.
+  Field and flux use the same gap-aware trapezoidal integration, so every integral
+  excludes intervals adjacent to invalid spatial samples and retains coverage.
+- Regression coverage checks the default four-of-nine selection, repeated toggles
+  within one open picker, all three line integrals across a gap, and
+  horizontal-versus-vertical waterfall dragging.
+- All 220 workspace tests, formatting, Clippy with warnings denied, and the release
+  Trunk/WASM build pass.
+
 ## 2026-09-12 — Straight line probes
 
 - Added independent two-click line probes with endpoint editing, rigid body dragging,
@@ -51,10 +72,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   material-aware energy density, and signed normal energy flux. Its 64-frame ring
   is independent of the longer point-probe ring. Partial domain or ambiguous-trace
   coverage produces spatial gaps while valid intervals continue recording.
-- Line readouts provide current field profile, waterfall, mean energy, and signed
-  normal-power history. Aggregates use trapezoidal integration over adjacent valid
-  samples and display the valid coverage fraction. All time plots share the existing
-  pan, zoom, and Live behavior; waterfall intensity has an independent gain control.
+- The initial line readout provided field profile and waterfall, mean energy, and
+  signed normal-power history. The plot-matrix follow-up above generalizes this to
+  all quantity/representation combinations.
 - Automated coverage includes two-click placement, rigid dragging as one undoable
   action, partial-coverage aggregation, format migration/round-trip, shader clock,
   flux/gap output, and independent preset strides. The native GPU check now also

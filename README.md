@@ -174,8 +174,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Drag either endpoint to reshape it or drag its body as one rigid object. The arrow
   shows the positive left normal; Flip direction reverses both the sampling order
   and flux sign. Low, Medium, and High presets record 32/64/128 spatial samples at
-  30/60/120 samples per simulated second. Floating readouts provide the current
-  field profile, a time waterfall, mean energy density, and signed normal power.
+  30/60/120 samples per simulated second. A compact Plots menu exposes field,
+  normal flux, and energy as a waterfall, versus arclength, or integrated versus
+  time: nine combinations in total. New readouts initially show field versus
+  arclength, its waterfall, normal power, and integrated energy. All active views
+  share one time window; drag waterfalls vertically and time traces horizontally.
   Portions outside the simulated domain or on a two-trace boundary appear as gaps;
   the remaining coverage still contributes to the readout.
 - **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered
