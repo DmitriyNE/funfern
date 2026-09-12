@@ -55,6 +55,18 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Persistent adaptation-target display
+
+- Fixed the adaptation-target overlay disappearing at every automatic AMR commit.
+  The last completed adaptive size field now survives its mesh handoff and is
+  sampled on the replacement mesh, rather than requiring the old result's
+  per-element array to have the new triangle count.
+- Fresh scenes and geometry, material, boundary, reset, or AMR-setting changes
+  continue to invalidate the display. A regression test evaluates an old indicator
+  field on a replacement mesh with a different revision and element count.
+- All 270 workspace tests, Clippy with warnings denied, native release compilation,
+  and release Trunk/WASM packaging pass.
+
 ## 2026-09-12 — Material profile placement and visualization
 
 - Moved region-owned material-frame controls under Profile placement for the

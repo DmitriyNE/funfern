@@ -3500,7 +3500,9 @@ impl Playground {
                 self.fresh_simulation_requested = false;
             }
             self.solution_indicator_job = None;
-            self.solution_indicator_result = None;
+            if candidate.fresh || scene_settings_changed {
+                self.solution_indicator_result = None;
+            }
             self.solution_indicator_source = None;
             self.amr_last_analyzed_step = None;
             self.amr_coarsen_streak = 0;
@@ -9159,15 +9161,15 @@ impl Playground {
         }
         if self.show_amr_target
             && let (Some(mesh), Some(result)) = (&self.mesh, &self.solution_indicator_result)
-            && result.element_targets.len() == mesh.triangles.len()
         {
             let minimum = self.amr_minimum_edge;
             let span = (self.amr_maximum_edge - minimum).max(f64::MIN_POSITIVE);
             let mut target_mesh = egui::Mesh::default();
             target_mesh.reserve_vertices(mesh.triangles.len() * 3);
             target_mesh.reserve_triangles(mesh.triangles.len());
-            for (triangle, target) in mesh.triangles.iter().zip(&result.element_targets) {
-                let fraction = ((*target - minimum) / span).clamp(0.0, 1.0) as f32;
+            for triangle in &mesh.triangles {
+                let target = displayed_amr_target(mesh, triangle, result.field.as_ref());
+                let fraction = ((target - minimum) / span).clamp(0.0, 1.0) as f32;
                 let color = amr_target_color(fraction);
                 let base = target_mesh.vertices.len() as u32;
                 for vertex in triangle.vertices {
@@ -10730,6 +10732,11 @@ fn amr_target_color(fraction: f32) -> Color32 {
         egui::lerp(fine[2]..=coarse[2], fraction) as u8,
         105,
     )
+}
+
+fn displayed_amr_target(mesh: &TriMesh, triangle: &MeshTriangle, field: &dyn MeshSizeField) -> f64 {
+    let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+    field.target_edge_length((points[0] + points[1] + points[2]) / 3.0, triangle.region)
 }
 
 fn outer_boundary_condition_color(condition: OuterBoundaryCondition) -> Color32 {
@@ -16008,6 +16015,69 @@ mod tests {
     }
 
     #[test]
+    fn adaptation_target_field_projects_onto_a_replacement_mesh() {
+        let mesh = Arc::new(TriMesh {
+            geometry_revision: 1,
+            mesh_revision: 1,
+            vertices: vec![
+                MeshVertex {
+                    point: Point2::new(-0.5, -0.5),
+                    boundary: None,
+                },
+                MeshVertex {
+                    point: Point2::new(0.5, -0.5),
+                    boundary: None,
+                },
+                MeshVertex {
+                    point: Point2::new(0.0, 0.5),
+                    boundary: None,
+                },
+            ],
+            triangles: vec![MeshTriangle {
+                vertices: [0, 1, 2],
+                region: BACKGROUND_REGION,
+            }],
+            boundary_edges: vec![],
+            quality: MeshQuality {
+                minimum_angle_degrees: 45.0,
+                maximum_edge_length: 1.0,
+            },
+        });
+        let operator =
+            Arc::new(QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()).unwrap());
+        let count = operator.degrees_of_freedom();
+        let snapshot = QuadraticSolutionSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            displacement: vec![0.0; count],
+            velocity: vec![0.0; count],
+            acceleration: vec![0.0; count],
+            auxiliary: vec![0.0; count],
+            volume_acceleration: vec![0.0; count],
+            time: 0.0,
+            time_step: 0.01,
+        };
+        let mut job = SolutionIndicatorJob::new(
+            mesh.clone(),
+            operator,
+            Scene::default(),
+            snapshot,
+            SolutionIndicatorOptions::default(),
+        );
+        let result = loop {
+            if let Some(result) = job.advance(100) {
+                break result.unwrap();
+            }
+        };
+        let mut replacement = (*mesh).clone();
+        replacement.mesh_revision = 2;
+        replacement.triangles.push(replacement.triangles[0]);
+        assert_ne!(result.element_targets.len(), replacement.triangles.len());
+        assert!(replacement.triangles.iter().all(|triangle| {
+            displayed_amr_target(&replacement, triangle, result.field.as_ref()).is_finite()
+        }));
+    }
+
+    #[test]
     fn automatic_adaptation_work_limit_retains_the_committed_mesh() {
         let mut h = Harness::new();
         build_mesh_candidate(&mut h.state);
@@ -16025,7 +16095,12 @@ mod tests {
             .unwrap();
         h.state.mesh_adaptation_automatic = true;
 
-        h.state.refresh_mesh_adaptation();
+        for _ in 0..100 {
+            h.state.refresh_mesh_adaptation();
+            if h.state.mesh_adaptation_job.is_none() {
+                break;
+            }
+        }
 
         assert!(h.state.mesh_adaptation_job.is_none());
         assert!(h.state.mesh_error.is_none());
