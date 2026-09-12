@@ -505,6 +505,9 @@ The singleton far-field monitor derives a counterclockwise square contour from t
 fixed outer domain and a document-level inset. It uses 256 midpoint samples with
 outward normals and accepts the configuration only when the contour encloses all
 modeled boundaries and every sample lies in the same lossless background region.
+Enclosure is checked against adaptively subdivided periodic and open spline traces
+with a fixed world-space error margin. Control polygons are deliberately excluded
+from this predicate because their hull may extend beyond a fully enclosed curve.
 For background speed `c`, the GPU records `u`, `u_t`, and `grad(u) dot n` at 60
 samples per simulated second. A second compute dispatch evaluates 96 directions
 with temporal interpolation of the retarded contour data and the directional

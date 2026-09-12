@@ -1233,23 +1233,7 @@ impl Playground {
             return Err("Far-field inset must lie between 0 and 1".into());
         }
         let half_extent = 1.0 - settings.inset;
-        let enclosed = |point: Point2| {
-            point.x.abs() < half_extent - 1.0e-6 && point.y.abs() < half_extent - 1.0e-6
-        };
-        if scene
-            .obstacles
-            .iter()
-            .flat_map(|loop_| loop_.spline.controls())
-            .chain(
-                scene
-                    .internal_boundaries
-                    .iter()
-                    .flat_map(|boundary| boundary.spline.controls()),
-            )
-            .any(|point| !enclosed(*point))
-        {
-            return Err("Decrease the inset: the contour must enclose all geometry".into());
-        }
+        Self::validate_far_field_clearance(scene, half_extent)?;
         let material = scene
             .region_material(BACKGROUND_REGION)
             .ok_or("The background material is missing")?;
@@ -1277,6 +1261,36 @@ impl Playground {
             sample_spacing: 8.0 * half_extent / FAR_FIELD_CONTOUR_POINTS as f64,
             delay_margin: std::f64::consts::SQRT_2 * half_extent / wave_speed,
         })
+    }
+
+    fn validate_far_field_clearance(scene: &Scene, half_extent: f64) -> Result<(), String> {
+        const CURVE_TOLERANCE: f64 = WORLD_TOLERANCE * 0.25;
+        let options = SamplingOptions {
+            tolerance: CURVE_TOLERANCE,
+            max_depth: 16,
+            max_points: 4096,
+        };
+        let enclosed = |point: Point2| {
+            point.x.abs() < half_extent - CURVE_TOLERANCE
+                && point.y.abs() < half_extent - CURVE_TOLERANCE
+        };
+        for loop_ in &scene.obstacles {
+            let samples = sample(&loop_.spline, options).map_err(|_| {
+                "Far-field clearance could not be resolved for a closed curve".to_string()
+            })?;
+            if samples.iter().any(|sample| !enclosed(sample.point)) {
+                return Err("Decrease the inset: the contour must enclose all geometry".into());
+            }
+        }
+        for boundary in &scene.internal_boundaries {
+            let samples = sample_open(&boundary.spline, options).map_err(|_| {
+                "Far-field clearance could not be resolved for an open curve".to_string()
+            })?;
+            if samples.iter().any(|sample| !enclosed(sample.point)) {
+                return Err("Decrease the inset: the contour must enclose all geometry".into());
+            }
+        }
+        Ok(())
     }
 
     fn ingest_far_field_samples(&mut self, display: &FarFieldDisplay) {
@@ -13831,6 +13845,37 @@ mod tests {
                 .unwrap_err()
                 .contains("enclose")
         );
+    }
+
+    #[test]
+    fn far_field_clearance_uses_the_curve_instead_of_its_control_hull() {
+        let half_extent = 0.88;
+        let spline = PeriodicCubicSpline::rounded(Point2::new(0.73, 0.0), 0.15);
+        assert!(spline.controls().iter().any(|point| point.x >= half_extent));
+        let scene = Scene {
+            obstacles: vec![Obstacle::hole(ObstacleId(9), spline)],
+            internal_boundaries: vec![InternalBoundary {
+                id: InternalBoundaryId(9),
+                spline: OpenCubicSpline::uniform(vec![
+                    Point2::new(0.70, -0.20),
+                    Point2::new(0.90, -0.10),
+                    Point2::new(0.90, 0.10),
+                    Point2::new(0.70, 0.20),
+                ])
+                .unwrap(),
+                region: BACKGROUND_REGION,
+                span_laws: vec![InternalBoundaryLaw::REFLECTING],
+            }],
+            ..Scene::default()
+        };
+        assert!(
+            scene.internal_boundaries[0]
+                .spline
+                .controls()
+                .iter()
+                .any(|point| point.x >= half_extent)
+        );
+        Playground::validate_far_field_clearance(&scene, half_extent).unwrap();
     }
 
     #[test]

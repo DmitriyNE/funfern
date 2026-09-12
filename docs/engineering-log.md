@@ -40,6 +40,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## 2026-09-12 — Automatic inset far-field monitor
 
+- Corrected contour clearance to test adaptively subdivided closed and open spline
+  traces rather than their global control hulls. The sampler's fixed world-space
+  error margin keeps genuine contact ambiguous while allowing enclosed curves whose
+  off-curve control points cross the contour.
 - Implemented the scene-level far-field switch as a derived square Huygens contour:
   one inset controls 256 counterclockwise midpoint samples and no additional probe
   geometry or selection mode is exposed. The contour must enclose modeled geometry
@@ -54,7 +58,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   polar patterns. Double-clicking the contour or `FF` badge opens the readout. The
   View inspector can hide the derived contour, while compatible mesh and AMR
   handoffs preserve host history.
-- All 250 workspace tests pass. The native Metal check compiled and exercised all
+- All 251 workspace tests pass. The native Metal check compiled and exercised all
   recorder shaders on an Apple M1 Max with 9,690 DOFs: 1,024 steps and readback took
   about 0.15 s after setup, producing finite 96-direction far-field records. Native
   release compilation, Clippy, and release Trunk/WASM are checked for this slice.
