@@ -7,6 +7,18 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Add probe-data export for point, line, area, and far-field readouts. Preserve
+  timestamps, spatial or angular coordinates, quantity names, and coverage metadata
+  in a simple format suitable for plotting outside Funfern.
+- [ ] Support longer probe recordings without unbounded host memory or unreadable
+  plots. Investigate bounded multiresolution history or progressive decimation while
+  keeping recent samples at full resolution and synchronized readout navigation.
+- [ ] Decide whether far-field radiated power should remain explicitly relative and
+  nondimensional or gain an optional physical calibration. Document the amplitude,
+  distance, material, and dimensional conventions before presenting absolute units.
+- [ ] Revisit generalized far-field sampling contours when editable outer-domain
+  shapes arrive. Keep the automatic inset contour as the simple default and only
+  expose custom contour geometry if non-rectangular domains require it.
 - [ ] Design phone-adjusted interactions. The responsive toolbar is usable at phone
   widths, but viewport editing still assumes a mouse: add touch selection, one-finger
   object manipulation, unambiguous canvas pan/zoom gestures, larger hit targets, and
