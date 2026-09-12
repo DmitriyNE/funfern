@@ -547,17 +547,30 @@ fn decode_scene(
 }
 
 pub fn save(document: &Document) -> Result<String, String> {
-    serde_json::to_string_pretty(&FileV2 {
+    serde_json::to_string_pretty(&encode_document(document)).map_err(|error| error.to_string())
+}
+
+#[doc(hidden)]
+pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&encode_document(document)).map_err(|error| error.to_string())
+}
+
+fn encode_document(document: &Document) -> FileV2 {
+    FileV2 {
         version: 8,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
-    })
-    .map_err(|error| error.to_string())
+    }
 }
 
 /// Structural parsing only. UI advances LoadCandidate across frames before replacing.
 pub fn parse(bytes: &[u8]) -> Result<LoadCandidate, String> {
+    Ok(candidate(parse_document(bytes)?))
+}
+
+#[doc(hidden)]
+pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
     if bytes.len() > MAX_FILE_BYTES {
         return Err("File exceeds 2 MiB".into());
     }
@@ -595,8 +608,13 @@ pub fn parse(bytes: &[u8]) -> Result<LoadCandidate, String> {
         }
         _ => return Err("Unsupported scene version".into()),
     };
+    Ok(document)
+}
+
+#[doc(hidden)]
+pub fn candidate(document: Document) -> LoadCandidate {
     let job = ValidationJob::new(document.accepted.clone(), 0);
-    Ok(LoadCandidate { document, job })
+    LoadCandidate { document, job }
 }
 
 pub struct LoadCandidate {

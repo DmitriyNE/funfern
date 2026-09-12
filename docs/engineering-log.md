@@ -31,6 +31,32 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Examples, recovery, export, and shareable scenes
+
+- Added an Examples gallery with live vector thumbnails, names, and short
+  descriptions. Starter obstacle, double-slit baffles, a material lens, and the
+  eight-obstacle scattering scene are bundled. Every accepted example passes the
+  normal bounded validator, and opening one is a single undoable document action.
+- Added debounced crash recovery for the complete draft/accepted document pair.
+  Browser builds use local storage; native builds write and atomically rename a
+  per-user recovery file. Startup restores recovery automatically unless a shared
+  scene fragment is present. Invalid editable drafts are retained.
+- Added compressed `#scene=v1.…` sharing. The fragment contains URL-safe,
+  zlib-compressed versioned scene JSON, is bounded before and after decompression,
+  and goes through the ordinary structural and geometry validation pipeline. Copy
+  scene link updates the browser address and clipboard; native builds copy a link
+  to the deployed Pages app. Once active, autosave keeps the fragment current with
+  browser `replaceState` rather than adding navigation history entries.
+- Added accepted-scene SVG export independent of camera, selection, field state,
+  and editor overlays. This is also the reusable scene-thumbnail rendering basis;
+  raster screenshots and video remain later work.
+- Verification: formatting, workspace Clippy with warnings denied, all 193
+  workspace tests, native release compilation, and warning-free release Trunk/WASM
+  packaging pass. Coverage includes compressed-link corruption and round trips,
+  native atomic recovery, complete example validation/SVG generation, gallery UI,
+  and undoable example replacement. Interactive browser testing remains deferred
+  by prior agreement.
+
 ## 2026-09-12 — Physical boundary residuals for solution AMR
 
 - Follow-up: AMR handoff now gates step scheduling without changing the user's

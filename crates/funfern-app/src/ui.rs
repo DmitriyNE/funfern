@@ -1,7 +1,11 @@
-use crate::files::{self, FileEvent};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::wave_gpu::forcing_weights;
 use crate::wave_gpu::{PulseSettings, SourceSettings, WaveDisplay, WaveGpuRequest, WaveTransfer};
+use crate::{
+    examples,
+    files::{self, FileEvent, SaveKind},
+    recovery, sharing,
+};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
@@ -56,6 +60,11 @@ const EDITABLE_LOOP_KINDS: [(LoopKind, &str); 2] = [
 struct UiNotice {
     text: String,
     created: Instant,
+}
+#[derive(Clone, Copy)]
+enum LoadMode {
+    Replace,
+    Undoable,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum InspectorPanel {
@@ -281,6 +290,13 @@ pub struct Playground {
     receiver: Mutex<Receiver<FileEvent>>,
     file_busy: bool,
     load: Option<LoadCandidate>,
+    load_mode: LoadMode,
+    load_notice: &'static str,
+    startup_load_checked: bool,
+    autosave_observed: funfern_app::editor::Document,
+    autosave_due: Option<Instant>,
+    share_fragment_active: bool,
+    examples_open: bool,
     frame_ms: f32,
     ready: bool,
     logo_texture: Option<egui::TextureHandle>,
@@ -415,6 +431,13 @@ impl Default for Playground {
             receiver: Mutex::new(receiver),
             file_busy: false,
             load: None,
+            load_mode: LoadMode::Replace,
+            load_notice: "Scene loaded; history cleared",
+            startup_load_checked: false,
+            autosave_observed: funfern_app::editor::Document::default(),
+            autosave_due: None,
+            share_fragment_active: false,
+            examples_open: false,
             frame_ms: 0.0,
             ready: false,
             logo_texture: None,
@@ -1300,18 +1323,48 @@ impl Playground {
             .unwrap_or(BACKGROUND_REGION)
     }
     fn update_files(&mut self) {
+        if !self.startup_load_checked {
+            self.startup_load_checked = true;
+            if !self.automated_benchmark {
+                if let Some(result) = sharing::initial_fragment() {
+                    self.share_fragment_active = true;
+                    match result.and_then(|bytes| persistence::parse(&bytes)) {
+                        Ok(load) => self.start_load(
+                            load,
+                            LoadMode::Replace,
+                            "Shared scene loaded; history cleared",
+                        ),
+                        Err(error) => {
+                            self.message = format!("Could not load shared scene: {error}")
+                        }
+                    }
+                } else {
+                    match recovery::load() {
+                        Ok(Some(bytes)) => match persistence::parse(&bytes) {
+                            Ok(load) => {
+                                self.start_load(load, LoadMode::Replace, "Autosaved scene restored")
+                            }
+                            Err(error) => {
+                                self.message = format!("Could not restore autosave: {error}")
+                            }
+                        },
+                        Ok(None) => {}
+                        Err(error) => self.message = error,
+                    }
+                }
+            }
+        }
         let events: Vec<_> = self.receiver.lock().unwrap().try_iter().collect();
         for event in events {
             self.file_busy = false;
             match event {
                 FileEvent::Loaded(bytes) => match persistence::parse(&bytes) {
                     Ok(load) => {
-                        self.load = Some(load);
-                        self.message.clear();
+                        self.start_load(load, LoadMode::Replace, "Scene loaded; history cleared")
                     }
                     Err(e) => self.message = e,
                 },
-                FileEvent::Saved => self.notify("Scene saved"),
+                FileEvent::Saved(message) => self.notify(message),
                 FileEvent::Cancelled => {}
                 FileEvent::Error(e) => self.message = e,
             }
@@ -1322,11 +1375,50 @@ impl Playground {
             self.load = None;
             match result {
                 Ok(document) => {
-                    self.editor.replace_validated(document);
+                    match self.load_mode {
+                        LoadMode::Replace => self.editor.replace_validated(document),
+                        LoadMode::Undoable => self.editor.replace_validated_with_history(document),
+                    }
                     self.clear_transient();
-                    self.notify("Scene loaded; history cleared");
+                    self.notify(self.load_notice);
                 }
                 Err(e) => self.message = e,
+            }
+        }
+        self.refresh_autosave();
+    }
+
+    fn start_load(&mut self, load: LoadCandidate, mode: LoadMode, notice: &'static str) {
+        self.load = Some(load);
+        self.load_mode = mode;
+        self.load_notice = notice;
+        self.message.clear();
+    }
+
+    fn refresh_autosave(&mut self) {
+        if self.automated_benchmark || self.load.is_some() {
+            return;
+        }
+        if self.editor.document != self.autosave_observed {
+            self.autosave_observed = self.editor.document.clone();
+            self.autosave_due = Some(Instant::now());
+            return;
+        }
+        if self
+            .autosave_due
+            .is_some_and(|started| started.elapsed().as_secs_f32() >= 0.8)
+        {
+            self.autosave_due = None;
+            let result = recovery::save(&self.autosave_observed).and_then(|()| {
+                if self.share_fragment_active {
+                    let fragment = sharing::encode(&self.autosave_observed)?;
+                    sharing::replace_fragment(&fragment)
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = result {
+                self.message = error;
             }
         }
     }
@@ -2257,8 +2349,25 @@ impl Playground {
         self.editor.commit();
         match persistence::save(&self.editor.document) {
             Ok(json) => {
-                files::save(self.sender.clone(), json.into_bytes());
+                files::save(self.sender.clone(), json.into_bytes(), SaveKind::Scene);
                 self.file_busy = true;
+            }
+            Err(error) => self.message = error,
+        }
+    }
+
+    fn export_scene_svg(&mut self) {
+        let svg = examples::scene_svg(&self.editor.document.accepted);
+        files::save(self.sender.clone(), svg.into_bytes(), SaveKind::SceneSvg);
+        self.file_busy = true;
+    }
+
+    fn copy_scene_link(&mut self, context: &egui::Context) {
+        match sharing::encode(&self.editor.document).and_then(|fragment| sharing::link(&fragment)) {
+            Ok(url) => {
+                self.share_fragment_active = true;
+                context.copy_text(url);
+                self.notify("Scene link copied");
             }
             Err(error) => self.message = error,
         }
@@ -2301,6 +2410,19 @@ impl Playground {
                             self.load_scene();
                             ui.close();
                         }
+                        if ui.button("Examples").clicked() {
+                            self.examples_open = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Export scene SVG").clicked() {
+                            self.export_scene_svg();
+                            ui.close();
+                        }
+                        if ui.button("Copy scene link").clicked() {
+                            self.copy_scene_link(ui.ctx());
+                            ui.close();
+                        }
                     });
                 });
             } else {
@@ -2316,6 +2438,24 @@ impl Playground {
                 {
                     self.load_scene();
                 }
+                if ui
+                    .add_enabled(file_enabled, egui::Button::new("Examples"))
+                    .clicked()
+                {
+                    self.examples_open = true;
+                }
+                ui.add_enabled_ui(file_enabled, |ui| {
+                    ui.menu_button("Export", |ui| {
+                        if ui.button("Scene SVG").clicked() {
+                            self.export_scene_svg();
+                            ui.close();
+                        }
+                        if ui.button("Copy scene link").clicked() {
+                            self.copy_scene_link(ui.ctx());
+                            ui.close();
+                        }
+                    });
+                });
             }
             if ui.button("Fit view").clicked() {
                 self.fit = true;
@@ -2457,6 +2597,59 @@ impl Playground {
             open = false;
         }
         self.add_geometry_open = open;
+    }
+
+    fn example_gallery(&mut self, context: &egui::Context) {
+        if !self.examples_open {
+            return;
+        }
+        let mut open = true;
+        let mut selected = None;
+        egui::Window::new("Examples")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .show(context, |ui| {
+                ui.label("Open an example as one undoable document change.");
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .max_height(540.0)
+                    .show(ui, |ui| {
+                        for (index, example) in examples::catalog().iter().enumerate() {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    let preview = paint_example_thumbnail(
+                                        ui,
+                                        &example.document.accepted,
+                                        egui::vec2(180.0, 112.0),
+                                    );
+                                    ui.vertical(|ui| {
+                                        ui.heading(example.name);
+                                        ui.set_max_width(320.0);
+                                        ui.label(example.description);
+                                        ui.add_space(8.0);
+                                        if ui.button("Open example").clicked() || preview.clicked()
+                                        {
+                                            selected = Some(index);
+                                        }
+                                    });
+                                });
+                            });
+                            ui.add_space(6.0);
+                        }
+                    });
+            });
+        self.examples_open = open;
+        if let Some(index) = selected {
+            let example = &examples::catalog()[index];
+            self.start_load(
+                persistence::candidate(example.document.clone()),
+                LoadMode::Undoable,
+                "Example opened; Undo restores the previous scene",
+            );
+            self.examples_open = false;
+        }
     }
 
     fn performance_warning(&self) -> bool {
@@ -7711,12 +7904,79 @@ impl Playground {
                 });
         }
         state.add_geometry_popover(root.ctx());
+        state.example_gallery(root.ctx());
         state.performance_window(root.ctx());
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(root, |ui| state.viewport(ui, wave_display))
             .inner
     }
+}
+
+fn paint_example_thumbnail(ui: &mut egui::Ui, scene: &Scene, size: egui::Vec2) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    let background = scene
+        .region_material(BACKGROUND_REGION)
+        .map(|material| Color32::from_rgb(material.color[0], material.color[1], material.color[2]))
+        .unwrap_or(Color32::from_rgb(47, 73, 88));
+    painter.rect_filled(rect, 5.0, background);
+    painter.rect_stroke(
+        rect,
+        5.0,
+        Stroke::new(1.0, Color32::from_rgb(123, 151, 160)),
+        egui::StrokeKind::Inside,
+    );
+    let project = |point: Point2| {
+        egui::pos2(
+            egui::lerp(
+                rect.left() + 7.0..=rect.right() - 7.0,
+                ((point.x + 1.0) * 0.5) as f32,
+            ),
+            egui::lerp(
+                rect.bottom() - 7.0..=rect.top() + 7.0,
+                ((point.y + 1.0) * 0.5) as f32,
+            ),
+        )
+    };
+    for obstacle in &scene.obstacles {
+        let points = (0..=64)
+            .map(|index| {
+                project(
+                    obstacle
+                        .spline
+                        .evaluate(obstacle.spline.period() * index as f64 / 64.0),
+                )
+            })
+            .collect::<Vec<_>>();
+        let fill = match obstacle.role {
+            LoopRole::Hole { .. } | LoopRole::Wall { .. } => Color32::from_rgb(16, 23, 31),
+            LoopRole::MaterialInterface { interior, .. } => scene
+                .region_material(interior)
+                .map(|material| {
+                    Color32::from_rgb(material.color[0], material.color[1], material.color[2])
+                })
+                .unwrap_or(background),
+        };
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            fill,
+            Stroke::new(1.5, TEAL),
+        ));
+    }
+    for boundary in &scene.internal_boundaries {
+        let points = (0..=48)
+            .map(|index| {
+                project(
+                    boundary
+                        .spline
+                        .evaluate(boundary.spline.period() * index as f64 / 48.0),
+                )
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, Stroke::new(2.0, TEAL)));
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 #[cfg(test)]
@@ -8853,7 +9113,17 @@ mod tests {
             .center()
             .y;
         assert!((undo_center_y - 21.0).abs() < 4.0);
-        for label in ["Edit", "View", "Simulation", "Materials", "+ Draw"] {
+        for label in [
+            "Save",
+            "Load",
+            "Examples",
+            "Export",
+            "Edit",
+            "View",
+            "Simulation",
+            "Materials",
+            "+ Draw",
+        ] {
             assert!(
                 h.texts.iter().any(|(text, _)| text == label),
                 "missing {label}"
@@ -8873,6 +9143,39 @@ mod tests {
         ));
         assert!(h.texts.iter().any(|(text, _)| text == "Straight"));
         assert!(!h.texts.iter().any(|(text, _)| text == "Circle"));
+    }
+
+    #[test]
+    fn example_gallery_previews_catalog_and_opening_is_undoable() {
+        let mut h = Harness::new();
+        h.click_text("Examples");
+        assert!(h.state.examples_open);
+        h.frame(vec![]);
+        for name in ["Starter obstacle", "Double slit", "Material lens"] {
+            assert!(
+                h.texts.iter().any(|(text, _)| text == name),
+                "missing {name}"
+            );
+        }
+        assert_eq!(examples::catalog().len(), 4);
+
+        let before = h.state.editor.document.clone();
+        h.state.startup_load_checked = true;
+        h.state.start_load(
+            persistence::candidate(examples::catalog()[1].document.clone()),
+            LoadMode::Undoable,
+            "Example opened",
+        );
+        for _ in 0..100 {
+            h.state.update_files();
+            if h.state.load.is_none() {
+                break;
+            }
+        }
+        assert_eq!(h.state.editor.document, examples::catalog()[1].document);
+        assert_eq!(h.state.editor.history_len(), (1, 0));
+        h.state.editor.undo();
+        assert_eq!(h.state.editor.document, before);
     }
 
     #[test]

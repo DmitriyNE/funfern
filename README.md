@@ -171,7 +171,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **Files:** Save scene downloads JSON in the browser or opens a native save
   dialog. Load scene uses file upload/native selection and validates before
   replacement. Successful loading clears history; malformed files leave the
-  current document intact. Camera and selection are not saved.
+  current document intact. Examples opens a thumbnail gallery; opening one is
+  undoable. Export writes a scene-only SVG. Documents autosave after edits and
+  restore on startup from browser local storage or the native per-user recovery
+  file. Copy scene link embeds compressed, validated scene data in a `#scene=v1.…`
+  URL fragment; while that fragment is active, later autosaves keep it current.
+  Camera and selection are not saved.
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
   constrained mesh and its labeled outer, hole, interface, closed-wall, and baffle
   edges. Elements below 15° are

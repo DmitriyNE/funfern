@@ -976,3 +976,20 @@ fn heterogeneous_first_order_assignment_preserves_face_ratio() {
         FaceBoundaryCondition::Impedance { ratio: 1.0 }
     );
 }
+
+#[test]
+fn validated_example_replacement_is_one_undoable_action() {
+    let mut editor = Editor::default();
+    let before = editor.document.clone();
+    let scene = Scene::default();
+    let example = Document {
+        draft: scene.clone(),
+        accepted: scene,
+    };
+
+    editor.replace_validated_with_history(example.clone());
+    assert_eq!(editor.document, example);
+    assert_eq!(editor.history_len(), (1, 0));
+    editor.undo();
+    assert_eq!(editor.document, before);
+}

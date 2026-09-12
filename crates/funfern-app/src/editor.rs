@@ -1575,6 +1575,30 @@ impl Editor {
     }
     /// Caller must validate the accepted scene before replacement.
     pub fn replace_validated(&mut self, document: Document) {
+        self.install_document(document);
+        self.undo.clear();
+        self.redo.clear();
+        self.before = None;
+        self.changed();
+    }
+
+    /// Installs a validated example as one undoable document action.
+    pub fn replace_validated_with_history(&mut self, document: Document) {
+        if self.document == document {
+            return;
+        }
+        self.commit();
+        self.undo.push(self.document.clone());
+        if self.undo.len() > 100 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        self.before = None;
+        self.install_document(document);
+        self.changed();
+    }
+
+    fn install_document(&mut self, document: Document) {
         self.next_obstacle_id = document
             .draft
             .obstacles
@@ -1612,10 +1636,6 @@ impl Editor {
             .unwrap_or(0)
             .saturating_add(1);
         self.document = document;
-        self.undo.clear();
-        self.redo.clear();
-        self.before = None;
-        self.changed();
     }
 }
 

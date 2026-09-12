@@ -2454,6 +2454,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_egui",
+ "flate2",
  "funfern-core",
  "rfd",
  "serde",

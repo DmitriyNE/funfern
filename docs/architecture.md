@@ -109,6 +109,19 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
+Scene JSON remains the single persistence representation. File loading, bundled
+examples, crash recovery, and shared links all pass through the same structural
+decoder and bounded accepted-scene validator before replacing the editor document.
+Examples carry names and descriptions and render their thumbnails directly from
+the accepted spline geometry; opening one is a single undoable document change.
+Autosave retains both the accepted scene and any invalid editable draft, writing to
+browser local storage or an atomic per-user native recovery file after a short
+debounce. On browser startup, a `#scene=v1.…` fragment takes precedence over local
+recovery. Its URL-safe payload is zlib-compressed versioned scene JSON, capped before
+and after decompression. Once sharing is active, autosave updates the fragment with
+`history.replaceState`, avoiding a browser-history entry for every edit. Scene-only
+SVG export samples the accepted curves independently of camera and transient UI.
+
 Open splines store one law per nonempty knot span. A span either has independent
 left and right face conditions or one paired thin-gap law. These modes are mutually
 exclusive. Reflecting faces add no weak boundary term. Prescribed Neumann data adds

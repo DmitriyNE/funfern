@@ -1,4 +1,7 @@
+mod examples;
 mod files;
+mod recovery;
+mod sharing;
 mod ui;
 mod wave_gpu;
 use bevy::prelude::*;

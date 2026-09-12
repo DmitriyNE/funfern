@@ -2,9 +2,39 @@ use funfern_app::persistence::MAX_FILE_BYTES;
 use std::sync::mpsc::Sender;
 pub enum FileEvent {
     Loaded(Vec<u8>),
-    Saved,
+    Saved(&'static str),
     Cancelled,
     Error(String),
+}
+
+#[derive(Clone, Copy)]
+pub enum SaveKind {
+    Scene,
+    SceneSvg,
+}
+
+impl SaveKind {
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::Scene => "funfern-scene.json",
+            Self::SceneSvg => "funfern-scene.svg",
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn filter(self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            Self::Scene => ("funfern scene", &["json"]),
+            Self::SceneSvg => ("SVG image", &["svg"]),
+        }
+    }
+
+    fn success(self) -> &'static str {
+        match self {
+            Self::Scene => "Scene saved",
+            Self::SceneSvg => "Scene SVG exported",
+        }
+    }
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load(sender: Sender<FileEvent>) {
@@ -28,15 +58,16 @@ pub fn load(sender: Sender<FileEvent>) {
     });
 }
 #[cfg(not(target_arch = "wasm32"))]
-pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>) {
+pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>, kind: SaveKind) {
     std::thread::spawn(move || {
+        let (description, extensions) = kind.filter();
         let result = if let Some(path) = rfd::FileDialog::new()
-            .add_filter("funfern scene", &["json"])
-            .set_file_name("funfern-scene.json")
+            .add_filter(description, extensions)
+            .set_file_name(kind.file_name())
             .save_file()
         {
             match std::fs::write(path, bytes) {
-                Ok(()) => FileEvent::Saved,
+                Ok(()) => FileEvent::Saved(kind.success()),
                 Err(e) => FileEvent::Error(e.to_string()),
             }
         } else {
@@ -65,15 +96,15 @@ pub fn load(sender: Sender<FileEvent>) {
     });
 }
 #[cfg(target_arch = "wasm32")]
-pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>) {
+pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>, kind: SaveKind) {
     wasm_bindgen_futures::spawn_local(async move {
         let result = if let Some(file) = rfd::AsyncFileDialog::new()
-            .set_file_name("funfern-scene.json")
+            .set_file_name(kind.file_name())
             .save_file()
             .await
         {
             match file.write(&bytes).await {
-                Ok(()) => FileEvent::Saved,
+                Ok(()) => FileEvent::Saved(kind.success()),
                 Err(e) => FileEvent::Error(e.to_string()),
             }
         } else {
