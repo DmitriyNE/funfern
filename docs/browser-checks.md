@@ -53,9 +53,10 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   file upload. IDs and nonuniform intervals survive. History clears on load.
   Cancel dialogs and try malformed JSON, duplicate IDs, unsupported versions,
   oversized files, and an invalid accepted scene; the document remains intact.
-- [ ] In Simulation, toggle Place pulse and Move source on and off by clicking the
-  selected button. Both modes persist across repeated viewport clicks and inspector
-  changes until explicitly ended. Verify the pulse footprint and source marker.
+- [ ] In Simulation, toggle Place pulse on and off by clicking the selected button;
+  it persists across repeated viewport clicks and inspector changes until explicitly
+  ended. Enable the continuous source and drag its marker directly. Verify that a
+  saved file, copied scene link, and autosave restore its position and parameters.
   Run/Pause and Reset remain at the right of the top bar; Step is available while
   paused. Energy is visible in Simulation and Performance diagnostics.
 - [ ] Add, name, edit, assign, and delete a material. Delete is disabled while the

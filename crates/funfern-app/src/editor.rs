@@ -9,6 +9,40 @@ pub enum GeometryControl {
 pub const MAX_PROBES: usize = 16;
 pub const MAX_SEGMENT_PROBE_POINTS: usize = 512;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceSettings {
+    pub enabled: bool,
+    pub position: Point2,
+    pub amplitude: f32,
+    pub width: f32,
+    pub frequency_hz: f32,
+    pub region: RegionId,
+}
+
+impl SourceSettings {
+    pub fn valid(self) -> bool {
+        self.position.finite()
+            && self.amplitude.is_finite()
+            && self.width.is_finite()
+            && self.width > 0.0
+            && self.frequency_hz.is_finite()
+            && self.frequency_hz >= 0.0
+    }
+}
+
+impl Default for SourceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            position: Point2::new(-0.45, 0.0),
+            amplitude: 18.0,
+            width: 0.06,
+            frequency_hz: 2.5,
+            region: BACKGROUND_REGION,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProbeId(pub u64);
 
@@ -100,6 +134,7 @@ pub struct Document {
     pub draft: Scene,
     pub accepted: Scene,
     pub probes: Vec<ProbeDefinition>,
+    pub source: SourceSettings,
 }
 impl Default for Document {
     fn default() -> Self {
@@ -108,6 +143,7 @@ impl Default for Document {
             draft: scene.clone(),
             accepted: scene,
             probes: vec![],
+            source: SourceSettings::default(),
         }
     }
 }
@@ -606,6 +642,14 @@ impl Editor {
             self.acceptance = Acceptance::Invalid(issue)
         } else {
             self.document.accepted = self.document.draft.clone();
+            if self
+                .document
+                .accepted
+                .region(self.document.source.region)
+                .is_none()
+            {
+                self.document.source.region = BACKGROUND_REGION;
+            }
             self.acceptance = Acceptance::Valid;
         }
     }

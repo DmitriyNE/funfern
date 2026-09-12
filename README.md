@@ -156,10 +156,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Subdomain assignment. Unused non-default materials can be deleted. Clicking a
   filled region in the viewport selects and highlights it. Material changes
   preserve the live field and reuse the committed mesh.
-- **Simulation input:** Place pulse and Move source remain active for repeated
-  viewport clicks and can be toggled off with the same selected button, the
-  viewport Done action, or Escape. Pulse strength/width and continuous-source
-  position, frequency, strength, width, and region are editable in Simulation.
+- **Simulation input:** Place pulse remains active for repeated viewport clicks and
+  can be toggled off with the same selected button, the viewport Done action, or
+  Escape. Drag the visible continuous-source marker directly to reposition it.
+  Pulse strength/width and continuous-source position, frequency, strength, width,
+  and region are editable in Simulation. Continuous-source settings are included
+  in scene files, shared links, examples, Undo/Redo, and autosave.
 - **Point probes:** add persistent point receivers from Probes, then click repeatedly
   in the viewport. Markers can be selected, dragged, renamed, colored, disabled,
   cleared, or deleted; double-clicking one opens its floating readout. Each readout
@@ -236,8 +238,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Refinement reacts immediately, while coarsening requires two quiet estimates and
   has its own transaction quota. The View panel can overlay the current target field.
 - **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
-  Gaussian displacement with zero initial velocity. Move source positions the
-  optional continuous sinusoidal source. Simulation speed is bounded to 16
+  Gaussian displacement with zero initial velocity. The optional continuous
+  sinusoidal source is repositioned by dragging its viewport marker. Simulation speed is bounded to 16
   substeps per display frame. Field colors use an adjustable symmetric gain.
   Pulses and continuous sources act only in their containing wall-separated
   region. With open baffles their Gaussian stencil uses mesh-path distance, so it

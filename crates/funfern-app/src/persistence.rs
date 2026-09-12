@@ -1,6 +1,6 @@
 use crate::editor::{
     Document, MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, ProbeDefinition, ProbeId, ProbeSamplingPreset,
-    ProbeTarget,
+    ProbeTarget, SourceSettings,
 };
 use funfern_core::*;
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,19 @@ struct FileV2 {
     accepted: StoredScene,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     probes: Vec<StoredProbe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<StoredSource>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSource {
+    enabled: bool,
+    position: [f64; 2],
+    amplitude: f32,
+    width: f32,
+    frequency_hz: f32,
+    region: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -593,7 +606,7 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 10,
+        version: 11,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
@@ -621,7 +634,36 @@ fn encode_document(document: &Document) -> FileV2 {
                 },
             })
             .collect(),
+        source: Some(StoredSource {
+            enabled: document.source.enabled,
+            position: [document.source.position.x, document.source.position.y],
+            amplitude: document.source.amplitude,
+            width: document.source.width,
+            frequency_hz: document.source.frequency_hz,
+            region: document.source.region.0,
+        }),
     }
+}
+
+fn decode_source(stored: Option<StoredSource>, accepted: &Scene) -> Result<SourceSettings, String> {
+    let Some(stored) = stored else {
+        return Ok(SourceSettings::default());
+    };
+    let source = SourceSettings {
+        enabled: stored.enabled,
+        position: Point2::new(stored.position[0], stored.position[1]),
+        amplitude: stored.amplitude,
+        width: stored.width,
+        frequency_hz: stored.frequency_hz,
+        region: RegionId(stored.region),
+    };
+    if !source.valid() {
+        return Err("Scene contains invalid continuous-source settings".into());
+    }
+    if accepted.region(source.region).is_none() {
+        return Err("Continuous source references a missing region".into());
+    }
+    Ok(source)
 }
 
 fn decode_probes(stored: Vec<StoredProbe>) -> Result<Vec<ProbeDefinition>, String> {
@@ -694,27 +736,32 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 draft: decode_v1(file.draft)?,
                 accepted: decode_v1(file.accepted)?,
                 probes: vec![],
+                source: SourceSettings::default(),
             }
         }
-        2..=10 => {
+        2..=11 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
             }
+            let draft = decode_scene(
+                file.draft,
+                header.version >= 5,
+                header.version >= 6,
+                header.version < 7,
+            )?;
+            let accepted = decode_scene(
+                file.accepted,
+                header.version >= 5,
+                header.version >= 6,
+                header.version < 7,
+            )?;
+            let source = decode_source(file.source, &accepted)?;
             Document {
-                draft: decode_scene(
-                    file.draft,
-                    header.version >= 5,
-                    header.version >= 6,
-                    header.version < 7,
-                )?,
-                accepted: decode_scene(
-                    file.accepted,
-                    header.version >= 5,
-                    header.version >= 6,
-                    header.version < 7,
-                )?,
+                draft,
+                accepted,
                 probes: decode_probes(file.probes)?,
+                source,
             }
         }
         _ => return Err("Unsupported scene version".into()),

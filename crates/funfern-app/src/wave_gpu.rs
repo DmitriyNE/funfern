@@ -27,6 +27,7 @@ use bevy::{
         storage::{GpuShaderBuffer, ShaderBuffer},
     },
 };
+use funfern_app::editor::SourceSettings;
 use funfern_core::{
     BoundarySignal, OuterBoundaryConditions, Point2, QuadraticPointStencil, QuadraticTransferMap,
     QuadraticWaveOperator, QuadraticWaveState, RegionId, TriMesh,
@@ -49,16 +50,6 @@ const STATUS_ERROR: u8 = 2;
 const STATUS_TRANSFERRING: u8 = 3;
 
 #[derive(Clone, Copy, Debug)]
-pub struct SourceSettings {
-    pub enabled: bool,
-    pub position: Point2,
-    pub amplitude: f32,
-    pub width: f32,
-    pub frequency_hz: f32,
-    pub region: RegionId,
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct PulseSettings {
     pub position: Point2,
     pub amplitude: f32,
@@ -74,19 +65,6 @@ pub struct WaveTransfer<'a> {
     pub target_time_step: f64,
     pub source: SourceSettings,
     pub map: &'a QuadraticTransferMap,
-}
-
-impl Default for SourceSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            position: Point2::new(-0.45, 0.0),
-            amplitude: 18.0,
-            width: 0.06,
-            frequency_hz: 2.5,
-            region: funfern_core::BACKGROUND_REGION,
-        }
-    }
 }
 
 #[derive(Default)]

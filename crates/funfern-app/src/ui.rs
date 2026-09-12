@@ -2,7 +2,7 @@
 use crate::wave_gpu::forcing_weights;
 use crate::wave_gpu::{
     CurveProbeDisplay, CurveProbeInput, CurveProbeRecord, PointProbeRecord, ProbeDisplay,
-    PulseSettings, SourceSettings, WaveDisplay, WaveGpuRequest, WaveTransfer,
+    PulseSettings, WaveDisplay, WaveGpuRequest, WaveTransfer,
 };
 use crate::{
     examples,
@@ -19,7 +19,7 @@ use bevy_egui::{
 use funfern_app::{
     editor::{
         Acceptance, BoundaryFaceTarget, Editor, GeometryControl, LoopKind, ProbeDefinition,
-        ProbeId, ProbeSamplingPreset, ProbeTarget,
+        ProbeId, ProbeSamplingPreset, ProbeTarget, SourceSettings,
     },
     persistence::{self, LoadCandidate},
 };
@@ -52,7 +52,6 @@ enum InteractionMode {
         role: CreationRole,
     },
     PlacePulse,
-    MoveSource,
     PlaceProbe,
     PlaceSegmentProbe,
 }
@@ -422,6 +421,7 @@ pub struct Playground {
     probe_history_seconds: f64,
     show_probe_markers: bool,
     probe_drag: Option<ProbeDrag>,
+    source_dragging: bool,
     segment_probe_start: Option<Point2>,
     probe_name_edit: Option<(ProbeId, String)>,
     creation_role: CreationRole,
@@ -579,6 +579,7 @@ impl Default for Playground {
             probe_history_seconds: 10.0,
             show_probe_markers: true,
             probe_drag: None,
+            source_dragging: false,
             segment_probe_start: None,
             probe_name_edit: None,
             creation_role: CreationRole::Hole,
@@ -1008,6 +1009,7 @@ impl Playground {
         self.selected_spans.clear();
         self.selected_probe = None;
         self.probe_drag = None;
+        self.source_dragging = false;
         self.segment_probe_start = None;
         self.probe_name_edit = None;
         self.gizmo_pivot = None;
@@ -1850,9 +1852,10 @@ impl Playground {
                     self.clear_transient();
                     self.clear_all_probe_traces();
                     self.probe_compiled = None;
+                    self.wave_source = self.editor.document.source;
+                    self.wave_source_dirty = true;
                     if let Some(simulation) = example_simulation {
                         self.wave_source = simulation.source;
-                        self.wave_source_dirty = true;
                         self.wave_pending_pulse = None;
                         self.fresh_simulation_requested = true;
                         self.show_boundary_conditions = true;
@@ -2720,6 +2723,7 @@ impl Playground {
             self.wave_energy_step = u64::MAX;
             self.wave_source_dirty = false;
             self.wave_source.region = candidate.source_region;
+            self.editor.document.source.region = candidate.source_region;
             if candidate.fresh {
                 self.fresh_simulation_requested = false;
             }
@@ -4908,36 +4912,20 @@ impl Playground {
         ui.label("Excitation");
         let wave_available = self.wave_operator.is_some();
         ui.add_enabled_ui(wave_available, |ui| {
-            ui.horizontal(|ui| {
-                let placing_pulse = self.interaction_mode == InteractionMode::PlacePulse;
-                if ui
-                    .add(egui::Button::new("Place pulse").selected(placing_pulse))
-                    .on_hover_text(
-                        "Click repeatedly in the viewport; click again or press Esc to finish",
-                    )
-                    .clicked()
-                {
-                    self.interaction_mode = if placing_pulse {
-                        InteractionMode::Select
-                    } else {
-                        InteractionMode::PlacePulse
-                    };
-                }
-                let moving_source = self.interaction_mode == InteractionMode::MoveSource;
-                if ui
-                    .add(egui::Button::new("Move source").selected(moving_source))
-                    .on_hover_text(
-                        "Click repeatedly in the viewport; click again or press Esc to finish",
-                    )
-                    .clicked()
-                {
-                    self.interaction_mode = if moving_source {
-                        InteractionMode::Select
-                    } else {
-                        InteractionMode::MoveSource
-                    };
-                }
-            });
+            let placing_pulse = self.interaction_mode == InteractionMode::PlacePulse;
+            if ui
+                .add(egui::Button::new("Place pulse").selected(placing_pulse))
+                .on_hover_text(
+                    "Click repeatedly in the viewport; click again or press Esc to finish",
+                )
+                .clicked()
+            {
+                self.interaction_mode = if placing_pulse {
+                    InteractionMode::Select
+                } else {
+                    InteractionMode::PlacePulse
+                };
+            }
             ui.add(
                 egui::Slider::new(&mut self.pulse_amplitude, 0.01..=5.0)
                     .logarithmic(true)
@@ -4953,25 +4941,26 @@ impl Playground {
                     .logarithmic(true)
                     .text("simulation speed"),
             );
-            if ui
-                .checkbox(&mut self.wave_source.enabled, "Continuous source")
-                .changed()
-            {
-                self.wave_source_dirty = true;
-            }
-            ui.add_enabled_ui(self.wave_source.enabled, |ui| {
+            let source_before = self.wave_source;
+            let enabled_response = ui.checkbox(&mut self.wave_source.enabled, "Continuous source");
+            let source_responses = ui.add_enabled_ui(self.wave_source.enabled, |ui| {
+                let mut responses = Vec::new();
                 let mut position = self.wave_source.position;
                 ui.horizontal(|ui| {
                     ui.label("Position");
-                    ui.add(
-                        egui::DragValue::new(&mut position.x)
-                            .speed(0.005)
-                            .prefix("x "),
+                    responses.push(
+                        ui.add(
+                            egui::DragValue::new(&mut position.x)
+                                .speed(0.005)
+                                .prefix("x "),
+                        ),
                     );
-                    ui.add(
-                        egui::DragValue::new(&mut position.y)
-                            .speed(0.005)
-                            .prefix("y "),
+                    responses.push(
+                        ui.add(
+                            egui::DragValue::new(&mut position.y)
+                                .speed(0.005)
+                                .prefix("y "),
+                        ),
                     );
                 });
                 if position != self.wave_source.position {
@@ -4981,9 +4970,8 @@ impl Playground {
                         .as_ref()
                         .and_then(|mesh| mesh_region_at(mesh, position))
                         .unwrap_or(BACKGROUND_REGION);
-                    self.wave_source_dirty = true;
                 }
-                for response in [
+                responses.extend([
                     ui.add(
                         egui::Slider::new(&mut self.wave_source.frequency_hz, 0.25..=8.0)
                             .logarithmic(true)
@@ -4999,13 +4987,28 @@ impl Playground {
                             .logarithmic(true)
                             .text("source width"),
                     ),
-                ] {
-                    if response.changed() {
-                        self.wave_source_dirty = true;
-                    }
-                }
+                ]);
                 ui.small(format!("Region {}", self.wave_source.region.0));
+                responses
             });
+            if self.wave_source != source_before {
+                if self.wave_source.valid() {
+                    self.editor.begin();
+                    self.editor.document.source = self.wave_source;
+                    self.wave_source_dirty = true;
+                } else {
+                    self.wave_source = source_before;
+                    self.message = "Continuous-source values must be finite".into();
+                }
+            }
+            if enabled_response.changed()
+                || source_responses
+                    .inner
+                    .iter()
+                    .any(|response| response.lost_focus() || response.drag_stopped())
+            {
+                self.editor.commit();
+            }
         });
         if let Some(operator) = &self.wave_operator {
             ui.small(format!(
@@ -6045,7 +6048,7 @@ impl Playground {
             } else if self.interaction_mode != InteractionMode::Select {
                 egui::CursorIcon::Crosshair
             } else if let Some(point) = pointer {
-                if self.hit_probe(point, r).is_some() {
+                if self.hit_source(point, r) || self.hit_probe(point, r).is_some() {
                     egui::CursorIcon::Grab
                 } else {
                     match self.hit_gizmo(point, r) {
@@ -6069,6 +6072,7 @@ impl Playground {
                 let cancelled_segment_start = self.interaction_mode
                     == InteractionMode::PlaceSegmentProbe
                     && self.segment_probe_start.take().is_some();
+                let source_dragging = std::mem::take(&mut self.source_dragging);
                 let probe_drag = self.probe_drag.take();
                 let drag = self.drag.take();
                 match &drag {
@@ -6082,8 +6086,14 @@ impl Playground {
                     _ => {}
                 }
                 self.pending_span_click = None;
-                if probe_drag.is_some() || drag.is_some() || self.editor.editing() {
+                if source_dragging
+                    || probe_drag.is_some()
+                    || drag.is_some()
+                    || self.editor.editing()
+                {
                     self.editor.cancel();
+                    self.wave_source = self.editor.document.source;
+                    self.wave_source_dirty = true;
                 } else if !cancelled_segment_start {
                     self.custom.clear();
                     self.interaction_mode = InteractionMode::Select;
@@ -6179,7 +6189,10 @@ impl Playground {
                 } else if primary && self.interaction_mode == InteractionMode::Select {
                     self.refresh_curves();
                     let modifiers = ctx.input(|input| input.modifiers);
-                    if let Some(hit) = self.hit_probe(p, r) {
+                    if self.hit_source(p, r) {
+                        self.editor.begin();
+                        self.source_dragging = true;
+                    } else if let Some(hit) = self.hit_probe(p, r) {
                         let id = hit.id();
                         self.select_probe(id);
                         self.editor.begin();
@@ -6342,7 +6355,25 @@ impl Playground {
                         + Point2::new(-delta.x as f64 / self.scale, delta.y as f64 / self.scale);
                 } else if response.dragged_by(egui::PointerButton::Primary) {
                     let world = self.world(p, r);
-                    if let Some(probe_drag) = self.probe_drag.as_ref() {
+                    if self.source_dragging {
+                        let position =
+                            if self.snap_to_grid || ctx.input(|input| input.modifiers.shift) {
+                                Point2::new(
+                                    (world.x / self.snap_step).round() * self.snap_step,
+                                    (world.y / self.snap_step).round() * self.snap_step,
+                                )
+                            } else {
+                                world
+                            };
+                        self.wave_source.position = position;
+                        self.wave_source.region = self
+                            .wave_mesh
+                            .as_ref()
+                            .and_then(|mesh| mesh_region_at(mesh, position))
+                            .unwrap_or(BACKGROUND_REGION);
+                        self.editor.document.source = self.wave_source;
+                        self.wave_source_dirty = true;
+                    } else if let Some(probe_drag) = self.probe_drag.as_ref() {
                         let snap = |point: Point2| {
                             if self.snap_to_grid || ctx.input(|input| input.modifiers.shift) {
                                 Point2::new(
@@ -6539,6 +6570,7 @@ impl Playground {
                 if response.double_clicked()
                     && self.interaction_mode == InteractionMode::Select
                     && !space
+                    && !self.hit_source(p, r)
                     && self.hit_handle(p, r).is_none()
                     && self.hit_internal_handle(p, r).is_none()
                 {
@@ -6607,15 +6639,6 @@ impl Playground {
                         InteractionMode::PlacePulse => {
                             self.wave_pending_pulse = Some(self.world(p, r));
                         }
-                        InteractionMode::MoveSource => {
-                            self.wave_source.position = self.world(p, r);
-                            self.wave_source.region = self
-                                .wave_mesh
-                                .as_ref()
-                                .and_then(|mesh| mesh_region_at(mesh, self.wave_source.position))
-                                .unwrap_or(RegionId(0));
-                            self.wave_source_dirty = true;
-                        }
                         InteractionMode::PlaceProbe => {
                             let result = self.editor.create_point_probe(self.world(p, r));
                             if let Some(id) = self.error(result) {
@@ -6641,6 +6664,9 @@ impl Playground {
             }
         }
         if !ctx.input(|i| i.pointer.primary_down()) {
+            if std::mem::take(&mut self.source_dragging) {
+                self.editor.commit();
+            }
             if self.probe_drag.take().is_some() {
                 self.editor.commit();
             }
@@ -7309,7 +7335,7 @@ impl Playground {
                 _ => {}
             }
         }
-        if self.wave_source.enabled || self.interaction_mode == InteractionMode::MoveSource {
+        if self.wave_source.enabled {
             let center = self.screen(self.wave_source.position, r);
             painter.circle_stroke(center, 7.0, Stroke::new(2.0, GOLD));
             painter.line_segment(
@@ -7423,7 +7449,6 @@ impl Playground {
                 "Click to add control points",
             ),
             InteractionMode::PlacePulse => ("Placing pulse", "Click repeatedly to inject"),
-            InteractionMode::MoveSource => ("Moving source", "Click to reposition"),
             InteractionMode::PlaceProbe => ("Placing point probes", "Click repeatedly to add"),
             InteractionMode::PlaceSegmentProbe => (
                 "Placing line probes",
@@ -7454,7 +7479,6 @@ impl Playground {
                         let cancel_label = if matches!(
                             self.interaction_mode,
                             InteractionMode::PlacePulse
-                                | InteractionMode::MoveSource
                                 | InteractionMode::PlaceProbe
                                 | InteractionMode::PlaceSegmentProbe
                         ) {
@@ -7581,6 +7605,15 @@ impl Playground {
             .min_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(id, i, _)| (id, i))
     }
+
+    fn hit_source(&self, point: Pos2, viewport: Rect) -> bool {
+        self.wave_source.enabled
+            && self
+                .screen(self.wave_source.position, viewport)
+                .distance(point)
+                <= 12.0
+    }
+
     fn hit_probe(&self, point: Pos2, viewport: Rect) -> Option<ProbeHit> {
         if !self.show_probe_markers {
             return None;
@@ -8187,6 +8220,7 @@ pub fn mesh_benchmark_scene() -> Playground {
             draft: scene.clone(),
             accepted: scene,
             probes: vec![],
+            source: SourceSettings::default(),
         });
     state
 }
@@ -8295,6 +8329,7 @@ pub fn wave_gpu_check_scene() -> Playground {
                     },
                 },
             ],
+            source: SourceSettings::default(),
         });
     state
 }
@@ -9785,6 +9820,10 @@ impl Playground {
     fn show(&mut self, root: &mut egui::Ui, wave_display: Option<&WaveDisplay>) -> Rect {
         // Remember capture before panels can end a text edit this frame.
         self.keyboard_captured = root.ctx().text_edit_focused();
+        if self.wave_source != self.editor.document.source {
+            self.wave_source = self.editor.document.source;
+            self.wave_source_dirty = true;
+        }
         self.expire_notice();
         if self.logo_texture.is_none() {
             let image = egui::ColorImage::from_rgba_unmultiplied(
@@ -11250,6 +11289,36 @@ mod tests {
     }
 
     #[test]
+    fn loading_a_scene_restores_its_continuous_source() {
+        let mut h = Harness::new();
+        h.state.startup_load_checked = true;
+        let mut document = h.state.editor.document.clone();
+        document.source = SourceSettings {
+            enabled: true,
+            position: Point2::new(0.38, -0.26),
+            amplitude: 27.0,
+            width: 0.04,
+            frequency_hz: 3.75,
+            region: BACKGROUND_REGION,
+        };
+        let bytes = persistence::save(&document).unwrap();
+        h.state.start_load(
+            persistence::parse(bytes.as_bytes()).unwrap(),
+            LoadMode::Replace,
+            "",
+        );
+        for _ in 0..100 {
+            h.state.update_files();
+            if h.state.load.is_none() {
+                break;
+            }
+        }
+        assert_eq!(h.state.editor.document.source, document.source);
+        assert_eq!(h.state.wave_source, document.source);
+        assert!(h.state.wave_source_dirty);
+    }
+
+    #[test]
     fn top_bar_progressively_compacts_file_and_panel_controls() {
         let mut h = Harness::new();
         h.state.inspector_panel = None;
@@ -12138,7 +12207,7 @@ mod tests {
     }
 
     #[test]
-    fn pulse_and_source_tools_only_change_transient_simulation_input() {
+    fn pulse_is_transient_and_continuous_source_is_directly_draggable() {
         let mut h = Harness::new();
         build_mesh_candidate(&mut h.state);
         commit_mesh_without_gpu(&mut h.state);
@@ -12147,10 +12216,7 @@ mod tests {
         assert_eq!(h.state.interaction_mode, InteractionMode::PlacePulse);
         h.click_text("Place pulse");
         assert_eq!(h.state.interaction_mode, InteractionMode::Select);
-        h.click_text("Move source");
-        assert_eq!(h.state.interaction_mode, InteractionMode::MoveSource);
-        h.click_text("Move source");
-        assert_eq!(h.state.interaction_mode, InteractionMode::Select);
+        assert!(!h.texts.iter().any(|(text, _)| text == "Move source"));
 
         let document = h.state.editor.document.clone();
         h.state.interaction_mode = InteractionMode::PlacePulse;
@@ -12161,14 +12227,39 @@ mod tests {
         let second_pulse = Point2::new(0.2, -0.1);
         h.click(h.point(second_pulse));
         assert!((h.state.wave_pending_pulse.unwrap() - second_pulse).norm() < 1.0e-6);
-        h.state.interaction_mode = InteractionMode::MoveSource;
-        let source = Point2::new(-0.55, 0.25);
-        h.click(h.point(source));
-        assert!((h.state.wave_source.position - source).norm() < 1.0e-6);
-        assert!(h.state.wave_source_dirty);
-        assert_eq!(h.state.interaction_mode, InteractionMode::MoveSource);
         assert_eq!(h.state.editor.document, document);
-        assert_eq!(h.state.editor.history_len(), (0, 0));
+
+        h.state.interaction_mode = InteractionMode::Select;
+        h.click_text("Continuous source");
+        assert!(h.state.wave_source.enabled);
+        assert_eq!(h.state.editor.document.source, h.state.wave_source);
+        let source = Point2::new(-0.55, 0.25);
+        h.drag_with_modifiers(
+            h.point(h.state.wave_source.position),
+            h.point(source),
+            Modifiers::NONE,
+        );
+        assert!((h.state.wave_source.position - source).norm() < 1.0e-6);
+        assert_eq!(h.state.editor.document.source, h.state.wave_source);
+        assert!(h.state.wave_source_dirty);
+        assert_eq!(h.state.interaction_mode, InteractionMode::Select);
+        assert_eq!(h.state.editor.history_len(), (2, 0));
+
+        let cancelled = Point2::new(-0.2, 0.4);
+        h.button(h.point(source), PointerButton::Primary, true);
+        h.move_to(h.point(cancelled));
+        h.key(Key::Escape, Modifiers::NONE);
+        h.button(h.point(cancelled), PointerButton::Primary, false);
+        assert!((h.state.wave_source.position - source).norm() < 1.0e-6);
+        assert_eq!(h.state.editor.document.source, h.state.wave_source);
+        assert_eq!(h.state.editor.history_len(), (2, 0));
+
+        h.key(Key::Z, Modifiers::COMMAND);
+        assert!(
+            (h.state.wave_source.position - SourceSettings::default().position).norm() < 1.0e-6
+        );
+        h.key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+        assert!((h.state.wave_source.position - source).norm() < 1.0e-6);
 
         let positive = field_color(0.5, 2.0);
         let negative = field_color(-0.5, 2.0);

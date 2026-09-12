@@ -39,10 +39,11 @@ solver starts in the running state after its initial operator is committed.
 Selection remains contextual rather than introducing separate selection modes.
 Draw opens a transient role/primitive popover: holes and interfaces offer Circle
 and Custom, while baffles offer Straight and Custom. A single `InteractionMode`
-owns draw, pulse-placement, source-placement, and probe placement state. Placement
-modes are shown over the viewport and survive inspector changes; preset geometry is
-deliberately one-shot, while pulse and source placement remain active until toggled
-off, ended with the overlay, or cancelled with Escape.
+owns draw, pulse-placement, and probe placement state. Placement modes are shown
+over the viewport and survive inspector changes; preset geometry is deliberately
+one-shot, while pulse placement remains active until toggled off, ended with the
+overlay, or cancelled with Escape. The continuous source is manipulated directly
+through its viewport marker.
 
 The lower-right status control carries a compact performance summary (FPS, solver
 steps per second, DOFs, mesh size, and timestep). Detailed performance measurements
@@ -125,9 +126,11 @@ excluded from scene files and document history.
 Scene JSON remains the single persistence representation. File loading, bundled
 examples, crash recovery, and shared links all pass through the same structural
 decoder and bounded accepted-scene validator before replacing the editor document.
-Examples carry names and descriptions and render their thumbnails directly from
-the accepted spline geometry. Their application-layer presets also provide a
-continuous source and deliberate boundary configuration. Opening one is a single
+The document includes probes and continuous-source configuration alongside draft
+and accepted geometry, so every persistence route and Undo/Redo sees the same
+state. Examples carry names and descriptions and render their thumbnails directly
+from the accepted spline geometry. Their documents also provide a continuous
+source and deliberate boundary configuration. Opening one is a single
 undoable document change and starts a fresh zero field; it does not transfer the
 field from the previously open scene. Ordinary edits and AMR retain their normal
 field-preserving handoff.

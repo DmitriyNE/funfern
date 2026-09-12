@@ -38,6 +38,20 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 
+## 2026-09-12 — Direct and persistent continuous source
+
+- Removed the separate Move source placement mode. An enabled continuous source is
+  now dragged directly by its viewport marker, with grid/Shift snapping and Escape
+  restoring the pre-drag position. One complete drag is one Undo/Redo action.
+- Moved continuous-source enablement, position, frequency, strength, width, and
+  containing region into the document. Scene files are version 11; version 10 and
+  older files load with the previous disabled default. Files, scene links, examples,
+  Undo/Redo, and browser/native autosave now use the same source state.
+- Added UI input coverage for direct drag and cancellation, plus persistence tests
+  for round-trip, legacy defaults, invalid values, and missing region references.
+- All 222 workspace tests, formatting, Clippy with warnings denied, and the release
+  Trunk/WASM build pass.
+
 ## 2026-09-12 — Line-probe plot matrix
 
 - Replaced the four exposed line-readout toggles with a compact 3×3 Plots menu.

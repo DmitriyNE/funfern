@@ -1,6 +1,5 @@
-use crate::wave_gpu::SourceSettings;
 use funfern_app::{
-    editor::{Document, ProbeDefinition, ProbeId, ProbeTarget},
+    editor::{Document, ProbeDefinition, ProbeId, ProbeTarget, SourceSettings},
     persistence,
 };
 use funfern_core::*;
@@ -22,32 +21,47 @@ pub fn catalog() -> &'static [ExampleScene] {
     static CATALOG: OnceLock<Vec<ExampleScene>> = OnceLock::new();
     CATALOG.get_or_init(|| {
         vec![
-            ExampleScene {
-                name: "Starter obstacle",
-                description: "A point source scatters from a rounded obstacle above a reflecting floor.",
-                document: starter_obstacle(),
-                simulation: continuous_source(Point2::new(-0.55, 0.05), 2.5, 18.0, 0.06),
-            },
-            ExampleScene {
-                name: "Double slit",
-                description: "A point source illuminates two apertures in a reflecting waveguide.",
-                document: double_slit(),
-                simulation: continuous_source(Point2::new(-0.62, 0.0), 3.0, 20.0, 0.05),
-            },
-            ExampleScene {
-                name: "Material lens",
-                description: "A point source illuminates a slower circular material region with absorbing edges.",
-                document: material_lens(),
-                simulation: continuous_source(Point2::new(-0.72, 0.0), 3.5, 16.0, 0.045),
-            },
-            ExampleScene {
-                name: "Obstacle array",
-                description: "A point source drives multiple scattering through eight reflecting obstacles.",
-                document: obstacle_array(),
-                simulation: continuous_source(Point2::new(-0.92, 0.0), 3.0, 20.0, 0.045),
-            },
+            example(
+                "Starter obstacle",
+                "A point source scatters from a rounded obstacle above a reflecting floor.",
+                starter_obstacle(),
+                continuous_source(Point2::new(-0.55, 0.05), 2.5, 18.0, 0.06),
+            ),
+            example(
+                "Double slit",
+                "A point source illuminates two apertures in a reflecting waveguide.",
+                double_slit(),
+                continuous_source(Point2::new(-0.62, 0.0), 3.0, 20.0, 0.05),
+            ),
+            example(
+                "Material lens",
+                "A point source illuminates a slower circular material region with absorbing edges.",
+                material_lens(),
+                continuous_source(Point2::new(-0.72, 0.0), 3.5, 16.0, 0.045),
+            ),
+            example(
+                "Obstacle array",
+                "A point source drives multiple scattering through eight reflecting obstacles.",
+                obstacle_array(),
+                continuous_source(Point2::new(-0.92, 0.0), 3.0, 20.0, 0.045),
+            ),
         ]
     })
+}
+
+fn example(
+    name: &'static str,
+    description: &'static str,
+    mut document: Document,
+    simulation: ExampleSimulation,
+) -> ExampleScene {
+    document.source = simulation.source;
+    ExampleScene {
+        name,
+        description,
+        document,
+        simulation,
+    }
 }
 
 fn continuous_source(
@@ -118,6 +132,7 @@ fn double_slit() -> Document {
         draft: scene.clone(),
         accepted: scene,
         probes: vec![],
+        source: SourceSettings::default(),
     }
 }
 
@@ -152,6 +167,7 @@ fn material_lens() -> Document {
         draft: scene.clone(),
         accepted: scene,
         probes: vec![],
+        source: SourceSettings::default(),
     }
 }
 
@@ -248,6 +264,7 @@ mod tests {
             };
             assert_eq!(loaded, example.document, "{}", example.name);
             assert!(example.simulation.source.enabled, "{}", example.name);
+            assert_eq!(example.document.source, example.simulation.source);
             assert_ne!(
                 example.document.accepted.outer_boundaries,
                 OuterBoundaryConditions::default(),

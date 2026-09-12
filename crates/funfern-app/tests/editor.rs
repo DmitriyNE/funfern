@@ -249,10 +249,42 @@ fn version_nine_point_probes_remain_loadable() {
     let json = save(&editor.document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
     value["version"] = 9.into();
+    value.as_object_mut().unwrap().remove("source");
     assert_eq!(
         decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap(),
         editor.document
     );
+}
+
+#[test]
+fn continuous_source_round_trips_and_version_ten_uses_the_default() {
+    let document = Document {
+        source: SourceSettings {
+            enabled: true,
+            position: Point2::new(-0.37, 0.28),
+            amplitude: 23.0,
+            width: 0.045,
+            frequency_hz: 3.25,
+            region: BACKGROUND_REGION,
+        },
+        ..Default::default()
+    };
+    let json = save(&document).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["version"], 11);
+    assert_eq!(decode(json.as_bytes()).unwrap(), document);
+
+    value["version"] = 10.into();
+    value.as_object_mut().unwrap().remove("source");
+    let legacy = decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+    assert_eq!(legacy.source, SourceSettings::default());
+
+    let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    malformed["source"]["width"] = 0.into();
+    assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
+    malformed = serde_json::from_str(&json).unwrap();
+    malformed["source"]["region"] = 999.into();
+    assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
 }
 #[test]
 fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
@@ -263,7 +295,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 11.into(),
+            0 => value["version"] = 12.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -340,7 +372,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        10
+        11
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -1036,6 +1068,7 @@ fn validated_example_replacement_is_one_undoable_action() {
         draft: scene.clone(),
         accepted: scene,
         probes: vec![],
+        source: SourceSettings::default(),
     };
 
     editor.replace_validated_with_history(example.clone());
