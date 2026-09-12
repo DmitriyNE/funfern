@@ -132,10 +132,22 @@ impl OuterBoundaryConditions {
 #[derive(Clone, Debug, PartialEq)]
 pub enum WaveError {
     InvalidCoefficients,
+    MaterialEvaluation {
+        material: String,
+        coefficient: &'static str,
+        point: Point2,
+        reason: String,
+    },
     InvalidMesh(&'static str),
-    InvalidTimeStep { requested: f64, maximum: f64 },
+    InvalidTimeStep {
+        requested: f64,
+        maximum: f64,
+    },
     InvalidState,
-    SizeMismatch { expected: usize, actual: usize },
+    SizeMismatch {
+        expected: usize,
+        actual: usize,
+    },
 }
 
 impl std::fmt::Display for WaveError {
@@ -144,6 +156,16 @@ impl std::fmt::Display for WaveError {
             Self::InvalidCoefficients => write!(
                 f,
                 "Wave coefficients must be finite with positive mass and stiffness and nonnegative damping"
+            ),
+            Self::MaterialEvaluation {
+                material,
+                coefficient,
+                point,
+                reason,
+            } => write!(
+                f,
+                "Material `{material}` {coefficient} is invalid at ({:.4}, {:.4}): {reason}",
+                point.x, point.y
             ),
             Self::InvalidMesh(reason) => write!(f, "Cannot assemble wave operator: {reason}"),
             Self::InvalidTimeStep { requested, maximum } => write!(

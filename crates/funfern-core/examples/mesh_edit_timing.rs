@@ -34,9 +34,10 @@ fn main() {
                 Material {
                     id: MaterialId(2),
                     name: "Inclusion".into(),
-                    mass_density: 1.0,
-                    stiffness: 1.8,
-                    damping: 0.0,
+                    mass_density: ScalarField::constant(1.0),
+                    stiffness: ScalarField::constant(1.8),
+                    damping: ScalarField::constant(0.0),
+                    parameters: vec![],
                     color: [190, 110, 80],
                 },
             ],
@@ -44,10 +45,12 @@ fn main() {
                 Region {
                     id: BACKGROUND_REGION,
                     material: DEFAULT_MATERIAL,
+                    frame: MaterialFrame::world(),
                 },
                 Region {
                     id: RegionId(2),
                     material: MaterialId(2),
+                    frame: MaterialFrame::world(),
                 },
             ],
             ..Scene::default()

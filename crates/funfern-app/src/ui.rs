@@ -73,6 +73,121 @@ struct UiNotice {
     text: String,
     created: Instant,
 }
+
+fn material_scalar_editor(
+    ui: &mut egui::Ui,
+    id: MaterialId,
+    slot: usize,
+    label: &str,
+    field: &mut ScalarField,
+    parameters: &[MaterialParameter],
+    state: (&mut Option<(MaterialId, String)>, &mut Option<String>),
+) -> bool {
+    let (edit, error) = state;
+    if !matches!(edit, Some((candidate, _)) if *candidate == id) {
+        *edit = None;
+        *error = None;
+    }
+    let mut formula_mode = matches!(field, ScalarField::Formula(_));
+    let was_formula = formula_mode;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        egui::ComboBox::from_id_salt(("material_field_mode", id.0, slot))
+            .width(76.0)
+            .selected_text(if formula_mode { "Formula" } else { "Constant" })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut formula_mode, false, "Constant");
+                ui.selectable_value(&mut formula_mode, true, "Formula");
+            });
+    });
+    let mut changed = false;
+    if formula_mode != was_formula {
+        if formula_mode {
+            let value = field.constant_value().unwrap_or(1.0);
+            let source = format!("{value}");
+            *field = ScalarField::formula(source.clone()).unwrap();
+            *edit = Some((id, source));
+            *error = None;
+            changed = true;
+        } else {
+            let coordinates = MaterialCoordinates {
+                x: 0.0,
+                y: 0.0,
+                r: 0.0,
+                theta: 0.0,
+            };
+            match field.evaluate(coordinates, parameters) {
+                Ok(value) => {
+                    *field = ScalarField::constant(value);
+                    *edit = None;
+                    *error = None;
+                    changed = true;
+                }
+                Err(problem) => *error = Some(problem.to_string()),
+            }
+        }
+    }
+    match field {
+        ScalarField::Constant(value) => {
+            let minimum = if slot == 2 { 0.0 } else { 1.0e-6 };
+            changed |= ui
+                .add(
+                    egui::DragValue::new(value)
+                        .speed(if slot == 2 { 0.005 } else { 0.01 })
+                        .range(minimum..=1.0e6)
+                        .update_while_editing(false),
+                )
+                .changed();
+        }
+        ScalarField::Formula(formula) => {
+            if !matches!(edit, Some((candidate, _)) if *candidate == id) {
+                *edit = Some((id, formula.source().into()));
+            }
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut edit.as_mut().unwrap().1)
+                    .desired_width(ui.available_width())
+                    .hint_text("Expression"),
+            );
+            let lost_focus = response.lost_focus();
+            response.on_hover_text(
+                "Local x, y, r use world units; theta uses radians. Parameters are shared by this material.",
+            );
+            if lost_focus {
+                let source = edit.as_ref().unwrap().1.clone();
+                match ScalarField::formula(source) {
+                    Ok(candidate) => {
+                        let coordinates = MaterialCoordinates {
+                            x: 0.0,
+                            y: 0.0,
+                            r: 0.0,
+                            theta: 0.0,
+                        };
+                        match candidate.evaluate(coordinates, parameters) {
+                            Ok(value) if (slot == 2 && value >= 0.0) || value > 0.0 => {
+                                *field = candidate;
+                                *error = None;
+                                changed = true;
+                            }
+                            Ok(_) => {
+                                *error = Some(if slot == 2 {
+                                    "damping must be nonnegative at the frame origin".into()
+                                } else {
+                                    "coefficient must be positive at the frame origin".into()
+                                });
+                            }
+                            Err(problem) => *error = Some(problem.to_string()),
+                        }
+                    }
+                    Err(problem) => *error = Some(problem.to_string()),
+                }
+            }
+        }
+    }
+    if let Some(error) = error {
+        ui.colored_label(RED, error);
+    }
+    changed
+}
 #[derive(Clone, Copy)]
 enum LoadMode {
     Replace,
@@ -511,6 +626,9 @@ pub struct Playground {
     creation_role: CreationRole,
     material_selection: MaterialId,
     material_name_edit: Option<(MaterialId, String)>,
+    material_formula_edits: [Option<(MaterialId, String)>; 3],
+    material_formula_errors: [Option<String>; 3],
+    material_parameter_name_edits: BTreeMap<(u64, usize), String>,
     loop_role_edit: Option<(ObstacleId, LoopKind)>,
     region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
@@ -635,6 +753,7 @@ pub struct Playground {
     wave_energy_step: u64,
     wave_gpu_status: &'static str,
     wave_error: Option<String>,
+    wave_failed_revision: Option<u64>,
 }
 impl Default for Playground {
     fn default() -> Self {
@@ -682,6 +801,9 @@ impl Default for Playground {
             creation_role: CreationRole::Hole,
             material_selection: DEFAULT_MATERIAL,
             material_name_edit: None,
+            material_formula_edits: [None, None, None],
+            material_formula_errors: [None, None, None],
+            material_parameter_name_edits: BTreeMap::new(),
             loop_role_edit: None,
             region_selection: BACKGROUND_REGION,
             selection: None,
@@ -808,6 +930,7 @@ impl Default for Playground {
             wave_energy_step: 0,
             wave_gpu_status: "loading",
             wave_error: None,
+            wave_failed_revision: None,
         }
     }
 }
@@ -1243,6 +1366,9 @@ impl Playground {
         let material = scene
             .region_material(BACKGROUND_REGION)
             .ok_or("The background material is missing")?;
+        let material = material
+            .uniform()
+            .ok_or("Far-field projection requires a uniform lossless background material")?;
         if material.damping.abs() > 1.0e-12 {
             return Err("Far-field projection requires a lossless background material".into());
         }
@@ -2728,6 +2854,7 @@ impl Playground {
             && self.simulation_candidate.is_none()
             && (self.editor.document.accepted != self.mesh_committed_scene
                 || self.fresh_simulation_requested)
+            && self.wave_failed_revision != Some(self.editor.revision)
             && let (Some(mesh), Some(source_operator)) =
                 (self.wave_mesh.as_ref(), self.wave_operator.as_ref())
         {
@@ -2774,12 +2901,19 @@ impl Playground {
                             });
                             self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
                             self.wave_error = None;
+                            self.wave_failed_revision = None;
                             self.message.clear();
                         }
-                        Err(error) => self.wave_error = Some(error.to_string()),
+                        Err(error) => {
+                            self.wave_error = Some(error.to_string());
+                            self.wave_failed_revision = Some(self.editor.revision);
+                        }
                     }
                 }
-                Err(error) => self.wave_error = Some(error.to_string()),
+                Err(error) => {
+                    self.wave_error = Some(error.to_string());
+                    self.wave_failed_revision = Some(self.editor.revision);
+                }
             }
         }
         if active {
@@ -2946,6 +3080,14 @@ impl Playground {
             self.solution_indicator_source = None;
             self.amr_coarsen_streak = 0;
             self.amr_status = "off";
+            return;
+        }
+        if self.mesh_committed_scene.has_varying_materials() {
+            self.solution_indicator_job = None;
+            self.solution_indicator_result = None;
+            self.solution_indicator_source = None;
+            self.amr_coarsen_streak = 0;
+            self.amr_status = "waiting for coefficient-aware AMR";
             return;
         }
         if self.editor.editing()
@@ -5504,6 +5646,81 @@ impl Playground {
                 self.error(result);
             }
         }
+        if let Some(region) = self
+            .editor
+            .document
+            .draft
+            .region(self.region_selection)
+            .copied()
+        {
+            ui.add_space(4.0);
+            ui.label("Material frame").on_hover_text(
+                "A rigid origin and angle for local material coordinates; x, y, and r use world units.",
+            );
+            let mut frame = region.frame;
+            let mut angle_degrees = frame.angle_radians.to_degrees();
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Origin");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut frame.origin.x)
+                            .speed(0.01)
+                            .prefix("x ")
+                            .update_while_editing(false),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut frame.origin.y)
+                            .speed(0.01)
+                            .prefix("y ")
+                            .update_while_editing(false),
+                    )
+                    .changed();
+            });
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut angle_degrees)
+                        .speed(0.5)
+                        .suffix("°")
+                        .prefix("Angle ")
+                        .update_while_editing(false),
+                )
+                .changed();
+            frame.angle_radians = angle_degrees.to_radians();
+            if region.id == BACKGROUND_REGION {
+                ui.small("World frame");
+            } else {
+                let previous = frame.attachment;
+                egui::ComboBox::from_label("Attachment")
+                    .selected_text(match frame.attachment {
+                        MaterialFrameAttachment::World => "World",
+                        MaterialFrameAttachment::FollowRegion => "Follow region",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut frame.attachment,
+                            MaterialFrameAttachment::World,
+                            "World",
+                        );
+                        ui.selectable_value(
+                            &mut frame.attachment,
+                            MaterialFrameAttachment::FollowRegion,
+                            "Follow region",
+                        );
+                    });
+                changed |= previous != frame.attachment;
+                if ui.button("Center on region").clicked() {
+                    let result = self.editor.center_region_frame(region.id);
+                    self.error(result);
+                }
+            }
+            if changed {
+                let result = self.editor.set_region_frame(region.id, frame);
+                self.error(result);
+            }
+        }
         ui.separator();
         ui.label("Library");
         ui.horizontal(|ui| {
@@ -5594,38 +5811,163 @@ impl Playground {
                 self.editor.commit();
                 self.material_name_edit = None;
             }
-            let responses = [
-                ui.add(
-                    egui::DragValue::new(&mut material.mass_density)
-                        .speed(0.01)
-                        .range(1.0e-6..=1.0e6)
-                        .prefix("density ")
-                        .update_while_editing(false),
+            let mut values_changed = material_scalar_editor(
+                ui,
+                material.id,
+                0,
+                "Density",
+                &mut material.mass_density,
+                &material.parameters,
+                (
+                    &mut self.material_formula_edits[0],
+                    &mut self.material_formula_errors[0],
                 ),
-                ui.add(
-                    egui::DragValue::new(&mut material.stiffness)
-                        .speed(0.01)
-                        .range(1.0e-6..=1.0e6)
-                        .prefix("stiffness ")
-                        .update_while_editing(false),
+            );
+            values_changed |= material_scalar_editor(
+                ui,
+                material.id,
+                1,
+                "Stiffness",
+                &mut material.stiffness,
+                &material.parameters,
+                (
+                    &mut self.material_formula_edits[1],
+                    &mut self.material_formula_errors[1],
                 ),
-                ui.add(
-                    egui::DragValue::new(&mut material.damping)
-                        .speed(0.005)
-                        .range(0.0..=1.0e6)
-                        .prefix("damping ")
-                        .update_while_editing(false),
+            );
+            values_changed |= material_scalar_editor(
+                ui,
+                material.id,
+                2,
+                "Damping",
+                &mut material.damping,
+                &material.parameters,
+                (
+                    &mut self.material_formula_edits[2],
+                    &mut self.material_formula_errors[2],
                 ),
-            ];
+            );
             ui.small("Nondimensional coefficients");
-            if responses.iter().any(egui::Response::changed) {
+            if values_changed && material.valid() {
                 let result = self.editor.update_material(material.clone());
                 self.error(result);
             }
-            ui.small(format!(
-                "wave speed {:.3}",
-                (material.stiffness / material.mass_density).sqrt()
-            ));
+            if material.varying() || !material.parameters.is_empty() {
+                ui.label("Parameters");
+                let mut rename = None;
+                let mut delete = None;
+                let mut parameter_value_changed = false;
+                for index in 0..material.parameters.len() {
+                    let key = (material.id.0, index);
+                    let current_name = material.parameters[index].name.clone();
+                    self.material_parameter_name_edits
+                        .entry(key)
+                        .or_insert_with(|| current_name.clone());
+                    let referenced = [
+                        &material.mass_density,
+                        &material.stiffness,
+                        &material.damping,
+                    ]
+                    .into_iter()
+                    .flat_map(ScalarField::parameter_names)
+                    .any(|name| name == current_name);
+                    let mut lost_focus = false;
+                    ui.horizontal(|ui| {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(
+                                self.material_parameter_name_edits.get_mut(&key).unwrap(),
+                            )
+                            .desired_width(66.0),
+                        );
+                        lost_focus = response.lost_focus();
+                        parameter_value_changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut material.parameters[index].value)
+                                    .speed(0.01)
+                                    .update_while_editing(false),
+                            )
+                            .changed();
+                        if ui
+                            .add_enabled(!referenced, egui::Button::new("−"))
+                            .on_hover_text(if referenced {
+                                "Parameter is used by a formula"
+                            } else {
+                                "Delete parameter"
+                            })
+                            .clicked()
+                        {
+                            delete = Some(index);
+                        }
+                    });
+                    if lost_focus {
+                        rename = Some((index, self.material_parameter_name_edits[&key].clone()));
+                    }
+                }
+                if let Some((index, name)) = rename
+                    && name != material.parameters[index].name
+                {
+                    match material.rename_parameter(index, name) {
+                        Ok(()) => parameter_value_changed = true,
+                        Err(error) => self.message = error.to_string(),
+                    }
+                }
+                if let Some(index) = delete {
+                    material.parameters.remove(index);
+                    self.material_parameter_name_edits
+                        .retain(|(id, _), _| *id != material.id.0);
+                    parameter_value_changed = true;
+                }
+                if material.parameters.len() < MAX_MATERIAL_PARAMETERS
+                    && ui.button("+ Parameter").clicked()
+                {
+                    let name = if material
+                        .parameters
+                        .iter()
+                        .all(|parameter| parameter.name != "R")
+                    {
+                        "R".into()
+                    } else {
+                        (2..)
+                            .map(|index| format!("p{index}"))
+                            .find(|name| {
+                                material
+                                    .parameters
+                                    .iter()
+                                    .all(|parameter| parameter.name != *name)
+                            })
+                            .unwrap()
+                    };
+                    material
+                        .parameters
+                        .push(MaterialParameter { name, value: 1.0 });
+                    parameter_value_changed = true;
+                }
+                if parameter_value_changed && material.valid() {
+                    let result = self.editor.update_material(material.clone());
+                    self.error(result);
+                }
+            } else if ui.button("+ Parameter").clicked() {
+                material.parameters.push(MaterialParameter {
+                    name: "R".into(),
+                    value: 1.0,
+                });
+                let result = self.editor.update_material(material.clone());
+                self.error(result);
+            }
+            let frame = self
+                .editor
+                .document
+                .draft
+                .regions
+                .iter()
+                .find(|region| region.material == material.id)
+                .map_or(MaterialFrame::world(), |region| region.frame);
+            if let Ok(values) = material.evaluate(frame, frame.origin) {
+                ui.small(format!(
+                    "wave speed at frame origin {:.3}",
+                    (values.stiffness / values.mass_density).sqrt()
+                ));
+            }
             if self.material_selection != DEFAULT_MATERIAL {
                 let material_in_use = self
                     .editor
@@ -10159,9 +10501,10 @@ pub fn wave_gpu_check_scene() -> Playground {
             Material {
                 id: MaterialId(2),
                 name: "Isolated interior".into(),
-                mass_density: 1.0,
-                stiffness: 1.0,
-                damping: 0.0,
+                mass_density: ScalarField::constant(1.0),
+                stiffness: ScalarField::constant(1.0),
+                damping: ScalarField::constant(0.0),
+                parameters: vec![],
                 color: [77, 121, 164],
             },
         ],
@@ -10169,10 +10512,15 @@ pub fn wave_gpu_check_scene() -> Playground {
             Region {
                 id: BACKGROUND_REGION,
                 material: DEFAULT_MATERIAL,
+                frame: MaterialFrame::world(),
             },
             Region {
                 id: RegionId(2),
                 material: MaterialId(2),
+                frame: MaterialFrame {
+                    attachment: MaterialFrameAttachment::FollowRegion,
+                    ..MaterialFrame::world()
+                },
             },
         ],
         outer_boundaries: OuterBoundaryConditions::default(),
@@ -11503,9 +11851,9 @@ pub fn wave_transfer_benchmark(
                 .material(material)
                 .unwrap()
                 .clone();
-            values.mass_density = 1.7;
-            values.stiffness = 0.8;
-            values.damping = 0.05;
+            values.mass_density = ScalarField::constant(1.7);
+            values.stiffness = ScalarField::constant(0.8);
+            values.damping = ScalarField::constant(0.05);
             state.editor.update_material(values).unwrap();
             state
                 .editor
@@ -13902,7 +14250,7 @@ mod tests {
         assert!((input.wave_speed - 1.0).abs() < 1.0e-12);
 
         let mut damped = scene.clone();
-        damped.materials[0].damping = 0.1;
+        damped.materials[0].damping = ScalarField::constant(0.1);
         assert!(
             Playground::compile_far_field(&mesh, &operator, &damped, settings)
                 .unwrap_err()
@@ -14896,7 +15244,7 @@ mod tests {
             .material(material)
             .unwrap()
             .clone();
-        values.mass_density = 2.0;
+        values.mass_density = ScalarField::formula("2 + 0.25 * x").unwrap();
         h.state.editor.update_material(values).unwrap();
         h.state
             .editor
@@ -14916,6 +15264,43 @@ mod tests {
         assert!(candidate.transfer.is_some());
         let new_mass: f64 = candidate.operator.lumped_mass().iter().sum();
         assert!((new_mass - 2.0 * old_mass).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn invalid_spatial_material_keeps_the_solver_and_retries_after_an_edit() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        commit_mesh_without_gpu(&mut h.state);
+        let mesh = h.state.mesh.clone().unwrap();
+        let operator = h.state.wave_operator.clone().unwrap();
+
+        let mut material = h.state.editor.document.draft.materials[0].clone();
+        // Valid at the frame origin, but negative at assembly points near the sides.
+        material.mass_density = ScalarField::formula("0.1 - x^2").unwrap();
+        h.state.editor.update_material(material.clone()).unwrap();
+        h.settle();
+        h.state.refresh_mesh();
+        assert!(h.state.simulation_candidate.is_none());
+        assert!(h.state.wave_error.as_deref().unwrap().contains("density"));
+        assert!(Arc::ptr_eq(h.state.mesh.as_ref().unwrap(), &mesh));
+        assert!(Arc::ptr_eq(
+            h.state.wave_operator.as_ref().unwrap(),
+            &operator
+        ));
+        assert_eq!(h.state.wave_failed_revision, Some(h.state.editor.revision));
+
+        let failed_revision = h.state.wave_failed_revision;
+        h.state.refresh_mesh();
+        assert_eq!(h.state.wave_failed_revision, failed_revision);
+        assert!(h.state.simulation_candidate.is_none());
+
+        material.mass_density = ScalarField::formula("1 + 0.1 * x").unwrap();
+        h.state.editor.update_material(material).unwrap();
+        h.settle();
+        h.state.refresh_mesh();
+        assert!(h.state.simulation_candidate.is_some());
+        assert!(h.state.wave_error.is_none());
+        assert_eq!(h.state.wave_failed_revision, None);
     }
 
     #[test]

@@ -47,8 +47,7 @@ pub struct QuadraticAreaElement {
     pub barycentric_vertices: [[f64; 3]; 3],
     pub barycentric_gradients: [Point2; 3],
     pub region: RegionId,
-    pub mass_density: f64,
-    pub stiffness: f64,
+    pub coefficients: [crate::EvaluatedMaterial; 12],
     pub area: f64,
 }
 
@@ -59,6 +58,8 @@ pub struct QuadraticAreaMatrices {
     pub field: [f64; 7],
     /// Symmetric upper triangle in row-major `(0,0), (0,1), ... (6,6)` order.
     pub mass: [f64; QUADRATIC_AREA_MATRIX_ENTRIES],
+    /// Density-weighted symmetric mass matrix used for kinetic energy.
+    pub density: [f64; QUADRATIC_AREA_MATRIX_ENTRIES],
     /// Symmetric upper triangle in the same order as `mass`.
     pub stiffness: [f64; QUADRATIC_AREA_MATRIX_ENTRIES],
 }
@@ -68,9 +69,11 @@ impl QuadraticAreaElement {
         let mut result = QuadraticAreaMatrices {
             field: [0.0; 7],
             mass: [0.0; QUADRATIC_AREA_MATRIX_ENTRIES],
+            density: [0.0; QUADRATIC_AREA_MATRIX_ENTRIES],
             stiffness: [0.0; QUADRATIC_AREA_MATRIX_ENTRIES],
         };
-        for (local, weight) in area_quadrature() {
+        for ((local, weight), coefficients) in area_quadrature().into_iter().zip(self.coefficients)
+        {
             let barycentric = std::array::from_fn(|coordinate| {
                 self.barycentric_vertices[0][coordinate] * local[0]
                     + self.barycentric_vertices[1][coordinate] * local[1]
@@ -87,8 +90,11 @@ impl QuadraticAreaElement {
             for (row, row_value) in values.iter().copied().enumerate() {
                 for (column, column_value) in values.iter().copied().enumerate().skip(row) {
                     result.mass[entry] += physical_weight * row_value * column_value;
-                    result.stiffness[entry] +=
-                        physical_weight * gradients[row].dot(gradients[column]);
+                    result.stiffness[entry] += physical_weight
+                        * coefficients.stiffness
+                        * gradients[row].dot(gradients[column]);
+                    result.density[entry] +=
+                        physical_weight * coefficients.mass_density * row_value * column_value;
                     entry += 1;
                 }
             }
@@ -229,6 +235,7 @@ impl QuadraticPointStencil {
             return Err(PointProbeError::OutsideDomain);
         };
         Self::from_element(
+            mesh,
             operator,
             scene,
             triangle_index,
@@ -239,6 +246,7 @@ impl QuadraticPointStencil {
     }
 
     fn from_element(
+        mesh: &TriMesh,
         operator: &QuadraticWaveOperator,
         scene: &Scene,
         triangle_index: usize,
@@ -246,9 +254,14 @@ impl QuadraticPointStencil {
         barycentric: [f64; 3],
         gradients: [Point2; 3],
     ) -> Result<Self, PointProbeError> {
+        let point = mesh.triangles[triangle_index]
+            .vertices
+            .map(|index| mesh.vertices[index].point);
+        let point =
+            point[0] * barycentric[0] + point[1] * barycentric[1] + point[2] * barycentric[2];
         let material = scene
-            .region_material(region)
-            .ok_or(PointProbeError::InvalidMesh)?;
+            .material_at(region, point)
+            .map_err(|_| PointProbeError::InvalidMesh)?;
         let nodes = *operator
             .element_nodes()
             .get(triangle_index)
@@ -370,9 +383,6 @@ impl QuadraticAreaStencil {
             if polygon.len() < 3 {
                 continue;
             }
-            let material = scene
-                .region_material(triangle.region)
-                .ok_or(AreaProbeError::InvalidMesh)?;
             let nodes = *operator
                 .element_nodes()
                 .get(triangle_index)
@@ -392,13 +402,25 @@ impl QuadraticAreaStencil {
                         (a - point).cross(b - point) / twice_area,
                     ]
                 });
+                let mut coefficients = [crate::EvaluatedMaterial {
+                    mass_density: 1.0,
+                    stiffness: 1.0,
+                    damping: 0.0,
+                }; 12];
+                for (slot, (local, _)) in area_quadrature().into_iter().enumerate() {
+                    let point = subtriangle[0] * local[0]
+                        + subtriangle[1] * local[1]
+                        + subtriangle[2] * local[2];
+                    coefficients[slot] = scene
+                        .material_at(triangle.region, point)
+                        .map_err(|_| AreaProbeError::InvalidMesh)?;
+                }
                 elements.push(QuadraticAreaElement {
                     nodes,
                     barycentric_vertices,
                     barycentric_gradients: gradients,
                     region: triangle.region,
-                    mass_density: material.mass_density,
-                    stiffness: material.stiffness,
+                    coefficients,
                     area,
                 });
             }
@@ -458,7 +480,7 @@ impl QuadraticAreaStencil {
                         * local_displacement[row]
                         * local_displacement[column];
                     speed_squared += symmetry
-                        * matrices.mass[entry]
+                        * matrices.density[entry]
                         * local_velocity[row]
                         * local_velocity[column];
                     gradient_squared += symmetry
@@ -469,8 +491,7 @@ impl QuadraticAreaStencil {
                 }
             }
             displacement_squared_integral += field_squared;
-            total_energy +=
-                0.5 * (element.mass_density * speed_squared + element.stiffness * gradient_squared);
+            total_energy += 0.5 * (speed_squared + gradient_squared);
         }
         let mean_displacement = displacement_integral / self.covered_area;
         let rms_displacement = (displacement_squared_integral / self.covered_area)
@@ -659,6 +680,7 @@ impl QuadraticBoundaryStencil {
                         left * -1.0
                     };
                     let stencil = QuadraticPointStencil::from_element(
+                        mesh,
                         operator,
                         scene,
                         triangle_index,
@@ -717,13 +739,14 @@ mod tests {
         };
         let scene = Scene {
             materials: vec![Material {
-                mass_density: 2.0,
-                stiffness: 3.0,
+                mass_density: crate::ScalarField::constant(2.0),
+                stiffness: crate::ScalarField::constant(3.0),
                 ..Material::default_medium()
             }],
             regions: vec![Region {
                 id: BACKGROUND_REGION,
                 material: DEFAULT_MATERIAL,
+                frame: crate::MaterialFrame::world(),
             }],
             ..Scene::default()
         };
@@ -752,6 +775,30 @@ mod tests {
         assert!((sample.velocity - 4.0).abs() < 1.0e-12);
         assert!((sample.gradient - Point2::new(2.0, -1.0)).norm() < 1.0e-12);
         assert!((sample.energy_density - (0.5 * 2.0 * 16.0 + 0.5 * 3.0 * 5.0)).abs() < 1.0e-11);
+    }
+
+    #[test]
+    fn point_probe_uses_coefficients_at_the_sample_position() {
+        let (mesh, mut scene, _) = fixture();
+        scene.materials[0].mass_density = crate::ScalarField::formula("1 + x").unwrap();
+        scene.materials[0].stiffness = crate::ScalarField::formula("2 + y").unwrap();
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let point = Point2::new(0.2, 0.3);
+        let stencil = QuadraticPointStencil::build(&mesh, &operator, &scene, point).unwrap();
+        let displacement = operator
+            .node_points()
+            .iter()
+            .map(|p| 2.0 * p.x - p.y)
+            .collect::<Vec<_>>();
+        let velocity = vec![4.0; operator.degrees_of_freedom()];
+        let sample = stencil.sample(&displacement, &velocity).unwrap();
+        let expected = 0.5 * 1.2 * 16.0 + 0.5 * 2.3 * 5.0;
+        assert!((sample.energy_density - expected).abs() < 1.0e-11);
     }
 
     #[test]
@@ -882,6 +929,7 @@ mod tests {
         scene.regions.push(Region {
             id: interior,
             material: DEFAULT_MATERIAL,
+            frame: crate::MaterialFrame::world(),
         });
         scene.obstacles[0].role = crate::LoopRole::MaterialInterface {
             exterior: BACKGROUND_REGION,

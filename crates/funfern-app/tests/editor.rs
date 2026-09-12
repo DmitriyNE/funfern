@@ -268,7 +268,7 @@ fn area_probe_targets_and_far_field_settings_round_trip() {
         .unwrap();
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 13"));
+    assert!(json.contains("\"version\": 14"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
     assert_eq!(decoded.far_field.inset, 0.17);
@@ -352,7 +352,7 @@ fn continuous_source_round_trips_and_version_ten_uses_the_default() {
     };
     let json = save(&document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 13);
+    assert_eq!(value["version"], 14);
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
     value["version"] = 10.into();
@@ -377,7 +377,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 14.into(),
+            0 => value["version"] = 15.into(),
             1 => value["domain"][0] = 0.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -454,7 +454,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        13
+        14
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -851,9 +851,9 @@ fn material_regions_round_trip_and_version_one_migrates_to_holes() {
         .unwrap();
     settle(&mut editor);
     let mut values = editor.document.draft.material(material).unwrap().clone();
-    values.mass_density = 2.5;
-    values.stiffness = 6.0;
-    values.damping = 0.1;
+    values.mass_density = ScalarField::constant(2.5);
+    values.stiffness = ScalarField::constant(6.0);
+    values.damping = ScalarField::constant(0.1);
     editor.update_material(values).unwrap();
     settle(&mut editor);
     let document = decode(save(&editor.document).unwrap().as_bytes()).unwrap();
@@ -883,6 +883,157 @@ fn material_regions_round_trip_and_version_one_migrates_to_holes() {
             exterior: BACKGROUND_REGION
         }
     ));
+}
+
+#[test]
+fn spatial_materials_parameters_and_frames_round_trip() {
+    let mut editor = Editor::default();
+    let material_id = editor.add_material().unwrap();
+    let loop_id = editor
+        .create_region_loop(
+            PeriodicCubicSpline::rounded(Point2::new(0.5, 0.0), 0.12),
+            BACKGROUND_REGION,
+            material_id,
+            false,
+        )
+        .unwrap();
+    settle(&mut editor);
+    let region_id = editor.obstacle(loop_id).unwrap().role.interior().unwrap();
+    let mut material = editor.document.draft.material(material_id).unwrap().clone();
+    material.parameters = vec![MaterialParameter {
+        name: "R".into(),
+        value: 0.35,
+    }];
+    material.mass_density = ScalarField::formula("1 + r / R").unwrap();
+    material.stiffness = ScalarField::formula("2 - clamp(0, 1, r / R)").unwrap();
+    editor.update_material(material).unwrap();
+    editor
+        .set_region_frame(
+            region_id,
+            MaterialFrame {
+                origin: Point2::new(0.48, -0.03),
+                angle_radians: 0.4,
+                attachment: MaterialFrameAttachment::FollowRegion,
+            },
+        )
+        .unwrap();
+    settle(&mut editor);
+
+    let json = save(&editor.document).unwrap();
+    assert!(json.contains("\"version\": 14"));
+    assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
+
+    let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    malformed["accepted"]["materials"][1]["mass_density"]["source"] = "sqrt(".into();
+    assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
+    malformed = serde_json::from_str(&json).unwrap();
+    malformed["accepted"]["regions"][1]["frame"]["angle_radians"] = "sideways".into();
+    assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
+}
+
+#[test]
+fn version_thirteen_materials_gain_world_unit_region_frames() {
+    let mut editor = Editor::default();
+    let material_id = editor.add_material().unwrap();
+    let loop_id = editor
+        .create_region_loop(
+            PeriodicCubicSpline::rounded(Point2::new(0.46, -0.21), 0.11),
+            BACKGROUND_REGION,
+            material_id,
+            false,
+        )
+        .unwrap();
+    settle(&mut editor);
+    let region_id = editor.obstacle(loop_id).unwrap().role.interior().unwrap();
+    let json = save(&editor.document).unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+    legacy["version"] = 13.into();
+    for scene_name in ["draft", "accepted"] {
+        let scene = legacy[scene_name].as_object_mut().unwrap();
+        for material in scene["materials"].as_array_mut().unwrap() {
+            for coefficient in ["mass_density", "stiffness", "damping"] {
+                let value = material[coefficient]["value"].clone();
+                material[coefficient] = value;
+            }
+            material.as_object_mut().unwrap().remove("parameters");
+        }
+        for region in scene["regions"].as_array_mut().unwrap() {
+            region.as_object_mut().unwrap().remove("frame");
+        }
+    }
+    let migrated = decode(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();
+    assert_eq!(
+        migrated.draft.region(BACKGROUND_REGION).unwrap().frame,
+        MaterialFrame::world()
+    );
+    let frame = migrated.draft.region(region_id).unwrap().frame;
+    assert_eq!(frame.attachment, MaterialFrameAttachment::FollowRegion);
+    assert!((frame.origin - Point2::new(0.46, -0.21)).norm() < 1.0e-3);
+    assert_eq!(frame.angle_radians, 0.0);
+}
+
+#[test]
+fn attached_material_frame_follows_a_whole_loop_similarity() {
+    let mut editor = Editor::default();
+    let material_id = editor.add_material().unwrap();
+    let loop_id = editor
+        .create_region_loop(
+            PeriodicCubicSpline::rounded(Point2::new(0.45, 0.0), 0.1),
+            BACKGROUND_REGION,
+            material_id,
+            false,
+        )
+        .unwrap();
+    settle(&mut editor);
+    let region_id = editor.obstacle(loop_id).unwrap().role.interior().unwrap();
+    let original_frame = MaterialFrame {
+        origin: Point2::new(0.48, 0.04),
+        angle_radians: 0.2,
+        attachment: MaterialFrameAttachment::FollowRegion,
+    };
+    editor.set_region_frame(region_id, original_frame).unwrap();
+    let controls = editor.obstacle(loop_id).unwrap().spline.controls().to_vec();
+    let center = controls.iter().copied().reduce(|a, b| a + b).unwrap() / controls.len() as f64;
+    let angle = 0.35_f64;
+    let scale = 1.4;
+    let translation = Point2::new(-0.12, 0.18);
+    let (sin, cos) = angle.sin_cos();
+    let transform = |point: Point2| {
+        let relative = point - center;
+        center
+            + translation
+            + Point2::new(
+                scale * (cos * relative.x - sin * relative.y),
+                scale * (sin * relative.x + cos * relative.y),
+            )
+    };
+    let updates = controls
+        .iter()
+        .enumerate()
+        .map(|(index, point)| (GeometryControl::Loop(loop_id, index), transform(*point)))
+        .collect::<Vec<_>>();
+    let history = editor.history_len().0;
+    editor.begin();
+    editor.set_control_points(&updates).unwrap();
+    editor.commit();
+    let frame = editor.document.draft.region(region_id).unwrap().frame;
+    assert!((frame.origin - transform(original_frame.origin)).norm() < 1.0e-12);
+    assert!((frame.angle_radians - (original_frame.angle_radians + angle)).abs() < 1.0e-12);
+    assert_eq!(editor.history_len().0, history + 1);
+
+    let before_partial = frame;
+    editor.begin();
+    editor
+        .set_control_points(&[(
+            GeometryControl::Loop(loop_id, 0),
+            updates[0].1 + Point2::new(0.01, 0.0),
+        )])
+        .unwrap();
+    assert_eq!(
+        editor.document.draft.region(region_id).unwrap().frame,
+        before_partial
+    );
+    editor.cancel();
 }
 
 #[test]
@@ -1253,7 +1404,7 @@ fn boundary_probe_round_trips_and_tracks_periodic_insertion() {
     assert_eq!(target.spans(9), vec![7, 8, 0]);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 13"));
+    assert!(json.contains("\"version\": 14"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded.probes, editor.document.probes);
 

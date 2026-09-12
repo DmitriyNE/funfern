@@ -109,10 +109,22 @@ while constrained edges carry their logical boundary/span ID and side informatio
 Those labels survive remeshing even though numerical indices do not.
 
 Material interfaces use a conforming field with piecewise mass density, stiffness,
-and damping, giving the scalar weak-form transmission condition. Internal walls
-require separate traces on their two sides and therefore a topology/DOF operation,
-not merely a coefficient label. Material-value changes reuse the current mesh and
-enter the same transactional operator replacement path as boundary changes.
+and damping, giving the scalar weak-form transmission condition. Each scalar
+coefficient is either constant or a bounded compiled expression over local `x`,
+`y`, `r`, and `theta` plus material-level named parameters. The local coordinates
+always have world units. Their frame contains only an origin, an angle, and a
+world/follow-region attachment policy; it is rigid and orthonormal, with no scale.
+A whole-loop similarity transform carries an attached origin and orientation, but
+uniformly scaling geometry does not change the spatial wavelength of its material
+profile. Non-rigid control edits leave the frame unchanged. Coefficients are sampled
+at volume and boundary quadrature points and at probe positions, so assembly,
+energy, impedance, and timestep limits use the same material definition. Invalid
+runtime values abort the candidate operator and leave the current solver running.
+Internal walls require separate traces on their two sides and therefore a
+topology/DOF operation, not merely a coefficient label. Material-value changes
+reuse the current mesh and enter the same transactional operator replacement path
+as boundary changes. The current solution AMR indicator accepts uniform materials
+only; coefficient-gradient terms and visualization are a later slice.
 
 Boundary conditions attach to logical parameter spans rather than individual mesh
 segments. Sampling copies a span assignment onto every resulting constrained edge.
@@ -124,7 +136,10 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON version 13 remains the single persistence representation. File loading, bundled
+Scene JSON version 14 remains the single persistence representation. Version 14
+stores constant/formula coefficient variants, material parameters, and every
+region's material frame. Older scalar coefficients migrate as constants; older
+interior regions receive a centered, attached, world-unit frame. File loading, bundled
 examples, crash recovery, and shared links all pass through the same structural
 decoder and bounded accepted-scene validator before replacing the editor document.
 The document includes probes, continuous-source configuration, and far-field

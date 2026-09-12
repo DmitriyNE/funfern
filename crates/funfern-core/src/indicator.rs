@@ -445,6 +445,7 @@ impl SolutionIndicatorJob {
             return Err(SolutionIndicatorError::InvalidOperator);
         }
         if !self.scene.structure_valid()
+            || self.scene.has_varying_materials()
             || self
                 .mesh
                 .triangles
@@ -514,6 +515,7 @@ impl SolutionIndicatorJob {
         let material = self
             .scene
             .region_material(region)
+            .and_then(|material| material.uniform())
             .ok_or(SolutionIndicatorError::InvalidScene)?;
         let raw_nodes = self.boundary_edge_nodes(triangle, edge.vertices)?;
         let nodes = if edge.parameters[0] < edge.parameters[1] {
@@ -679,6 +681,7 @@ impl SolutionIndicatorJob {
         let material = self
             .scene
             .region_material(triangle.region)
+            .and_then(|material| material.uniform())
             .ok_or(SolutionIndicatorError::InvalidScene)?;
         for local in 0..3 {
             let mut barycentric = [0.0; 3];
@@ -710,6 +713,7 @@ impl SolutionIndicatorJob {
         let material = self
             .scene
             .region_material(triangle.region)
+            .and_then(|material| material.uniform())
             .ok_or(SolutionIndicatorError::InvalidScene)?;
         let omega = (std::f64::consts::TAU * self.options.forcing_frequency_hz).max(1.0);
         let recovered = triangle.vertices.map(|vertex| {
@@ -798,6 +802,7 @@ impl SolutionIndicatorJob {
                     let stiffness = self
                         .scene
                         .region_material(triangle.region)
+                        .and_then(|material| material.uniform())
                         .ok_or(SolutionIndicatorError::InvalidScene)?
                         .stiffness;
                     jump += stiffness * grad.dot(outward_normal(geometry.points, points));
@@ -808,6 +813,7 @@ impl SolutionIndicatorJob {
                 let stiffness = self
                     .scene
                     .region_material(self.mesh.triangles[*triangle_index].region)
+                    .and_then(|material| material.uniform())
                     .ok_or(SolutionIndicatorError::InvalidScene)?
                     .stiffness;
                 self.estimates[*triangle_index].interior_jump +=
@@ -934,6 +940,7 @@ impl SolutionIndicatorJob {
         let material = self
             .scene
             .region_material(self.mesh.triangles[index].region)
+            .and_then(|material| material.uniform())
             .ok_or(SolutionIndicatorError::InvalidScene)?;
         let wavelength_target = if self.options.forcing_frequency_hz > 0.0 {
             (material.stiffness / material.mass_density).sqrt()
@@ -1871,6 +1878,36 @@ mod tests {
             )
             .unwrap_err(),
             SolutionIndicatorError::InvalidSnapshot
+        );
+    }
+
+    #[test]
+    fn spatial_materials_wait_for_a_coefficient_aware_indicator() {
+        let mesh = square();
+        let mut scene = Scene::default();
+        scene.materials[0].stiffness = crate::ScalarField::formula("1 + 0.1 * x").unwrap();
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &scene,
+                scene.outer_boundaries,
+            )
+            .unwrap(),
+        );
+        let state = snapshot(&mesh, &operator, |_| 0.0);
+        assert_eq!(
+            run(
+                SolutionIndicatorJob::new(
+                    mesh,
+                    operator,
+                    scene,
+                    state,
+                    SolutionIndicatorOptions::default(),
+                ),
+                100,
+            )
+            .unwrap_err(),
+            SolutionIndicatorError::InvalidScene
         );
     }
 }

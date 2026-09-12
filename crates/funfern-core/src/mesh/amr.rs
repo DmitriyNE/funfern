@@ -1523,9 +1523,10 @@ mod tests {
                 Material {
                     id: MaterialId(2),
                     name: "Inclusion".into(),
-                    mass_density: 1.0,
-                    stiffness: 2.0,
-                    damping: 0.0,
+                    mass_density: crate::ScalarField::constant(1.0),
+                    stiffness: crate::ScalarField::constant(2.0),
+                    damping: crate::ScalarField::constant(0.0),
+                    parameters: vec![],
                     color: [180, 90, 70],
                 },
             ],
@@ -1533,10 +1534,12 @@ mod tests {
                 Region {
                     id: BACKGROUND_REGION,
                     material: DEFAULT_MATERIAL,
+                    frame: crate::MaterialFrame::world(),
                 },
                 Region {
                     id: RegionId(2),
                     material: MaterialId(2),
+                    frame: crate::MaterialFrame::world(),
                 },
             ],
             ..Scene::default()

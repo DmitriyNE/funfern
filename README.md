@@ -153,9 +153,19 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Deleting an entire loop is a separate panel action.
 - **Materials:** create and name materials in the Library, edit positive mass
   density and stiffness plus nonnegative volume damping, and assign them under
-  Subdomain assignment. Unused non-default materials can be deleted. Clicking a
-  filled region in the viewport selects and highlights it. Material changes
-  preserve the live field and reuse the committed mesh.
+  Subdomain assignment. Each coefficient can be a constant or a formula. Formulas
+  use local `x`, `y`, `r`, and `theta`, constants `pi` and `e`, named material
+  parameters, arithmetic, powers, and `sqrt`, `abs`, `sin`, `cos`, `tan`, `exp`,
+  `log`, `min`, `max`, `clamp`, and `smoothstep`. For example, a radial profile can
+  define parameter `R = 0.35` and stiffness `2 - clamp(0, 1, r / R)^2`.
+  Coordinates are measured in world units in a rigid orthonormal frame: origin and
+  angle set placement, with no hidden coordinate scaling. A region frame can stay
+  fixed in the world or follow whole-loop translation, rotation, and uniform scale;
+  scaling moves the frame with the object but does not rescale the profile. Unused
+  non-default materials can be deleted. Clicking a filled region selects and
+  highlights it. Material changes preserve the live field and reuse the committed
+  mesh. Automatic solution AMR pauses for varying materials until its estimator
+  accounts for coefficient gradients.
 - **Simulation input:** Place pulse remains active for repeated viewport clicks and
   can be toggled off with the same selected button, the viewport Done action, or
   Escape. Drag the visible continuous-source marker directly to reposition it.

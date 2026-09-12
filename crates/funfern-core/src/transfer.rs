@@ -872,9 +872,10 @@ mod tests {
                 Material {
                     id: MaterialId(2),
                     name: "Inside".into(),
-                    mass_density: 1.0,
-                    stiffness: 1.0,
-                    damping: 0.0,
+                    mass_density: crate::ScalarField::constant(1.0),
+                    stiffness: crate::ScalarField::constant(1.0),
+                    damping: crate::ScalarField::constant(0.0),
+                    parameters: vec![],
                     color: [1, 2, 3],
                 },
             ],
@@ -882,10 +883,12 @@ mod tests {
                 Region {
                     id: BACKGROUND_REGION,
                     material: MaterialId(1),
+                    frame: crate::MaterialFrame::world(),
                 },
                 Region {
                     id: RegionId(2),
                     material: MaterialId(2),
+                    frame: crate::MaterialFrame::world(),
                 },
             ],
             outer_boundaries: OuterBoundaryConditions::default(),

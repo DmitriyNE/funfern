@@ -542,6 +542,10 @@ impl WaveGpuRequest {
                 || !contribution.field_b.is_finite()
                 || contribution.mass.iter().any(|values| !values.is_finite())
                 || contribution
+                    .density
+                    .iter()
+                    .any(|values| !values.is_finite())
+                || contribution
                     .stiffness
                     .iter()
                     .any(|values| !values.is_finite())
@@ -1680,6 +1684,7 @@ struct GpuAreaProbeContribution {
     field_a: Vec4,
     field_b: Vec4,
     mass: [Vec4; 7],
+    density: [Vec4; 7],
     stiffness: [Vec4; 7],
     material_area: Vec4,
 }
@@ -1807,13 +1812,9 @@ fn gpu_area_probe_contribution(element: QuadraticAreaElement) -> GpuAreaProbeCon
             0.0,
         ]),
         mass: pack_area_matrix(matrices.mass),
+        density: pack_area_matrix(matrices.density),
         stiffness: pack_area_matrix(matrices.stiffness),
-        material_area: Vec4::new(
-            element.mass_density as f32,
-            element.stiffness as f32,
-            element.area as f32,
-            1.0,
-        ),
+        material_area: Vec4::new(0.0, 0.0, element.area as f32, 1.0),
     }
 }
 
@@ -3162,8 +3163,11 @@ mod tests {
                 Point2::new(0.0, 1.0),
             ],
             region: funfern_core::BACKGROUND_REGION,
-            mass_density: 2.0,
-            stiffness: 3.0,
+            coefficients: [funfern_core::EvaluatedMaterial {
+                mass_density: 2.0,
+                stiffness: 3.0,
+                damping: 0.0,
+            }; 12],
             area: 0.5,
         };
         let matrices = element.integrated_matrices();
@@ -3195,6 +3199,10 @@ mod tests {
         assert_eq!(
             &unpack(uploaded.mass)[..28],
             &matrices.mass.map(|v| v as f32)
+        );
+        assert_eq!(
+            &unpack(uploaded.density)[..28],
+            &matrices.density.map(|v| v as f32)
         );
         assert_eq!(
             &unpack(uploaded.stiffness)[..28],

@@ -308,6 +308,7 @@ impl Editor {
             if self.document.draft.material(new_region_material).is_none() {
                 return Err("Choose an existing interior material".into());
             }
+            let frame = frame_for_spline(&obstacle.spline)?;
             let interior = RegionId(self.next_region_id);
             self.next_region_id = self
                 .next_region_id
@@ -323,6 +324,7 @@ impl Editor {
             self.document.draft.regions.push(Region {
                 id: interior,
                 material: new_region_material,
+                frame,
             });
             self.document
                 .draft
@@ -606,6 +608,7 @@ impl Editor {
         if !changed {
             return Ok(());
         }
+        let frame_updates = self.following_frame_updates(points);
         for (control, point) in points {
             match *control {
                 GeometryControl::Loop(id, index) => self
@@ -630,8 +633,64 @@ impl Editor {
                     .map_err(|error| error.to_string())?,
             }
         }
+        for (region_id, frame) in frame_updates {
+            self.document
+                .draft
+                .regions
+                .iter_mut()
+                .find(|region| region.id == region_id)
+                .unwrap()
+                .frame = frame;
+        }
         self.changed();
         Ok(())
+    }
+
+    fn following_frame_updates(
+        &self,
+        updates: &[(GeometryControl, Point2)],
+    ) -> Vec<(RegionId, MaterialFrame)> {
+        let mut result = Vec::new();
+        for obstacle in &self.document.draft.obstacles {
+            let Some(region_id) = obstacle.role.interior() else {
+                continue;
+            };
+            let Some(region) = self.document.draft.region(region_id) else {
+                continue;
+            };
+            if region.frame.attachment != MaterialFrameAttachment::FollowRegion {
+                continue;
+            }
+            let old = obstacle.spline.controls();
+            let new = (0..old.len())
+                .map(|index| {
+                    updates.iter().rev().find_map(|(control, point)| {
+                        (*control == GeometryControl::Loop(obstacle.id, index)).then_some(*point)
+                    })
+                })
+                .collect::<Option<Vec<_>>>();
+            let Some(new) = new else {
+                continue;
+            };
+            let Some((old_center, new_center, a, b)) = similarity(old, &new) else {
+                continue;
+            };
+            let relative = region.frame.origin - old_center;
+            let origin = new_center
+                + Point2::new(
+                    a * relative.x - b * relative.y,
+                    b * relative.x + a * relative.y,
+                );
+            result.push((
+                region_id,
+                MaterialFrame {
+                    origin,
+                    angle_radians: region.frame.angle_radians + b.atan2(a),
+                    attachment: region.frame.attachment,
+                },
+            ));
+        }
+        result
     }
 
     pub fn set_outer_boundary_condition(
@@ -1403,10 +1462,12 @@ impl Editor {
         } else {
             LoopRole::MaterialInterface { exterior, interior }
         };
+        let frame = frame_for_spline(&spline)?;
         self.begin();
         self.document.draft.regions.push(Region {
             id: interior,
             material,
+            frame,
         });
         match self.create_loop_inner(spline, role) {
             Ok(id) => {
@@ -1539,9 +1600,14 @@ impl Editor {
                 .checked_add(1)
                 .ok_or("Region IDs exhausted")?;
             self.begin();
+            let mut frame = old_region.frame;
+            if frame.attachment == MaterialFrameAttachment::FollowRegion {
+                frame.origin = frame.origin + offset;
+            }
             self.document.draft.regions.push(Region {
                 id: new_region,
                 material: old_region.material,
+                frame,
             });
             match source.role {
                 LoopRole::MaterialInterface { exterior, .. } => LoopRole::MaterialInterface {
@@ -1590,9 +1656,10 @@ impl Editor {
         self.document.draft.materials.push(Material {
             id,
             name: format!("Material {}", id.0),
-            mass_density: 1.0,
-            stiffness: 1.0,
-            damping: 0.0,
+            mass_density: ScalarField::constant(1.0),
+            stiffness: ScalarField::constant(1.0),
+            damping: ScalarField::constant(0.0),
+            parameters: vec![],
             color: COLORS[(id.0.saturating_sub(2) as usize) % COLORS.len()],
         });
         self.changed();
@@ -1680,6 +1747,59 @@ impl Editor {
         self.changed();
         self.commit();
         Ok(())
+    }
+
+    pub fn set_region_frame(
+        &mut self,
+        region_id: RegionId,
+        frame: MaterialFrame,
+    ) -> Result<(), String> {
+        if !frame.valid()
+            || (region_id == BACKGROUND_REGION
+                && frame.attachment != MaterialFrameAttachment::World)
+        {
+            return Err("Material frame values are invalid".into());
+        }
+        let region = self
+            .document
+            .draft
+            .region(region_id)
+            .ok_or("Missing region")?;
+        if region.frame == frame {
+            return Ok(());
+        }
+        self.begin();
+        self.document
+            .draft
+            .regions
+            .iter_mut()
+            .find(|region| region.id == region_id)
+            .unwrap()
+            .frame = frame;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn center_region_frame(&mut self, region_id: RegionId) -> Result<(), String> {
+        if region_id == BACKGROUND_REGION {
+            return self.set_region_frame(region_id, MaterialFrame::world());
+        }
+        let owner = self
+            .document
+            .draft
+            .obstacles
+            .iter()
+            .find(|obstacle| obstacle.role.interior() == Some(region_id))
+            .ok_or("Region has no owning loop")?;
+        let mut frame = self
+            .document
+            .draft
+            .region(region_id)
+            .ok_or("Missing region")?
+            .frame;
+        frame.origin = frame_for_spline(&owner.spline)?.origin;
+        self.set_region_frame(region_id, frame)
     }
     pub fn remove_point(&mut self, id: ObstacleId, index: usize) -> Result<(), String> {
         let obstacle = self.obstacle(id).ok_or("Missing obstacle")?;
@@ -2449,6 +2569,80 @@ impl Editor {
             .saturating_add(1);
         self.document = document;
     }
+}
+
+fn frame_for_spline(spline: &PeriodicCubicSpline) -> Result<MaterialFrame, String> {
+    let samples = sample(
+        spline,
+        SamplingOptions {
+            tolerance: 1.0e-4,
+            max_depth: 14,
+            max_points: 4096,
+        },
+    )
+    .map_err(|_| "Could not center the material frame")?;
+    let first = samples
+        .first()
+        .ok_or("Could not center the material frame")?
+        .point;
+    let (minimum, maximum) = samples
+        .iter()
+        .fold((first, first), |(minimum, maximum), sample| {
+            (
+                Point2::new(minimum.x.min(sample.point.x), minimum.y.min(sample.point.y)),
+                Point2::new(maximum.x.max(sample.point.x), maximum.y.max(sample.point.y)),
+            )
+        });
+    Ok(MaterialFrame {
+        origin: (minimum + maximum) / 2.0,
+        angle_radians: 0.0,
+        attachment: MaterialFrameAttachment::FollowRegion,
+    })
+}
+
+fn similarity(old: &[Point2], new: &[Point2]) -> Option<(Point2, Point2, f64, f64)> {
+    if old.len() != new.len() || old.len() < 2 {
+        return None;
+    }
+    let old_center = old.iter().copied().reduce(|a, b| a + b)? / old.len() as f64;
+    let new_center = new.iter().copied().reduce(|a, b| a + b)? / new.len() as f64;
+    let mut denominator = 0.0;
+    let mut dot = 0.0;
+    let mut cross = 0.0;
+    for (old, new) in old.iter().zip(new) {
+        let old = *old - old_center;
+        let new = *new - new_center;
+        denominator += old.dot(old);
+        dot += old.dot(new);
+        cross += old.cross(new);
+    }
+    if !denominator.is_finite() || denominator <= f64::EPSILON {
+        return None;
+    }
+    let a = dot / denominator;
+    let b = cross / denominator;
+    if !a.is_finite() || !b.is_finite() || a.hypot(b) <= 1.0e-8 {
+        return None;
+    }
+    let scale = old
+        .iter()
+        .chain(new)
+        .map(|point| point.norm())
+        .fold(1.0_f64, f64::max);
+    let residual = old
+        .iter()
+        .zip(new)
+        .map(|(old, new)| {
+            let relative = *old - old_center;
+            let predicted = new_center
+                + Point2::new(
+                    a * relative.x - b * relative.y,
+                    b * relative.x + a * relative.y,
+                );
+            (predicted - *new).norm()
+        })
+        .fold(0.0_f64, f64::max);
+    (residual <= 1.0e-8 * scale).then_some((old_center, new_center, a, b))
 }
 
 fn set_boundary_probe_run(

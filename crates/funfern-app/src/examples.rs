@@ -147,14 +147,19 @@ fn material_lens() -> Document {
     scene.materials.push(Material {
         id: MaterialId(2),
         name: "Slow lens".into(),
-        mass_density: 1.0,
-        stiffness: 0.36,
-        damping: 0.0,
+        mass_density: ScalarField::constant(1.0),
+        stiffness: ScalarField::constant(0.36),
+        damping: ScalarField::constant(0.0),
+        parameters: vec![],
         color: [61, 116, 139],
     });
     scene.regions.push(Region {
         id: RegionId(2),
         material: MaterialId(2),
+        frame: MaterialFrame {
+            attachment: MaterialFrameAttachment::FollowRegion,
+            ..MaterialFrame::world()
+        },
     });
     scene.obstacles.push(Obstacle::with_role(
         ObstacleId(1),

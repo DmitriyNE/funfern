@@ -14,8 +14,9 @@ struct AreaContribution {
     field_a: vec4<f32>,
     field_b: vec4<f32>,
     mass: array<vec4<f32>, 7>,
+    density: array<vec4<f32>, 7>,
     stiffness: array<vec4<f32>, 7>,
-    // Mass density, stiffness, clipped element area, validity.
+    // Unused, unused, clipped element area, validity.
     material_area: vec4<f32>,
 }
 
@@ -101,15 +102,12 @@ fn sample_area_elements(@builtin(global_invocation_id) invocation: vec3<u32>) {
             let mass = packed(contribution.mass, entry);
             let stiffness = packed(contribution.stiffness, entry);
             field_squared += symmetry * mass * u[row] * u[column];
-            kinetic += symmetry * mass * v[row] * v[column];
+            kinetic += symmetry * packed(contribution.density, entry) * v[row] * v[column];
             potential += symmetry * stiffness * u[row] * u[column];
             entry += 1u;
         }
     }
-    let energy = 0.5 * (
-        contribution.material_area.x * kinetic
-        + contribution.material_area.y * potential
-    );
+    let energy = 0.5 * (kinetic + potential);
     scratch[element_index].values = vec4<f32>(
         field,
         field_squared,

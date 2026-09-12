@@ -7,6 +7,14 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Add coefficient-aware AMR indicators before re-enabling automatic adaptation
+  for spatial materials. Include coefficient-gradient residual terms and preserve
+  the current bounded-work and coarsening behavior.
+- [ ] Add a material-profile viewport overlay and frame gizmo. Keep numeric frame
+  controls as the dependable baseline; the visual editor must retain rigid,
+  world-unit coordinates and avoid implying profile scale.
+- [ ] Add a polished Luneburg/GRIN catalog example after coefficient-aware AMR and
+  profile visualization make its resolution and placement clear.
 - [ ] Add probe-data export for point, line, area, and far-field readouts. Preserve
   timestamps, spatial or angular coordinates, quantity names, and coverage metadata
   in a simple format suitable for plotting outside Funfern.
@@ -49,6 +57,35 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
+
+## 2026-09-12 — Spatial scalar material profiles
+
+- Added a dependency-free bounded expression compiler for density, stiffness, and
+  damping. Expressions support local Cartesian/polar coordinates, shared named
+  parameters, arithmetic and a small math-function set; source, operation, nesting,
+  stack, and parameter counts are capped.
+- Added rigid orthonormal material frames with numeric origin, angle, and world or
+  follow-region attachment. Local `x`, `y`, and `r` remain world units. Whole-loop
+  similarity edits carry attached frames, while scaling geometry does not scale the
+  coordinate system and non-rigid control edits leave it fixed.
+- The enriched quadratic operator now evaluates coefficients at mass nodes,
+  stiffness quadrature points, and boundary quadrature points. Point and area probe
+  energy use the same spatial values, and the maximum sampled wave speed enters the
+  explicit timestep bound. A formula that becomes non-finite, nonpositive, or
+  negative where disallowed rejects the candidate operator without replacing the
+  running solver.
+- Scene JSON is version 14 and persists formula source, material parameters, and
+  region frames through files, links, examples, recovery, and history. Versions
+  1–13 remain loadable; legacy coefficients become constants and interior frames
+  are centered on their sampled owning loops.
+- Automatic solution AMR pauses with `waiting for coefficient-aware AMR` whenever
+  an assigned material is spatially varying. Far-field compilation continues to
+  require a uniform lossless background.
+- Formula drafts remain in the Materials inspector when parsing fails, with the
+  last valid material retained. Numeric coefficient, parameter, and frame edits are
+  normal undoable material transactions.
+- All 264 workspace tests pass. Formatting, Clippy with warnings denied, native
+  release compilation, and release Trunk/WASM packaging pass for this slice.
 
 ## 2026-09-12 — Automatic inset far-field monitor
 
@@ -555,8 +592,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   using a closed Huygens/Kirchhoff sampling contour to derive angle-time and
   integrated polar radiation views in a homogeneous exterior region.
 - Represent spatial variation as a reusable profile plus an explicit placement
-  frame. Profiles use local dimensionless coordinates such as `x`, `y`, `r`, and
-  `theta`; frames can be world-fixed, object-attached, or independently transformed.
+  frame. Profiles use local world-unit coordinates `x`, `y`, `r`, and `theta` in a
+  rigid orthonormal frame; frames can be world-fixed, object-attached, or
+  independently transformed.
   Evaluate profiles at FEM quadrature points. This supports GRIN and Luneburg media
   without making non-rigid region edits silently warp a field definition.
 - Keep distributed excitation separate from passive material properties. A volume

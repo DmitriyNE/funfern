@@ -1,6 +1,8 @@
 use crate::{
-    BoundarySignal, OpenCubicSpline, OpenSampler, PeriodicCubicSpline, Point2, Sample, Sampler,
-    SamplingOptions, point_segment_distance,
+    BoundarySignal, EvaluatedMaterial, MAX_MATERIAL_PARAMETERS, MaterialError, MaterialFrame,
+    MaterialFrameAttachment, MaterialParameter, OpenCubicSpline, OpenSampler, PeriodicCubicSpline,
+    Point2, Sample, Sampler, SamplingOptions, ScalarField, point_segment_distance,
+    reserved_identifier, valid_identifier,
 };
 pub const MAX_OBSTACLES: usize = 32;
 pub const MAX_INTERNAL_BOUNDARIES: usize = 32;
@@ -21,9 +23,10 @@ pub struct MaterialId(pub u64);
 pub struct Material {
     pub id: MaterialId,
     pub name: String,
-    pub mass_density: f64,
-    pub stiffness: f64,
-    pub damping: f64,
+    pub mass_density: ScalarField,
+    pub stiffness: ScalarField,
+    pub damping: ScalarField,
+    pub parameters: Vec<MaterialParameter>,
     pub color: [u8; 3],
 }
 
@@ -32,30 +35,114 @@ impl Material {
         Self {
             id: DEFAULT_MATERIAL,
             name: "Background".into(),
-            mass_density: 1.0,
-            stiffness: 1.0,
-            damping: 0.0,
+            mass_density: ScalarField::constant(1.0),
+            stiffness: ScalarField::constant(1.0),
+            damping: ScalarField::constant(0.0),
+            parameters: vec![],
             color: [47, 73, 88],
         }
     }
 
     pub fn valid(&self) -> bool {
+        let unique_parameters = self.parameters.len() <= MAX_MATERIAL_PARAMETERS
+            && self
+                .parameters
+                .iter()
+                .enumerate()
+                .all(|(index, parameter)| {
+                    parameter.valid()
+                        && !self.parameters[..index]
+                            .iter()
+                            .any(|previous| previous.name == parameter.name)
+                });
+        let references_exist = [&self.mass_density, &self.stiffness, &self.damping]
+            .into_iter()
+            .flat_map(ScalarField::parameter_names)
+            .all(|name| {
+                self.parameters
+                    .iter()
+                    .any(|parameter| parameter.name == name)
+            });
         self.id.0 > 0
             && !self.name.trim().is_empty()
             && self.name.len() <= 64
-            && self.mass_density.is_finite()
-            && self.mass_density > 0.0
-            && self.stiffness.is_finite()
-            && self.stiffness > 0.0
-            && self.damping.is_finite()
-            && self.damping >= 0.0
+            && unique_parameters
+            && references_exist
+            && self
+                .mass_density
+                .constant_value()
+                .is_none_or(|value| value.is_finite() && value > 0.0)
+            && self
+                .stiffness
+                .constant_value()
+                .is_none_or(|value| value.is_finite() && value > 0.0)
+            && self
+                .damping
+                .constant_value()
+                .is_none_or(|value| value.is_finite() && value >= 0.0)
+    }
+
+    pub fn varying(&self) -> bool {
+        [&self.mass_density, &self.stiffness, &self.damping]
+            .into_iter()
+            .any(|field| field.constant_value().is_none())
+    }
+
+    pub fn evaluate(
+        &self,
+        frame: MaterialFrame,
+        point: Point2,
+    ) -> Result<EvaluatedMaterial, MaterialError> {
+        let coordinates = frame.coordinates(point);
+        let values = EvaluatedMaterial {
+            mass_density: self.mass_density.evaluate(coordinates, &self.parameters)?,
+            stiffness: self.stiffness.evaluate(coordinates, &self.parameters)?,
+            damping: self.damping.evaluate(coordinates, &self.parameters)?,
+        };
+        values
+            .valid()
+            .then_some(values)
+            .ok_or(MaterialError::InvalidValue)
+    }
+
+    pub fn uniform(&self) -> Option<EvaluatedMaterial> {
+        let values = EvaluatedMaterial {
+            mass_density: self.mass_density.constant_value()?,
+            stiffness: self.stiffness.constant_value()?,
+            damping: self.damping.constant_value()?,
+        };
+        values.valid().then_some(values)
+    }
+
+    pub fn rename_parameter(&mut self, index: usize, name: String) -> Result<(), MaterialError> {
+        if index >= self.parameters.len()
+            || !valid_identifier(&name)
+            || reserved_identifier(&name)
+            || self
+                .parameters
+                .iter()
+                .enumerate()
+                .any(|(other, parameter)| other != index && parameter.name == name)
+        {
+            return Err(MaterialError::InvalidValue);
+        }
+        let old = self.parameters[index].name.clone();
+        let mass_density = self.mass_density.rename_parameter(&old, &name)?;
+        let stiffness = self.stiffness.rename_parameter(&old, &name)?;
+        let damping = self.damping.rename_parameter(&old, &name)?;
+        self.mass_density = mass_density;
+        self.stiffness = stiffness;
+        self.damping = damping;
+        self.parameters[index].name = name;
+        Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Region {
     pub id: RegionId,
     pub material: MaterialId,
+    pub frame: MaterialFrame,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,6 +344,7 @@ impl Default for Scene {
             regions: vec![Region {
                 id: BACKGROUND_REGION,
                 material: DEFAULT_MATERIAL,
+                frame: MaterialFrame::world(),
             }],
             outer_boundaries: crate::OuterBoundaryConditions::default(),
         }
@@ -314,6 +402,9 @@ impl Scene {
         let unique_regions = self.regions.iter().enumerate().all(|(i, region)| {
             region.id.0 > 0
                 && self.material(region.material).is_some()
+                && region.frame.valid()
+                && (region.id != BACKGROUND_REGION
+                    || region.frame.attachment == MaterialFrameAttachment::World)
                 && !self.regions[..i]
                     .iter()
                     .any(|previous| previous.id == region.id)
@@ -370,6 +461,24 @@ impl Scene {
     pub fn region_material(&self, id: RegionId) -> Option<&Material> {
         self.region(id)
             .and_then(|region| self.material(region.material))
+    }
+
+    pub fn material_at(
+        &self,
+        region: RegionId,
+        point: Point2,
+    ) -> Result<EvaluatedMaterial, MaterialError> {
+        let region = self.region(region).ok_or(MaterialError::InvalidValue)?;
+        self.material(region.material)
+            .ok_or(MaterialError::InvalidValue)?
+            .evaluate(region.frame, point)
+    }
+
+    pub fn has_varying_materials(&self) -> bool {
+        self.regions.iter().any(|region| {
+            self.material(region.material)
+                .is_some_and(Material::varying)
+        })
     }
 
     /// Geometry and topology equality excludes names, colors, coefficients, and

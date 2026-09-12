@@ -77,23 +77,12 @@ impl QuadraticWaveOperator {
         if !scene.structure_valid() {
             return Err(WaveError::InvalidCoefficients);
         }
-        let mut coefficients = BTreeMap::new();
-        for region in &scene.regions {
-            let material = scene
-                .material(region.material)
-                .ok_or(WaveError::InvalidCoefficients)?;
-            let values = WaveCoefficients {
-                mass_density: material.mass_density,
-                stiffness: material.stiffness,
-                damping: material.damping,
-            };
-            validate_coefficients(values)?;
-            coefficients.insert(region.id, values);
-        }
-        let outer = *coefficients
-            .get(&BACKGROUND_REGION)
-            .ok_or(WaveError::InvalidCoefficients)?;
-        Self::assemble_regions(mesh, coefficients, outer, outer_boundaries, Some(scene))
+        Self::assemble_with_provider(
+            mesh,
+            CoefficientProvider::Scene(scene),
+            outer_boundaries,
+            Some(scene),
+        )
     }
 
     fn assemble_regions(
@@ -112,6 +101,23 @@ impl QuadraticWaveOperator {
             .copied()
             .any(|coefficients| validate_coefficients(coefficients).is_err())
         {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        Self::assemble_with_provider(
+            mesh,
+            CoefficientProvider::Constant(&coefficients_by_region),
+            outer_boundaries,
+            scene,
+        )
+    }
+
+    fn assemble_with_provider(
+        mesh: &TriMesh,
+        coefficients: CoefficientProvider<'_>,
+        outer_boundaries: OuterBoundaryConditions,
+        scene: Option<&Scene>,
+    ) -> Result<Self, WaveError> {
+        if !outer_boundaries.valid() {
             return Err(WaveError::InvalidCoefficients);
         }
         if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
@@ -179,10 +185,8 @@ impl QuadraticWaveOperator {
         let mut face_neumann_loads = vec![[BoundaryLoad::default(); 2]; count];
         let mut mass = vec![0.0; count];
         let mut damping = vec![0.0; count];
+        let mut maximum_wave_speed = 0.0_f64;
         for (triangle, indices) in mesh.triangles.iter().zip(&local_nodes) {
-            let coefficients = *coefficients_by_region
-                .get(&triangle.region)
-                .ok_or(WaveError::InvalidMesh("a triangle has an unknown region"))?;
             let points = triangle.vertices.map(|index| mesh.vertices[index].point);
             let twice_area = (points[1] - points[0]).cross(points[2] - points[0]);
             let area = 0.5 * twice_area;
@@ -202,30 +206,37 @@ impl QuadraticWaveOperator {
                 9.0 / 20.0,
             ];
             for local in 0..7 {
-                mass[indices[local]] += coefficients.mass_density * area * MASS_WEIGHTS[local];
-                damping[indices[local]] += coefficients.damping * area * MASS_WEIGHTS[local];
+                let values = coefficients.at(triangle.region, node_points[indices[local]])?;
+                maximum_wave_speed =
+                    maximum_wave_speed.max((values.stiffness / values.mass_density).sqrt());
+                mass[indices[local]] += values.mass_density * area * MASS_WEIGHTS[local];
+                damping[indices[local]] += values.damping * area * MASS_WEIGHTS[local];
             }
 
             let mut local_stiffness = [[0.0; 7]; 7];
             for (barycentric, weight) in stiffness_quadrature() {
+                let point = points[0] * barycentric[0]
+                    + points[1] * barycentric[1]
+                    + points[2] * barycentric[2];
+                let values = coefficients.at(triangle.region, point)?;
+                maximum_wave_speed =
+                    maximum_wave_speed.max((values.stiffness / values.mass_density).sqrt());
                 let gradients =
                     enriched_quadratic_basis_gradients(barycentric, barycentric_gradients);
                 for i in 0..7 {
                     for j in 0..7 {
-                        local_stiffness[i][j] += weight * gradients[i].dot(gradients[j]);
+                        local_stiffness[i][j] +=
+                            weight * values.stiffness * gradients[i].dot(gradients[j]);
                     }
                 }
             }
             for i in 0..7 {
                 for j in 0..7 {
                     *rows[indices[i]].entry(indices[j]).or_default() +=
-                        coefficients.stiffness * area * local_stiffness[i][j];
+                        area * local_stiffness[i][j];
                 }
             }
         }
-        let impedance = (outer_coefficients.mass_density * outer_coefficients.stiffness).sqrt();
-        let wave_speed = (outer_coefficients.stiffness / outer_coefficients.mass_density).sqrt();
-        let auxiliary_scale = 0.5 * outer_coefficients.stiffness * wave_speed;
         let mut visited = BTreeSet::new();
         for boundary in &mesh.boundary_edges {
             let BoundaryLabel::Outer(side) = boundary.label else {
@@ -254,6 +265,11 @@ impl QuadraticWaveOperator {
                 ));
             }
             let nodes = [a, b, midpoint];
+            let node_coefficients = [
+                coefficients.at(BACKGROUND_REGION, node_points[nodes[0]])?,
+                coefficients.at(BACKGROUND_REGION, node_points[nodes[1]])?,
+                coefficients.at(BACKGROUND_REGION, node_points[nodes[2]])?,
+            ];
             let line_weights = [length / 6.0, length / 6.0, 2.0 * length / 3.0];
             match condition {
                 OuterBoundaryCondition::Reflecting => {}
@@ -277,24 +293,27 @@ impl QuadraticWaveOperator {
                 }
                 OuterBoundaryCondition::FirstOrderOutgoing
                 | OuterBoundaryCondition::SecondOrderOutgoing => {
-                    let scale = impedance * length;
-                    damping[a] += scale / 6.0;
-                    damping[midpoint] += 2.0 * scale / 3.0;
-                    damping[b] += scale / 6.0;
+                    for ((node, weight), values) in
+                        nodes.into_iter().zip(line_weights).zip(node_coefficients)
+                    {
+                        let impedance = (values.mass_density * values.stiffness).sqrt();
+                        damping[node] += impedance * weight;
+                    }
                 }
             }
             if condition == OuterBoundaryCondition::SecondOrderOutgoing {
                 // P2 line-element stiffness in endpoint/endpoint/midpoint order.
                 // Sharing vertex indices across incident sides supplies the
                 // corner coupling in the assembled tangential operator.
-                let local = [[7.0, 1.0, -8.0], [1.0, 7.0, -8.0], [-8.0, -8.0, 16.0]];
-                for i in 0..3 {
-                    auxiliary_active[nodes[i]] = true;
-                    for j in 0..3 {
-                        *auxiliary_rows[nodes[i]].entry(nodes[j]).or_default() +=
-                            auxiliary_scale * local[i][j] / (3.0 * length);
-                    }
-                }
+                let middle = node_coefficients[2];
+                let wave_speed = (middle.stiffness / middle.mass_density).sqrt();
+                assemble_auxiliary_line(
+                    nodes,
+                    length,
+                    0.5 * middle.stiffness * wave_speed,
+                    &mut auxiliary_rows,
+                    &mut auxiliary_active,
+                );
             }
         }
         if let Some(scene) = scene {
@@ -307,8 +326,8 @@ impl QuadraticWaveOperator {
                 face_neumann_loads: &mut face_neumann_loads,
                 damping: &mut damping,
             };
-            assemble_hole_boundary_conditions(mesh, scene, &coefficients_by_region, &mut assembly)?;
-            assemble_internal_boundary_laws(mesh, scene, &coefficients_by_region, &mut assembly)?;
+            assemble_hole_boundary_conditions(mesh, scene, coefficients, &mut assembly)?;
+            assemble_internal_boundary_laws(mesh, scene, coefficients, &mut assembly)?;
         }
         if mass.iter().any(|value| !value.is_finite() || *value <= 0.0)
             || damping
@@ -383,11 +402,9 @@ impl QuadraticWaveOperator {
                 ]
             })
             .fold(f64::INFINITY, f64::min);
-        let maximum_wave_speed = coefficients_by_region
-            .values()
-            .map(|coefficients| (coefficients.stiffness / coefficients.mass_density).sqrt())
-            .fold(0.0_f64, f64::max);
         if !minimum_edge_length.is_finite()
+            || !maximum_wave_speed.is_finite()
+            || maximum_wave_speed <= 0.0
             || maximum_time_step < minimum_edge_length / maximum_wave_speed * 1.0e-6
         {
             return Err(WaveError::InvalidMesh(
@@ -922,6 +939,61 @@ impl QuadraticWaveState {
 
 type TraceNodes = ([usize; 3], f64);
 
+#[derive(Clone, Copy)]
+enum CoefficientProvider<'a> {
+    Constant(&'a BTreeMap<RegionId, WaveCoefficients>),
+    Scene(&'a Scene),
+}
+
+impl CoefficientProvider<'_> {
+    fn at(self, region: RegionId, point: Point2) -> Result<WaveCoefficients, WaveError> {
+        let values = match self {
+            Self::Constant(values) => *values.get(&region).ok_or(WaveError::InvalidCoefficients)?,
+            Self::Scene(scene) => {
+                let region = scene
+                    .region(region)
+                    .ok_or(WaveError::InvalidMesh("a triangle has an unknown region"))?;
+                let material = scene
+                    .material(region.material)
+                    .ok_or(WaveError::InvalidCoefficients)?;
+                let coordinates = region.frame.coordinates(point);
+                let evaluate =
+                    |field: &crate::ScalarField, coefficient: &'static str, positive: bool| {
+                        let value =
+                            field
+                                .evaluate(coordinates, &material.parameters)
+                                .map_err(|error| WaveError::MaterialEvaluation {
+                                    material: material.name.clone(),
+                                    coefficient,
+                                    point,
+                                    reason: error.to_string(),
+                                })?;
+                        if (positive && value <= 0.0) || (!positive && value < 0.0) {
+                            return Err(WaveError::MaterialEvaluation {
+                                material: material.name.clone(),
+                                coefficient,
+                                point,
+                                reason: if positive {
+                                    "value must be positive".into()
+                                } else {
+                                    "value must be nonnegative".into()
+                                },
+                            });
+                        }
+                        Ok(value)
+                    };
+                WaveCoefficients {
+                    mass_density: evaluate(&material.mass_density, "density", true)?,
+                    stiffness: evaluate(&material.stiffness, "stiffness", true)?,
+                    damping: evaluate(&material.damping, "damping", false)?,
+                }
+            }
+        };
+        validate_coefficients(values)?;
+        Ok(values)
+    }
+}
+
 struct BoundaryAssembly<'a> {
     edge_nodes: &'a BTreeMap<(usize, usize), usize>,
     rows: &'a mut [BTreeMap<usize, f64>],
@@ -935,7 +1007,7 @@ struct BoundaryAssembly<'a> {
 fn assemble_hole_boundary_conditions(
     mesh: &TriMesh,
     scene: &Scene,
-    coefficients_by_region: &BTreeMap<RegionId, WaveCoefficients>,
+    coefficients: CoefficientProvider<'_>,
     assembly: &mut BoundaryAssembly<'_>,
 ) -> Result<(), WaveError> {
     for edge in &mesh.boundary_edges {
@@ -977,16 +1049,22 @@ fn assemble_hole_boundary_conditions(
                 "a hole boundary edge has an invalid spline parameter",
             ))?;
         let condition = obstacle.span_conditions[span];
-        let coefficients = *coefficients_by_region
-            .get(&exterior)
-            .ok_or(WaveError::InvalidCoefficients)?;
         let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
         if !length.is_finite() || length <= 0.0 {
             return Err(WaveError::InvalidMesh(
                 "a hole boundary edge has invalid length",
             ));
         }
-        assemble_face_condition(condition, [a, midpoint, b], length, coefficients, assembly)?;
+        let nodes = [a, midpoint, b];
+        let values = [
+            coefficients.at(exterior, mesh.vertices[a].point)?,
+            coefficients.at(
+                exterior,
+                (mesh.vertices[a].point + mesh.vertices[b].point) / 2.0,
+            )?,
+            coefficients.at(exterior, mesh.vertices[b].point)?,
+        ];
+        assemble_face_condition(condition, nodes, length, values, assembly)?;
     }
     Ok(())
 }
@@ -994,7 +1072,7 @@ fn assemble_hole_boundary_conditions(
 fn assemble_internal_boundary_laws(
     mesh: &TriMesh,
     scene: &Scene,
-    coefficients_by_region: &BTreeMap<RegionId, WaveCoefficients>,
+    coefficients: CoefficientProvider<'_>,
     assembly: &mut BoundaryAssembly<'_>,
 ) -> Result<(), WaveError> {
     let mut traces = BTreeMap::<(InternalBoundaryId, u64, u64), [Option<TraceNodes>; 2]>::new();
@@ -1009,9 +1087,6 @@ fn assemble_internal_boundary_laws(
             .ok_or(WaveError::InvalidMesh(
                 "an internal-boundary edge has an unknown ID",
             ))?;
-        let coefficients = *coefficients_by_region
-            .get(&boundary.region)
-            .ok_or(WaveError::InvalidCoefficients)?;
         let [a, b] = edge.vertices;
         if a >= mesh.vertices.len() || b >= mesh.vertices.len() || a == b {
             return Err(WaveError::InvalidMesh(
@@ -1051,7 +1126,21 @@ fn assemble_internal_boundary_laws(
         } else {
             [b, midpoint, a]
         };
-        assemble_face_condition(condition, nodes, length, coefficients, assembly)?;
+        let values = [
+            coefficients.at(
+                boundary.region,
+                assembly_point(nodes[0], mesh, midpoint, a, b),
+            )?,
+            coefficients.at(
+                boundary.region,
+                assembly_point(nodes[1], mesh, midpoint, a, b),
+            )?,
+            coefficients.at(
+                boundary.region,
+                assembly_point(nodes[2], mesh, midpoint, a, b),
+            )?,
+        ];
+        assemble_face_condition(condition, nodes, length, values, assembly)?;
         let (start, end) = if parameter_a < parameter_b {
             (parameter_a, parameter_b)
         } else {
@@ -1094,8 +1183,8 @@ fn assemble_internal_boundary_laws(
         else {
             continue;
         };
-        let coefficients = coefficients_by_region[&boundary.region];
-        let spring = stiffness_ratio * coefficients.stiffness;
+        let point = boundary.spline.evaluate(parameter);
+        let spring = stiffness_ratio * coefficients.at(boundary.region, point)?.stiffness;
         for ((left_node, right_node), weight) in
             left.into_iter()
                 .zip(right)
@@ -1118,23 +1207,32 @@ fn assemble_face_condition(
     condition: FaceBoundaryCondition,
     nodes: [usize; 3],
     length: f64,
-    coefficients: WaveCoefficients,
+    coefficients: [WaveCoefficients; 3],
     assembly: &mut BoundaryAssembly<'_>,
 ) -> Result<(), WaveError> {
     let weights = [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0];
     match condition {
         FaceBoundaryCondition::Reflecting => {}
         FaceBoundaryCondition::Impedance { ratio } => {
-            let impedance = ratio * (coefficients.mass_density * coefficients.stiffness).sqrt();
-            for (node, weight) in nodes.into_iter().zip(weights) {
+            for ((node, weight), coefficients) in nodes
+                .into_iter()
+                .zip(weights)
+                .zip(coefficients.iter().copied())
+            {
+                let impedance = ratio * (coefficients.mass_density * coefficients.stiffness).sqrt();
                 assembly.damping[node] += impedance * length * weight;
             }
         }
         FaceBoundaryCondition::SecondOrderOutgoing => {
-            let impedance = (coefficients.mass_density * coefficients.stiffness).sqrt();
-            for (node, weight) in nodes.into_iter().zip(weights) {
+            for ((node, weight), coefficients) in nodes
+                .into_iter()
+                .zip(weights)
+                .zip(coefficients.iter().copied())
+            {
+                let impedance = (coefficients.mass_density * coefficients.stiffness).sqrt();
                 assembly.damping[node] += impedance * length * weight;
             }
+            let coefficients = coefficients[1];
             let wave_speed = (coefficients.stiffness / coefficients.mass_density).sqrt();
             assemble_auxiliary_line(
                 nodes,
@@ -1156,6 +1254,14 @@ fn assemble_face_condition(
         }
     }
     Ok(())
+}
+
+fn assembly_point(node: usize, mesh: &TriMesh, midpoint: usize, a: usize, b: usize) -> Point2 {
+    if node == midpoint {
+        (mesh.vertices[a].point + mesh.vertices[b].point) / 2.0
+    } else {
+        mesh.vertices[node].point
+    }
 }
 
 fn assemble_auxiliary_line(
@@ -1319,17 +1425,19 @@ mod tests {
                 Material {
                     id: MaterialId(1),
                     name: "Left".into(),
-                    mass_density: 2.0,
-                    stiffness: 3.0,
-                    damping: 0.5,
+                    mass_density: crate::ScalarField::constant(2.0),
+                    stiffness: crate::ScalarField::constant(3.0),
+                    damping: crate::ScalarField::constant(0.5),
+                    parameters: vec![],
                     color: [1, 2, 3],
                 },
                 Material {
                     id: MaterialId(2),
                     name: "Right".into(),
-                    mass_density: 4.0,
-                    stiffness: 7.0,
-                    damping: 1.5,
+                    mass_density: crate::ScalarField::constant(4.0),
+                    stiffness: crate::ScalarField::constant(7.0),
+                    damping: crate::ScalarField::constant(1.5),
+                    parameters: vec![],
                     color: [4, 5, 6],
                 },
             ],
@@ -1337,10 +1445,12 @@ mod tests {
                 Region {
                     id: BACKGROUND_REGION,
                     material: MaterialId(1),
+                    frame: crate::MaterialFrame::world(),
                 },
                 Region {
                     id: RegionId(2),
                     material: MaterialId(2),
+                    frame: crate::MaterialFrame::world(),
                 },
             ],
             outer_boundaries: OuterBoundaryConditions::default(),
@@ -1533,6 +1643,57 @@ mod tests {
             operator.element_nodes()[0][5],
             operator.element_nodes()[1][3]
         );
+    }
+
+    #[test]
+    fn scene_assembly_samples_spatial_materials_at_quadrature_points() {
+        let mut scene = Scene::default();
+        let material = &mut scene.materials[0];
+        material.mass_density = crate::ScalarField::formula("1 + x").unwrap();
+        material.stiffness = crate::ScalarField::formula("2 + x").unwrap();
+        material.damping = crate::ScalarField::formula("y").unwrap();
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &square(),
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+
+        assert!((operator.lumped_mass().iter().sum::<f64>() - 1.5).abs() < 1.0e-12);
+        assert!((operator.lumped_damping().iter().sum::<f64>() - 0.5).abs() < 1.0e-12);
+        let x = operator
+            .node_points()
+            .iter()
+            .map(|point| point.x)
+            .collect::<Vec<_>>();
+        let applied = operator.apply_stiffness(&x).unwrap();
+        let energy = x.iter().zip(applied).map(|(x, kx)| x * kx).sum::<f64>();
+        assert!((energy - 2.5).abs() < 2.0e-12);
+        let constant = operator
+            .apply_stiffness(&vec![1.0; operator.degrees_of_freedom()])
+            .unwrap();
+        assert!(constant.iter().all(|value| value.abs() < 5.0e-12));
+    }
+
+    #[test]
+    fn spatial_material_failure_identifies_coefficient_material_and_point() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_density = crate::ScalarField::formula("x").unwrap();
+        let error = QuadraticWaveOperator::assemble_scene(
+            &square(),
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            WaveError::MaterialEvaluation {
+                material,
+                coefficient: "density",
+                point: Point2 { x: 0.0, y: 0.0 },
+                ..
+            } if material == "Background"
+        ));
     }
 
     #[test]

@@ -146,10 +146,33 @@ struct StoredScene {
 struct StoredMaterial {
     id: u64,
     name: String,
-    mass_density: f64,
-    stiffness: f64,
-    damping: f64,
+    mass_density: StoredScalarField,
+    stiffness: StoredScalarField,
+    damping: StoredScalarField,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    parameters: Vec<StoredMaterialParameter>,
     color: [u8; 3],
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredScalarField {
+    Legacy(f64),
+    Field(StoredScalarFieldV14),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredScalarFieldV14 {
+    Constant { value: f64 },
+    Formula { source: String },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredMaterialParameter {
+    name: String,
+    value: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -157,6 +180,23 @@ struct StoredMaterial {
 struct StoredRegion {
     id: u64,
     material: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frame: Option<StoredMaterialFrame>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredMaterialFrame {
+    origin: [f64; 2],
+    angle_radians: f64,
+    attachment: StoredMaterialFrameAttachment,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredMaterialFrameAttachment {
+    World,
+    FollowRegion,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -253,9 +293,17 @@ fn encode_scene(scene: &Scene) -> StoredScene {
             .map(|material| StoredMaterial {
                 id: material.id.0,
                 name: material.name.clone(),
-                mass_density: material.mass_density,
-                stiffness: material.stiffness,
-                damping: material.damping,
+                mass_density: encode_scalar_field(&material.mass_density),
+                stiffness: encode_scalar_field(&material.stiffness),
+                damping: encode_scalar_field(&material.damping),
+                parameters: material
+                    .parameters
+                    .iter()
+                    .map(|parameter| StoredMaterialParameter {
+                        name: parameter.name.clone(),
+                        value: parameter.value,
+                    })
+                    .collect(),
                 color: material.color,
             })
             .collect(),
@@ -265,6 +313,16 @@ fn encode_scene(scene: &Scene) -> StoredScene {
             .map(|region| StoredRegion {
                 id: region.id.0,
                 material: region.material.0,
+                frame: Some(StoredMaterialFrame {
+                    origin: [region.frame.origin.x, region.frame.origin.y],
+                    angle_radians: region.frame.angle_radians,
+                    attachment: match region.frame.attachment {
+                        MaterialFrameAttachment::World => StoredMaterialFrameAttachment::World,
+                        MaterialFrameAttachment::FollowRegion => {
+                            StoredMaterialFrameAttachment::FollowRegion
+                        }
+                    },
+                }),
             })
             .collect(),
         loops: scene
@@ -337,6 +395,33 @@ fn encode_scene(scene: &Scene) -> StoredScene {
             })
             .collect(),
         outer_boundaries: Some(scene.outer_boundaries.sides.map(encode_outer_condition)),
+    }
+}
+
+fn encode_scalar_field(field: &ScalarField) -> StoredScalarField {
+    StoredScalarField::Field(match field {
+        ScalarField::Constant(value) => StoredScalarFieldV14::Constant { value: *value },
+        ScalarField::Formula(formula) => StoredScalarFieldV14::Formula {
+            source: formula.source().into(),
+        },
+    })
+}
+
+fn decode_scalar_field(
+    field: StoredScalarField,
+    require_tagged: bool,
+) -> Result<ScalarField, String> {
+    match field {
+        StoredScalarField::Legacy(_) if require_tagged => {
+            Err("Version 14 material coefficients require an explicit kind".into())
+        }
+        StoredScalarField::Legacy(value) => Ok(ScalarField::constant(value)),
+        StoredScalarField::Field(StoredScalarFieldV14::Constant { value }) => {
+            Ok(ScalarField::constant(value))
+        }
+        StoredScalarField::Field(StoredScalarFieldV14::Formula { source }) => {
+            ScalarField::formula(source).map_err(|error| error.to_string())
+        }
     }
 }
 
@@ -493,6 +578,7 @@ fn decode_scene(
     require_loop_conditions: bool,
     require_outer_boundaries: bool,
     normalize_legacy_parallel_gap: bool,
+    require_material_frames: bool,
 ) -> Result<Scene, String> {
     if stored.loops.len() > MAX_OBSTACLES
         || stored.internal_boundaries.len() > MAX_INTERNAL_BOUNDARIES
@@ -504,23 +590,50 @@ fn decode_scene(
     let materials = stored
         .materials
         .into_iter()
-        .map(|material| Material {
-            id: MaterialId(material.id),
-            name: material.name,
-            mass_density: material.mass_density,
-            stiffness: material.stiffness,
-            damping: material.damping,
-            color: material.color,
+        .map(|material| {
+            Ok(Material {
+                id: MaterialId(material.id),
+                name: material.name,
+                mass_density: decode_scalar_field(material.mass_density, require_material_frames)?,
+                stiffness: decode_scalar_field(material.stiffness, require_material_frames)?,
+                damping: decode_scalar_field(material.damping, require_material_frames)?,
+                parameters: material
+                    .parameters
+                    .into_iter()
+                    .map(|parameter| MaterialParameter {
+                        name: parameter.name,
+                        value: parameter.value,
+                    })
+                    .collect(),
+                color: material.color,
+            })
         })
-        .collect();
-    let regions = stored
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut regions = stored
         .regions
         .into_iter()
-        .map(|region| Region {
-            id: RegionId(region.id),
-            material: MaterialId(region.material),
+        .map(|region| {
+            let frame = match region.frame {
+                Some(frame) => MaterialFrame {
+                    origin: Point2::new(frame.origin[0], frame.origin[1]),
+                    angle_radians: frame.angle_radians,
+                    attachment: match frame.attachment {
+                        StoredMaterialFrameAttachment::World => MaterialFrameAttachment::World,
+                        StoredMaterialFrameAttachment::FollowRegion => {
+                            MaterialFrameAttachment::FollowRegion
+                        }
+                    },
+                },
+                None if !require_material_frames => MaterialFrame::world(),
+                None => return Err("Scene region has no material frame".into()),
+            };
+            Ok(Region {
+                id: RegionId(region.id),
+                material: MaterialId(region.material),
+                frame,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     let obstacles = stored
         .loops
         .into_iter()
@@ -626,6 +739,25 @@ fn decode_scene(
         }
         None => return Err("Scene has no outer boundary conditions".into()),
     };
+    if !require_material_frames {
+        for region in &mut regions {
+            if region.id == BACKGROUND_REGION {
+                region.frame = MaterialFrame::world();
+                continue;
+            }
+            let Some(owner) = obstacles
+                .iter()
+                .find(|obstacle| obstacle.role.interior() == Some(region.id))
+            else {
+                continue;
+            };
+            region.frame = MaterialFrame {
+                origin: sampled_loop_bounds_center(&owner.spline)?,
+                angle_radians: 0.0,
+                attachment: MaterialFrameAttachment::FollowRegion,
+            };
+        }
+    }
     let scene = Scene {
         obstacles,
         internal_boundaries,
@@ -639,6 +771,31 @@ fn decode_scene(
     Ok(scene)
 }
 
+fn sampled_loop_bounds_center(spline: &PeriodicCubicSpline) -> Result<Point2, String> {
+    let samples = sample(
+        spline,
+        SamplingOptions {
+            tolerance: 1.0e-4,
+            max_depth: 14,
+            max_points: 4096,
+        },
+    )
+    .map_err(|_| "Could not fit a material frame to its region")?;
+    let first = samples
+        .first()
+        .ok_or("Could not fit a material frame to an empty region")?
+        .point;
+    let (minimum, maximum) = samples
+        .iter()
+        .fold((first, first), |(minimum, maximum), sample| {
+            (
+                Point2::new(minimum.x.min(sample.point.x), minimum.y.min(sample.point.y)),
+                Point2::new(maximum.x.max(sample.point.x), maximum.y.max(sample.point.y)),
+            )
+        });
+    Ok((minimum + maximum) / 2.0)
+}
+
 pub fn save(document: &Document) -> Result<String, String> {
     serde_json::to_string_pretty(&encode_document(document)).map_err(|error| error.to_string())
 }
@@ -650,7 +807,7 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 13,
+        version: 14,
         domain: DOMAIN,
         draft: encode_scene(&document.draft),
         accepted: encode_scene(&document.accepted),
@@ -936,7 +1093,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 far_field: FarFieldSettings::default(),
             }
         }
-        2..=13 => {
+        2..=14 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if file.domain != DOMAIN {
                 return Err("Unsupported scene domain".into());
@@ -946,12 +1103,14 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 header.version >= 5,
                 header.version >= 6,
                 header.version < 7,
+                header.version >= 14,
             )?;
             let accepted = decode_scene(
                 file.accepted,
                 header.version >= 5,
                 header.version >= 6,
                 header.version < 7,
+                header.version >= 14,
             )?;
             let source = decode_source(file.source, &accepted)?;
             let probes = decode_probes(

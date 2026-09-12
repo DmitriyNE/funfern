@@ -482,9 +482,10 @@ fn medium(id: u64, name: &str, stiffness: f64, color: [u8; 3]) -> Material {
     Material {
         id: MaterialId(id),
         name: name.into(),
-        mass_density: 1.0,
-        stiffness,
-        damping: 0.0,
+        mass_density: ScalarField::constant(1.0),
+        stiffness: ScalarField::constant(stiffness),
+        damping: ScalarField::constant(0.0),
+        parameters: vec![],
         color,
     }
 }
@@ -505,10 +506,12 @@ fn two_region_scene(role: impl FnOnce(RegionId, RegionId) -> LoopRole) -> Scene 
             Region {
                 id: BACKGROUND_REGION,
                 material: DEFAULT_MATERIAL,
+                frame: MaterialFrame::world(),
             },
             Region {
                 id: RegionId(2),
                 material: MaterialId(2),
+                frame: MaterialFrame::world(),
             },
         ],
         outer_boundaries: OuterBoundaryConditions::default(),
@@ -985,6 +988,7 @@ fn mixed_loops_and_multiple_baffles_preserve_unmoved_topology() {
     scene.regions.push(Region {
         id: RegionId(2),
         material: MaterialId(2),
+        frame: MaterialFrame::world(),
     });
     scene.obstacles.push(Obstacle::with_role(
         ObstacleId(5),
@@ -1109,6 +1113,7 @@ fn baffle_insertion_avoids_accidental_cfl_slivers() {
     scene.regions.push(Region {
         id: RegionId(2),
         material: MaterialId(2),
+        frame: MaterialFrame::world(),
     });
     let mesh = mesh_scene(
         &scene,
@@ -1186,6 +1191,7 @@ fn nested_material_regions_follow_explicit_region_ownership() {
     scene.regions.push(Region {
         id: RegionId(3),
         material: MaterialId(3),
+        frame: MaterialFrame::world(),
     });
     scene.obstacles.push(Obstacle::with_role(
         ObstacleId(21),
