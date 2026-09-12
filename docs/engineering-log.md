@@ -33,6 +33,11 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## 2026-09-12 — Physical boundary residuals for solution AMR
 
+- Follow-up: AMR handoff now gates step scheduling without changing the user's
+  Run/Pause preference. This removes playback-button flicker, preserves a choice
+  made while a candidate is pending, and avoids accumulating catch-up time during
+  the transfer. The 79 app/editor tests, app Clippy, native release build, release
+  Trunk/WASM package, and Metal `--amr-check` pass after the fix.
 - Extended the resumable solution indicator across every physical boundary edge.
   Reflecting, prescribed Neumann, first-order impedance, and second-order radiation
   faces now contribute their active-law residual to the adjacent element. Closed

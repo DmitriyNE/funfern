@@ -222,7 +222,6 @@ struct SimulationCandidate {
     time_step: f64,
     transfer: Option<QuadraticTransferMap>,
     generation: Option<u64>,
-    resume_running: bool,
     simulation_time: f64,
     exposed_nodes: usize,
     source_region: RegionId,
@@ -1517,7 +1516,6 @@ impl Playground {
                                         time_step,
                                         transfer,
                                         generation: None,
-                                        resume_running: self.wave_running,
                                         simulation_time: 0.0,
                                         exposed_nodes,
                                         adaptation_state,
@@ -1570,7 +1568,6 @@ impl Playground {
                                     .clone()
                                     .unwrap_or_else(|| MeshAdaptationState::from_mesh(mesh)),
                                 generation: None,
-                                resume_running: self.wave_running,
                                 simulation_time: 0.0,
                             });
                             self.wave_prepare_ms = prepare.elapsed().as_secs_f64() * 1000.0;
@@ -1715,7 +1712,6 @@ impl Playground {
             boundary: self.mesh_committed_scene.outer_boundaries,
             transfer,
             generation: None,
-            resume_running: self.wave_running,
             simulation_time: 0.0,
             exposed_nodes,
             adaptation_state: result.state,
@@ -2001,7 +1997,6 @@ impl Playground {
         {
             // Stop issuing new steps and let the render world encode every
             // previously requested step before changing buffer generations.
-            self.wave_running = false;
             if request.caught_up() {
                 let mut target_source = self.wave_source;
                 target_source.region = candidate.source_region;
@@ -2092,7 +2087,6 @@ impl Playground {
             self.wave_energy_step = u64::MAX;
             self.wave_source_dirty = false;
             self.wave_source.region = candidate.source_region;
-            self.wave_running = candidate.resume_running;
             self.solution_indicator_job = None;
             self.solution_indicator_result = None;
             self.solution_indicator_source = None;
@@ -2180,7 +2174,10 @@ impl Playground {
         self.wave_completed_steps = completed_steps;
         self.wave_dispatches = request.stats().dispatches();
         self.wave_substeps_last = 0;
-        if self.wave_operator.is_some() && request.ready() {
+        // A pending handoff must drain the already requested work before it can
+        // replace the GPU buffers. Keep the user's Run/Pause preference intact
+        // while temporarily withholding both continuous and manual scheduling.
+        if self.wave_operator.is_some() && request.ready() && self.simulation_candidate.is_none() {
             if self.wave_step_requested {
                 request.request_steps(1);
                 self.wave_substeps_last += 1;
@@ -9647,6 +9644,32 @@ mod tests {
             automatic_adaptation_work_limit(mesh, AmrQuality::Detailed.topology_budget());
         assert!(fast >= default_limit);
         assert!(detailed > fast);
+    }
+
+    #[test]
+    fn candidate_handoff_preserves_the_user_run_preference() {
+        let mut h = Harness::new();
+        build_mesh_candidate(&mut h.state);
+        assert!(h.state.simulation_candidate.is_some());
+        assert!(h.state.wave_running);
+
+        let mut request = WaveGpuRequest::default();
+        request.request_steps(1);
+        let display = WaveDisplay::default();
+        let mut assets = Assets::<ShaderBuffer>::default();
+        let world = World::new();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, &world);
+        h.state.refresh_wave(
+            &mut request,
+            &display,
+            &mut assets,
+            &mut commands,
+            1.0 / 60.0,
+        );
+
+        assert!(h.state.simulation_candidate.is_some());
+        assert!(h.state.wave_running);
     }
 
     #[test]
