@@ -318,7 +318,10 @@ spans union the sectors on their two sides, separated spans retain distinct
 traces, and a free baffle tip reconnects because it has one surrounding sector.
 `TopologyMeshPlan` validates total active/excluded face assignment and projects
 compiled face cycles and oriented curve sides into region-labelled trace cycles.
-The existing triangulator and solver do not consume this plan yet.
+The full-rebuild triangulator now consumes that plan directly, preserving stable
+curve/span labels and snapshot trace identities through holes, transmitting
+interfaces, free and attached baffles, outer dividers, and junctions. The app,
+solver, AMR, and probes still use the legacy scene path.
 
 - Make meshing consume a completed topology snapshot instead of independently
   rediscovering loop nesting and open-divider regions. Triangulate each active face
@@ -346,6 +349,11 @@ The existing triangulator and solver do not consume this plan yet.
   material-at-point results, and region connectivity from representative current
   examples as fixtures. Do not retain a production legacy-geometry adapter solely
   for these comparisons.
+- Keep exact mesh reuse for unchanged topology plans and skip remeshing for
+  boundary-law-only changes. Coordinate motion currently takes a typed full
+  rebuild. Migrating local repair requires topology-curve evaluation and
+  sector-aware endpoint rewiring; do that after the numerical consumers no longer
+  depend on legacy scene categories.
 
 **Exit criterion:** the solver and probes use no coordinate-side guesses for
 region or trace identity, existing examples retain their behavior, and junction

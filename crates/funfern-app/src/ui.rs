@@ -11627,6 +11627,22 @@ impl Playground {
                             InternalBoundarySide::Left => Color32::from_rgb(235, 132, 115),
                             InternalBoundarySide::Right => Color32::from_rgb(235, 183, 115),
                         },
+                        BoundaryLabel::Curve {
+                            side, separated, ..
+                        } => {
+                            if !separated {
+                                Color32::from_rgb(102, 210, 178)
+                            } else {
+                                match side {
+                                    funfern_core::CurveTraceSide::Left => {
+                                        Color32::from_rgb(235, 132, 115)
+                                    }
+                                    funfern_core::CurveTraceSide::Right => {
+                                        Color32::from_rgb(235, 183, 115)
+                                    }
+                                }
+                            }
+                        }
                     };
                     painter.line_segment(
                         edge.vertices
@@ -20964,14 +20980,17 @@ mod tests {
                 MeshVertex {
                     point: Point2::new(-0.5, -0.5),
                     boundary: None,
+                    trace: None,
                 },
                 MeshVertex {
                     point: Point2::new(0.5, -0.5),
                     boundary: None,
+                    trace: None,
                 },
                 MeshVertex {
                     point: Point2::new(0.0, 0.5),
                     boundary: None,
+                    trace: None,
                 },
             ],
             triangles: vec![MeshTriangle {

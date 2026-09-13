@@ -336,6 +336,7 @@ impl QuadraticTransferMap {
             .map(|point| MeshVertex {
                 point: *point,
                 boundary: None,
+                trace: None,
             })
             .collect();
         let region_groups = region_components(target_mesh)?;
@@ -729,6 +730,7 @@ mod tests {
                 .map(|p| MeshVertex {
                     point: Point2::new(p[0], p[1]),
                     boundary: None,
+                    trace: None,
                 })
                 .collect(),
             triangles: triangles

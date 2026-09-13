@@ -394,7 +394,8 @@ fn several_holes_keep_labels_and_topology() {
             | BoundaryLabel::MaterialInterface(_)
             | BoundaryLabel::OpenMaterialInterface(_)
             | BoundaryLabel::Wall { .. }
-            | BoundaryLabel::InternalBoundary { .. } => None,
+            | BoundaryLabel::InternalBoundary { .. }
+            | BoundaryLabel::Curve { .. } => None,
         })
         .collect();
     assert_eq!(labels, BTreeSet::from([10, 11, 12]));
@@ -635,7 +636,8 @@ fn empty_domain_and_outer_side_labels_mesh() {
             | BoundaryLabel::MaterialInterface(_)
             | BoundaryLabel::OpenMaterialInterface(_)
             | BoundaryLabel::Wall { .. }
-            | BoundaryLabel::InternalBoundary { .. } => None,
+            | BoundaryLabel::InternalBoundary { .. }
+            | BoundaryLabel::Curve { .. } => None,
         })
         .collect();
     assert_eq!(sides.len(), 4);

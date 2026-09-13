@@ -64,6 +64,31 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   divider graphs. The first junction implementation deliberately uses the robust
   full-rebuild fallback for graph-edge movement and topology edits.
 
+## 2026-09-13 — Topology-plan full meshing baseline
+
+- Added a full constrained-mesh path that consumes `TopologyMeshPlan` directly.
+  It triangulates assigned faces without recreating legacy obstacles or dividers,
+  shares complete transmitting chains, duplicates separated traces, and retains
+  `CurveId`, `CurveSpanId`, side, and junction `TraceVertexId` lineage in the mesh.
+- Free and one-ended baffles use the proven recover-and-cut path after face
+  triangulation. Attached tips are rewired to the exact topology sector rather
+  than the nearest coincident coordinate, closing the leak-prone ambiguity that
+  motivated the unified trace contract.
+- Added direct meshing fixtures for the empty rectangle, transmitting and excluded
+  closed loops, free and outer-attached baffles, an outer divider, and a
+  three-region T junction. The fixtures check area, region count, constraint
+  adjacency, two-sided labels, and trace lineage.
+- Audited local repair rather than adapting it speculatively. Exact unchanged
+  plans reuse the existing mesh, and boundary-law changes preserve the same
+  discretization. Coordinate changes currently report
+  `CoordinateRepairDeferred` and take the robust full rebuild. The legacy repair
+  obtains curve geometry and trace pairing from object-specific `Scene` members
+  and cannot safely rewire arbitrary junction sectors; migrating that algorithm is
+  a separate slice after solver/AMR consumers use the topology plan.
+- The topology full-build entry point is synchronous at this stage. The legacy app
+  continues using its cooperative meshing transaction until the document and
+  numerical consumer cutover provides a revisioned topology plan to schedule.
+
 ## 2026-09-13 — Unified curve topology kernel
 
 - Extended the compiled arrangement with directed face-boundary edge references

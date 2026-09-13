@@ -466,18 +466,22 @@ mod tests {
                 MeshVertex {
                     point: Point2::new(-1.0, -1.0),
                     boundary: None,
+                    trace: None,
                 },
                 MeshVertex {
                     point: Point2::new(1.0, -1.0),
                     boundary: None,
+                    trace: None,
                 },
                 MeshVertex {
                     point: Point2::new(1.0, 1.0),
                     boundary: None,
+                    trace: None,
                 },
                 MeshVertex {
                     point: Point2::new(-1.0, 1.0),
                     boundary: None,
+                    trace: None,
                 },
             ],
             triangles: vec![

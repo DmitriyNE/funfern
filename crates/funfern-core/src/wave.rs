@@ -934,6 +934,7 @@ mod tests {
                         -1.0 + 2.0 * y as f64 / n as f64,
                     ),
                     boundary: None,
+                    trace: None,
                 });
             }
         }

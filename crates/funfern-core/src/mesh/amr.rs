@@ -670,6 +670,10 @@ impl MeshAdaptationJob {
             } | BoundaryLabel::Wall {
                 side: BoundarySide::Interior,
                 ..
+            } | BoundaryLabel::Curve {
+                side: CurveTraceSide::Right,
+                separated: true,
+                ..
             }
         )
     }
@@ -728,6 +732,7 @@ impl MeshAdaptationJob {
                         parameter == breakpoint
                     })
                 }),
+            BoundaryLabel::Curve { .. } => true,
         }
     }
 
@@ -951,6 +956,11 @@ impl MeshAdaptationJob {
                     spline.evaluate(t1) - spline.derivative(t1, 1) * ((t1 - t0) / 3.0),
                     spline.evaluate(t1),
                 ]
+            }
+            BoundaryLabel::Curve { .. } => {
+                return Err(MeshAdaptationError::InvalidSource(
+                    "unified topology curve geometry is unavailable to legacy AMR",
+                ));
             }
         };
         Ok(hull.iter().all(|point| {
@@ -1338,6 +1348,9 @@ impl MeshAdaptationJob {
                 .ok_or(MeshAdaptationError::InvalidSource(
                     "unknown material interface",
                 )),
+            BoundaryLabel::Curve { .. } => Err(MeshAdaptationError::InvalidSource(
+                "unified topology curve geometry is unavailable to legacy AMR",
+            )),
         }
     }
 

@@ -407,6 +407,7 @@ pub struct CompiledVertex {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TopologySnapshot {
     pub revision: u64,
+    pub domain: DomainRect,
     pub vertices: Vec<CompiledVertex>,
     pub faces: Vec<CompiledFace>,
     pub edges: Vec<CompiledEdge>,
@@ -1333,6 +1334,7 @@ impl GraphBuilder {
 
         Ok(TopologySnapshot {
             revision,
+            domain: geometry.domain,
             vertices,
             faces,
             edges: compiled_edges,

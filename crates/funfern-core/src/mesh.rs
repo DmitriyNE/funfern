@@ -57,6 +57,14 @@ pub enum BoundaryLabel {
         id: InternalBoundaryId,
         side: InternalBoundarySide,
     },
+    /// Boundary chain emitted by the unified topology compiler. Transmitting
+    /// chains have one shared trace; separated chains have one label per side.
+    Curve {
+        curve: crate::CurveId,
+        span: crate::CurveSpanId,
+        side: CurveTraceSide,
+        separated: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +91,9 @@ pub struct MeshVertex {
     /// A boundary vertex can be shared by two outer-side labels at a corner;
     /// edge labels remain authoritative in that case.
     pub boundary: Option<BoundaryPoint>,
+    /// Snapshot-local sector identity at an authored or derived junction.
+    /// Interior samples on a span are identified by boundary label + parameter.
+    pub trace: Option<crate::TraceVertexId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,6 +238,7 @@ struct MeshBuilder {
     triangles: Vec<MeshTriangle>,
     boundary_edges: Vec<BoundaryEdge>,
     boundary_keys: BTreeSet<(usize, usize)>,
+    boundary_regions: Vec<(BoundaryLabel, BTreeSet<RegionId>)>,
     domain_loops: Vec<Polygon>,
     interior_loops: Vec<Option<Polygon>>,
     loop_ids: Vec<ObstacleId>,
@@ -431,6 +443,7 @@ impl MeshBuilder {
             triangles: vec![],
             boundary_edges: vec![],
             boundary_keys: BTreeSet::new(),
+            boundary_regions: vec![],
             domain_loops: vec![],
             interior_loops: vec![],
             loop_ids: vec![],
@@ -547,7 +560,11 @@ impl MeshBuilder {
             return Err(self.capacity_error());
         }
         let index = self.vertices.len();
-        self.vertices.push(MeshVertex { point, boundary });
+        self.vertices.push(MeshVertex {
+            point,
+            boundary,
+            trace: None,
+        });
         self.incident.push(BTreeSet::new());
         if let Some(region) = &mut self.repair_region {
             region.push(true);
@@ -804,7 +821,24 @@ impl MeshBuilder {
 
     fn region_at(&self, point: Point2) -> Option<RegionId> {
         if self.domain_loops.is_empty() {
-            return None;
+            return self.domains.iter().find_map(|domain| {
+                let outer = domain
+                    .outer
+                    .iter()
+                    .map(|index| self.point(*index))
+                    .collect::<Vec<_>>();
+                if locate_in_polygon(point, &outer) == PolygonLocation::Outside {
+                    return None;
+                }
+                let inside_hole = domain.holes.iter().any(|hole| {
+                    let points = hole
+                        .iter()
+                        .map(|index| self.point(*index))
+                        .collect::<Vec<_>>();
+                    locate_in_polygon(point, &points) == PolygonLocation::Inside
+                });
+                (!inside_hole).then_some(domain.region)
+            });
         }
         let points = |polygon: &Polygon| {
             polygon
@@ -836,6 +870,13 @@ impl MeshBuilder {
     }
 
     fn boundary_relevant_to_region(&self, label: BoundaryLabel, region: RegionId) -> bool {
+        if let Some((_, regions)) = self
+            .boundary_regions
+            .iter()
+            .find(|(candidate, _)| *candidate == label)
+        {
+            return regions.contains(&region);
+        }
         match label {
             BoundaryLabel::Outer(_) => region == BACKGROUND_REGION,
             BoundaryLabel::Obstacle(id) => self
@@ -859,6 +900,7 @@ impl MeshBuilder {
                 .iter()
                 .position(|candidate| *candidate == id)
                 .is_some_and(|index| self.internal_boundary_regions[index] == region),
+            BoundaryLabel::Curve { .. } => false,
         }
     }
 
@@ -2746,7 +2788,13 @@ impl MeshingJob {
                                 BoundaryLabel::Outer(_)
                                 | BoundaryLabel::Obstacle(_)
                                 | BoundaryLabel::Wall { .. }
-                                | BoundaryLabel::InternalBoundary { .. } => 1,
+                                | BoundaryLabel::InternalBoundary { .. }
+                                | BoundaryLabel::Curve {
+                                    separated: true, ..
+                                } => 1,
+                                BoundaryLabel::Curve {
+                                    separated: false, ..
+                                } => 2,
                             });
                         if sides.len() != expected
                             || !sides.contains(&(index, triangle.vertices[opposite]))
@@ -2791,7 +2839,13 @@ impl MeshingJob {
                     BoundaryLabel::Outer(_)
                     | BoundaryLabel::Obstacle(_)
                     | BoundaryLabel::Wall { .. }
-                    | BoundaryLabel::InternalBoundary { .. } => 1,
+                    | BoundaryLabel::InternalBoundary { .. }
+                    | BoundaryLabel::Curve {
+                        separated: true, ..
+                    } => 1,
+                    BoundaryLabel::Curve {
+                        separated: false, ..
+                    } => 2,
                 };
                 if b.adjacency
                     .get(&edge_key(edge[0], edge[1]))

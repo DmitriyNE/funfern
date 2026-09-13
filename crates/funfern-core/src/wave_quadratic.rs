@@ -1643,6 +1643,7 @@ mod tests {
                 .map(|[x, y]| MeshVertex {
                     point: Point2::new(x, y),
                     boundary: None,
+                    trace: None,
                 })
                 .collect(),
             triangles: vec![
@@ -2714,6 +2715,7 @@ mod tests {
                 .map(|[x, y]| MeshVertex {
                     point: Point2::new(x, y),
                     boundary: None,
+                    trace: None,
                 })
                 .collect(),
             triangles: vec![MeshTriangle {

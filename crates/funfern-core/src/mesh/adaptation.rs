@@ -780,13 +780,20 @@ impl MeshUpdateJob {
                                 "local repair of open material interfaces is not supported",
                             ));
                         }
+                        BoundaryLabel::Curve { .. } => {
+                            return Err(MeshError::Topology(
+                                "local repair of unified topology curves is not supported",
+                            ));
+                        }
                         BoundaryLabel::Outer(_) | BoundaryLabel::Wall { .. } => {}
                     }
                 }
-                self.builder
+                let imported = self
+                    .builder
                     .as_mut()
                     .unwrap()
                     .add_vertex(vertex.point, vertex.boundary)?;
+                self.builder.as_mut().unwrap().vertices[imported].trace = vertex.trace;
                 self.displacement.push(delta);
                 self.next_displacement.push(delta);
                 self.allowed.push(delta != Point2::default());
@@ -891,6 +898,11 @@ impl MeshUpdateJob {
                     }
                     BoundaryLabel::Wall { .. } => {
                         return Err(MeshError::Topology("unsupported source boundary topology"));
+                    }
+                    BoundaryLabel::Curve { .. } => {
+                        return Err(MeshError::Topology(
+                            "local repair of unified topology curves is not supported",
+                        ));
                     }
                 }
                 self.builder.as_mut().unwrap().add_boundary_edge(edge);

@@ -616,6 +616,16 @@ Creation, deletion, knot edits, resolution changes, excessive motion and failed
 repair use the full resumable mesher. Resolution remains an application preference,
 excluded from geometry files and undo history.
 
+The unified topology path has its own full-rebuild baseline. `TopologyMeshPlan`
+supplies directed face cycles, stable curve/span labels, and snapshot-local sector
+trace IDs; the triangulator no longer infers region ownership from object classes.
+Transmitting sides share the same constrained vertex chain. Separated free or
+attached baffles are recovered into the face mesh and cut into the exact trace
+sectors, including distinct coincident vertices at an outer attachment. An
+unchanged plan reuses its mesh, and changing only a boundary law does not remesh.
+Coordinate edits use a typed full rebuild until the patch repair receives unified
+curve evaluation and junction-sector rewiring.
+
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a
 structured diagnostic and never changes the draft, accepted geometry, or history.

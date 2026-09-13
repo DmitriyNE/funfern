@@ -660,6 +660,9 @@ impl SolutionIndicatorJob {
             BoundaryLabel::MaterialInterface(_) | BoundaryLabel::OpenMaterialInterface(_) => {
                 unreachable!()
             }
+            BoundaryLabel::Curve { .. } => {
+                return Err(SolutionIndicatorError::InvalidScene);
+            }
         };
         let record_index = self.boundary_records.len();
         self.boundary_records.push(BoundaryRecord {
@@ -1318,6 +1321,7 @@ mod tests {
                 .map(|[x, y]| MeshVertex {
                     point: Point2::new(x, y),
                     boundary: None,
+                    trace: None,
                 })
                 .collect(),
             triangles: vec![
