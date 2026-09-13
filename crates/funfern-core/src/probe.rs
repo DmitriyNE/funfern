@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
+
 use crate::{
-    BoundaryLabel, Point2, QuadraticWaveOperator, RegionId, Scene, TopologyMeshPlan,
-    TopologyWaveModel, TriMesh, enriched_quadratic_basis, enriched_quadratic_basis_gradients,
+    BoundaryLabel, EvaluatedMaterial, PlannedBoundarySource, Point2, PointSource,
+    QuadraticWaveOperator, RegionId, Scene, TopologyMeshPlan, TopologyWaveModel, TriMesh,
+    VolumeSource, WaveCoefficients, enriched_quadratic_basis, enriched_quadratic_basis_gradients,
     point_segment_distance,
 };
 
@@ -8,6 +11,7 @@ const BOUNDARY_TOLERANCE: f64 = 1.0e-9;
 const MIN_DISK_POLYGON_SIDES: usize = 24;
 const MAX_DISK_POLYGON_SIDES: usize = 128;
 const DISK_APPROXIMATION_TOLERANCE: f64 = 2.0e-4;
+pub const MAX_FAR_FIELD_CONTOUR_POINTS: usize = 4096;
 
 #[derive(Clone, Copy)]
 enum ProbeModel<'a> {
@@ -132,6 +136,89 @@ pub struct BoundaryStencilTarget {
     pub parameter: f64,
     pub period: f64,
     pub region: RegionId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuadraticFarFieldStencil {
+    pub samples: Vec<(QuadraticPointStencil, Point2, Point2)>,
+    pub exterior_region: RegionId,
+    pub wave_speed: f64,
+    pub sample_spacing: f64,
+    pub delay_margin: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FarFieldCompileOptions<'a> {
+    pub inset: f64,
+    pub sample_count: usize,
+    pub point_source: Option<PointSource>,
+    pub volume_sources: &'a [VolumeSource],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FarFieldCompileError {
+    InvalidInputs,
+    InvalidInset,
+    InvalidSampleCount,
+    GeometryOutsideContour,
+    MultipleExteriorFaces,
+    NonUniformExterior,
+    LossyExterior,
+    AnisotropicExterior,
+    DrivenExterior,
+    InvalidWaveSpeed,
+    ContourUnavailable(PointProbeError),
+    ContourLeavesExterior,
+}
+
+impl std::fmt::Display for FarFieldCompileError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidInputs => {
+                formatter.write_str("far-field mesh, topology, or material model is invalid")
+            }
+            Self::InvalidInset => formatter
+                .write_str("far-field inset must leave a nonempty contour inside the domain"),
+            Self::InvalidSampleCount => {
+                formatter.write_str("far-field contour sample count is outside its bounds")
+            }
+            Self::GeometryOutsideContour => formatter
+                .write_str("decrease the inset: the far-field contour must enclose all geometry"),
+            Self::MultipleExteriorFaces => formatter
+                .write_str("far-field projection requires one exterior face outside the contour"),
+            Self::NonUniformExterior => {
+                formatter.write_str("far-field projection requires a uniform exterior medium")
+            }
+            Self::LossyExterior => {
+                formatter.write_str("far-field projection requires a lossless exterior medium")
+            }
+            Self::AnisotropicExterior => {
+                formatter.write_str("far-field projection requires an isotropic exterior medium")
+            }
+            Self::DrivenExterior => {
+                formatter.write_str("far-field projection requires a source-free exterior medium")
+            }
+            Self::InvalidWaveSpeed => formatter.write_str("the exterior wave speed is invalid"),
+            Self::ContourUnavailable(error) => {
+                write!(
+                    formatter,
+                    "the far-field contour is unavailable on the mesh: {error}"
+                )
+            }
+            Self::ContourLeavesExterior => {
+                formatter.write_str("the far-field contour leaves its uniform exterior face")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FarFieldCompileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ContourUnavailable(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -932,16 +1019,213 @@ impl QuadraticBoundaryStencil {
     }
 }
 
+impl QuadraticFarFieldStencil {
+    /// Compiles a rectangular Huygens contour from the unified topology model.
+    /// Every modeled curve must lie strictly inside the contour, leaving one
+    /// source-free, uniform, isotropic, lossless exterior face around it.
+    pub fn build_topology(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        plan: &TopologyMeshPlan,
+        model: TopologyWaveModel<'_>,
+        options: FarFieldCompileOptions<'_>,
+    ) -> Result<Self, FarFieldCompileError> {
+        let FarFieldCompileOptions {
+            inset,
+            sample_count,
+            point_source,
+            volume_sources,
+        } = options;
+        let active_regions = plan
+            .domains
+            .iter()
+            .map(|domain| domain.region)
+            .collect::<BTreeSet<_>>();
+        let sources_valid = point_source.is_none_or(|source| {
+            source.valid()
+                && active_regions.contains(&source.region)
+                && model.region(source.region).is_some()
+        }) && volume_sources.len() <= crate::MAX_VOLUME_SOURCES
+            && volume_sources.iter().enumerate().all(|(index, source)| {
+                source.valid()
+                    && active_regions.contains(&source.region)
+                    && model.region(source.region).is_some()
+                    && !volume_sources[..index]
+                        .iter()
+                        .any(|previous| previous.region == source.region)
+            });
+        if !model.valid_for(plan)
+            || !sources_valid
+            || mesh.geometry_revision != plan.geometry_revision
+            || mesh.geometry_revision != operator.geometry_revision()
+            || mesh.mesh_revision != operator.mesh_revision()
+            || mesh.triangles.len() != operator.element_nodes().len()
+            || mesh
+                .triangles
+                .iter()
+                .any(|triangle| !active_regions.contains(&triangle.region))
+        {
+            return Err(FarFieldCompileError::InvalidInputs);
+        }
+        if !inset.is_finite() || inset <= 0.0 || 2.0 * inset >= plan.domain.minimum_extent() {
+            return Err(FarFieldCompileError::InvalidInset);
+        }
+        if !(4..=MAX_FAR_FIELD_CONTOUR_POINTS).contains(&sample_count) {
+            return Err(FarFieldCompileError::InvalidSampleCount);
+        }
+
+        let exterior_faces = plan
+            .boundaries
+            .iter()
+            .filter(|boundary| matches!(boundary.source, PlannedBoundarySource::Outer(_)))
+            .map(|boundary| (boundary.face, boundary.region))
+            .collect::<BTreeSet<_>>();
+        let mut exterior_faces = exterior_faces.into_iter();
+        let Some((exterior_face, exterior_region)) = exterior_faces.next() else {
+            return Err(FarFieldCompileError::InvalidInputs);
+        };
+        if exterior_faces.next().is_some() {
+            return Err(FarFieldCompileError::MultipleExteriorFaces);
+        }
+
+        let margin = plan.domain.tolerance() * 0.25;
+        let enclosed = |point: Point2| {
+            point.x > plan.domain.min_x + inset + margin
+                && point.x < plan.domain.max_x - inset - margin
+                && point.y > plan.domain.min_y + inset + margin
+                && point.y < plan.domain.max_y - inset - margin
+        };
+        if plan.boundaries.iter().any(|boundary| {
+            matches!(boundary.source, PlannedBoundarySource::Curve { .. })
+                && boundary.points.into_iter().any(|point| !enclosed(point))
+        }) {
+            return Err(FarFieldCompileError::GeometryOutsideContour);
+        }
+        if point_source.is_some_and(|source| source.enabled && !enclosed(source.position)) {
+            return Err(FarFieldCompileError::DrivenExterior);
+        }
+
+        if !plan
+            .domains
+            .iter()
+            .any(|domain| domain.face == exterior_face && domain.region == exterior_region)
+        {
+            return Err(FarFieldCompileError::InvalidInputs);
+        }
+        let region = model
+            .region(exterior_region)
+            .ok_or(FarFieldCompileError::InvalidInputs)?;
+        let material = model
+            .material(region.material)
+            .and_then(crate::Material::uniform)
+            .ok_or(FarFieldCompileError::NonUniformExterior)?;
+        validate_far_field_material(material, volume_sources, exterior_region)?;
+        let wave_speed = model.physics.wave_speed(WaveCoefficients {
+            mass_density: material.mass_density,
+            stiffness: material.stiffness,
+            damping: material.damping,
+        });
+        if !wave_speed.is_finite() || wave_speed <= 0.0 {
+            return Err(FarFieldCompileError::InvalidWaveSpeed);
+        }
+
+        let samples = rectangular_far_field_contour(plan.domain, inset, sample_count)
+            .into_iter()
+            .map(|(position, normal)| {
+                let stencil =
+                    QuadraticPointStencil::build_topology(mesh, operator, plan, model, position)
+                        .map_err(FarFieldCompileError::ContourUnavailable)?;
+                if stencil.region != exterior_region {
+                    return Err(FarFieldCompileError::ContourLeavesExterior);
+                }
+                Ok((stencil, position, normal))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let perimeter = 2.0 * (plan.domain.width() + plan.domain.height() - 4.0 * inset);
+        Ok(Self {
+            samples,
+            exterior_region,
+            wave_speed,
+            sample_spacing: perimeter / sample_count as f64,
+            delay_margin: plan
+                .domain
+                .corners()
+                .into_iter()
+                .map(Point2::norm)
+                .fold(0.0, f64::max)
+                / wave_speed,
+        })
+    }
+}
+
+fn validate_far_field_material(
+    material: EvaluatedMaterial,
+    sources: &[VolumeSource],
+    exterior_region: RegionId,
+) -> Result<(), FarFieldCompileError> {
+    if material.damping.abs() > 1.0e-12 {
+        return Err(FarFieldCompileError::LossyExterior);
+    }
+    if (material.axis_ratio - 1.0).abs() > 1.0e-12 {
+        return Err(FarFieldCompileError::AnisotropicExterior);
+    }
+    if sources
+        .iter()
+        .any(|source| source.enabled && source.region == exterior_region)
+    {
+        return Err(FarFieldCompileError::DrivenExterior);
+    }
+    Ok(())
+}
+
+fn rectangular_far_field_contour(
+    domain: crate::DomainRect,
+    inset: f64,
+    sample_count: usize,
+) -> Vec<(Point2, Point2)> {
+    let min_x = domain.min_x + inset;
+    let max_x = domain.max_x - inset;
+    let min_y = domain.min_y + inset;
+    let max_y = domain.max_y - inset;
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    let perimeter = 2.0 * (width + height);
+    let spacing = perimeter / sample_count as f64;
+    (0..sample_count)
+        .map(|index| {
+            let distance = (index as f64 + 0.5) * spacing;
+            if distance < width {
+                (Point2::new(min_x + distance, min_y), Point2::new(0.0, -1.0))
+            } else if distance < width + height {
+                (
+                    Point2::new(max_x, min_y + distance - width),
+                    Point2::new(1.0, 0.0),
+                )
+            } else if distance < 2.0 * width + height {
+                (
+                    Point2::new(max_x - (distance - width - height), max_y),
+                    Point2::new(0.0, 1.0),
+                )
+            } else {
+                (
+                    Point2::new(min_x, max_y - (distance - 2.0 * width - height)),
+                    Point2::new(-1.0, 0.0),
+                )
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         BACKGROUND_REGION, BoundaryEdge, CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline,
         DEFAULT_MATERIAL, FaceBoundaryCondition, FaceRegionAssignment, InternalBoundaryCoupling,
-        Material, MeshQuality, MeshTriangle, MeshVertex, ObstacleId, OpenCubicSpline,
-        OuterBoundaryCondition, OuterSide, QuadraticWaveOperator, Region, SpanBehavior,
-        TopologyCurve, TopologyGeometry, TopologyVertex, TopologyVertexId, TopologyVertexLocation,
-        compile_topology, mesh_topology_plan,
+        Material, MaterialId, MeshQuality, MeshTriangle, MeshVertex, ObstacleId, OpenCubicSpline,
+        OuterBoundaryCondition, OuterSide, PeriodicCubicSpline, QuadraticWaveOperator, Region,
+        ScalarField, SpanBehavior, TimeSignal, TopologyCurve, TopologyGeometry, TopologyVertex,
+        TopologyVertexId, TopologyVertexLocation, compile_topology, mesh_topology_plan,
     };
 
     fn fixture() -> (TriMesh, Scene, QuadraticWaveOperator) {
@@ -1112,6 +1396,33 @@ mod tests {
                         fraction: 0.5,
                     },
                 },
+            ],
+            ..TopologyGeometry::default()
+        }
+    }
+
+    fn topology_inclusion() -> TopologyGeometry {
+        TopologyGeometry {
+            curves: vec![
+                TopologyCurve::new(
+                    CurveId(4),
+                    CurveSpline::Closed(
+                        PeriodicCubicSpline::polygon(vec![
+                            Point2::new(-0.3, -0.3),
+                            Point2::new(0.3, -0.3),
+                            Point2::new(0.3, 0.3),
+                            Point2::new(-0.3, 0.3),
+                        ])
+                        .unwrap(),
+                    ),
+                    (0..4)
+                        .map(|index| CurveSpan {
+                            id: CurveSpanId(10 + index),
+                            behavior: SpanBehavior::Transmitting,
+                        })
+                        .collect(),
+                )
+                .unwrap(),
             ],
             ..TopologyGeometry::default()
         }
@@ -1614,5 +1925,212 @@ mod tests {
         assert_eq!(traces[0].stencil.region, regions[0]);
         assert_eq!(traces[1].stencil.region, regions[1]);
         assert!(traces[0].outward_normal.dot(traces[1].outward_normal) < -0.99);
+    }
+
+    #[test]
+    fn topology_far_field_compiles_one_uniform_exterior_around_an_internal_baffle() {
+        let (plan, mesh, scene, operator) = topology_fixture(topology_baffle());
+        let compiled = QuadraticFarFieldStencil::build_topology(
+            &mesh,
+            &operator,
+            &plan,
+            TopologyWaveModel::from_scene(&scene),
+            FarFieldCompileOptions {
+                inset: 0.12,
+                sample_count: 64,
+                point_source: Some(PointSource {
+                    enabled: true,
+                    ..PointSource::default()
+                }),
+                volume_sources: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(compiled.samples.len(), 64);
+        assert_eq!(compiled.exterior_region, BACKGROUND_REGION);
+        assert!((compiled.wave_speed - 1.0).abs() < 1.0e-12);
+        assert!((compiled.sample_spacing - 7.04 / 64.0).abs() < 1.0e-12);
+        assert!((compiled.delay_margin - 2.0_f64.sqrt()).abs() < 1.0e-12);
+        assert!(compiled.samples.iter().all(|(stencil, point, normal)| {
+            stencil.region == BACKGROUND_REGION
+                && (normal.norm() - 1.0).abs() < 1.0e-12
+                && normal.dot(*point) > 0.0
+        }));
+
+        let (inclusion_plan, inclusion_mesh, mut inclusion_scene, _) =
+            topology_fixture(topology_inclusion());
+        let exterior_region = inclusion_plan
+            .boundaries
+            .iter()
+            .find_map(|boundary| {
+                matches!(boundary.source, PlannedBoundarySource::Outer(_))
+                    .then_some(boundary.region)
+            })
+            .unwrap();
+        let interior_region = inclusion_plan
+            .domains
+            .iter()
+            .find_map(|domain| (domain.region != exterior_region).then_some(domain.region))
+            .unwrap();
+        inclusion_scene.materials.push(Material {
+            id: MaterialId(2),
+            mass_density: ScalarField::formula("1 + 0.1 * x").unwrap(),
+            ..Material::default_medium()
+        });
+        inclusion_scene
+            .regions
+            .iter_mut()
+            .find(|region| region.id == interior_region)
+            .unwrap()
+            .material = MaterialId(2);
+        let interior_source = VolumeSource {
+            region: interior_region,
+            enabled: true,
+            profile: ScalarField::constant(1.0),
+            parameters: vec![],
+            signal: TimeSignal::ZERO,
+        };
+        let inclusion_operator = QuadraticWaveOperator::assemble_topology(
+            &inclusion_mesh,
+            &inclusion_plan,
+            TopologyWaveModel::from_scene(&inclusion_scene),
+        )
+        .unwrap();
+        QuadraticFarFieldStencil::build_topology(
+            &inclusion_mesh,
+            &inclusion_operator,
+            &inclusion_plan,
+            TopologyWaveModel::from_scene(&inclusion_scene),
+            FarFieldCompileOptions {
+                inset: 0.12,
+                sample_count: 64,
+                point_source: None,
+                volume_sources: &[interior_source],
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn topology_far_field_rejects_nonuniform_driven_or_partitioned_exteriors() {
+        let (plan, mesh, scene, operator) = topology_fixture(TopologyGeometry::default());
+        let compile = |scene: &Scene, sources: &[VolumeSource]| {
+            QuadraticFarFieldStencil::build_topology(
+                &mesh,
+                &operator,
+                &plan,
+                TopologyWaveModel::from_scene(scene),
+                FarFieldCompileOptions {
+                    inset: 0.12,
+                    sample_count: 64,
+                    point_source: None,
+                    volume_sources: sources,
+                },
+            )
+        };
+
+        let mut varying = scene.clone();
+        varying.materials[0].mass_density = ScalarField::formula("1 + 0.1 * x").unwrap();
+        assert_eq!(
+            compile(&varying, &[]),
+            Err(FarFieldCompileError::NonUniformExterior)
+        );
+
+        let mut anisotropic = scene.clone();
+        anisotropic.materials[0].axis_ratio = ScalarField::constant(1.5);
+        assert_eq!(
+            compile(&anisotropic, &[]),
+            Err(FarFieldCompileError::AnisotropicExterior)
+        );
+
+        let source = VolumeSource {
+            region: BACKGROUND_REGION,
+            enabled: true,
+            profile: ScalarField::constant(1.0),
+            parameters: vec![],
+            signal: TimeSignal::ZERO,
+        };
+        assert_eq!(
+            compile(&scene, &[source]),
+            Err(FarFieldCompileError::DrivenExterior)
+        );
+        assert_eq!(
+            QuadraticFarFieldStencil::build_topology(
+                &mesh,
+                &operator,
+                &plan,
+                TopologyWaveModel::from_scene(&scene),
+                FarFieldCompileOptions {
+                    inset: 0.12,
+                    sample_count: 64,
+                    point_source: Some(PointSource {
+                        enabled: true,
+                        position: Point2::new(0.95, 0.0),
+                        ..PointSource::default()
+                    }),
+                    volume_sources: &[],
+                },
+            ),
+            Err(FarFieldCompileError::DrivenExterior)
+        );
+
+        let (divider_plan, divider_mesh, divider_scene, divider_operator) =
+            topology_fixture(topology_divider());
+        assert_eq!(
+            QuadraticFarFieldStencil::build_topology(
+                &divider_mesh,
+                &divider_operator,
+                &divider_plan,
+                TopologyWaveModel::from_scene(&divider_scene),
+                FarFieldCompileOptions {
+                    inset: 0.12,
+                    sample_count: 64,
+                    point_source: None,
+                    volume_sources: &[],
+                },
+            ),
+            Err(FarFieldCompileError::MultipleExteriorFaces)
+        );
+
+        let near_shell = TopologyGeometry {
+            curves: vec![
+                TopologyCurve::new(
+                    CurveId(3),
+                    CurveSpline::Open(
+                        OpenCubicSpline::polyline(vec![
+                            Point2::new(-0.5, -0.1),
+                            Point2::new(0.95, 0.1),
+                        ])
+                        .unwrap(),
+                    ),
+                    vec![CurveSpan {
+                        id: CurveSpanId(3),
+                        behavior: SpanBehavior::Separated {
+                            left: FaceBoundaryCondition::Reflecting,
+                            right: FaceBoundaryCondition::Reflecting,
+                            coupling: InternalBoundaryCoupling::Independent,
+                        },
+                    }],
+                )
+                .unwrap(),
+            ],
+            ..TopologyGeometry::default()
+        };
+        let (near_plan, near_mesh, near_scene, near_operator) = topology_fixture(near_shell);
+        assert_eq!(
+            QuadraticFarFieldStencil::build_topology(
+                &near_mesh,
+                &near_operator,
+                &near_plan,
+                TopologyWaveModel::from_scene(&near_scene),
+                FarFieldCompileOptions {
+                    inset: 0.12,
+                    sample_count: 64,
+                    point_source: None,
+                    volume_sources: &[],
+                },
+            ),
+            Err(FarFieldCompileError::GeometryOutsideContour)
+        );
     }
 }

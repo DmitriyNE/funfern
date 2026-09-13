@@ -350,7 +350,10 @@ samples reject ambiguous curve traces, disk and region integrals use active face
 assignments and topology material evaluation, and boundary samples validate their
 curve/span/side/parameter/region target against the plan before selecting an
 adjacent element. Application-level boundary-path metadata and far-field
-compilation remain for the following consumer slices.
+upload remain for the atomic application cutover. The core far-field compiler now
+derives one exterior face from the topology plan, checks compiled curve clearance,
+and rejects spatial, anisotropic, lossy, or driven exterior media before producing
+its rectangular Huygens stencils.
 
 ##### Topology-aware fixed-geometry AMR slice (implemented)
 
@@ -473,7 +476,8 @@ trace equivalence, and boundary sampling are immutable for the lifetime of the j
   graph edits; local graph repair is a later optimization.
 - Compile far-field contours only when the inset contour lies wholly in one
   uniform exterior face. Disable it with a precise reason when interfaces or
-  varying exterior material cross that face.
+  varying exterior material cross that face. This is implemented in the core
+  topology path; application upload switches during the atomic cutover.
 - Add numerical comparisons for old supported scenes, multi-region junction
   assembly, separated same-face traces, transfer through face split/merge, AMR
   commit continuity, and finite long runs with all supported boundary laws.

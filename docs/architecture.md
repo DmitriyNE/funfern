@@ -785,13 +785,18 @@ magnitude. Definitions and host histories survive ordinary
 solver handoffs; stencils rebuild for each committed mesh.
 
 The singleton far-field monitor derives a counterclockwise rectangular contour from
-the outer domain and a document-level inset. It uses 256 equal-arclength midpoint samples with
-outward normals and accepts the configuration only when the contour encloses all
-modeled boundaries and every sample lies in the same lossless background region.
-Enclosure is checked against adaptively subdivided periodic and open spline traces
-with a fixed world-space error margin. Control polygons are deliberately excluded
-from this predicate because their hull may extend beyond a fully enclosed curve.
-For background speed `c`, the GPU records `u`, `u_t`, and `grad(u) dot n` at 60
+the outer domain and a document-level inset. It uses 256 equal-arclength midpoint
+samples with outward normals and accepts the configuration only when the contour
+encloses all modeled boundaries and every sample lies in the same lossless
+exterior region. The topology compiler derives that exterior from outer-boundary
+face ownership, requires exactly one exterior face, and checks every compiled curve
+segment against the inset shell. The exterior material must be uniform, isotropic,
+lossless, and free of region sources; a localized point source must lie inside the
+contour. Spatial or driven materials remain valid in fully enclosed faces. The
+legacy path checks adaptively subdivided periodic and open spline traces with the
+same fixed world-space margin. Both paths deliberately ignore control polygons
+because their hull may extend beyond a fully enclosed curve.
+For exterior speed `c`, the GPU records `u`, `u_t`, and `grad(u) dot n` at 60
 samples per simulated second. A second compute dispatch evaluates 96 directions
 with temporal interpolation of the retarded contour data and the directional
 Huygens integrand `grad(u) dot n - (n dot d) u_t / c`. The observation timestamp is

@@ -66,6 +66,30 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   junction implementation deliberately uses the robust full-rebuild fallback for
   graph-edge movement and topology edits.
 
+## 2026-09-14 — Topology-aware far-field compilation
+
+- Added a dependency-free `QuadraticFarFieldStencil` compiler for topology plans.
+  It produces a bounded rectangular midpoint contour, outward normals, topology
+  point stencils, sample spacing, wave speed, and the common retarded-time delay
+  margin needed by the existing GPU projection.
+- Exterior classification now comes from stable outer-boundary face ownership.
+  More than one incident outer face is rejected even if both regions currently
+  evaluate to the same constants, so an interface cannot silently cross the
+  Huygens contour.
+- Clearance uses the plan's sampled curve segments and a fixed world-space margin.
+  Internal baffles and inclusions are allowed; curves entering the exterior shell
+  receive a specific enclosure error.
+- The compiler requires a uniform, isotropic, lossless exterior with no active
+  region source. Enabled point sources must lie inside the contour. Spatial and
+  driven materials in fully enclosed faces remain valid.
+- Structured failures cover malformed revisions, inset and output bounds, exterior
+  topology, material properties, source placement, mesh sampling, and a contour
+  that resolves to the wrong face. Direct tests cover an internal baffle, a
+  spatially varying driven inclusion, outer-face partitioning, shell intrusion,
+  anisotropy, and both point and region sources.
+- All **430 workspace tests**, workspace Clippy with warnings denied, native release
+  compilation, and `NO_COLOR=true trunk build --release --locked` pass.
+
 ## 2026-09-14 — Topology-aware ordinary probe stencils
 
 - Added topology entry points for quadratic point, boundary, disk, and region probe
