@@ -58,6 +58,21 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-13 — Stable vector-overlay exposure
+
+- Replaced frame-local-only arrow normalization with a peak-held exposure. The
+  current spatial 90th percentile still responds immediately to stronger fields,
+  but its denominator cannot fall below 2% of the strongest meaningful value seen
+  during the current run and overlay mode.
+- Suppressed the overlay when its current 90th percentile falls below an absolute
+  numerical floor or 0.01% of the held peak. Once outgoing energy leaves, arrows
+  now shrink and disappear instead of expanding residual noise to full length.
+  Fresh fields and quantity changes reset exposure; ordinary handoffs and toggling
+  the same overlay retain it.
+- Added a regression for peak retention, bounded late-field scaling, and silence
+  thresholds. The 305-test workspace suite, warning-denied Clippy, and release
+  Trunk build pass.
+
 ## 2026-09-13 — DC-stable EM reconstruction
 
 - Replaced the raw primary-field accumulator with a two-stage, critically damped

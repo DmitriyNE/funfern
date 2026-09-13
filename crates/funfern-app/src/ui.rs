@@ -44,6 +44,9 @@ const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const GIZMO_PADDING: f64 = 18.0;
+const VECTOR_OVERLAY_ABSOLUTE_SILENCE: f64 = 1.0e-6;
+const VECTOR_OVERLAY_REFERENCE_FLOOR_RATIO: f64 = 0.02;
+const VECTOR_OVERLAY_SILENCE_RATIO: f64 = 1.0e-4;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum CreationRole {
     #[default]
@@ -877,6 +880,8 @@ pub struct Playground {
     material_overlay_error: Option<String>,
     vector_overlay_average: BTreeMap<(i32, i32), Point2>,
     vector_overlay_step: u64,
+    vector_overlay_mode: VectorOverlay,
+    vector_overlay_peak_reference: f64,
     wave_mesh: Option<Arc<TriMesh>>,
     wave_operator: Option<Arc<QuadraticWaveOperator>>,
     wave_boundary_committed: OuterBoundaryConditions,
@@ -1048,6 +1053,8 @@ impl Default for Playground {
             material_overlay_error: None,
             vector_overlay_average: BTreeMap::new(),
             vector_overlay_step: u64::MAX,
+            vector_overlay_mode: VectorOverlay::Off,
+            vector_overlay_peak_reference: 0.0,
             wave_mesh: None,
             wave_operator: None,
             wave_boundary_committed: OuterBoundaryConditions::default(),
@@ -2870,6 +2877,7 @@ impl Playground {
             self.solution_indicator_source = None;
             self.vector_overlay_average.clear();
             self.vector_overlay_step = u64::MAX;
+            self.vector_overlay_peak_reference = 0.0;
         }
         // Prepare from the displayed mesh's own scene, never an obsolete
         // in-flight request. Geometry edits are coalesced until the drag ends.
@@ -3665,6 +3673,9 @@ impl Playground {
                 self.wave_active_wall_seconds = 0.0;
                 self.wave_dispatches = 0;
                 self.wave_step_requested = false;
+                self.vector_overlay_average.clear();
+                self.vector_overlay_step = u64::MAX;
+                self.vector_overlay_peak_reference = 0.0;
             }
             self.wave_completed_steps = 0;
             self.wave_steps_per_second = 0.0;
@@ -11416,6 +11427,12 @@ impl Playground {
         completed_steps: u64,
     ) {
         let settings = self.editor.document.presentation;
+        if self.vector_overlay_mode != settings.vector_overlay {
+            self.vector_overlay_average.clear();
+            self.vector_overlay_step = u64::MAX;
+            self.vector_overlay_peak_reference = 0.0;
+            self.vector_overlay_mode = settings.vector_overlay;
+        }
         if settings.vector_overlay_smoothed {
             if self.vector_overlay_step != completed_steps {
                 let mut next = BTreeMap::new();
@@ -11447,7 +11464,13 @@ impl Playground {
             return;
         }
         magnitudes.sort_by(f64::total_cmp);
-        let reference = magnitudes[(magnitudes.len() - 1) * 9 / 10].max(1.0e-12);
+        let instantaneous_reference = magnitudes[(magnitudes.len() - 1) * 9 / 10];
+        let Some(reference) = stable_vector_overlay_reference(
+            instantaneous_reference,
+            &mut self.vector_overlay_peak_reference,
+        ) else {
+            return;
+        };
         let maximum_length = settings.vector_overlay_density * 0.46;
         let scale = maximum_length as f64 * settings.vector_overlay_gain as f64 / reference;
         for (_, origin, value) in samples {
@@ -11818,6 +11841,17 @@ const fn transverse_field_magnitude_label(physics: PhysicsModel) -> &'static str
             polarization: ElectromagneticPolarization::Te,
         } => "Electric magnitude |E|",
     }
+}
+
+fn stable_vector_overlay_reference(instantaneous: f64, peak_reference: &mut f64) -> Option<f64> {
+    if !instantaneous.is_finite() || instantaneous < VECTOR_OVERLAY_ABSOLUTE_SILENCE {
+        return None;
+    }
+    *peak_reference = (*peak_reference).max(instantaneous);
+    if instantaneous < *peak_reference * VECTOR_OVERLAY_SILENCE_RATIO {
+        return None;
+    }
+    Some(instantaneous.max(*peak_reference * VECTOR_OVERLAY_REFERENCE_FLOOR_RATIO))
 }
 
 fn material_coefficient_labels(physics: PhysicsModel) -> [&'static str; 3] {
@@ -17353,6 +17387,21 @@ mod tests {
                 (vector.x + 2.0).abs() < 1.0e-5 && vector.y.abs() < 1.0e-5
             })
         );
+    }
+
+    #[test]
+    fn vector_overlay_scale_does_not_promote_late_noise() {
+        let mut peak = 0.0;
+        assert_eq!(stable_vector_overlay_reference(10.0, &mut peak), Some(10.0));
+        assert_eq!(peak, 10.0);
+        assert_eq!(stable_vector_overlay_reference(1.0, &mut peak), Some(1.0));
+        assert_eq!(stable_vector_overlay_reference(0.1, &mut peak), Some(0.2));
+        assert_eq!(stable_vector_overlay_reference(5.0e-4, &mut peak), None);
+        assert_eq!(stable_vector_overlay_reference(5.0e-7, &mut peak), None);
+        assert_eq!(peak, 10.0);
+
+        peak = 0.0;
+        assert_eq!(stable_vector_overlay_reference(0.01, &mut peak), Some(0.01));
     }
 
     #[test]
