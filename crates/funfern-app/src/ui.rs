@@ -7796,52 +7796,58 @@ impl Playground {
                 self.set_span_selection(vec![]);
             }
         });
-        ui.add_space(8.0);
-        ui.label("Domain bounds");
-        let mut domain = self.editor.document.model.draft.domain;
-        let responses = ui
-            .push_id("domain_bounds", |ui| {
-                [
-                    ui.add(
-                        egui::DragValue::new(&mut domain.min_x)
-                            .speed(0.01)
-                            .prefix("left ")
-                            .update_while_editing(false),
-                    ),
-                    ui.add(
-                        egui::DragValue::new(&mut domain.max_x)
-                            .speed(0.01)
-                            .prefix("right ")
-                            .update_while_editing(false),
-                    ),
-                    ui.add(
-                        egui::DragValue::new(&mut domain.min_y)
-                            .speed(0.01)
-                            .prefix("bottom ")
-                            .update_while_editing(false),
-                    ),
-                    ui.add(
-                        egui::DragValue::new(&mut domain.max_y)
-                            .speed(0.01)
-                            .prefix("top ")
-                            .update_while_editing(false),
-                    ),
-                ]
-            })
-            .inner;
-        if responses.iter().any(|response| {
-            response.gained_focus() || response.drag_started() || response.changed()
-        }) {
-            self.editor.begin();
-        }
-        if responses.iter().any(egui::Response::changed) {
-            self.editor.set_domain_during_edit(domain);
-        }
-        if responses
+        if self
+            .selected_spans
             .iter()
-            .any(|response| response.lost_focus() || response.drag_stopped())
+            .any(|span| matches!(span, GeometrySpan::Outer(_)))
         {
-            self.editor.commit();
+            ui.add_space(8.0);
+            ui.label("Domain bounds");
+            let mut domain = self.editor.document.model.draft.domain;
+            let responses = ui
+                .push_id("domain_bounds", |ui| {
+                    [
+                        ui.add(
+                            egui::DragValue::new(&mut domain.min_x)
+                                .speed(0.01)
+                                .prefix("left ")
+                                .update_while_editing(false),
+                        ),
+                        ui.add(
+                            egui::DragValue::new(&mut domain.max_x)
+                                .speed(0.01)
+                                .prefix("right ")
+                                .update_while_editing(false),
+                        ),
+                        ui.add(
+                            egui::DragValue::new(&mut domain.min_y)
+                                .speed(0.01)
+                                .prefix("bottom ")
+                                .update_while_editing(false),
+                        ),
+                        ui.add(
+                            egui::DragValue::new(&mut domain.max_y)
+                                .speed(0.01)
+                                .prefix("top ")
+                                .update_while_editing(false),
+                        ),
+                    ]
+                })
+                .inner;
+            if responses.iter().any(|response| {
+                response.gained_focus() || response.drag_started() || response.changed()
+            }) {
+                self.editor.begin();
+            }
+            if responses.iter().any(egui::Response::changed) {
+                self.editor.set_domain_during_edit(domain);
+            }
+            if responses
+                .iter()
+                .any(|response| response.lost_focus() || response.drag_stopped())
+            {
+                self.editor.commit();
+            }
         }
         if let InteractionMode::DrawCustom { .. } = self.interaction_mode {
             ui.horizontal(|ui| {
@@ -14994,6 +15000,35 @@ mod tests {
             OuterBoundaryCondition::FirstOrderOutgoing
         );
         assert_eq!(harness.state.editor.history_len().0, history + 1);
+    }
+
+    #[test]
+    fn domain_bounds_are_only_shown_for_outer_boundary_selection() {
+        let mut harness = Harness::new();
+        assert!(
+            !harness
+                .texts
+                .iter()
+                .any(|(text, _)| text == "Domain bounds")
+        );
+
+        harness.click(harness.point(Point2::new(0.35, 1.0)));
+        harness.frame(vec![]);
+        assert!(
+            harness
+                .texts
+                .iter()
+                .any(|(text, _)| text == "Domain bounds")
+        );
+
+        harness.click(harness.point(Point2::new(0.15, 0.0)));
+        harness.frame(vec![]);
+        assert!(
+            !harness
+                .texts
+                .iter()
+                .any(|(text, _)| text == "Domain bounds")
+        );
     }
 
     #[test]
