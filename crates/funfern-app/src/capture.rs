@@ -4,11 +4,11 @@ use image::{DynamicImage, ImageFormat};
 use std::io::Cursor;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PixelCrop {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+pub(crate) struct PixelCrop {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 pub fn encode_viewport_png(
@@ -43,7 +43,7 @@ fn encode_dynamic_viewport_png(
     Ok(bytes.into_inner())
 }
 
-fn pixel_crop(
+pub(crate) fn pixel_crop(
     logical_canvas: Rect,
     logical_viewport: Rect,
     image_width: u32,
@@ -79,6 +79,57 @@ fn pixel_crop(
         width: right - left,
         height: bottom - top,
     })
+}
+
+pub(crate) fn video_dimensions(crop: PixelCrop) -> Result<(u32, u32), String> {
+    let width = crop.width & !1;
+    let height = crop.height & !1;
+    if width < 2 || height < 2 {
+        return Err("Captured viewport is too small to record".into());
+    }
+    Ok((width, height))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn viewport_rgba_frame(
+    image: Image,
+    logical_canvas: Rect,
+    logical_viewport: Rect,
+    output_width: u32,
+    output_height: u32,
+) -> Result<Vec<u8>, String> {
+    use image::{GenericImage, Rgba, RgbaImage, imageops::FilterType};
+
+    let image = image
+        .try_into_dynamic()
+        .map_err(|error| format!("Could not read captured video frame: {error}"))?;
+    let crop = pixel_crop(
+        logical_canvas,
+        logical_viewport,
+        image.width(),
+        image.height(),
+    )?;
+    let source = image
+        .crop_imm(crop.x, crop.y, crop.width, crop.height)
+        .to_rgba8();
+    let scale = (output_width as f64 / source.width() as f64)
+        .min(output_height as f64 / source.height() as f64);
+    let fitted_width = ((source.width() as f64 * scale).round() as u32).clamp(1, output_width);
+    let fitted_height = ((source.height() as f64 * scale).round() as u32).clamp(1, output_height);
+    let fitted = if fitted_width == source.width() && fitted_height == source.height() {
+        source
+    } else {
+        image::imageops::resize(&source, fitted_width, fitted_height, FilterType::Triangle)
+    };
+    let mut output = RgbaImage::from_pixel(output_width, output_height, Rgba([11, 17, 23, 255]));
+    output
+        .copy_from(
+            &fitted,
+            (output_width - fitted_width) / 2,
+            (output_height - fitted_height) / 2,
+        )
+        .map_err(|error| format!("Could not compose captured video frame: {error}"))?;
+    Ok(output.into_raw())
 }
 
 #[cfg(test)]
@@ -136,5 +187,31 @@ mod tests {
         assert!(pixel_crop(canvas, outside, 200, 100).is_err());
         assert!(pixel_crop(Rect::ZERO, canvas, 200, 100).is_err());
         assert!(pixel_crop(canvas, canvas, 0, 100).is_err());
+    }
+
+    #[test]
+    fn video_dimensions_are_even() {
+        assert_eq!(
+            video_dimensions(PixelCrop {
+                x: 0,
+                y: 0,
+                width: 101,
+                height: 55,
+            })
+            .unwrap(),
+            (100, 54)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn video_frame_letterboxes_without_stretching() {
+        let canvas = Rect::from_min_max((0.0, 0.0).into(), (4.0, 2.0).into());
+        let viewport = canvas;
+        let source = RgbaImage::from_pixel(4, 2, Rgba([200, 30, 10, 255]));
+        let image = Image::from_dynamic(DynamicImage::ImageRgba8(source), true, Default::default());
+        let frame = viewport_rgba_frame(image, canvas, viewport, 4, 4).unwrap();
+        assert_eq!(&frame[0..4], &[11, 17, 23, 255]);
+        assert_eq!(&frame[4 * 4..4 * 4 + 4], &[200, 30, 10, 255]);
     }
 }

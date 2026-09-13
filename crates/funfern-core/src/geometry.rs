@@ -105,6 +105,7 @@ pub struct Material {
     pub mass_density: ScalarField,
     pub stiffness: ScalarField,
     pub damping: ScalarField,
+    pub axis_ratio: ScalarField,
     pub parameters: Vec<MaterialParameter>,
     pub color: [u8; 3],
 }
@@ -182,6 +183,7 @@ impl Material {
             mass_density: ScalarField::constant(1.0),
             stiffness: ScalarField::constant(1.0),
             damping: ScalarField::constant(0.0),
+            axis_ratio: ScalarField::constant(1.0),
             parameters: vec![],
             color: [47, 73, 88],
         }
@@ -199,14 +201,19 @@ impl Material {
                             .iter()
                             .any(|previous| previous.name == parameter.name)
                 });
-        let references_exist = [&self.mass_density, &self.stiffness, &self.damping]
-            .into_iter()
-            .flat_map(ScalarField::parameter_names)
-            .all(|name| {
-                self.parameters
-                    .iter()
-                    .any(|parameter| parameter.name == name)
-            });
+        let references_exist = [
+            &self.mass_density,
+            &self.stiffness,
+            &self.damping,
+            &self.axis_ratio,
+        ]
+        .into_iter()
+        .flat_map(ScalarField::parameter_names)
+        .all(|name| {
+            self.parameters
+                .iter()
+                .any(|parameter| parameter.name == name)
+        });
         self.id.0 > 0
             && !self.name.trim().is_empty()
             && self.name.len() <= 64
@@ -224,12 +231,25 @@ impl Material {
                 .damping
                 .constant_value()
                 .is_none_or(|value| value.is_finite() && value >= 0.0)
+            && self
+                .axis_ratio
+                .constant_value()
+                .is_none_or(|value| value.is_finite() && value >= 1.0)
     }
 
     pub fn varying(&self) -> bool {
-        [&self.mass_density, &self.stiffness, &self.damping]
-            .into_iter()
-            .any(|field| field.constant_value().is_none())
+        [
+            &self.mass_density,
+            &self.stiffness,
+            &self.damping,
+            &self.axis_ratio,
+        ]
+        .into_iter()
+        .any(|field| field.constant_value().is_none())
+    }
+
+    pub fn uses_frame(&self) -> bool {
+        self.varying() || self.axis_ratio.constant_value() != Some(1.0)
     }
 
     pub fn evaluate(
@@ -242,6 +262,7 @@ impl Material {
             mass_density: self.mass_density.evaluate(coordinates, &self.parameters)?,
             stiffness: self.stiffness.evaluate(coordinates, &self.parameters)?,
             damping: self.damping.evaluate(coordinates, &self.parameters)?,
+            axis_ratio: self.axis_ratio.evaluate(coordinates, &self.parameters)?,
         };
         values
             .valid()
@@ -254,6 +275,7 @@ impl Material {
             mass_density: self.mass_density.constant_value()?,
             stiffness: self.stiffness.constant_value()?,
             damping: self.damping.constant_value()?,
+            axis_ratio: self.axis_ratio.constant_value()?,
         };
         values.valid().then_some(values)
     }
@@ -274,9 +296,11 @@ impl Material {
         let mass_density = self.mass_density.rename_parameter(&old, &name)?;
         let stiffness = self.stiffness.rename_parameter(&old, &name)?;
         let damping = self.damping.rename_parameter(&old, &name)?;
+        let axis_ratio = self.axis_ratio.rename_parameter(&old, &name)?;
         self.mass_density = mass_density;
         self.stiffness = stiffness;
         self.damping = damping;
+        self.axis_ratio = axis_ratio;
         self.parameters[index].name = name;
         Ok(())
     }
@@ -683,7 +707,27 @@ impl Scene {
                 mass_density: values.mass_density,
                 stiffness: values.stiffness,
                 damping: values.damping,
+                axis_ratio: properties.axis_ratio,
             })
+            .ok_or(MaterialError::InvalidValue)
+    }
+
+    pub fn directional_material_at(
+        &self,
+        region: RegionId,
+        point: Point2,
+    ) -> Result<crate::DirectionalWaveCoefficients, MaterialError> {
+        let region = self.region(region).ok_or(MaterialError::InvalidValue)?;
+        let properties = self
+            .material(region.material)
+            .ok_or(MaterialError::InvalidValue)?
+            .evaluate(region.frame, point)?;
+        let values = self
+            .physics
+            .directional_wave_coefficients(properties, region.frame);
+        values
+            .valid()
+            .then_some(values)
             .ok_or(MaterialError::InvalidValue)
     }
 
@@ -710,10 +754,12 @@ impl Scene {
                 .all(|(left, right)| {
                     left.id == right.id
                         && left.material == right.material
-                        && (!(self.material(left.material).is_some_and(Material::varying)
+                        && (!(self
+                            .material(left.material)
+                            .is_some_and(Material::uses_frame)
                             || other
                                 .material(right.material)
-                                .is_some_and(Material::varying))
+                                .is_some_and(Material::uses_frame))
                             || left.frame == right.frame)
                 })
             && self.outer_boundaries == other.outer_boundaries

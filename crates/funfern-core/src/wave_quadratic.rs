@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    BACKGROUND_REGION, BoundaryLabel, FaceBoundaryCondition, InternalBoundaryCoupling,
-    InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition, OuterBoundaryConditions,
-    OuterSide, PhysicsModel, Point2, RegionId, Scene, TimeSignal, TriMesh, WaveCoefficients,
-    WaveError,
+    BACKGROUND_REGION, BoundaryLabel, DirectionalWaveCoefficients, FaceBoundaryCondition,
+    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition,
+    OuterBoundaryConditions, OuterSide, PhysicsModel, Point2, RegionId, Scene, SymmetricTensor2,
+    TimeSignal, TriMesh, WaveCoefficients, WaveError,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -213,8 +213,7 @@ impl QuadraticWaveOperator {
             ];
             for local in 0..7 {
                 let values = coefficients.at(triangle.region, node_points[indices[local]])?;
-                maximum_wave_speed =
-                    maximum_wave_speed.max((values.stiffness / values.mass_density).sqrt());
+                maximum_wave_speed = maximum_wave_speed.max(values.maximum_wave_speed());
                 mass[indices[local]] += values.mass_density * area * MASS_WEIGHTS[local];
                 damping[indices[local]] += values.damping * area * MASS_WEIGHTS[local];
             }
@@ -225,14 +224,13 @@ impl QuadraticWaveOperator {
                     + points[1] * barycentric[1]
                     + points[2] * barycentric[2];
                 let values = coefficients.at(triangle.region, point)?;
-                maximum_wave_speed =
-                    maximum_wave_speed.max((values.stiffness / values.mass_density).sqrt());
+                maximum_wave_speed = maximum_wave_speed.max(values.maximum_wave_speed());
                 let gradients =
                     enriched_quadratic_basis_gradients(barycentric, barycentric_gradients);
                 for i in 0..7 {
                     for j in 0..7 {
                         local_stiffness[i][j] +=
-                            weight * values.stiffness * gradients[i].dot(gradients[j]);
+                            weight * gradients[i].dot(values.stiffness.apply(gradients[j]));
                     }
                 }
             }
@@ -277,6 +275,7 @@ impl QuadraticWaveOperator {
                 coefficients.at(BACKGROUND_REGION, node_points[nodes[2]])?,
             ];
             let line_weights = [length / 6.0, length / 6.0, 2.0 * length / 3.0];
+            let normal = outer_normal(side);
             match condition {
                 OuterBoundaryCondition::Reflecting => {}
                 OuterBoundaryCondition::Neumann { .. } => {
@@ -302,7 +301,7 @@ impl QuadraticWaveOperator {
                     for ((node, weight), values) in
                         nodes.into_iter().zip(line_weights).zip(node_coefficients)
                     {
-                        let impedance = (values.mass_density * values.stiffness).sqrt();
+                        let impedance = values.normal_impedance(normal);
                         damping[node] += impedance * weight;
                     }
                 }
@@ -315,11 +314,10 @@ impl QuadraticWaveOperator {
                 // Sharing vertex indices across incident sides supplies the
                 // corner coupling in the assembled tangential operator.
                 let middle = node_coefficients[2];
-                let wave_speed = (middle.stiffness / middle.mass_density).sqrt();
                 assemble_auxiliary_line(
                     nodes,
                     length,
-                    0.5 * middle.stiffness * wave_speed,
+                    middle.stiffness.determinant() / (2.0 * middle.normal_impedance(normal)),
                     &mut auxiliary_rows,
                     &mut auxiliary_active,
                 );
@@ -1035,9 +1033,16 @@ enum CoefficientProvider<'a> {
 }
 
 impl CoefficientProvider<'_> {
-    fn at(self, region: RegionId, point: Point2) -> Result<WaveCoefficients, WaveError> {
+    fn at(self, region: RegionId, point: Point2) -> Result<DirectionalWaveCoefficients, WaveError> {
         let values = match self {
-            Self::Constant(values) => *values.get(&region).ok_or(WaveError::InvalidCoefficients)?,
+            Self::Constant(values) => {
+                let value = *values.get(&region).ok_or(WaveError::InvalidCoefficients)?;
+                DirectionalWaveCoefficients {
+                    mass_density: value.mass_density,
+                    stiffness: SymmetricTensor2::isotropic(value.stiffness),
+                    damping: value.damping,
+                }
+            }
             Self::Scene(scene) => {
                 let region = scene
                     .region(region)
@@ -1071,15 +1076,28 @@ impl CoefficientProvider<'_> {
                         }
                         Ok(value)
                     };
-                let properties = WaveCoefficients {
+                let properties = crate::EvaluatedMaterial {
                     mass_density: evaluate(&material.mass_density, "density", true)?,
                     stiffness: evaluate(&material.stiffness, "stiffness", true)?,
                     damping: evaluate(&material.damping, "damping", false)?,
+                    axis_ratio: evaluate(&material.axis_ratio, "axis ratio", true)?,
                 };
-                scene.physics.wave_coefficients(properties)
+                if properties.axis_ratio < 1.0 {
+                    return Err(WaveError::MaterialEvaluation {
+                        material: material.name.clone(),
+                        coefficient: "axis ratio",
+                        point,
+                        reason: "value must be at least one".into(),
+                    });
+                }
+                scene
+                    .physics
+                    .directional_wave_coefficients(properties, region.frame)
             }
         };
-        validate_coefficients(values)?;
+        if !values.valid() {
+            return Err(WaveError::InvalidCoefficients);
+        }
         Ok(values)
     }
 }
@@ -1154,11 +1172,13 @@ fn assemble_hole_boundary_conditions(
             )?,
             coefficients.at(exterior, mesh.vertices[b].point)?,
         ];
+        let tangent = (mesh.vertices[b].point - mesh.vertices[a].point) / length;
         assemble_face_condition(
             condition.resolved(scene.physics),
             nodes,
             length,
             values,
+            Point2::new(-tangent.y, tangent.x),
             assembly,
         )?;
     }
@@ -1236,11 +1256,13 @@ fn assemble_internal_boundary_laws(
                 assembly_point(nodes[2], mesh, midpoint, a, b),
             )?,
         ];
+        let tangent = (mesh.vertices[b].point - mesh.vertices[a].point) / length;
         assemble_face_condition(
             condition.resolved(scene.physics),
             nodes,
             length,
             values,
+            Point2::new(-tangent.y, tangent.x),
             assembly,
         )?;
         let (start, end) = if parameter_a < parameter_b {
@@ -1286,7 +1308,10 @@ fn assemble_internal_boundary_laws(
             continue;
         };
         let point = boundary.spline.evaluate(parameter);
-        let spring = stiffness_ratio * coefficients.at(boundary.region, point)?.stiffness;
+        let spring = stiffness_ratio
+            * coefficients
+                .at(boundary.region, point)?
+                .geometric_mean_stiffness();
         for ((left_node, right_node), weight) in
             left.into_iter()
                 .zip(right)
@@ -1309,7 +1334,8 @@ fn assemble_face_condition(
     condition: FaceBoundaryCondition,
     nodes: [usize; 3],
     length: f64,
-    coefficients: [WaveCoefficients; 3],
+    coefficients: [DirectionalWaveCoefficients; 3],
+    normal: Point2,
     assembly: &mut BoundaryAssembly<'_>,
 ) -> Result<(), WaveError> {
     let weights = [1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0];
@@ -1321,7 +1347,7 @@ fn assemble_face_condition(
                 .zip(weights)
                 .zip(coefficients.iter().copied())
             {
-                let impedance = ratio * (coefficients.mass_density * coefficients.stiffness).sqrt();
+                let impedance = ratio * coefficients.normal_impedance(normal);
                 assembly.damping[node] += impedance * length * weight;
             }
         }
@@ -1331,15 +1357,15 @@ fn assemble_face_condition(
                 .zip(weights)
                 .zip(coefficients.iter().copied())
             {
-                let impedance = (coefficients.mass_density * coefficients.stiffness).sqrt();
+                let impedance = coefficients.normal_impedance(normal);
                 assembly.damping[node] += impedance * length * weight;
             }
             let coefficients = coefficients[1];
-            let wave_speed = (coefficients.stiffness / coefficients.mass_density).sqrt();
             assemble_auxiliary_line(
                 nodes,
                 length,
-                0.5 * coefficients.stiffness * wave_speed,
+                coefficients.stiffness.determinant()
+                    / (2.0 * coefficients.normal_impedance(normal)),
                 assembly.auxiliary_rows,
                 assembly.auxiliary_active,
             );
@@ -1359,6 +1385,15 @@ fn assemble_face_condition(
         }
     }
     Ok(())
+}
+
+fn outer_normal(side: OuterSide) -> Point2 {
+    match side {
+        OuterSide::Bottom => Point2::new(0.0, -1.0),
+        OuterSide::Right => Point2::new(1.0, 0.0),
+        OuterSide::Top => Point2::new(0.0, 1.0),
+        OuterSide::Left => Point2::new(-1.0, 0.0),
+    }
 }
 
 fn assembly_point(node: usize, mesh: &TriMesh, midpoint: usize, a: usize, b: usize) -> Point2 {
@@ -1474,6 +1509,36 @@ pub fn enriched_quadratic_basis_laplacians(
     ]
 }
 
+/// Hessians of the seven enriched-quadratic basis functions.
+pub fn enriched_quadratic_basis_hessians(
+    [l0, l1, l2]: [f64; 3],
+    [g0, g1, g2]: [Point2; 3],
+) -> [SymmetricTensor2; 7] {
+    fn outer(a: Point2, b: Point2) -> SymmetricTensor2 {
+        SymmetricTensor2::new(a.x * b.x, 0.5 * (a.x * b.y + a.y * b.x), a.y * b.y)
+    }
+    let bubble = SymmetricTensor2::new(
+        54.0 * (l0 * g1.x * g2.x + l1 * g0.x * g2.x + l2 * g0.x * g1.x),
+        27.0 * (l0 * (g1.x * g2.y + g1.y * g2.x)
+            + l1 * (g0.x * g2.y + g0.y * g2.x)
+            + l2 * (g0.x * g1.y + g0.y * g1.x)),
+        54.0 * (l0 * g1.y * g2.y + l1 * g0.y * g2.y + l2 * g0.y * g1.y),
+    );
+    let add = |a: SymmetricTensor2, b: SymmetricTensor2| {
+        SymmetricTensor2::new(a.xx + b.xx, a.xy + b.xy, a.yy + b.yy)
+    };
+    let scale = |a: SymmetricTensor2, s: f64| SymmetricTensor2::new(a.xx * s, a.xy * s, a.yy * s);
+    [
+        add(scale(outer(g0, g0), 4.0), scale(bubble, 1.0 / 9.0)),
+        add(scale(outer(g1, g1), 4.0), scale(bubble, 1.0 / 9.0)),
+        add(scale(outer(g2, g2), 4.0), scale(bubble, 1.0 / 9.0)),
+        add(scale(outer(g0, g1), 8.0), scale(bubble, -4.0 / 9.0)),
+        add(scale(outer(g1, g2), 8.0), scale(bubble, -4.0 / 9.0)),
+        add(scale(outer(g2, g0), 8.0), scale(bubble, -4.0 / 9.0)),
+        bubble,
+    ]
+}
+
 /// Cardinal basis values for the seven local nodes in the order returned by
 /// [`QuadraticWaveOperator::element_nodes`].
 pub fn enriched_quadratic_basis([l0, l1, l2]: [f64; 3]) -> [f64; 7] {
@@ -1535,6 +1600,7 @@ mod tests {
                     mass_density: crate::ScalarField::constant(2.0),
                     stiffness: crate::ScalarField::constant(3.0),
                     damping: crate::ScalarField::constant(0.5),
+                    axis_ratio: crate::ScalarField::constant(1.0),
                     parameters: vec![],
                     color: [1, 2, 3],
                 },
@@ -1544,6 +1610,7 @@ mod tests {
                     mass_density: crate::ScalarField::constant(4.0),
                     stiffness: crate::ScalarField::constant(7.0),
                     damping: crate::ScalarField::constant(1.5),
+                    axis_ratio: crate::ScalarField::constant(1.0),
                     parameters: vec![],
                     color: [4, 5, 6],
                 },
@@ -2663,5 +2730,61 @@ mod tests {
                 "a near-degenerate element collapses the explicit CFL timestep"
             ))
         ));
+    }
+
+    #[test]
+    fn directional_scene_assembles_rotated_tensor_energy() {
+        let mut scene = Scene::default();
+        scene.materials[0].axis_ratio = crate::ScalarField::constant(4.0);
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &square(),
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let energy = |operator: &QuadraticWaveOperator, direction: Point2| {
+            let values = operator
+                .node_points()
+                .iter()
+                .map(|point| point.dot(direction))
+                .collect::<Vec<_>>();
+            let applied = operator.apply_stiffness(&values).unwrap();
+            values.iter().zip(applied).map(|(a, b)| a * b).sum::<f64>()
+        };
+        assert!((energy(&operator, Point2::new(1.0, 0.0)) - 4.0).abs() < 1.0e-10);
+        assert!((energy(&operator, Point2::new(0.0, 1.0)) - 0.25).abs() < 1.0e-10);
+
+        scene.regions[0].frame.angle_radians = std::f64::consts::FRAC_PI_2;
+        let rotated = QuadraticWaveOperator::assemble_scene(
+            &square(),
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        assert!((energy(&rotated, Point2::new(1.0, 0.0)) - 0.25).abs() < 1.0e-10);
+        assert!((energy(&rotated, Point2::new(0.0, 1.0)) - 4.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn outgoing_impedance_uses_the_boundary_normal() {
+        let mut scene = Scene::default();
+        scene.materials[0].axis_ratio = crate::ScalarField::constant(4.0);
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &square_with_outer_boundary(),
+            &scene,
+            OuterBoundaryCondition::FirstOrderOutgoing,
+        )
+        .unwrap();
+        let damping_at = |point: Point2| {
+            let index = operator
+                .node_points()
+                .iter()
+                .position(|candidate| (*candidate - point).norm() < 1.0e-12)
+                .unwrap();
+            operator.lumped_damping()[index]
+        };
+        // The x-normal edge sees sqrt(A_xx)=2, while the y-normal edge sees 1/2.
+        assert!((damping_at(Point2::new(1.0, 0.5)) - 4.0 / 3.0).abs() < 1.0e-12);
+        assert!((damping_at(Point2::new(0.5, 0.0)) - 1.0 / 3.0).abs() < 1.0e-12);
     }
 }

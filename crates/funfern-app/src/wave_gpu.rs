@@ -1953,9 +1953,9 @@ fn gpu_probe_stencil(stencil: Option<QuadraticPointStencil>) -> GpuProbeStencil 
         gradient_y_b: Vec4::from_array([gradient_y[4], gradient_y[5], gradient_y[6], 0.0]),
         material: Vec4::new(
             stencil.mass_density as f32,
-            stencil.stiffness as f32,
-            1.0,
-            0.0,
+            stencil.stiffness.xx as f32,
+            stencil.stiffness.xy as f32,
+            stencil.stiffness.yy as f32,
         ),
     }
 }
@@ -3473,6 +3473,8 @@ mod tests {
         assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
         assert!(!shader.contains("control.values.w + parameters.time_data.z"));
         assert!(shader.contains("stencil.material.x * displacement * displacement"));
+        assert!(shader.contains("dot(gradient, flux)"));
+        assert!(shader.contains("length(potential_flux)"));
         assert!(shader.contains("let poynting = select(0.0, abs(displacement) * transverse"));
     }
 
@@ -3542,9 +3544,9 @@ mod tests {
     #[test]
     fn curve_probe_shader_records_profile_energy_flux_and_gaps() {
         let shader = include_str!("curve_probe.wgsl");
-        assert!(shader.contains("let normal_gradient"));
-        assert!(shader.contains("-stencil.material.y * velocity * normal_gradient"));
-        assert!(shader.contains("-stencil.material.y * displacement * potential_normal_gradient"));
+        assert!(shader.contains("let tensor_flux = vec2<f32>"));
+        assert!(shader.contains("-velocity * dot(tensor_flux, normal)"));
+        assert!(shader.contains("-displacement * dot(potential_flux, normal)"));
         assert!(shader.contains("let transverse = select("));
         assert!(shader.contains("bitcast<f32>(0x7fc00000u | (point & 1u))"));
         assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));
@@ -3572,9 +3574,9 @@ mod tests {
                 Point2::new(0.0, 1.0),
             ],
             region: funfern_core::BACKGROUND_REGION,
-            coefficients: [funfern_core::EvaluatedMaterial {
+            coefficients: [funfern_core::DirectionalWaveCoefficients {
                 mass_density: 2.0,
-                stiffness: 3.0,
+                stiffness: funfern_core::SymmetricTensor2::isotropic(3.0),
                 damping: 0.0,
             }; 12],
             area: 0.5,

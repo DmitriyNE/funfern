@@ -543,7 +543,7 @@ fn area_probe_targets_and_far_field_settings_round_trip() {
         .unwrap();
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 19"));
+    assert!(json.contains("\"version\": 20"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
     assert_eq!(decoded.model.far_field.inset, 0.17);
@@ -634,7 +634,7 @@ fn point_source_round_trips_and_version_ten_uses_the_default() {
     };
     let json = save(&document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 19);
+    assert_eq!(value["version"], 20);
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
     set_file_version(&mut value, 10);
@@ -745,7 +745,7 @@ fn volume_source_round_trips_and_is_one_undoable_region_edit() {
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 19"));
+    assert!(json.contains("\"version\": 20"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -781,7 +781,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 20.into(),
+            0 => value["version"] = 21.into(),
             1 => value["accepted"]["domain"][0] = 1.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -858,7 +858,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        19
+        20
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -1337,6 +1337,7 @@ fn spatial_materials_parameters_and_frames_round_trip() {
     }];
     material.mass_density = ScalarField::formula("1 + r / R").unwrap();
     material.stiffness = ScalarField::formula("2 - clamp(0, 1, r / R)").unwrap();
+    material.axis_ratio = ScalarField::formula("1 + 2 * clamp(0, 1, r / R)").unwrap();
     editor.update_material(material).unwrap();
     editor
         .set_region_frame(
@@ -1349,9 +1350,12 @@ fn spatial_materials_parameters_and_frames_round_trip() {
         )
         .unwrap();
     settle(&mut editor);
+    editor.document.presentation.material_overlay =
+        MaterialOverlay::Property(MaterialProperty::Anisotropy);
+    editor.document.presentation.material_overlay_logarithmic = true;
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 19"));
+    assert!(json.contains("\"version\": 20"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1360,6 +1364,23 @@ fn spatial_materials_parameters_and_frames_round_trip() {
     malformed = serde_json::from_str(&json).unwrap();
     malformed["accepted"]["regions"][1]["frame"]["angle_radians"] = "sideways".into();
     assert!(decode(serde_json::to_string(&malformed).unwrap().as_bytes()).is_err());
+
+    let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+    legacy["version"] = 19.into();
+    for scene in ["draft", "accepted"] {
+        for material in legacy[scene]["materials"].as_array_mut().unwrap() {
+            material.as_object_mut().unwrap().remove("axis_ratio");
+        }
+    }
+    let migrated = decode(serde_json::to_string(&legacy).unwrap().as_bytes()).unwrap();
+    assert!(
+        migrated
+            .model
+            .draft
+            .materials
+            .iter()
+            .all(|material| { material.axis_ratio == ScalarField::constant(1.0) })
+    );
 }
 
 #[test]
@@ -1867,7 +1888,7 @@ fn boundary_probe_round_trips_and_tracks_periodic_insertion() {
     assert_eq!(target.spans(9), vec![7, 8, 0]);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 19"));
+    assert!(json.contains("\"version\": 20"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded.model.probes, editor.document.model.probes);
 

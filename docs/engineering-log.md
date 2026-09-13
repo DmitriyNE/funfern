@@ -7,9 +7,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Add browser video capture using the scene-only presentation fence established
-  by viewport PNG export, then reassess the remaining product roadmap. Keep playback
-  live, show a clear recording indicator, and keep panels outside the recording.
+- [ ] Raise viewport video capture from the initial 30 FPS implementation to 60 FPS.
+  Measure browser encoding and native GPU-readback pressure first, retain bounded
+  native queues and wall-clock pacing, and report dropped frames rather than slowing
+  the simulation when capture cannot sustain the requested rate.
 - [ ] Replace the vector overlay's run-peak exposure heuristic with a robust
   automatic scale that can recover after a legitimate transient spike such as
   **Place pulse**, while still refusing to magnify late numerical noise. Avoid
@@ -59,6 +60,56 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   follow-ups include bounded time-envelope expressions, pulsed/chirped drives,
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
+
+## 2026-09-13 — Directional material tensors
+
+- Added a reusable dependency-free symmetric 2D tensor and a fourth material
+  field, **Axis ratio**, with constant/formula input and `a >= 1` validation.
+  Region frames orient `A = k R diag(a, 1/a) R^T`; the base coefficient remains
+  its geometric mean and the x/y wave-speed ratio is exactly `a`.
+- Updated enriched-quadratic volume assembly, the row-sum CFL guard, first- and
+  second-order straight-edge radiation terms, thin-gap scaling, and solution AMR
+  to use directional flux. The estimator now recovers `A grad(u)`, includes the
+  reconstructed tensor divergence in its strong residual, and limits active
+  wavelengths with the slow principal speed.
+- Updated point, line, boundary, and area probe energy/flux calculations on CPU
+  and WebGPU. EM complementary fields rotate `A grad(potential)` and Poynting flow
+  uses the same tensor flux. Far-field projection now rejects an anisotropic
+  background explicitly while allowing directional inclusions.
+- Added the logarithmic **Material anisotropy** overlay with fast-axis marks and a
+  local principal-coefficient/speed readout. The **Anisotropic crystal** example
+  demonstrates a rotated inclusion, source, probes, and second-order outer edges.
+- Scene JSON is version 20. Axis-ratio formulas, the selected overlay, files,
+  links, recovery, examples, and history share the document representation;
+  versions 1–19 migrate to isotropic ratio one.
+- Verification: `cargo fmt --all`, 362 workspace tests, native and wasm32 Clippy
+  with warnings denied, native release compilation, and `trunk build --release`
+  pass. Interactive browser behavior was not re-exercised in this slice.
+
+## 2026-09-13 — Unified viewport video recording
+
+- Added a shared capture coordinator for PNG and video presentation state. Capture
+  requests now cross a frame boundary before the clean presentation fence is
+  enabled, so an Export popup painted during the click frame cannot appear in the
+  PNG or the opening video frame.
+- Added silent, fixed-size 30 FPS recording with a common Export action and a bottom
+  status-strip recording indicator, elapsed timer, dropped-frame count, and Stop
+  control. Simulation playback, pan, zoom, and persisted View overlays remain live;
+  panels, floating readouts, selection emphasis, gizmos, marquees, and prompts stay
+  out of the captured viewport.
+- Browser builds copy the central WebGPU canvas region into a hidden recording
+  canvas, select VP9/VP8 WebM or MP4 through `MediaRecorder`, and download the final
+  Blob. Native builds choose a destination after probing FFmpeg, keep one Bevy GPU
+  readback in flight, and feed a two-frame bounded worker queue. The worker streams
+  RGBA to H.264, VP9, or VP8 and repeats the latest image across missed wall-clock
+  slots. Both backends retain fixed even dimensions and letterbox after resize.
+- Added crop, even-dimension, letterbox, clean-frame ordering, and capture-state
+  coverage. All 354 workspace tests and warning-denied native/WASM Clippy pass. A
+  native integration test encoded a real H.264 MP4 with the installed FFmpeg; the
+  release native build and release Trunk package pass. The local Chrome/WebGPU suite
+  starts and resizes the app, copies the real WebGPU canvas through `MediaRecorder`,
+  and verifies a nonempty downloaded video. Full visual inspection remains on the
+  local checklist because the GitHub runner cannot initialize WebGPU.
 
 ## 2026-09-13 — Physics-switch material conversion
 

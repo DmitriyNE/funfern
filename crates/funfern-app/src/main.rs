@@ -2,6 +2,7 @@ mod capture;
 mod examples;
 mod files;
 mod material_overlay;
+mod recording;
 mod recovery;
 mod sharing;
 mod ui;

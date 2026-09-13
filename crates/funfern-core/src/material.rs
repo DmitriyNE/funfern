@@ -83,6 +83,11 @@ impl MaterialFrame {
             theta: y.atan2(x),
         }
     }
+
+    /// Rotates a tensor expressed in this frame's local axes into world axes.
+    pub fn tensor_from_local(self, x: f64, y: f64) -> SymmetricTensor2 {
+        SymmetricTensor2::from_principal(x, y, self.angle_radians)
+    }
 }
 
 impl Default for MaterialFrame {
@@ -225,6 +230,8 @@ pub struct EvaluatedMaterial {
     pub mass_density: f64,
     pub stiffness: f64,
     pub damping: f64,
+    /// Ratio of the wave speed along the material-frame x axis to that along y.
+    pub axis_ratio: f64,
 }
 
 impl EvaluatedMaterial {
@@ -235,6 +242,69 @@ impl EvaluatedMaterial {
             && self.stiffness > 0.0
             && self.damping.is_finite()
             && self.damping >= 0.0
+            && self.axis_ratio.is_finite()
+            && self.axis_ratio >= 1.0
+    }
+}
+
+/// A symmetric 2x2 tensor stored without redundant entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SymmetricTensor2 {
+    pub xx: f64,
+    pub xy: f64,
+    pub yy: f64,
+}
+
+impl SymmetricTensor2 {
+    pub const fn new(xx: f64, xy: f64, yy: f64) -> Self {
+        Self { xx, xy, yy }
+    }
+
+    pub const fn isotropic(value: f64) -> Self {
+        Self::new(value, 0.0, value)
+    }
+
+    pub fn from_principal(x: f64, y: f64, angle_radians: f64) -> Self {
+        let (sin, cos) = angle_radians.sin_cos();
+        Self {
+            xx: x * cos * cos + y * sin * sin,
+            xy: (x - y) * sin * cos,
+            yy: x * sin * sin + y * cos * cos,
+        }
+    }
+
+    pub fn apply(self, vector: Point2) -> Point2 {
+        Point2::new(
+            self.xx * vector.x + self.xy * vector.y,
+            self.xy * vector.x + self.yy * vector.y,
+        )
+    }
+
+    pub fn quadratic_form(self, vector: Point2) -> f64 {
+        vector.dot(self.apply(vector))
+    }
+
+    pub fn contract(self, other: Self) -> f64 {
+        self.xx * other.xx + 2.0 * self.xy * other.xy + self.yy * other.yy
+    }
+
+    pub fn determinant(self) -> f64 {
+        self.xx * self.yy - self.xy * self.xy
+    }
+
+    pub fn eigenvalues(self) -> [f64; 2] {
+        let mean = 0.5 * (self.xx + self.yy);
+        let radius = (0.25 * (self.xx - self.yy).powi(2) + self.xy * self.xy).sqrt();
+        [mean - radius, mean + radius]
+    }
+
+    pub fn finite_spd(self) -> bool {
+        self.xx.is_finite()
+            && self.xy.is_finite()
+            && self.yy.is_finite()
+            && self.xx > 0.0
+            && self.determinant().is_finite()
+            && self.determinant() > 0.0
     }
 }
 
@@ -1171,5 +1241,20 @@ mod tests {
             precedence_round_trip.evaluate(at(2.0, 4.0), &[]),
             precedence.evaluate(at(2.0, 4.0), &[])
         );
+    }
+
+    #[test]
+    fn symmetric_tensor_rotation_preserves_principal_values_and_quadratic_form() {
+        let angle = 0.37;
+        let tensor = SymmetricTensor2::from_principal(6.0, 1.5, angle);
+        let eigenvalues = tensor.eigenvalues();
+        assert!((eigenvalues[0] - 1.5).abs() < 1.0e-12);
+        assert!((eigenvalues[1] - 6.0).abs() < 1.0e-12);
+        assert!((tensor.determinant() - 9.0).abs() < 1.0e-12);
+        assert!(tensor.finite_spd());
+
+        let axis = Point2::new(angle.cos(), angle.sin());
+        assert!((tensor.quadratic_form(axis) - 6.0).abs() < 1.0e-12);
+        assert!(!SymmetricTensor2::new(1.0, 2.0, 1.0).finite_spd());
     }
 }

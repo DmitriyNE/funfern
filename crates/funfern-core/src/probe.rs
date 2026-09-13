@@ -15,7 +15,7 @@ pub struct QuadraticPointStencil {
     pub gradient_weights: [Point2; 7],
     pub region: RegionId,
     pub mass_density: f64,
-    pub stiffness: f64,
+    pub stiffness: crate::SymmetricTensor2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,7 +47,7 @@ pub struct QuadraticAreaElement {
     pub barycentric_vertices: [[f64; 3]; 3],
     pub barycentric_gradients: [Point2; 3],
     pub region: RegionId,
-    pub coefficients: [crate::EvaluatedMaterial; 12],
+    pub coefficients: [crate::DirectionalWaveCoefficients; 12],
     pub area: f64,
 }
 
@@ -94,12 +94,12 @@ impl QuadraticAreaElement {
                 for (column, column_value) in values.iter().copied().enumerate().skip(row) {
                     result.mass[entry] += physical_weight * row_value * column_value;
                     result.stiffness[entry] += physical_weight
-                        * coefficients.stiffness
-                        * gradients[row].dot(gradients[column]);
+                        * gradients[row].dot(coefficients.stiffness.apply(gradients[column]));
                     result.stiffness_squared[entry] += physical_weight
-                        * coefficients.stiffness
-                        * coefficients.stiffness
-                        * gradients[row].dot(gradients[column]);
+                        * coefficients
+                            .stiffness
+                            .apply(gradients[row])
+                            .dot(coefficients.stiffness.apply(gradients[column]));
                     result.density[entry] +=
                         physical_weight * coefficients.mass_density * row_value * column_value;
                     entry += 1;
@@ -267,7 +267,7 @@ impl QuadraticPointStencil {
         let point =
             point[0] * barycentric[0] + point[1] * barycentric[1] + point[2] * barycentric[2];
         let material = scene
-            .material_at(region, point)
+            .directional_material_at(region, point)
             .map_err(|_| PointProbeError::InvalidMesh)?;
         let nodes = *operator
             .element_nodes()
@@ -307,7 +307,7 @@ impl QuadraticPointStencil {
             gradient = gradient + self.gradient_weights[local] * u;
         }
         let energy_density =
-            0.5 * (self.mass_density * speed * speed + self.stiffness * gradient.dot(gradient));
+            0.5 * (self.mass_density * speed * speed + self.stiffness.quadratic_form(gradient));
         if !field.is_finite() || !speed.is_finite() || !energy_density.is_finite() {
             return Err(PointProbeError::NonFiniteValues);
         }
@@ -409,9 +409,9 @@ impl QuadraticAreaStencil {
                         (a - point).cross(b - point) / twice_area,
                     ]
                 });
-                let mut coefficients = [crate::EvaluatedMaterial {
+                let mut coefficients = [crate::DirectionalWaveCoefficients {
                     mass_density: 1.0,
-                    stiffness: 1.0,
+                    stiffness: crate::SymmetricTensor2::isotropic(1.0),
                     damping: 0.0,
                 }; 12];
                 for (slot, (local, _)) in area_quadrature().into_iter().enumerate() {
@@ -419,7 +419,7 @@ impl QuadraticAreaStencil {
                         + subtriangle[1] * local[1]
                         + subtriangle[2] * local[2];
                     coefficients[slot] = scene
-                        .material_at(triangle.region, point)
+                        .directional_material_at(triangle.region, point)
                         .map_err(|_| AreaProbeError::InvalidMesh)?;
                 }
                 elements.push(QuadraticAreaElement {
@@ -806,6 +806,29 @@ mod tests {
         let sample = stencil.sample(&displacement, &velocity).unwrap();
         let expected = 0.5 * 1.2 * 16.0 + 0.5 * 2.3 * 5.0;
         assert!((sample.energy_density - expected).abs() < 1.0e-11);
+    }
+
+    #[test]
+    fn point_probe_energy_uses_the_directional_quadratic_form() {
+        let (mesh, mut scene, _) = fixture();
+        scene.materials[0].axis_ratio = crate::ScalarField::constant(4.0);
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let stencil =
+            QuadraticPointStencil::build(&mesh, &operator, &scene, Point2::new(0.2, 0.3)).unwrap();
+        let displacement = operator
+            .node_points()
+            .iter()
+            .map(|point| 2.0 * point.x - point.y)
+            .collect::<Vec<_>>();
+        let sample = stencil
+            .sample(&displacement, &vec![4.0; operator.degrees_of_freedom()])
+            .unwrap();
+        assert!((sample.energy_density - 40.375).abs() < 1.0e-11);
     }
 
     #[test]

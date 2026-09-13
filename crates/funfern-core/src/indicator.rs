@@ -1,11 +1,11 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    BoundaryLabel, BoundarySide, EvaluatedMaterial, FaceBoundaryCondition,
+    BoundaryLabel, BoundarySide, DirectionalWaveCoefficients, FaceBoundaryCondition,
     InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField,
     OuterBoundaryCondition, Point2, QuadraticWaveOperator, RegionId, Scene, TriMesh,
     enriched_quadratic_basis, enriched_quadratic_basis_gradients,
-    enriched_quadratic_basis_laplacians,
+    enriched_quadratic_basis_hessians,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -255,9 +255,9 @@ struct ElementEstimate {
 
 #[derive(Clone, Copy)]
 struct ElementMaterialSamples {
-    vertex_stiffness: [f64; 3],
-    quadrature: [EvaluatedMaterial; 6],
-    stiffness_gradient: Point2,
+    vertex_stiffness: [crate::SymmetricTensor2; 3],
+    quadrature: [DirectionalWaveCoefficients; 6],
+    stiffness_divergence: Point2,
     minimum_wave_speed: f64,
 }
 
@@ -645,8 +645,10 @@ impl SolutionIndicatorJob {
                         let point = boundary
                             .spline
                             .evaluate(0.5 * (edge.parameters[0] + edge.parameters[1]));
-                        let spring =
-                            stiffness_ratio * self.material_at(boundary.region, point)?.stiffness;
+                        let spring = stiffness_ratio
+                            * self
+                                .material_at(boundary.region, point)?
+                                .geometric_mean_stiffness();
                         Some((BoundaryPairKey { id, start, end }, slot, spring))
                     }
                 };
@@ -679,13 +681,12 @@ impl SolutionIndicatorJob {
         }
         let triangle = self.mesh.triangles[index];
         let geometry = element_geometry(&self.mesh, triangle.vertices)?;
-        let mut vertex_stiffness = [0.0; 3];
+        let mut vertex_stiffness = [crate::SymmetricTensor2::default(); 3];
         let mut minimum_wave_speed = f64::INFINITY;
         for (local, point) in geometry.points.into_iter().enumerate() {
             let material = self.material_at(triangle.region, point)?;
             vertex_stiffness[local] = material.stiffness;
-            minimum_wave_speed =
-                minimum_wave_speed.min((material.stiffness / material.mass_density).sqrt());
+            minimum_wave_speed = minimum_wave_speed.min(material.minimum_wave_speed());
         }
         let mut samples = [None; 6];
         for (sample, (barycentric, _)) in samples.iter_mut().zip(quadrature()) {
@@ -693,25 +694,26 @@ impl SolutionIndicatorJob {
                 triangle.region,
                 barycentric_point(geometry.points, barycentric),
             )?;
-            minimum_wave_speed =
-                minimum_wave_speed.min((material.stiffness / material.mass_density).sqrt());
+            minimum_wave_speed = minimum_wave_speed.min(material.minimum_wave_speed());
             *sample = Some(material);
         }
         let [Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)] = samples else {
             return Err(SolutionIndicatorError::InvalidScene);
         };
         let samples = [a, b, c, d, e, f];
-        let stiffness_gradient = geometry
-            .gradients
-            .into_iter()
-            .zip(vertex_stiffness)
-            .fold(Point2::default(), |gradient, (basis, stiffness)| {
-                gradient + basis * stiffness
-            });
+        let mut dxx = Point2::default();
+        let mut dxy = Point2::default();
+        let mut dyy = Point2::default();
+        for (basis, stiffness) in geometry.gradients.into_iter().zip(vertex_stiffness) {
+            dxx = dxx + basis * stiffness.xx;
+            dxy = dxy + basis * stiffness.xy;
+            dyy = dyy + basis * stiffness.yy;
+        }
+        let stiffness_divergence = Point2::new(dxx.x + dxy.y, dxy.x + dyy.y);
         self.material_samples[index] = Some(ElementMaterialSamples {
             vertex_stiffness,
             quadrature: samples,
-            stiffness_gradient,
+            stiffness_divergence,
             minimum_wave_speed,
         });
         self.phase = IndicatorPhase::SampleMaterials(index + 1);
@@ -751,14 +753,14 @@ impl SolutionIndicatorJob {
         &self,
         region: RegionId,
         point: Point2,
-    ) -> Result<EvaluatedMaterial, SolutionIndicatorError> {
-        self.scene.material_at(region, point).map_err(|error| {
-            SolutionIndicatorError::MaterialEvaluation {
+    ) -> Result<DirectionalWaveCoefficients, SolutionIndicatorError> {
+        self.scene
+            .directional_material_at(region, point)
+            .map_err(|error| SolutionIndicatorError::MaterialEvaluation {
                 region,
                 point,
                 reason: error.to_string(),
-            }
-        })
+            })
     }
 
     fn recover(&mut self, index: usize) -> Result<(), SolutionIndicatorError> {
@@ -781,9 +783,9 @@ impl SolutionIndicatorJob {
                 .entry((triangle.vertices[local], triangle.region))
                 .or_default();
             entry.displacement = entry.displacement
-                + displacement * (material.vertex_stiffness[local] * geometry.area);
+                + material.vertex_stiffness[local].apply(displacement) * geometry.area;
             entry.velocity =
-                entry.velocity + velocity * (material.vertex_stiffness[local] * geometry.area);
+                entry.velocity + material.vertex_stiffness[local].apply(velocity) * geometry.area;
             entry.weight += geometry.area;
         }
         self.phase = IndicatorPhase::Recover(index + 1);
@@ -817,36 +819,37 @@ impl SolutionIndicatorJob {
         {
             let basis = enriched_quadratic_basis(barycentric);
             let gradients = enriched_quadratic_basis_gradients(barycentric, geometry.gradients);
-            let laplacians = enriched_quadratic_basis_laplacians(barycentric, geometry.gradients);
+            let hessians = enriched_quadratic_basis_hessians(barycentric, geometry.gradients);
             let u = scalar(&self.snapshot.displacement, nodes, basis);
             let v = scalar(&self.snapshot.velocity, nodes, basis);
             let a = scalar(&self.snapshot.acceleration, nodes, basis);
             let source = scalar(&self.snapshot.volume_acceleration, nodes, basis);
             let grad_u = gradient(&self.snapshot.displacement, nodes, gradients);
             let grad_v = gradient(&self.snapshot.velocity, nodes, gradients);
-            let laplace_u = scalar(&self.snapshot.displacement, nodes, laplacians);
+            let hessian_u = tensor(&self.snapshot.displacement, nodes, hessians);
             let recovered_u = recovered[0].0 * barycentric[0]
                 + recovered[1].0 * barycentric[1]
                 + recovered[2].0 * barycentric[2];
             let recovered_v = recovered[0].1 * barycentric[0]
                 + recovered[1].1 * barycentric[1]
                 + recovered[2].1 * barycentric[2];
-            let flux_u = grad_u * coefficients.stiffness;
-            let flux_v = grad_v * coefficients.stiffness;
+            let flux_u = coefficients.stiffness.apply(grad_u);
+            let flux_v = coefficients.stiffness.apply(grad_v);
+            let stiffness_scale = coefficients.geometric_mean_stiffness();
             estimate.recovery += weight
                 * geometry.area
                 * ((flux_u - recovered_u).dot(flux_u - recovered_u)
                     + (flux_v - recovered_v).dot(flux_v - recovered_v) / (omega * omega))
-                / coefficients.stiffness;
+                / stiffness_scale;
             let residual = coefficients.mass_density * (a - source) + coefficients.damping * v
-                - coefficients.stiffness * laplace_u
-                - material.stiffness_gradient.dot(grad_u);
+                - coefficients.stiffness.contract(hessian_u)
+                - material.stiffness_divergence.dot(grad_u);
             estimate.cell_residual +=
                 weight * geometry.area * geometry.maximum_edge.powi(2) * residual.powi(2)
-                    / coefficients.stiffness;
+                    / stiffness_scale;
             estimate.energy += weight
                 * geometry.area
-                * (coefficients.stiffness * grad_u.dot(grad_u)
+                * (coefficients.stiffness.quadratic_form(grad_u)
                     + coefficients.mass_density * (omega * omega * u * u + v * v));
         }
         self.total_energy += estimate.energy;
@@ -888,8 +891,10 @@ impl SolutionIndicatorJob {
                         self.operator.element_nodes()[*triangle_index].map(|node| node as usize);
                     let grad = gradient(&self.snapshot.displacement, nodes, gradients);
                     let stiffness = self.material_at(triangle.region, point)?.stiffness;
-                    stiffnesses[side] = stiffness;
-                    jump += stiffness * grad.dot(outward_normal(geometry.points, points));
+                    stiffnesses[side] = stiffness.determinant().sqrt();
+                    jump += stiffness
+                        .apply(grad)
+                        .dot(outward_normal(geometry.points, points));
                 }
                 for (integral, stiffness) in integrals.iter_mut().zip(stiffnesses) {
                     *integral += weight * length * jump * jump / stiffness;
@@ -950,9 +955,8 @@ impl SolutionIndicatorJob {
         };
         let middle_material =
             self.material_at(record.region, edge_points[0].lerp(edge_points[1], 0.5))?;
-        let auxiliary_scale = 0.5
-            * middle_material.stiffness
-            * (middle_material.stiffness / middle_material.mass_density).sqrt();
+        let auxiliary_scale = middle_material.stiffness.determinant()
+            / (2.0 * middle_material.normal_impedance(normal));
         let mut integral = 0.0;
         for (fraction, weight) in line_quadrature() {
             let point = edge_points[0].lerp(edge_points[1], fraction);
@@ -961,8 +965,10 @@ impl SolutionIndicatorJob {
                 barycentric(point, geometry.points).ok_or(SolutionIndicatorError::InvalidMesh)?;
             let gradients = enriched_quadratic_basis_gradients(barycentric, geometry.gradients);
             let nodes = self.operator.element_nodes()[record.triangle].map(|node| node as usize);
-            let flux = material.stiffness
-                * gradient(&self.snapshot.displacement, nodes, gradients).dot(normal);
+            let flux = material
+                .stiffness
+                .apply(gradient(&self.snapshot.displacement, nodes, gradients))
+                .dot(normal);
             let displacement = line_scalar(&self.snapshot.displacement, record.nodes, fraction);
             let velocity = line_scalar(&self.snapshot.velocity, record.nodes, fraction);
             if let FaceBoundaryCondition::Dirichlet { signal } = record.condition {
@@ -978,11 +984,11 @@ impl SolutionIndicatorJob {
                     flux - signal.value(self.snapshot.time)
                 }
                 FaceBoundaryCondition::Impedance { ratio } => {
-                    let impedance = ratio * (material.mass_density * material.stiffness).sqrt();
+                    let impedance = ratio * material.normal_impedance(normal);
                     flux + impedance * velocity
                 }
                 FaceBoundaryCondition::SecondOrderOutgoing => {
-                    let impedance = (material.mass_density * material.stiffness).sqrt();
+                    let impedance = material.normal_impedance(normal);
                     flux + impedance * velocity - auxiliary_scale * auxiliary_second
                 }
                 FaceBoundaryCondition::Dirichlet { .. } => unreachable!(),
@@ -994,7 +1000,7 @@ impl SolutionIndicatorJob {
                 residual += spring
                     * (displacement - line_scalar(&self.snapshot.displacement, partner, fraction));
             }
-            integral += weight * length * residual * residual / material.stiffness;
+            integral += weight * length * residual * residual / material.geometric_mean_stiffness();
         }
         self.estimates[record.triangle].boundary_residual += length * integral;
         self.report.boundary_edges_evaluated += 1;
@@ -1175,6 +1181,24 @@ fn gradient(values: &[f64], nodes: [usize; 7], basis: [Point2; 7]) -> Point2 {
         .zip(basis)
         .fold(Point2::default(), |sum, (node, weight)| {
             sum + weight * values[node]
+        })
+}
+
+fn tensor(
+    values: &[f64],
+    nodes: [usize; 7],
+    basis: [crate::SymmetricTensor2; 7],
+) -> crate::SymmetricTensor2 {
+    nodes
+        .into_iter()
+        .zip(basis)
+        .fold(crate::SymmetricTensor2::default(), |sum, (node, weight)| {
+            let value = values[node];
+            crate::SymmetricTensor2::new(
+                sum.xx + weight.xx * value,
+                sum.xy + weight.xy * value,
+                sum.yy + weight.yy * value,
+            )
         })
 }
 
@@ -1732,6 +1756,7 @@ mod tests {
             mass_density: crate::ScalarField::constant(1.0),
             stiffness: crate::ScalarField::formula("2 + 0.1 * x").unwrap(),
             damping: crate::ScalarField::constant(0.0),
+            axis_ratio: crate::ScalarField::constant(1.0),
             parameters: vec![],
             color: [80, 120, 160],
         });
@@ -2131,6 +2156,45 @@ mod tests {
         )
         .unwrap();
 
+        assert!(
+            result
+                .element_targets
+                .iter()
+                .all(|target| *target <= 0.010_000_001)
+        );
+    }
+
+    #[test]
+    fn directional_wavelength_guard_uses_the_slow_principal_axis() {
+        let mesh = square();
+        let mut scene = Scene::default();
+        scene.materials[0].axis_ratio = crate::ScalarField::constant(4.0);
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene_with_boundaries(
+                &mesh,
+                &scene,
+                scene.outer_boundaries,
+            )
+            .unwrap(),
+        );
+        let state = snapshot(&mesh, &operator, |_| 0.0);
+        let result = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions {
+                    minimum_edge_length: 0.005,
+                    maximum_edge_length: 2.0,
+                    forcing_frequency_hz: 10.0,
+                    elements_per_wavelength: 5.0,
+                    ..Default::default()
+                },
+            ),
+            100,
+        )
+        .unwrap();
         assert!(
             result
                 .element_targets

@@ -52,8 +52,8 @@ pub struct OverlaySample {
     pub region: RegionId,
     pub material_name: String,
     pub coordinates: MaterialCoordinates,
-    values: [Option<f64>; 6],
-    errors: [Option<String>; 6],
+    values: [Option<f64>; 7],
+    errors: [Option<String>; 7],
 }
 
 impl OverlaySample {
@@ -68,8 +68,8 @@ pub struct MaterialOverlaySnapshot {
     pub key: OverlayKey,
     pub samples: Vec<OverlaySample>,
     pub triangles: Vec<[u32; 3]>,
-    linear_ranges: [Option<OverlayRange>; 6],
-    log_ranges: [Option<OverlayRange>; 6],
+    linear_ranges: [Option<OverlayRange>; 7],
+    log_ranges: [Option<OverlayRange>; 7],
 }
 
 impl MaterialOverlaySnapshot {
@@ -174,8 +174,8 @@ impl MaterialOverlayJob {
         if self.cursor != self.requests.len() {
             return None;
         }
-        let mut linear_ranges = [None; 6];
-        let mut log_ranges = [None; 6];
+        let mut linear_ranges = [None; 7];
+        let mut log_ranges = [None; 7];
         for property in MaterialProperty::ALL {
             let values = self.samples.iter().filter_map(|sample| {
                 sample
@@ -221,8 +221,8 @@ pub fn sample(scene: &Scene, region_id: RegionId, point: funfern_core::Point2) -
     let Some(material) = scene.material(region.material) else {
         return failed_sample(point, region_id, "Missing material", coordinates);
     };
-    let mut values = [None; 6];
-    let mut errors: [Option<String>; 6] = std::array::from_fn(|_| None);
+    let mut values = [None; 7];
+    let mut errors: [Option<String>; 7] = std::array::from_fn(|_| None);
     let fields = [
         &material.mass_density,
         &material.stiffness,
@@ -269,17 +269,25 @@ pub fn sample(scene: &Scene, region_id: RegionId, point: funfern_core::Point2) -
             errors[4] = Some(error);
         }
     }
+    match material
+        .axis_ratio
+        .evaluate(coordinates, &material.parameters)
+    {
+        Ok(value) if value.is_finite() && value >= 1.0 => values[5] = Some(value),
+        Ok(_) => errors[5] = Some("must be at least one".into()),
+        Err(error) => errors[5] = Some(error.to_string()),
+    }
     if let Some(source) = scene.volume_source(region_id) {
         if source.enabled {
             match source.evaluate(region.frame, point) {
-                Ok(profile) => values[5] = Some(profile * source.signal.characteristic_amplitude()),
-                Err(error) => errors[5] = Some(error.to_string()),
+                Ok(profile) => values[6] = Some(profile * source.signal.characteristic_amplitude()),
+                Err(error) => errors[6] = Some(error.to_string()),
             }
         } else {
-            values[5] = Some(0.0);
+            values[6] = Some(0.0);
         }
     } else {
-        values[5] = Some(0.0);
+        values[6] = Some(0.0);
     }
     OverlaySample {
         point,
@@ -302,7 +310,7 @@ fn failed_sample(
         region,
         material_name: "Missing".into(),
         coordinates,
-        values: [None; 6],
+        values: [None; 7],
         errors: std::array::from_fn(|_| Some(message.into())),
     }
 }
@@ -365,11 +373,24 @@ mod tests {
         );
         assert_eq!(sample.value(MaterialProperty::WaveSpeed), Ok(1.0));
         assert_eq!(sample.value(MaterialProperty::Impedance), Ok(1.0));
+        assert_eq!(sample.value(MaterialProperty::Anisotropy), Ok(1.0));
         let mut values = (0..100).map(f64::from).collect::<Vec<_>>();
         values.push(1.0e12);
         let range = robust_range(&mut values).unwrap();
         assert!(range.maximum < 1000.0);
         assert_eq!(range.normalized(range.minimum, false), Some(0.0));
+    }
+
+    #[test]
+    fn anisotropy_overlay_evaluates_the_axis_ratio_formula() {
+        let mut scene = Scene::default();
+        scene.materials[0].axis_ratio = funfern_core::ScalarField::formula("1 + abs(x)").unwrap();
+        let sample = sample(
+            &scene,
+            funfern_core::BACKGROUND_REGION,
+            funfern_core::Point2::new(-0.75, 0.0),
+        );
+        assert_eq!(sample.value(MaterialProperty::Anisotropy), Ok(1.75));
     }
 
     #[test]

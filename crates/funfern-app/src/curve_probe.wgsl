@@ -85,26 +85,35 @@ fn sample_curve_probes(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let gradient_y = dot(displacement_a, stencil.gradient_y_a) + dot(displacement_b, stencil.gradient_y_b);
     let potential_gradient_x = dot(potential_a, stencil.gradient_x_a) + dot(potential_b, stencil.gradient_x_b);
     let potential_gradient_y = dot(potential_a, stencil.gradient_y_a) + dot(potential_b, stencil.gradient_y_b);
+    let gradient = vec2<f32>(gradient_x, gradient_y);
+    let potential_gradient = vec2<f32>(potential_gradient_x, potential_gradient_y);
+    let tensor_flux = vec2<f32>(
+        stencil.material.y * gradient.x + stencil.material.z * gradient.y,
+        stencil.material.z * gradient.x + stencil.material.w * gradient.y,
+    );
+    let potential_flux = vec2<f32>(
+        stencil.material.y * potential_gradient.x + stencil.material.z * potential_gradient.y,
+        stencil.material.z * potential_gradient.x + stencil.material.w * potential_gradient.y,
+    );
     let electromagnetic = control.values.w > 0.5;
     let primary_energy = select(stencil.material.x * velocity * velocity, stencil.material.x * displacement * displacement, electromagnetic);
     let gradient_energy = select(
-        stencil.material.y * (gradient_x * gradient_x + gradient_y * gradient_y),
-        stencil.material.y * (potential_gradient_x * potential_gradient_x + potential_gradient_y * potential_gradient_y),
+        dot(gradient, tensor_flux),
+        dot(potential_gradient, potential_flux),
         electromagnetic,
     );
     let energy = 0.5 * (primary_energy + gradient_energy);
-    let normal_gradient = gradient_x * stencil.normal_stride_valid.x + gradient_y * stencil.normal_stride_valid.y;
-    let potential_normal_gradient = potential_gradient_x * stencil.normal_stride_valid.x + potential_gradient_y * stencil.normal_stride_valid.y;
-    let flux = select(
-        -stencil.material.y * velocity * normal_gradient,
-        -stencil.material.y * displacement * potential_normal_gradient,
+    let normal = stencil.normal_stride_valid.xy;
+    let output_flux = select(
+        -velocity * dot(tensor_flux, normal),
+        -displacement * dot(potential_flux, normal),
         electromagnetic,
     );
     let transverse = select(
         0.0,
-        stencil.material.y * length(vec2<f32>(potential_gradient_x, potential_gradient_y)),
+        length(potential_flux),
         electromagnetic,
     );
-    output[index].primary = vec4<f32>(displacement, energy, flux, time);
+    output[index].primary = vec4<f32>(displacement, energy, output_flux, time);
     output[index].secondary = vec4<f32>(transverse, 0.0, 0.0, 0.0);
 }

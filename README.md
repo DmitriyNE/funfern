@@ -42,6 +42,10 @@ Native development:
 cargo run -p funfern-app --locked
 ```
 
+Native viewport recording also requires `ffmpeg` on `PATH`. Funfern selects an
+available H.264, VP9, or VP8 encoder and writes MP4 or WebM accordingly. Browser
+recording uses the browser's built-in `MediaRecorder` and needs no additional tool.
+
 Release browser bundle (output: `dist/`):
 
 ```sh
@@ -184,8 +188,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   A removal that would merge different span conditions is rejected until the two
   assignments agree. Shape-preserving insertion copies the split span assignment.
   A complete selected loop or baffle can be deleted with Delete or Backspace.
-- **Materials:** create and name materials in the Library, edit the three positive
-  or nonnegative properties named by the active physics skin, and assign them under
+- **Materials:** create and name materials in the Library, edit the three base
+  properties named by the active physics skin, and assign them under
   Subdomain assignment. Each coefficient can be a constant or a formula. Formulas
   use local `x`, `y`, `r`, and `theta`, constants `pi` and `e`, named material
   parameters, arithmetic, powers, and `sqrt`, `abs`, `sin`, `cos`, `tan`, `exp`,
@@ -196,13 +200,20 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   angle set placement, with no hidden coordinate scaling. A region frame can stay
   fixed in the world or follow whole-loop translation, rotation, and uniform scale;
   scaling moves the frame with the object but does not rescale the profile. Unused
+  materials are isotropic by default. Directional materials add a constant or
+  formula **Axis ratio** of at least one. The frame's local x axis is the fast
+  principal axis; the local stiffness/flux tensor is `k diag(a, 1/a)`, preserving
+  the base coefficient's geometric mean while giving a principal wave-speed ratio
+  `a`. The ratio survives Mechanical/EM and TM/TE switches unchanged. Unused
   non-default materials can be deleted. Clicking a filled region selects and
   highlights it. Material changes preserve the live field and reuse the committed
   mesh. Profile placement appears for the selected subdomain and can be adjusted
   numerically or with its viewport origin/rotation gizmo. View can overlay material
-  regions, density, stiffness, damping, wave speed, impedance, or volume-source
+  regions, density, stiffness, damping, wave speed, impedance, anisotropy, or volume-source
   amplitude with linear/log and
-  automatic/manual range controls plus a local-coordinate hover readout. Automatic
+  automatic/manual range controls plus a local-coordinate hover readout. The
+  anisotropy overlay uses a logarithmic ratio scale and sparse fast-axis marks.
+  Automatic
   solution AMR evaluates varying coefficients and their gradients directly.
 - **Vector view:** View can overlay arrows derived from the synchronized quadratic
   field readback. A DC-rejecting inverse time derivative reconstructs the transverse
@@ -287,10 +298,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   dialog. Load scene uses file upload/native selection and validates before
   replacement. Successful loading clears history; malformed files leave the
   current document intact. Examples opens a thumbnail gallery; opening one is
-  undoable. Export can write a geometry SVG or a PNG snapshot of the current
-  viewport at its physical pixel resolution. PNG snapshots follow the active View
-  settings while omitting panels, floating readouts, selection emphasis, gizmos,
-  marquees, and active-tool prompts. Documents autosave after edits and restore on
+  undoable. Export can write a geometry SVG, a PNG snapshot, or a silent 30 FPS
+  recording of the current viewport at its physical pixel resolution. Captures
+  follow the active View settings while omitting panels, floating readouts,
+  selection emphasis, gizmos, marquees, and active-tool prompts. Recording leaves
+  playback and viewport navigation live; its status-strip control shows elapsed
+  time and stops/finalizes the file. Documents autosave after edits and restore on
   startup from browser local storage or the native per-user recovery file. Copy
   scene link embeds compressed, validated scene data in a `#scene=v1.…` URL
   fragment; while that fragment is active, later autosaves keep it current.
@@ -370,11 +383,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   stable boundary ID and left/right face on the old mesh during transfer.
 
 Scenes allow 32 geometric features, 32 materials, one volume source per region, and
-128 controls per curve. Version 19 JSON stores editable draft and accepted domain
+128 controls per curve. Version 20 JSON stores editable draft and accepted domain
 rectangles together with the complete boundary laws, constant/formula materials
-and region frames, and region-owned volume sources in
+including directional axis ratios and region frames, and region-owned volume sources in
 both draft and accepted scenes, presentation settings, and a tagged shared time-signal
-representation for point, volume, and boundary drives. Versions 2–18 remain compatible,
+representation for point, volume, and boundary drives. Versions 2–19 remain compatible,
 and version 1 files migrate their loops to background holes. Legacy baffles that
 combined a thin-gap spring with face laws load with the thin-gap law taking
 precedence. JSON files are capped at 2 MiB and require finite coordinates. The editor

@@ -13,6 +13,7 @@ use crate::{
         self, MaterialOverlay, MaterialOverlayJob, MaterialOverlaySnapshot, MaterialProperty,
         OverlayKey, OverlayRange,
     },
+    recording::{self, DestinationRequest, RecordingEvent, RecordingSpec, VideoRecorder},
     recovery, sharing,
 };
 use bevy::platform::time::Instant;
@@ -36,6 +37,8 @@ use funfern_app::{
 };
 use funfern_core::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, Sender},
@@ -140,10 +143,10 @@ struct UiNotice {
 fn material_scalar_editor(
     ui: &mut egui::Ui,
     id: MaterialId,
-    slot: usize,
     label: &str,
     field: &mut ScalarField,
     parameters: &[MaterialParameter],
+    minimum: f64,
     state: (&mut Option<(MaterialId, String)>, &mut Option<String>),
 ) -> bool {
     let (edit, error) = state;
@@ -155,7 +158,7 @@ fn material_scalar_editor(
     let was_formula = formula_mode;
     ui.horizontal(|ui| {
         ui.label(label);
-        egui::ComboBox::from_id_salt(("material_field_mode", id.0, slot))
+        egui::ComboBox::from_id_salt(("material_field_mode", id.0, label))
             .width(76.0)
             .selected_text(if formula_mode { "Formula" } else { "Constant" })
             .show_ui(ui, |ui| {
@@ -192,11 +195,10 @@ fn material_scalar_editor(
     }
     match field {
         ScalarField::Constant(value) => {
-            let minimum = if slot == 2 { 0.0 } else { 1.0e-6 };
             changed |= ui
                 .add(
                     egui::DragValue::new(value)
-                        .speed(if slot == 2 { 0.005 } else { 0.01 })
+                        .speed(if minimum == 0.0 { 0.005 } else { 0.01 })
                         .range(minimum..=1.0e6)
                         .update_while_editing(false),
                 )
@@ -226,14 +228,16 @@ fn material_scalar_editor(
                             theta: 0.0,
                         };
                         match candidate.evaluate(coordinates, parameters) {
-                            Ok(value) if (slot == 2 && value >= 0.0) || value > 0.0 => {
+                            Ok(value) if value >= minimum => {
                                 *field = candidate;
                                 *error = None;
                                 changed = true;
                             }
                             Ok(_) => {
-                                *error = Some(if slot == 2 {
+                                *error = Some(if minimum == 0.0 {
                                     "damping must be nonnegative at the frame origin".into()
+                                } else if minimum == 1.0 {
+                                    "axis ratio must be at least one at the frame origin".into()
                                 } else {
                                     "coefficient must be positive at the frame origin".into()
                                 });
@@ -783,9 +787,21 @@ enum TouchGesture {
 enum SnapshotState {
     #[default]
     Idle,
+    Requested,
     Armed,
     Capturing,
     Saving,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RecordingState {
+    #[default]
+    Idle,
+    SelectingDestination,
+    Requested,
+    Preparing,
+    Starting,
+    Recording,
+    Finalizing,
 }
 #[derive(Clone, Copy)]
 enum GizmoHit {
@@ -887,8 +903,8 @@ pub struct Playground {
     creation_role: CreationRole,
     material_selection: MaterialId,
     material_name_edit: Option<(MaterialId, String)>,
-    material_formula_edits: [Option<(MaterialId, String)>; 3],
-    material_formula_errors: [Option<String>; 3],
+    material_formula_edits: [Option<(MaterialId, String)>; 4],
+    material_formula_errors: [Option<String>; 4],
     material_parameter_name_edits: BTreeMap<(u64, usize), String>,
     volume_source_formula_edit: Option<(RegionId, String)>,
     volume_source_formula_error: Option<String>,
@@ -933,6 +949,14 @@ pub struct Playground {
     receiver: Mutex<Receiver<FileEvent>>,
     file_busy: bool,
     snapshot_state: SnapshotState,
+    video_recorder: VideoRecorder,
+    recording_state: RecordingState,
+    recording_started: Option<Instant>,
+    recording_description: String,
+    recording_dropped_frames: u64,
+    recording_last_requested_slot: Option<u64>,
+    #[cfg(not(target_arch = "wasm32"))]
+    recording_readback_in_flight: Arc<AtomicBool>,
     load: Option<LoadCandidate>,
     load_mode: LoadMode,
     load_notice: &'static str,
@@ -1064,8 +1088,8 @@ impl Default for Playground {
             creation_role: CreationRole::Hole,
             material_selection: DEFAULT_MATERIAL,
             material_name_edit: None,
-            material_formula_edits: [None, None, None],
-            material_formula_errors: [None, None, None],
+            material_formula_edits: [None, None, None, None],
+            material_formula_errors: [None, None, None, None],
             material_parameter_name_edits: BTreeMap::new(),
             volume_source_formula_edit: None,
             volume_source_formula_error: None,
@@ -1112,6 +1136,14 @@ impl Default for Playground {
             receiver: Mutex::new(receiver),
             file_busy: false,
             snapshot_state: SnapshotState::Idle,
+            video_recorder: VideoRecorder::default(),
+            recording_state: RecordingState::Idle,
+            recording_started: None,
+            recording_description: String::new(),
+            recording_dropped_frames: 0,
+            recording_last_requested_slot: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            recording_readback_in_flight: Arc::new(AtomicBool::new(false)),
             load: None,
             load_mode: LoadMode::Replace,
             load_notice: "Scene loaded; history cleared",
@@ -1655,6 +1687,9 @@ impl Playground {
             .ok_or("Far-field projection requires a uniform lossless background material")?;
         if material.damping.abs() > 1.0e-12 {
             return Err("Far-field projection requires a lossless background material".into());
+        }
+        if (material.axis_ratio - 1.0).abs() > 1.0e-12 {
+            return Err("Far-field projection requires an isotropic background material".into());
         }
         let wave_speed = scene.physics.wave_speed(WaveCoefficients {
             mass_density: material.mass_density,
@@ -4499,10 +4534,119 @@ impl Playground {
     }
 
     fn export_viewport_png(&mut self) {
-        if self.snapshot_state == SnapshotState::Idle {
-            self.snapshot_state = SnapshotState::Armed;
+        if self.snapshot_state == SnapshotState::Idle
+            && self.recording_state == RecordingState::Idle
+        {
+            self.snapshot_state = SnapshotState::Requested;
             self.file_busy = true;
         }
+    }
+
+    fn request_video_recording(&mut self) {
+        if self.recording_state != RecordingState::Idle
+            || self.snapshot_state != SnapshotState::Idle
+        {
+            return;
+        }
+        self.recording_started = None;
+        self.recording_description.clear();
+        self.recording_dropped_frames = 0;
+        self.recording_last_requested_slot = None;
+        match self.video_recorder.request_destination() {
+            Ok(DestinationRequest::Ready) => {
+                self.recording_state = RecordingState::Requested;
+            }
+            Ok(DestinationRequest::Pending) => {
+                self.recording_state = RecordingState::SelectingDestination;
+            }
+            Err(error) => self.message = error,
+        }
+    }
+
+    fn stop_video_recording(&mut self) {
+        match self.recording_state {
+            RecordingState::Requested | RecordingState::Preparing => {
+                self.recording_state = RecordingState::Idle;
+            }
+            RecordingState::Starting | RecordingState::Recording => {
+                self.video_recorder.stop();
+                self.recording_state = RecordingState::Finalizing;
+            }
+            _ => {}
+        }
+    }
+
+    fn begin_capture_frame(&mut self) {
+        if self.snapshot_state == SnapshotState::Requested {
+            self.snapshot_state = SnapshotState::Armed;
+        }
+        if self.recording_state == RecordingState::Requested {
+            self.recording_state = RecordingState::Preparing;
+        }
+    }
+
+    fn update_recording(&mut self) {
+        for event in self.video_recorder.poll() {
+            match event {
+                RecordingEvent::DestinationReady => {
+                    if self.recording_state == RecordingState::SelectingDestination {
+                        self.recording_state = RecordingState::Requested;
+                    }
+                }
+                RecordingEvent::Started(description) => {
+                    if self.recording_state == RecordingState::Starting {
+                        self.recording_description = description;
+                        self.recording_started = Some(Instant::now());
+                        self.recording_last_requested_slot = None;
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            self.recording_readback_in_flight = Arc::new(AtomicBool::new(false));
+                        }
+                        self.recording_state = RecordingState::Recording;
+                    }
+                }
+                RecordingEvent::Finished(message) => {
+                    self.video_recorder.stop();
+                    self.recording_state = RecordingState::Idle;
+                    self.recording_started = None;
+                    self.recording_last_requested_slot = None;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.recording_readback_in_flight
+                        .store(false, Ordering::Release);
+                    self.notify(message);
+                }
+                RecordingEvent::Cancelled => {
+                    self.recording_state = RecordingState::Idle;
+                }
+                RecordingEvent::DroppedFrame => {
+                    self.recording_dropped_frames += 1;
+                }
+                RecordingEvent::Error(error) => {
+                    self.video_recorder.stop();
+                    self.recording_state = RecordingState::Idle;
+                    self.recording_started = None;
+                    self.recording_last_requested_slot = None;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.recording_readback_in_flight
+                        .store(false, Ordering::Release);
+                    self.message = error;
+                }
+            }
+        }
+    }
+
+    fn clean_presentation(&self) -> bool {
+        matches!(
+            self.snapshot_state,
+            SnapshotState::Armed | SnapshotState::Capturing
+        ) || matches!(
+            self.recording_state,
+            RecordingState::Preparing | RecordingState::Starting | RecordingState::Recording
+        )
+    }
+
+    fn recording_active(&self) -> bool {
+        self.recording_state != RecordingState::Idle
     }
 
     fn copy_scene_link(&mut self, context: &egui::Context) {
@@ -4560,8 +4704,41 @@ impl Playground {
                         self.copy_scene_link(ui.ctx());
                         ui.close();
                     }
-                    if ui.button("Export viewport PNG").clicked() {
+                    let capture_ready = self.snapshot_state == SnapshotState::Idle
+                        && self.recording_state == RecordingState::Idle;
+                    if ui
+                        .add_enabled(capture_ready, egui::Button::new("Export viewport PNG"))
+                        .clicked()
+                    {
                         self.export_viewport_png();
+                        ui.close();
+                    }
+                    let recording_label = if matches!(
+                        self.recording_state,
+                        RecordingState::Starting | RecordingState::Recording
+                    ) {
+                        "Stop recording"
+                    } else if self.recording_active() {
+                        "Preparing recording…"
+                    } else {
+                        "Record viewport"
+                    };
+                    if ui
+                        .add_enabled(
+                            capture_ready
+                                || matches!(
+                                    self.recording_state,
+                                    RecordingState::Starting | RecordingState::Recording
+                                ),
+                            egui::Button::new(recording_label),
+                        )
+                        .clicked()
+                    {
+                        if self.recording_active() {
+                            self.stop_video_recording();
+                        } else {
+                            self.request_video_recording();
+                        }
                         ui.close();
                     }
                     if ui.button("Export scene SVG").clicked() {
@@ -4595,8 +4772,41 @@ impl Playground {
                         self.copy_scene_link(ui.ctx());
                         ui.close();
                     }
-                    if ui.button("Viewport PNG").clicked() {
+                    let capture_ready = self.snapshot_state == SnapshotState::Idle
+                        && self.recording_state == RecordingState::Idle;
+                    if ui
+                        .add_enabled(capture_ready, egui::Button::new("Viewport PNG"))
+                        .clicked()
+                    {
                         self.export_viewport_png();
+                        ui.close();
+                    }
+                    let recording_label = if matches!(
+                        self.recording_state,
+                        RecordingState::Starting | RecordingState::Recording
+                    ) {
+                        "Stop recording"
+                    } else if self.recording_active() {
+                        "Preparing recording…"
+                    } else {
+                        "Record viewport"
+                    };
+                    if ui
+                        .add_enabled(
+                            capture_ready
+                                || matches!(
+                                    self.recording_state,
+                                    RecordingState::Starting | RecordingState::Recording
+                                ),
+                            egui::Button::new(recording_label),
+                        )
+                        .clicked()
+                    {
+                        if self.recording_active() {
+                            self.stop_video_recording();
+                        } else {
+                            self.request_video_recording();
+                        }
                         ui.close();
                     }
                     if ui.button("Scene SVG").clicked() {
@@ -6531,6 +6741,12 @@ impl Playground {
                     .document
                     .presentation
                     .material_overlay_logarithmic = false;
+            } else if property == MaterialProperty::Anisotropy {
+                self.editor
+                    .document
+                    .presentation
+                    .material_overlay_logarithmic = true;
+                ui.small("Log scale · marks show the fast material axis");
             } else {
                 ui.checkbox(
                     &mut self
@@ -6992,7 +7208,7 @@ impl Playground {
                 .model
                 .draft
                 .material(region.material)
-                .is_some_and(Material::varying)
+                .is_some_and(Material::uses_frame)
                 || self
                     .editor
                     .document
@@ -7163,10 +7379,10 @@ impl Playground {
             let mut values_changed = material_scalar_editor(
                 ui,
                 material.id,
-                0,
                 coefficient_labels[0],
                 &mut material.mass_density,
                 &material.parameters,
+                1.0e-6,
                 (
                     &mut self.material_formula_edits[0],
                     &mut self.material_formula_errors[0],
@@ -7175,10 +7391,10 @@ impl Playground {
             values_changed |= material_scalar_editor(
                 ui,
                 material.id,
-                1,
                 coefficient_labels[1],
                 &mut material.stiffness,
                 &material.parameters,
+                1.0e-6,
                 (
                     &mut self.material_formula_edits[1],
                     &mut self.material_formula_errors[1],
@@ -7187,15 +7403,44 @@ impl Playground {
             values_changed |= material_scalar_editor(
                 ui,
                 material.id,
-                2,
                 coefficient_labels[2],
                 &mut material.damping,
                 &material.parameters,
+                0.0,
                 (
                     &mut self.material_formula_edits[2],
                     &mut self.material_formula_errors[2],
                 ),
             );
+            let mut directional = material.axis_ratio.constant_value() != Some(1.0);
+            ui.horizontal(|ui| {
+                ui.label("Directionality");
+                ui.selectable_value(&mut directional, false, "Isotropic");
+                ui.selectable_value(&mut directional, true, "Directional");
+            });
+            if directional && material.axis_ratio.constant_value() == Some(1.0) {
+                material.axis_ratio = ScalarField::constant(2.0);
+                values_changed = true;
+            } else if !directional && material.axis_ratio.constant_value() != Some(1.0) {
+                material.axis_ratio = ScalarField::constant(1.0);
+                self.material_formula_edits[3] = None;
+                self.material_formula_errors[3] = None;
+                values_changed = true;
+            }
+            if directional {
+                values_changed |= material_scalar_editor(
+                    ui,
+                    material.id,
+                    "Axis ratio",
+                    &mut material.axis_ratio,
+                    &material.parameters,
+                    1.0,
+                    (
+                        &mut self.material_formula_edits[3],
+                        &mut self.material_formula_errors[3],
+                    ),
+                );
+            }
             ui.horizontal(|ui| {
                 ui.small("Nondimensional material properties");
                 ui.menu_button("?", |ui| {
@@ -7231,6 +7476,7 @@ impl Playground {
                         &material.mass_density,
                         &material.stiffness,
                         &material.damping,
+                        &material.axis_ratio,
                     ]
                     .into_iter()
                     .flat_map(ScalarField::parameter_names)
@@ -7341,6 +7587,18 @@ impl Playground {
                     ui.small(format!(
                         "wave impedance at frame origin {:.3}",
                         physics.impedance(properties)
+                    ));
+                }
+                if values.axis_ratio > 1.0 + 1.0e-12 {
+                    let directional = physics.directional_wave_coefficients(values, frame);
+                    let principal = directional.stiffness.eigenvalues();
+                    ui.small(format!(
+                        "axis ratio {:.3} · principal {:.3}/{:.3} · speeds {:.3}/{:.3}",
+                        values.axis_ratio,
+                        principal[1],
+                        principal[0],
+                        directional.maximum_wave_speed(),
+                        directional.minimum_wave_speed()
                     ));
                 }
             }
@@ -7964,7 +8222,8 @@ impl Playground {
                 let field = match slot {
                     0 => &material.mass_density,
                     1 => &material.stiffness,
-                    _ => &material.damping,
+                    2 => &material.damping,
+                    _ => &material.axis_ratio,
                 };
                 field.source() != Some(source.as_str())
             })
@@ -7975,8 +8234,8 @@ impl Playground {
             return Err("Finish the pending material formula edit before changing physics".into());
         }
         self.editor.set_physics(physics)?;
-        self.material_formula_edits = [None, None, None];
-        self.material_formula_errors = [None, None, None];
+        self.material_formula_edits = [None, None, None, None];
+        self.material_formula_errors = [None, None, None, None];
         if physics == PhysicsModel::Mechanical
             && self.editor.document.presentation.vector_overlay == VectorOverlay::ComplementaryField
         {
@@ -9653,7 +9912,15 @@ impl Playground {
                     .map(|snapshot| material_overlay::sample(&snapshot.key.scene, region, world))?;
                 Some((world, sample))
             });
-        let height = if hovered.is_some() { 112.0 } else { 54.0 };
+        let height = if hovered.is_some() {
+            if property == MaterialProperty::Anisotropy {
+                128.0
+            } else {
+                112.0
+            }
+        } else {
+            54.0
+        };
         let rect = Rect::from_min_size(
             viewport.left_top() + egui::vec2(12.0, 12.0),
             egui::vec2(258.0, height),
@@ -9755,7 +10022,7 @@ impl Playground {
                 .value(property)
                 .map(format_value)
                 .unwrap_or_else(|error| format!("Error: {error}"));
-            let lines = [
+            let mut lines = vec![
                 format!(
                     "{} · region {} · {}",
                     sample.material_name, sample.region.0, value
@@ -9769,6 +10036,22 @@ impl Playground {
                     sample.coordinates.theta.to_degrees()
                 ),
             ];
+            if property == MaterialProperty::Anisotropy
+                && let Some(snapshot) = snapshot
+                && let Ok(coefficients) = snapshot
+                    .key
+                    .scene
+                    .directional_material_at(sample.region, world)
+            {
+                let eigenvalues = coefficients.stiffness.eigenvalues();
+                lines.push(format!(
+                    "A₁ {:.3}  A₂ {:.3}  c₁ {:.3}  c₂ {:.3}",
+                    eigenvalues[1],
+                    eigenvalues[0],
+                    coefficients.maximum_wave_speed(),
+                    coefficients.minimum_wave_speed()
+                ));
+            }
             for (index, line) in lines.into_iter().enumerate() {
                 painter.text(
                     rect.left_top() + egui::vec2(8.0, 57.0 + index as f32 * 16.0),
@@ -9787,7 +10070,7 @@ impl Playground {
 
     fn viewport(&mut self, ui: &mut egui::Ui, wave_display: Option<&WaveDisplay>) -> Rect {
         self.refresh_material_overlay();
-        let clean_capture = self.snapshot_state == SnapshotState::Armed;
+        let clean_capture = self.clean_presentation();
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let r = response.rect;
@@ -10890,6 +11173,28 @@ impl Playground {
             painter.add(egui::Shape::mesh(values));
             if !invalid.indices.is_empty() {
                 painter.add(egui::Shape::mesh(invalid));
+            }
+            if property == MaterialProperty::Anisotropy {
+                let stride = (snapshot.samples.len() / 90).max(1);
+                for sample in snapshot.samples.iter().step_by(stride) {
+                    let Ok(ratio) = sample.value(property) else {
+                        continue;
+                    };
+                    if ratio <= 1.0 + 1.0e-6 {
+                        continue;
+                    }
+                    let angle = snapshot
+                        .key
+                        .scene
+                        .region(sample.region)
+                        .map_or(0.0, |region| region.frame.angle_radians);
+                    let center = self.screen(sample.point, r);
+                    let direction = egui::vec2(angle.cos() as f32, -angle.sin() as f32) * 7.0;
+                    painter.line_segment(
+                        [center - direction, center + direction],
+                        Stroke::new(1.2, Color32::from_rgba_unmultiplied(232, 247, 242, 190)),
+                    );
+                }
             }
         }
         if self.editor.document.presentation.field
@@ -12165,7 +12470,7 @@ impl Playground {
             .model
             .draft
             .material(region.material)
-            .is_some_and(Material::varying)
+            .is_some_and(Material::uses_frame)
             .then_some((region.id, region.frame))
     }
 
@@ -12964,31 +13269,28 @@ fn vector_overlay_samples(
             let Ok(raw) = material.evaluate(region.frame, centroid) else {
                 return None;
             };
-            let properties = WaveCoefficients {
-                mass_density: raw.mass_density,
-                stiffness: raw.stiffness,
-                damping: raw.damping,
-            };
-            let stiffness = scene.physics.wave_coefficients(properties).stiffness;
+            let coefficients = scene
+                .physics
+                .directional_wave_coefficients(raw, region.frame);
+            let potential_flux = coefficients.stiffness.apply(potential_gradient);
+            let flux = coefficients.stiffness.apply(gradient);
             let vector = match (mode, scene.physics) {
                 (
                     VectorOverlay::ComplementaryField,
                     PhysicsModel::Electromagnetic {
                         polarization: ElectromagneticPolarization::Tm,
                     },
-                ) => Point2::new(-potential_gradient.y, potential_gradient.x) * stiffness,
+                ) => Point2::new(-potential_flux.y, potential_flux.x),
                 (
                     VectorOverlay::ComplementaryField,
                     PhysicsModel::Electromagnetic {
                         polarization: ElectromagneticPolarization::Te,
                     },
-                ) => Point2::new(potential_gradient.y, -potential_gradient.x) * stiffness,
+                ) => Point2::new(potential_flux.y, -potential_flux.x),
                 (VectorOverlay::RelativeEnergyFlow, PhysicsModel::Electromagnetic { .. }) => {
-                    potential_gradient * (-stiffness * primary)
+                    potential_flux * -primary
                 }
-                (VectorOverlay::RelativeEnergyFlow, PhysicsModel::Mechanical) => {
-                    gradient * (-stiffness * velocity)
-                }
+                (VectorOverlay::RelativeEnergyFlow, PhysicsModel::Mechanical) => flux * -velocity,
                 _ => return None,
             };
             if !vector.finite() {
@@ -13234,6 +13536,8 @@ pub fn frame(
     }
     state.frame_ms = state.frame_ms * 0.95 + time.delta_secs() * 1000.0 * 0.05;
     state.update_files();
+    state.update_recording();
+    state.begin_capture_frame();
     state.ingest_probe_samples(&probe_display);
     state.ingest_curve_probe_samples(&curve_probe_display);
     state.ingest_area_probe_samples(&area_probe_display);
@@ -13263,6 +13567,72 @@ pub fn frame(
                 let _ = sender.send(event);
             },
         );
+    }
+    if state.recording_state == RecordingState::Preparing {
+        let pixels_per_point = ctx.pixels_per_point() as f64;
+        let physical_width = (logical_canvas.width() as f64 * pixels_per_point).round() as u32;
+        let physical_height = (logical_canvas.height() as f64 * pixels_per_point).round() as u32;
+        let result = crate::capture::pixel_crop(
+            logical_canvas,
+            logical_viewport,
+            physical_width,
+            physical_height,
+        )
+        .and_then(crate::capture::video_dimensions)
+        .and_then(|(width, height)| {
+            state.video_recorder.start(
+                RecordingSpec {
+                    width,
+                    height,
+                    fps: recording::VIDEO_FPS,
+                },
+                logical_canvas,
+                logical_viewport,
+            )
+        });
+        match result {
+            Ok(()) => state.recording_state = RecordingState::Starting,
+            Err(error) => {
+                state.recording_state = RecordingState::Idle;
+                state.message = error;
+            }
+        }
+    }
+    if matches!(
+        state.recording_state,
+        RecordingState::Starting | RecordingState::Recording
+    ) {
+        state
+            .video_recorder
+            .update_viewport(logical_canvas, logical_viewport);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if state.recording_state == RecordingState::Recording
+        && let Some(started) = state.recording_started
+    {
+        let slot = (started.elapsed().as_secs_f64() * recording::VIDEO_FPS as f64).floor() as u64;
+        let new_slot = state.recording_last_requested_slot != Some(slot);
+        if new_slot
+            && state
+                .recording_readback_in_flight
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            && let Some(target) = state.video_recorder.native_frame_target()
+        {
+            state.recording_last_requested_slot = Some(slot);
+            let in_flight = state.recording_readback_in_flight.clone();
+            commands.spawn(Screenshot::primary_window()).observe(
+                move |captured: On<ScreenshotCaptured>| {
+                    target.submit(
+                        captured.image.clone(),
+                        logical_canvas,
+                        logical_viewport,
+                        slot,
+                    );
+                    in_flight.store(false, Ordering::Release);
+                },
+            );
+        }
     }
     state.editor.validate_frame(12_000);
     state.refresh_mesh();
@@ -13382,6 +13752,7 @@ pub fn wave_gpu_check_scene() -> Playground {
                 mass_density: ScalarField::constant(1.0),
                 stiffness: ScalarField::constant(1.0),
                 damping: ScalarField::constant(0.0),
+                axis_ratio: ScalarField::constant(1.0),
                 parameters: vec![],
                 color: [77, 121, 164],
             },
@@ -15117,9 +15488,41 @@ impl Playground {
                         }
                     };
                     ui.colored_label(color, text);
-                    if matches!(
+                    if state.recording_state == RecordingState::SelectingDestination {
+                        ui.colored_label(GOLD, "Choosing recording destination…");
+                    } else if matches!(
+                        state.recording_state,
+                        RecordingState::Requested
+                            | RecordingState::Preparing
+                            | RecordingState::Starting
+                    ) {
+                        ui.colored_label(GOLD, "Preparing recording…");
+                        if ui.small_button("Stop").clicked() {
+                            state.stop_video_recording();
+                        }
+                    } else if state.recording_state == RecordingState::Recording {
+                        let elapsed = state
+                            .recording_started
+                            .map(recording::elapsed_label)
+                            .unwrap_or_else(|| "00:00".into());
+                        let response = ui.colored_label(RED, format!("● REC  {elapsed}"));
+                        if !state.recording_description.is_empty() {
+                            response.on_hover_text(&state.recording_description);
+                        }
+                        if state.recording_dropped_frames > 0 {
+                            ui.colored_label(
+                                GOLD,
+                                format!("{} dropped", state.recording_dropped_frames),
+                            );
+                        }
+                        if ui.small_button("Stop").clicked() {
+                            state.stop_video_recording();
+                        }
+                    } else if state.recording_state == RecordingState::Finalizing {
+                        ui.colored_label(GOLD, "Finalizing recording…");
+                    } else if matches!(
                         state.snapshot_state,
-                        SnapshotState::Armed | SnapshotState::Capturing
+                        SnapshotState::Requested | SnapshotState::Armed | SnapshotState::Capturing
                     ) {
                         ui.colored_label(GOLD, "Capturing snapshot…");
                     } else if state.snapshot_state == SnapshotState::Saving {
@@ -15193,7 +15596,7 @@ impl Playground {
                     });
                 });
         }
-        if state.snapshot_state != SnapshotState::Armed {
+        if !state.clean_presentation() {
             state.add_geometry_popover(root.ctx());
             state.example_gallery(root.ctx());
             state.performance_window(root.ctx());
@@ -15381,6 +15784,8 @@ mod tests {
         }
         fn frame(&mut self, events: Vec<Event>) {
             self.time += 1.0 / 60.0;
+            self.state.update_recording();
+            self.state.begin_capture_frame();
             let output = self.ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
@@ -17253,7 +17658,13 @@ mod tests {
 
         harness.click_text("Export");
         harness.frame(vec![]);
-        let menu_y = ["Copy scene link", "Viewport PNG", "Scene SVG"].map(|label| {
+        let menu_y = [
+            "Copy scene link",
+            "Viewport PNG",
+            "Record viewport",
+            "Scene SVG",
+        ]
+        .map(|label| {
             harness
                 .texts
                 .iter()
@@ -17263,10 +17674,14 @@ mod tests {
                 .center()
                 .y
         });
-        assert!(menu_y[0] < menu_y[1] && menu_y[1] < menu_y[2]);
+        assert!(menu_y.windows(2).all(|pair| pair[0] < pair[1]));
 
         harness.click_text("Viewport PNG");
-        assert_eq!(harness.state.snapshot_state, SnapshotState::Armed);
+        assert_eq!(
+            harness.state.snapshot_state,
+            SnapshotState::Requested,
+            "the menu-click frame must not be captured"
+        );
         assert!(harness.state.file_busy);
         assert_eq!(harness.state.editor.document, document);
         assert_eq!(harness.state.editor.history_len(), history);
@@ -17276,6 +17691,13 @@ mod tests {
         harness.state.performance_open = true;
         harness.state.add_geometry_open = true;
         harness.frame(vec![]);
+        assert!(
+            !harness
+                .texts
+                .iter()
+                .any(|(text, _)| text == "Viewport PNG" || text == "Scene SVG"),
+            "the already-painted export menu must be gone before capture"
+        );
         assert!(
             harness
                 .texts
@@ -17294,6 +17716,25 @@ mod tests {
                 .iter()
                 .any(|(text, _)| text == "Draw geometry")
         );
+    }
+
+    #[test]
+    fn capture_requests_enter_clean_presentation_on_the_following_frame() {
+        let mut state = Playground {
+            snapshot_state: SnapshotState::Requested,
+            ..Default::default()
+        };
+        assert!(!state.clean_presentation());
+        state.begin_capture_frame();
+        assert_eq!(state.snapshot_state, SnapshotState::Armed);
+        assert!(state.clean_presentation());
+
+        state.snapshot_state = SnapshotState::Idle;
+        state.recording_state = RecordingState::Requested;
+        assert!(!state.clean_presentation());
+        state.begin_capture_frame();
+        assert_eq!(state.recording_state, RecordingState::Preparing);
+        assert!(state.clean_presentation());
     }
 
     #[test]
@@ -17318,8 +17759,13 @@ mod tests {
                 "missing {name}"
             );
         }
-        assert_eq!(examples::catalog().len(), 7);
-        for name in ["GRIN rod", "Luneburg lens", "Phased array"] {
+        assert_eq!(examples::catalog().len(), 8);
+        for name in [
+            "GRIN rod",
+            "Anisotropic crystal",
+            "Luneburg lens",
+            "Phased array",
+        ] {
             assert!(
                 examples::catalog()
                     .iter()
@@ -18123,6 +18569,60 @@ mod tests {
                 .unwrap_err()
                 .contains("lossless")
         );
+
+        let mut anisotropic = scene.clone();
+        anisotropic.materials[0].axis_ratio = ScalarField::constant(2.0);
+        assert!(
+            Playground::compile_far_field(&mesh, &operator, &anisotropic, settings)
+                .unwrap_err()
+                .contains("isotropic background")
+        );
+
+        let mut inclusion = scene.clone();
+        inclusion.materials.push(Material {
+            id: MaterialId(2),
+            name: "Directional inclusion".into(),
+            mass_density: ScalarField::constant(1.0),
+            stiffness: ScalarField::constant(1.0),
+            damping: ScalarField::constant(0.0),
+            axis_ratio: ScalarField::constant(2.0),
+            parameters: vec![],
+            color: [60, 120, 130],
+        });
+        inclusion.regions.push(Region {
+            id: RegionId(2),
+            material: MaterialId(2),
+            frame: MaterialFrame {
+                angle_radians: 0.4,
+                ..MaterialFrame::world()
+            },
+        });
+        inclusion.obstacles.push(Obstacle::with_role(
+            ObstacleId(10),
+            PeriodicCubicSpline::rounded(Point2::default(), 0.2),
+            LoopRole::MaterialInterface {
+                exterior: BACKGROUND_REGION,
+                interior: RegionId(2),
+            },
+        ));
+        let inclusion_mesh = mesh_scene(
+            &inclusion,
+            2,
+            MeshingOptions {
+                target_edge_length: 0.18,
+                minimum_angle_degrees: 10.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let inclusion_operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
+            &inclusion_mesh,
+            &inclusion,
+            inclusion.outer_boundaries,
+        )
+        .unwrap();
+        Playground::compile_far_field(&inclusion_mesh, &inclusion_operator, &inclusion, settings)
+            .unwrap();
 
         let mut outside = scene.clone();
         outside.obstacles.push(Obstacle::hole(
@@ -19735,6 +20235,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn native_amr_check_scene_exercises_a_spatial_material_indicator() {
         let mut state = amr_check_scene();
         assert!(state.editor.document.model.accepted.has_varying_materials());

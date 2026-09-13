@@ -73,6 +73,11 @@ pub fn catalog() -> &'static [ExampleScene] {
                 grin_rod(),
             ),
             example(
+                "Anisotropic crystal",
+                "A rotated directional inclusion turns circular wavefronts into ellipses.",
+                anisotropic_crystal(),
+            ),
+            example(
                 "Luneburg lens",
                 "A TE magnetic-field wave focuses at the far rim of a radial-index lens.",
                 luneburg_lens(),
@@ -120,7 +125,11 @@ fn property_preview(scene: &Scene, property: MaterialProperty) -> Option<Example
             continue;
         };
         let material = scene.region_material(interior)?;
-        if property != MaterialProperty::VolumeSource && !material.varying() {
+        if !matches!(
+            property,
+            MaterialProperty::VolumeSource | MaterialProperty::Anisotropy
+        ) && !material.varying()
+        {
             continue;
         }
         if property == MaterialProperty::VolumeSource && scene.volume_source(interior).is_none() {
@@ -187,6 +196,7 @@ fn property_preview(scene: &Scene, property: MaterialProperty) -> Option<Example
                             MaterialProperty::Damping => raw.damping,
                             MaterialProperty::WaveSpeed => scene.physics.wave_speed(properties),
                             MaterialProperty::Impedance => scene.physics.impedance(properties),
+                            MaterialProperty::Anisotropy => raw.axis_ratio,
                             MaterialProperty::VolumeSource => scene
                                 .volume_source(interior)
                                 .filter(|source| source.enabled)
@@ -211,6 +221,8 @@ fn property_preview(scene: &Scene, property: MaterialProperty) -> Option<Example
         let magnitude = minimum.abs().max(maximum.abs()).max(1.0e-12);
         minimum = -magnitude;
         maximum = magnitude;
+    } else if property == MaterialProperty::Anisotropy {
+        minimum = minimum.min(1.0);
     }
     (!triangles.is_empty() && minimum.is_finite() && maximum.is_finite()).then_some(
         ExamplePropertyPreview {
@@ -326,6 +338,7 @@ fn material_lens() -> Document {
         mass_density: ScalarField::constant(1.0 / 0.36),
         stiffness: ScalarField::constant(1.0),
         damping: ScalarField::constant(0.0),
+        axis_ratio: ScalarField::constant(1.0),
         parameters: vec![],
         color: [61, 116, 139],
     });
@@ -369,6 +382,7 @@ fn grin_rod() -> Document {
         mass_density: ScalarField::formula("1 + dn * smoothstep(0, 1, 1 - (y / H)^2)").unwrap(),
         stiffness: ScalarField::formula("1 / (1 + dn * smoothstep(0, 1, 1 - (y / H)^2))").unwrap(),
         damping: ScalarField::constant(0.0),
+        axis_ratio: ScalarField::constant(1.0),
         parameters: vec![
             MaterialParameter {
                 name: "H".into(),
@@ -443,6 +457,85 @@ fn grin_rod() -> Document {
     document
 }
 
+fn anisotropic_crystal() -> Document {
+    let region = RegionId(2);
+    let material = MaterialId(2);
+    let center = Point2::new(0.08, 0.0);
+    let mut scene = Scene {
+        outer_boundaries: OuterBoundaryConditions::uniform(
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        ),
+        ..Default::default()
+    };
+    scene.materials.push(Material {
+        id: material,
+        name: "Rotated crystal".into(),
+        mass_density: ScalarField::constant(1.0),
+        stiffness: ScalarField::constant(1.0),
+        damping: ScalarField::constant(0.0),
+        axis_ratio: ScalarField::constant(2.4),
+        parameters: vec![],
+        color: [54, 125, 126],
+    });
+    scene.regions.push(Region {
+        id: region,
+        material,
+        frame: MaterialFrame {
+            origin: center,
+            angle_radians: 32.0_f64.to_radians(),
+            attachment: MaterialFrameAttachment::FollowRegion,
+        },
+    });
+    scene.obstacles.push(Obstacle::with_role(
+        ObstacleId(1),
+        PeriodicCubicSpline::rounded(center, 0.48),
+        LoopRole::MaterialInterface {
+            exterior: BACKGROUND_REGION,
+            interior: region,
+        },
+    ));
+    let mut document = Document {
+        model: DocumentModel {
+            draft: scene.clone(),
+            accepted: scene,
+            probes: vec![
+                ProbeDefinition {
+                    id: ProbeId(1),
+                    name: "Crystal cross-section".into(),
+                    color: [94, 220, 195],
+                    enabled: true,
+                    target: ProbeTarget::Segment {
+                        start: Point2::new(-0.38, -0.52),
+                        end: Point2::new(0.54, 0.52),
+                        preset: ProbeSamplingPreset::High,
+                    },
+                },
+                ProbeDefinition {
+                    id: ProbeId(2),
+                    name: "Crystal center".into(),
+                    color: [248, 196, 112],
+                    enabled: true,
+                    target: ProbeTarget::Point(center),
+                },
+            ],
+            source: PointSource {
+                enabled: true,
+                position: Point2::new(-0.72, 0.0),
+                width: 0.045,
+                region: BACKGROUND_REGION,
+                signal: TimeSignal::harmonic(0.0, 15.0, 3.2, 0.0),
+            },
+            far_field: Default::default(),
+        },
+        presentation: Default::default(),
+    };
+    document.presentation.material_overlay =
+        MaterialOverlay::Property(MaterialProperty::Anisotropy);
+    document.presentation.material_overlay_opacity = 0.56;
+    document.presentation.material_overlay_logarithmic = true;
+    document
+}
+
 fn luneburg_lens() -> Document {
     const RADIUS: f64 = 0.43;
     const CONTROL_COUNT: usize = 16;
@@ -469,6 +562,7 @@ fn luneburg_lens() -> Document {
         mass_density: ScalarField::formula("max(2 - (r / R)^2, 1)").unwrap(),
         stiffness: ScalarField::constant(1.0),
         damping: ScalarField::constant(0.0),
+        axis_ratio: ScalarField::constant(1.0),
         parameters: vec![MaterialParameter {
             name: "R".into(),
             value: RADIUS,
@@ -679,7 +773,7 @@ mod tests {
 
     #[test]
     fn bundled_examples_are_structurally_valid_and_exportable() {
-        assert_eq!(catalog().len(), 7);
+        assert_eq!(catalog().len(), 8);
         assert_eq!(catalog()[0].document.model.probes.len(), 1);
         for example in catalog() {
             assert!(
@@ -953,5 +1047,46 @@ mod tests {
             "double-slit timestep is impractical: {:e}",
             operator.recommended_time_step()
         );
+    }
+
+    #[test]
+    fn anisotropic_crystal_compiles_directional_operator_and_probes() {
+        let example = catalog()
+            .iter()
+            .find(|example| example.name == "Anisotropic crystal")
+            .unwrap();
+        let scene = &example.document.model.accepted;
+        let coefficients = scene
+            .directional_material_at(RegionId(2), Point2::new(0.08, 0.0))
+            .unwrap();
+        assert!(
+            (coefficients.maximum_wave_speed() / coefficients.minimum_wave_speed() - 2.4).abs()
+                < 1.0e-12
+        );
+        let mesh = Arc::new(
+            mesh_scene(
+                scene,
+                82,
+                MeshingOptions {
+                    target_edge_length: 0.08,
+                    minimum_angle_degrees: 10.0,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
+            &mesh,
+            scene,
+            scene.outer_boundaries,
+        )
+        .unwrap();
+        assert!(operator.recommended_time_step().is_finite());
+        assert!(operator.recommended_time_step() > 0.0);
+        for probe in &example.document.model.probes {
+            if let ProbeTarget::Point(point) = probe.target {
+                QuadraticPointStencil::build(&mesh, &operator, scene, point).unwrap();
+            }
+        }
     }
 }

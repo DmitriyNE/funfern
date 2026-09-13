@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::{BACKGROUND_REGION, Material, MaterialError, OuterSide, Point2, RegionId, TriMesh};
+use crate::{
+    BACKGROUND_REGION, EvaluatedMaterial, Material, MaterialError, MaterialFrame, OuterSide,
+    Point2, RegionId, SymmetricTensor2, TriMesh,
+};
 
 /// Constant material coefficients for the scalar wave model
 /// `mass_density * u_tt + damping * u_t - div(stiffness * grad(u)) = f`.
@@ -9,6 +12,41 @@ pub struct WaveCoefficients {
     pub mass_density: f64,
     pub stiffness: f64,
     pub damping: f64,
+}
+
+/// Coefficients after a material's directional law and local frame have been
+/// resolved at one world-space point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DirectionalWaveCoefficients {
+    pub mass_density: f64,
+    pub stiffness: SymmetricTensor2,
+    pub damping: f64,
+}
+
+impl DirectionalWaveCoefficients {
+    pub fn valid(self) -> bool {
+        self.mass_density.is_finite()
+            && self.mass_density > 0.0
+            && self.stiffness.finite_spd()
+            && self.damping.is_finite()
+            && self.damping >= 0.0
+    }
+
+    pub fn minimum_wave_speed(self) -> f64 {
+        (self.stiffness.eigenvalues()[0] / self.mass_density).sqrt()
+    }
+
+    pub fn maximum_wave_speed(self) -> f64 {
+        (self.stiffness.eigenvalues()[1] / self.mass_density).sqrt()
+    }
+
+    pub fn normal_impedance(self, normal: Point2) -> f64 {
+        (self.mass_density * self.stiffness.quadratic_form(normal)).sqrt()
+    }
+
+    pub fn geometric_mean_stiffness(self) -> f64 {
+        self.stiffness.determinant().sqrt()
+    }
 }
 
 impl WaveCoefficients {
@@ -72,6 +110,24 @@ impl PhysicsModel {
         match self {
             Self::Mechanical => (properties.mass_density * properties.stiffness).sqrt(),
             Self::Electromagnetic { .. } => (properties.stiffness / properties.mass_density).sqrt(),
+        }
+    }
+
+    pub fn directional_wave_coefficients(
+        self,
+        properties: EvaluatedMaterial,
+        frame: MaterialFrame,
+    ) -> DirectionalWaveCoefficients {
+        let scalar = self.wave_coefficients(WaveCoefficients {
+            mass_density: properties.mass_density,
+            stiffness: properties.stiffness,
+            damping: properties.damping,
+        });
+        let ratio = properties.axis_ratio;
+        DirectionalWaveCoefficients {
+            mass_density: scalar.mass_density,
+            stiffness: frame.tensor_from_local(scalar.stiffness * ratio, scalar.stiffness / ratio),
+            damping: scalar.damping,
         }
     }
 
@@ -1133,6 +1189,7 @@ mod tests {
         material.mass_density = ScalarField::formula("2 + 0.2*x*x").unwrap();
         material.stiffness = ScalarField::formula("5 - 0.3*y").unwrap();
         material.damping = ScalarField::formula("0.1 + 0.02*r").unwrap();
+        material.axis_ratio = ScalarField::formula("1 + abs(x)").unwrap();
 
         let electromagnetic = mechanical.convert_material(tm, &material).unwrap();
         assert_eq!(
@@ -1147,6 +1204,7 @@ mod tests {
             let frame = crate::MaterialFrame::world();
             let old = material.evaluate(frame, point).unwrap();
             let new = electromagnetic.evaluate(frame, point).unwrap();
+            assert_eq!(old.axis_ratio, new.axis_ratio);
             let old = WaveCoefficients {
                 mass_density: old.mass_density,
                 stiffness: old.stiffness,
@@ -1184,6 +1242,38 @@ mod tests {
             initial_lengths
         );
         assert_eq!(cycled, mechanical.convert_material(tm, &material).unwrap());
+    }
+
+    #[test]
+    fn directional_skin_keeps_ratio_and_geometric_mean() {
+        let properties = EvaluatedMaterial {
+            mass_density: 4.0,
+            stiffness: 9.0,
+            damping: 0.5,
+            axis_ratio: 3.0,
+        };
+        let frame = MaterialFrame {
+            angle_radians: 0.41,
+            ..MaterialFrame::world()
+        };
+        for physics in [
+            PhysicsModel::Mechanical,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            },
+        ] {
+            let coefficients = physics.directional_wave_coefficients(properties, frame);
+            let eigenvalues = coefficients.stiffness.eigenvalues();
+            assert!((eigenvalues[1] / eigenvalues[0] - 9.0).abs() < 1.0e-12);
+            assert!(coefficients.valid());
+            assert!(
+                (coefficients.maximum_wave_speed() / coefficients.minimum_wave_speed() - 3.0).abs()
+                    < 1.0e-12
+            );
+        }
     }
 
     #[test]

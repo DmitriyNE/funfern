@@ -111,12 +111,17 @@ validated containment graph. Mesh triangles carry their owning region/material I
 while constrained edges carry their logical boundary/span ID and side information.
 Those labels survive remeshing even though numerical indices do not.
 
-Material interfaces use a conforming scalar field with three piecewise material
+Material interfaces use a conforming scalar field with three base material
 properties. Mechanical scenes interpret them as density `rho`, stiffness `k`, and
 damping `d`. EM scenes store permittivity `epsilon`, permeability `mu`, and reduced
 loss rate `alpha`, then compile TM to `(mass, stiffness, damping) =
 (epsilon, 1/mu, epsilon*alpha)` and TE to `(mu, 1/epsilon, mu*alpha)`. Both give
-`c = 1/sqrt(epsilon*mu)` and `Z = sqrt(mu/epsilon)`. Each scalar
+`c = 1/sqrt(epsilon*mu)` and `Z = sqrt(mu/epsilon)`. An optional directional
+axis-ratio field `a >= 1` resolves in the region's orthonormal material frame to
+`A_local = k diag(a, 1/a)`. Its determinant remains `k^2`, its principal wave-speed
+ratio is `a`, and `a = 1` is exactly the prior isotropic model. Mechanical, TM, and
+TE compilation all use this same flux tensor, so changing the physics skin leaves
+the directional law unchanged. Each scalar
 coefficient is either constant or a bounded compiled expression over local `x`,
 `y`, `r`, and `theta` plus material-level named parameters. The local coordinates
 always have world units. Their frame contains only an origin, an angle, and a
@@ -125,7 +130,7 @@ A whole-loop similarity transform carries an attached origin and orientation, bu
 uniformly scaling geometry does not change the spatial wavelength of its material
 profile. Non-rigid control edits leave the frame unchanged. Coefficients are sampled
 at volume and boundary quadrature points and at probe positions, so assembly,
-energy, impedance, and timestep limits use the same material definition. Invalid
+energy, directional boundary impedance, and timestep limits use the same material definition. Invalid
 runtime values abort the candidate operator and leave the current solver running.
 Material formulas parse through a private expression tree before compiling to the
 bounded postfix evaluator. Ordinary edits retain their original source verbatim and
@@ -140,14 +145,16 @@ Internal walls require separate traces on their two sides and therefore a
 topology/DOF operation, not merely a coefficient label. Material-value changes
 reuse the current mesh and enter the same transactional operator replacement path
 as boundary changes. The View inspector can render density, stiffness, damping,
-wave speed, or impedance on the quadratic display topology. Overlay vertices
+wave speed, impedance, or anisotropy on the quadratic display topology. The
+anisotropy view colors `log(a)` and draws sparse marks along the fast principal
+axis. Overlay vertices
 include region identity so a shared interface retains a sharp coefficient jump. A
 revision-keyed cooperative cache evaluates all properties once, allowing property
 switches without resampling; invalid samples are localized in red and never affect
 solver acceptance. Profile placement belongs to a region and has both numeric
 controls and a rigid origin/rotation viewport gizmo. Solution AMR samples spatial
 coefficients at element and boundary quadrature points. Its strong residual includes
-the stiffness-gradient term, recovered and interface fluxes use local stiffness,
+the tensor-divergence term, recovered and interface fluxes use `A grad(u)`,
 and each element's active-frequency ceiling uses its slowest sampled wave speed.
 The element stiffness gradient is the piecewise-linear reconstruction from vertex
 samples, keeping the estimator dependency-free and convergent under refinement.
@@ -176,7 +183,7 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON version 19 remains the single persistence representation. A `Document`
+Scene JSON version 20 remains the single persistence representation. A `Document`
 owns one `DocumentModel` plus `PresentationSettings`. The model contains the draft
 and accepted scenes, probes, point-source configuration, and far-field settings; it
 is also the exact snapshot type stored by Undo/Redo. Presentation contains the View
@@ -185,7 +192,8 @@ through scene files, examples, shared links, and recovery, but stays outside his
 so model edits never rewind the user's current view. Camera, selection, open panels,
 floating-window positions, solver state, and derived render caches remain transient.
 
-Version 19 moves the editable axis-aligned domain into both draft and accepted
+Version 20 adds the optional material axis-ratio field and anisotropy presentation
+overlay; versions 1–19 migrate missing ratios to one. Version 19 moves the editable axis-aligned domain into both draft and accepted
 scenes; older files migrate their historical top-level fixed domain. Version 18
 adds the scene physics model, polarization, explicit electric/magnetic
 wall variants, and a tagged material law whose serialized property names follow
@@ -400,9 +408,10 @@ Duplication creates new stable geometry IDs, copies knot intervals,
 multiplicities, and span laws, and gives duplicated material-interface or wall
 loops their own interior region with the same material.
 
-Version 19 JSON stores independent draft and accepted domain rectangles alongside
+Version 20 JSON stores material axis ratios in addition to the independent draft
+and accepted domain rectangles introduced by version 19, alongside
 the loop roles, all assigned boundary laws, materials, regions, controls, intervals,
-knot multiplicities, and both scenes. Versions 2–18 remain compatible; version 1
+knot multiplicities, and both scenes. Versions 2–19 remain compatible; version 1
 loads by assigning its loops the background hole role and
 creating the default background material/region. Older loop records migrate to a
 reflecting condition on every periodic span. Version-6 baffles that combined a
@@ -425,14 +434,26 @@ second finger joins, navigation owns the gesture until every finger lifts and an
 tentative document drag or marquee is rolled back. Marquee direction distinguishes
 fully enclosed logical spans from crossing spans.
 
-Viewport PNG export uses Bevy's primary-window screenshot pipeline on the existing
-wgpu device. A request waits one UI frame for its menu to close, records the logical
-central-panel rectangle, and maps that rectangle onto the returned physical image
-dimensions before cropping and PNG encoding. The capture frame suppresses transient
-editor emphasis and floating windows while retaining persisted View overlays and
-the logo. Capture state, framing, and output never enter the document or history.
-Native builds pass encoded bytes to the existing save dialog; browser builds create
-a Blob download after asynchronous GPU readback.
+Viewport capture has one coordinator and presentation fence for still images and
+video. A request remains pending through the menu-click frame, enters preparation
+at the beginning of the following UI frame, and only then suppresses transient
+editor emphasis and floating windows. Persisted View overlays and the logo remain.
+This deferred transition prevents the already-painted Export popup from entering a
+PNG or the first video frame. Capture state, framing, and output never enter the
+document or history.
+
+PNG export uses Bevy's primary-window screenshot pipeline on the existing wgpu
+device, maps the logical central-panel rectangle onto the returned physical image,
+and crops before encoding. Video fixes its even-pixel output dimensions at start
+and contains a resized viewport within that frame after a window resize. Browser
+recording copies the WebGPU canvas viewport into a hidden 2D canvas and gives its
+30 FPS stream to `MediaRecorder`; codec selection prefers VP9, VP8, WebM, then MP4.
+Native recording keeps one Bevy screenshot readback in flight and passes completed
+images through a two-frame bounded queue to a worker streaming raw RGBA into an
+FFmpeg H.264/VP9/VP8 encoder. Missing native timing slots repeat the latest frame
+rather than changing wall-clock duration. The common status UI, start/stop states,
+crop calculation, presentation policy, and error recovery do not depend on the
+backend.
 
 Canvas resize/display scale comes from Bevy/egui, and Fit View frames the current
 draft domain. JSON excludes the viewport. There is no independent wgpu device, WebGL

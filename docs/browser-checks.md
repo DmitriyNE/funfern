@@ -82,6 +82,17 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   emphasis, gizmos, marquees, and tool prompts are absent. Repeat after resize and
   at a non-1× display scale; capture must not pause playback or alter camera,
   document, presentation, selection, or history.
+- [ ] Start **Record viewport** from the Export menu while the simulation is
+  running. The first video frame must not contain the menu. Confirm that the field,
+  active View overlays, probes, and logo remain while panels, floating readouts,
+  selections, gizmos, marquees, prompts, and the red recording/status controls stay
+  outside the video. Pan and zoom, resize the browser, pause and resume, then stop
+  from the status bar. The downloaded WebM or MP4 should retain its original frame
+  dimensions, letterbox rather than stretch after resize, play for the elapsed
+  wall-clock duration, and contain no audio. Repeat once while initially paused and
+  record the chosen MIME type from the status tooltip. An unsupported MediaRecorder
+  or canvas-stream implementation should produce a readable error and restore the
+  ordinary viewport.
 - [ ] In Simulation, toggle Place pulse on and off by clicking the selected button;
   it persists across repeated viewport clicks and inspector changes until explicitly
   ended. Enable the continuous source and drag its marker directly. Verify that a

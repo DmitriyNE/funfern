@@ -117,6 +117,7 @@ enum StoredMaterialProperty {
     Damping,
     WaveSpeed,
     Impedance,
+    Anisotropy,
     VolumeSource,
 }
 
@@ -263,6 +264,8 @@ struct StoredMaterial {
     stiffness: Option<StoredScalarField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     damping: Option<StoredScalarField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    axis_ratio: Option<StoredScalarField>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     parameters: Vec<StoredMaterialParameter>,
     color: [u8; 3],
@@ -481,6 +484,8 @@ fn encode_scene(scene: &Scene) -> StoredScene {
                 mass_density: None,
                 stiffness: None,
                 damping: None,
+                axis_ratio: (material.axis_ratio.constant_value() != Some(1.0))
+                    .then(|| encode_scalar_field(&material.axis_ratio)),
                 parameters: material
                     .parameters
                     .iter()
@@ -917,6 +922,11 @@ fn decode_scene(stored: StoredScene, options: SceneDecodeOptions) -> Result<Scen
                 mass_density: decode_scalar_field(mass_density, require_material_frames)?,
                 stiffness: decode_scalar_field(stiffness, require_material_frames)?,
                 damping: decode_scalar_field(damping, require_material_frames)?,
+                axis_ratio: material
+                    .axis_ratio
+                    .map(|field| decode_scalar_field(field, require_material_frames))
+                    .transpose()?
+                    .unwrap_or_else(|| ScalarField::constant(1.0)),
                 parameters: material
                     .parameters
                     .into_iter()
@@ -1159,7 +1169,7 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 19,
+        version: 20,
         domain: [
             document.model.accepted.domain.min_x,
             document.model.accepted.domain.max_x,
@@ -1272,6 +1282,7 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
                     MaterialProperty::Damping => StoredMaterialProperty::Damping,
                     MaterialProperty::WaveSpeed => StoredMaterialProperty::WaveSpeed,
                     MaterialProperty::Impedance => StoredMaterialProperty::Impedance,
+                    MaterialProperty::Anisotropy => StoredMaterialProperty::Anisotropy,
                     MaterialProperty::VolumeSource => StoredMaterialProperty::VolumeSource,
                 })
             }
@@ -1319,6 +1330,7 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
                     StoredMaterialProperty::Damping => MaterialProperty::Damping,
                     StoredMaterialProperty::WaveSpeed => MaterialProperty::WaveSpeed,
                     StoredMaterialProperty::Impedance => MaterialProperty::Impedance,
+                    StoredMaterialProperty::Anisotropy => MaterialProperty::Anisotropy,
                     StoredMaterialProperty::VolumeSource => MaterialProperty::VolumeSource,
                 })
             }
@@ -1567,7 +1579,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 presentation: PresentationSettings::default(),
             }
         }
-        2..=19 => {
+        2..=20 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             let legacy_domain = decode_domain(file.domain)?;
             let options = SceneDecodeOptions {

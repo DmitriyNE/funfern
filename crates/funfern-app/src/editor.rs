@@ -42,6 +42,7 @@ pub enum MaterialProperty {
     Damping,
     WaveSpeed,
     Impedance,
+    Anisotropy,
     VolumeSource,
 }
 
@@ -77,12 +78,13 @@ impl VectorOverlay {
 }
 
 impl MaterialProperty {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Density,
         Self::Stiffness,
         Self::Damping,
         Self::WaveSpeed,
         Self::Impedance,
+        Self::Anisotropy,
         Self::VolumeSource,
     ];
 
@@ -93,6 +95,7 @@ impl MaterialProperty {
             Self::Damping => "Damping",
             Self::WaveSpeed => "Wave speed",
             Self::Impedance => "Impedance",
+            Self::Anisotropy => "Material anisotropy",
             Self::VolumeSource => "Volume source",
         }
     }
@@ -106,6 +109,7 @@ impl MaterialProperty {
                 Self::Damping => "Loss rate α",
                 Self::WaveSpeed => "Wave speed",
                 Self::Impedance => "Wave impedance",
+                Self::Anisotropy => "Material anisotropy",
                 Self::VolumeSource => "Volume current",
             },
         }
@@ -118,7 +122,8 @@ impl MaterialProperty {
             Self::Damping => 2,
             Self::WaveSpeed => 3,
             Self::Impedance => 4,
-            Self::VolumeSource => 5,
+            Self::Anisotropy => 5,
+            Self::VolumeSource => 6,
         }
     }
 }
@@ -1998,6 +2003,7 @@ impl Editor {
             mass_density: ScalarField::constant(1.0),
             stiffness: ScalarField::constant(1.0),
             damping: ScalarField::constant(0.0),
+            axis_ratio: ScalarField::constant(1.0),
             parameters: vec![],
             color: COLORS[(id.0.saturating_sub(2) as usize) % COLORS.len()],
         });

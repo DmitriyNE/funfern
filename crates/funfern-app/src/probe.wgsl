@@ -47,7 +47,7 @@ fn weighted(values_a: vec4<f32>, values_b: vec4<f32>, stencil: ProbeStencil) -> 
 fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
     let probe = invocation.x;
     let count = u32(control.values.z);
-    if probe >= count || stencils[probe].material.z < 0.5 {
+    if probe >= count || stencils[probe].material.x <= 0.0 {
         return;
     }
     let stencil = stencils[probe];
@@ -99,6 +99,16 @@ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
         + dot(potential_b, stencil.gradient_x_b);
     let potential_gradient_y = dot(potential_a, stencil.gradient_y_a)
         + dot(potential_b, stencil.gradient_y_b);
+    let gradient = vec2<f32>(gradient_x, gradient_y);
+    let potential_gradient = vec2<f32>(potential_gradient_x, potential_gradient_y);
+    let flux = vec2<f32>(
+        stencil.material.y * gradient.x + stencil.material.z * gradient.y,
+        stencil.material.z * gradient.x + stencil.material.w * gradient.y,
+    );
+    let potential_flux = vec2<f32>(
+        stencil.material.y * potential_gradient.x + stencil.material.z * potential_gradient.y,
+        stencil.material.z * potential_gradient.x + stencil.material.w * potential_gradient.y,
+    );
     let electromagnetic = control.values.w > 0.5;
     let primary_energy = select(
         stencil.material.x * velocity * velocity,
@@ -106,15 +116,14 @@ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
         electromagnetic,
     );
     let gradient_energy = select(
-        stencil.material.y * (gradient_x * gradient_x + gradient_y * gradient_y),
-        stencil.material.y * (potential_gradient_x * potential_gradient_x
-            + potential_gradient_y * potential_gradient_y),
+        dot(gradient, flux),
+        dot(potential_gradient, potential_flux),
         electromagnetic,
     );
     let energy = 0.5 * (primary_energy + gradient_energy);
     let transverse = select(
         0.0,
-        stencil.material.y * length(vec2<f32>(potential_gradient_x, potential_gradient_y)),
+        length(potential_flux),
         electromagnetic,
     );
     let poynting = select(0.0, abs(displacement) * transverse, electromagnetic);
