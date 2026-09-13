@@ -497,89 +497,282 @@ fixtures assemble and step without leaks or invalid node-membership errors.
 
 #### Stage 3: document model, face assignments, and persistence
 
+The application cutover needs a stable authored face reference. `FaceId` is an
+ordinal in one compiled snapshot, so persisting it would make material ownership
+change when an unrelated edit changes face traversal order. A point seed is also
+unsafe because a moving divider can pass over it. Persist an oriented boundary
+anchor instead:
+
+```text
+TopologyScene
+  geometry: TopologyGeometry
+  physics: PhysicsModel
+  materials: [Material]
+  regions: [Region]
+  face_assignments: [AuthoredFaceAssignment]
+  volume_sources: [VolumeSource]
+  outer_boundaries: OuterBoundaryConditions
+
+AuthoredFaceAssignment
+  anchor: Outer(side, fraction)
+        | Curve(curve, span, side, parameter)
+  region: RegionId | Excluded
+```
+
+The parameter is inside the referenced logical span. It disambiguates faces when
+a crossing divides one span into several compiled atoms. `resolve_face_anchor`
+maps the anchor to a snapshot-local `FaceId`; derived `FaceRegionAssignment`s then
+feed `TopologyMeshPlan`. Anchors at an endpoint, on an ambiguous crossing, on a
+deleted span, or on the wrong side of an excluded face fail with an ID-bearing
+validation issue. Every active region resolves to exactly one bounded face, no two
+assignments may resolve to the same face, and every valid bounded face has exactly
+one active or excluded assignment. A face omitted from the assignment list is a
+persistent invalid-draft state until the user chooses a material or hole. The
+exterior is never assignable.
+
 - Replace `Scene.obstacles`, `Scene.internal_boundaries`,
-  `Scene.material_interfaces`, and `Scene.junctions` with unified curves,
-  topology vertices, span behaviors, and face assignments. Keep materials in the
-  library and keep region frames/sources on active-face assignments.
-- Store only user-authored geometry and semantic assignments in the document.
-  Store compiled faces as a revision-keyed cache, never as a second editable source
-  of truth. Draft and accepted scenes each receive their own compiled snapshot.
-- Preserve semantic IDs across harmless edits. When a face splits, retain the old
-  region on the side containing its stable anchor and allocate a region for the
-  other face; when faces merge, prefer the background/root assignment and otherwise
-  require the edit command to state which assignment survives. Retarget or remove
-  region probes and sources in the same undoable transaction.
+  `Scene.material_interfaces`, and `Scene.junctions` in the application document
+  with `TopologyScene`. Materials remain a library; region material/frame state
+  and volume sources keep their stable `RegionId` references.
+- Store only authored geometry, anchors, laws, probes, sources, and presentation
+  settings. Keep the compiled topology snapshot and mesh plan in a revision-keyed
+  cache, never in serialization or undo history. Draft and accepted scenes each
+  have independent cache entries.
+- Centralize topology mutations as editor commands. Insertion, control removal,
+  split/join, curve reversal, junction materialization, attachment, detachment, and
+  deletion must return an ID-remap record. Apply that record to region anchors,
+  selected spans, and boundary probes before the command is committed. Coordinate
+  movement does not need a remap.
+- Normalize a proper transmitting crossing into authored C0 breakpoints and one
+  stable topology vertex before accepting or persisting it. A derived crossing
+  must not become an unselectable, unstable junction in the editor.
+- When a face splits, its existing anchor determines which daughter retains the
+  old `RegionId`. A creation command either gives the other daughter a new region
+  and anchor or leaves it visibly unassigned. When faces merge and assignments
+  differ, the delete command must carry the surviving assignment; it must never
+  select one by traversal order. Deleting a hole or separated baffle is
+  unambiguous.
+- Keep region probes and sources with the surviving `RegionId`. Deleting their
+  region removes or retargets them as part of the same visible, undoable command;
+  never leave a probe silently sampling a different face.
+- Replace legacy boundary-probe targets with stable topology paths. An outer target
+  stores ordered outer sides. A curve target stores `CurveId`, an ordered bounded
+  list of `CurveSpanId`s, `CurveTraceSide`, direction, and sampling preset. Knot
+  insertion expands the path, reversal reverses it and swaps orientation, and
+  removal is rejected if the remaining path is no longer contiguous.
 - Add scene-file version 22 as a deliberate compatibility break and remove the
-  versions 1 through 21 decoders. Rewrite the built-in examples and regenerate the
-  checked-in example JSON in version 22. Loading an obsolete or malformed file
-  reports the unsupported version and leaves the current document untouched.
+  versions 1 through 21 decoders. Rewrite the built-in examples and URL-scene
+  fixtures in version 22. Loading obsolete local storage is ignored with one clear
+  notice; loading an obsolete or malformed file leaves the current document
+  untouched.
 - Keep one complete topology edit as one `DocumentModel` history entry. Loading
-  clears history as it does now; invalid drafts remain serializable.
+  clears history as it does now. Invalid drafts, including unresolved anchors and
+  incomplete transmitting dividers, remain serializable and undoable.
+
+Before changing the live application, add document-level tests for anchor
+resolution across coordinate movement, curve sampling changes, crossings, knot
+insertion/removal, split/join, and reversal. Cover face split/merge ownership,
+dependent probe/source handling, exact version-22 round trips, invalid-draft round
+trips, stale compilation rejection, and atomic failure of old or malformed files.
 
 **Exit criterion:** version 22 round-trips exact semantic state, obsolete schemas
 fail atomically with a useful message, and undo/redo restores geometry, face
 assignments, probes, sources, and accepted/draft pairs together.
 
-#### Stage 4: drawing, selection, attachment, and face UI
+#### Stage 4: cooperative rebuild and atomic runtime contract
 
-- Replace separate geometry tools with `Open curve` and `Closed curve`, plus
-  friendly initial-configuration controls:
-  - Closed + **Material region** creates a transmitting loop and assigns the chosen
-    material to the new interior face.
-  - Closed + **Hole** excludes the new interior face and applies the chosen boundary
-    condition to its active side.
-  - Open + **Divider** creates transmitting spans and previews which directed side
-    receives the chosen material. It remains an invalid draft until it completes a
-    partition.
-  - Open + **Baffle** creates separated spans and applies the chosen initial
-    condition to both sides. Thin gap remains a separate coupling choice, not a
-    boundary-condition option.
-- Keep Circle, Rectangle, spline, and polygonal construction as geometric shape
-  choices under those two tools. The two-point spline-baffle shortcut continues to
-  insert the intermediate controls needed for a straight cubic.
-- Make attachment primarily a snap operation. Dragging or drawing an endpoint near
-  an outer side, existing topology vertex, or curve shows a strong gold target.
-  Dropping on a curve performs shape-preserving breakpoint insertion and creates or
-  reuses a junction. Endpoint-to-endpoint drops merge vertices. Dragging a branch
-  endpoint away detaches it when its span behavior permits a free end.
-- Paint targets after curves and boundary-condition overlays so they cannot be
-  obscured. Make inner and outer attachment targets use the same hit-testing path.
-  Add keyboard-accessible attach/detach actions as a fallback to precise dragging.
-- Preserve the current selection model: one control or topology vertex for point
-  editing, multiple spans for rigid transforms and bulk law assignment, and a
-  whole-curve selection command. A topology vertex has one visible handle even
-  when several splines meet there.
-- Derive both **Materials** and **Subdomains** overlays from the current compiled
-  draft. Materials colors by assigned material; Subdomains uses categorical
-  `RegionId` colors so equal-material faces remain visibly distinct. Never use the
-  last committed mesh to preview draft topology.
-- Use one contextual inspector below the feature list. Curve geometry controls,
-  span behavior/conditions, junction attachment, face material/frame/source, and
-  divider removal appear according to selection. Removing a divider previews the
-  face merge and asks which material survives only when the two assignments differ.
+The topology mesher is currently synchronous while the live legacy mesher yields
+after a small work slice. Switching it directly would freeze the browser during a
+full rebuild. Refactor the topology full-rebuild path into a deterministic
+`TopologyMeshJob` before changing the document used by the UI.
 
-Editor tests use synthesized egui pointer events for both attachment paths,
-creation presets, selection priority, junction dragging, detach, divider removal,
-bulk span conditions, overlays, Delete, Escape, and one-entry history. A short
-manual native/browser pass checks touch targets and visual layering; browser
-WebGPU execution remains a local smoke check rather than a CI requirement.
+- Split topology meshing into bounded phases: plan import, one-face triangulation
+  and refinement, separated-trace recovery, junction/slit recovery, legalization,
+  verification, and publication. Yield on both primitive work and elapsed frame
+  budget. The final mesh must be identical for every slice size.
+- Carry one immutable accepted bundle through the complete transaction:
+
+  ```text
+  AcceptedTopology
+    document_revision
+    topology_revision
+    authored: Arc<TopologyScene>
+    snapshot: Arc<TopologySnapshot>
+    plan: Arc<TopologyMeshPlan>
+  ```
+
+  Mesh, assembly, volume-source compilation, transfer, GPU upload, probes, AMR,
+  indicators, overlays, and far-field compilation must all reference this bundle
+  or its token. No candidate may combine an old scene with a newly compiled plan.
+- Keep the last accepted bundle and GPU state running while draft compilation,
+  meshing, assembly, transfer, or upload is pending or fails. Publish the complete
+  candidate atomically only after GPU resources are ready. Preserve requested
+  run/pause state, simulation time, and compatible probe histories across a normal
+  handoff; example load and explicit reset still request a fresh field.
+- Use `topology_mesh_update_action` for transaction classification. Material,
+  formula, source, boundary-law, and presentation changes reuse geometry. Curve
+  coordinate and graph changes take the verified full topology rebuild initially.
+  Report the latter as a typed `CoordinateRepairDeferred` decision so later local
+  repair can replace it without changing UI policy.
+- Route production calls through `assemble_topology`, topology volume-source and
+  probe compilers, `SolutionIndicatorJob::new_topology`,
+  `MeshAdaptationJob::new_topology`, and topology far-field compilation. Material
+  property overlays resolve the same active face assignments. Point-source region
+  lookup uses the committed plan; a source exactly on an interface gets a precise
+  ambiguous-placement status.
+- Include document, topology, mesh, adaptation, and GPU generations in stale-result
+  checks. Cancellation discards partial output without touching the active bundle.
+
+Core tests compare topology mesh output across tiny and large work slices and
+exercise cancellation at every phase. Application transaction tests cover
+material-only reuse, law-only reuse, graph and coordinate rebuilds, failed draft
+compilation, failed mesh or upload, AMR handoff, ordinary probes, far field, and a
+stale completion arriving after a newer edit.
+
+**Exit criterion:** a topology rebuild never monopolizes a browser frame, every
+published numerical object names the same topology token, and failure at any stage
+leaves the running simulation intact.
+
+#### Stage 5: drawing, selection, attachment, and face UI
+
+The UI stays purpose-first. Users choose what a curve should initially do; open,
+closed, transmitting, and separated are implementation details revealed only when
+editing requires them.
+
+**Draw popover**
+
+- Keep the top-bar **+ Draw** entry. Its first row contains **Region**, **Hole**,
+  **Divider**, and **Baffle**. The second row shows only applicable geometry:
+  Circle, Rectangle, Polygon, and Spline for closed Region/Hole; Polyline and
+  Spline for Divider/Baffle.
+- **Region** creates a closed transmitting curve and asks for the interior
+  material. **Hole** creates a closed separated curve and asks for the domain-side
+  condition. **Divider** creates an open transmitting curve and asks for the new
+  side's material. **Baffle** creates an open separated curve and asks for its
+  initial condition. Thin gap remains a coupling in the contextual editor.
+- A divider keeps the old material on the daughter containing the old face anchor;
+  the other daughter receives the selected material. This avoids asking the user
+  to reason about left/right before the curve has a direction. An incomplete
+  divider remains a persistent invalid draft.
+- Preserve the two-point spline-baffle shortcut that inserts equidistant internal
+  controls for a straight cubic. Drawing stays active until explicitly dismissed
+  where the current tool already has repeat placement.
+- Use the same gold attachment targets for every open path: outer sides, authored
+  junctions, and any curve interior. A curve-interior drop performs exact C0
+  breakpoint insertion and creates or reuses a topology vertex in one history
+  action. Render targets above geometry and law strokes. Keyboard-accessible
+  **Attach endpoint** and **Detach endpoint** actions provide a precise fallback.
+
+**Viewport selection and manipulation**
+
+- Replace object-specific selection with `CurveId`/`CurveSpanId`. One ordinary
+  control selects and moves only that control. An attached breakpoint selects its
+  authoritative `TopologyVertexId`; dragging it moves all incident curves once.
+  Multiple selected spans remain a rigid transform selection, including the
+  existing translation, scale, rotation gizmos, snapping, and marquee behavior.
+- Keep handle priority over spans, Shift span toggling, command-click whole-curve
+  selection, and right-drag/two-finger viewport navigation. Preserve the
+  direction-dependent marquee: left-to-right fully encloses, right-to-left hits.
+- A rigid selection containing only some arms of a shared junction cannot move the
+  vertex without distorting an unselected arm. Keep the transform visible but
+  block that gesture with `Junction also belongs to unselected spans` and actions
+  **Select incident spans** and **Detach endpoint**. If every incident arm is
+  selected, transform the vertex once.
+- Draw a small direction arrow on the focused curve and tint the selected trace
+  side. `Left` and `Right` always mean relative to increasing curve parameter;
+  bulk edits across curves apply that same coherent rule.
+- Keep outer-edge/corner selection and extent editing in the same contextual area
+  as curve editing. A topology vertex attached to an outer side follows a domain
+  resize through its stored fraction.
+
+**Edit panel**
+
+- Keep one lean contextual inspector below the collapsible feature list. Do not
+  reintroduce operation modes, a collapsible Transform group, or explanatory
+  paragraphs. Geometry moves remain available immediately after selection.
+- Order controls as: selection/coordinates, transform and gizmos, spline tools,
+  attachment/topology actions, then span behavior and boundary laws. Show only
+  controls that act on the current selection.
+- Selected spans expose **Transmit** or **Boundary**. For a separated span with one
+  active side, show a single **Domain side** law. With two active sides, show the
+  Left/Right picker and highlight that side in the viewport; show coupling only
+  when both traces support it. Mixed multi-selection remains editable through
+  explicit common-value actions.
+- A closed curve with one well-defined interior face gets a compact
+  `Inside: Hole | <material>` shortcut. Full region frame, source, and library
+  editing remains in **Materials**. Divider removal previews the merged face and,
+  only if assignments differ, presents **Keep <material A>** and
+  **Keep <material B>** before committing.
+- Delete acts on the current semantic selection. Deleting a control, span path,
+  curve, junction, or dependent probe is one history action and either includes a
+  complete ownership choice or leaves the document unchanged with a specific
+  reason. Escape restores the pre-drag document as today.
+
+**Materials, overlays, probes, and status**
+
+- Build Materials > **Subdomain assignment** from the current compiled draft.
+  Rows show stable region/material names and swatches, never `FaceId`. Picking a
+  face highlights its complete derived boundary. An unassigned face offers
+  **Assign material** or **Make hole**; the latter is disabled when transmitting
+  adjacency would make the mesh plan invalid.
+- Keep **Library** unchanged. A region frame remains fixed unless the complete
+  defining boundary undergoes one rigid/similarity transform; do not infer a new
+  local frame orientation from a general junction graph.
+- Derive both **Materials** and **Subdomains** overlays from the draft snapshot.
+  Materials uses the assigned material colors; Subdomains uses categorical region
+  colors so adjacent equal-material faces remain distinct. A compilable but
+  unassigned face gets an amber hatch. Never preview draft topology using the last
+  committed mesh.
+- Preserve probe panel and floating readouts. Boundary probes pick the same span
+  and side highlights as boundary editing. Area-region probes follow `RegionId`.
+  Double-click behavior and view toggles stay unchanged.
+- Use one status-bar sentence for the active phase, such as
+  `Geometry invalid: divider endpoint is free`, `Topology rebuilding: tracing
+  faces`, `Mesh rebuilding: recovering junctions`, or `Simulation ready`. Do not
+  add a second permanent progress label to the Simulation panel.
+- If geometry compilation fails, draw the authored draft in red over a subdued
+  accepted reference. If geometry compiles but assignment fails, retain normal
+  curves and highlight the relevant face/anchor in amber or red. The invalid draft
+  remains fully selectable and editable in either case.
+
+Editor tests use synthesized egui pointer events for inner and outer attachment,
+the four creation presets, selection priority, junction dragging and partial-arm
+blocking, detach, divider removal and ownership choice, bulk span conditions,
+side orientation, overlay face picking, Delete, Escape, and one-entry history.
+A short manual native/browser pass checks visual layering, narrow layout, touch
+targets, and gestures. Browser WebGPU execution remains a local smoke check rather
+than a CI requirement.
 
 **Exit criterion:** users can build, attach, reconfigure, and remove the same curve
 without knowing its former object class, and the draft overlay agrees with the mesh
 that will be committed.
 
-#### Stage 5: remove the parallel models and document the result
+#### Stage 6: atomic application switch and legacy removal
 
-- Delete the legacy object-specific topology, validation, region flood, mesher
-  branches, editor selection variants, and persistence writers after all consumers
-  use the unified snapshot. Remove the obsolete file decoders as part of the same
-  hard cut.
+- Land the new document/editor commands, cooperative mesh job, and UI structures
+  behind non-production tests first. Switch document loading, validation,
+  rendering, hit testing, simulation transactions, AMR, probes, far field, and
+  overlays in one integration change so a frame cannot mix legacy and topology
+  identities.
+- Rewrite every bundled example in the new authored model and make the first
+  example the startup document. Check its sources, probes, boundary laws, material
+  frames, view settings, and readout state rather than comparing geometry alone.
+- Delete production uses of `ObstacleId`, `InternalBoundaryId`,
+  `MaterialInterfaceId`, `JunctionId`, object-specific `GeometrySpan` variants,
+  legacy boundary-probe targets, and legacy mesher/operator/probe/AMR entry points.
+  Keep legacy core algorithms temporarily only where they provide numerical
+  equivalence fixtures; do not ship a compatibility adapter.
 - Update architecture notes, file-format documentation, examples, help text, and
-  the engineering log. Record the initial full-remesh limitation and the later
-  local-repair work explicitly.
-- Run formatting, Clippy with warnings denied, core/app tests, native compilation,
-  release WASM compilation, scene migration fixtures, and the local browser smoke
-  suite where WebGPU is available.
+  the engineering log. Record topology coordinate movement's initial full-rebuild
+  behavior and the deferred local-repair work explicitly.
+- Run formatting, Clippy with warnings denied, the complete core/app suite, native
+  release compilation, release Trunk/WebGPU compilation, scene fixtures, and the
+  local browser smoke suite where WebGPU is available. Record handoff times for a
+  multi-region junction example and confirm that the cooperative topology job
+  stays inside its frame budget.
+- Use a source audit as a final gate: the application production path must contain
+  no old geometry IDs and no calls to legacy scene meshing, assembly, indicator,
+  adaptation, transfer, source, ordinary-probe, or far-field compilers.
 
 **Completion:** one stored curve model, one compiled face map, and one span-law
 model drive validation, rendering, meshing, simulation, probes, persistence, and

@@ -7,6 +7,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] After the atomic topology application cutover, add sector-aware local mesh
+  repair for unified curve coordinate edits. The first cutover deliberately takes
+  a cooperative full rebuild for curve and junction movement while preserving
+  exact mesh reuse for material, source, and boundary-law edits.
 - [ ] Raise viewport video capture from the initial 30 FPS implementation to 60 FPS.
   Measure browser encoding and native GPU-readback pressure first, retain bounded
   native queues and wall-clock pacing, and report dropped frames rather than slowing
@@ -62,9 +66,26 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
-- [ ] Extend bounded coordinate repair to open material-divider graphs. The first
-  junction implementation deliberately uses the robust full-rebuild fallback for
-  graph-edge movement and topology edits.
+
+## 2026-09-14 — Planned atomic topology application cutover
+
+- Specified an authored `TopologyScene` with stable oriented face anchors. Compiled
+  `FaceId`s remain snapshot-local cache data and will not enter persistence,
+  history, selection, probes, or source ownership.
+- Split the implementation into document/anchor contracts, a cooperative topology
+  mesh job, headless topology editor commands, a version-22 persistence and example
+  hard cut, one atomic UI/runtime switch, and legacy production-path removal.
+- Defined the purpose-first Draw popover, unified curve/span/junction selection,
+  partial-junction transform handling, contextual span and face controls, explicit
+  material choice on ambiguous divider removal, and draft-derived subdomain
+  overlays. Invalid topology and unassigned faces remain editable and get localized
+  viewport feedback.
+- The live transaction will carry one immutable authored scene, topology snapshot,
+  and mesh plan token through meshing, assembly, transfer, GPU upload, AMR, probes,
+  overlays, and far field. A failed or stale candidate leaves the accepted running
+  state untouched.
+- Topology coordinate edits initially use the verified cooperative full rebuild.
+  Local graph repair remains a measured follow-up rather than a cutover blocker.
 
 ## 2026-09-14 — Topology-aware far-field compilation
 
