@@ -39,13 +39,14 @@ inspector, Draw, and wave playback actions, while a hideable contextual right
 inspector exposes one of five panels: Edit, View, Simulation, Materials, or Probes. The
 solver starts in the running state after its initial operator is committed.
 Selection remains contextual rather than introducing separate selection modes.
-Draw opens a transient role/primitive popover: holes and interfaces offer Circle
-and Custom, while baffles offer Straight and Custom. A single `InteractionMode`
-owns draw, pulse-placement, and probe placement state. Placement modes are shown
-over the viewport and survive inspector changes; preset geometry is deliberately
-one-shot, while pulse placement remains active until toggled off, ended with the
-overlay, or cancelled with Escape. The point source is manipulated directly
-through its viewport marker.
+Draw opens a transient role/primitive popover: holes and interfaces offer Circle,
+Rectangle, Polygon, and Spline, while baffles offer Straight, Polyline, and Spline.
+Polygonal tools accept interpolation vertices; Spline accepts control points. A
+single `InteractionMode` owns draw, pulse-placement, and probe placement state.
+Placement modes are shown over the viewport and survive inspector changes;
+constrained finite constructions are deliberately one-shot, while pulse placement
+remains active until toggled off, ended with the overlay, or cancelled with Escape.
+The point source is manipulated directly through its viewport marker.
 
 The lower-right status control carries a compact performance summary (FPS, solver
 steps per second, DOFs, mesh size, and timestep). Detailed performance measurements
@@ -285,6 +286,12 @@ controls extend periodically; de Boor evaluates positions and the differentiated
 control/knot sequences. Intervals below 1e-12 of a period are rejected as
 numerically ill-conditioned. Parameters wrap over one period.
 
+Exact polyline constructors expand each vertex-to-vertex edge into one collinear
+cubic Bézier span. Interior or periodic breakpoints have multiplicity three, making
+the vertex an interpolated C0 corner while retaining the normal open or periodic
+spline representation. Straight and rectangular tools are constrained instances of
+the same constructors; no separate polygon geometry reaches validation or meshing.
+
 Periodic knot insertion updates a whole period of the affected control sequence,
 including controls crossing the seam, and preserves position and derivatives.
 Existing knots select their associated handles. Removal drops a control and its
@@ -326,10 +333,11 @@ both scenes and clears history.
 Selection is either one spline control or a transient set of topological spans.
 Handles always select one control for local deformation; spans support bulk
 boundary assignment, while a set containing every span of movable curves also
-supports exact affine transforms. A screen-space marquee selects every curve or
-outer span touched by its rectangle. Its geometry-kind filter can restrict the
-operation to loops, baffles, or outer edges; replacement, additive, and subtractive
-operations all produce the same transient span set used by click selection.
+supports exact affine transforms. A left-to-right screen-space marquee selects
+logical spans fully enclosed by its rectangle; right-to-left selects spans that
+cross or lie inside it. Its geometry-kind filter can restrict the operation to
+loops, baffles, or outer edges. Replace, Add, and Subtract update live with keyboard
+modifiers and all produce the same transient span set used by click selection.
 Repeated-knot multiplicity is stored separately from positive knot intervals, so
 C2, C1, and C0 joins do not create empty boundary-condition spans. Raising
 multiplicity uses exact knot insertion and
@@ -344,8 +352,12 @@ seam. Rigid dragging and snapping use the selected arcs' length-weighted centroi
 Shift distinguishes a click from a drag before toggling an already selected span;
 during translation it temporarily enables grid snapping, and during rotation or
 uniform scaling it selects the transform's fixed increment. The transform pivot is
-transient, as are selection, transform inputs, and snapping preferences. Bulk
-boundary edits validate all outer, hole, and oriented
+transient, as are selection, transform inputs, and snapping preferences. An open
+complete curve or a partial spline piece with C0-bounded support can be straightened
+by distributing its active controls along the chord between its fixed endpoints.
+This changes only control positions, preserving knot topology, span laws, and
+geometry-attached probe spans. Complete periodic curves are excluded. Bulk boundary
+edits validate all outer, hole, and oriented
 baffle-face targets before one revision and history transaction. Baffle left/right
 always follows increasing spline parameter.
 

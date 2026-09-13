@@ -7,13 +7,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Near-term product-polish order after the completed phone/touch slice: drawing
-  primitives and generalized C0-piece straightening, then screenshot/video capture.
-  Reassess the remaining product roadmap after those groups land.
-- [ ] Implement the bounded drawing-primitives slice described below: a contextual
-  Loop/Baffle catalog, two-point Straight, Rectangle, Polygon, Polyline, an explicitly
-  named Spline tool, and generalized C0-piece straightening. Keep advanced
-  construction operations outside this slice.
+- [ ] Next product-polish slice after the completed phone/touch and drawing work:
+  screenshot/video capture. Reassess the remaining product roadmap afterward.
 - [ ] Replace the vector overlay's run-peak exposure heuristic with a robust
   automatic scale that can recover after a legitimate transient spike such as
   **Place pulse**, while still refusing to magnify late numerical noise. Avoid
@@ -64,6 +59,29 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-13 — Drawing primitives and generalized straightening
+
+- Replaced the ambiguous **Custom** choice with explicit role-specific catalogs.
+  Hole and Interface offer Circle, Rectangle, Polygon, and Spline; Baffle offers
+  Straight, Polyline, and Spline. Viewport prompts and previews distinguish clicked
+  interpolation vertices from freeform spline controls.
+- Added dependency-free exact polyline and polygon constructors to `funfern-core`.
+  Every edge is represented by a collinear cubic Bézier span and every entered
+  vertex is a multiplicity-three C0 breakpoint. Completed geometry remains an
+  ordinary open or periodic spline throughout validation, persistence, and meshing.
+- Straight baffles now use two clicked endpoints. Rectangle uses two opposite
+  corners; Polyline and Polygon accept actual vertices and finish with Enter, while
+  clicking the first vertex also closes Polygon. Each completed primitive is one
+  document-history action; Backspace and Escape retain their staging behavior.
+- Moved straightening into the shared contextual transform controls. It now handles
+  complete open baffles and partial loop or baffle pieces bounded by C0 breaks,
+  including seam-wrapped loop selections. It keeps endpoints fixed and changes only
+  active control positions, so span conditions and boundary-probe attachments stay
+  intact. Complete loops are deliberately ineligible.
+- All 334 workspace tests, warning-denied Clippy, native release compilation, and
+  the release Trunk build pass. Interactive construction remains on the manual
+  browser and touch-device checklist.
+
 ## 2026-09-13 — Revised drawing-primitives slice
 
 - Keep creation choices local to the **Draw** popup rather than adding a persistent
@@ -86,8 +104,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Generalize **Straighten baffle** into **Straighten selected piece** for a contiguous
   span run bounded by C0 breaks or open endpoints. Preserve the piece endpoints,
   distribute its controls along the chord, and retain span boundary conditions,
-  baffle face coherence, and geometry-attached probe references. A complete curve
-  remains eligible.
+  baffle face coherence, and geometry-attached probe references. A complete open
+  curve remains eligible; a complete periodic loop does not collapse into a line.
 - Each completed primitive and each straighten operation is one undoable document
   action. Failed or invalid placement remains governed by the existing draft and
   validator behavior. Respect the 32-feature and 128-control limits, and keep all

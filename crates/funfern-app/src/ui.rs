@@ -46,22 +46,71 @@ const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const GIZMO_PADDING: f64 = 18.0;
 const VECTOR_OVERLAY_ABSOLUTE_SILENCE: f64 = 1.0e-6;
 const VECTOR_OVERLAY_SILENCE_RATIO: f64 = 1.0e-4;
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum CreationRole {
     #[default]
     Hole,
     MaterialInterface,
     InternalBoundary,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrawTool {
+    Circle,
+    Rectangle,
+    Polygon,
+    Straight,
+    Polyline,
+    Spline,
+}
+impl DrawTool {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Circle => "Circle",
+            Self::Rectangle => "Rectangle",
+            Self::Polygon => "Polygon",
+            Self::Straight => "Straight",
+            Self::Polyline => "Polyline",
+            Self::Spline => "Spline",
+        }
+    }
+
+    const fn minimum_points(self) -> usize {
+        match self {
+            Self::Circle => 0,
+            Self::Straight | Self::Rectangle | Self::Polyline => 2,
+            Self::Polygon => 3,
+            Self::Spline => 4,
+        }
+    }
+
+    const fn maximum_points(self) -> usize {
+        match self {
+            Self::Circle => 0,
+            Self::Straight | Self::Rectangle => 2,
+            Self::Polygon => 42,
+            Self::Polyline => 43,
+            Self::Spline => 128,
+        }
+    }
+
+    const fn finishes_automatically(self) -> bool {
+        matches!(self, Self::Circle | Self::Straight | Self::Rectangle)
+    }
+
+    const fn places_vertices(self) -> bool {
+        matches!(
+            self,
+            Self::Straight | Self::Rectangle | Self::Polygon | Self::Polyline
+        )
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum InteractionMode {
     #[default]
     Select,
-    DrawPreset {
+    Draw {
         role: CreationRole,
-    },
-    DrawCustom {
-        role: CreationRole,
+        tool: DrawTool,
     },
     PlacePulse,
     PlaceProbe,
@@ -2876,33 +2925,141 @@ impl Playground {
         }
         self.apply_control_updates(updates);
     }
-    fn finish_custom(&mut self) {
-        if self.custom.len() < 4 {
-            self.message = "A cubic curve needs at least four control points".into();
-            return;
-        }
-        if self.creation_role == CreationRole::InternalBoundary {
-            let spline = OpenCubicSpline::uniform(self.custom.clone()).unwrap();
-            let anchor = spline.evaluate(spline.period() * 0.5);
-            let region = self.region_at(anchor);
-            let result = self.editor.create_internal_boundary(spline, region);
-            if let Some(id) = self.error(result) {
-                self.select_baffle(id);
-                self.custom.clear();
-                self.interaction_mode = InteractionMode::Select;
+
+    fn straightenable_control_groups(&self) -> Option<Vec<Vec<GeometryControl>>> {
+        for obstacle in &self.editor.document.model.draft.obstacles {
+            let selected = (0..obstacle.spline.intervals().len())
+                .filter(|span| {
+                    self.selected_spans
+                        .contains(&GeometrySpan::Loop(obstacle.id, *span))
+                })
+                .count();
+            if selected != 0 && selected == obstacle.spline.intervals().len() {
+                return None;
             }
+        }
+        let groups = self.transformable_curve_controls()?;
+        groups
+            .iter()
+            .all(|group| {
+                let Some(start) = group
+                    .first()
+                    .and_then(|control| self.editor.control_point(*control))
+                else {
+                    return false;
+                };
+                let Some(end) = group
+                    .last()
+                    .and_then(|control| self.editor.control_point(*control))
+                else {
+                    return false;
+                };
+                group.len() >= 2 && (end - start).norm() > f64::EPSILON
+            })
+            .then_some(groups)
+    }
+
+    fn straighten_selection(&mut self) {
+        let Some(groups) = self.straightenable_control_groups() else {
+            self.message = "Select C0-bounded open pieces to straighten".into();
+            return;
+        };
+        let mut updates = Vec::new();
+        for group in groups {
+            let start = self.editor.control_point(group[0]).unwrap();
+            let end = self.editor.control_point(*group.last().unwrap()).unwrap();
+            let denominator = (group.len() - 1) as f64;
+            updates.extend(
+                group
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, control)| (control, start.lerp(end, index as f64 / denominator))),
+            );
+        }
+        if self.apply_control_updates(updates) {
+            self.gizmo_pivot = None;
+        }
+    }
+
+    fn finish_drawing(&mut self) {
+        let InteractionMode::Draw { role, tool } = self.interaction_mode else {
+            return;
+        };
+        if self.custom.len() < tool.minimum_points() {
+            self.message = format!(
+                "{} needs at least {} {}",
+                tool.label(),
+                tool.minimum_points(),
+                if tool.places_vertices() {
+                    "vertices"
+                } else {
+                    "control points"
+                }
+            );
             return;
         }
-        let spline = PeriodicCubicSpline::uniform(self.custom.clone()).unwrap();
         let center = self
             .custom
             .iter()
             .copied()
             .fold(Point2::default(), |sum, point| sum + point)
             / self.custom.len() as f64;
-        let result = self.create_spline(spline, center);
-        if let Some(id) = self.error(result) {
-            self.select_loop(id);
+        let result = match (role, tool) {
+            (CreationRole::InternalBoundary, DrawTool::Straight | DrawTool::Polyline) => {
+                OpenCubicSpline::polyline(self.custom.clone())
+                    .map_err(|error| error.to_string())
+                    .and_then(|spline| {
+                        let anchor = spline.evaluate(spline.period() * 0.5);
+                        let region = self.region_at(anchor);
+                        self.editor
+                            .create_internal_boundary(spline, region)
+                            .map(FocusedFeature::Baffle)
+                    })
+            }
+            (CreationRole::InternalBoundary, DrawTool::Spline) => {
+                OpenCubicSpline::uniform(self.custom.clone())
+                    .map_err(|error| error.to_string())
+                    .and_then(|spline| {
+                        let anchor = spline.evaluate(spline.period() * 0.5);
+                        let region = self.region_at(anchor);
+                        self.editor
+                            .create_internal_boundary(spline, region)
+                            .map(FocusedFeature::Baffle)
+                    })
+            }
+            (CreationRole::Hole | CreationRole::MaterialInterface, DrawTool::Rectangle) => {
+                let first = self.custom[0];
+                let second = self.custom[1];
+                let vertices = vec![
+                    Point2::new(first.x.min(second.x), first.y.min(second.y)),
+                    Point2::new(first.x.max(second.x), first.y.min(second.y)),
+                    Point2::new(first.x.max(second.x), first.y.max(second.y)),
+                    Point2::new(first.x.min(second.x), first.y.max(second.y)),
+                ];
+                PeriodicCubicSpline::polygon(vertices)
+                    .map_err(|error| error.to_string())
+                    .and_then(|spline| self.create_spline(role, spline, center))
+                    .map(FocusedFeature::Loop)
+            }
+            (CreationRole::Hole | CreationRole::MaterialInterface, DrawTool::Polygon) => {
+                PeriodicCubicSpline::polygon(self.custom.clone())
+                    .map_err(|error| error.to_string())
+                    .and_then(|spline| self.create_spline(role, spline, center))
+                    .map(FocusedFeature::Loop)
+            }
+            (CreationRole::Hole | CreationRole::MaterialInterface, DrawTool::Spline) => {
+                PeriodicCubicSpline::uniform(self.custom.clone())
+                    .map_err(|error| error.to_string())
+                    .and_then(|spline| self.create_spline(role, spline, center))
+                    .map(FocusedFeature::Loop)
+            }
+            _ => Err("The selected drawing tool is not available for this role".into()),
+        };
+        if let Some(feature) = self.error(result) {
+            match feature {
+                FocusedFeature::Loop(id) => self.select_loop(id),
+                FocusedFeature::Baffle(id) => self.select_baffle(id),
+            }
             self.custom.clear();
             self.interaction_mode = InteractionMode::Select;
         }
@@ -2910,11 +3067,12 @@ impl Playground {
 
     fn create_spline(
         &mut self,
+        role: CreationRole,
         spline: PeriodicCubicSpline,
         anchor: Point2,
     ) -> Result<ObstacleId, String> {
         let exterior = self.region_at(anchor);
-        match self.creation_role {
+        match role {
             CreationRole::Hole => self.editor.create_loop(spline, LoopRole::Hole { exterior }),
             CreationRole::MaterialInterface => {
                 self.editor
@@ -4385,10 +4543,7 @@ impl Playground {
                 }
             }
         }
-        let drawing = matches!(
-            self.interaction_mode,
-            InteractionMode::DrawPreset { .. } | InteractionMode::DrawCustom { .. }
-        );
+        let drawing = matches!(self.interaction_mode, InteractionMode::Draw { .. });
         let draw_response =
             ui.add(egui::Button::new("+ Draw").selected(drawing || self.add_geometry_open));
         self.add_geometry_anchor = draw_response.rect.left_bottom() + egui::vec2(0.0, 4.0);
@@ -4455,8 +4610,6 @@ impl Playground {
             .fixed_pos(self.add_geometry_anchor)
             .default_width(250.0)
             .show(ctx, |ui| {
-                ui.small("Choose a role, then place a primitive in the viewport.");
-                ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     for (role, label) in [
                         (CreationRole::Hole, "Hole"),
@@ -4488,25 +4641,28 @@ impl Playground {
                         });
                 }
                 ui.separator();
-                ui.label("Primitive");
-                ui.horizontal(|ui| {
-                    let primitive_label = if self.creation_role == CreationRole::InternalBoundary {
-                        "Straight"
+                ui.label("Shape");
+                ui.horizontal_wrapped(|ui| {
+                    let tools: &[DrawTool] = if self.creation_role == CreationRole::InternalBoundary
+                    {
+                        &[DrawTool::Straight, DrawTool::Polyline, DrawTool::Spline]
                     } else {
-                        "Circle"
+                        &[
+                            DrawTool::Circle,
+                            DrawTool::Rectangle,
+                            DrawTool::Polygon,
+                            DrawTool::Spline,
+                        ]
                     };
-                    if ui.button(primitive_label).clicked() {
-                        self.interaction_mode = InteractionMode::DrawPreset {
-                            role: self.creation_role,
-                        };
-                        close = true;
-                    }
-                    if ui.button("Custom").clicked() {
-                        self.interaction_mode = InteractionMode::DrawCustom {
-                            role: self.creation_role,
-                        };
-                        self.custom.clear();
-                        close = true;
+                    for tool in tools {
+                        if ui.button(tool.label()).clicked() {
+                            self.interaction_mode = InteractionMode::Draw {
+                                role: self.creation_role,
+                                tool: *tool,
+                            };
+                            self.custom.clear();
+                            close = true;
+                        }
                     }
                 });
             });
@@ -8039,14 +8195,28 @@ impl Playground {
                 }
             });
         }
-        if let InteractionMode::DrawCustom { .. } = self.interaction_mode {
+        if let InteractionMode::Draw { tool, .. } = self.interaction_mode
+            && !tool.finishes_automatically()
+        {
             ui.horizontal(|ui| {
-                ui.label(format!("{} / 128 points", self.custom.len()));
+                ui.label(format!(
+                    "{} / {} {}",
+                    self.custom.len(),
+                    tool.maximum_points(),
+                    if tool.places_vertices() {
+                        "vertices"
+                    } else {
+                        "controls"
+                    }
+                ));
                 if ui
-                    .add_enabled(self.custom.len() >= 4, egui::Button::new("Finish"))
+                    .add_enabled(
+                        self.custom.len() >= tool.minimum_points(),
+                        egui::Button::new("Finish"),
+                    )
                     .clicked()
                 {
-                    self.finish_custom();
+                    self.finish_drawing();
                 }
                 if ui.button("Cancel").clicked() {
                     self.custom.clear();
@@ -8337,12 +8507,6 @@ impl Playground {
                     self.select_baffle(id);
                 }
             }
-            if ui.button("Straighten baffle").clicked() {
-                let result = self.editor.straighten_internal_boundary(id);
-                if self.error(result).is_some() {
-                    self.gizmo_pivot = None;
-                }
-            }
         }
         if let Some((id, Some(index))) = self.internal_selection
             && let Some(boundary) = self.editor.internal_boundary(id)
@@ -8508,6 +8672,22 @@ impl Playground {
                         self.align_selection(false);
                     }
                 });
+                if ui
+                    .add_enabled(
+                        self.straightenable_control_groups().is_some(),
+                        egui::Button::new(if piece_count == 1 {
+                            "Straighten selected piece"
+                        } else {
+                            "Straighten selected pieces"
+                        }),
+                    )
+                    .on_disabled_hover_text(
+                        "Straightening needs open endpoints or C0 breaks on both sides",
+                    )
+                    .clicked()
+                {
+                    self.straighten_selection();
+                }
             }
         }
         self.topology_inspector(ui);
@@ -9544,7 +9724,7 @@ impl Playground {
                 self.clear_transient();
             }
             if !typing
-                && !matches!(self.interaction_mode, InteractionMode::DrawCustom { .. })
+                && !matches!(self.interaction_mode, InteractionMode::Draw { .. })
                 && ctx.input(|i| {
                     i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
                 })
@@ -9557,9 +9737,11 @@ impl Playground {
                 {
                     self.select_filtered();
                 }
-                if matches!(self.interaction_mode, InteractionMode::DrawCustom { .. }) {
-                    if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        self.finish_custom();
+                if let InteractionMode::Draw { tool, .. } = self.interaction_mode {
+                    if ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                        && !tool.finishes_automatically()
+                    {
+                        self.finish_drawing();
                     }
                     if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
                         self.custom.pop();
@@ -10244,47 +10426,47 @@ impl Playground {
                     }
                 } else if response.clicked() && !space && !self.panning {
                     match self.interaction_mode {
-                        InteractionMode::DrawPreset { role } => {
-                            let center = self.world(p, r);
+                        InteractionMode::Draw { role, tool } => {
                             self.creation_role = role;
-                            if role == CreationRole::InternalBoundary {
-                                let result = self.editor.create_internal_boundary(
-                                    OpenCubicSpline::uniform(vec![
-                                        center + Point2::new(-0.25, 0.0),
-                                        center + Point2::new(-0.08, 0.0),
-                                        center + Point2::new(0.08, 0.0),
-                                        center + Point2::new(0.25, 0.0),
-                                    ])
-                                    .unwrap(),
-                                    self.region_at(center),
-                                );
-                                if let Some(id) = self.error(result) {
-                                    self.select_baffle(id);
-                                    self.interaction_mode = InteractionMode::Select;
-                                }
-                            } else {
+                            let point = self.world(p, r);
+                            if tool == DrawTool::Circle {
                                 let result = self.create_spline(
-                                    PeriodicCubicSpline::rounded(center, 0.15),
-                                    center,
+                                    role,
+                                    PeriodicCubicSpline::rounded(point, 0.15),
+                                    point,
                                 );
                                 if let Some(id) = self.error(result) {
                                     self.select_loop(id);
                                     self.interaction_mode = InteractionMode::Select;
                                 }
-                            }
-                        }
-                        InteractionMode::DrawCustom { role } => {
-                            self.creation_role = role;
-                            if role != CreationRole::InternalBoundary
-                                && self.custom.len() >= 4
-                                && self.screen(self.custom[0], r).distance(p)
-                                    < self.hit_tolerance(10.0)
-                            {
-                                self.finish_custom();
-                            } else if self.custom.len() < 128 {
-                                self.custom.push(self.world(p, r));
                             } else {
-                                self.message = "Maximum 128 control points".into();
+                                let closes_on_first = tool == DrawTool::Polygon
+                                    || (tool == DrawTool::Spline
+                                        && role != CreationRole::InternalBoundary);
+                                if closes_on_first
+                                    && self.custom.len() >= tool.minimum_points()
+                                    && self.screen(self.custom[0], r).distance(p)
+                                        < self.hit_tolerance(10.0)
+                                {
+                                    self.finish_drawing();
+                                } else if self.custom.len() < tool.maximum_points() {
+                                    self.custom.push(point);
+                                    if tool.finishes_automatically()
+                                        && self.custom.len() == tool.minimum_points()
+                                    {
+                                        self.finish_drawing();
+                                    }
+                                } else {
+                                    self.message = format!(
+                                        "Maximum {} {}",
+                                        tool.maximum_points(),
+                                        if tool.places_vertices() {
+                                            "vertices"
+                                        } else {
+                                            "control points"
+                                        }
+                                    );
+                                }
                             }
                         }
                         InteractionMode::PlacePulse => {
@@ -11113,29 +11295,74 @@ impl Playground {
                 TEAL,
             );
         }
-        if !self.custom.is_empty() {
-            let mut points = self.custom.clone();
-            if over
-                && let Some(p) = pointer
-                && points.len() < 128
-            {
-                points.push(self.world(p, r));
+        if let InteractionMode::Draw { role, tool } = self.interaction_mode
+            && !self.custom.is_empty()
+        {
+            let candidate = (over && self.custom.len() < tool.maximum_points())
+                .then(|| pointer.map(|point| self.world(point, r)))
+                .flatten();
+            if tool == DrawTool::Rectangle {
+                if let Some(second) = candidate.or_else(|| self.custom.get(1).copied()) {
+                    painter.rect_stroke(
+                        Rect::from_two_pos(self.screen(self.custom[0], r), self.screen(second, r)),
+                        0.0,
+                        Stroke::new(2.0, GOLD),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            } else {
+                let mut points = self.custom.clone();
+                if let Some(candidate) = candidate {
+                    points.push(candidate);
+                }
+                let screen_points = points
+                    .iter()
+                    .map(|point| self.screen(*point, r))
+                    .collect::<Vec<_>>();
+                if screen_points.len() >= 2 {
+                    painter.add(egui::Shape::line(
+                        screen_points.clone(),
+                        Stroke::new(1.0, GOLD),
+                    ));
+                    if tool == DrawTool::Polygon && screen_points.len() >= 3 {
+                        painter.line_segment(
+                            [*screen_points.last().unwrap(), screen_points[0]],
+                            Stroke::new(1.0, GOLD.gamma_multiply(0.55)),
+                        );
+                    }
+                }
             }
-            let polygon: Vec<_> = points.iter().map(|p| self.screen(*p, r)).collect();
-            painter.add(egui::Shape::line(polygon, Stroke::new(1.0, GOLD)));
-            for (i, p) in self.custom.iter().enumerate() {
-                painter.circle_stroke(
-                    self.screen(*p, r),
-                    if i == 0 { 7.0 } else { 4.0 },
-                    Stroke::new(1.5, GOLD),
-                );
+            for (index, point) in self.custom.iter().enumerate() {
+                let position = self.screen(*point, r);
+                if tool.places_vertices() {
+                    let size = if index == 0 && tool == DrawTool::Polygon {
+                        9.0
+                    } else {
+                        7.0
+                    };
+                    painter.rect_filled(
+                        Rect::from_center_size(position, egui::vec2(size, size)),
+                        1.0,
+                        GOLD,
+                    );
+                } else {
+                    painter.circle_stroke(
+                        position,
+                        if index == 0 && role != CreationRole::InternalBoundary {
+                            7.0
+                        } else {
+                            4.0
+                        },
+                        Stroke::new(1.5, GOLD),
+                    );
+                }
             }
-            if self.custom.len() >= 4 {
+            if tool == DrawTool::Spline && self.custom.len() >= 4 {
                 let options = SamplingOptions {
                     tolerance: 0.6 / self.scale,
                     ..Default::default()
                 };
-                if self.creation_role == CreationRole::InternalBoundary {
+                if role == CreationRole::InternalBoundary {
                     if let Ok(spline) = OpenCubicSpline::uniform(self.custom.clone())
                         && let Ok(samples) = sample_open(&spline, options)
                     {
@@ -11236,19 +11463,10 @@ impl Playground {
         }
         if let Some(pointer) = pointer.filter(|point| r.contains(*point)) {
             match self.interaction_mode {
-                InteractionMode::DrawPreset {
-                    role: CreationRole::InternalBoundary,
+                InteractionMode::Draw {
+                    tool: DrawTool::Circle,
+                    ..
                 } => {
-                    let center = self.world(pointer, r);
-                    painter.line_segment(
-                        [
-                            self.screen(center + Point2::new(-0.25, 0.0), r),
-                            self.screen(center + Point2::new(0.25, 0.0), r),
-                        ],
-                        Stroke::new(2.0, GOLD),
-                    );
-                }
-                InteractionMode::DrawPreset { .. } => {
                     painter.circle_stroke(
                         pointer,
                         (0.15 * self.scale) as f32,
@@ -11549,26 +11767,42 @@ impl Playground {
     fn interaction_mode_overlay(&mut self, ctx: &egui::Context, viewport: Rect) {
         let (title, hint) = match self.interaction_mode {
             InteractionMode::Select => return,
-            InteractionMode::DrawPreset { role } => (
-                match role {
-                    CreationRole::Hole => "Drawing hole · Circle",
-                    CreationRole::MaterialInterface => "Drawing interface · Circle",
-                    CreationRole::InternalBoundary => "Drawing baffle · Straight",
+            InteractionMode::Draw { role, tool } => (
+                format!(
+                    "Drawing {} · {}",
+                    match role {
+                        CreationRole::Hole => "hole",
+                        CreationRole::MaterialInterface => "interface",
+                        CreationRole::InternalBoundary => "baffle",
+                    },
+                    tool.label()
+                ),
+                match tool {
+                    DrawTool::Circle => "Click to place",
+                    DrawTool::Straight => {
+                        if self.custom.is_empty() {
+                            "Click the first endpoint"
+                        } else {
+                            "Click the second endpoint"
+                        }
+                    }
+                    DrawTool::Rectangle => {
+                        if self.custom.is_empty() {
+                            "Click the first corner"
+                        } else {
+                            "Click the opposite corner"
+                        }
+                    }
+                    DrawTool::Polygon | DrawTool::Polyline => "Click to add vertices",
+                    DrawTool::Spline => "Click to add control points",
                 },
-                "Click to place",
             ),
-            InteractionMode::DrawCustom { role } => (
-                match role {
-                    CreationRole::Hole => "Drawing hole · Custom",
-                    CreationRole::MaterialInterface => "Drawing interface · Custom",
-                    CreationRole::InternalBoundary => "Drawing baffle · Custom",
-                },
-                "Click to add control points",
-            ),
-            InteractionMode::PlacePulse => ("Placing pulse", "Click repeatedly to inject"),
-            InteractionMode::PlaceProbe => ("Placing point probes", "Click repeatedly to add"),
+            InteractionMode::PlacePulse => ("Placing pulse".into(), "Click repeatedly to inject"),
+            InteractionMode::PlaceProbe => {
+                ("Placing point probes".into(), "Click repeatedly to add")
+            }
             InteractionMode::PlaceSegmentProbe => (
-                "Placing line probes",
+                "Placing line probes".into(),
                 if self.segment_probe_start.is_some() {
                     "Click the end point"
                 } else {
@@ -11576,18 +11810,19 @@ impl Playground {
                 },
             ),
             InteractionMode::PlaceAreaDisk => (
-                "Placing disk probes",
+                "Placing disk probes".into(),
                 if self.area_probe_center.is_some() {
                     "Click the radius"
                 } else {
                     "Click the center"
                 },
             ),
-            InteractionMode::PlaceAreaRegion => {
-                ("Placing subdomain probes", "Click inside a subdomain")
-            }
+            InteractionMode::PlaceAreaRegion => (
+                "Placing subdomain probes".into(),
+                "Click inside a subdomain",
+            ),
             InteractionMode::SelectArea => (
-                "Area selection",
+                "Area selection".into(),
                 "Drag → for enclosed · drag ← for crossing",
             ),
         };
@@ -11599,13 +11834,26 @@ impl Playground {
                     ui.horizontal(|ui| {
                         ui.strong(title);
                         ui.label(hint);
-                        if matches!(self.interaction_mode, InteractionMode::DrawCustom { .. }) {
-                            ui.label(format!("{} points", self.custom.len()));
+                        if let InteractionMode::Draw { tool, .. } = self.interaction_mode
+                            && !tool.finishes_automatically()
+                        {
+                            ui.label(format!(
+                                "{} {}",
+                                self.custom.len(),
+                                if tool.places_vertices() {
+                                    "vertices"
+                                } else {
+                                    "controls"
+                                }
+                            ));
                             if ui
-                                .add_enabled(self.custom.len() >= 4, egui::Button::new("Finish"))
+                                .add_enabled(
+                                    self.custom.len() >= tool.minimum_points(),
+                                    egui::Button::new("Finish"),
+                                )
                                 .clicked()
                             {
-                                self.finish_custom();
+                                self.finish_drawing();
                             }
                         }
                         if self.interaction_mode == InteractionMode::SelectArea {
@@ -15164,11 +15412,12 @@ mod tests {
     }
 
     #[test]
-    fn custom_open_baffle_creation_and_handle_drag() {
+    fn spline_open_baffle_creation_and_handle_drag() {
         let mut harness = Harness::new();
         harness.state.creation_role = CreationRole::InternalBoundary;
-        harness.state.interaction_mode = InteractionMode::DrawCustom {
+        harness.state.interaction_mode = InteractionMode::Draw {
             role: CreationRole::InternalBoundary,
+            tool: DrawTool::Spline,
         };
         for point in [
             Point2::new(-0.65, 0.48),
@@ -16307,18 +16556,75 @@ mod tests {
         assert!((after.evaluate(3.5) - untouched).norm() < 1.0e-12);
         assert_eq!(harness.state.editor.history_len().0, history + 1);
     }
+
     #[test]
-    fn both_creation_workflows_and_custom_cancel() {
+    fn straighten_selected_c0_loop_piece_preserves_remote_curve_and_attachments() {
+        let mut harness = Harness::new();
+        let id = ObstacleId(1);
+        harness
+            .state
+            .editor
+            .set_obstacle_continuity(id, 7, 0)
+            .unwrap();
+        harness
+            .state
+            .editor
+            .set_obstacle_continuity(id, 1, 0)
+            .unwrap();
+        harness
+            .state
+            .set_span_selection(vec![GeometrySpan::Loop(id, 7), GeometrySpan::Loop(id, 0)]);
+        let target = harness
+            .state
+            .boundary_probe_target_from_selection()
+            .unwrap();
+        harness.state.editor.create_boundary_probe(target).unwrap();
+        let before = harness.state.editor.obstacle(id).unwrap().spline.clone();
+        let conditions = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .span_conditions
+            .clone();
+        let probes = harness.state.editor.document.model.probes.clone();
+        let untouched = before.evaluate(3.5);
+        let start = before.evaluate(before.span_bounds(7).unwrap()[0]);
+        let end = before.evaluate(before.span_bounds(0).unwrap()[1]);
+        let direction = end - start;
+        let history = harness.state.editor.history_len().0;
+
+        harness.click_text("Straighten selected piece");
+
+        let after = &harness.state.editor.obstacle(id).unwrap().spline;
+        for parameter in [7.0, 7.25, 7.75, 0.0, 0.25, 0.75, 1.0] {
+            let relative = after.evaluate(parameter) - start;
+            let cross = relative.x * direction.y - relative.y * direction.x;
+            assert!(cross.abs() / direction.norm() < 1.0e-10);
+        }
+        assert!((after.evaluate(3.5) - untouched).norm() < 1.0e-12);
+        assert_eq!(
+            harness.state.editor.obstacle(id).unwrap().span_conditions,
+            conditions
+        );
+        assert_eq!(harness.state.editor.document.model.probes, probes);
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
+    }
+
+    #[test]
+    fn circle_and_spline_creation_and_cancel() {
         let mut h = Harness::new();
-        h.state.interaction_mode = InteractionMode::DrawPreset {
+        h.state.interaction_mode = InteractionMode::Draw {
             role: CreationRole::Hole,
+            tool: DrawTool::Circle,
         };
         h.click(h.point(Point2::new(0.5, 0.4)));
         assert_eq!(h.state.editor.document.model.draft.obstacles.len(), 2);
         assert_eq!(h.state.interaction_mode, InteractionMode::Select);
         assert_eq!(h.state.editor.history_len().0, 1);
-        h.state.interaction_mode = InteractionMode::DrawCustom {
+        h.state.interaction_mode = InteractionMode::Draw {
             role: CreationRole::Hole,
+            tool: DrawTool::Spline,
         };
         for p in [
             Point2::new(-0.7, -0.4),
@@ -16334,8 +16640,9 @@ mod tests {
         assert_eq!(h.state.editor.history_len().0, 2);
         h.settle();
         assert_eq!(h.state.editor.acceptance, Acceptance::Valid);
-        h.state.interaction_mode = InteractionMode::DrawCustom {
+        h.state.interaction_mode = InteractionMode::Draw {
             role: CreationRole::Hole,
+            tool: DrawTool::Spline,
         };
         h.click(h.point(Point2::new(0.4, -0.3)));
         h.click(h.point(Point2::new(0.6, -0.3)));
@@ -16345,6 +16652,159 @@ mod tests {
         assert!(h.state.custom.is_empty());
         assert_eq!(h.state.editor.history_len().0, 2);
     }
+
+    #[test]
+    fn straight_and_polyline_baffles_use_clicked_vertices() {
+        let mut harness = Harness::new();
+        let history = harness.state.editor.history_len().0;
+        let start = Point2::new(-0.8, 0.72);
+        let end = Point2::new(0.75, 0.56);
+        harness.state.interaction_mode = InteractionMode::Draw {
+            role: CreationRole::InternalBoundary,
+            tool: DrawTool::Straight,
+        };
+        let start = harness.state.world(harness.point(start), harness.rect);
+        let end = harness.state.world(harness.point(end), harness.rect);
+        harness.click(harness.point(start));
+        assert_eq!(harness.state.custom, vec![start]);
+        assert!(
+            harness
+                .state
+                .editor
+                .document
+                .model
+                .draft
+                .internal_boundaries
+                .is_empty()
+        );
+        harness.click(harness.point(end));
+        let straight = harness
+            .state
+            .editor
+            .document
+            .model
+            .draft
+            .internal_boundaries
+            .last()
+            .unwrap();
+        assert_eq!(straight.spline.controls().len(), 4);
+        for (index, control) in straight.spline.controls().iter().enumerate() {
+            assert!((*control - start.lerp(end, index as f64 / 3.0)).norm() < 1.0e-12);
+        }
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
+        assert_eq!(harness.state.interaction_mode, InteractionMode::Select);
+
+        let vertices = [
+            Point2::new(-0.82, -0.72),
+            Point2::new(-0.2, -0.58),
+            Point2::new(0.72, -0.76),
+        ]
+        .map(|vertex| harness.state.world(harness.point(vertex), harness.rect));
+        harness.state.interaction_mode = InteractionMode::Draw {
+            role: CreationRole::InternalBoundary,
+            tool: DrawTool::Polyline,
+        };
+        for vertex in vertices {
+            harness.click(harness.point(vertex));
+        }
+        harness.key(Key::Enter, Modifiers::NONE);
+        let polyline = &harness
+            .state
+            .editor
+            .document
+            .model
+            .draft
+            .internal_boundaries[1]
+            .spline;
+        assert_eq!(polyline.multiplicities(), &[3]);
+        assert_eq!(polyline.controls().len(), 7);
+        for (index, vertex) in vertices.into_iter().enumerate() {
+            let parameter = polyline.breakpoint(index).unwrap();
+            assert!((polyline.evaluate(parameter) - vertex).norm() < 1.0e-12);
+        }
+        assert_eq!(harness.state.editor.history_len().0, history + 2);
+    }
+
+    #[test]
+    fn rectangle_and_polygon_loops_are_exact_c0_geometry() {
+        let mut harness = Harness::new();
+        let history = harness.state.editor.history_len().0;
+        let first = Point2::new(-0.86, -0.82);
+        let second = Point2::new(-0.34, -0.43);
+        let first = harness.state.world(harness.point(first), harness.rect);
+        let second = harness.state.world(harness.point(second), harness.rect);
+        harness.state.interaction_mode = InteractionMode::Draw {
+            role: CreationRole::Hole,
+            tool: DrawTool::Rectangle,
+        };
+        harness.click(harness.point(first));
+        harness.click(harness.point(second));
+        let rectangle = &harness.state.editor.document.model.draft.obstacles[1].spline;
+        assert_eq!(rectangle.multiplicities(), &[3, 3, 3, 3]);
+        let corners = [
+            first,
+            Point2::new(second.x, first.y),
+            second,
+            Point2::new(first.x, second.y),
+        ];
+        for (index, corner) in corners.into_iter().enumerate() {
+            let parameter = rectangle.span_bounds(index).unwrap()[0];
+            assert!((rectangle.evaluate(parameter) - corner).norm() < 1.0e-12);
+        }
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
+
+        let vertices = [
+            Point2::new(0.38, 0.46),
+            Point2::new(0.88, 0.42),
+            Point2::new(0.72, 0.88),
+        ]
+        .map(|vertex| harness.state.world(harness.point(vertex), harness.rect));
+        harness.state.interaction_mode = InteractionMode::Draw {
+            role: CreationRole::Hole,
+            tool: DrawTool::Polygon,
+        };
+        for vertex in vertices {
+            harness.click(harness.point(vertex));
+        }
+        harness.click(harness.point(vertices[0]));
+        let polygon = &harness.state.editor.document.model.draft.obstacles[2].spline;
+        assert_eq!(polygon.multiplicities(), &[3, 3, 3]);
+        for (index, vertex) in vertices.into_iter().enumerate() {
+            let parameter = polygon.span_bounds(index).unwrap()[0];
+            assert!((polygon.evaluate(parameter) - vertex).norm() < 1.0e-12);
+        }
+        assert_eq!(harness.state.editor.history_len().0, history + 2);
+    }
+
+    #[test]
+    fn touch_can_place_a_two_endpoint_straight_baffle() {
+        let mut harness = Harness::new();
+        harness.state.interaction_mode = InteractionMode::Draw {
+            role: CreationRole::InternalBoundary,
+            tool: DrawTool::Straight,
+        };
+        let start = harness.point(Point2::new(-0.72, 0.7));
+        let end = harness.point(Point2::new(0.68, 0.62));
+        harness.primary_touch(1, TouchPhase::Start, start);
+        harness.primary_touch(1, TouchPhase::End, start);
+        harness.primary_touch(2, TouchPhase::Start, end);
+        harness.primary_touch(2, TouchPhase::End, end);
+
+        assert_eq!(
+            harness
+                .state
+                .editor
+                .document
+                .model
+                .draft
+                .internal_boundaries
+                .len(),
+            1
+        );
+        assert_eq!(harness.state.editor.history_len(), (1, 0));
+        assert_eq!(harness.state.interaction_mode, InteractionMode::Select);
+    }
+
     #[test]
     fn zoom_is_cursor_centered_and_panel_scroll_does_not_zoom() {
         let mut h = Harness::new();
@@ -16409,15 +16869,20 @@ mod tests {
         assert!(h.state.add_geometry_open);
         h.frame(vec![]);
         assert!(h.texts.iter().any(|(text, _)| text == "Draw geometry"));
-        assert!(h.texts.iter().any(|(text, _)| text == "Circle"));
-        assert!(h.texts.iter().any(|(text, _)| text == "Custom"));
+        for tool in ["Circle", "Rectangle", "Polygon", "Spline"] {
+            assert!(h.texts.iter().any(|(text, _)| text == tool));
+        }
         h.click_text("Baffle");
         assert!(matches!(
             h.state.creation_role,
             CreationRole::InternalBoundary
         ));
         assert!(h.texts.iter().any(|(text, _)| text == "Straight"));
+        assert!(h.texts.iter().any(|(text, _)| text == "Polyline"));
+        assert!(h.texts.iter().any(|(text, _)| text == "Spline"));
         assert!(!h.texts.iter().any(|(text, _)| text == "Circle"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Rectangle"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Polygon"));
     }
 
     #[test]
@@ -18033,8 +18498,9 @@ mod tests {
     fn numeric_edit_commits_once_and_typing_captures_editor_keys() {
         let mut h = Harness::new();
         h.click(h.point(Point2::new(0.15, 0.0)));
-        h.state.interaction_mode = InteractionMode::DrawCustom {
+        h.state.interaction_mode = InteractionMode::Draw {
             role: CreationRole::Hole,
+            tool: DrawTool::Spline,
         };
         h.state.custom = vec![
             Point2::new(-0.7, 0.4),
@@ -18107,8 +18573,9 @@ mod tests {
         }]);
         assert_ne!(center, h.state.center);
         assert_eq!(h.state.editor.history_len(), (0, 0));
-        h.state.interaction_mode = InteractionMode::DrawCustom {
+        h.state.interaction_mode = InteractionMode::Draw {
             role: CreationRole::Hole,
+            tool: DrawTool::Spline,
         };
         let points = [
             Point2::new(-0.7, 0.4),

@@ -13,10 +13,12 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
 - [ ] Hide every inspector panel and restore each of Edit, View, Simulation, and
   Materials. The viewport expands when the inspector is hidden. At a narrow width,
   File and panel menus replace buttons without obscuring playback controls.
-- [ ] Draw > Hole/Interface > Circle creates one loop and ends placement. Custom
-  previews after four controls; exercise Finish, Enter, first-handle closure,
-  Backspace, and Escape. Draw > Baffle offers Straight and Custom. The viewport
-  overlay always states the active mode and provides Cancel or Done.
+- [ ] Draw > Hole/Interface offers Circle, Rectangle, Polygon, and Spline. Exercise
+  two-corner Rectangle, vertex-based Polygon with Enter and first-vertex closure,
+  and the four-control Spline preview. Draw > Baffle offers two-endpoint Straight,
+  vertex-based Polyline, and control-point Spline. Check Finish, Enter, Backspace,
+  Escape, previews, one-entry history, invalid drafts, and the 32-feature/128-control
+  limits. The viewport overlay identifies vertices versus control points.
 - [ ] Drag a handle outside the square. The invalid draft persists after release,
   is red, and shows a specific reason and the accepted reference. Drag it back
   to recover. Escape during a drag restores both scenes. Undo restores the prior
@@ -44,10 +46,11 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   verify coherent left/right face selection and that Thin gap replaces the two
   independent face conditions instead of competing with them. Enable View >
   Boundary conditions and compare the canvas colors with the legend.
-- [ ] Use C0 isolation, continuity downgrade/reshape, baffle straightening,
-  splitting, and endpoint merging. Endpoint-only actions appear only for a valid
-  endpoint selection; merge is enabled only for two complete baffles within the
-  join distance.
+- [ ] Use C0 isolation, continuity downgrade/reshape, Straighten selected piece on
+  both a complete baffle and a partial C0-bounded loop piece, splitting, and endpoint
+  merging. Straightening preserves endpoints, conditions, and probe attachments.
+  Endpoint-only actions appear only for a valid endpoint selection; merge is enabled
+  only for two complete baffles within the join distance.
 - [ ] Undo/redo each action through buttons and Ctrl/Cmd shortcuts. One drag or
   completed coordinate edit is one action. Undo/redo restores invalid drafts.
 - [ ] Type coordinates. Delete, Space, and Ctrl/Cmd+Z while typing are captured

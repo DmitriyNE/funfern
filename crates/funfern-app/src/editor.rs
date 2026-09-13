@@ -1808,8 +1808,11 @@ impl Editor {
         spline: PeriodicCubicSpline,
         role: LoopRole,
     ) -> Result<ObstacleId, String> {
-        if self.document.model.draft.obstacles.len() >= MAX_OBSTACLES {
-            return Err("Maximum 32 obstacles".into());
+        if self.document.model.draft.obstacles.len()
+            + self.document.model.draft.internal_boundaries.len()
+            >= MAX_OBSTACLES
+        {
+            return Err("Maximum 32 geometric features".into());
         }
         if self.document.model.draft.region(role.exterior()).is_none()
             || role

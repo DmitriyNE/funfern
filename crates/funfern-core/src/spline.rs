@@ -155,6 +155,32 @@ impl OpenCubicSpline {
         Self::new(controls, intervals)
     }
 
+    /// Builds an exact C0 polyline whose cubic segments interpolate `vertices`.
+    pub fn polyline(vertices: Vec<Point2>) -> Result<Self, SplineError> {
+        let Some(control_count) = vertices
+            .len()
+            .checked_mul(3)
+            .and_then(|count| count.checked_sub(2))
+        else {
+            return Err(SplineError::ControlCount);
+        };
+        if vertices.len() < 2 || control_count > 128 {
+            return Err(SplineError::ControlCount);
+        }
+        let mut controls = Vec::with_capacity(control_count);
+        let mut intervals = Vec::with_capacity(vertices.len() - 1);
+        controls.push(vertices[0]);
+        for edge in vertices.windows(2) {
+            let [start, end] = [edge[0], edge[1]];
+            controls.push(start.lerp(end, 1.0 / 3.0));
+            controls.push(start.lerp(end, 2.0 / 3.0));
+            controls.push(end);
+            intervals.push((end - start).norm());
+        }
+        let multiplicities = vec![3; intervals.len().saturating_sub(1)];
+        Self::new_with_multiplicities(controls, intervals, multiplicities)
+    }
+
     pub fn controls(&self) -> &[Point2] {
         &self.controls
     }
@@ -650,6 +676,27 @@ impl PeriodicCubicSpline {
     pub fn uniform(controls: Vec<Point2>) -> Result<Self, SplineError> {
         let n = controls.len();
         Self::new(controls, vec![1.0; n])
+    }
+    /// Builds an exact closed C0 polygon whose cubic segments interpolate `vertices`.
+    pub fn polygon(vertices: Vec<Point2>) -> Result<Self, SplineError> {
+        let Some(control_count) = vertices.len().checked_mul(3) else {
+            return Err(SplineError::ControlCount);
+        };
+        if vertices.len() < 3 || control_count > 128 {
+            return Err(SplineError::ControlCount);
+        }
+        let mut controls = Vec::with_capacity(control_count);
+        let mut intervals = Vec::with_capacity(vertices.len());
+        for index in 0..vertices.len() {
+            let start = vertices[index];
+            let end = vertices[(index + 1) % vertices.len()];
+            controls.push(start.lerp(end, 1.0 / 3.0));
+            controls.push(start.lerp(end, 2.0 / 3.0));
+            controls.push(end);
+            intervals.push((end - start).norm());
+        }
+        let multiplicities = vec![3; intervals.len()];
+        Self::new_with_multiplicities(controls, intervals, multiplicities)
     }
     pub fn rounded(center: Point2, radius: f64) -> Self {
         Self::uniform(

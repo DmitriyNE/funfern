@@ -156,17 +156,24 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   two-sided walls remain load-compatible but are no longer a primary creation tool.
 - **Circle:** click to place eight controls on a radius `0.15` circle, then
   automatically return to selection. The spline lies inside its control polygon.
-- **Straight:** click to place a four-control straight baffle, then return to
-  selection.
-- **Custom:** click control points; four points enable the live preview. Enter
-  finishes an open baffle; Enter or clicking the first handle closes a loop.
-  Backspace removes the last point; Escape cancels construction. These are control
-  points, not interpolation points.
+- **Straight and Rectangle:** two endpoint clicks create an arbitrarily oriented
+  straight baffle; two opposite-corner clicks create an axis-aligned rectangular
+  loop. Both use exact straight cubic spans and then return to selection.
+- **Polygon and Polyline:** clicks place interpolation vertices joined by exact C0
+  straight spans. Enter finishes either tool; clicking the first vertex also closes
+  a polygon. Polygon is available for loops and Polyline for baffles.
+- **Spline:** this is the freeform control-point tool. Four controls enable its live
+  curve preview. Enter finishes an open baffle; Enter or clicking the first handle
+  closes a loop. Its control polygon distinguishes it from the vertex-based tools.
+  Backspace removes the latest staged point and Escape cancels construction.
+- **Straighten:** a complete baffle or a partial span selection isolated by C0
+  breaks can be made exactly straight while preserving its endpoints, span laws,
+  and attached probes. Closed complete loops cannot collapse into a line.
 - **Remove:** Delete or the panel action removes the selected control and its
   associated knot. This can reshape the curve. At least four controls must remain.
   A removal that would merge different span conditions is rejected until the two
   assignments agree. Shape-preserving insertion copies the split span assignment.
-  Deleting an entire loop is a separate panel action.
+  A complete selected loop or baffle can be deleted with Delete or Backspace.
 - **Materials:** create and name materials in the Library, edit the three positive
   or nonnegative properties named by the active physics skin, and assign them under
   Subdomain assignment. Each coefficient can be a constant or a formula. Formulas

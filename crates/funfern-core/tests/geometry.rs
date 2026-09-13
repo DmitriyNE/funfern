@@ -342,6 +342,67 @@ fn open_spline_rejects_malformed_inputs() {
 }
 
 #[test]
+fn polyline_constructor_interpolates_exact_straight_pieces() {
+    let vertices = vec![
+        Point2::new(-0.8, -0.4),
+        Point2::new(-0.1, 0.5),
+        Point2::new(0.75, 0.15),
+    ];
+    let spline = OpenCubicSpline::polyline(vertices.clone()).unwrap();
+    assert_eq!(spline.multiplicities(), &[3]);
+    for (index, edge) in vertices.windows(2).enumerate() {
+        let [start, end] = spline.span_bounds(index).unwrap();
+        near(spline.evaluate(start), edge[0], 1.0e-12);
+        near(spline.evaluate(end), edge[1], 1.0e-12);
+        for step in 0..=8 {
+            let fraction = step as f64 / 8.0;
+            near(
+                spline.evaluate(start + (end - start) * fraction),
+                edge[0].lerp(edge[1], fraction),
+                1.0e-12,
+            );
+        }
+    }
+    assert!(OpenCubicSpline::polyline(vec![vertices[0]]).is_err());
+    assert!(OpenCubicSpline::polyline(vec![vertices[0], vertices[0]]).is_err());
+    assert!(OpenCubicSpline::polyline(vec![Point2::default(); 44]).is_err());
+}
+
+#[test]
+fn polygon_constructor_interpolates_exact_closed_pieces() {
+    let vertices = vec![
+        Point2::new(-0.6, -0.4),
+        Point2::new(0.7, -0.4),
+        Point2::new(0.4, 0.65),
+        Point2::new(-0.5, 0.45),
+    ];
+    let spline = PeriodicCubicSpline::polygon(vertices.clone()).unwrap();
+    assert_eq!(spline.multiplicities(), &[3, 3, 3, 3]);
+    for index in 0..vertices.len() {
+        let edge = [vertices[index], vertices[(index + 1) % vertices.len()]];
+        let [start, end] = spline.span_bounds(index).unwrap();
+        near(spline.evaluate(start), edge[0], 1.0e-12);
+        near(spline.evaluate(end), edge[1], 1.0e-12);
+        for step in 0..=8 {
+            let fraction = step as f64 / 8.0;
+            near(
+                spline.evaluate(start + (end - start) * fraction),
+                edge[0].lerp(edge[1], fraction),
+                1.0e-12,
+            );
+        }
+    }
+    near(
+        spline.evaluate(0.0),
+        spline.evaluate(spline.period()),
+        1.0e-12,
+    );
+    assert!(PeriodicCubicSpline::polygon(vertices[..2].to_vec()).is_err());
+    assert!(PeriodicCubicSpline::polygon(vec![vertices[0], vertices[1], vertices[1]]).is_err());
+    assert!(PeriodicCubicSpline::polygon(vec![Point2::default(); 43]).is_err());
+}
+
+#[test]
 fn open_spline_sampling_keeps_both_endpoints_and_parameter_search() {
     let spline = open_irregular();
     let samples = sample_open(&spline, SamplingOptions::default()).unwrap();
