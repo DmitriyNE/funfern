@@ -64,6 +64,26 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   divider graphs. The first junction implementation deliberately uses the robust
   full-rebuild fallback for graph-edge movement and topology edits.
 
+## 2026-09-13 — Topology-aware material and volume-source lookup
+
+- `TopologyWaveModel` now exposes region/material lookup and scalar or directional
+  material evaluation from the explicit plan libraries. Legacy scenes and topology
+  consumers share the same evaluator, including material frames, anisotropy, and
+  mechanical/EM coefficient conversion.
+- Added a resumable topology volume-source compiler. It validates source regions
+  against active face assignments, owns an immutable material/source snapshot, and
+  accumulates forcing by the region labels already carried by mesh triangles.
+- Replaced the two-volume-source-per-node representation with arbitrary sparse
+  contributions. The WebGPU path packs a node header plus channel/weight pairs in
+  the existing eighth storage binding, so a junction pays only for its actual
+  incident sources and ordinary nodes stay compact.
+- Direct tests cover region-frame evaluation, cooperative compilation, inactive
+  face rejection, four independently driven faces meeting at one transmitting
+  junction, source isolation by triangle region, and sparse GPU packing.
+- All **415 workspace tests**, workspace Clippy with warnings denied, native
+  release compilation and Metal shader startup, and release Trunk WebGPU packaging
+  pass.
+
 ## 2026-09-13 — Separated and mixed junction meshing
 
 - Separated curves are now divided into recovery runs whenever either side's

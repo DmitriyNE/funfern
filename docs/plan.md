@@ -336,7 +336,10 @@ the remaining numerical consumers so one transaction cannot mix label models.
 GPU upload no longer caps a node at two incident regions: host-filtered source
 weights plus a per-node source-membership flag support arbitrary junction degree
 without increasing the portable WebGPU binding count. Unified separated traces
-also participate in the source's mesh-path distance calculation.
+also participate in the source's mesh-path distance calculation. Volume sources
+now compile from active plan regions and the shared material library, retain their
+resumable snapshot semantics, and use sparse GPU channel/weight records so every
+driven face at a multi-region junction contributes without a two-channel cap.
 
 - Make meshing consume a completed topology snapshot instead of independently
   rediscovering loop nesting and open-divider regions. Triangulate each active face
@@ -349,8 +352,8 @@ also participate in the source's mesh-path distance calculation.
 - Replace the current assumption that a wave node belongs to at most two regions
   with topology-supplied trace/sector memberships. This is required for three or
   more regions meeting at a point.
-- Update material/source lookup, AMR indicators, local-repair eligibility, and
-  point/line/boundary/area probes to consume the new labels. Preserve the existing
+- Update AMR indicators, local-repair eligibility, and point/line/boundary/area
+  probes to consume the new labels. Preserve the existing
   full-remesh transaction as the safe first path for graph edits; local graph
   repair is a later optimization.
 - Compile far-field contours only when the inset contour lies wholly in one

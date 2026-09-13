@@ -35,7 +35,43 @@ impl<'a> TopologyWaveModel<'a> {
         }
     }
 
-    fn valid(self, plan: &TopologyMeshPlan) -> bool {
+    pub fn region(self, id: RegionId) -> Option<&'a Region> {
+        self.regions.iter().find(|region| region.id == id)
+    }
+
+    pub fn material(self, id: crate::MaterialId) -> Option<&'a Material> {
+        self.materials.iter().find(|material| material.id == id)
+    }
+
+    pub fn material_at(
+        self,
+        region: RegionId,
+        point: Point2,
+    ) -> Result<crate::EvaluatedMaterial, crate::MaterialError> {
+        crate::wave::evaluate_material_library_at(
+            self.physics,
+            self.materials,
+            self.regions,
+            region,
+            point,
+        )
+    }
+
+    pub fn directional_material_at(
+        self,
+        region: RegionId,
+        point: Point2,
+    ) -> Result<DirectionalWaveCoefficients, crate::MaterialError> {
+        crate::wave::evaluate_directional_material_library_at(
+            self.physics,
+            self.materials,
+            self.regions,
+            region,
+            point,
+        )
+    }
+
+    pub fn valid_for(self, plan: &TopologyMeshPlan) -> bool {
         self.outer_boundaries.valid()
             && self.materials.iter().all(Material::valid)
             && self.regions.iter().all(|region| {
@@ -144,7 +180,7 @@ impl QuadraticWaveOperator {
         plan: &TopologyMeshPlan,
         model: TopologyWaveModel<'_>,
     ) -> Result<Self, WaveError> {
-        if !model.valid(plan) {
+        if !model.valid_for(plan) {
             return Err(WaveError::InvalidCoefficients);
         }
         Self::assemble_with_provider(
@@ -1146,17 +1182,9 @@ impl CoefficientProvider<'_> {
                 evaluate_directional_material(scene.physics, material, *region, point)?
             }
             Self::Topology(model) => {
-                let region = model
-                    .regions
-                    .iter()
-                    .find(|candidate| candidate.id == region)
-                    .ok_or(WaveError::InvalidMesh("a triangle has an unknown region"))?;
-                let material = model
-                    .materials
-                    .iter()
-                    .find(|material| material.id == region.material)
-                    .ok_or(WaveError::InvalidCoefficients)?;
-                evaluate_directional_material(model.physics, material, *region, point)?
+                model.directional_material_at(region, point).map_err(|_| {
+                    WaveError::InvalidMesh("a triangle has an unknown or invalid region material")
+                })?
             }
         };
         if !values.valid() {

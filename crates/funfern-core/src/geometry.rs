@@ -1087,25 +1087,13 @@ impl Scene {
         region: RegionId,
         point: Point2,
     ) -> Result<EvaluatedMaterial, MaterialError> {
-        let region = self.region(region).ok_or(MaterialError::InvalidValue)?;
-        let properties = self
-            .material(region.material)
-            .ok_or(MaterialError::InvalidValue)?
-            .evaluate(region.frame, point)?;
-        let values = self.physics.wave_coefficients(crate::WaveCoefficients {
-            mass_density: properties.mass_density,
-            stiffness: properties.stiffness,
-            damping: properties.damping,
-        });
-        values
-            .valid()
-            .then_some(crate::EvaluatedMaterial {
-                mass_density: values.mass_density,
-                stiffness: values.stiffness,
-                damping: values.damping,
-                axis_ratio: properties.axis_ratio,
-            })
-            .ok_or(MaterialError::InvalidValue)
+        crate::wave::evaluate_material_library_at(
+            self.physics,
+            &self.materials,
+            &self.regions,
+            region,
+            point,
+        )
     }
 
     pub fn directional_material_at(
@@ -1113,18 +1101,13 @@ impl Scene {
         region: RegionId,
         point: Point2,
     ) -> Result<crate::DirectionalWaveCoefficients, MaterialError> {
-        let region = self.region(region).ok_or(MaterialError::InvalidValue)?;
-        let properties = self
-            .material(region.material)
-            .ok_or(MaterialError::InvalidValue)?
-            .evaluate(region.frame, point)?;
-        let values = self
-            .physics
-            .directional_wave_coefficients(properties, region.frame);
-        values
-            .valid()
-            .then_some(values)
-            .ok_or(MaterialError::InvalidValue)
+        crate::wave::evaluate_directional_material_library_at(
+            self.physics,
+            &self.materials,
+            &self.regions,
+            region,
+            point,
+        )
     }
 
     pub fn has_varying_materials(&self) -> bool {

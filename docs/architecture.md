@@ -650,8 +650,17 @@ material junctions without another storage binding. The upload/handoff boundary
 therefore accepts topology-plan meshes and operators. Quadratic solution transfer
 also consumes the unified mesh lineage: separated nodes prefer source elements on
 the same stable curve side, and matching snapshot trace IDs narrow coincident
-junction candidates to the same angular sector. Source compilation, AMR, and probe
-metadata remain on the legacy model until their consumer slices are complete.
+junction candidates to the same angular sector. Volume-source compilation also
+consumes the topology plan directly. It validates carriers against active face
+assignments and evaluates profiles and mass density in the assigned region's
+orthonormal material frame. The resumable job owns its material/source snapshot,
+so editor changes cannot alter an in-flight result. Shared nodes accumulate every
+incident driven region; the GPU keeps the existing forcing-weight binding by
+storing a fixed node header followed by sparse channel/weight pairs. This removes
+the old two-source junction limit without making every node carry the maximum 33
+source channels. Scene and topology paths use one material-library evaluator,
+including the mechanical/EM coefficient conversion. AMR and probe metadata remain
+on the legacy model until their consumer slices are complete.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a
@@ -694,11 +703,13 @@ existing wgpu device. State remains GPU-resident; asynchronous readback supplies
 the egui field colors and energy diagnostic. Each readback carries a GPU-written
 step marker so stale asynchronous results cannot be mistaken for a newer level.
 The wave layout already occupies WebGPU's portable eight-storage-binding budget.
-Volume-source channel IDs and two mass-normalized weights therefore share the
-existing point/pulse forcing-weight record. Point, volume, and boundary drives use
-one fixed-size GPU signal record with reserved space for later waveform parameters;
-the volume signal table shares the existing forcing buffer. No second wgpu device or
-extra storage binding is needed.
+Volume-source weights therefore share the existing point/pulse forcing-weight
+buffer. Each DOF has a compact header containing point/pulse weights plus an
+offset/count into packed pairs that follow the headers; only nodes touching a
+driven region consume pair records. Point, volume, and boundary drives use one
+fixed-size GPU signal record with reserved space for later waveform parameters;
+the volume signal table shares the existing forcing buffer. No second wgpu device
+or extra storage binding is needed.
 
 Point probes compile to seven-node enriched-quadratic interpolation stencils with
 separate gradient weights. A small compute pipeline samples the centered primary

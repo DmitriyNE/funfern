@@ -28,10 +28,9 @@ use bevy::{
     },
 };
 use funfern_core::{
-    CompiledVolumeSources, MAX_VOLUME_SOURCES, NO_VOLUME_SOURCE, OuterBoundaryConditions,
-    PhysicsModel, Point2, PointSource, QuadraticAreaElement, QuadraticAreaStencil,
-    QuadraticPointStencil, QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState,
-    RegionId, TimeSignal, TriMesh,
+    CompiledVolumeSources, MAX_VOLUME_SOURCES, OuterBoundaryConditions, PhysicsModel, Point2,
+    PointSource, QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil,
+    QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh,
 };
 
 const WORKGROUP_SIZE: u32 = 128;
@@ -1375,38 +1374,51 @@ fn zip_forcing_weights(
     source: &[f32],
     pulse: &[f32],
     volume_sources: &CompiledVolumeSources,
-) -> Result<Vec<GpuForcingWeights>, String> {
+) -> Result<Vec<GpuForcingWeightWord>, String> {
     if source.len() != pulse.len() || source.len() != volume_sources.nodes.len() {
         return Err("Source and pulse weights do not match the wave discretization".into());
     }
-    source
+    let header_count = source.len();
+    let contribution_count = volume_sources
+        .nodes
+        .iter()
+        .map(|node| node.contributions.len().div_ceil(2))
+        .sum::<usize>();
+    let mut packed = vec![GpuForcingWeightWord::default(); header_count];
+    packed.reserve(contribution_count);
+    for (index, ((&source, &pulse), node)) in source
         .iter()
         .zip(pulse)
         .zip(&volume_sources.nodes)
-        .map(|((&source, &pulse), volume)| {
-            if volume.channels.iter().any(|channel| {
-                *channel != NO_VOLUME_SOURCE && *channel as usize >= volume_sources.signals.len()
-            }) {
-                return Err("Volume-source channel is out of range".into());
-            }
-            let channel = |channel: u32| {
-                if channel == NO_VOLUME_SOURCE {
-                    0
-                } else {
-                    channel + 1
+        .enumerate()
+    {
+        let offset = u32::try_from(packed.len())
+            .map_err(|_| "Volume-source weights are too large for the GPU")?;
+        let count = u32::try_from(node.contributions.len())
+            .map_err(|_| "Too many volume sources meet at a wave node")?;
+        if !source.is_finite() || !pulse.is_finite() {
+            return Err("Point-source weights cannot be represented on the GPU".into());
+        }
+        packed[index].data = UVec4::new(source.to_bits(), pulse.to_bits(), offset, count);
+        for pair in node.contributions.chunks(2) {
+            let mut data = [0_u32; 4];
+            for (slot, contribution) in pair.iter().enumerate() {
+                if contribution.channel as usize >= volume_sources.signals.len() {
+                    return Err("Volume-source channel is out of range".into());
                 }
-            };
-            let weights = Vec2::new(volume.weights[0] as f32, volume.weights[1] as f32);
-            if !weights.is_finite() {
-                return Err("Volume-source weights cannot be represented on the GPU".into());
+                let weight = contribution.weight as f32;
+                if !weight.is_finite() {
+                    return Err("Volume-source weights cannot be represented on the GPU".into());
+                }
+                data[slot * 2] = contribution.channel + 1;
+                data[slot * 2 + 1] = weight.to_bits();
             }
-            Ok(GpuForcingWeights {
-                point_pulse: Vec2::new(source, pulse),
-                channels: UVec2::new(channel(volume.channels[0]), channel(volume.channels[1])),
-                volume: weights,
-            })
-        })
-        .collect()
+            packed.push(GpuForcingWeightWord {
+                data: UVec4::from_array(data),
+            });
+        }
+    }
+    Ok(packed)
 }
 
 fn node_regions(
@@ -1853,10 +1865,8 @@ struct GpuMatrixEntry {
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
-struct GpuForcingWeights {
-    point_pulse: Vec2,
-    channels: UVec2,
-    volume: Vec2,
+struct GpuForcingWeightWord {
+    data: UVec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -2423,7 +2433,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuMatrixEntry>>(false),
                 storage_buffer_read_only::<Vec<GpuNode>>(false),
                 storage_buffer::<Vec<GpuState>>(false),
-                storage_buffer_read_only::<Vec<GpuForcingWeights>>(false),
+                storage_buffer_read_only::<Vec<GpuForcingWeightWord>>(false),
             ),
         ),
     );
@@ -3281,8 +3291,8 @@ mod tests {
         CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline, FaceRegionAssignment,
         MeshingOptions, OpenCubicSpline, OuterSide, Region, Scene, SpanBehavior, TopologyCurve,
         TopologyGeometry, TopologyMeshPlan, TopologyVertex, TopologyVertexId,
-        TopologyVertexLocation, TopologyWaveModel, VolumeSourceNode, compile_topology,
-        mesh_topology_plan,
+        TopologyVertexLocation, TopologyWaveModel, VolumeSourceContribution, VolumeSourceNode,
+        compile_topology, mesh_topology_plan,
     };
 
     fn four_region_topology() -> (TriMesh, QuadraticWaveOperator) {
@@ -3480,8 +3490,10 @@ mod tests {
                 phase_radians: 0.4,
             }],
             nodes: vec![VolumeSourceNode {
-                channels: [0, NO_VOLUME_SOURCE],
-                weights: [0.75, 0.0],
+                contributions: vec![VolumeSourceContribution {
+                    channel: 0,
+                    weight: 0.75,
+                }],
             }],
         };
         let forcing = gpu_forcing(
@@ -3500,9 +3512,41 @@ mod tests {
         assert_eq!(forcing.volume[0].values.y, 3.0);
         assert!((forcing.volume[0].values.z - 5.0 * std::f32::consts::PI).abs() < 1.0e-5);
         let weights = zip_forcing_weights(&[0.2], &[0.3], &sources).unwrap();
-        assert_eq!(weights[0].point_pulse, Vec2::new(0.2, 0.3));
-        assert_eq!(weights[0].channels, UVec2::new(1, 0));
-        assert_eq!(weights[0].volume, Vec2::new(0.75, 0.0));
+        assert_eq!(f32::from_bits(weights[0].data.x), 0.2);
+        assert_eq!(f32::from_bits(weights[0].data.y), 0.3);
+        assert_eq!(weights[0].data.z, 1);
+        assert_eq!(weights[0].data.w, 1);
+        assert_eq!(weights[1].data.x, 1);
+        assert_eq!(f32::from_bits(weights[1].data.y), 0.75);
+    }
+
+    #[test]
+    fn forcing_weight_buffer_packs_arbitrary_junction_channels_sparsely() {
+        let sources = CompiledVolumeSources {
+            signals: vec![TimeSignal::ZERO; 4],
+            nodes: vec![VolumeSourceNode {
+                contributions: (0..4)
+                    .map(|channel| VolumeSourceContribution {
+                        channel,
+                        weight: channel as f64 + 0.25,
+                    })
+                    .collect(),
+            }],
+        };
+        let packed = zip_forcing_weights(&[0.2], &[0.3], &sources).unwrap();
+        assert_eq!(packed.len(), 3);
+        assert_eq!(
+            packed[0].data,
+            UVec4::new(0.2_f32.to_bits(), 0.3_f32.to_bits(), 1, 4)
+        );
+        assert_eq!(packed[1].data.x, 1);
+        assert_eq!(f32::from_bits(packed[1].data.y), 0.25);
+        assert_eq!(packed[1].data.z, 2);
+        assert_eq!(f32::from_bits(packed[1].data.w), 1.25);
+        assert_eq!(packed[2].data.x, 3);
+        assert_eq!(f32::from_bits(packed[2].data.y), 2.25);
+        assert_eq!(packed[2].data.z, 4);
+        assert_eq!(f32::from_bits(packed[2].data.w), 3.25);
     }
 
     #[test]

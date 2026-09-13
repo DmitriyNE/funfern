@@ -2,8 +2,63 @@ use std::collections::BTreeMap;
 
 use crate::{
     BACKGROUND_REGION, EvaluatedMaterial, Material, MaterialError, MaterialFrame, OuterSide,
-    Point2, RegionId, SymmetricTensor2, TriMesh,
+    Point2, Region, RegionId, SymmetricTensor2, TriMesh,
 };
+
+pub(crate) fn evaluate_material_library_at(
+    physics: PhysicsModel,
+    materials: &[Material],
+    regions: &[Region],
+    region: RegionId,
+    point: Point2,
+) -> Result<EvaluatedMaterial, MaterialError> {
+    let region = regions
+        .iter()
+        .find(|candidate| candidate.id == region)
+        .ok_or(MaterialError::InvalidValue)?;
+    let properties = materials
+        .iter()
+        .find(|material| material.id == region.material)
+        .ok_or(MaterialError::InvalidValue)?
+        .evaluate(region.frame, point)?;
+    let values = physics.wave_coefficients(WaveCoefficients {
+        mass_density: properties.mass_density,
+        stiffness: properties.stiffness,
+        damping: properties.damping,
+    });
+    values
+        .valid()
+        .then_some(EvaluatedMaterial {
+            mass_density: values.mass_density,
+            stiffness: values.stiffness,
+            damping: values.damping,
+            axis_ratio: properties.axis_ratio,
+        })
+        .ok_or(MaterialError::InvalidValue)
+}
+
+pub(crate) fn evaluate_directional_material_library_at(
+    physics: PhysicsModel,
+    materials: &[Material],
+    regions: &[Region],
+    region: RegionId,
+    point: Point2,
+) -> Result<DirectionalWaveCoefficients, MaterialError> {
+    let region = regions
+        .iter()
+        .find(|candidate| candidate.id == region)
+        .ok_or(MaterialError::InvalidValue)?;
+    let properties = materials
+        .iter()
+        .find(|material| material.id == region.material)
+        .ok_or(MaterialError::InvalidValue)?
+        .evaluate(region.frame, point)?;
+    let values = physics.directional_wave_coefficients(properties, region.frame);
+    values
+        .valid()
+        .then_some(values)
+        .ok_or(MaterialError::InvalidValue)
+}
 
 /// Constant material coefficients for the scalar wave model
 /// `mass_density * u_tt + damping * u_t - div(stiffness * grad(u)) = f`.

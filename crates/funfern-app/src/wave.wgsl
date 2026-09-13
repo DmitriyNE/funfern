@@ -26,10 +26,8 @@ struct Forcing {
     volume: array<TimeSignal, 33>,
 }
 
-struct ForcingWeights {
-    point_pulse: vec2<f32>,
-    channels: vec2<u32>,
-    volume: vec2<f32>,
+struct ForcingWeightWord {
+    data: vec4<u32>,
 }
 
 struct NodeData {
@@ -66,7 +64,7 @@ const RECONSTRUCTION_DECAY_RATE: f32 = 0.5;
 @group(0) @binding(4) var<storage, read> matrix_over_mass: array<MatrixEntry>;
 @group(0) @binding(5) var<storage, read> nodes: array<NodeData>;
 @group(0) @binding(6) var<storage, read_write> states: array<State>;
-@group(0) @binding(7) var<storage, read> forcing_weights: array<ForcingWeights>;
+@group(0) @binding(7) var<storage, read> forcing_weights: array<ForcingWeightWord>;
 
 fn signal_value(signal: TimeSignal, time: f32) -> f32 {
     return signal.values.x
@@ -90,15 +88,14 @@ fn neumann_acceleration(i: u32, time: f32) -> f32 {
 }
 
 fn volume_acceleration(i: u32, time: f32) -> f32 {
-    let weights = forcing_weights[i];
+    let header = forcing_weights[i].data;
     var value = 0.0;
-    if weights.channels.x != 0u {
-        value += weights.volume.x
-            * signal_value(forcing.volume[weights.channels.x - 1u], time);
-    }
-    if weights.channels.y != 0u {
-        value += weights.volume.y
-            * signal_value(forcing.volume[weights.channels.y - 1u], time);
+    for (var slot = 0u; slot < header.w; slot += 1u) {
+        let packed = forcing_weights[header.z + slot / 2u].data;
+        let channel = select(packed.z, packed.x, slot % 2u == 0u);
+        let weight_bits = select(packed.w, packed.y, slot % 2u == 0u);
+        value += bitcast<f32>(weight_bits)
+            * signal_value(forcing.volume[channel - 1u], time);
     }
     return value;
 }
@@ -141,7 +138,7 @@ fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
     let dt2 = parameters.time_data.y;
     let gamma = nodes[i].position_damping.z;
     let acceleration = forcing.source.position_width_enabled.w
-        * forcing_weights[i].point_pulse.x
+        * bitcast<f32>(forcing_weights[i].data.x)
         * signal_value(forcing.source.signal, parameters.time_data.z)
         + volume_acceleration(i, parameters.time_data.z)
         + neumann_acceleration(i, parameters.time_data.z);
@@ -204,7 +201,7 @@ fn inject(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let addition = forcing.pulse.position_width_amplitude.w
-        * forcing_weights[i].point_pulse.y;
+        * bitcast<f32>(forcing_weights[i].data.y);
     states[i].levels.x += addition;
     states[i].levels.y += addition;
     states[i].auxiliary.y = 0.0;
