@@ -45,7 +45,6 @@ const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const GIZMO_PADDING: f64 = 18.0;
 const VECTOR_OVERLAY_ABSOLUTE_SILENCE: f64 = 1.0e-6;
-const VECTOR_OVERLAY_REFERENCE_FLOOR_RATIO: f64 = 0.02;
 const VECTOR_OVERLAY_SILENCE_RATIO: f64 = 1.0e-4;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum CreationRole {
@@ -11851,7 +11850,7 @@ fn stable_vector_overlay_reference(instantaneous: f64, peak_reference: &mut f64)
     if instantaneous < *peak_reference * VECTOR_OVERLAY_SILENCE_RATIO {
         return None;
     }
-    Some(instantaneous.max(*peak_reference * VECTOR_OVERLAY_REFERENCE_FLOOR_RATIO))
+    Some(*peak_reference)
 }
 
 fn material_coefficient_labels(physics: PhysicsModel) -> [&'static str; 3] {
@@ -17394,8 +17393,8 @@ mod tests {
         let mut peak = 0.0;
         assert_eq!(stable_vector_overlay_reference(10.0, &mut peak), Some(10.0));
         assert_eq!(peak, 10.0);
-        assert_eq!(stable_vector_overlay_reference(1.0, &mut peak), Some(1.0));
-        assert_eq!(stable_vector_overlay_reference(0.1, &mut peak), Some(0.2));
+        assert_eq!(stable_vector_overlay_reference(1.0, &mut peak), Some(10.0));
+        assert_eq!(stable_vector_overlay_reference(0.1, &mut peak), Some(10.0));
         assert_eq!(stable_vector_overlay_reference(5.0e-4, &mut peak), None);
         assert_eq!(stable_vector_overlay_reference(5.0e-7, &mut peak), None);
         assert_eq!(peak, 10.0);

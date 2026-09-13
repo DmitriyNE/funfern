@@ -225,12 +225,13 @@ quadratic gradient of `A` and reconstructs `H = (-A_y, A_x)/mu` for TM or
 `E = (A_y, -A_x)/epsilon` for TE. The corresponding Poynting vector is
 `S = -k u grad(A)`, where `k` is `1/mu` for TM or `1/epsilon` for TE. Screen bins
 bound arrow density and an exponential display filter reduces jitter. Arrow
-exposure uses the current spatial 90th percentile but retains the strongest
-reference for the current run and overlay mode. The reference cannot fall below 2%
-of that peak; the overlay becomes silent when its current 90th percentile falls
-below the absolute floor or 0.01% of the peak. The scale survives ordinary solver
-handoffs and toggling the same overlay, but resets with a fresh field or a different
-vector quantity. Mechanical scenes retain the prior `-k u_t grad(u)` energy-flow
+exposure uses the strongest spatial 90th percentile reached during the current run
+and overlay mode. Once established, this held peak remains the normalization
+reference, so weaker fields stay proportionally shorter instead of being expanded
+back to full-size arrows. The overlay becomes silent when its current 90th
+percentile falls below the absolute floor or 0.01% of the peak. The scale survives
+ordinary solver handoffs and toggling the same overlay, but resets with a fresh field
+or a different vector quantity. Mechanical scenes retain the prior `-k u_t grad(u)` energy-flow
 display. These arrows derive the transverse field belonging to one scalar
 polarization and are not presented as a simultaneous full-vector Maxwell state.
 
