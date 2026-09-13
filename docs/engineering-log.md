@@ -66,6 +66,20 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## 2026-09-13 — Unified curve topology kernel
 
+- Extended the compiled arrangement with directed face-boundary edge references
+  and snapshot-local trace vertices. Sector connectivity now determines whether
+  coincident geometry shares a solver node: transmitting rays join sectors,
+  separated rays divide them, and free separated tips reconnect without a special
+  coordinate rule.
+- Added `TopologyMeshPlan`, the checked input contract for the new triangulation
+  path. It requires an explicit active or excluded assignment for every bounded
+  face, rejects transmitting or coupled spans beside excluded faces, preserves
+  arbitrary region membership at junctions, and emits oriented per-side curve
+  constraints with stable curve/span IDs.
+- The plan has direct tests for shared transmitting traces, one-sided hole
+  boundaries, separated baffle interiors with reconnected tips, complete face
+  assignments, and outer attachments. The legacy triangulator does not consume the
+  plan yet; this is the remaining half of the mesher cutover.
 - Added the dependency-free migration target for one open/closed curve model,
   stable logical spans, authoritative free/interior/outer topology vertices, and
   transmitting or separated trace behavior. Hole, region, divider, and baffle will

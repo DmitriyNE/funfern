@@ -32,6 +32,11 @@ pub struct FaceId(pub u64);
 
 pub const EXTERIOR_FACE: FaceId = FaceId(0);
 
+/// Snapshot-local finite-element trace identity at an arrangement vertex.
+/// Several trace vertices may occupy the same point when separated spans meet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TraceVertexId(pub u64);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TopologyVertexLocation {
     /// A deliberately free curve endpoint.
@@ -353,10 +358,25 @@ pub enum CompiledEdgeSource {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledEdge {
     pub source: CompiledEdgeSource,
+    pub curve: Option<CurveId>,
+    pub behavior: Option<SpanBehavior>,
     pub points: [Point2; 2],
     pub parameter: [f64; 2],
     pub left: FaceId,
     pub right: FaceId,
+    pub traces: [CompiledEdgeTraces; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompiledEdgeTraces {
+    pub left: TraceVertexId,
+    pub right: TraceVertexId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompiledTraceVertex {
+    pub id: TraceVertexId,
+    pub face: FaceId,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -365,13 +385,23 @@ pub struct CompiledFace {
     /// The first cycle is the counter-clockwise outer boundary. Remaining
     /// clockwise or zero-area cycles are holes or slit traces in that face.
     pub cycles: Vec<Vec<Point2>>,
+    /// The same cycles as directed references to `TopologySnapshot::edges`.
+    /// Every step is oriented with this face on its left.
+    pub boundaries: Vec<Vec<CompiledBoundaryStep>>,
     pub area: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompiledBoundaryStep {
+    pub edge: usize,
+    pub reversed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompiledVertex {
     pub point: Point2,
     pub authored: Option<TopologyVertexId>,
+    pub traces: Vec<CompiledTraceVertex>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -481,6 +511,7 @@ struct RawSegment {
     parameter: [f64; 2],
     endpoint_vertices: [Option<TopologyVertexId>; 2],
     curve: Option<usize>,
+    curve_id: Option<CurveId>,
     sequence: usize,
     sequence_count: usize,
     closed: bool,
@@ -755,6 +786,7 @@ fn build_raw_segments(
                     node_vertex_at(curve, pair[1].t),
                 ],
                 curve: Some(curve_index),
+                curve_id: Some(curve.id),
                 sequence,
                 sequence_count,
                 closed: !curve.spline.is_open(),
@@ -798,15 +830,17 @@ fn finish_arrangement(
                 }
             };
             builder.add_edge(
-                a,
-                b,
-                endpoint_vertex(pair[0]),
-                endpoint_vertex(pair[1]),
-                segment.source,
-                [
-                    lerp_scalar(segment.parameter[0], segment.parameter[1], pair[0]),
-                    lerp_scalar(segment.parameter[0], segment.parameter[1], pair[1]),
-                ],
+                [a, b],
+                [endpoint_vertex(pair[0]), endpoint_vertex(pair[1])],
+                EdgeDescriptor {
+                    source: segment.source,
+                    curve: segment.curve_id,
+                    behavior: segment.behavior,
+                    parameter: [
+                        lerp_scalar(segment.parameter[0], segment.parameter[1], pair[0]),
+                        lerp_scalar(segment.parameter[0], segment.parameter[1], pair[1]),
+                    ],
+                },
             )?;
         }
     }
@@ -1036,6 +1070,15 @@ fn collinear_overlap(a0: Point2, a1: Point2, b0: Point2, b1: Point2) -> f64 {
 struct AtomicEdge {
     vertices: [usize; 2],
     source: CompiledEdgeSource,
+    curve: Option<CurveId>,
+    behavior: Option<SpanBehavior>,
+    parameter: [f64; 2],
+}
+
+struct EdgeDescriptor {
+    source: CompiledEdgeSource,
+    curve: Option<CurveId>,
+    behavior: Option<SpanBehavior>,
     parameter: [f64; 2],
 }
 
@@ -1058,17 +1101,14 @@ impl GraphBuilder {
 
     fn add_edge(
         &mut self,
-        a: Point2,
-        b: Point2,
-        a_authored: Option<TopologyVertexId>,
-        b_authored: Option<TopologyVertexId>,
-        source: CompiledEdgeSource,
-        parameter: [f64; 2],
+        points: [Point2; 2],
+        authored: [Option<TopologyVertexId>; 2],
+        descriptor: EdgeDescriptor,
     ) -> Result<(), TopologyIssue> {
-        let a = self.vertex(a, a_authored)?;
-        let b = self.vertex(b, b_authored)?;
+        let a = self.vertex(points[0], authored[0])?;
+        let b = self.vertex(points[1], authored[1])?;
         if a == b {
-            return Err(match source {
+            return Err(match descriptor.source {
                 CompiledEdgeSource::Curve(span) => TopologyIssue::NearContact {
                     first: CompiledEdgeSource::Curve(span),
                     second: CompiledEdgeSource::Curve(span),
@@ -1081,8 +1121,10 @@ impl GraphBuilder {
         }
         self.edges.push(AtomicEdge {
             vertices: [a, b],
-            source,
-            parameter,
+            source: descriptor.source,
+            curve: descriptor.curve,
+            behavior: descriptor.behavior,
+            parameter: descriptor.parameter,
         });
         Ok(())
     }
@@ -1115,7 +1157,11 @@ impl GraphBuilder {
             return Err(TopologyIssue::TooManySegments);
         }
         let index = self.vertices.len();
-        self.vertices.push(CompiledVertex { point, authored });
+        self.vertices.push(CompiledVertex {
+            point,
+            authored,
+            traces: vec![],
+        });
         self.buckets.entry(key).or_default().push(index);
         Ok(index)
     }
@@ -1185,6 +1231,7 @@ impl GraphBuilder {
             cycles.push(Cycle {
                 area: signed_area(&points),
                 points,
+                half_edges,
             });
         }
 
@@ -1205,6 +1252,7 @@ impl GraphBuilder {
             faces.push(CompiledFace {
                 id,
                 cycles: vec![cycles[cycle_index].points.clone()],
+                boundaries: vec![cycle_steps(&cycles[cycle_index])],
                 area: cycles[cycle_index].area,
             });
         }
@@ -1229,20 +1277,32 @@ impl GraphBuilder {
                     .unwrap();
                 compiled.area += cycle.area;
                 compiled.cycles.push(cycle.points.clone());
+                compiled.boundaries.push(cycle_steps(cycle));
             }
         }
 
+        let mut vertices = self.vertices;
+        let edge_traces = compile_trace_vertices(
+            &mut vertices,
+            &self.edges,
+            &outgoing,
+            &half_edge_cycle,
+            &cycle_faces,
+        );
         let mut compiled_edges = Vec::with_capacity(self.edges.len());
         for (edge_index, edge) in self.edges.iter().enumerate() {
             compiled_edges.push(CompiledEdge {
                 source: edge.source,
+                curve: edge.curve,
+                behavior: edge.behavior,
                 points: [
-                    self.vertices[edge.vertices[0]].point,
-                    self.vertices[edge.vertices[1]].point,
+                    vertices[edge.vertices[0]].point,
+                    vertices[edge.vertices[1]].point,
                 ],
                 parameter: edge.parameter,
                 left: cycle_faces[half_edge_cycle[edge_index * 2]],
                 right: cycle_faces[half_edge_cycle[edge_index * 2 + 1]],
+                traces: edge_traces[edge_index],
             });
         }
 
@@ -1260,8 +1320,7 @@ impl GraphBuilder {
                     continue;
                 }
                 let point = curve.spline.node_point(endpoint).unwrap();
-                let degree = self
-                    .vertices
+                let degree = vertices
                     .iter()
                     .position(|vertex| (vertex.point - point).norm() <= tolerance * 0.25)
                     .map(|vertex| outgoing[vertex].len())
@@ -1274,16 +1333,113 @@ impl GraphBuilder {
 
         Ok(TopologySnapshot {
             revision,
-            vertices: self.vertices,
+            vertices,
             faces,
             edges: compiled_edges,
         })
     }
 }
 
+fn compile_trace_vertices(
+    vertices: &mut [CompiledVertex],
+    edges: &[AtomicEdge],
+    outgoing: &[Vec<usize>],
+    half_edge_cycle: &[usize],
+    cycle_faces: &[FaceId],
+) -> Vec<[CompiledEdgeTraces; 2]> {
+    let mut next_trace = 1u64;
+    let mut sector_traces = vec![vec![]; vertices.len()];
+    for (vertex, around) in outgoing.iter().enumerate() {
+        let count = around.len();
+        let mut parents = (0..count).collect::<Vec<_>>();
+        for (position, half_edge) in around.iter().copied().enumerate() {
+            if edges[half_edge / 2]
+                .behavior
+                .is_some_and(SpanBehavior::transmitting)
+            {
+                union(&mut parents, position, (position + count - 1) % count);
+            }
+        }
+        let mut roots = BTreeMap::<usize, TraceVertexId>::new();
+        for (sector, half_edge) in around.iter().copied().enumerate() {
+            let root = find_root(&mut parents, sector);
+            let trace = *roots.entry(root).or_insert_with(|| {
+                let id = TraceVertexId(next_trace);
+                next_trace += 1;
+                id
+            });
+            sector_traces[vertex].push(trace);
+            let face = cycle_faces[half_edge_cycle[half_edge]];
+            let trace_vertex = CompiledTraceVertex { id: trace, face };
+            if !vertices[vertex].traces.contains(&trace_vertex) {
+                vertices[vertex].traces.push(trace_vertex);
+            }
+        }
+    }
+
+    edges
+        .iter()
+        .enumerate()
+        .map(|(edge_index, edge)| {
+            let start_half_edge = edge_index * 2;
+            let end_half_edge = start_half_edge + 1;
+            let start_around = &outgoing[edge.vertices[0]];
+            let start = start_around
+                .iter()
+                .position(|half_edge| *half_edge == start_half_edge)
+                .unwrap();
+            let end_around = &outgoing[edge.vertices[1]];
+            let end = end_around
+                .iter()
+                .position(|half_edge| *half_edge == end_half_edge)
+                .unwrap();
+            [
+                CompiledEdgeTraces {
+                    left: sector_traces[edge.vertices[0]][start],
+                    right: sector_traces[edge.vertices[0]]
+                        [(start + start_around.len() - 1) % start_around.len()],
+                },
+                CompiledEdgeTraces {
+                    left: sector_traces[edge.vertices[1]]
+                        [(end + end_around.len() - 1) % end_around.len()],
+                    right: sector_traces[edge.vertices[1]][end],
+                },
+            ]
+        })
+        .collect()
+}
+
+fn find_root(parents: &mut [usize], mut value: usize) -> usize {
+    while parents[value] != value {
+        parents[value] = parents[parents[value]];
+        value = parents[value];
+    }
+    value
+}
+
+fn union(parents: &mut [usize], left: usize, right: usize) {
+    let left = find_root(parents, left);
+    let right = find_root(parents, right);
+    if left != right {
+        parents[right] = left;
+    }
+}
+
 struct Cycle {
     points: Vec<Point2>,
+    half_edges: Vec<usize>,
     area: f64,
+}
+
+fn cycle_steps(cycle: &Cycle) -> Vec<CompiledBoundaryStep> {
+    cycle
+        .half_edges
+        .iter()
+        .map(|half_edge| CompiledBoundaryStep {
+            edge: half_edge / 2,
+            reversed: half_edge % 2 == 1,
+        })
+        .collect()
 }
 
 fn left_probe(cycle: &Cycle, tolerance: f64) -> Option<Point2> {
@@ -1351,6 +1507,7 @@ fn domain_segments(domain: DomainRect) -> Vec<RawSegment> {
             parameter: [0.0, 1.0],
             endpoint_vertices: [None, None],
             curve: None,
+            curve_id: None,
             sequence: index,
             sequence_count: 4,
             closed: true,
@@ -1559,6 +1716,11 @@ mod tests {
             snapshot.face_at(Point2::new(-0.5, 0.0)),
             snapshot.face_at(Point2::new(0.5, 0.0))
         );
+        assert!(
+            snapshot
+                .span_edges(CurveSpanId(1))
+                .all(|edge| edge.traces.iter().all(|trace| trace.left == trace.right))
+        );
     }
 
     #[test]
@@ -1577,6 +1739,36 @@ mod tests {
             snapshot
                 .span_edges(CurveSpanId(1))
                 .all(|edge| edge.left == edge.right)
+        );
+        assert!(
+            snapshot
+                .span_edges(CurveSpanId(1))
+                .all(|edge| edge.traces.iter().all(|trace| trace.left == trace.right))
+        );
+    }
+
+    #[test]
+    fn closed_separated_curve_has_distinct_trace_nodes() {
+        let curve = closed(
+            1,
+            1,
+            &[[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+            SpanBehavior::REFLECTING,
+        );
+        let snapshot = compile_topology(
+            &TopologyGeometry {
+                curves: vec![curve],
+                ..TopologyGeometry::default()
+            },
+            0,
+        )
+        .unwrap();
+        assert!(
+            snapshot
+                .edges
+                .iter()
+                .filter(|edge| matches!(edge.source, CompiledEdgeSource::Curve(_)))
+                .all(|edge| edge.traces.iter().all(|trace| trace.left != trace.right))
         );
     }
 
@@ -1795,10 +1987,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(crossing.faces.len(), 4);
-        assert!(
-            crossing.vertices.iter().any(|vertex| {
-                vertex.authored.is_none() && vertex.point == Point2::new(0.0, 0.0)
-            })
+        let crossing_vertex = crossing
+            .vertices
+            .iter()
+            .find(|vertex| vertex.authored.is_none() && vertex.point == Point2::new(0.0, 0.0))
+            .unwrap();
+        assert_eq!(
+            crossing_vertex
+                .traces
+                .iter()
+                .map(|trace| trace.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
         );
 
         let junction = TopologyVertexId(5);

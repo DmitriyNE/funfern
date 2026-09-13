@@ -115,6 +115,24 @@ retain their side and normalized side coordinate. Mesh triangles carry their own
 while constrained edges carry their logical boundary/span ID and side information.
 Those labels survive remeshing even though numerical indices do not.
 
+The replacement topology kernel removes those stored object roles. It stores one
+open/closed curve type, optional shared topology vertices at spline breakpoints,
+and a behavior on each stable span: transmitting or separated, with coupling
+orthogonal to the two side conditions. A bounded compiler derives directed
+half-edges and planar faces. Active-face assignments carry stable regions;
+unassigned faces represent holes or the exterior. Hole, material-region, divider,
+and baffle choices remain editor creation presets rather than geometry classes.
+
+At an arrangement vertex, angular sectors determine finite-element trace identity.
+Crossing a transmitting ray joins the adjacent sectors; crossing a separated ray
+does not. A free baffle tip has one surrounding sector and therefore reconnects
+without a special coordinate test. The compiled snapshot exposes these trace IDs
+on both endpoints and sides of every edge. `TopologyMeshPlan` then combines them
+with explicit active/excluded face assignments, so meshing and assembly do not
+infer trace connectivity or region identity from point coordinates. This kernel
+and projection are implemented alongside the current pipeline while consumers are
+being changed over.
+
 During divider drawing, the outer boundary and existing divider curves are attachment
 targets. Attaching to the interior of a divider inserts a shape-preserving knot,
 raises that breakpoint to C0 without moving the curve, and creates the junction as

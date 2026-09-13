@@ -8,8 +8,10 @@ use crate::{
 use crate::{Scene, WORLD_TOLERANCE};
 mod adaptation;
 mod amr;
+mod topology_plan;
 pub use adaptation::*;
 pub use amr::*;
+pub use topology_plan::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OuterSide {

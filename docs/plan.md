@@ -312,6 +312,14 @@ span adjacency for these fixtures, and stale jobs cannot publish their result.
 
 #### Stage 2: mesher, solver, AMR, transfer, and probes
 
+In progress. The topology snapshot now derives snapshot-local trace-vertex
+equivalence from the ordered sectors at every arrangement vertex. Transmitting
+spans union the sectors on their two sides, separated spans retain distinct
+traces, and a free baffle tip reconnects because it has one surrounding sector.
+`TopologyMeshPlan` validates total active/excluded face assignment and projects
+compiled face cycles and oriented curve sides into region-labelled trace cycles.
+The existing triangulator and solver do not consume this plan yet.
+
 - Make meshing consume a completed topology snapshot instead of independently
   rediscovering loop nesting and open-divider regions. Triangulate each active face
   and recover each logical span as a constrained chain with `CurveSpanId`, side,
