@@ -77,11 +77,13 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   hard cut, one atomic UI/runtime switch, and legacy production-path removal.
 - Defined a geometry-first Draw popover with Closed curve and Open curve groups.
   Closed curves choose an initial Subdomain/Hole purpose; open curves choose
-  Subdomain separator/BC baffle. Also specified unified curve/span/junction
-  selection, partial-junction transform handling, contextual span and face controls,
-  explicit material choice on ambiguous divider removal, and draft-derived
-  subdomain overlays. Invalid topology and unassigned faces remain editable and get
-  localized viewport feedback.
+  Subdomain separator/BC baffle. Separator drawing must start and finish on valid
+  boundaries of the same active face; unattached completion is refused, while
+  baffles retain free-end support. Also specified unified curve/span/junction
+  selection, partial-junction transform handling, contextual span and face
+  controls, explicit material choice on ambiguous divider removal, and
+  draft-derived subdomain overlays. Invalid topology and unassigned faces remain
+  editable and get localized viewport feedback.
 - The live transaction will carry one immutable authored scene, topology snapshot,
   and mesh plan token through meshing, assembly, transfer, GPU upload, AMR, probes,
   overlays, and far field. A failed or stale candidate leaves the accepted running

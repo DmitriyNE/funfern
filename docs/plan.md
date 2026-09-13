@@ -656,18 +656,33 @@ restrict later editing.
   separator** starts transmitting and asks for the new side's material. A **BC
   baffle** starts separated and asks for its initial condition. Thin gap remains a
   coupling in the contextual editor.
-- A divider keeps the old material on the daughter containing the old face anchor;
-  the other daughter receives the selected material. This avoids asking the user
-  to reason about left/right before the curve has a direction. An incomplete
-  divider remains a persistent invalid draft.
+- A Subdomain separator can start only on the boundary of an active face. Once its
+  first segment establishes which incident face it enters, only boundary points of
+  that same face are valid completion targets. Outer sides, closed curves, existing
+  open curves, and authored junctions participate when their relevant side bounds
+  that face. At a multi-sector junction, the hovered sector and live path preview
+  disambiguate the intended face.
+- While drawing a separator, show valid start and completion targets in gold and
+  dim invalid boundary targets. Enter or clicking the final point commits only when
+  both endpoints are attached, the path lies inside the selected face, and the
+  result creates two valid daughter faces without an illegal crossing or contact.
+  Otherwise keep the construction gesture active with a short reason; Escape
+  cancels it without changing the document. A later edit may still detach or
+  invalidate an accepted separator, in which case the normal persistent-invalid-
+  draft behavior applies.
+- A completed separator keeps the old material on the daughter containing the old
+  face anchor; the other daughter receives the selected material. This avoids
+  asking the user to reason about left/right before the curve has a direction.
 - Preserve the two-point spline-baffle shortcut that inserts equidistant internal
   controls for a straight cubic. Drawing stays active until explicitly dismissed
   where the current tool already has repeat placement.
-- Use the same gold attachment targets for every open path: outer sides, authored
-  junctions, and any curve interior. A curve-interior drop performs exact C0
-  breakpoint insertion and creates or reuses a topology vertex in one history
-  action. Render targets above geometry and law strokes. Keyboard-accessible
-  **Attach endpoint** and **Detach endpoint** actions provide a precise fallback.
+- Use one attachment hit-testing path for all open curves: outer sides, authored
+  junctions, and any curve interior. Separators filter it through the same-face
+  completion rule; BC baffles allow free, singly attached, or doubly attached
+  endpoints. A curve-interior drop performs exact C0 breakpoint insertion and
+  creates or reuses a topology vertex in one history action. Render targets above
+  geometry and law strokes. Keyboard-accessible **Attach endpoint** and **Detach
+  endpoint** actions provide a precise fallback.
 
 **Viewport selection and manipulation**
 
@@ -742,10 +757,11 @@ restrict later editing.
   remains fully selectable and editable in either case.
 
 Editor tests use synthesized egui pointer events for inner and outer attachment,
-both curve families and all four initial purposes, selection priority, junction
-dragging and partial-arm blocking, detach, divider removal and ownership choice,
-bulk span conditions, side orientation, overlay face picking, Delete, Escape, and
-one-entry history.
+both curve families and all four initial purposes, separator start and same-face
+completion filtering, refusal of unattached separator completion, selection
+priority, junction dragging and partial-arm blocking, detach, divider removal and
+ownership choice, bulk span conditions, side orientation, overlay face picking,
+Delete, Escape, and one-entry history.
 A short manual native/browser pass checks visual layering, narrow layout, touch
 targets, and gestures. Browser WebGPU execution remains a local smoke check rather
 than a CI requirement.
