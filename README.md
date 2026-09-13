@@ -86,11 +86,13 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Ctrl/Cmd-click selects the complete curve. Shift-drag adds an unselected span
   before moving the resulting transformable selection and temporarily enables
   grid snapping. Double-click inserts a knot without changing the curve and
-  selects its control. Drag from empty viewport space to
-  box-select every touched span; Shift-drag adds and Alt-drag subtracts. The span
-  filter limits box selection and Ctrl/Cmd+A to outer edges, loops, baffles, or all
-  geometry. Select filtered, Invert, and Clear provide the same bulk operations in
-  the panel. Selection and its filter do not enter document history.
+  selects its control. Drag a marquee left-to-right to select spans fully enclosed
+  by it; drag right-to-left to select spans that touch or lie inside it. Shift-drag
+  adds and Alt-drag subtracts. The span filter limits marquee selection and
+  Ctrl/Cmd+A to outer edges, loops, baffles, or all geometry. Select filtered,
+  Invert, and Clear provide the same bulk operations in the panel. **Area select**
+  exposes persistent Replace/Add/Subtract controls for touch input. Selection and
+  its filter do not enter document history.
 - **Transform:** complete curves and partial selections bounded by C0 knots can
   be dragged, translated, rotated, uniformly scaled, snapped, or aligned as one
   undoable action. **Isolate selection at C0** inserts every missing boundary
@@ -246,9 +248,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   visible-window-averaged polar patterns, and radiated power over time. Double-click
   the contour or its `FF` badge to open it. The contour must enclose every modeled boundary
   and stay in the lossless background material; View can hide its overlay.
-- **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered
-  on the cursor. Fit View frames the current domain. Panel scrolling and text
-  editing do not manipulate the viewport.
+- **Navigate:** right-drag or Space + left-drag pans with a mouse. On touch screens,
+  drag an object to manipulate it, drag empty canvas to pan, and use two fingers to
+  pan and pinch around their shared center. Touch hit targets expand without making
+  the drawn controls larger. Fit View frames the current domain. Panel scrolling
+  and text editing do not manipulate the viewport.
 - **Drafts:** green curves are accepted, amber curves are being checked, red
   curves are invalid. The last accepted scene stays as a subdued reference.
   Invalid edits remain after release. Escape during a drag restores its starting

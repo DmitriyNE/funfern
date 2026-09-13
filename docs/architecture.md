@@ -388,6 +388,12 @@ geometry is allowed. Failed parsing or validation never replaces the document.
 The viewport and panels share egui's event routing and logical-pixel coordinates.
 Geometry is drawn with the egui painter on Bevy's wgpu device. Input gestures
 start in the viewport; panel/text capture prevents accidental geometry edits.
+Mouse and touch share the same feature-hit priority, with larger invisible touch
+targets. Empty one-finger drags pan, while an explicit Area-select mode owns touch
+marquees. Egui's multi-touch centroid supplies cursor-centered pinch zoom and pan;
+once a second finger joins, navigation owns the gesture until every finger lifts
+and any tentative document drag is rolled back. Marquee direction distinguishes
+fully enclosed logical spans from crossing spans.
 Canvas resize/display scale comes from Bevy/egui, and Fit View frames the current
 draft domain. JSON excludes the viewport. There is no independent wgpu device, WebGL
 fallback, audio subsystem, or 3D rendering pipeline. This editor acceptance model

@@ -25,9 +25,11 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   fixed. Double-click the same knot again: select its control without insertion.
   Delete removes a control, down to four. Delete obstacle is separate.
 - [ ] Select one control handle, one span, several spans, and a whole curve. Test
-  Shift-toggle, Command/Ctrl-click whole curve, marquee replace, Shift-add,
-  Alt-subtract, filters, Select filtered, Invert, and Clear. Mixed-object span
-  selection must not expose a whole-object delete or role change.
+  Shift-toggle, Command/Ctrl-click whole curve, left-to-right fully-enclosed
+  marquee, right-to-left crossing marquee, Shift-add, Alt-subtract, filters,
+  Select filtered, Invert, and Clear. Exercise persistent Area select with Replace,
+  Add, and Subtract. Mixed-object span selection must not expose a whole-object
+  delete or role change.
 - [ ] Drag selected spans as one rigid piece with snapping enabled. Exercise the
   rotation ring, square scale grip, Shift angle/scale snapping, movable transform
   center, and numeric translate/rotate/scale controls. With persistent snapping
@@ -47,6 +49,13 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   by text editing. Scroll the right inspector without moving or zooming geometry.
 - [ ] Right-drag and Space+left-drag pan. Wheel zoom preserves the world point
   under the cursor. A drag that starts on the panel never edits geometry.
+- [ ] On a touch device, tap-select and drag handles, curves, sources, probes,
+  domain edges, and transform gizmos. Empty one-finger drag pans; two fingers pan
+  and pinch around their centroid. Add a second finger during an object drag and
+  verify that the tentative edit rolls back without a history entry or release
+  click. Confirm that placement tools accept repeated taps, Area select works in
+  both directions, panel scrolling does not move geometry, and touch targets are
+  comfortable without visibly enlarged handles.
 - [ ] Resize the window and change display scale. The box stays square, controls
   stay aligned, and Fit View centers the current domain.
 - [ ] Save a valid scene and a scene with an invalid draft. Reload both using

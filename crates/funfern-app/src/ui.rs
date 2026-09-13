@@ -68,6 +68,7 @@ enum InteractionMode {
     PlaceSegmentProbe,
     PlaceAreaDisk,
     PlaceAreaRegion,
+    SelectArea,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FocusedFeature {
@@ -645,11 +646,43 @@ impl AmrQuality {
         0.65
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MarqueeOperation {
     Replace,
     Add,
     Subtract,
+}
+impl MarqueeOperation {
+    const ALL: [Self; 3] = [Self::Replace, Self::Add, Self::Subtract];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Replace => "Replace",
+            Self::Add => "Add",
+            Self::Subtract => "Subtract",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarqueeContainment {
+    Enclosed,
+    Crossing,
+}
+impl MarqueeContainment {
+    const fn from_drag(anchor: Pos2, current: Pos2) -> Self {
+        if current.x >= anchor.x {
+            Self::Enclosed
+        } else {
+            Self::Crossing
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Enclosed => "Enclosed",
+            Self::Crossing => "Crossing",
+        }
+    }
 }
 #[derive(Clone, Copy)]
 enum PendingSpanClick {
@@ -686,6 +719,16 @@ enum Drag {
         base: Vec<GeometrySpan>,
         operation: MarqueeOperation,
     },
+}
+#[derive(Clone, Copy)]
+enum TouchGesture {
+    Direct,
+    EmptyPan {
+        anchor: Pos2,
+        current: Pos2,
+        moved: bool,
+    },
+    Navigate,
 }
 #[derive(Clone, Copy)]
 enum GizmoHit {
@@ -800,6 +843,7 @@ pub struct Playground {
     focused_feature: Option<FocusedFeature>,
     selected_spans: Vec<GeometrySpan>,
     span_selection_filter: SpanSelectionFilter,
+    marquee_operation: MarqueeOperation,
     baffle_face: InternalBoundarySide,
     gizmo_pivot: Option<Point2>,
     pending_span_click: Option<PendingSpanClick>,
@@ -812,6 +856,9 @@ pub struct Playground {
     snap_to_grid: bool,
     snap_step: f64,
     panning: bool,
+    touch_active: bool,
+    touch_gesture: Option<TouchGesture>,
+    suppress_touch_click: bool,
     center: Point2,
     scale: f64,
     fit: bool,
@@ -974,6 +1021,7 @@ impl Default for Playground {
                 .map(|span| GeometrySpan::Loop(ObstacleId(1), span))
                 .collect(),
             span_selection_filter: SpanSelectionFilter::All,
+            marquee_operation: MarqueeOperation::Replace,
             baffle_face: InternalBoundarySide::Left,
             gizmo_pivot: None,
             pending_span_click: None,
@@ -986,6 +1034,9 @@ impl Default for Playground {
             snap_to_grid: false,
             snap_step: 0.05,
             panning: false,
+            touch_active: false,
+            touch_gesture: None,
+            suppress_touch_click: false,
             center: Point2::default(),
             scale: 300.0,
             fit: true,
@@ -1931,8 +1982,59 @@ impl Playground {
         self.drag = None;
         self.material_frame_drag = None;
         self.panning = false;
+        self.touch_active = false;
+        self.touch_gesture = None;
+        self.suppress_touch_click = false;
         self.custom.clear();
         self.interaction_mode = InteractionMode::Select;
+    }
+
+    fn cancel_pointer_edit(&mut self) -> bool {
+        let source_dragging = std::mem::take(&mut self.source_dragging);
+        let probe_drag = self.probe_drag.take();
+        let domain_drag = self.domain_drag.take();
+        let material_frame_drag = self.material_frame_drag.take();
+        let drag = self.drag.take();
+        match &drag {
+            Some(Drag::Translate { gizmo_before, .. }) => self.gizmo_pivot = *gizmo_before,
+            Some(Drag::Pivot { start, .. }) => self.gizmo_pivot = *start,
+            Some(Drag::Marquee { base, .. }) => self.set_span_selection(base.clone()),
+            _ => {}
+        }
+        self.pending_span_click = None;
+        let cancelled = source_dragging
+            || probe_drag.is_some()
+            || domain_drag.is_some()
+            || material_frame_drag.is_some()
+            || drag.is_some()
+            || self.editor.editing();
+        if cancelled {
+            self.editor.cancel();
+            self.wave_source = self.editor.document.model.source;
+            self.wave_source_dirty = true;
+        }
+        cancelled
+    }
+
+    fn apply_touch_navigation(&mut self, gesture: egui::MultiTouchInfo, viewport: Rect) {
+        let translation = gesture.translation_delta;
+        self.center = self.center
+            + Point2::new(
+                -translation.x as f64 / self.scale,
+                translation.y as f64 / self.scale,
+            );
+        let before = self.world(gesture.center_pos, viewport);
+        self.scale = (self.scale * gesture.zoom_delta as f64).clamp(20.0, 20_000.0);
+        let after = self.world(gesture.center_pos, viewport);
+        self.center = self.center + before - after;
+    }
+
+    fn hit_tolerance(&self, mouse: f32) -> f32 {
+        if self.touch_active {
+            mouse.max(18.0)
+        } else {
+            mouse
+        }
     }
     fn error<T>(&mut self, result: Result<T, String>) -> Option<T> {
         match result {
@@ -2215,7 +2317,13 @@ impl Playground {
         self.set_span_selection(spans);
     }
 
-    fn spans_in_marquee(&self, marquee: Rect, viewport: Rect) -> Vec<GeometrySpan> {
+    fn spans_in_marquee(&self, anchor: Pos2, current: Pos2, viewport: Rect) -> Vec<GeometrySpan> {
+        let marquee = Rect::from_two_pos(anchor, current);
+        let containment = MarqueeContainment::from_drag(anchor, current);
+        // Rendering samples approximate the true cubic to 0.6 screen points.
+        // Requiring a little clearance keeps a barely clipped curve out of the
+        // fully-enclosed result instead of overstating what the samples prove.
+        let enclosure = marquee.shrink(0.75);
         let mut spans = Vec::new();
         let mut seen = BTreeSet::new();
         let mut add = |span| {
@@ -2225,25 +2333,39 @@ impl Playground {
         };
         for side in OuterSide::ALL {
             let [a, b] = outer_side_points(self.editor.document.model.draft.domain, side);
-            if segment_intersects_rect(self.screen(a, viewport), self.screen(b, viewport), marquee)
-            {
+            let [a, b] = [self.screen(a, viewport), self.screen(b, viewport)];
+            let selected = match containment {
+                MarqueeContainment::Enclosed => enclosure.contains(a) && enclosure.contains(b),
+                MarqueeContainment::Crossing => segment_intersects_rect(a, b, marquee),
+            };
+            if selected {
                 add(GeometrySpan::Outer(side));
             }
         }
+        let mut enclosed = BTreeMap::<(u8, u64, usize), (GeometrySpan, bool)>::new();
         for curve in &self.draft_curves {
             let Some(obstacle) = self.editor.obstacle(curve.id) else {
                 continue;
             };
             for segment in curve.samples.windows(2) {
-                if segment_intersects_rect(
-                    self.screen(segment[0].point, viewport),
-                    self.screen(segment[1].point, viewport),
-                    marquee,
-                ) && let Some(span) = obstacle
+                let Some(span) = obstacle
                     .spline
                     .span_index(0.5 * (segment[0].t + segment[1].t))
+                else {
+                    continue;
+                };
+                let span = GeometrySpan::Loop(curve.id, span);
+                let a = self.screen(segment[0].point, viewport);
+                let b = self.screen(segment[1].point, viewport);
+                if containment == MarqueeContainment::Crossing
+                    && segment_intersects_rect(a, b, marquee)
                 {
-                    add(GeometrySpan::Loop(curve.id, span));
+                    add(span);
+                } else if containment == MarqueeContainment::Enclosed {
+                    let entry = enclosed
+                        .entry(geometry_span_key(span))
+                        .or_insert((span, true));
+                    entry.1 &= enclosure.contains(a) && enclosure.contains(b);
                 }
             }
         }
@@ -2252,15 +2374,31 @@ impl Playground {
                 continue;
             };
             for segment in curve.samples.windows(2) {
-                if segment_intersects_rect(
-                    self.screen(segment[0].point, viewport),
-                    self.screen(segment[1].point, viewport),
-                    marquee,
-                ) && let Some(span) = boundary
+                let Some(span) = boundary
                     .spline
                     .span_index(0.5 * (segment[0].t + segment[1].t))
+                else {
+                    continue;
+                };
+                let span = GeometrySpan::Baffle(curve.id, span);
+                let a = self.screen(segment[0].point, viewport);
+                let b = self.screen(segment[1].point, viewport);
+                if containment == MarqueeContainment::Crossing
+                    && segment_intersects_rect(a, b, marquee)
                 {
-                    add(GeometrySpan::Baffle(curve.id, span));
+                    add(span);
+                } else if containment == MarqueeContainment::Enclosed {
+                    let entry = enclosed
+                        .entry(geometry_span_key(span))
+                        .or_insert((span, true));
+                    entry.1 &= enclosure.contains(a) && enclosure.contains(b);
+                }
+            }
+        }
+        if containment == MarqueeContainment::Enclosed {
+            for (_, (span, entirely_inside)) in enclosed {
+                if entirely_inside {
+                    add(span);
                 }
             }
         }
@@ -7796,6 +7934,27 @@ impl Playground {
                 self.set_span_selection(vec![]);
             }
         });
+        let selecting_area = self.interaction_mode == InteractionMode::SelectArea;
+        if ui
+            .add(egui::Button::new("Area select").selected(selecting_area))
+            .clicked()
+        {
+            self.interaction_mode = if selecting_area {
+                InteractionMode::Select
+            } else {
+                self.custom.clear();
+                self.segment_probe_start = None;
+                self.area_probe_center = None;
+                InteractionMode::SelectArea
+            };
+        }
+        if selecting_area {
+            ui.horizontal_wrapped(|ui| {
+                for operation in MarqueeOperation::ALL {
+                    ui.selectable_value(&mut self.marquee_operation, operation, operation.label());
+                }
+            });
+        }
         if let InteractionMode::DrawCustom { .. } = self.interaction_mode {
             ui.horizontal(|ui| {
                 ui.label(format!("{} / 128 points", self.custom.len()));
@@ -9220,6 +9379,23 @@ impl Playground {
         let over = response.contains_pointer() && pointer.is_some_and(|p| r.contains(p));
         let typing = self.keyboard_captured || ctx.text_edit_focused();
         let enabled = !self.automated_benchmark && !self.file_busy && self.load.is_none();
+        self.touch_active = ctx.input(|input| input.any_touches());
+        let multi_touch = ctx.input(|input| input.multi_touch());
+        if enabled
+            && let Some(gesture) = multi_touch
+            && (matches!(self.touch_gesture, Some(TouchGesture::Navigate))
+                || over && r.contains(gesture.center_pos))
+        {
+            if !matches!(self.touch_gesture, Some(TouchGesture::Navigate)) {
+                self.cancel_pointer_edit();
+                self.touch_gesture = Some(TouchGesture::Navigate);
+                self.suppress_touch_click = true;
+            }
+            self.panning = true;
+            self.apply_touch_navigation(gesture, r);
+        }
+        let touch_navigation_owns_pointer =
+            matches!(self.touch_gesture, Some(TouchGesture::Navigate));
         if over && !typing {
             let cursor = if self.panning {
                 egui::CursorIcon::Grabbing
@@ -9265,34 +9441,12 @@ impl Playground {
                     && self.segment_probe_start.take().is_some();
                 let cancelled_area_start = self.interaction_mode == InteractionMode::PlaceAreaDisk
                     && self.area_probe_center.take().is_some();
-                let source_dragging = std::mem::take(&mut self.source_dragging);
-                let probe_drag = self.probe_drag.take();
-                let domain_drag = self.domain_drag.take();
-                let material_frame_drag = self.material_frame_drag.take();
-                let drag = self.drag.take();
-                match &drag {
-                    Some(Drag::Translate { gizmo_before, .. }) => {
-                        self.gizmo_pivot = *gizmo_before;
-                    }
-                    Some(Drag::Pivot { start, .. }) => self.gizmo_pivot = *start,
-                    Some(Drag::Marquee { base, .. }) => {
-                        self.set_span_selection(base.clone());
-                    }
-                    _ => {}
-                }
-                self.pending_span_click = None;
-                if source_dragging
-                    || probe_drag.is_some()
-                    || domain_drag.is_some()
-                    || material_frame_drag.is_some()
-                    || drag.is_some()
-                    || self.editor.editing()
+                if !self.cancel_pointer_edit() && !cancelled_segment_start && !cancelled_area_start
                 {
-                    self.editor.cancel();
-                    self.wave_source = self.editor.document.model.source;
-                    self.wave_source_dirty = true;
-                } else if !cancelled_segment_start && !cancelled_area_start {
                     self.custom.clear();
+                    self.interaction_mode = InteractionMode::Select;
+                }
+                if self.interaction_mode == InteractionMode::SelectArea {
                     self.interaction_mode = InteractionMode::Select;
                 }
                 self.panning = false;
@@ -9305,7 +9459,7 @@ impl Playground {
                 }
                 self.clear_transient();
             }
-            if over && !typing {
+            if over && !typing && !touch_navigation_owns_pointer && !self.suppress_touch_click {
                 if self.interaction_mode == InteractionMode::Select
                     && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
                 {
@@ -9384,7 +9538,22 @@ impl Playground {
                 let space = ctx.input(|i| i.key_down(egui::Key::Space));
                 if secondary || primary && space {
                     self.panning = true;
+                } else if primary && self.interaction_mode == InteractionMode::SelectArea {
+                    if self.touch_active {
+                        self.touch_gesture = Some(TouchGesture::Direct);
+                    }
+                    self.refresh_curves();
+                    self.pending_span_click = None;
+                    self.drag = Some(Drag::Marquee {
+                        anchor: p,
+                        current: p,
+                        base: self.selected_spans.clone(),
+                        operation: self.marquee_operation,
+                    });
                 } else if primary && self.interaction_mode == InteractionMode::Select {
+                    if self.touch_active {
+                        self.touch_gesture = Some(TouchGesture::Direct);
+                    }
                     self.refresh_curves();
                     let modifiers = ctx.input(|input| input.modifiers);
                     if let Some(hit) = self.hit_material_frame_gizmo(p, r)
@@ -9632,19 +9801,39 @@ impl Playground {
                             }
                         } else {
                             self.pending_span_click = None;
-                            self.drag = Some(Drag::Marquee {
-                                anchor: p,
-                                current: p,
-                                base: self.selected_spans.clone(),
-                                operation: if modifiers.alt {
-                                    MarqueeOperation::Subtract
-                                } else if modifiers.shift {
-                                    MarqueeOperation::Add
-                                } else {
-                                    MarqueeOperation::Replace
-                                },
-                            });
+                            if self.touch_active {
+                                self.touch_gesture = Some(TouchGesture::EmptyPan {
+                                    anchor: p,
+                                    current: p,
+                                    moved: false,
+                                });
+                            } else {
+                                self.drag = Some(Drag::Marquee {
+                                    anchor: p,
+                                    current: p,
+                                    base: self.selected_spans.clone(),
+                                    operation: if modifiers.alt {
+                                        MarqueeOperation::Subtract
+                                    } else if modifiers.shift {
+                                        MarqueeOperation::Add
+                                    } else {
+                                        MarqueeOperation::Replace
+                                    },
+                                });
+                            }
                         }
+                    }
+                }
+                if let Some(TouchGesture::EmptyPan {
+                    anchor,
+                    current,
+                    moved,
+                }) = self.touch_gesture.as_mut()
+                {
+                    *current = p;
+                    *moved |= anchor.distance(p) >= 4.0;
+                    if *moved {
+                        self.panning = true;
                     }
                 }
                 if self.panning {
@@ -9942,7 +10131,7 @@ impl Playground {
                         }
                     }
                     if let Some((anchor, current, base, operation)) = marquee_update {
-                        let hits = self.spans_in_marquee(Rect::from_two_pos(anchor, current), r);
+                        let hits = self.spans_in_marquee(anchor, current, r);
                         self.apply_marquee_selection(&base, hits, operation);
                     }
                 }
@@ -10010,7 +10199,8 @@ impl Playground {
                             self.creation_role = role;
                             if role != CreationRole::InternalBoundary
                                 && self.custom.len() >= 4
-                                && self.screen(self.custom[0], r).distance(p) < 10.0
+                                && self.screen(self.custom[0], r).distance(p)
+                                    < self.hit_tolerance(10.0)
                             {
                                 self.finish_custom();
                             } else if self.custom.len() < 128 {
@@ -10070,7 +10260,7 @@ impl Playground {
                                 self.message = "Click inside a simulated subdomain".into();
                             }
                         }
-                        InteractionMode::Select => {}
+                        InteractionMode::Select | InteractionMode::SelectArea => {}
                     }
                 }
             }
@@ -10112,7 +10302,7 @@ impl Playground {
             }) = &drag
             {
                 if anchor.distance(*current) >= 4.0 {
-                    let hits = self.spans_in_marquee(Rect::from_two_pos(*anchor, *current), r);
+                    let hits = self.spans_in_marquee(*anchor, *current, r);
                     self.apply_marquee_selection(base, hits, *operation);
                 } else {
                     self.set_span_selection(base.clone());
@@ -10132,6 +10322,19 @@ impl Playground {
             }
             if !ctx.input(|i| i.pointer.button_down(egui::PointerButton::Secondary)) {
                 self.panning = false;
+            }
+            if !self.touch_active && (self.touch_gesture.is_some() || self.suppress_touch_click) {
+                if let Some(TouchGesture::EmptyPan { anchor, moved, .. }) =
+                    self.touch_gesture.take()
+                    && !moved
+                {
+                    self.set_span_selection(vec![]);
+                    self.region_selection = self.region_at(self.world(anchor, r));
+                } else {
+                    self.touch_gesture = None;
+                }
+                self.panning = false;
+                self.suppress_touch_click = false;
             }
         }
         self.refresh_curves();
@@ -10867,21 +11070,54 @@ impl Playground {
         }) = &self.drag
         {
             let marquee = Rect::from_two_pos(*anchor, *current).intersect(r);
-            let color = match operation {
+            let operation_color = match operation {
                 MarqueeOperation::Replace => SELECT,
                 MarqueeOperation::Add => GOLD,
                 MarqueeOperation::Subtract => RED,
             };
+            let containment = MarqueeContainment::from_drag(*anchor, *current);
+            let border_color = match containment {
+                MarqueeContainment::Enclosed => SELECT,
+                MarqueeContainment::Crossing => TEAL,
+            };
             painter.rect_filled(
                 marquee,
                 0.0,
-                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24),
+                Color32::from_rgba_unmultiplied(
+                    operation_color.r(),
+                    operation_color.g(),
+                    operation_color.b(),
+                    24,
+                ),
             );
-            painter.rect_stroke(
-                marquee,
-                0.0,
-                Stroke::new(1.0, color),
-                egui::StrokeKind::Inside,
+            if containment == MarqueeContainment::Enclosed {
+                painter.rect_stroke(
+                    marquee,
+                    0.0,
+                    Stroke::new(1.0, border_color),
+                    egui::StrokeKind::Inside,
+                );
+            } else {
+                let corners = [
+                    marquee.left_top(),
+                    marquee.right_top(),
+                    marquee.right_bottom(),
+                    marquee.left_bottom(),
+                    marquee.left_top(),
+                ];
+                painter.extend(egui::Shape::dashed_line(
+                    &corners,
+                    Stroke::new(1.0, border_color),
+                    5.0,
+                    3.0,
+                ));
+            }
+            painter.text(
+                marquee.left_top() + egui::vec2(4.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                format!("{} · {}", operation.label(), containment.label()),
+                egui::FontId::monospace(9.0),
+                border_color,
             );
         }
         self.draw_material_overlay_legend(&painter, r, pointer);
@@ -11246,6 +11482,10 @@ impl Playground {
             InteractionMode::PlaceAreaRegion => {
                 ("Placing subdomain probes", "Click inside a subdomain")
             }
+            InteractionMode::SelectArea => (
+                "Area selection",
+                "Drag → for enclosed · drag ← for crossing",
+            ),
         };
         egui::Area::new("interaction_mode_overlay".into())
             .fixed_pos(viewport.left_top() + egui::vec2(12.0, 12.0))
@@ -11264,6 +11504,15 @@ impl Playground {
                                 self.finish_custom();
                             }
                         }
+                        if self.interaction_mode == InteractionMode::SelectArea {
+                            for operation in MarqueeOperation::ALL {
+                                ui.selectable_value(
+                                    &mut self.marquee_operation,
+                                    operation,
+                                    operation.label(),
+                                );
+                            }
+                        }
                         let cancel_label = if matches!(
                             self.interaction_mode,
                             InteractionMode::PlacePulse
@@ -11271,6 +11520,7 @@ impl Playground {
                                 | InteractionMode::PlaceSegmentProbe
                                 | InteractionMode::PlaceAreaDisk
                                 | InteractionMode::PlaceAreaRegion
+                                | InteractionMode::SelectArea
                         ) {
                             "Done"
                         } else {
@@ -11297,7 +11547,7 @@ impl Playground {
             })
             .into_iter()
             .map(|(side, a, b)| (side, point_segment_distance(point, a, b)))
-            .filter(|(_, distance)| *distance * self.scale <= 8.0)
+            .filter(|(_, distance)| *distance * self.scale <= self.hit_tolerance(8.0) as f64)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(side, _)| side)
     }
@@ -11312,7 +11562,7 @@ impl Playground {
             .into_iter()
             .enumerate()
             .map(|(index, corner)| (index, self.screen(corner, viewport).distance(point)))
-            .filter(|(_, distance)| *distance <= 10.0)
+            .filter(|(_, distance)| *distance <= self.hit_tolerance(10.0))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(index, _)| index)
     }
@@ -11387,11 +11637,11 @@ impl Playground {
         let pivot = self.selection_pivot()?;
         let center = self.screen(pivot, r);
         let distance = center.distance(point);
-        if distance <= 8.0 {
+        if distance <= self.hit_tolerance(8.0) {
             Some(GizmoHit::Pivot)
-        } else if self.scale_handle_position(r, pivot).distance(point) <= 8.0 {
+        } else if self.scale_handle_position(r, pivot).distance(point) <= self.hit_tolerance(8.0) {
             Some(GizmoHit::Scale)
-        } else if (distance - self.gizmo_radius(r, pivot)).abs() <= 7.0 {
+        } else if (distance - self.gizmo_radius(r, pivot)).abs() <= self.hit_tolerance(7.0) {
             Some(GizmoHit::Rotate)
         } else {
             None
@@ -11421,9 +11671,9 @@ impl Playground {
         let (_, frame) = self.selected_material_frame()?;
         let center = self.screen(frame.origin, r);
         let distance = center.distance(point);
-        if distance <= 9.0 {
+        if distance <= self.hit_tolerance(9.0) {
             Some(MaterialFrameGizmoHit::Origin)
-        } else if (distance - 42.0).abs() <= 7.0 {
+        } else if (distance - 42.0).abs() <= self.hit_tolerance(7.0) {
             Some(MaterialFrameGizmoHit::Rotate)
         } else {
             None
@@ -11462,7 +11712,7 @@ impl Playground {
                     .enumerate()
                     .map(move |(i, c)| (o.id, i, self.screen(*c, r).distance(p)))
             })
-            .filter(|x| x.2 <= 10.0)
+            .filter(|x| x.2 <= self.hit_tolerance(10.0))
             .min_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(id, i, _)| (id, i))
     }
@@ -11472,7 +11722,7 @@ impl Playground {
             && self
                 .screen(self.wave_source.position, viewport)
                 .distance(point)
-                <= 12.0
+                <= self.hit_tolerance(12.0)
     }
 
     fn hit_far_field(&self, point: Pos2, viewport: Rect) -> bool {
@@ -11497,9 +11747,9 @@ impl Playground {
                     Point2::new(point.x as f64, point.y as f64),
                     Point2::new(start.x as f64, start.y as f64),
                     Point2::new(end.x as f64, end.y as f64),
-                ) <= 7.0
+                ) <= self.hit_tolerance(7.0) as f64
             })
-            || corners[2].distance(point) <= 24.0
+            || corners[2].distance(point) <= self.hit_tolerance(24.0)
     }
 
     fn area_region_anchor(&self, region: RegionId) -> Point2 {
@@ -11537,20 +11787,20 @@ impl Playground {
             .filter(|probe| self.probe_visible(probe.target))
             .find_map(|probe| match probe.target {
                 ProbeTarget::Point(position) => (self.screen(position, viewport).distance(point)
-                    <= 10.0)
-                    .then_some(ProbeHit::Point(probe.id)),
+                    <= self.hit_tolerance(10.0))
+                .then_some(ProbeHit::Point(probe.id)),
                 ProbeTarget::Segment { start, end, .. } => {
                     let a = self.screen(start, viewport);
                     let b = self.screen(end, viewport);
-                    if a.distance(point) <= 10.0 {
+                    if a.distance(point) <= self.hit_tolerance(10.0) {
                         Some(ProbeHit::SegmentEndpoint(probe.id, true))
-                    } else if b.distance(point) <= 10.0 {
+                    } else if b.distance(point) <= self.hit_tolerance(10.0) {
                         Some(ProbeHit::SegmentEndpoint(probe.id, false))
                     } else if point_segment_distance(
                         Point2::new(point.x as f64, point.y as f64),
                         Point2::new(a.x as f64, a.y as f64),
                         Point2::new(b.x as f64, b.y as f64),
-                    ) <= 7.0
+                    ) <= self.hit_tolerance(7.0) as f64
                     {
                         Some(ProbeHit::SegmentBody(probe.id))
                     } else {
@@ -11577,16 +11827,16 @@ impl Playground {
                         }
                         remaining -= length;
                     }
-                    (self.screen(badge, viewport).distance(point) <= 11.0)
+                    (self.screen(badge, viewport).distance(point) <= self.hit_tolerance(11.0))
                         .then_some(ProbeHit::Boundary(probe.id))
                 }
                 ProbeTarget::AreaDisk { center, radius } => {
                     let center = self.screen(center, viewport);
                     let radius = (radius * self.scale) as f32;
                     let radius_handle = center + egui::vec2(radius, 0.0);
-                    if radius_handle.distance(point) <= 10.0 {
+                    if radius_handle.distance(point) <= self.hit_tolerance(10.0) {
                         Some(ProbeHit::AreaDiskRadius(probe.id))
-                    } else if center.distance(point) <= radius + 7.0 {
+                    } else if center.distance(point) <= radius + self.hit_tolerance(7.0) {
                         Some(ProbeHit::AreaDiskBody(probe.id))
                     } else {
                         None
@@ -11595,8 +11845,8 @@ impl Playground {
                 ProbeTarget::AreaRegion { region } => (self
                     .screen(self.area_region_anchor(region), viewport)
                     .distance(point)
-                    <= 12.0)
-                    .then_some(ProbeHit::AreaRegion(probe.id)),
+                    <= self.hit_tolerance(12.0))
+                .then_some(ProbeHit::AreaRegion(probe.id)),
             })
     }
 
@@ -11630,7 +11880,7 @@ impl Playground {
                         (boundary.id, index, self.screen(*control, r).distance(p))
                     })
             })
-            .filter(|candidate| candidate.2 <= 10.0)
+            .filter(|candidate| candidate.2 <= self.hit_tolerance(10.0))
             .min_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(id, index, _)| (id, index))
     }
@@ -11644,7 +11894,7 @@ impl Playground {
                     .windows(2)
                     .map(|s| point_segment_distance(world, s[0].point, s[1].point))
                     .fold(f64::INFINITY, f64::min);
-                (distance * self.scale <= 8.0).then_some((c, distance))
+                (distance * self.scale <= self.hit_tolerance(8.0) as f64).then_some((c, distance))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(c, _)| {
@@ -11656,7 +11906,7 @@ impl Playground {
                     .map(|t| (t, self.screen(spline.evaluate(t), r).distance(p)))
                     .min_by(|a, b| a.1.total_cmp(&b.1));
                 let t = match nearest_knot {
-                    Some((t, distance)) if distance <= 4.0 => t,
+                    Some((t, distance)) if distance <= self.hit_tolerance(4.0) => t,
                     _ => closest_parameter(spline, &c.samples, world),
                 };
                 (c.id, t)
@@ -11675,7 +11925,8 @@ impl Playground {
                         point_segment_distance(world, samples[0].point, samples[1].point)
                     })
                     .fold(f64::INFINITY, f64::min);
-                (distance * self.scale <= 8.0).then_some((curve, distance))
+                (distance * self.scale <= self.hit_tolerance(8.0) as f64)
+                    .then_some((curve, distance))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(curve, _)| {
@@ -14574,7 +14825,7 @@ fn paint_example_thumbnail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui::{Event, Key, Modifiers, PointerButton};
+    use egui::{Event, Key, Modifiers, PointerButton, TouchDeviceId, TouchId, TouchPhase};
     struct Harness {
         state: Playground,
         ctx: egui::Context,
@@ -14660,6 +14911,46 @@ mod tests {
             self.move_to(p);
             self.button(p, PointerButton::Primary, true);
             self.button(p, PointerButton::Primary, false);
+        }
+        fn primary_touch(&mut self, id: u64, phase: TouchPhase, p: Pos2) {
+            let mut events = vec![Event::Touch {
+                device_id: TouchDeviceId(1),
+                id: TouchId(id),
+                phase,
+                pos: p,
+                force: None,
+            }];
+            match phase {
+                TouchPhase::Start => {
+                    events.insert(0, Event::PointerMoved(p));
+                    events.push(Event::PointerButton {
+                        pos: p,
+                        button: PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Modifiers::NONE,
+                    });
+                }
+                TouchPhase::Move => events.insert(0, Event::PointerMoved(p)),
+                TouchPhase::End | TouchPhase::Cancel => {
+                    events.insert(0, Event::PointerMoved(p));
+                    events.push(Event::PointerButton {
+                        pos: p,
+                        button: PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Modifiers::NONE,
+                    });
+                }
+            }
+            self.frame(events);
+        }
+        fn secondary_touch(&mut self, id: u64, phase: TouchPhase, p: Pos2) {
+            self.frame(vec![Event::Touch {
+                device_id: TouchDeviceId(1),
+                id: TouchId(id),
+                phase,
+                pos: p,
+                force: None,
+            }]);
         }
         fn click_with_modifiers(&mut self, p: Pos2, modifiers: Modifiers) {
             self.frame(vec![
@@ -15289,6 +15580,51 @@ mod tests {
         harness.key(Key::Escape, Modifiers::NONE);
         harness.button(end, PointerButton::Primary, false);
         assert_eq!(harness.state.selected_spans, previous);
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
+    }
+
+    #[test]
+    fn marquee_direction_switches_between_enclosed_and_crossing_spans() {
+        let mut harness = Harness::new();
+        harness.state.span_selection_filter = SpanSelectionFilter::Outer;
+        let left = harness.point(Point2::new(-0.2, 1.1));
+        let right = harness.point(Point2::new(0.2, 0.9));
+
+        let enclosed = harness.state.spans_in_marquee(left, right, harness.rect);
+        assert!(!enclosed.contains(&GeometrySpan::Outer(OuterSide::Top)));
+
+        let crossing = harness.state.spans_in_marquee(right, left, harness.rect);
+        assert!(crossing.contains(&GeometrySpan::Outer(OuterSide::Top)));
+
+        let enclosing_left = harness.point(Point2::new(-1.1, 1.1));
+        let enclosing_right = harness.point(Point2::new(1.1, 0.9));
+        let enclosed =
+            harness
+                .state
+                .spans_in_marquee(enclosing_left, enclosing_right, harness.rect);
+        assert!(enclosed.contains(&GeometrySpan::Outer(OuterSide::Top)));
+    }
+
+    #[test]
+    fn touch_area_select_uses_direction_and_remains_active() {
+        let mut harness = Harness::new();
+        harness.state.span_selection_filter = SpanSelectionFilter::Outer;
+        harness.state.set_span_selection(vec![]);
+        harness.state.interaction_mode = InteractionMode::SelectArea;
+        harness.state.marquee_operation = MarqueeOperation::Replace;
+        harness.frame(vec![]);
+        let start = harness.point(Point2::new(0.2, 1.1));
+        let end = harness.point(Point2::new(-0.2, 0.9));
+
+        harness.primary_touch(1, TouchPhase::Start, start);
+        harness.primary_touch(1, TouchPhase::Move, end);
+        harness.primary_touch(1, TouchPhase::End, end);
+
+        assert_eq!(
+            harness.state.selected_spans,
+            vec![GeometrySpan::Outer(OuterSide::Top)]
+        );
+        assert_eq!(harness.state.interaction_mode, InteractionMode::SelectArea);
         assert_eq!(harness.state.editor.history_len(), (0, 0));
     }
 
@@ -17225,6 +17561,198 @@ mod tests {
         assert_eq!(h.state.center, center);
         assert_eq!(h.state.editor.document, before);
         assert_eq!(h.state.editor.history_len(), (0, 0));
+    }
+
+    #[test]
+    fn empty_single_touch_pans_without_changing_selection_or_history() {
+        let mut harness = Harness::new();
+        let before = harness.state.editor.document.clone();
+        let selected = harness.state.selected_spans.clone();
+        let center = harness.state.center;
+        let start = harness.point(Point2::new(0.75, 0.75));
+        let end = start + egui::vec2(50.0, 24.0);
+
+        harness.primary_touch(1, TouchPhase::Start, start);
+        harness.primary_touch(1, TouchPhase::Move, end);
+        harness.primary_touch(1, TouchPhase::End, end);
+
+        assert_ne!(harness.state.center, center);
+        assert_eq!(harness.state.selected_spans, selected);
+        assert_eq!(harness.state.editor.document, before);
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
+    }
+
+    #[test]
+    fn one_finger_object_drag_commits_one_history_entry() {
+        let mut harness = Harness::new();
+        let before = harness.state.editor.document.clone();
+        let start = harness.point(Point2::new(0.15, 0.0));
+        let end = start + egui::vec2(24.0, -12.0);
+
+        harness.primary_touch(1, TouchPhase::Start, start);
+        harness.primary_touch(1, TouchPhase::Move, end);
+        harness.primary_touch(1, TouchPhase::End, end);
+        harness.settle();
+
+        assert_ne!(harness.state.editor.document, before);
+        assert_eq!(harness.state.editor.history_len(), (1, 0));
+        assert_eq!(harness.state.selection, Some((ObstacleId(1), Some(0))));
+    }
+
+    #[test]
+    fn touch_hit_targets_are_larger_without_changing_mouse_targets() {
+        let mut harness = Harness::new();
+        let control = harness.point(Point2::new(0.15, 0.0));
+        let near = control + egui::vec2(15.0, 0.0);
+        harness.state.set_span_selection(vec![]);
+        harness.state.selection = None;
+        harness.frame(vec![]);
+
+        harness.click(near);
+        assert_eq!(harness.state.selection, None);
+
+        harness.primary_touch(1, TouchPhase::Start, near);
+        harness.primary_touch(1, TouchPhase::End, near);
+        assert_eq!(harness.state.selection, Some((ObstacleId(1), Some(0))));
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
+    }
+
+    #[test]
+    fn two_finger_navigation_preserves_its_center_and_document() {
+        let mut harness = Harness::new();
+        let before = harness.state.editor.document.clone();
+        let center = harness.rect.center();
+        let first = center + egui::vec2(-60.0, 0.0);
+        let second = center + egui::vec2(60.0, 0.0);
+        harness.primary_touch(1, TouchPhase::Start, first);
+        harness.secondary_touch(2, TouchPhase::Start, second);
+        let world_at_center = harness.state.world(center, harness.rect);
+        let scale = harness.state.scale;
+
+        let moved_first = center + egui::vec2(-90.0, 0.0);
+        let moved_second = center + egui::vec2(90.0, 0.0);
+        harness.frame(vec![
+            Event::PointerMoved(moved_first),
+            Event::Touch {
+                device_id: TouchDeviceId(1),
+                id: TouchId(1),
+                phase: TouchPhase::Move,
+                pos: moved_first,
+                force: None,
+            },
+            Event::Touch {
+                device_id: TouchDeviceId(1),
+                id: TouchId(2),
+                phase: TouchPhase::Move,
+                pos: moved_second,
+                force: None,
+            },
+        ]);
+
+        assert!(harness.state.scale > scale);
+        let after = harness.state.world(center, harness.rect);
+        assert!((after - world_at_center).norm() < 1.0e-9);
+        harness.secondary_touch(2, TouchPhase::End, moved_second);
+        harness.primary_touch(1, TouchPhase::End, moved_first);
+        assert_eq!(harness.state.editor.document, before);
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
+        assert!(harness.state.touch_gesture.is_none());
+        assert!(!harness.state.suppress_touch_click);
+    }
+
+    #[test]
+    fn two_finger_translation_pans_and_suppresses_placement_clicks() {
+        let mut harness = Harness::new();
+        harness.state.interaction_mode = InteractionMode::PlaceProbe;
+        let document = harness.state.editor.document.clone();
+        let center = harness.rect.center();
+        let first = center + egui::vec2(-80.0, 80.0);
+        let second = center + egui::vec2(80.0, 80.0);
+        let camera = harness.state.center;
+        let scale = harness.state.scale;
+        harness.primary_touch(1, TouchPhase::Start, first);
+        harness.secondary_touch(2, TouchPhase::Start, second);
+
+        let delta = egui::vec2(36.0, -18.0);
+        let moved_first = first + delta;
+        let moved_second = second + delta;
+        harness.frame(vec![
+            Event::PointerMoved(moved_first),
+            Event::Touch {
+                device_id: TouchDeviceId(1),
+                id: TouchId(1),
+                phase: TouchPhase::Move,
+                pos: moved_first,
+                force: None,
+            },
+            Event::Touch {
+                device_id: TouchDeviceId(1),
+                id: TouchId(2),
+                phase: TouchPhase::Move,
+                pos: moved_second,
+                force: None,
+            },
+        ]);
+        let expected = camera + Point2::new(-delta.x as f64 / scale, delta.y as f64 / scale);
+        assert!((harness.state.center - expected).norm() < 1.0e-9);
+
+        harness.secondary_touch(2, TouchPhase::End, moved_second);
+        harness.primary_touch(1, TouchPhase::End, moved_first);
+        assert_eq!(harness.state.editor.document, document);
+        assert!(harness.state.editor.document.model.probes.is_empty());
+        assert_eq!(harness.state.interaction_mode, InteractionMode::PlaceProbe);
+    }
+
+    #[test]
+    fn touch_started_in_a_panel_cannot_take_over_the_viewport() {
+        let mut harness = Harness::new();
+        let camera = harness.state.center;
+        let panel = egui::pos2(harness.rect.left() - 24.0, harness.rect.center().y);
+        let viewport = harness.rect.center();
+
+        harness.primary_touch(1, TouchPhase::Start, panel);
+        harness.primary_touch(1, TouchPhase::Move, viewport);
+        harness.primary_touch(1, TouchPhase::End, viewport);
+
+        assert_eq!(harness.state.center, camera);
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
+    }
+
+    #[test]
+    fn repeated_touch_placement_keeps_the_tool_active() {
+        let mut harness = Harness::new();
+        harness.state.interaction_mode = InteractionMode::PlaceProbe;
+        let first = harness.point(Point2::new(0.55, 0.45));
+        let second = harness.point(Point2::new(0.7, 0.25));
+
+        harness.primary_touch(1, TouchPhase::Start, first);
+        harness.primary_touch(1, TouchPhase::End, first);
+        harness.primary_touch(2, TouchPhase::Start, second);
+        harness.primary_touch(2, TouchPhase::End, second);
+
+        assert_eq!(harness.state.editor.document.model.probes.len(), 2);
+        assert_eq!(harness.state.interaction_mode, InteractionMode::PlaceProbe);
+        assert_eq!(harness.state.editor.history_len(), (2, 0));
+    }
+
+    #[test]
+    fn adding_second_finger_cancels_an_uncommitted_object_drag() {
+        let mut harness = Harness::new();
+        let before = harness.state.editor.document.clone();
+        let start = harness.point(Point2::new(0.15, 0.0));
+        let moved = start + egui::vec2(25.0, 0.0);
+        harness.primary_touch(1, TouchPhase::Start, start);
+        harness.primary_touch(1, TouchPhase::Move, moved);
+        assert_ne!(harness.state.editor.document, before);
+
+        harness.secondary_touch(2, TouchPhase::Start, moved + egui::vec2(80.0, 0.0));
+        assert_eq!(harness.state.editor.document, before);
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
+
+        harness.secondary_touch(2, TouchPhase::End, moved + egui::vec2(80.0, 0.0));
+        harness.primary_touch(1, TouchPhase::End, moved);
+        assert_eq!(harness.state.editor.document, before);
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
     }
     #[test]
     fn double_click_inserts_once_and_existing_knot_selects() {
