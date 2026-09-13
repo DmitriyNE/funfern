@@ -40,7 +40,7 @@ inspector exposes one of five panels: Edit, View, Simulation, Materials, or Prob
 solver starts in the running state after its initial operator is committed.
 Selection remains contextual rather than introducing separate selection modes.
 Draw opens a transient role/primitive popover: holes and interfaces offer Circle,
-Rectangle, Polygon, and Spline, while baffles offer Straight, Polyline, and Spline.
+Rectangle, Polygon, and Spline, while baffles offer Polyline and Spline.
 Polygonal tools accept interpolation vertices; Spline accepts control points. A
 single `InteractionMode` owns draw, pulse-placement, and probe placement state.
 Placement modes are shown over the viewport and survive inspector changes;
@@ -289,8 +289,9 @@ numerically ill-conditioned. Parameters wrap over one period.
 Exact polyline constructors expand each vertex-to-vertex edge into one collinear
 cubic Bézier span. Interior or periodic breakpoints have multiplicity three, making
 the vertex an interpolated C0 corner while retaining the normal open or periodic
-spline representation. Straight and rectangular tools are constrained instances of
-the same constructors; no separate polygon geometry reaches validation or meshing.
+spline representation. A two-control baffle Spline expands its endpoints into one
+such exact straight span, and the rectangular tool uses the periodic constructor;
+no separate polygon geometry reaches validation or meshing.
 
 Periodic knot insertion updates a whole period of the affected control sequence,
 including controls crossing the seam, and preserves position and derivatives.
@@ -401,10 +402,11 @@ The viewport and panels share egui's event routing and logical-pixel coordinates
 Geometry is drawn with the egui painter on Bevy's wgpu device. Input gestures
 start in the viewport; panel/text capture prevents accidental geometry edits.
 Mouse and touch share the same feature-hit priority, with larger invisible touch
-targets. Empty one-finger drags pan, while an explicit Area-select mode owns touch
-marquees. Egui's multi-touch centroid supplies cursor-centered pinch zoom and pan;
-once a second finger joins, navigation owns the gesture until every finger lifts
-and any tentative document drag is rolled back. Marquee direction distinguishes
+targets. Empty one-finger drags use the ordinary directional marquee, while the
+explicit Area-select mode supplies persistent replace/add/subtract operations.
+Egui's multi-touch centroid supplies cursor-centered pinch zoom and pan; once a
+second finger joins, navigation owns the gesture until every finger lifts and any
+tentative document drag or marquee is rolled back. Marquee direction distinguishes
 fully enclosed logical spans from crossing spans.
 Canvas resize/display scale comes from Bevy/egui, and Fit View frames the current
 draft domain. JSON excludes the viewport. There is no independent wgpu device, WebGL

@@ -59,6 +59,23 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-13 — Touch marquee and two-point spline baffles
+
+- Reserved viewport navigation on touch for the two-finger centroid/pinch gesture.
+  An empty one-finger drag now starts the ordinary directional marquee in Select,
+  while feature hits still directly manipulate handles, curves, probes, sources,
+  domain edges, and gizmos. A second finger cancels the tentative marquee before
+  navigation takes ownership.
+- Removed the separate **Straight** baffle primitive. **Baffle → Spline** now has
+  two valid completion forms: exactly two entered controls expand to the existing
+  exact straight cubic representation with equidistant controls, while four or
+  more controls create the freeform open spline. Three entered controls deliberately
+  remain incomplete. Polyline continues to provide explicit C0 interpolation
+  vertices.
+- All 335 workspace tests, warning-denied Clippy, native release compilation, and
+  the release Trunk build pass. Real-device touch interaction remains on the manual
+  browser checklist.
+
 ## 2026-09-13 — Drawing primitives and generalized straightening
 
 - Replaced the ambiguous **Custom** choice with explicit role-specific catalogs.

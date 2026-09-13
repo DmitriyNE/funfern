@@ -156,16 +156,18 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   two-sided walls remain load-compatible but are no longer a primary creation tool.
 - **Circle:** click to place eight controls on a radius `0.15` circle, then
   automatically return to selection. The spline lies inside its control polygon.
-- **Straight and Rectangle:** two endpoint clicks create an arbitrarily oriented
-  straight baffle; two opposite-corner clicks create an axis-aligned rectangular
-  loop. Both use exact straight cubic spans and then return to selection.
+- **Rectangle:** two opposite-corner clicks create an axis-aligned rectangular
+  loop from exact straight cubic spans and then return to selection.
 - **Polygon and Polyline:** clicks place interpolation vertices joined by exact C0
   straight spans. Enter finishes either tool; clicking the first vertex also closes
   a polygon. Polygon is available for loops and Polyline for baffles.
-- **Spline:** this is the freeform control-point tool. Four controls enable its live
-  curve preview. Enter finishes an open baffle; Enter or clicking the first handle
-  closes a loop. Its control polygon distinguishes it from the vertex-based tools.
-  Backspace removes the latest staged point and Escape cancels construction.
+- **Spline:** this is the control-point tool. A baffle can be finished with exactly
+  two clicked controls to create an exact straight line with equidistant internal
+  controls; three controls are incomplete, and four or more form the usual freeform
+  spline. Four controls enable the live curve preview. Enter finishes an open
+  baffle; Enter or clicking the first handle closes a loop. Its control polygon
+  distinguishes it from the vertex-based tools. Backspace removes the latest staged
+  point and Escape cancels construction.
 - **Straighten:** a complete baffle or a partial span selection isolated by C0
   breaks can be made exactly straight while preserving its endpoints, span laws,
   and attached probes. Closed complete loops cannot collapse into a line.
@@ -261,10 +263,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   the contour or its `FF` badge to open it. The contour must enclose every modeled boundary
   and stay in the lossless background material; View can hide its overlay.
 - **Navigate:** right-drag or Space + left-drag pans with a mouse. On touch screens,
-  drag an object to manipulate it, drag empty canvas to pan, and use two fingers to
-  pan and pinch around their shared center. Touch hit targets expand without making
-  the drawn controls larger. Fit View frames the current domain. Panel scrolling
-  and text editing do not manipulate the viewport.
+  drag an object to manipulate it, drag empty canvas with one finger to marquee
+  spans, and use two fingers to pan and pinch around their shared center. Touch hit
+  targets expand without making the drawn controls larger. Fit View frames the
+  current domain. Panel scrolling and text editing do not manipulate the viewport.
 - **Drafts:** green curves are accepted, amber curves are being checked, red
   curves are invalid. The last accepted scene stays as a subdued reference.
   Invalid edits remain after release. Escape during a drag restores its starting

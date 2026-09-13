@@ -15,10 +15,12 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   File and panel menus replace buttons without obscuring playback controls.
 - [ ] Draw > Hole/Interface offers Circle, Rectangle, Polygon, and Spline. Exercise
   two-corner Rectangle, vertex-based Polygon with Enter and first-vertex closure,
-  and the four-control Spline preview. Draw > Baffle offers two-endpoint Straight,
-  vertex-based Polyline, and control-point Spline. Check Finish, Enter, Backspace,
-  Escape, previews, one-entry history, invalid drafts, and the 32-feature/128-control
-  limits. The viewport overlay identifies vertices versus control points.
+  and the four-control Spline preview. Draw > Baffle offers vertex-based Polyline
+  and control-point Spline. Finish the Spline at exactly two controls and verify an
+  exact straight baffle; verify that three controls cannot finish and four or more
+  retain the freeform spline behavior. Check Finish, Enter, Backspace, Escape,
+  previews, one-entry history, invalid drafts, and the 32-feature/128-control limits.
+  The viewport overlay identifies vertices versus control points.
 - [ ] Drag a handle outside the square. The invalid draft persists after release,
   is red, and shows a specific reason and the accepted reference. Drag it back
   to recover. Escape during a drag restores both scenes. Undo restores the prior
@@ -58,12 +60,12 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
 - [ ] Right-drag and Space+left-drag pan. Wheel zoom preserves the world point
   under the cursor. A drag that starts on the panel never edits geometry.
 - [ ] On a touch device, tap-select and drag handles, curves, sources, probes,
-  domain edges, and transform gizmos. Empty one-finger drag pans; two fingers pan
-  and pinch around their centroid. Add a second finger during an object drag and
-  verify that the tentative edit rolls back without a history entry or release
-  click. Confirm that placement tools accept repeated taps, Area select works in
-  both directions, panel scrolling does not move geometry, and touch targets are
-  comfortable without visibly enlarged handles.
+  domain edges, and transform gizmos. Empty one-finger drag draws a directional
+  marquee; two fingers pan and pinch around their centroid. Add a second finger
+  during an object drag or marquee and verify that the tentative action rolls back
+  without a history entry or release click. Confirm that placement tools accept
+  repeated taps, Area select works in both directions, panel scrolling does not move
+  geometry, and touch targets are comfortable without visibly enlarged handles.
 - [ ] Resize the window and change display scale. The box stays square, controls
   stay aligned, and Fit View centers the current domain.
 - [ ] Save a valid scene and a scene with an invalid draft. Reload both using

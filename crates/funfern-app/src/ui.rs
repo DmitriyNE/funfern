@@ -58,7 +58,6 @@ enum DrawTool {
     Circle,
     Rectangle,
     Polygon,
-    Straight,
     Polyline,
     Spline,
 }
@@ -68,40 +67,44 @@ impl DrawTool {
             Self::Circle => "Circle",
             Self::Rectangle => "Rectangle",
             Self::Polygon => "Polygon",
-            Self::Straight => "Straight",
             Self::Polyline => "Polyline",
             Self::Spline => "Spline",
         }
     }
 
-    const fn minimum_points(self) -> usize {
-        match self {
-            Self::Circle => 0,
-            Self::Straight | Self::Rectangle | Self::Polyline => 2,
-            Self::Polygon => 3,
-            Self::Spline => 4,
+    const fn minimum_points(self, role: CreationRole) -> usize {
+        match (self, role) {
+            (Self::Spline, CreationRole::InternalBoundary) => 2,
+            (Self::Circle, _) => 0,
+            (Self::Rectangle | Self::Polyline, _) => 2,
+            (Self::Polygon, _) => 3,
+            (Self::Spline, _) => 4,
+        }
+    }
+
+    const fn can_finish(self, role: CreationRole, points: usize) -> bool {
+        match (self, role) {
+            (Self::Spline, CreationRole::InternalBoundary) => points == 2 || points >= 4,
+            _ => points >= self.minimum_points(role),
         }
     }
 
     const fn maximum_points(self) -> usize {
         match self {
             Self::Circle => 0,
-            Self::Straight | Self::Rectangle => 2,
-            Self::Polygon => 42,
+            Self::Rectangle => 2,
             Self::Polyline => 43,
+            Self::Polygon => 42,
             Self::Spline => 128,
         }
     }
 
     const fn finishes_automatically(self) -> bool {
-        matches!(self, Self::Circle | Self::Straight | Self::Rectangle)
+        matches!(self, Self::Circle | Self::Rectangle)
     }
 
     const fn places_vertices(self) -> bool {
-        matches!(
-            self,
-            Self::Straight | Self::Rectangle | Self::Polygon | Self::Polyline
-        )
+        matches!(self, Self::Rectangle | Self::Polygon | Self::Polyline)
     }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -773,11 +776,6 @@ enum Drag {
 #[derive(Clone, Copy)]
 enum TouchGesture {
     Direct,
-    EmptyPan {
-        anchor: Pos2,
-        current: Pos2,
-        moved: bool,
-    },
     Navigate,
 }
 #[derive(Clone, Copy)]
@@ -2985,17 +2983,21 @@ impl Playground {
         let InteractionMode::Draw { role, tool } = self.interaction_mode else {
             return;
         };
-        if self.custom.len() < tool.minimum_points() {
-            self.message = format!(
-                "{} needs at least {} {}",
-                tool.label(),
-                tool.minimum_points(),
-                if tool.places_vertices() {
-                    "vertices"
-                } else {
-                    "control points"
-                }
-            );
+        if !tool.can_finish(role, self.custom.len()) {
+            self.message = if role == CreationRole::InternalBoundary && tool == DrawTool::Spline {
+                "Spline baffle needs two endpoints or at least four control points".into()
+            } else {
+                format!(
+                    "{} needs at least {} {}",
+                    tool.label(),
+                    tool.minimum_points(role),
+                    if tool.places_vertices() {
+                        "vertices"
+                    } else {
+                        "control points"
+                    }
+                )
+            };
             return;
         }
         let center = self
@@ -3005,7 +3007,7 @@ impl Playground {
             .fold(Point2::default(), |sum, point| sum + point)
             / self.custom.len() as f64;
         let result = match (role, tool) {
-            (CreationRole::InternalBoundary, DrawTool::Straight | DrawTool::Polyline) => {
+            (CreationRole::InternalBoundary, DrawTool::Polyline) => {
                 OpenCubicSpline::polyline(self.custom.clone())
                     .map_err(|error| error.to_string())
                     .and_then(|spline| {
@@ -3017,7 +3019,12 @@ impl Playground {
                     })
             }
             (CreationRole::InternalBoundary, DrawTool::Spline) => {
-                OpenCubicSpline::uniform(self.custom.clone())
+                let spline = if self.custom.len() == 2 {
+                    OpenCubicSpline::polyline(self.custom.clone())
+                } else {
+                    OpenCubicSpline::uniform(self.custom.clone())
+                };
+                spline
                     .map_err(|error| error.to_string())
                     .and_then(|spline| {
                         let anchor = spline.evaluate(spline.period() * 0.5);
@@ -4645,7 +4652,7 @@ impl Playground {
                 ui.horizontal_wrapped(|ui| {
                     let tools: &[DrawTool] = if self.creation_role == CreationRole::InternalBoundary
                     {
-                        &[DrawTool::Straight, DrawTool::Polyline, DrawTool::Spline]
+                        &[DrawTool::Polyline, DrawTool::Spline]
                     } else {
                         &[
                             DrawTool::Circle,
@@ -8195,7 +8202,7 @@ impl Playground {
                 }
             });
         }
-        if let InteractionMode::Draw { tool, .. } = self.interaction_mode
+        if let InteractionMode::Draw { role, tool } = self.interaction_mode
             && !tool.finishes_automatically()
         {
             ui.horizontal(|ui| {
@@ -8211,7 +8218,7 @@ impl Playground {
                 ));
                 if ui
                     .add_enabled(
-                        self.custom.len() >= tool.minimum_points(),
+                        tool.can_finish(role, self.custom.len()),
                         egui::Button::new("Finish"),
                     )
                     .clicked()
@@ -10057,38 +10064,18 @@ impl Playground {
                             }
                         } else {
                             self.pending_span_click = None;
-                            if self.touch_active {
-                                self.touch_gesture = Some(TouchGesture::EmptyPan {
-                                    anchor: p,
-                                    current: p,
-                                    moved: false,
-                                });
-                            } else {
-                                let default_operation = MarqueeOperation::Replace;
-                                self.drag = Some(Drag::Marquee {
-                                    anchor: p,
-                                    current: p,
-                                    base: self.selected_spans.clone(),
+                            let default_operation = MarqueeOperation::Replace;
+                            self.drag = Some(Drag::Marquee {
+                                anchor: p,
+                                current: p,
+                                base: self.selected_spans.clone(),
+                                default_operation,
+                                operation: Self::marquee_operation_with_modifiers(
                                     default_operation,
-                                    operation: Self::marquee_operation_with_modifiers(
-                                        default_operation,
-                                        modifiers,
-                                    ),
-                                });
-                            }
+                                    modifiers,
+                                ),
+                            });
                         }
-                    }
-                }
-                if let Some(TouchGesture::EmptyPan {
-                    anchor,
-                    current,
-                    moved,
-                }) = self.touch_gesture.as_mut()
-                {
-                    *current = p;
-                    *moved |= anchor.distance(p) >= 4.0;
-                    if *moved {
-                        self.panning = true;
                     }
                 }
                 if self.panning {
@@ -10444,7 +10431,7 @@ impl Playground {
                                     || (tool == DrawTool::Spline
                                         && role != CreationRole::InternalBoundary);
                                 if closes_on_first
-                                    && self.custom.len() >= tool.minimum_points()
+                                    && tool.can_finish(role, self.custom.len())
                                     && self.screen(self.custom[0], r).distance(p)
                                         < self.hit_tolerance(10.0)
                                 {
@@ -10452,7 +10439,7 @@ impl Playground {
                                 } else if self.custom.len() < tool.maximum_points() {
                                     self.custom.push(point);
                                     if tool.finishes_automatically()
-                                        && self.custom.len() == tool.minimum_points()
+                                        && self.custom.len() == tool.minimum_points(role)
                                     {
                                         self.finish_drawing();
                                     }
@@ -10610,15 +10597,7 @@ impl Playground {
                 self.panning = false;
             }
             if !self.touch_active && (self.touch_gesture.is_some() || self.suppress_touch_click) {
-                if let Some(TouchGesture::EmptyPan { anchor, moved, .. }) =
-                    self.touch_gesture.take()
-                    && !moved
-                {
-                    self.set_span_selection(vec![]);
-                    self.region_selection = self.region_at(self.world(anchor, r));
-                } else {
-                    self.touch_gesture = None;
-                }
+                self.touch_gesture = None;
                 self.panning = false;
                 self.suppress_touch_click = false;
             }
@@ -11779,13 +11758,6 @@ impl Playground {
                 ),
                 match tool {
                     DrawTool::Circle => "Click to place",
-                    DrawTool::Straight => {
-                        if self.custom.is_empty() {
-                            "Click the first endpoint"
-                        } else {
-                            "Click the second endpoint"
-                        }
-                    }
                     DrawTool::Rectangle => {
                         if self.custom.is_empty() {
                             "Click the first corner"
@@ -11794,6 +11766,15 @@ impl Playground {
                         }
                     }
                     DrawTool::Polygon | DrawTool::Polyline => "Click to add vertices",
+                    DrawTool::Spline if role == CreationRole::InternalBoundary => {
+                        match self.custom.len() {
+                            0 => "Click endpoints or add spline controls",
+                            1 => "Click the second endpoint",
+                            2 => "Finish straight, or add two more controls",
+                            3 => "Add one more control for a spline",
+                            _ => "Click to add control points",
+                        }
+                    }
                     DrawTool::Spline => "Click to add control points",
                 },
             ),
@@ -11834,7 +11815,7 @@ impl Playground {
                     ui.horizontal(|ui| {
                         ui.strong(title);
                         ui.label(hint);
-                        if let InteractionMode::Draw { tool, .. } = self.interaction_mode
+                        if let InteractionMode::Draw { role, tool } = self.interaction_mode
                             && !tool.finishes_automatically()
                         {
                             ui.label(format!(
@@ -11848,7 +11829,7 @@ impl Playground {
                             ));
                             if ui
                                 .add_enabled(
-                                    self.custom.len() >= tool.minimum_points(),
+                                    tool.can_finish(role, self.custom.len()),
                                     egui::Button::new("Finish"),
                                 )
                                 .clicked()
@@ -16654,14 +16635,14 @@ mod tests {
     }
 
     #[test]
-    fn straight_and_polyline_baffles_use_clicked_vertices() {
+    fn two_control_spline_and_polyline_baffles_use_clicked_vertices() {
         let mut harness = Harness::new();
         let history = harness.state.editor.history_len().0;
         let start = Point2::new(-0.8, 0.72);
         let end = Point2::new(0.75, 0.56);
         harness.state.interaction_mode = InteractionMode::Draw {
             role: CreationRole::InternalBoundary,
-            tool: DrawTool::Straight,
+            tool: DrawTool::Spline,
         };
         let start = harness.state.world(harness.point(start), harness.rect);
         let end = harness.state.world(harness.point(end), harness.rect);
@@ -16678,6 +16659,18 @@ mod tests {
                 .is_empty()
         );
         harness.click(harness.point(end));
+        assert_eq!(harness.state.custom, vec![start, end]);
+        assert!(
+            harness
+                .state
+                .editor
+                .document
+                .model
+                .draft
+                .internal_boundaries
+                .is_empty()
+        );
+        harness.key(Key::Enter, Modifiers::NONE);
         let straight = harness
             .state
             .editor
@@ -16777,11 +16770,11 @@ mod tests {
     }
 
     #[test]
-    fn touch_can_place_a_two_endpoint_straight_baffle() {
+    fn touch_can_finish_a_two_control_spline_as_a_straight_baffle() {
         let mut harness = Harness::new();
         harness.state.interaction_mode = InteractionMode::Draw {
             role: CreationRole::InternalBoundary,
-            tool: DrawTool::Straight,
+            tool: DrawTool::Spline,
         };
         let start = harness.point(Point2::new(-0.72, 0.7));
         let end = harness.point(Point2::new(0.68, 0.62));
@@ -16789,6 +16782,19 @@ mod tests {
         harness.primary_touch(1, TouchPhase::End, start);
         harness.primary_touch(2, TouchPhase::Start, end);
         harness.primary_touch(2, TouchPhase::End, end);
+
+        assert_eq!(harness.state.custom.len(), 2);
+        assert!(
+            harness
+                .state
+                .editor
+                .document
+                .model
+                .draft
+                .internal_boundaries
+                .is_empty()
+        );
+        harness.click_text("Finish");
 
         assert_eq!(
             harness
@@ -16803,6 +16809,42 @@ mod tests {
         );
         assert_eq!(harness.state.editor.history_len(), (1, 0));
         assert_eq!(harness.state.interaction_mode, InteractionMode::Select);
+    }
+
+    #[test]
+    fn three_control_baffle_spline_remains_incomplete() {
+        let mut harness = Harness::new();
+        harness.state.interaction_mode = InteractionMode::Draw {
+            role: CreationRole::InternalBoundary,
+            tool: DrawTool::Spline,
+        };
+        harness.state.custom = vec![
+            Point2::new(-0.6, 0.7),
+            Point2::new(0.0, 0.55),
+            Point2::new(0.6, 0.7),
+        ];
+
+        harness.state.finish_drawing();
+
+        assert!(
+            harness
+                .state
+                .editor
+                .document
+                .model
+                .draft
+                .internal_boundaries
+                .is_empty()
+        );
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
+        assert!(harness.state.message.contains("two endpoints"));
+        assert!(matches!(
+            harness.state.interaction_mode,
+            InteractionMode::Draw {
+                role: CreationRole::InternalBoundary,
+                tool: DrawTool::Spline
+            }
+        ));
     }
 
     #[test]
@@ -16877,7 +16919,7 @@ mod tests {
             h.state.creation_role,
             CreationRole::InternalBoundary
         ));
-        assert!(h.texts.iter().any(|(text, _)| text == "Straight"));
+        assert!(!h.texts.iter().any(|(text, _)| text == "Straight"));
         assert!(h.texts.iter().any(|(text, _)| text == "Polyline"));
         assert!(h.texts.iter().any(|(text, _)| text == "Spline"));
         assert!(!h.texts.iter().any(|(text, _)| text == "Circle"));
@@ -18261,20 +18303,25 @@ mod tests {
     }
 
     #[test]
-    fn empty_single_touch_pans_without_changing_selection_or_history() {
+    fn empty_single_touch_draws_a_directional_marquee_without_history() {
         let mut harness = Harness::new();
         let before = harness.state.editor.document.clone();
-        let selected = harness.state.selected_spans.clone();
         let center = harness.state.center;
-        let start = harness.point(Point2::new(0.75, 0.75));
-        let end = start + egui::vec2(50.0, 24.0);
+        harness.state.span_selection_filter = SpanSelectionFilter::Outer;
+        harness.state.set_span_selection(vec![]);
+        harness.frame(vec![]);
+        let start = harness.point(Point2::new(0.2, 1.1));
+        let end = harness.point(Point2::new(-0.2, 0.9));
 
         harness.primary_touch(1, TouchPhase::Start, start);
         harness.primary_touch(1, TouchPhase::Move, end);
         harness.primary_touch(1, TouchPhase::End, end);
 
-        assert_ne!(harness.state.center, center);
-        assert_eq!(harness.state.selected_spans, selected);
+        assert_eq!(harness.state.center, center);
+        assert_eq!(
+            harness.state.selected_spans,
+            vec![GeometrySpan::Outer(OuterSide::Top)]
+        );
         assert_eq!(harness.state.editor.document, before);
         assert_eq!(harness.state.editor.history_len(), (0, 0));
     }
