@@ -345,6 +345,13 @@ transmitting curve labels as interior flux jumps, and resolves separated boundar
 laws and thin-gap pairs directly from the plan. Its adaptive size field remains
 keyed by the mesh's explicit `RegionId` labels.
 
+Ordinary probe stencils now have topology entry points as well. Point and line
+samples reject ambiguous curve traces, disk and region integrals use active face
+assignments and topology material evaluation, and boundary samples validate their
+curve/span/side/parameter/region target against the plan before selecting an
+adjacent element. Application-level boundary-path metadata and far-field
+compilation remain for the following consumer slices.
+
 ##### Topology-aware fixed-geometry AMR slice (implemented)
 
 This slice migrates solution-driven refinement and coarsening on an unchanged
@@ -460,9 +467,10 @@ trace equivalence, and boundary sampling are immutable for the lifetime of the j
 - Replace the current assumption that a wave node belongs to at most two regions
   with topology-supplied trace/sector memberships. This is required for three or
   more regions meeting at a point.
-- Update local-repair eligibility and point/line/boundary/area probes to consume
-  the new labels. Preserve the existing full-remesh transaction as the safe first
-  path for graph edits; local graph repair is a later optimization.
+- Update local-repair eligibility and application-level probe metadata to consume
+  the new labels. Core point/line/boundary/area stencils already use the topology
+  plan. Preserve the existing full-remesh transaction as the safe first path for
+  graph edits; local graph repair is a later optimization.
 - Compile far-field contours only when the inset contour lies wholly in one
   uniform exterior face. Disable it with a precise reason when interfaces or
   varying exterior material cross that face.

@@ -1,12 +1,112 @@
 use crate::{
-    BoundaryLabel, Point2, QuadraticWaveOperator, RegionId, Scene, TriMesh,
-    enriched_quadratic_basis, enriched_quadratic_basis_gradients, point_segment_distance,
+    BoundaryLabel, Point2, QuadraticWaveOperator, RegionId, Scene, TopologyMeshPlan,
+    TopologyWaveModel, TriMesh, enriched_quadratic_basis, enriched_quadratic_basis_gradients,
+    point_segment_distance,
 };
 
 const BOUNDARY_TOLERANCE: f64 = 1.0e-9;
 const MIN_DISK_POLYGON_SIDES: usize = 24;
 const MAX_DISK_POLYGON_SIDES: usize = 128;
 const DISK_APPROXIMATION_TOLERANCE: f64 = 2.0e-4;
+
+#[derive(Clone, Copy)]
+enum ProbeModel<'a> {
+    Scene(&'a Scene),
+    Topology {
+        plan: &'a TopologyMeshPlan,
+        model: TopologyWaveModel<'a>,
+    },
+}
+
+impl ProbeModel<'_> {
+    fn valid(self) -> bool {
+        match self {
+            Self::Scene(scene) => scene.structure_valid(),
+            Self::Topology { plan, model } => model.valid_for(plan),
+        }
+    }
+
+    fn contains_region(self, region: RegionId) -> bool {
+        match self {
+            Self::Scene(scene) => scene.region(region).is_some(),
+            Self::Topology { plan, .. } => {
+                plan.domains.iter().any(|domain| domain.region == region)
+            }
+        }
+    }
+
+    fn directional_material_at(
+        self,
+        region: RegionId,
+        point: Point2,
+    ) -> Result<crate::DirectionalWaveCoefficients, crate::MaterialError> {
+        match self {
+            Self::Scene(scene) => scene.directional_material_at(region, point),
+            Self::Topology { model, .. } => model.directional_material_at(region, point),
+        }
+    }
+
+    fn contains_boundary_target(
+        self,
+        label: BoundaryLabel,
+        parameter: f64,
+        period: f64,
+        region: RegionId,
+    ) -> bool {
+        let Self::Topology { plan, .. } = self else {
+            return true;
+        };
+        (-1..=1).any(|shift| {
+            let parameter = parameter + shift as f64 * period;
+            plan.boundaries.iter().any(|boundary| {
+                let [a, b] = boundary.parameter;
+                let contains = parameter >= a.min(b) - BOUNDARY_TOLERANCE
+                    && parameter <= a.max(b) + BOUNDARY_TOLERANCE;
+                if !contains || boundary.region != region {
+                    return false;
+                }
+                match (label, boundary.source, boundary.behavior) {
+                    (
+                        BoundaryLabel::Outer(label_side),
+                        crate::PlannedBoundarySource::Outer(side),
+                        _,
+                    ) => label_side == side,
+                    (
+                        BoundaryLabel::Curve {
+                            curve,
+                            span,
+                            side,
+                            separated: true,
+                        },
+                        crate::PlannedBoundarySource::Curve {
+                            curve: candidate_curve,
+                            span: candidate_span,
+                            side: candidate_side,
+                        },
+                        Some(crate::SpanBehavior::Separated { .. }),
+                    ) => {
+                        curve == candidate_curve && span == candidate_span && side == candidate_side
+                    }
+                    (
+                        BoundaryLabel::Curve {
+                            curve,
+                            span,
+                            separated: false,
+                            ..
+                        },
+                        crate::PlannedBoundarySource::Curve {
+                            curve: candidate_curve,
+                            span: candidate_span,
+                            ..
+                        },
+                        Some(crate::SpanBehavior::Transmitting),
+                    ) => curve == candidate_curve && span == candidate_span,
+                    _ => false,
+                }
+            })
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QuadraticPointStencil {
@@ -24,6 +124,14 @@ pub struct QuadraticBoundaryStencil {
     pub point: Point2,
     /// Unit normal pointing away from the sampled trace's adjacent element.
     pub outward_normal: Point2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoundaryStencilTarget {
+    pub label: BoundaryLabel,
+    pub parameter: f64,
+    pub period: f64,
+    pub region: RegionId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -184,7 +292,30 @@ impl QuadraticPointStencil {
         scene: &Scene,
         point: Point2,
     ) -> Result<Self, PointProbeError> {
+        Self::build_with_model(mesh, operator, ProbeModel::Scene(scene), point)
+    }
+
+    /// Builds a point stencil from explicit topology face assignments and the
+    /// shared material library. Points on a curve constraint are rejected because
+    /// their material/trace side is ambiguous without a boundary target.
+    pub fn build_topology(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        plan: &TopologyMeshPlan,
+        model: TopologyWaveModel<'_>,
+        point: Point2,
+    ) -> Result<Self, PointProbeError> {
+        Self::build_with_model(mesh, operator, ProbeModel::Topology { plan, model }, point)
+    }
+
+    fn build_with_model(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        model: ProbeModel<'_>,
+        point: Point2,
+    ) -> Result<Self, PointProbeError> {
         if !point.finite()
+            || !model.valid()
             || mesh.geometry_revision != operator.geometry_revision()
             || mesh.mesh_revision != operator.mesh_revision()
             || mesh.triangles.len() != operator.element_nodes().len()
@@ -197,6 +328,7 @@ impl QuadraticPointStencil {
                 BoundaryLabel::MaterialInterface(_)
                     | BoundaryLabel::Wall { .. }
                     | BoundaryLabel::InternalBoundary { .. }
+                    | BoundaryLabel::Curve { .. }
             ) {
                 continue;
             }
@@ -244,7 +376,7 @@ impl QuadraticPointStencil {
         Self::from_element(
             mesh,
             operator,
-            scene,
+            model,
             triangle_index,
             region,
             barycentric,
@@ -255,7 +387,7 @@ impl QuadraticPointStencil {
     fn from_element(
         mesh: &TriMesh,
         operator: &QuadraticWaveOperator,
-        scene: &Scene,
+        model: ProbeModel<'_>,
         triangle_index: usize,
         region: RegionId,
         barycentric: [f64; 3],
@@ -266,7 +398,10 @@ impl QuadraticPointStencil {
             .map(|index| mesh.vertices[index].point);
         let point =
             point[0] * barycentric[0] + point[1] * barycentric[1] + point[2] * barycentric[2];
-        let material = scene
+        if !model.contains_region(region) {
+            return Err(PointProbeError::InvalidMesh);
+        }
+        let material = model
             .directional_material_at(region, point)
             .map_err(|_| PointProbeError::InvalidMesh)?;
         let nodes = *operator
@@ -327,9 +462,32 @@ impl QuadraticAreaStencil {
         scene: &Scene,
         shape: AreaProbeShape,
     ) -> Result<Self, AreaProbeError> {
+        Self::build_with_model(mesh, operator, ProbeModel::Scene(scene), shape)
+    }
+
+    /// Builds a disk or active-face-region integral from a compiled topology
+    /// plan. Region targets must name an active face assignment, even if the
+    /// material library still contains an unused region with the same ID.
+    pub fn build_topology(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        plan: &TopologyMeshPlan,
+        model: TopologyWaveModel<'_>,
+        shape: AreaProbeShape,
+    ) -> Result<Self, AreaProbeError> {
+        Self::build_with_model(mesh, operator, ProbeModel::Topology { plan, model }, shape)
+    }
+
+    fn build_with_model(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        model: ProbeModel<'_>,
+        shape: AreaProbeShape,
+    ) -> Result<Self, AreaProbeError> {
         if mesh.geometry_revision != operator.geometry_revision()
             || mesh.mesh_revision != operator.mesh_revision()
             || mesh.triangles.len() != operator.element_nodes().len()
+            || !model.valid()
         {
             return Err(AreaProbeError::InvalidMesh);
         }
@@ -345,7 +503,7 @@ impl QuadraticAreaStencil {
                 Some(disk_polygon(center, radius))
             }
             AreaProbeShape::Region(region) => {
-                if scene.region(region).is_none() {
+                if !model.contains_region(region) {
                     return Err(AreaProbeError::MissingRegion);
                 }
                 None
@@ -418,7 +576,7 @@ impl QuadraticAreaStencil {
                     let point = subtriangle[0] * local[0]
                         + subtriangle[1] * local[1]
                         + subtriangle[2] * local[2];
-                    coefficients[slot] = scene
+                    coefficients[slot] = model
                         .directional_material_at(triangle.region, point)
                         .map_err(|_| AreaProbeError::InvalidMesh)?;
                 }
@@ -610,9 +768,75 @@ impl QuadraticBoundaryStencil {
         period: f64,
         region: RegionId,
     ) -> Result<Self, PointProbeError> {
+        Self::build_with_model(
+            mesh,
+            operator,
+            ProbeModel::Scene(scene),
+            label,
+            parameter,
+            period,
+            region,
+        )
+    }
+
+    /// Builds a trace-specific boundary stencil from a topology curve label.
+    /// The explicit region selects the adjacent face at transmitting interfaces;
+    /// separated curves additionally retain their left/right trace identity.
+    pub fn build_topology(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        plan: &TopologyMeshPlan,
+        model: TopologyWaveModel<'_>,
+        target: BoundaryStencilTarget,
+    ) -> Result<Self, PointProbeError> {
+        let mesh_label = match target.label {
+            BoundaryLabel::Curve {
+                curve,
+                span,
+                separated: false,
+                ..
+            } => BoundaryLabel::Curve {
+                curve,
+                span,
+                side: crate::CurveTraceSide::Left,
+                separated: false,
+            },
+            label => label,
+        };
+        if !(ProbeModel::Topology { plan, model }).contains_boundary_target(
+            target.label,
+            target.parameter,
+            target.period,
+            target.region,
+        ) {
+            return Err(PointProbeError::InvalidMesh);
+        }
+        Self::build_with_model(
+            mesh,
+            operator,
+            ProbeModel::Topology { plan, model },
+            mesh_label,
+            target.parameter,
+            target.period,
+            target.region,
+        )
+    }
+
+    fn build_with_model(
+        mesh: &TriMesh,
+        operator: &QuadraticWaveOperator,
+        model: ProbeModel<'_>,
+        label: BoundaryLabel,
+        parameter: f64,
+        period: f64,
+        region: RegionId,
+    ) -> Result<Self, PointProbeError> {
         if !parameter.is_finite()
             || !period.is_finite()
             || period <= 0.0
+            || !model.valid()
+            || !model.contains_region(region)
+            || !model.contains_boundary_target(label, parameter, period, region)
             || mesh.geometry_revision != operator.geometry_revision()
             || mesh.mesh_revision != operator.mesh_revision()
             || mesh.triangles.len() != operator.element_nodes().len()
@@ -689,7 +913,7 @@ impl QuadraticBoundaryStencil {
                     let stencil = QuadraticPointStencil::from_element(
                         mesh,
                         operator,
-                        scene,
+                        model,
                         triangle_index,
                         region,
                         barycentric,
@@ -712,8 +936,12 @@ impl QuadraticBoundaryStencil {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, BoundaryEdge, DEFAULT_MATERIAL, Material, MeshQuality, MeshTriangle,
-        MeshVertex, ObstacleId, OuterBoundaryCondition, QuadraticWaveOperator, Region,
+        BACKGROUND_REGION, BoundaryEdge, CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline,
+        DEFAULT_MATERIAL, FaceBoundaryCondition, FaceRegionAssignment, InternalBoundaryCoupling,
+        Material, MeshQuality, MeshTriangle, MeshVertex, ObstacleId, OpenCubicSpline,
+        OuterBoundaryCondition, OuterSide, QuadraticWaveOperator, Region, SpanBehavior,
+        TopologyCurve, TopologyGeometry, TopologyVertex, TopologyVertexId, TopologyVertexLocation,
+        compile_topology, mesh_topology_plan,
     };
 
     fn fixture() -> (TriMesh, Scene, QuadraticWaveOperator) {
@@ -767,6 +995,126 @@ mod tests {
         )
         .unwrap();
         (mesh, scene, operator)
+    }
+
+    fn topology_fixture(
+        geometry: TopologyGeometry,
+    ) -> (TopologyMeshPlan, TriMesh, Scene, QuadraticWaveOperator) {
+        let topology = compile_topology(&geometry, 40).unwrap();
+        let assignments = topology
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(index, face)| FaceRegionAssignment {
+                face: face.id,
+                region: Some(RegionId(index as u64 + 1)),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        let mesh = mesh_topology_plan(
+            &plan,
+            41,
+            crate::MeshingOptions {
+                target_edge_length: 0.35,
+                minimum_angle_degrees: 8.0,
+                max_vertices: 20_000,
+                max_triangles: 40_000,
+                max_refinement_steps: 20_000,
+                ..crate::MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scene = Scene {
+            regions: assignments
+                .iter()
+                .map(|assignment| Region {
+                    id: assignment.region.unwrap(),
+                    material: DEFAULT_MATERIAL,
+                    frame: crate::MaterialFrame::world(),
+                })
+                .chain(std::iter::once(Region {
+                    id: RegionId(99),
+                    material: DEFAULT_MATERIAL,
+                    frame: crate::MaterialFrame::world(),
+                }))
+                .collect(),
+            ..Scene::default()
+        };
+        let operator = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        (plan, mesh, scene, operator)
+    }
+
+    fn topology_baffle() -> TopologyGeometry {
+        TopologyGeometry {
+            curves: vec![
+                TopologyCurve::new(
+                    CurveId(1),
+                    CurveSpline::Open(
+                        OpenCubicSpline::polyline(vec![
+                            Point2::new(-0.55, -0.06),
+                            Point2::new(0.55, 0.08),
+                        ])
+                        .unwrap(),
+                    ),
+                    vec![CurveSpan {
+                        id: CurveSpanId(1),
+                        behavior: SpanBehavior::Separated {
+                            left: FaceBoundaryCondition::Reflecting,
+                            right: FaceBoundaryCondition::Reflecting,
+                            coupling: InternalBoundaryCoupling::Independent,
+                        },
+                    }],
+                )
+                .unwrap(),
+            ],
+            ..TopologyGeometry::default()
+        }
+    }
+
+    fn topology_divider() -> TopologyGeometry {
+        let endpoints = [TopologyVertexId(1), TopologyVertexId(2)];
+        let mut curve = TopologyCurve::new(
+            CurveId(2),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(2),
+                behavior: SpanBehavior::Transmitting,
+            }],
+        )
+        .unwrap();
+        curve.nodes = endpoints
+            .map(|vertex| CurveNode {
+                vertex: Some(vertex),
+            })
+            .to_vec();
+        TopologyGeometry {
+            curves: vec![curve],
+            vertices: vec![
+                TopologyVertex {
+                    id: endpoints[0],
+                    location: TopologyVertexLocation::Outer {
+                        side: OuterSide::Bottom,
+                        fraction: 0.5,
+                    },
+                },
+                TopologyVertex {
+                    id: endpoints[1],
+                    location: TopologyVertexLocation::Outer {
+                        side: OuterSide::Top,
+                        fraction: 0.5,
+                    },
+                },
+            ],
+            ..TopologyGeometry::default()
+        }
     }
 
     #[test]
@@ -1067,5 +1415,204 @@ mod tests {
             QuadraticPointStencil::build(&mesh, &operator, &scene, Point2::new(0.4, 0.0)),
             Err(PointProbeError::AmbiguousBoundary)
         );
+    }
+
+    #[test]
+    fn topology_point_and_area_stencils_use_active_face_regions() {
+        let (plan, mesh, scene, operator) = topology_fixture(TopologyGeometry::default());
+        let model = TopologyWaveModel::from_scene(&scene);
+        let point = Point2::new(0.2, 0.3);
+        let stencil =
+            QuadraticPointStencil::build_topology(&mesh, &operator, &plan, model, point).unwrap();
+        assert_eq!(stencil.region, BACKGROUND_REGION);
+        let area = QuadraticAreaStencil::build_topology(
+            &mesh,
+            &operator,
+            &plan,
+            model,
+            AreaProbeShape::Region(BACKGROUND_REGION),
+        )
+        .unwrap();
+        assert!((area.covered_area - 4.0).abs() < 1.0e-9);
+        assert_eq!(
+            QuadraticAreaStencil::build_topology(
+                &mesh,
+                &operator,
+                &plan,
+                model,
+                AreaProbeShape::Region(RegionId(99)),
+            ),
+            Err(AreaProbeError::MissingRegion)
+        );
+    }
+
+    #[test]
+    fn topology_line_samples_gap_at_a_curve_and_boundary_sides_stay_distinct() {
+        let (plan, mesh, scene, operator) = topology_fixture(topology_baffle());
+        let model = TopologyWaveModel::from_scene(&scene);
+        let left_edge = mesh
+            .boundary_edges
+            .iter()
+            .find(|edge| {
+                matches!(
+                    edge.label,
+                    BoundaryLabel::Curve {
+                        side: crate::CurveTraceSide::Left,
+                        separated: true,
+                        ..
+                    }
+                )
+            })
+            .copied()
+            .unwrap();
+        let right_edge = mesh
+            .boundary_edges
+            .iter()
+            .find(|edge| {
+                matches!(
+                    edge.label,
+                    BoundaryLabel::Curve {
+                        side: crate::CurveTraceSide::Right,
+                        separated: true,
+                        ..
+                    }
+                ) && edge.parameters[0].min(edge.parameters[1])
+                    == left_edge.parameters[0].min(left_edge.parameters[1])
+                    && edge.parameters[0].max(edge.parameters[1])
+                        == left_edge.parameters[0].max(left_edge.parameters[1])
+            })
+            .copied()
+            .unwrap();
+        let parameter = 0.5 * (left_edge.parameters[0] + left_edge.parameters[1]);
+        let left = QuadraticBoundaryStencil::build_topology(
+            &mesh,
+            &operator,
+            &plan,
+            model,
+            BoundaryStencilTarget {
+                label: left_edge.label,
+                parameter,
+                period: 1.0,
+                region: BACKGROUND_REGION,
+            },
+        )
+        .unwrap();
+        let right = QuadraticBoundaryStencil::build_topology(
+            &mesh,
+            &operator,
+            &plan,
+            model,
+            BoundaryStencilTarget {
+                label: right_edge.label,
+                parameter,
+                period: 1.0,
+                region: BACKGROUND_REGION,
+            },
+        )
+        .unwrap();
+        assert_ne!(left.stencil.nodes, right.stencil.nodes);
+        assert!(left.outward_normal.dot(right.outward_normal) < -0.99);
+        assert_eq!(
+            QuadraticPointStencil::build_topology(&mesh, &operator, &plan, model, left.point,),
+            Err(PointProbeError::AmbiguousBoundary)
+        );
+        assert!(
+            QuadraticPointStencil::build_topology(
+                &mesh,
+                &operator,
+                &plan,
+                model,
+                left.point + Point2::new(0.0, 0.1),
+            )
+            .is_ok()
+        );
+        assert!(
+            QuadraticPointStencil::build_topology(
+                &mesh,
+                &operator,
+                &plan,
+                model,
+                left.point - Point2::new(0.0, 0.1),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn topology_probes_follow_transmitting_face_assignments() {
+        let (plan, mesh, scene, operator) = topology_fixture(topology_divider());
+        let model = TopologyWaveModel::from_scene(&scene);
+        let regions = [Point2::new(-0.5, 0.2), Point2::new(0.5, 0.2)].map(|point| {
+            QuadraticPointStencil::build_topology(&mesh, &operator, &plan, model, point)
+                .unwrap()
+                .region
+        });
+        assert_ne!(regions[0], regions[1]);
+        for region in regions {
+            let area = QuadraticAreaStencil::build_topology(
+                &mesh,
+                &operator,
+                &plan,
+                model,
+                AreaProbeShape::Region(region),
+            )
+            .unwrap();
+            assert!((area.covered_area - 2.0).abs() < 1.0e-9);
+        }
+        assert_eq!(
+            QuadraticPointStencil::build_topology(
+                &mesh,
+                &operator,
+                &plan,
+                model,
+                Point2::new(0.0, 0.2),
+            ),
+            Err(PointProbeError::AmbiguousBoundary)
+        );
+
+        let edge = mesh
+            .boundary_edges
+            .iter()
+            .find(|edge| {
+                matches!(
+                    edge.label,
+                    BoundaryLabel::Curve {
+                        separated: false,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let parameter = 0.5 * (edge.parameters[0] + edge.parameters[1]);
+        let BoundaryLabel::Curve { curve, span, .. } = edge.label else {
+            unreachable!()
+        };
+        let traces = [
+            (regions[0], crate::CurveTraceSide::Left),
+            (regions[1], crate::CurveTraceSide::Right),
+        ]
+        .map(|(region, side)| {
+            QuadraticBoundaryStencil::build_topology(
+                &mesh,
+                &operator,
+                &plan,
+                model,
+                BoundaryStencilTarget {
+                    label: BoundaryLabel::Curve {
+                        curve,
+                        span,
+                        side,
+                        separated: false,
+                    },
+                    parameter,
+                    period: 1.0,
+                    region,
+                },
+            )
+            .unwrap()
+        });
+        assert_eq!(traces[0].stencil.region, regions[0]);
+        assert_eq!(traces[1].stencil.region, regions[1]);
+        assert!(traces[0].outward_normal.dot(traces[1].outward_normal) < -0.99);
     }
 }

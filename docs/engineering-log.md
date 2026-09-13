@@ -66,6 +66,28 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   junction implementation deliberately uses the robust full-rebuild fallback for
   graph-edge movement and topology edits.
 
+## 2026-09-14 — Topology-aware ordinary probe stencils
+
+- Added topology entry points for quadratic point, boundary, disk, and region probe
+  stencils. Line probes inherit the point behavior because their spatial profiles
+  are compiled as repeated point samples.
+- Unified material lookup behind a shared probe model. Topology probes evaluate
+  anisotropic or spatial coefficients from explicit active face regions without
+  reconstructing legacy obstacles or dividers.
+- Point samples reject every unified curve constraint as ambiguous; this preserves
+  gaps when a line crosses a separated trace and avoids choosing an arbitrary
+  material at a transmitting interface.
+- Added `BoundaryStencilTarget` for stable curve/span/side, parameter, period, and
+  adjacent-region selection. Topology boundary probes validate that target against
+  the plan before binding a mesh edge, and separated left/right samples retain
+  distinct nodes and opposite outward normals.
+- Direct tests cover active versus merely library-present regions, whole-face area
+  integrals, line gaps across separated curves, both baffle traces, transmitting
+  face assignments, and ambiguous material-interface points. Far-field and
+  application-level boundary-path metadata remain separate follow-up slices.
+- All **428 workspace tests**, workspace Clippy with warnings denied, native release
+  compilation, and `NO_COLOR=true trunk build --release --locked` pass.
+
 ## 2026-09-14 — Topology-aware fixed-geometry AMR
 
 - Added `MeshAdaptationJob::new_topology` while retaining one resumable adaptation

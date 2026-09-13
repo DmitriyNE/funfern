@@ -659,8 +659,10 @@ incident driven region; the GPU keeps the existing forcing-weight binding by
 storing a fixed node header followed by sparse channel/weight pairs. This removes
 the old two-source junction limit without making every node carry the maximum 33
 source channels. Scene and topology paths use one material-library evaluator,
-including the mechanical/EM coefficient conversion. Mesh-repair eligibility and
-probe metadata remain on the legacy model until their consumer slices are complete.
+including the mechanical/EM coefficient conversion. Core point, line-sample,
+boundary-side, disk, and region probe stencils also accept the topology plan and
+material model directly. Mesh-repair eligibility and application-level probe target
+metadata remain on the legacy model until their consumer slices are complete.
 
 The residual-based AMR estimator has a topology entry point with the same
 cooperative work phases as the scene path. Its owned plan/model snapshot resolves
