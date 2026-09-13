@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     BACKGROUND_REGION, BoundaryLabel, DirectionalWaveCoefficients, FaceBoundaryCondition,
     InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, Material,
-    OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, PhysicsModel, PlannedBoundaryEdge,
+    OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, PhysicsModel,
     PlannedBoundarySource, Point2, Region, RegionId, Scene, SpanBehavior, SymmetricTensor2,
     TimeSignal, TopologyMeshPlan, TriMesh, WaveCoefficients, WaveError,
 };
@@ -25,6 +25,26 @@ pub struct TopologyWaveModel<'a> {
     pub outer_boundaries: OuterBoundaryConditions,
 }
 
+/// Owned material/physics snapshot for cooperative topology consumers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnedTopologyWaveModel {
+    pub physics: PhysicsModel,
+    pub materials: Vec<Material>,
+    pub regions: Vec<Region>,
+    pub outer_boundaries: OuterBoundaryConditions,
+}
+
+impl OwnedTopologyWaveModel {
+    pub fn as_model(&self) -> TopologyWaveModel<'_> {
+        TopologyWaveModel {
+            physics: self.physics,
+            materials: &self.materials,
+            regions: &self.regions,
+            outer_boundaries: self.outer_boundaries,
+        }
+    }
+}
+
 impl<'a> TopologyWaveModel<'a> {
     pub fn from_scene(scene: &'a Scene) -> Self {
         Self {
@@ -32,6 +52,15 @@ impl<'a> TopologyWaveModel<'a> {
             materials: &scene.materials,
             regions: &scene.regions,
             outer_boundaries: scene.outer_boundaries,
+        }
+    }
+
+    pub fn to_owned(self) -> OwnedTopologyWaveModel {
+        OwnedTopologyWaveModel {
+            physics: self.physics,
+            materials: self.materials.to_vec(),
+            regions: self.regions.to_vec(),
+            outer_boundaries: self.outer_boundaries,
         }
     }
 
@@ -1482,35 +1511,11 @@ fn topology_outer_region(
     parameters: [f64; 2],
 ) -> Result<RegionId, WaveError> {
     let midpoint = 0.5 * (parameters[0] + parameters[1]);
-    unique_planned_boundary(plan, midpoint, |source| {
-        source == PlannedBoundarySource::Outer(side)
-    })
-    .map(|boundary| boundary.region)
-}
-
-fn unique_planned_boundary(
-    plan: &TopologyMeshPlan,
-    parameter: f64,
-    matches_source: impl Fn(PlannedBoundarySource) -> bool,
-) -> Result<PlannedBoundaryEdge, WaveError> {
-    if !parameter.is_finite() {
-        return Err(WaveError::InvalidMesh(
-            "a topology boundary edge has invalid parameters",
-        ));
-    }
-    let mut matches = plan.boundaries.iter().copied().filter(|boundary| {
-        let [a, b] = boundary.parameter;
-        matches_source(boundary.source) && parameter > a.min(b) && parameter < a.max(b)
-    });
-    let boundary = matches.next().ok_or(WaveError::InvalidMesh(
-        "a mesh boundary has no topology-plan source",
-    ))?;
-    if matches.next().is_some() {
-        return Err(WaveError::InvalidMesh(
-            "a mesh boundary has ambiguous topology-plan sources",
-        ));
-    }
-    Ok(boundary)
+    plan.boundary_at(PlannedBoundarySource::Outer(side), midpoint)
+        .ok_or(WaveError::InvalidMesh(
+            "a mesh boundary has no unique topology-plan source",
+        ))
+        .map(|boundary| boundary.region)
 }
 
 fn boundary_adjacent_regions(
@@ -1566,9 +1571,14 @@ fn assemble_topology_boundary_laws(
                 "a topology curve edge has invalid parameters",
             ));
         }
-        let planned = unique_planned_boundary(plan, 0.5 * (parameter_a + parameter_b), |source| {
-            source == PlannedBoundarySource::Curve { curve, span, side }
-        })?;
+        let planned = plan
+            .boundary_at(
+                PlannedBoundarySource::Curve { curve, span, side },
+                0.5 * (parameter_a + parameter_b),
+            )
+            .ok_or(WaveError::InvalidMesh(
+                "a mesh boundary has no unique topology-plan source",
+            ))?;
         let adjacent = boundary_adjacent_regions(mesh, edge.vertices)?;
         if !separated {
             if planned.behavior != Some(SpanBehavior::Transmitting)

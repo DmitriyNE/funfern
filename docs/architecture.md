@@ -659,8 +659,18 @@ incident driven region; the GPU keeps the existing forcing-weight binding by
 storing a fixed node header followed by sparse channel/weight pairs. This removes
 the old two-source junction limit without making every node carry the maximum 33
 source channels. Scene and topology paths use one material-library evaluator,
-including the mechanical/EM coefficient conversion. AMR and probe metadata remain
-on the legacy model until their consumer slices are complete.
+including the mechanical/EM coefficient conversion. Mesh-repair eligibility and
+probe metadata remain on the legacy model until their consumer slices are complete.
+
+The residual-based AMR estimator has a topology entry point with the same
+cooperative work phases as the scene path. Its owned plan/model snapshot resolves
+outer laws by side and parameter interval, skips transmitting curve traces as
+interior edges, evaluates separated left/right laws, and pairs thin-gap traces by
+stable curve/span plus parameter range. Gradient recovery remains keyed by mesh
+vertex and `RegionId`, so a shared multi-region junction cannot average fluxes from
+different material sectors. The resulting size field uses the triangle's explicit
+region for interpolation. Mesh adaptation itself still needs topology-aware curve
+repair before the application can run this path end to end.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a

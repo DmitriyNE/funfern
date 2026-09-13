@@ -64,6 +64,24 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   divider graphs. The first junction implementation deliberately uses the robust
   full-rebuild fallback for graph-edge movement and topology edits.
 
+## 2026-09-13 — Topology-aware AMR indicator
+
+- Added `SolutionIndicatorJob::new_topology`, which owns the plan and material
+  model for deterministic bounded work while retaining the existing estimator,
+  grading, and target-field behavior.
+- Topology outer edges and separated curve sides now resolve their laws by stable
+  source label and parameter interval. Transmitting curves enter the ordinary
+  two-element flux-jump path; paired thin gaps use curve/span identity rather than
+  legacy baffle IDs.
+- Material sampling and recovery use explicit triangle regions. Four material
+  sectors may meet at one shared junction without cross-region gradient averaging,
+  and the output field continues to require the requested region during lookup.
+- Direct tests compare the scene and topology paths exactly on a one-face mesh,
+  exercise all four regions of a crossing junction, and process both sides of a
+  coupled topology baffle.
+- All **418 workspace tests**, workspace Clippy with warnings denied, native
+  release compilation, and release Trunk WebGPU packaging pass.
+
 ## 2026-09-13 — Topology-aware material and volume-source lookup
 
 - `TopologyWaveModel` now exposes region/material lookup and scalar or directional

@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    EvaluatedMaterial, MAX_VOLUME_SOURCES, Material, MaterialError, PhysicsModel, Point2,
+    EvaluatedMaterial, MAX_VOLUME_SOURCES, MaterialError, OwnedTopologyWaveModel, Point2,
     QuadraticWaveOperator, Region, RegionId, Scene, TimeSignal, TopologyMeshPlan,
     TopologyWaveModel, TriMesh, VolumeSource,
 };
@@ -109,30 +109,24 @@ pub struct VolumeSourceCompileJob {
 
 #[derive(Clone, Debug)]
 struct VolumeSourceMedium {
-    physics: PhysicsModel,
-    materials: Vec<Material>,
-    regions: Vec<Region>,
+    model: OwnedTopologyWaveModel,
 }
 
 impl VolumeSourceMedium {
     fn from_scene(scene: &Scene) -> Self {
         Self {
-            physics: scene.physics,
-            materials: scene.materials.clone(),
-            regions: scene.regions.clone(),
+            model: TopologyWaveModel::from_scene(scene).to_owned(),
         }
     }
 
     fn from_topology(model: TopologyWaveModel<'_>) -> Self {
         Self {
-            physics: model.physics,
-            materials: model.materials.to_vec(),
-            regions: model.regions.to_vec(),
+            model: model.to_owned(),
         }
     }
 
     fn region(&self, id: RegionId) -> Option<&Region> {
-        self.regions.iter().find(|region| region.id == id)
+        self.model.as_model().region(id)
     }
 
     fn material_at(
@@ -140,13 +134,7 @@ impl VolumeSourceMedium {
         region: RegionId,
         point: Point2,
     ) -> Result<EvaluatedMaterial, MaterialError> {
-        crate::wave::evaluate_material_library_at(
-            self.physics,
-            &self.materials,
-            &self.regions,
-            region,
-            point,
-        )
+        self.model.as_model().material_at(region, point)
     }
 }
 

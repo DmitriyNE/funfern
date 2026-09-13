@@ -1391,6 +1391,24 @@ impl TopologyMeshPlan {
             .ok()
             .map(|index| self.vertices[index].point)
     }
+
+    /// Resolves one planned boundary interval by its stable source label.
+    /// Endpoints are excluded so a shared breakpoint cannot select both spans.
+    pub fn boundary_at(
+        &self,
+        source: PlannedBoundarySource,
+        parameter: f64,
+    ) -> Option<PlannedBoundaryEdge> {
+        if !parameter.is_finite() {
+            return None;
+        }
+        let mut matches = self.boundaries.iter().copied().filter(|boundary| {
+            let [a, b] = boundary.parameter;
+            boundary.source == source && parameter > a.min(b) && parameter < a.max(b)
+        });
+        let boundary = matches.next()?;
+        matches.next().is_none().then_some(boundary)
+    }
 }
 
 fn validate_span_sides(

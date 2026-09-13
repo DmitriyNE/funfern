@@ -323,11 +323,11 @@ curve/span labels and snapshot trace identities through holes, transmitting
 interfaces, free and attached baffles, outer dividers, and junctions. Quadratic
 solution transfer now follows unified curve sides and junction-sector traces;
 transmitting face split/merge handoffs use geometric overlap instead of requiring
-the same region ID on both plans. The app, AMR, and probes still use the legacy
-scene path. The quadratic operator now also assembles directly from the plan: it
-evaluates each
-triangle's assigned region, resolves outer and curve-side conditions from stable
-labels, supports paired thin-gap traces, and accepts multi-region junction nodes.
+the same region ID on both plans. The app, mesh-repair path, and probes still use
+the legacy scene path. The quadratic operator now also assembles directly from the
+plan: it evaluates each triangle's assigned region, resolves outer and curve-side
+conditions from stable labels, supports paired thin-gap traces, and accepts
+multi-region junction nodes.
 Separated T-junctions are recovered only after all incident arms are installed, so
 the mesher emits the same sector equivalence as the topology compiler; mixed
 transmitting/separated junctions retain their conforming paths.
@@ -339,7 +339,11 @@ without increasing the portable WebGPU binding count. Unified separated traces
 also participate in the source's mesh-path distance calculation. Volume sources
 now compile from active plan regions and the shared material library, retain their
 resumable snapshot semantics, and use sparse GPU channel/weight records so every
-driven face at a multi-region junction contributes without a two-channel cap.
+driven face at a multi-region junction contributes without a two-channel cap. The
+solution-error indicator now samples topology-assigned materials, treats
+transmitting curve labels as interior flux jumps, and resolves separated boundary
+laws and thin-gap pairs directly from the plan. Its adaptive size field remains
+keyed by the mesh's explicit `RegionId` labels.
 
 - Make meshing consume a completed topology snapshot instead of independently
   rediscovering loop nesting and open-divider regions. Triangulate each active face
@@ -352,10 +356,9 @@ driven face at a multi-region junction contributes without a two-channel cap.
 - Replace the current assumption that a wave node belongs to at most two regions
   with topology-supplied trace/sector memberships. This is required for three or
   more regions meeting at a point.
-- Update AMR indicators, local-repair eligibility, and point/line/boundary/area
-  probes to consume the new labels. Preserve the existing
-  full-remesh transaction as the safe first path for graph edits; local graph
-  repair is a later optimization.
+- Update local-repair eligibility and point/line/boundary/area probes to consume
+  the new labels. Preserve the existing full-remesh transaction as the safe first
+  path for graph edits; local graph repair is a later optimization.
 - Compile far-field contours only when the inset contour lies wholly in one
   uniform exterior face. Disable it with a precise reason when interfaces or
   varying exterior material cross that face.
