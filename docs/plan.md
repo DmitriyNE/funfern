@@ -635,21 +635,27 @@ leaves the running simulation intact.
 
 #### Stage 5: drawing, selection, attachment, and face UI
 
-The UI stays purpose-first. Users choose what a curve should initially do; open,
-closed, transmitting, and separated are implementation details revealed only when
-editing requires them.
+The UI stays geometry-first. **Closed curves** and **Open curves** are the two
+object families; a compact purpose choice only supplies their initial face or span
+configuration. Purpose does not create a separate stored object type and does not
+restrict later editing.
 
 **Draw popover**
 
-- Keep the top-bar **+ Draw** entry. Its first row contains **Region**, **Hole**,
-  **Divider**, and **Baffle**. The second row shows only applicable geometry:
-  Circle, Rectangle, Polygon, and Spline for closed Region/Hole; Polyline and
-  Spline for Divider/Baffle.
-- **Region** creates a closed transmitting curve and asks for the interior
-  material. **Hole** creates a closed separated curve and asks for the domain-side
-  condition. **Divider** creates an open transmitting curve and asks for the new
-  side's material. **Baffle** creates an open separated curve and asks for its
-  initial condition. Thin gap remains a coupling in the contextual editor.
+- Keep the top-bar **+ Draw** entry. Divide the popover into two clearly labelled
+  groups:
+  - **Closed curve** contains Circle, Rectangle, Polygon, and Spline.
+  - **Open curve** contains Polyline and Spline.
+- Each group has one compact initial-purpose control next to or directly below its
+  tools. Closed curves choose **Subdomain** or **Hole**. Open curves choose
+  **Subdomain separator** or **BC baffle**. Present each pair as two mutually
+  exclusive checkbox choices, remember the last choice per family, and do not make
+  users choose it again for repeated drawing.
+- A closed **Subdomain** starts transmitting and asks for its interior material. A
+  **Hole** starts separated and asks for its domain-side condition. A **Subdomain
+  separator** starts transmitting and asks for the new side's material. A **BC
+  baffle** starts separated and asks for its initial condition. Thin gap remains a
+  coupling in the contextual editor.
 - A divider keeps the old material on the daughter containing the old face anchor;
   the other daughter receives the selected material. This avoids asking the user
   to reason about left/right before the curve has a direction. An incomplete
@@ -736,9 +742,10 @@ editing requires them.
   remains fully selectable and editable in either case.
 
 Editor tests use synthesized egui pointer events for inner and outer attachment,
-the four creation presets, selection priority, junction dragging and partial-arm
-blocking, detach, divider removal and ownership choice, bulk span conditions,
-side orientation, overlay face picking, Delete, Escape, and one-entry history.
+both curve families and all four initial purposes, selection priority, junction
+dragging and partial-arm blocking, detach, divider removal and ownership choice,
+bulk span conditions, side orientation, overlay face picking, Delete, Escape, and
+one-entry history.
 A short manual native/browser pass checks visual layering, narrow layout, touch
 targets, and gestures. Browser WebGPU execution remains a local smoke check rather
 than a CI requirement.
