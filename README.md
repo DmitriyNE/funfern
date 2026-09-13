@@ -88,11 +88,16 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   grid snapping. Double-click inserts a knot without changing the curve and
   selects its control. Drag a marquee left-to-right to select spans fully enclosed
   by it; drag right-to-left to select spans that touch or lie inside it. Shift-drag
-  adds and Alt-drag subtracts. The span filter limits marquee selection and
+  adds and Alt-drag subtracts; pressing or releasing either modifier during the
+  drag updates the operation immediately. The span filter limits marquee selection and
   Ctrl/Cmd+A to outer edges, loops, baffles, or all geometry. Select filtered,
   Invert, and Clear provide the same bulk operations in the panel. **Area select**
   exposes persistent Replace/Add/Subtract controls for touch input. Selection and
   its filter do not enter document history.
+- **Delete:** Delete or Backspace removes the selected control, probe, or every
+  completely selected loop and baffle as one undoable action. Partial spline-span
+  and outer-boundary selections are retained because they are not standalone
+  geometry objects.
 - **Transform:** complete curves and partial selections bounded by C0 knots can
   be dragged, translated, rotated, uniformly scaled, snapped, or aligned as one
   undoable action. **Isolate selection at C0** inserts every missing boundary

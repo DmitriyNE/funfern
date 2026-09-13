@@ -717,6 +717,7 @@ enum Drag {
         anchor: Pos2,
         current: Pos2,
         base: Vec<GeometrySpan>,
+        default_operation: MarqueeOperation,
         operation: MarqueeOperation,
     },
 }
@@ -2283,6 +2284,19 @@ impl Playground {
         self.set_span_selection(spans);
     }
 
+    fn marquee_operation_with_modifiers(
+        default: MarqueeOperation,
+        modifiers: egui::Modifiers,
+    ) -> MarqueeOperation {
+        if modifiers.alt {
+            MarqueeOperation::Subtract
+        } else if modifiers.shift {
+            MarqueeOperation::Add
+        } else {
+            default
+        }
+    }
+
     fn apply_marquee_selection(
         &mut self,
         base: &[GeometrySpan],
@@ -2315,6 +2329,83 @@ impl Playground {
             }
         }
         self.set_span_selection(spans);
+    }
+
+    fn fully_selected_geometry(&self) -> (Vec<ObstacleId>, Vec<InternalBoundaryId>) {
+        let obstacles = self
+            .editor
+            .document
+            .model
+            .draft
+            .obstacles
+            .iter()
+            .filter(|obstacle| {
+                (0..obstacle.spline.intervals().len()).all(|span| {
+                    self.selected_spans
+                        .contains(&GeometrySpan::Loop(obstacle.id, span))
+                })
+            })
+            .map(|obstacle| obstacle.id)
+            .collect();
+        let internal_boundaries = self
+            .editor
+            .document
+            .model
+            .draft
+            .internal_boundaries
+            .iter()
+            .filter(|boundary| {
+                (0..boundary.spline.intervals().len()).all(|span| {
+                    self.selected_spans
+                        .contains(&GeometrySpan::Baffle(boundary.id, span))
+                })
+            })
+            .map(|boundary| boundary.id)
+            .collect();
+        (obstacles, internal_boundaries)
+    }
+
+    fn delete_probe_and_ui_state(&mut self, id: ProbeId) {
+        let result = self.editor.delete_probe(id);
+        if self.error(result).is_some() {
+            self.probe_windows.remove(&id);
+            self.probe_traces.remove(&id);
+            self.curve_probe_traces.remove(&id);
+            self.area_probe_traces.remove(&id);
+            self.probe_status.remove(&id);
+            self.selected_probe = None;
+        }
+    }
+
+    fn delete_current_selection(&mut self) {
+        if let Some(id) = self.selected_probe {
+            self.delete_probe_and_ui_state(id);
+            return;
+        }
+        if let Some((id, Some(index))) = self.selection {
+            let result = self.editor.remove_point(id, index);
+            if self.error(result).is_some() {
+                self.select_loop(id);
+            }
+            return;
+        }
+        if let Some((id, Some(index))) = self.internal_selection {
+            let result = self.editor.remove_internal_boundary_point(id, index);
+            if self.error(result).is_some() {
+                self.select_baffle(id);
+            }
+            return;
+        }
+        let (obstacles, internal_boundaries) = self.fully_selected_geometry();
+        if !obstacles.is_empty() || !internal_boundaries.is_empty() {
+            let remaining_selection = self.selected_spans.clone();
+            self.editor
+                .delete_geometry(&obstacles, &internal_boundaries);
+            self.set_span_selection(remaining_selection);
+            self.reconcile_probe_definitions();
+        } else if !self.selected_spans.is_empty() {
+            self.message = "Select every span of a loop or baffle to delete it".into();
+        }
     }
 
     fn spans_in_marquee(&self, anchor: Pos2, current: Pos2, viewport: Rect) -> Vec<GeometrySpan> {
@@ -7557,14 +7648,7 @@ impl Playground {
                 self.probe_windows.insert(id);
             }
             if ui.button("Delete probe").clicked() {
-                let result = self.editor.delete_probe(id);
-                self.error(result);
-                self.probe_windows.remove(&id);
-                self.probe_traces.remove(&id);
-                self.curve_probe_traces.remove(&id);
-                self.area_probe_traces.remove(&id);
-                self.probe_status.remove(&id);
-                self.selected_probe = None;
+                self.delete_probe_and_ui_state(id);
                 self.interaction_mode = InteractionMode::Select;
             }
         });
@@ -9459,6 +9543,14 @@ impl Playground {
                 }
                 self.clear_transient();
             }
+            if !typing
+                && !matches!(self.interaction_mode, InteractionMode::DrawCustom { .. })
+                && ctx.input(|i| {
+                    i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
+                })
+            {
+                self.delete_current_selection();
+            }
             if over && !typing && !touch_navigation_owns_pointer && !self.suppress_touch_click {
                 if self.interaction_mode == InteractionMode::Select
                     && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
@@ -9471,30 +9563,6 @@ impl Playground {
                     }
                     if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
                         self.custom.pop();
-                    }
-                } else if ctx.input(|i| i.key_pressed(egui::Key::Delete))
-                    && let Some(id) = self.selected_probe
-                {
-                    let result = self.editor.delete_probe(id);
-                    self.error(result);
-                    self.probe_windows.remove(&id);
-                    self.probe_traces.remove(&id);
-                    self.curve_probe_traces.remove(&id);
-                    self.area_probe_traces.remove(&id);
-                    self.selected_probe = None;
-                } else if ctx.input(|i| i.key_pressed(egui::Key::Delete))
-                    && let Some((id, Some(index))) = self.selection
-                {
-                    let result = self.editor.remove_point(id, index);
-                    if self.error(result).is_some() {
-                        self.select_loop(id);
-                    }
-                } else if ctx.input(|i| i.key_pressed(egui::Key::Delete))
-                    && let Some((id, Some(index))) = self.internal_selection
-                {
-                    let result = self.editor.remove_internal_boundary_point(id, index);
-                    if self.error(result).is_some() {
-                        self.select_baffle(id);
                     }
                 }
                 let p = pointer.unwrap();
@@ -9544,11 +9612,17 @@ impl Playground {
                     }
                     self.refresh_curves();
                     self.pending_span_click = None;
+                    let default_operation = self.marquee_operation;
+                    let operation = Self::marquee_operation_with_modifiers(
+                        default_operation,
+                        ctx.input(|input| input.modifiers),
+                    );
                     self.drag = Some(Drag::Marquee {
                         anchor: p,
                         current: p,
                         base: self.selected_spans.clone(),
-                        operation: self.marquee_operation,
+                        default_operation,
+                        operation,
                     });
                 } else if primary && self.interaction_mode == InteractionMode::Select {
                     if self.touch_active {
@@ -9808,17 +9882,16 @@ impl Playground {
                                     moved: false,
                                 });
                             } else {
+                                let default_operation = MarqueeOperation::Replace;
                                 self.drag = Some(Drag::Marquee {
                                     anchor: p,
                                     current: p,
                                     base: self.selected_spans.clone(),
-                                    operation: if modifiers.alt {
-                                        MarqueeOperation::Subtract
-                                    } else if modifiers.shift {
-                                        MarqueeOperation::Add
-                                    } else {
-                                        MarqueeOperation::Replace
-                                    },
+                                    default_operation,
+                                    operation: Self::marquee_operation_with_modifiers(
+                                        default_operation,
+                                        modifiers,
+                                    ),
                                 });
                             }
                         }
@@ -10112,9 +10185,14 @@ impl Playground {
                             anchor,
                             current,
                             base,
+                            default_operation,
                             operation,
                         }) => {
                             *current = p;
+                            *operation = Self::marquee_operation_with_modifiers(
+                                *default_operation,
+                                ctx.input(|input| input.modifiers),
+                            );
                             marquee_update = Some((*anchor, *current, base.clone(), *operation));
                             None
                         }
@@ -10279,6 +10357,31 @@ impl Playground {
             if self.material_frame_drag.take().is_some() {
                 self.editor.commit();
             }
+            if let Some(Drag::Marquee {
+                default_operation,
+                operation,
+                ..
+            }) = self.drag.as_mut()
+            {
+                let release_modifiers = ctx.input(|input| {
+                    input
+                        .raw
+                        .events
+                        .iter()
+                        .find_map(|event| match event {
+                            egui::Event::PointerButton {
+                                button: egui::PointerButton::Primary,
+                                pressed: false,
+                                modifiers,
+                                ..
+                            } => Some(*modifiers),
+                            _ => None,
+                        })
+                        .unwrap_or(input.modifiers)
+                });
+                *operation =
+                    Self::marquee_operation_with_modifiers(*default_operation, release_modifiers);
+            }
             let drag = self.drag.take();
             let moved = matches!(
                 &drag,
@@ -10299,6 +10402,7 @@ impl Playground {
                 current,
                 base,
                 operation,
+                ..
             }) = &drag
             {
                 if anchor.distance(*current) >= 4.0 {
@@ -15606,6 +15710,47 @@ mod tests {
     }
 
     #[test]
+    fn marquee_modifiers_change_the_operation_during_the_drag() {
+        let mut harness = Harness::new();
+        let original = GeometrySpan::Loop(ObstacleId(1), 2);
+        harness.state.set_span_selection(vec![original]);
+        harness.state.span_selection_filter = SpanSelectionFilter::Outer;
+        let start = harness.point(Point2::new(0.2, 1.1));
+        let end = harness.point(Point2::new(-0.2, 0.9));
+        harness.frame(vec![
+            Event::PointerMoved(start),
+            Event::PointerButton {
+                pos: start,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        harness.frame(vec![Event::PointerMoved(end)]);
+        assert_eq!(
+            harness.state.selected_spans,
+            vec![GeometrySpan::Outer(OuterSide::Top)]
+        );
+
+        harness.frame(vec![Event::ModifiersChanged(Modifiers::SHIFT)]);
+        assert!(harness.state.selected_spans.contains(&original));
+        assert!(
+            harness
+                .state
+                .selected_spans
+                .contains(&GeometrySpan::Outer(OuterSide::Top))
+        );
+
+        harness.frame(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+        assert_eq!(
+            harness.state.selected_spans,
+            vec![GeometrySpan::Outer(OuterSide::Top)]
+        );
+        harness.button(end, PointerButton::Primary, false);
+        assert_eq!(harness.state.editor.history_len(), (0, 0));
+    }
+
+    #[test]
     fn touch_area_select_uses_direction_and_remains_active() {
         let mut harness = Harness::new();
         harness.state.span_selection_filter = SpanSelectionFilter::Outer;
@@ -15626,6 +15771,93 @@ mod tests {
         );
         assert_eq!(harness.state.interaction_mode, InteractionMode::SelectArea);
         assert_eq!(harness.state.editor.history_len(), (0, 0));
+    }
+
+    #[test]
+    fn delete_key_removes_complete_geometry_selection_as_one_action() {
+        let mut harness = Harness::new();
+        let baffle = harness
+            .state
+            .editor
+            .create_internal_boundary(
+                OpenCubicSpline::uniform(vec![
+                    Point2::new(-0.7, 0.6),
+                    Point2::new(-0.25, 0.6),
+                    Point2::new(0.25, 0.6),
+                    Point2::new(0.7, 0.6),
+                ])
+                .unwrap(),
+                BACKGROUND_REGION,
+            )
+            .unwrap();
+        harness.settle();
+        let history = harness.state.editor.history_len().0;
+        let mut selection = harness
+            .state
+            .curve_spans(GeometrySpan::Loop(ObstacleId(1), 0));
+        selection.extend(harness.state.curve_spans(GeometrySpan::Baffle(baffle, 0)));
+        selection.push(GeometrySpan::Outer(OuterSide::Top));
+        harness.state.set_span_selection(selection);
+        harness.move_to(Pos2::new(4.0, 4.0));
+        harness.key(Key::Delete, Modifiers::NONE);
+
+        assert!(
+            harness
+                .state
+                .editor
+                .document
+                .model
+                .draft
+                .obstacles
+                .is_empty()
+        );
+        assert!(
+            harness
+                .state
+                .editor
+                .document
+                .model
+                .draft
+                .internal_boundaries
+                .is_empty()
+        );
+        assert_eq!(
+            harness.state.selected_spans,
+            vec![GeometrySpan::Outer(OuterSide::Top)]
+        );
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
+        harness.state.editor.undo();
+        assert_eq!(harness.state.editor.document.model.draft.obstacles.len(), 1);
+        assert_eq!(
+            harness
+                .state
+                .editor
+                .document
+                .model
+                .draft
+                .internal_boundaries
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn backspace_deletes_a_selected_probe_outside_the_viewport() {
+        let mut harness = Harness::new();
+        let id = harness
+            .state
+            .editor
+            .create_point_probe(Point2::new(0.4, 0.4))
+            .unwrap();
+        let history = harness.state.editor.history_len().0;
+        harness.state.select_probe(id);
+        harness.state.probe_windows.insert(id);
+        harness.move_to(Pos2::new(4.0, 4.0));
+        harness.key(Key::Backspace, Modifiers::NONE);
+
+        assert!(harness.state.editor.document.model.probes.is_empty());
+        assert!(!harness.state.probe_windows.contains(&id));
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
     }
 
     #[test]
@@ -17786,6 +18018,7 @@ mod tests {
         );
         assert_eq!(h.state.editor.history_len().0, 1);
         assert!(h.state.selection.unwrap().1.is_some());
+        h.move_to(Pos2::new(4.0, 4.0));
         h.key(Key::Delete, Modifiers::NONE);
         assert_eq!(
             h.state.editor.document.model.draft.obstacles[0]

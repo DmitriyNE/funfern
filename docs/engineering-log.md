@@ -116,6 +116,20 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   compilation, and the release Trunk build pass. Real-device touch behavior remains
   a short manual browser check.
 
+## 2026-09-13 — Live marquee modifiers and selection deletion
+
+- Marquee operations now follow Shift and Alt throughout a drag instead of capturing
+  modifiers only at pointer-down. Releasing a modifier returns to Replace for the
+  ordinary mouse marquee or to the chosen Area-select operation.
+- Delete and Backspace now act on the current editor selection regardless of whether
+  the pointer is over the viewport. They remove probes, individual spline controls,
+  and all completely selected loops and baffles. Multi-feature geometry deletion is
+  one history action and also removes dependent probes through the editor model.
+  Partial-span and outer-boundary selections remain selected because those spans are
+  not independently deletable topology.
+- All 328 workspace tests, warning-denied Clippy, native release compilation, and
+  the release Trunk build pass.
+
 ## 2026-09-13 — Editable rectangular outer domain
 
 - Moved the axis-aligned domain rectangle into each core `Scene`, so draft and

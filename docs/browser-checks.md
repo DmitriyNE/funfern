@@ -27,9 +27,14 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
 - [ ] Select one control handle, one span, several spans, and a whole curve. Test
   Shift-toggle, Command/Ctrl-click whole curve, left-to-right fully-enclosed
   marquee, right-to-left crossing marquee, Shift-add, Alt-subtract, filters,
-  Select filtered, Invert, and Clear. Exercise persistent Area select with Replace,
-  Add, and Subtract. Mixed-object span selection must not expose a whole-object
-  delete or role change.
+  Select filtered, Invert, and Clear. Press and release Shift or Alt while a marquee
+  is already moving and confirm that its operation and result update immediately.
+  Exercise persistent Area select with Replace, Add, and Subtract. Mixed-object span
+  selection must not expose a whole-object delete or role change.
+- [ ] Press Delete and Backspace with a control, a probe, one complete feature, and
+  several complete features selected, including while the pointer is over a panel.
+  A multi-feature deletion is one undo entry; partial span and outer-edge selections
+  remain present.
 - [ ] Drag selected spans as one rigid piece with snapping enabled. Exercise the
   rotation ring, square scale grip, Shift angle/scale snapping, movable transform
   center, and numeric translate/rotate/scale controls. With persistent snapping

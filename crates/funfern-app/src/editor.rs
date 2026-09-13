@@ -1131,15 +1131,55 @@ impl Editor {
     }
 
     pub fn delete_internal_boundary(&mut self, id: InternalBoundaryId) {
+        self.delete_geometry(&[], &[id]);
+    }
+
+    pub fn delete_geometry(
+        &mut self,
+        obstacle_ids: &[ObstacleId],
+        internal_boundary_ids: &[InternalBoundaryId],
+    ) {
+        let mut obstacle_ids = obstacle_ids.to_vec();
+        obstacle_ids.sort_by_key(|id| id.0);
+        obstacle_ids.dedup();
+        let mut internal_boundary_ids = internal_boundary_ids.to_vec();
+        internal_boundary_ids.sort_by_key(|id| id.0);
+        internal_boundary_ids.dedup();
+        let has_obstacles = self
+            .document
+            .model
+            .draft
+            .obstacles
+            .iter()
+            .any(|obstacle| obstacle_ids.contains(&obstacle.id));
+        let has_internal_boundaries = self
+            .document
+            .model
+            .draft
+            .internal_boundaries
+            .iter()
+            .any(|boundary| internal_boundary_ids.contains(&boundary.id));
+        if !has_obstacles && !has_internal_boundaries {
+            return;
+        }
         self.begin();
+        for id in internal_boundary_ids {
+            self.delete_internal_boundary_during_edit(id);
+        }
+        for id in obstacle_ids {
+            self.delete_obstacle_during_edit(id);
+        }
+        self.changed();
+        self.commit();
+    }
+
+    fn delete_internal_boundary_during_edit(&mut self, id: InternalBoundaryId) {
         self.delete_boundary_probes_for(BoundaryProbeFeature::Baffle(id));
         self.document
             .model
             .draft
             .internal_boundaries
             .retain(|boundary| boundary.id != id);
-        self.changed();
-        self.commit();
     }
 
     pub fn duplicate_internal_boundary(
@@ -1791,7 +1831,10 @@ impl Editor {
         Ok(id)
     }
     pub fn delete_obstacle(&mut self, id: ObstacleId) {
-        self.begin();
+        self.delete_geometry(&[id], &[]);
+    }
+
+    fn delete_obstacle_during_edit(&mut self, id: ObstacleId) {
         self.delete_boundary_probes_for(BoundaryProbeFeature::Loop(id));
         let removed = self
             .document
@@ -1826,8 +1869,6 @@ impl Editor {
                 .regions
                 .retain(|region| region.id != interior);
         }
-        self.changed();
-        self.commit();
     }
 
     pub fn duplicate_obstacle(
