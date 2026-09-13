@@ -18,6 +18,10 @@ pub enum DividerEndpoint {
         interface: MaterialInterfaceId,
         node: InterfaceNodeId,
     },
+    InterfaceCurve {
+        interface: MaterialInterfaceId,
+        parameter: f64,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -1185,6 +1189,7 @@ impl Editor {
         }
         let mut candidate = self.document.model.draft.clone();
         let mut next_junction_id = self.next_junction_id;
+        let mut next_node_id = self.next_interface_node_id;
         let internal_targets = (1..spline.intervals().len())
             .map(|index| {
                 let point = spline.evaluate(spline.breakpoint(index).unwrap());
@@ -1261,6 +1266,88 @@ impl Editor {
                         Some(id);
                     Ok(id)
                 }
+                DividerEndpoint::InterfaceCurve {
+                    interface,
+                    parameter,
+                } => {
+                    let interface_index = candidate
+                        .material_interfaces
+                        .iter()
+                        .position(|candidate| candidate.id == interface)
+                        .ok_or("The selected divider no longer exists")?;
+                    let (node_index, existing_junction) = {
+                        let interface = &mut candidate.material_interfaces[interface_index];
+                        let InterfaceSpline::Open(spline) = &mut interface.spline else {
+                            return Err("Only open dividers accept junctions".into());
+                        };
+                        if !parameter.is_finite()
+                            || parameter < 0.0
+                            || parameter > spline.period()
+                            || (spline.evaluate(parameter) - point).norm()
+                                > candidate.domain.tolerance()
+                        {
+                            return Err("The divider endpoint misses its attachment curve".into());
+                        }
+                        let parameter_tolerance = spline.period() * 1.0e-10;
+                        let existing = (0..=spline.intervals().len()).find(|index| {
+                            (spline.breakpoint(*index).unwrap() - parameter).abs()
+                                <= parameter_tolerance
+                        });
+                        let node_index = if let Some(index) = existing {
+                            index
+                        } else {
+                            let span = spline
+                                .span_index(parameter)
+                                .ok_or("The attachment is outside the divider")?;
+                            spline
+                                .insert(parameter)
+                                .map_err(|error| error.to_string())?;
+                            let inherited = interface.span_sides[span];
+                            interface.span_sides.insert(span + 1, inherited);
+                            let id = InterfaceNodeId(next_node_id);
+                            next_node_id = next_node_id
+                                .checked_add(1)
+                                .ok_or("Interface-node IDs exhausted")?;
+                            interface
+                                .nodes
+                                .insert(span + 1, InterfaceNode { id, junction: None });
+                            span + 1
+                        };
+                        if let Some(junction) = interface.nodes[node_index].junction {
+                            (node_index, Some(junction))
+                        } else {
+                            if node_index == 0 || node_index + 1 == interface.nodes.len() {
+                                return Err(
+                                    "A free interface end cannot become an interior junction"
+                                        .into(),
+                                );
+                            }
+                            while spline.continuity(node_index).unwrap() > 0 {
+                                spline
+                                    .increase_multiplicity(node_index)
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            (node_index, None)
+                        }
+                    };
+                    if let Some(junction) = existing_junction {
+                        return Ok(junction);
+                    }
+                    if candidate.junctions.len() >= MAX_JUNCTIONS {
+                        return Err(format!("Maximum {MAX_JUNCTIONS} junctions"));
+                    }
+                    let id = JunctionId(next_junction_id);
+                    next_junction_id = next_junction_id
+                        .checked_add(1)
+                        .ok_or("Junction IDs exhausted")?;
+                    candidate.junctions.push(Junction {
+                        id,
+                        location: JunctionLocation::Interior,
+                    });
+                    candidate.material_interfaces[interface_index].nodes[node_index].junction =
+                        Some(id);
+                    Ok(id)
+                }
                 DividerEndpoint::Junction(id) => {
                     let junction = candidate
                         .junctions
@@ -1322,7 +1409,6 @@ impl Editor {
         }
         let interface_id = MaterialInterfaceId(self.next_material_interface_id);
         let region_id = RegionId(self.next_region_id);
-        let mut next_node_id = self.next_interface_node_id;
         let mut attachments = vec![None; spline.intervals().len() + 1];
         attachments[0] = Some(start_junction);
         *attachments.last_mut().unwrap() = Some(end_junction);

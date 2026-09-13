@@ -904,6 +904,7 @@ pub struct Playground {
     area_probe_center: Option<Point2>,
     probe_name_edit: Option<(ProbeId, String)>,
     creation_role: CreationRole,
+    divider_attachments: Vec<Option<DividerEndpoint>>,
     material_selection: MaterialId,
     material_name_edit: Option<(MaterialId, String)>,
     material_formula_edits: [Option<(MaterialId, String)>; 4],
@@ -1092,6 +1093,7 @@ impl Default for Playground {
             area_probe_center: None,
             probe_name_edit: None,
             creation_role: CreationRole::Hole,
+            divider_attachments: vec![],
             material_selection: DEFAULT_MATERIAL,
             material_name_edit: None,
             material_formula_edits: [None, None, None, None],
@@ -2135,6 +2137,7 @@ impl Playground {
         self.touch_gesture = None;
         self.suppress_touch_click = false;
         self.custom.clear();
+        self.divider_attachments.clear();
         self.interaction_mode = InteractionMode::Select;
     }
 
@@ -3185,11 +3188,17 @@ impl Playground {
                 .map_err(|error| error.to_string())
                 .and_then(|spline| {
                     let start = self
-                        .divider_endpoint(spline.evaluate(0.0))
-                        .ok_or("Start the divider on an outer edge or junction")?;
+                        .divider_attachments
+                        .first()
+                        .copied()
+                        .flatten()
+                        .ok_or("Start the divider on a highlighted attachment target")?;
                     let end = self
-                        .divider_endpoint(spline.evaluate(spline.period()))
-                        .ok_or("End the divider on an outer edge or junction")?;
+                        .divider_attachments
+                        .last()
+                        .copied()
+                        .flatten()
+                        .ok_or("End the divider on a highlighted attachment target")?;
                     let sources = (0..spline.intervals().len())
                         .map(|span| {
                             let bounds = spline.span_bounds(span).unwrap();
@@ -3272,6 +3281,7 @@ impl Playground {
                 FocusedFeature::Baffle(id) => self.select_baffle(id),
             }
             self.custom.clear();
+            self.divider_attachments.clear();
             self.interaction_mode = InteractionMode::Select;
         }
     }
@@ -3294,79 +3304,102 @@ impl Playground {
         }
     }
 
-    fn divider_endpoint(&self, point: Point2) -> Option<DividerEndpoint> {
+    fn divider_attachment_at_screen(
+        &self,
+        screen: Pos2,
+        viewport: Rect,
+    ) -> Option<(DividerEndpoint, Point2)> {
         let scene = &self.editor.document.model.draft;
-        if let Some((interface, node)) = scene.material_interfaces.iter().find_map(|interface| {
-            interface
-                .nodes
-                .iter()
-                .enumerate()
-                .find_map(|(index, node)| {
-                    interface
-                        .spline
-                        .node_point(index)
-                        .filter(|candidate| (*candidate - point).norm() <= scene.domain.tolerance())
-                        .map(|_| (interface, node))
-                })
-        }) {
-            return Some(node.junction.map_or(
-                DividerEndpoint::InterfaceNode {
-                    interface: interface.id,
-                    node: node.id,
-                },
-                DividerEndpoint::Junction,
+        if let Some((interface, node, point, _)) = scene
+            .material_interfaces
+            .iter()
+            .flat_map(|interface| {
+                interface
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, node)| {
+                        let point = interface.spline.node_point(index)?;
+                        Some((
+                            interface,
+                            node,
+                            point,
+                            self.screen(point, viewport).distance(screen),
+                        ))
+                    })
+            })
+            .filter(|candidate| candidate.3 <= self.hit_tolerance(12.0))
+            .min_by(|left, right| left.3.total_cmp(&right.3))
+        {
+            return Some((
+                node.junction.map_or(
+                    DividerEndpoint::InterfaceNode {
+                        interface: interface.id,
+                        node: node.id,
+                    },
+                    DividerEndpoint::Junction,
+                ),
+                point,
             ));
         }
-        if let Some(junction) = scene.junctions.iter().find(|junction| {
-            scene
-                .junction_point(**junction)
-                .is_some_and(|candidate| (candidate - point).norm() <= scene.domain.tolerance())
-        }) {
-            return Some(DividerEndpoint::Junction(junction.id));
+        let options = SamplingOptions {
+            tolerance: (0.6 / self.scale).max(scene.domain.tolerance() * 0.1),
+            max_depth: 14,
+            max_points: 4096,
+        };
+        let world = self.world(screen, viewport);
+        if let Some((id, parameter, point, _)) = scene
+            .material_interfaces
+            .iter()
+            .filter_map(|interface| {
+                let InterfaceSpline::Open(spline) = &interface.spline else {
+                    return None;
+                };
+                let samples = sample_open(spline, options).ok()?;
+                let distance = samples
+                    .windows(2)
+                    .map(|segment| {
+                        point_segment_distance(world, segment[0].point, segment[1].point)
+                    })
+                    .fold(f64::INFINITY, f64::min);
+                let parameter = closest_open_parameter(spline, &samples, world);
+                Some((
+                    interface.id,
+                    parameter,
+                    spline.evaluate(parameter),
+                    distance,
+                ))
+            })
+            .filter(|candidate| candidate.3 * self.scale <= self.hit_tolerance(12.0) as f64)
+            .min_by(|left, right| left.3.total_cmp(&right.3))
+        {
+            return Some((
+                DividerEndpoint::InterfaceCurve {
+                    interface: id,
+                    parameter,
+                },
+                point,
+            ));
         }
         OuterSide::ALL.into_iter().find_map(|side| {
             let [start, end] = outer_side_points(scene.domain, side);
             let delta = end - start;
-            let fraction = (point - start).dot(delta) / delta.dot(delta);
+            let fraction = (world - start).dot(delta) / delta.dot(delta);
             let projected = start.lerp(end, fraction.clamp(0.0, 1.0));
-            ((projected - point).norm() <= scene.domain.tolerance()).then_some(
-                DividerEndpoint::Outer {
-                    side,
-                    fraction: fraction.clamp(0.0, 1.0),
-                },
-            )
+            (self.screen(projected, viewport).distance(screen) <= self.hit_tolerance(12.0))
+                .then_some((
+                    DividerEndpoint::Outer {
+                        side,
+                        fraction: fraction.clamp(0.0, 1.0),
+                    },
+                    projected,
+                ))
         })
     }
 
     fn snap_divider_point(&self, screen: Pos2, viewport: Rect) -> Point2 {
-        let scene = &self.editor.document.model.draft;
-        if let Some((_, point)) = scene
-            .material_interfaces
-            .iter()
-            .flat_map(|interface| {
-                (0..interface.spline.node_count())
-                    .filter_map(|index| interface.spline.node_point(index))
-            })
-            .chain(
-                scene
-                    .junctions
-                    .iter()
-                    .filter_map(|junction| scene.junction_point(*junction)),
-            )
-            .map(|point| (self.screen(point, viewport).distance(screen), point))
-            .filter(|(distance, _)| *distance <= self.hit_tolerance(12.0))
-            .min_by(|left, right| left.0.total_cmp(&right.0))
-        {
-            return point;
-        }
-        if let Some(side) = self.hit_outer_boundary(screen, viewport) {
-            let point = self.world(screen, viewport);
-            let [start, end] = outer_side_points(scene.domain, side);
-            let delta = end - start;
-            let fraction = ((point - start).dot(delta) / delta.dot(delta)).clamp(0.0, 1.0);
-            return start.lerp(end, fraction);
-        }
-        self.world(screen, viewport)
+        self.divider_attachment_at_screen(screen, viewport)
+            .map_or_else(|| self.world(screen, viewport), |(_, point)| point)
     }
 
     fn region_at(&self, point: Point2) -> RegionId {
@@ -5039,6 +5072,7 @@ impl Playground {
             if drawing || self.add_geometry_open {
                 self.interaction_mode = InteractionMode::Select;
                 self.custom.clear();
+                self.divider_attachments.clear();
                 self.add_geometry_open = false;
             } else {
                 self.inspector_panel = Some(InspectorPanel::Edit);
@@ -5155,6 +5189,7 @@ impl Playground {
                                 tool: *tool,
                             };
                             self.custom.clear();
+                            self.divider_attachments.clear();
                             close = true;
                         }
                     }
@@ -8777,6 +8812,7 @@ impl Playground {
                 InteractionMode::Select
             } else {
                 self.custom.clear();
+                self.divider_attachments.clear();
                 self.segment_probe_start = None;
                 self.area_probe_center = None;
                 InteractionMode::SelectArea
@@ -8792,6 +8828,8 @@ impl Playground {
         if let InteractionMode::Draw { role, tool } = self.interaction_mode
             && !tool.finishes_automatically()
         {
+            let endpoint_attached = role != CreationRole::Divider
+                || self.divider_attachments.last().is_some_and(Option::is_some);
             ui.horizontal(|ui| {
                 ui.label(format!(
                     "{} / {} {}",
@@ -8805,7 +8843,7 @@ impl Playground {
                 ));
                 if ui
                     .add_enabled(
-                        tool.can_finish(role, self.custom.len()),
+                        tool.can_finish(role, self.custom.len()) && endpoint_attached,
                         egui::Button::new("Finish"),
                     )
                     .clicked()
@@ -8814,10 +8852,17 @@ impl Playground {
                 }
                 if ui.button("Cancel").clicked() {
                     self.custom.clear();
+                    self.divider_attachments.clear();
                     self.interaction_mode = InteractionMode::Select;
                 }
             });
-            ui.small("Enter finishes · Backspace removes the last point");
+            if role == CreationRole::Divider {
+                ui.small(
+                    "Gold = attachment target · click a divider to create a junction · click a target to finish",
+                );
+            } else {
+                ui.small("Enter finishes · Backspace removes the last point");
+            }
         }
         if let Some(summary) = self.selection_summary() {
             ui.add_space(8.0);
@@ -10378,6 +10423,7 @@ impl Playground {
                 if !self.cancel_pointer_edit() && !cancelled_segment_start && !cancelled_area_start
                 {
                     self.custom.clear();
+                    self.divider_attachments.clear();
                     self.interaction_mode = InteractionMode::Select;
                 }
                 if self.interaction_mode == InteractionMode::SelectArea {
@@ -10415,6 +10461,7 @@ impl Playground {
                     }
                     if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
                         self.custom.pop();
+                        self.divider_attachments.pop();
                     }
                 }
                 let p = pointer.unwrap();
@@ -11089,11 +11136,14 @@ impl Playground {
                     match self.interaction_mode {
                         InteractionMode::Draw { role, tool } => {
                             self.creation_role = role;
-                            let point = if role == CreationRole::Divider {
-                                self.snap_divider_point(p, r)
+                            let attachment = if role == CreationRole::Divider {
+                                self.divider_attachment_at_screen(p, r)
                             } else {
-                                self.world(p, r)
+                                None
                             };
+                            let point = attachment
+                                .map(|(_, point)| point)
+                                .unwrap_or_else(|| self.world(p, r));
                             if tool == DrawTool::Circle {
                                 let result = self.create_spline(
                                     role,
@@ -11117,10 +11167,24 @@ impl Playground {
                                         < self.hit_tolerance(10.0)
                                 {
                                     self.finish_drawing();
+                                } else if role == CreationRole::Divider
+                                    && self.custom.is_empty()
+                                    && attachment.is_none()
+                                {
+                                    self.message =
+                                        "Start the divider on a highlighted boundary or divider"
+                                            .into();
                                 } else if self.custom.len() < tool.maximum_points() {
                                     self.custom.push(point);
-                                    if tool.finishes_automatically()
-                                        && self.custom.len() == tool.minimum_points(role)
+                                    self.divider_attachments
+                                        .push(attachment.map(|(target, _)| target));
+                                    let divider_finished = role == CreationRole::Divider
+                                        && self.custom.len() > 1
+                                        && attachment.is_some()
+                                        && tool.can_finish(role, self.custom.len());
+                                    if divider_finished
+                                        || (tool.finishes_automatically()
+                                            && self.custom.len() == tool.minimum_points(role))
                                     {
                                         self.finish_drawing();
                                     }
@@ -11688,6 +11752,36 @@ impl Playground {
                     ));
                 }
             }
+            if matches!(
+                self.interaction_mode,
+                InteractionMode::Draw {
+                    role: CreationRole::Divider,
+                    ..
+                }
+            ) {
+                let corners = domain_rect.corners();
+                painter.add(egui::Shape::line(
+                    [corners[0], corners[1], corners[2], corners[3], corners[0]]
+                        .map(|point| self.screen(point, r))
+                        .to_vec(),
+                    Stroke::new(2.0, GOLD.gamma_multiply(0.65)),
+                ));
+                self.draw_material_interfaces(
+                    &painter,
+                    r,
+                    &self.editor.document.model.draft,
+                    GOLD.gamma_multiply(0.65),
+                    3.5,
+                );
+                if over
+                    && let Some(pointer) = pointer
+                    && let Some((_, point)) = self.divider_attachment_at_screen(pointer, r)
+                {
+                    let point = self.screen(point, r);
+                    painter.circle_filled(point, 4.0, GOLD);
+                    painter.circle_stroke(point, 8.0, Stroke::new(2.0, Color32::WHITE));
+                }
+            }
         }
         if self.editor.document.presentation.boundary_conditions {
             for side in OuterSide::ALL {
@@ -12046,7 +12140,15 @@ impl Playground {
             && !self.custom.is_empty()
         {
             let candidate = (over && self.custom.len() < tool.maximum_points())
-                .then(|| pointer.map(|point| self.world(point, r)))
+                .then(|| {
+                    pointer.map(|point| {
+                        if role == CreationRole::Divider {
+                            self.snap_divider_point(point, r)
+                        } else {
+                            self.world(point, r)
+                        }
+                    })
+                })
                 .flatten();
             if tool == DrawTool::Rectangle {
                 if let Some(second) = candidate.or_else(|| self.custom.get(1).copied()) {
@@ -12643,6 +12745,7 @@ impl Playground {
                         };
                         if ui.button(cancel_label).clicked() {
                             self.custom.clear();
+                            self.divider_attachments.clear();
                             self.segment_probe_start = None;
                             self.area_probe_center = None;
                             self.interaction_mode = InteractionMode::Select;
@@ -17772,6 +17875,54 @@ mod tests {
         h.key(Key::Escape, Modifiers::NONE);
         assert!(h.state.custom.is_empty());
         assert_eq!(h.state.editor.history_len().0, 2);
+    }
+
+    #[test]
+    fn divider_drawing_exposes_the_full_curve_as_an_attachment_target() {
+        let mut harness = Harness::new();
+        harness.state.editor.document.model.draft.obstacles.clear();
+        harness
+            .state
+            .editor
+            .document
+            .model
+            .accepted
+            .obstacles
+            .clear();
+        let interface = harness
+            .state
+            .editor
+            .create_material_divider(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)])
+                    .unwrap(),
+                DividerEndpoint::Outer {
+                    side: OuterSide::Bottom,
+                    fraction: 0.5,
+                },
+                DividerEndpoint::Outer {
+                    side: OuterSide::Top,
+                    fraction: 0.5,
+                },
+                vec![BACKGROUND_REGION],
+                DEFAULT_MATERIAL,
+            )
+            .unwrap();
+        harness.state.interaction_mode = InteractionMode::Draw {
+            role: CreationRole::Divider,
+            tool: DrawTool::Polyline,
+        };
+
+        harness.click(harness.point(Point2::default()));
+
+        assert_eq!(harness.state.custom.len(), 1);
+        assert!(matches!(
+            harness.state.divider_attachments.as_slice(),
+            [Some(DividerEndpoint::InterfaceCurve {
+                interface: id,
+                parameter,
+            })] if *id == interface && (*parameter - 1.0).abs() < 1.0e-4
+        ));
+        assert!(harness.state.editor.document.model.draft.junctions.len() == 2);
     }
 
     #[test]

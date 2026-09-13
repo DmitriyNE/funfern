@@ -70,8 +70,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   spans own explicit left/right regions; interior attachments require C0 and outer
   attachments store an edge plus normalized coordinate.
 - Added the staged **Divider** polyline/spline tool. The document changes only after
-  both endpoints attach. C0 node hits form T junctions, and a drawn curve may cross
-  existing C0 nodes while assigning the source region independently per span.
+  both endpoints attach. Eligible outer edges and divider curves are highlighted;
+  clicking a target to end the curve finishes the operation. A curve hit inserts a
+  shape-preserving C0 breakpoint and junction automatically, and a drawn curve may
+  cross existing C0 nodes while assigning the source region independently per span.
 - Added junction diamonds and direct junction dragging. Interior moves update every
   attached curve node; outer moves remain constrained to their selected domain edge.
   A complete drag is one undoable edit and Escape restores its snapshot.

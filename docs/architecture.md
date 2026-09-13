@@ -115,6 +115,11 @@ retain their side and normalized side coordinate. Mesh triangles carry their own
 while constrained edges carry their logical boundary/span ID and side information.
 Those labels survive remeshing even though numerical indices do not.
 
+During divider drawing, the outer boundary and existing divider curves are attachment
+targets. Attaching to the interior of a divider inserts a shape-preserving knot,
+raises that breakpoint to C0 without moving the curve, and creates the junction as
+part of the same staged document edit.
+
 Material interfaces use a conforming scalar field with three base material
 properties. Mechanical scenes interpret them as density `rho`, stiffness `k`, and
 damping `d`. EM scenes store permittivity `epsilon`, permeability `mu`, and reduced

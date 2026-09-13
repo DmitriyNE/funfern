@@ -2100,6 +2100,61 @@ fn divider_can_branch_from_a_c0_node_into_a_t_junction() {
 }
 
 #[test]
+fn divider_curve_attachment_creates_a_shape_preserving_c0_junction() {
+    let mut editor = Editor::default();
+    editor.document.model.draft.obstacles.clear();
+    editor.document.model.accepted.obstacles.clear();
+    let first = editor
+        .create_material_divider(
+            OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)]).unwrap(),
+            DividerEndpoint::Outer {
+                side: OuterSide::Bottom,
+                fraction: 0.5,
+            },
+            DividerEndpoint::Outer {
+                side: OuterSide::Top,
+                fraction: 0.5,
+            },
+            vec![BACKGROUND_REGION],
+            DEFAULT_MATERIAL,
+        )
+        .unwrap();
+    let before = match &editor.document.model.draft.material_interfaces[0].spline {
+        InterfaceSpline::Open(spline) => spline.clone(),
+        InterfaceSpline::Closed(_) => panic!("expected an open divider"),
+    };
+    editor
+        .create_material_divider(
+            OpenCubicSpline::polyline(vec![Point2::default(), Point2::new(1.0, 0.0)]).unwrap(),
+            DividerEndpoint::InterfaceCurve {
+                interface: first,
+                parameter: 1.0,
+            },
+            DividerEndpoint::Outer {
+                side: OuterSide::Right,
+                fraction: 0.5,
+            },
+            vec![BACKGROUND_REGION],
+            DEFAULT_MATERIAL,
+        )
+        .unwrap();
+
+    let vertical = &editor.document.model.draft.material_interfaces[0];
+    let InterfaceSpline::Open(spline) = &vertical.spline else {
+        panic!("expected an open divider")
+    };
+    assert_eq!(spline.intervals().len(), 2);
+    assert_eq!(spline.continuity(1), Some(0));
+    assert!((spline.evaluate(spline.breakpoint(1).unwrap()) - Point2::default()).norm() < 1.0e-12);
+    for sample in 0..=64 {
+        let parameter = before.period() * sample as f64 / 64.0;
+        assert!((spline.evaluate(parameter) - before.evaluate(parameter)).norm() < 1.0e-12);
+    }
+    assert!(vertical.nodes[1].junction.is_some());
+    assert!(validate(&editor.document.model.draft).valid());
+}
+
+#[test]
 fn divider_crossing_a_c0_node_relabels_each_entered_sector() {
     let mut editor = Editor::default();
     editor.document.model.draft.obstacles.clear();

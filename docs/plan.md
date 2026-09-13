@@ -206,8 +206,9 @@ files introduced open-spline span laws; version 5 also preserves periodic hole-s
 conditions. Older loops migrate to reflecting spans. Multi-region coordinate edits currently take the full-mesh path; extending
 bounded repair across region topology remains adaptation work.
 
-Open dividers stay staged until both ends attach to an outer edge or an existing
-C0 breakpoint. The graph stores per-span left/right regions and explicit junctions,
+Open dividers stay staged until both ends attach to an outer edge or another divider.
+Curve attachment inserts a shape-preserving C0 breakpoint and junction automatically.
+The graph stores per-span left/right regions and explicit junctions,
 meshes all transmitting branches as one conforming trace, and supports T/crossing
 sector relabeling, junction dragging, and region-merge removal by selected
 junction-to-junction section. Version 21 persists the graph in draft and accepted
