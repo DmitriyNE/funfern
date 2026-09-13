@@ -321,7 +321,12 @@ compiled face cycles and oriented curve sides into region-labelled trace cycles.
 The full-rebuild triangulator now consumes that plan directly, preserving stable
 curve/span labels and snapshot trace identities through holes, transmitting
 interfaces, free and attached baffles, outer dividers, and junctions. The app,
-solver, AMR, and probes still use the legacy scene path.
+AMR, transfer, probes, and GPU upload still use the legacy scene path. The
+quadratic operator now also assembles directly from the plan: it evaluates each
+triangle's assigned region, resolves outer and curve-side conditions from stable
+labels, supports paired thin-gap traces, and accepts multi-region junction nodes.
+Law-only plan changes reuse the existing mesh. The application cutover waits for
+the remaining numerical consumers so one transaction cannot mix label models.
 
 - Make meshing consume a completed topology snapshot instead of independently
   rediscovering loop nesting and open-divider regions. Triangulate each active face

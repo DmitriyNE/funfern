@@ -2,15 +2,65 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     BACKGROUND_REGION, BoundaryLabel, DirectionalWaveCoefficients, FaceBoundaryCondition,
-    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, OuterBoundaryCondition,
-    OuterBoundaryConditions, OuterSide, PhysicsModel, Point2, RegionId, Scene, SymmetricTensor2,
-    TimeSignal, TriMesh, WaveCoefficients, WaveError,
+    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, Material,
+    OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, PhysicsModel, PlannedBoundaryEdge,
+    PlannedBoundarySource, Point2, Region, RegionId, Scene, SpanBehavior, SymmetricTensor2,
+    TimeSignal, TopologyMeshPlan, TriMesh, WaveCoefficients, WaveError,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BoundaryLoad {
     pub signal: TimeSignal,
     pub normalized_weight: f64,
+}
+
+/// Material and presentation-independent physics data used by a compiled
+/// topology. It borrows the document libraries without depending on legacy
+/// obstacle, divider, or baffle collections.
+#[derive(Clone, Copy, Debug)]
+pub struct TopologyWaveModel<'a> {
+    pub physics: PhysicsModel,
+    pub materials: &'a [Material],
+    pub regions: &'a [Region],
+    pub outer_boundaries: OuterBoundaryConditions,
+}
+
+impl<'a> TopologyWaveModel<'a> {
+    pub fn from_scene(scene: &'a Scene) -> Self {
+        Self {
+            physics: scene.physics,
+            materials: &scene.materials,
+            regions: &scene.regions,
+            outer_boundaries: scene.outer_boundaries,
+        }
+    }
+
+    fn valid(self, plan: &TopologyMeshPlan) -> bool {
+        self.outer_boundaries.valid()
+            && self.materials.iter().all(Material::valid)
+            && self.regions.iter().all(|region| {
+                region.id.0 > 0
+                    && region.frame.valid()
+                    && self
+                        .materials
+                        .iter()
+                        .any(|material| material.id == region.material)
+            })
+            && self.materials.iter().enumerate().all(|(index, material)| {
+                !self.materials[..index]
+                    .iter()
+                    .any(|previous| previous.id == material.id)
+            })
+            && self.regions.iter().enumerate().all(|(index, region)| {
+                !self.regions[..index]
+                    .iter()
+                    .any(|previous| previous.id == region.id)
+            })
+            && plan
+                .domains
+                .iter()
+                .all(|domain| self.regions.iter().any(|region| region.id == domain.region))
+    }
 }
 
 /// Seven-node mass-lumped triangle: `P2` enriched by the cubic interior bubble.
@@ -82,7 +132,31 @@ impl QuadraticWaveOperator {
             CoefficientProvider::Scene(scene),
             outer_boundaries,
             Some(scene),
+            None,
+            scene.physics,
         )
+    }
+
+    /// Assembles materials and all curve-side laws from the unified topology
+    /// contract. The mesh may be reused across a law-only plan revision.
+    pub fn assemble_topology(
+        mesh: &TriMesh,
+        plan: &TopologyMeshPlan,
+        model: TopologyWaveModel<'_>,
+    ) -> Result<Self, WaveError> {
+        if !model.valid(plan) {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        let mut operator = Self::assemble_with_provider(
+            mesh,
+            CoefficientProvider::Topology(model),
+            model.outer_boundaries,
+            None,
+            Some(plan),
+            model.physics,
+        )?;
+        operator.geometry_revision = plan.geometry_revision;
+        Ok(operator)
     }
 
     fn assemble_regions(
@@ -108,6 +182,8 @@ impl QuadraticWaveOperator {
             CoefficientProvider::Constant(&coefficients_by_region),
             outer_boundaries,
             scene,
+            None,
+            scene.map_or(PhysicsModel::Mechanical, |scene| scene.physics),
         )
     }
 
@@ -116,11 +192,12 @@ impl QuadraticWaveOperator {
         coefficients: CoefficientProvider<'_>,
         outer_boundaries: OuterBoundaryConditions,
         scene: Option<&Scene>,
+        topology: Option<&TopologyMeshPlan>,
+        physics: PhysicsModel,
     ) -> Result<Self, WaveError> {
         if !outer_boundaries.valid() {
             return Err(WaveError::InvalidCoefficients);
         }
-        let physics = scene.map_or(PhysicsModel::Mechanical, |scene| scene.physics);
         let outer_boundaries = OuterBoundaryConditions {
             sides: outer_boundaries
                 .sides
@@ -269,10 +346,15 @@ impl QuadraticWaveOperator {
                 ));
             }
             let nodes = [a, b, midpoint];
+            let region = if let Some(plan) = topology {
+                topology_outer_region(plan, side, boundary.parameters)?
+            } else {
+                BACKGROUND_REGION
+            };
             let node_coefficients = [
-                coefficients.at(BACKGROUND_REGION, node_points[nodes[0]])?,
-                coefficients.at(BACKGROUND_REGION, node_points[nodes[1]])?,
-                coefficients.at(BACKGROUND_REGION, node_points[nodes[2]])?,
+                coefficients.at(region, node_points[nodes[0]])?,
+                coefficients.at(region, node_points[nodes[1]])?,
+                coefficients.at(region, node_points[nodes[2]])?,
             ];
             let line_weights = [length / 6.0, length / 6.0, 2.0 * length / 3.0];
             let normal = outer_normal(side);
@@ -335,6 +417,18 @@ impl QuadraticWaveOperator {
             };
             assemble_hole_boundary_conditions(mesh, scene, coefficients, &mut assembly)?;
             assemble_internal_boundary_laws(mesh, scene, coefficients, &mut assembly)?;
+        }
+        if let Some(plan) = topology {
+            let mut assembly = BoundaryAssembly {
+                edge_nodes: &edge_nodes,
+                rows: &mut rows,
+                auxiliary_rows: &mut auxiliary_rows,
+                auxiliary_active: &mut auxiliary_active,
+                dirichlet_signals: &mut dirichlet_signals,
+                face_neumann_loads: &mut face_neumann_loads,
+                damping: &mut damping,
+            };
+            assemble_topology_boundary_laws(mesh, plan, physics, coefficients, &mut assembly)?;
         }
         if mass.iter().any(|value| !value.is_finite() || *value <= 0.0)
             || damping
@@ -1030,6 +1124,7 @@ type TraceNodes = ([usize; 3], f64);
 enum CoefficientProvider<'a> {
     Constant(&'a BTreeMap<RegionId, WaveCoefficients>),
     Scene(&'a Scene),
+    Topology(TopologyWaveModel<'a>),
 }
 
 impl CoefficientProvider<'_> {
@@ -1050,49 +1145,20 @@ impl CoefficientProvider<'_> {
                 let material = scene
                     .material(region.material)
                     .ok_or(WaveError::InvalidCoefficients)?;
-                let coordinates = region.frame.coordinates(point);
-                let evaluate =
-                    |field: &crate::ScalarField, coefficient: &'static str, positive: bool| {
-                        let value =
-                            field
-                                .evaluate(coordinates, &material.parameters)
-                                .map_err(|error| WaveError::MaterialEvaluation {
-                                    material: material.name.clone(),
-                                    coefficient,
-                                    point,
-                                    reason: error.to_string(),
-                                })?;
-                        if (positive && value <= 0.0) || (!positive && value < 0.0) {
-                            return Err(WaveError::MaterialEvaluation {
-                                material: material.name.clone(),
-                                coefficient,
-                                point,
-                                reason: if positive {
-                                    "value must be positive".into()
-                                } else {
-                                    "value must be nonnegative".into()
-                                },
-                            });
-                        }
-                        Ok(value)
-                    };
-                let properties = crate::EvaluatedMaterial {
-                    mass_density: evaluate(&material.mass_density, "density", true)?,
-                    stiffness: evaluate(&material.stiffness, "stiffness", true)?,
-                    damping: evaluate(&material.damping, "damping", false)?,
-                    axis_ratio: evaluate(&material.axis_ratio, "axis ratio", true)?,
-                };
-                if properties.axis_ratio < 1.0 {
-                    return Err(WaveError::MaterialEvaluation {
-                        material: material.name.clone(),
-                        coefficient: "axis ratio",
-                        point,
-                        reason: "value must be at least one".into(),
-                    });
-                }
-                scene
-                    .physics
-                    .directional_wave_coefficients(properties, region.frame)
+                evaluate_directional_material(scene.physics, material, *region, point)?
+            }
+            Self::Topology(model) => {
+                let region = model
+                    .regions
+                    .iter()
+                    .find(|candidate| candidate.id == region)
+                    .ok_or(WaveError::InvalidMesh("a triangle has an unknown region"))?;
+                let material = model
+                    .materials
+                    .iter()
+                    .find(|material| material.id == region.material)
+                    .ok_or(WaveError::InvalidCoefficients)?;
+                evaluate_directional_material(model.physics, material, *region, point)?
             }
         };
         if !values.valid() {
@@ -1100,6 +1166,53 @@ impl CoefficientProvider<'_> {
         }
         Ok(values)
     }
+}
+
+fn evaluate_directional_material(
+    physics: PhysicsModel,
+    material: &Material,
+    region: Region,
+    point: Point2,
+) -> Result<DirectionalWaveCoefficients, WaveError> {
+    let coordinates = region.frame.coordinates(point);
+    let evaluate = |field: &crate::ScalarField, coefficient: &'static str, positive: bool| {
+        let value = field
+            .evaluate(coordinates, &material.parameters)
+            .map_err(|error| WaveError::MaterialEvaluation {
+                material: material.name.clone(),
+                coefficient,
+                point,
+                reason: error.to_string(),
+            })?;
+        if (positive && value <= 0.0) || (!positive && value < 0.0) {
+            return Err(WaveError::MaterialEvaluation {
+                material: material.name.clone(),
+                coefficient,
+                point,
+                reason: if positive {
+                    "value must be positive".into()
+                } else {
+                    "value must be nonnegative".into()
+                },
+            });
+        }
+        Ok(value)
+    };
+    let properties = crate::EvaluatedMaterial {
+        mass_density: evaluate(&material.mass_density, "density", true)?,
+        stiffness: evaluate(&material.stiffness, "stiffness", true)?,
+        damping: evaluate(&material.damping, "damping", false)?,
+        axis_ratio: evaluate(&material.axis_ratio, "axis ratio", true)?,
+    };
+    if properties.axis_ratio < 1.0 {
+        return Err(WaveError::MaterialEvaluation {
+            material: material.name.clone(),
+            coefficient: "axis ratio",
+            point,
+            reason: "value must be at least one".into(),
+        });
+    }
+    Ok(physics.directional_wave_coefficients(properties, region.frame))
 }
 
 struct BoundaryAssembly<'a> {
@@ -1312,6 +1425,243 @@ fn assemble_internal_boundary_laws(
             * coefficients
                 .at(boundary.region, point)?
                 .geometric_mean_stiffness();
+        for ((left_node, right_node), weight) in
+            left.into_iter()
+                .zip(right)
+                .zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
+        {
+            if left_node == right_node {
+                continue;
+            }
+            let scale = spring * 0.5 * (left_length + right_length) * weight;
+            *assembly.rows[left_node].entry(left_node).or_default() += scale;
+            *assembly.rows[left_node].entry(right_node).or_default() -= scale;
+            *assembly.rows[right_node].entry(left_node).or_default() -= scale;
+            *assembly.rows[right_node].entry(right_node).or_default() += scale;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TopologyTracePair {
+    traces: [Option<(TraceNodes, RegionId)>; 2],
+    stiffness_ratio: f64,
+    point: Point2,
+}
+
+fn topology_outer_region(
+    plan: &TopologyMeshPlan,
+    side: OuterSide,
+    parameters: [f64; 2],
+) -> Result<RegionId, WaveError> {
+    let midpoint = 0.5 * (parameters[0] + parameters[1]);
+    unique_planned_boundary(plan, midpoint, |source| {
+        source == PlannedBoundarySource::Outer(side)
+    })
+    .map(|boundary| boundary.region)
+}
+
+fn unique_planned_boundary(
+    plan: &TopologyMeshPlan,
+    parameter: f64,
+    matches_source: impl Fn(PlannedBoundarySource) -> bool,
+) -> Result<PlannedBoundaryEdge, WaveError> {
+    if !parameter.is_finite() {
+        return Err(WaveError::InvalidMesh(
+            "a topology boundary edge has invalid parameters",
+        ));
+    }
+    let mut matches = plan.boundaries.iter().copied().filter(|boundary| {
+        let [a, b] = boundary.parameter;
+        matches_source(boundary.source) && parameter > a.min(b) && parameter < a.max(b)
+    });
+    let boundary = matches.next().ok_or(WaveError::InvalidMesh(
+        "a mesh boundary has no topology-plan source",
+    ))?;
+    if matches.next().is_some() {
+        return Err(WaveError::InvalidMesh(
+            "a mesh boundary has ambiguous topology-plan sources",
+        ));
+    }
+    Ok(boundary)
+}
+
+fn boundary_adjacent_regions(
+    mesh: &TriMesh,
+    vertices: [usize; 2],
+) -> Result<Vec<RegionId>, WaveError> {
+    if vertices[0] >= mesh.vertices.len()
+        || vertices[1] >= mesh.vertices.len()
+        || vertices[0] == vertices[1]
+    {
+        return Err(WaveError::InvalidMesh(
+            "a topology boundary edge has invalid vertex indices",
+        ));
+    }
+    let regions = mesh
+        .triangles
+        .iter()
+        .filter(|triangle| {
+            triangle.vertices.contains(&vertices[0]) && triangle.vertices.contains(&vertices[1])
+        })
+        .map(|triangle| triangle.region)
+        .collect::<Vec<_>>();
+    if regions.is_empty() || regions.len() > 2 {
+        return Err(WaveError::InvalidMesh(
+            "a topology boundary edge has invalid adjacency",
+        ));
+    }
+    Ok(regions)
+}
+
+fn assemble_topology_boundary_laws(
+    mesh: &TriMesh,
+    plan: &TopologyMeshPlan,
+    physics: PhysicsModel,
+    coefficients: CoefficientProvider<'_>,
+    assembly: &mut BoundaryAssembly<'_>,
+) -> Result<(), WaveError> {
+    let mut pairs =
+        BTreeMap::<(crate::CurveId, crate::CurveSpanId, u64, u64), TopologyTracePair>::new();
+    for edge in &mesh.boundary_edges {
+        let BoundaryLabel::Curve {
+            curve,
+            span,
+            side,
+            separated,
+        } = edge.label
+        else {
+            continue;
+        };
+        let [parameter_a, parameter_b] = edge.parameters;
+        if !parameter_a.is_finite() || !parameter_b.is_finite() || parameter_a == parameter_b {
+            return Err(WaveError::InvalidMesh(
+                "a topology curve edge has invalid parameters",
+            ));
+        }
+        let planned = unique_planned_boundary(plan, 0.5 * (parameter_a + parameter_b), |source| {
+            source == PlannedBoundarySource::Curve { curve, span, side }
+        })?;
+        let adjacent = boundary_adjacent_regions(mesh, edge.vertices)?;
+        if !separated {
+            if planned.behavior != Some(SpanBehavior::Transmitting)
+                || adjacent.len() != 2
+                || !adjacent.contains(&planned.region)
+            {
+                return Err(WaveError::InvalidMesh(
+                    "a transmitting topology edge has inconsistent adjacency",
+                ));
+            }
+            continue;
+        }
+        let SpanBehavior::Separated {
+            left,
+            right,
+            coupling,
+        } = planned.behavior.ok_or(WaveError::InvalidMesh(
+            "a separated topology edge has no span behavior",
+        ))?
+        else {
+            return Err(WaveError::InvalidMesh(
+                "a separated mesh edge references a transmitting span",
+            ));
+        };
+        if adjacent.as_slice() != [planned.region] {
+            return Err(WaveError::InvalidMesh(
+                "a separated topology edge has the wrong face region",
+            ));
+        }
+        let [a, b] = edge.vertices;
+        let key = if a < b { (a, b) } else { (b, a) };
+        let midpoint = *assembly.edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
+            "a topology boundary edge does not belong to a triangle",
+        ))?;
+        let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
+        if !length.is_finite() || length <= 0.0 {
+            return Err(WaveError::InvalidMesh(
+                "a topology boundary edge has invalid length",
+            ));
+        }
+        let nodes = if parameter_a < parameter_b {
+            [a, midpoint, b]
+        } else {
+            [b, midpoint, a]
+        };
+        let [value_a, value_midpoint, value_b] = nodes.map(|node| {
+            coefficients.at(planned.region, assembly_point(node, mesh, midpoint, a, b))
+        });
+        let values = [value_a?, value_midpoint?, value_b?];
+        let tangent = (mesh.vertices[b].point - mesh.vertices[a].point) / length;
+        let condition = match side {
+            crate::CurveTraceSide::Left => left,
+            crate::CurveTraceSide::Right => right,
+        };
+        assemble_face_condition(
+            condition.resolved(physics),
+            nodes,
+            length,
+            values,
+            Point2::new(tangent.y, -tangent.x),
+            assembly,
+        )?;
+
+        let InternalBoundaryCoupling::ThinGap { stiffness_ratio } = coupling else {
+            continue;
+        };
+        let (start, end) = if parameter_a < parameter_b {
+            (parameter_a, parameter_b)
+        } else {
+            (parameter_b, parameter_a)
+        };
+        let pair = pairs
+            .entry((curve, span, start.to_bits(), end.to_bits()))
+            .or_insert(TopologyTracePair {
+                traces: [None, None],
+                stiffness_ratio,
+                point: mesh.vertices[a].point.lerp(mesh.vertices[b].point, 0.5),
+            });
+        if pair.stiffness_ratio != stiffness_ratio {
+            return Err(WaveError::InvalidMesh(
+                "paired topology traces disagree on their coupling",
+            ));
+        }
+        let slot = match side {
+            crate::CurveTraceSide::Left => 0,
+            crate::CurveTraceSide::Right => 1,
+        };
+        if pair.traces[slot]
+            .replace(((nodes, length), planned.region))
+            .is_some()
+        {
+            return Err(WaveError::InvalidMesh(
+                "a topology trace edge is duplicated",
+            ));
+        }
+    }
+
+    for (_, pair) in pairs {
+        let [
+            Some(((left, left_length), left_region)),
+            Some(((right, right_length), right_region)),
+        ] = pair.traces
+        else {
+            return Err(WaveError::InvalidMesh(
+                "a coupled topology segment is missing one trace",
+            ));
+        };
+        if (left_length - right_length).abs() > 1.0e-10 * left_length.max(right_length).max(1.0) {
+            return Err(WaveError::InvalidMesh(
+                "paired topology traces have different lengths",
+            ));
+        }
+        let left_stiffness = coefficients
+            .at(left_region, pair.point)?
+            .geometric_mean_stiffness();
+        let right_stiffness = coefficients
+            .at(right_region, pair.point)?
+            .geometric_mean_stiffness();
+        let spring = pair.stiffness_ratio * (left_stiffness * right_stiffness).sqrt();
         for ((left_node, right_node), weight) in
             left.into_iter()
                 .zip(right)
@@ -1575,10 +1925,311 @@ fn stiffness_quadrature() -> [([f64; 3], f64); 6] {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, BoundaryEdge, InternalBoundary, InternalBoundaryLaw, Material,
-        MaterialId, MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, Obstacle, ObstacleId,
-        OpenCubicSpline, OuterSide, PeriodicCubicSpline, Region, mesh_scene,
+        BACKGROUND_REGION, BoundaryEdge, CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline,
+        FaceRegionAssignment, InternalBoundary, InternalBoundaryLaw, Material, MaterialId,
+        MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, Obstacle, ObstacleId,
+        OpenCubicSpline, OuterSide, PeriodicCubicSpline, Region, TopologyCurve, TopologyGeometry,
+        TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology, mesh_scene,
+        mesh_topology_plan,
     };
+
+    fn topology_span(id: u64, behavior: SpanBehavior) -> CurveSpan {
+        CurveSpan {
+            id: CurveSpanId(id),
+            behavior,
+        }
+    }
+
+    fn topology_fixture(
+        curves: Vec<TopologyCurve>,
+        vertices: Vec<TopologyVertex>,
+        revision: u64,
+    ) -> (TopologyMeshPlan, TriMesh, Scene) {
+        let snapshot = compile_topology(
+            &TopologyGeometry {
+                curves,
+                vertices,
+                ..TopologyGeometry::default()
+            },
+            revision,
+        )
+        .unwrap();
+        let assignments = snapshot
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(index, face)| FaceRegionAssignment {
+                face: face.id,
+                region: Some(RegionId(index as u64 + 1)),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&snapshot, &assignments).unwrap();
+        let mesh = mesh_topology_plan(
+            &plan,
+            revision + 100,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                minimum_angle_degrees: 8.0,
+                max_vertices: 20_000,
+                max_triangles: 40_000,
+                max_refinement_steps: 20_000,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scene = Scene {
+            regions: assignments
+                .iter()
+                .map(|assignment| Region {
+                    id: assignment.region.unwrap(),
+                    material: crate::DEFAULT_MATERIAL,
+                    frame: crate::MaterialFrame::world(),
+                })
+                .collect(),
+            ..Scene::default()
+        };
+        (plan, mesh, scene)
+    }
+
+    #[test]
+    fn topology_solver_assembles_a_four_region_crossing_junction() {
+        let ids = [
+            TopologyVertexId(1),
+            TopologyVertexId(2),
+            TopologyVertexId(3),
+            TopologyVertexId(4),
+        ];
+        let mut horizontal = TopologyCurve::new(
+            CurveId(1),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(-1.0, 0.0), Point2::new(1.0, 0.0)])
+                    .unwrap(),
+            ),
+            vec![topology_span(1, SpanBehavior::Transmitting)],
+        )
+        .unwrap();
+        horizontal.nodes = vec![
+            CurveNode {
+                vertex: Some(ids[0]),
+            },
+            CurveNode {
+                vertex: Some(ids[1]),
+            },
+        ];
+        let mut vertical = TopologyCurve::new(
+            CurveId(2),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)])
+                    .unwrap(),
+            ),
+            vec![topology_span(2, SpanBehavior::Transmitting)],
+        )
+        .unwrap();
+        vertical.nodes = vec![
+            CurveNode {
+                vertex: Some(ids[2]),
+            },
+            CurveNode {
+                vertex: Some(ids[3]),
+            },
+        ];
+        let vertices = vec![
+            TopologyVertex {
+                id: ids[0],
+                location: TopologyVertexLocation::Outer {
+                    side: OuterSide::Left,
+                    fraction: 0.5,
+                },
+            },
+            TopologyVertex {
+                id: ids[1],
+                location: TopologyVertexLocation::Outer {
+                    side: OuterSide::Right,
+                    fraction: 0.5,
+                },
+            },
+            TopologyVertex {
+                id: ids[2],
+                location: TopologyVertexLocation::Outer {
+                    side: OuterSide::Bottom,
+                    fraction: 0.5,
+                },
+            },
+            TopologyVertex {
+                id: ids[3],
+                location: TopologyVertexLocation::Outer {
+                    side: OuterSide::Top,
+                    fraction: 0.5,
+                },
+            },
+        ];
+        let (plan, mesh, scene) = topology_fixture(vec![horizontal, vertical], vertices, 30);
+        assert_eq!(plan.domains.len(), 4);
+        let center = mesh
+            .vertices
+            .iter()
+            .position(|vertex| vertex.point == Point2::new(0.0, 0.0))
+            .unwrap();
+        let incident_regions = mesh
+            .triangles
+            .iter()
+            .filter(|triangle| triangle.vertices.contains(&center))
+            .map(|triangle| triangle.region)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(incident_regions.len(), 4);
+
+        let operator = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        let legacy = QuadraticWaveOperator::assemble_with_provider(
+            &mesh,
+            CoefficientProvider::Scene(&scene),
+            scene.outer_boundaries,
+            Some(&scene),
+            None,
+            scene.physics,
+        )
+        .unwrap();
+        assert_eq!(operator, legacy);
+        let force = operator
+            .apply_stiffness(&vec![1.0; operator.degrees_of_freedom()])
+            .unwrap();
+        assert!(force.iter().all(|value| value.abs() < 3.0e-11));
+        assert!(operator.lumped_mass()[center] > 0.0);
+    }
+
+    fn topology_baffle(
+        behavior: SpanBehavior,
+        revision: u64,
+    ) -> (TopologyMeshPlan, TriMesh, Scene) {
+        let curve = TopologyCurve::new(
+            CurveId(8),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.6, 0.0),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.6, 0.0),
+                ])
+                .unwrap(),
+            ),
+            vec![topology_span(80, behavior), topology_span(81, behavior)],
+        )
+        .unwrap();
+        topology_fixture(vec![curve], vec![], revision)
+    }
+
+    #[test]
+    fn topology_solver_applies_curve_side_laws_without_remeshing() {
+        let signal = TimeSignal::harmonic(0.4, 0.2, 1.5, 0.1);
+        let behavior = SpanBehavior::Separated {
+            left: FaceBoundaryCondition::Impedance { ratio: 2.0 },
+            right: FaceBoundaryCondition::Neumann { signal },
+            coupling: InternalBoundaryCoupling::Independent,
+        };
+        let (plan, mesh, scene) = topology_baffle(behavior, 40);
+        let driven = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        assert!(driven.lumped_damping().iter().sum::<f64>() > 0.0);
+        assert!(
+            driven
+                .face_neumann_loads()
+                .iter()
+                .flatten()
+                .any(|load| { load.signal == signal && load.normalized_weight > 0.0 })
+        );
+
+        let mut reflecting_plan = plan.clone();
+        reflecting_plan.geometry_revision += 1;
+        for boundary in &mut reflecting_plan.boundaries {
+            if let Some(SpanBehavior::Separated { left, right, .. }) = &mut boundary.behavior {
+                *left = FaceBoundaryCondition::Reflecting;
+                *right = FaceBoundaryCondition::Reflecting;
+            }
+        }
+        assert_eq!(
+            crate::topology_mesh_update_action(&plan, &reflecting_plan),
+            crate::TopologyMeshUpdateAction::Reuse
+        );
+        let reflecting = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &reflecting_plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        assert_eq!(reflecting.geometry_revision(), 41);
+        assert_eq!(reflecting.mesh_revision(), mesh.mesh_revision);
+        assert!(
+            reflecting.lumped_damping().iter().sum::<f64>()
+                < driven.lumped_damping().iter().sum::<f64>()
+        );
+        assert!(
+            reflecting
+                .face_neumann_loads()
+                .iter()
+                .flatten()
+                .all(|load| load.normalized_weight == 0.0)
+        );
+    }
+
+    #[test]
+    fn topology_solver_couples_paired_traces_with_a_thin_gap() {
+        let (reflecting_plan, mesh, scene) = topology_baffle(SpanBehavior::REFLECTING, 50);
+        let reflecting = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &reflecting_plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        let mut gap_plan = reflecting_plan.clone();
+        for boundary in &mut gap_plan.boundaries {
+            if let Some(SpanBehavior::Separated { coupling, .. }) = &mut boundary.behavior {
+                *coupling = InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 1000.0,
+                };
+            }
+        }
+        let gap = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &gap_plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        let trace_node = |side| {
+            let edge = mesh
+                .boundary_edges
+                .iter()
+                .find(|edge| {
+                    matches!(
+                        edge.label,
+                        BoundaryLabel::Curve {
+                            curve: CurveId(8),
+                            side: candidate,
+                            ..
+                        } if candidate == side
+                    )
+                })
+                .unwrap();
+            boundary_edge_nodes(&mesh, &gap, edge)[1]
+        };
+        let left = trace_node(crate::CurveTraceSide::Left);
+        let right = trace_node(crate::CurveTraceSide::Right);
+        let mut jump = vec![0.0; gap.degrees_of_freedom()];
+        jump[left] = 1.0;
+        let base_force = reflecting.apply_stiffness(&jump).unwrap();
+        let gap_force = gap.apply_stiffness(&jump).unwrap();
+        let added_left = gap_force[left] - base_force[left];
+        let added_right = gap_force[right] - base_force[right];
+        assert!(added_left > 0.0);
+        assert!((added_left + added_right).abs() < 1.0e-11);
+        assert!(gap.maximum_time_step() < reflecting.maximum_time_step());
+    }
 
     fn two_material_scene() -> Scene {
         Scene {

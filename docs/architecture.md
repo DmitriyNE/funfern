@@ -626,6 +626,19 @@ unchanged plan reuses its mesh, and changing only a boundary law does not remesh
 Coordinate edits use a typed full rebuild until the patch repair receives unified
 curve evaluation and junction-sector rewiring.
 
+The enriched-quadratic CPU operator has a topology-plan assembly entry point.
+Materials and local frames come from the region library keyed by each triangle's
+`RegionId`; outer segments and curve traces resolve their owning region and law
+through the plan's parameter intervals. Transmitting labels verify two-sided
+adjacency and add no boundary term. Separated labels assemble the selected
+left/right condition, while a thin gap pairs matching curve/span parameter ranges
+and adds a symmetric spring between the two trace DOFs. The same face-condition
+routine is shared with legacy assembly, so impedance, prescribed data, and the
+second-order auxiliary term retain their numerical definitions. Plan revisions
+that change only laws may rebuild the operator on the existing mesh. The GPU
+packing and transaction path remain on the legacy model until source, AMR,
+transfer, and probe metadata have migrated together.
+
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a
 structured diagnostic and never changes the draft, accepted geometry, or history.

@@ -400,13 +400,36 @@ fn apply_slit_trace_lineage(
 ) -> Result<(), MeshError> {
     for step in steps {
         let label = topology_label(step.boundary);
+        let BoundaryLabel::Curve {
+            curve,
+            side,
+            separated,
+            ..
+        } = label
+        else {
+            return Err(MeshError::Topology("slit trace has a non-curve label"));
+        };
         for (point, trace) in step.boundary.points.into_iter().zip(step.boundary.traces) {
             let vertices = builder
                 .boundary_edges
                 .iter()
-                .filter(|edge| edge.label == label)
+                .filter(|edge| {
+                    matches!(
+                        edge.label,
+                        BoundaryLabel::Curve {
+                            curve: candidate_curve,
+                            side: candidate_side,
+                            separated: candidate_separated,
+                            ..
+                        } if candidate_curve == curve
+                            && candidate_side == side
+                            && candidate_separated == separated
+                    )
+                })
                 .flat_map(|edge| edge.vertices)
-                .filter(|vertex| builder.point(*vertex) == point)
+                .filter(|vertex| {
+                    (builder.point(*vertex) - point).norm() <= builder.options.curve_tolerance
+                })
                 .collect::<BTreeSet<_>>();
             let vertex = vertices.into_iter().next().ok_or(MeshError::Topology(
                 "slit trace lineage endpoint is missing",

@@ -64,6 +64,34 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   divider graphs. The first junction implementation deliberately uses the robust
   full-rebuild fallback for graph-edge movement and topology edits.
 
+## 2026-09-13 — Topology-plan quadratic operator assembly
+
+- Added direct enriched-quadratic assembly from `TopologyMeshPlan` plus the
+  material/region library. Triangle coefficients, spatial material frames, and
+  rectangular outer-boundary coefficients now follow the plan's assigned regions
+  rather than legacy background or object lookup.
+- Unified curve labels drive transmitting-adjacency checks and both separated face
+  laws. Impedance, prescribed Neumann/Dirichlet, and second-order auxiliary terms
+  share the existing numerical assembly. Matching left/right trace segments add
+  the conservative thin-gap spring using both adjacent materials.
+- A boundary-law-only plan revision rebuilds the operator against the same mesh
+  and adopts the new document revision. Four-region crossing junctions assemble
+  without the former two-region node assumption; constant fields remain in the
+  stiffness nullspace.
+- Corrected free-slit trace lineage at logical knots to use the configured curve
+  tolerance. Exact coordinate equality could miss a recovered collinear vertex by
+  roundoff even though the correct curve-side trace was present.
+- Direct tests cover numerical equivalence with the established coefficient path,
+  a four-region X junction, mixed impedance/driven baffle sides, law-only mesh
+  reuse, and paired thin-gap force conservation/timestep tightening.
+- Verification passes: formatting, all **404 workspace tests**, Clippy across all
+  targets with warnings denied, native release compilation, and the release Trunk
+  WebGPU build. Interactive browser testing was not repeated for this numerical
+  core slice.
+- The application/GPU transaction, sources, AMR, transfer, and probes still use
+  legacy scene labels. They will move as one follow-up consumer slice; the new CPU
+  entry point does not yet change interactive behavior.
+
 ## 2026-09-13 — Topology-plan full meshing baseline
 
 - Added a full constrained-mesh path that consumes `TopologyMeshPlan` directly.
