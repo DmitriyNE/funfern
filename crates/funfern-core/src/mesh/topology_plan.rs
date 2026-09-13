@@ -1446,7 +1446,6 @@ pub enum TopologyMeshPlanError {
     MissingTrace(TraceVertexId),
     BrokenCycle(FaceId),
     MissingCurve(CurveSpanId),
-    TransmittingExcludedFace(CurveSpanId),
     CoupledExcludedFace(CurveSpanId),
 }
 
@@ -1602,7 +1601,7 @@ impl TopologyMeshPlan {
             let compiled = face
                 .boundaries
                 .iter()
-                .map(|cycle| compile_cycle(topology, face.id, region, cycle))
+                .map(|cycle| compile_cycle(topology, &assigned, face.id, region, cycle))
                 .collect::<Result<Vec<_>, _>>()?;
             let cycles = compiled
                 .iter()
@@ -1710,12 +1709,9 @@ fn validate_span_sides(
         let left = assigned.get(&edge.left).copied().flatten();
         let right = assigned.get(&edge.right).copied().flatten();
         match edge.behavior {
-            Some(SpanBehavior::Transmitting) if left.is_none() || right.is_none() => {
-                return Err(TopologyMeshPlanError::TransmittingExcludedFace(span));
-            }
             Some(SpanBehavior::Separated { coupling, .. })
                 if !matches!(coupling, crate::InternalBoundaryCoupling::Independent)
-                    && (left.is_none() || right.is_none()) =>
+                    && left.is_some() != right.is_some() =>
             {
                 return Err(TopologyMeshPlanError::CoupledExcludedFace(span));
             }
@@ -1728,6 +1724,7 @@ fn validate_span_sides(
 
 fn compile_cycle(
     topology: &TopologySnapshot,
+    assigned: &BTreeMap<FaceId, Option<RegionId>>,
     face: FaceId,
     region: RegionId,
     steps: &[CompiledBoundaryStep],
@@ -1748,7 +1745,7 @@ fn compile_cycle(
         cycle.push(start);
         planned.push(PlannedFaceStep {
             edge: step.edge,
-            boundary: planned_face_edge(edge, face, region, step.reversed)?,
+            boundary: planned_face_edge(edge, assigned, face, region, step.reversed)?,
         });
         expected = Some(end);
     }
@@ -1760,6 +1757,7 @@ fn compile_cycle(
 
 fn planned_face_edge(
     edge: &CompiledEdge,
+    assigned: &BTreeMap<FaceId, Option<RegionId>>,
     face: FaceId,
     region: RegionId,
     reversed: bool,
@@ -1800,13 +1798,29 @@ fn planned_face_edge(
     };
     Ok(PlannedBoundaryEdge {
         source,
-        behavior: edge.behavior,
+        behavior: effective_curve_behavior(edge, assigned),
         face,
         region,
         traces: [start, end],
         points,
         parameter,
     })
+}
+
+/// A transmitting trace against an excluded face is the wall of the active
+/// domain. Compile it as a homogeneous Neumann boundary without changing the
+/// authored span, so transmission returns if that face is activated later.
+fn effective_curve_behavior(
+    edge: &CompiledEdge,
+    assigned: &BTreeMap<FaceId, Option<RegionId>>,
+) -> Option<SpanBehavior> {
+    let active = |face: FaceId| assigned.get(&face).copied().flatten().is_some();
+    match edge.behavior {
+        Some(SpanBehavior::Transmitting) if active(edge.left) != active(edge.right) => {
+            Some(SpanBehavior::REFLECTING)
+        }
+        behavior => behavior,
+    }
 }
 
 fn oriented_face_traces(
@@ -1845,6 +1859,7 @@ fn append_boundary_sides(
             let curve = edge
                 .curve
                 .ok_or(TopologyMeshPlanError::MissingCurve(span))?;
+            let behavior = effective_curve_behavior(edge, assigned);
             if let Some(region) = side(edge.left) {
                 output.push(PlannedBoundaryEdge {
                     source: PlannedBoundarySource::Curve {
@@ -1852,7 +1867,7 @@ fn append_boundary_sides(
                         span,
                         side: CurveTraceSide::Left,
                     },
-                    behavior: edge.behavior,
+                    behavior,
                     face: edge.left,
                     region,
                     traces: [edge.traces[0].left, edge.traces[1].left],
@@ -1861,7 +1876,7 @@ fn append_boundary_sides(
                 });
             }
             if let Some(region) = side(edge.right)
-                && (edge.behavior != Some(SpanBehavior::Transmitting) || edge.right != edge.left)
+                && (behavior != Some(SpanBehavior::Transmitting) || edge.right != edge.left)
             {
                 output.push(PlannedBoundaryEdge {
                     source: PlannedBoundarySource::Curve {
@@ -1869,7 +1884,7 @@ fn append_boundary_sides(
                         span,
                         side: CurveTraceSide::Right,
                     },
-                    behavior: edge.behavior,
+                    behavior,
                     face: edge.right,
                     region,
                     traces: [edge.traces[1].right, edge.traces[0].right],
@@ -2043,10 +2058,10 @@ mod tests {
     }
 
     #[test]
-    fn topology_mesher_excludes_a_hole_face() {
+    fn topology_mesher_turns_a_transmitting_hole_edge_into_a_wall() {
         let topology = compile_topology(
             &TopologyGeometry {
-                curves: vec![square(SpanBehavior::REFLECTING)],
+                curves: vec![square(SpanBehavior::Transmitting)],
                 ..TopologyGeometry::default()
             },
             16,
@@ -2576,7 +2591,7 @@ mod tests {
     }
 
     #[test]
-    fn transmitting_face_cannot_be_excluded_and_assignments_are_total() {
+    fn transmitting_face_against_excluded_face_is_effectively_reflecting() {
         let topology = compile_topology(
             &TopologyGeometry {
                 curves: vec![square(SpanBehavior::Transmitting)],
@@ -2604,10 +2619,11 @@ mod tests {
                 region: (index == 0).then_some(RegionId(1)),
             })
             .collect::<Vec<_>>();
-        assert!(matches!(
-            TopologyMeshPlan::new(&topology, &assignments),
-            Err(TopologyMeshPlanError::TransmittingExcludedFace(_))
-        ));
+        let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        assert!(plan.boundaries.iter().all(|boundary| {
+            !matches!(boundary.source, PlannedBoundarySource::Curve { .. })
+                || boundary.behavior == Some(SpanBehavior::REFLECTING)
+        }));
     }
 
     #[test]

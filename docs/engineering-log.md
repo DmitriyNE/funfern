@@ -67,6 +67,22 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-14 — Headless topology document editing
+
+- Added the application-side topology document model with draft/accepted snapshots,
+  stable ID allocation, revisioned cooperative validation, and complete snapshot
+  undo/redo. Closed subdomain and hole creation, free baffle creation, coordinate
+  edits, and bulk span-law edits use the same atomic command path.
+- Changed excluded-face boundary semantics. An authored transmitting curve with one
+  active neighbor now compiles to an effective homogeneous Neumann wall on that
+  side; the authored transmission intent is retained and returns if the face is
+  reactivated. Curves surrounded only by excluded faces are valid but inert.
+- Direct tests cover invalid-draft retention and cancellation, one-entry creation
+  and span edits, stable accepted/draft undo, the effective wall rule, and actual
+  meshing of an excluded face bounded by an authored transmitting curve.
+- All 448 workspace tests, workspace Clippy with warnings denied, native release
+  compilation, and the release Trunk build pass.
+
 ## 2026-09-14 — Authored topology scenes and cooperative full meshing
 
 - Added dependency-free `TopologyScene`, `FaceAnchor`, and explicit authored face
@@ -350,7 +366,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   coordinate rule.
 - Added `TopologyMeshPlan`, the checked input contract for the new triangulation
   path. It requires an explicit active or excluded assignment for every bounded
-  face, rejects transmitting or coupled spans beside excluded faces, preserves
+  face, resolves a transmitting span beside an excluded face as an effective
+  reflecting wall, rejects coupled spans missing an active side, preserves
   arbitrary region membership at junctions, and emits oriented per-side curve
   constraints with stable curve/span IDs.
 - The plan has direct tests for shared transmitting traces, one-sided hole

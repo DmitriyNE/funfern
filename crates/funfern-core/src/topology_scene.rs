@@ -668,21 +668,66 @@ mod tests {
     }
 
     #[test]
-    fn excluded_face_requires_separated_boundary_behavior() {
+    fn transmitting_curve_against_excluded_face_becomes_reflecting() {
         let mut scene = loop_scene();
+        let transmitting = scene.compile(0).unwrap();
+        assert!(transmitting.plan.boundaries.iter().any(|boundary| {
+            matches!(boundary.source, crate::PlannedBoundarySource::Curve { .. })
+                && boundary.behavior == Some(SpanBehavior::Transmitting)
+        }));
         scene.regions.pop();
         scene.face_assignments[1].region = None;
-        assert!(matches!(
-            scene.compile(1),
-            Err(TopologySceneIssue::Plan(
-                TopologyMeshPlanError::TransmittingExcludedFace(_)
-            ))
-        ));
-        for span in &mut scene.geometry.curves[0].spans {
+        let compiled = scene.compile(1).unwrap();
+        assert_eq!(compiled.plan.domains.len(), 1);
+        assert!(compiled.plan.boundaries.iter().all(|boundary| {
+            !matches!(boundary.source, crate::PlannedBoundarySource::Curve { .. })
+                || boundary.behavior == Some(SpanBehavior::REFLECTING)
+        }));
+        assert!(
+            scene.geometry.curves[0]
+                .spans
+                .iter()
+                .all(|span| span.behavior == SpanBehavior::Transmitting)
+        );
+    }
+
+    #[test]
+    fn transmitting_curve_between_two_excluded_faces_is_inert_but_valid() {
+        let mut scene = TopologyScene::default();
+        let mut hole = closed_curve(1, 10, Point2::default(), 0.6);
+        for span in &mut hole.spans {
             span.behavior = SpanBehavior::REFLECTING;
         }
-        let compiled = scene.compile(2).unwrap();
+        let separator = closed_curve(2, 30, Point2::default(), 0.2);
+        let anchor = |curve: &TopologyCurve, side| {
+            let bounds = curve.spline.span_bounds(0).unwrap();
+            FaceAnchor::Curve {
+                curve: curve.id,
+                span: curve.spans[0].id,
+                side,
+                parameter: (bounds[0] + bounds[1]) * 0.5,
+            }
+        };
+        scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: anchor(&hole, CurveTraceSide::Left),
+            region: None,
+        });
+        scene.face_assignments.push(AuthoredFaceAssignment {
+            anchor: anchor(&separator, CurveTraceSide::Left),
+            region: None,
+        });
+        scene.geometry.curves = vec![hole, separator];
+        let compiled = scene.compile(1).unwrap();
         assert_eq!(compiled.plan.domains.len(), 1);
+        assert!(compiled.plan.boundaries.iter().all(|boundary| {
+            !matches!(
+                boundary.source,
+                crate::PlannedBoundarySource::Curve {
+                    curve: CurveId(2),
+                    ..
+                }
+            )
+        }));
     }
 
     #[test]

@@ -127,6 +127,14 @@ draft rather than an implicit hole. Compiled face IDs never enter persistence or
 history. Hole, material-region, divider, and baffle choices are initial curve
 configurations rather than geometry classes.
 
+Face exclusion also resolves the effective boundary law. An authored transmitting
+span between two active faces remains conforming. If exactly one neighboring face
+is excluded, the active side compiles as a homogeneous Neumann wall while the
+authored span remains transmitting; reactivating the excluded face therefore
+restores transmission without losing intent. A curve with no active neighboring
+face is inert and omitted from the mesh. Coupled two-trace laws still require both
+sides to be active.
+
 At an arrangement vertex, angular sectors determine finite-element trace identity.
 Crossing a transmitting ray joins the adjacent sectors; crossing a separated ray
 does not. A free baffle tip has one surrounding sector and therefore reconnects
