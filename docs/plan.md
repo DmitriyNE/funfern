@@ -500,8 +500,11 @@ fixtures assemble and step without leaks or invalid node-membership errors.
 In progress. The dependency-free authored `TopologyScene`, explicit active or
 excluded face dispositions, oriented boundary anchors, structured assignment
 errors, same-face separator endpoint check, synchronous convenience compiler, and
-resumable scene compiler are implemented in the core. The application document,
-edit remapping, version-22 persistence, and examples still await the atomic cut.
+resumable scene compiler are implemented in the core. The headless application
+document now creates closed curves, free or attached baffles, and attached
+separators; it remaps split-span anchors and boundary probes and resolves curve
+removal ownership atomically. Remaining spline topology edits, version-22
+persistence, and examples still await the atomic cut.
 
 The application cutover needs a stable authored face reference. `FaceId` is an
 ordinal in one compiled snapshot, so persisting it would make material ownership

@@ -73,6 +73,18 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   stable ID allocation, revisioned cooperative validation, and complete snapshot
   undo/redo. Closed subdomain and hole creation, free baffle creation, coordinate
   edits, and bulk span-law edits use the same atomic command path.
+- Added boundary-interior and junction-sector attachment targets. Open-curve
+  commands now create free, singly attached, or doubly attached baffles and require
+  transmitting separators to attach twice to the same active face. Inner-curve
+  attachment performs exact C0 insertion and remaps face anchors and boundary-probe
+  paths before accepting the candidate.
+- Curve removal automatically keeps the only active neighboring region. Merging
+  two active regions requires an explicit survivor; dropped region sources and
+  area probes, plus probes attached to the removed curve, disappear in the same
+  undoable command. When the chosen exterior material carries a non-background
+  region ID, its dependents are retargeted to the stable background identity and
+  the previous background dependents are removed. Endpoint detach remains an editable invalid draft for a
+  separator, and reattachment to the original junction restores the exact scene.
 - Changed excluded-face boundary semantics. An authored transmitting curve with one
   active neighbor now compiles to an effective homogeneous Neumann wall on that
   side; the authored transmission intent is retained and returns if the face is
@@ -80,7 +92,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Direct tests cover invalid-draft retention and cancellation, one-entry creation
   and span edits, stable accepted/draft undo, the effective wall rule, and actual
   meshing of an excluded face bounded by an authored transmitting curve.
-- All 448 workspace tests, workspace Clippy with warnings denied, native release
+- All 456 workspace tests, workspace Clippy with warnings denied, native release
   compilation, and the release Trunk build pass.
 
 ## 2026-09-14 — Authored topology scenes and cooperative full meshing

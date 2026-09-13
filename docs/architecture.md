@@ -150,6 +150,18 @@ targets. Attaching to the interior of a divider inserts a shape-preserving knot,
 raises that breakpoint to C0 without moving the curve, and creates the junction as
 part of the same staged document edit.
 
+The headless topology editor represents an attachment hit as either an oriented
+boundary anchor or an authored junction plus its selected incident face. Creating
+a separator validates both targets against one compiled draft, requires the same
+active face, attaches both endpoints, then assigns the single new daughter face in
+one document command. Span insertion remaps face anchors and expands boundary-probe
+paths before validation. Removing a curve keeps the sole active neighbor
+automatically; when two active regions merge, the command requires an explicit
+survivor and removes probes or sources owned by the dropped region atomically.
+The outer domain retains the stable background region identity; choosing the
+other side's material transfers that side's material and dependents into the
+background identity and removes dependents belonging to the discarded side.
+
 Material interfaces use a conforming scalar field with three base material
 properties. Mechanical scenes interpret them as density `rho`, stiffness `k`, and
 damping `d`. EM scenes store permittivity `epsilon`, permeability `mu`, and reduced
