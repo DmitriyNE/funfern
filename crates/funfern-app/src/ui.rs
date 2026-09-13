@@ -11752,36 +11752,6 @@ impl Playground {
                     ));
                 }
             }
-            if matches!(
-                self.interaction_mode,
-                InteractionMode::Draw {
-                    role: CreationRole::Divider,
-                    ..
-                }
-            ) {
-                let corners = domain_rect.corners();
-                painter.add(egui::Shape::line(
-                    [corners[0], corners[1], corners[2], corners[3], corners[0]]
-                        .map(|point| self.screen(point, r))
-                        .to_vec(),
-                    Stroke::new(2.0, GOLD.gamma_multiply(0.65)),
-                ));
-                self.draw_material_interfaces(
-                    &painter,
-                    r,
-                    &self.editor.document.model.draft,
-                    GOLD.gamma_multiply(0.65),
-                    3.5,
-                );
-                if over
-                    && let Some(pointer) = pointer
-                    && let Some((_, point)) = self.divider_attachment_at_screen(pointer, r)
-                {
-                    let point = self.screen(point, r);
-                    painter.circle_filled(point, 4.0, GOLD);
-                    painter.circle_stroke(point, 8.0, Stroke::new(2.0, Color32::WHITE));
-                }
-            }
         }
         if self.editor.document.presentation.boundary_conditions {
             for side in OuterSide::ALL {
@@ -12134,6 +12104,38 @@ impl Playground {
                 egui::FontId::monospace(11.0),
                 TEAL,
             );
+        }
+        if !clean_capture
+            && matches!(
+                self.interaction_mode,
+                InteractionMode::Draw {
+                    role: CreationRole::Divider,
+                    ..
+                }
+            )
+        {
+            let corners = domain_rect.corners();
+            painter.add(egui::Shape::line(
+                [corners[0], corners[1], corners[2], corners[3], corners[0]]
+                    .map(|point| self.screen(point, r))
+                    .to_vec(),
+                Stroke::new(3.0, GOLD),
+            ));
+            self.draw_material_interfaces(
+                &painter,
+                r,
+                &self.editor.document.model.draft,
+                GOLD,
+                4.0,
+            );
+            if over
+                && let Some(pointer) = pointer
+                && let Some((_, point)) = self.divider_attachment_at_screen(pointer, r)
+            {
+                let point = self.screen(point, r);
+                painter.circle_filled(point, 4.0, GOLD);
+                painter.circle_stroke(point, 8.0, Stroke::new(2.0, Color32::WHITE));
+            }
         }
         if !clean_capture
             && let InteractionMode::Draw { role, tool } = self.interaction_mode
