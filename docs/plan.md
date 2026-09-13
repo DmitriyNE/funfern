@@ -345,6 +345,110 @@ transmitting curve labels as interior flux jumps, and resolves separated boundar
 laws and thin-gap pairs directly from the plan. Its adaptive size field remains
 keyed by the mesh's explicit `RegionId` labels.
 
+##### Topology-aware fixed-geometry AMR slice
+
+The next slice migrates solution-driven refinement and coarsening on an unchanged
+`TopologyMeshPlan`. It does not migrate coordinate-edit repair. Moving a curve,
+moving a junction, changing span behavior, splitting or merging faces, and changing
+the outer rectangle continue through `TopologyMeshUpdateAction::FullRebuild`.
+That distinction keeps the AMR transaction local: its input geometry, face graph,
+trace equivalence, and boundary sampling are immutable for the lifetime of the job.
+
+**Geometry contract and preflight**
+
+- Give `MeshAdaptationJob` the same dual-input shape as the operator, source, and
+  indicator jobs: retain `new` for legacy tests and add `new_topology`, which owns a
+  cloned plan. Keep one refinement/coarsening engine and isolate differences behind
+  geometry-contract helpers.
+- Build a compact topology adaptation index from the plan: active regions; canonical
+  physical chains; sampled parameter intervals; expected one- or two-element
+  adjacency; planned endpoint trace IDs and points; and opposite-side keys for
+  separated curves. A transmitting span has one physical chain keyed by
+  `(curve, span)` even though the plan describes both adjacent faces. A separated
+  span has independent left and right chains keyed by `(curve, span, side)`.
+- Validate the source mesh against that index before changing it. Every triangle
+  region must be active. Every constrained edge must lie inside exactly one planned
+  interval with the expected label, parameter direction, geometry, adjacency, and
+  incident region. Every planned interval must be covered once without gaps or
+  overlaps. Every planned `TraceVertexId` must occur once at its exact plan point
+  with the expected incident region sectors. Missing separated partners, duplicate
+  traces, unknown spans, and a transmitting edge represented as two cracks are hard
+  input errors.
+- Preserve `MeshVertex::trace` while importing and compacting. It is independent of
+  AMR vertex lineage: lineage tracks discretization history, while a trace ID tracks
+  a topology sector at a sampled endpoint or junction.
+
+**Legal refinement and coarsening**
+
+- Treat each `PlannedBoundaryEdge` as an immutable straight geometric atom. Boundary
+  refinement may insert a no-trace vertex only inside that atom, with its position
+  obtained by parameter interpolation on the atom. This preserves the full mesher's
+  sampled spline exactly instead of re-evaluating a mutable curve or introducing a
+  second approximation.
+- Refine outer and transmitting constraints once. Refine a separated constraint by
+  locating its opposite side through stable curve/span and normalized parameter
+  interval, then split both traces at the same parameter in one operation. Physical
+  coordinate equality is an asserted consequence, never the lookup key.
+- Pin every vertex carrying a `TraceVertexId`, every outer corner, and every planned
+  interval endpoint. These include spline sampling vertices, span boundaries, free
+  tips, attached endpoints, and all junction sectors. Only AMR-created boundary
+  vertices inside one planned interval may be removed.
+- Permit transmitting-boundary coarsening within one atom when the ordinary
+  orientation, target-length, region, and quality tests pass. Coarsen separated
+  sides as one paired operation and require both sides to choose the same retained
+  parameter. Never merge across plan atoms or spans, change a trace equivalence
+  class, remove a face's last element, or collapse an interior vertex into a
+  different region or constrained sector.
+- Classify constrained vertices from both boundary-edge incidence and trace IDs;
+  topology junction endpoints often intentionally have `boundary == None`. Extend
+  the existing relaxed angle test only to triangles touching a separated trace, not
+  to ordinary transmitting material interfaces.
+- Share the boundary-adjacency rule used by full topology meshing and AMR
+  verification: outer and separated edges have one incident triangle; transmitting
+  topology curves have two. Edge legalization remains unable to cross any
+  constrained chain and must retain equal region IDs across every unconstrained
+  edge it flips.
+
+**Publication and failure behavior**
+
+- Add a topology-aware final verification pass over triangles, constrained chains,
+  separated pairs, trace vertices, and active regions. It must prove that refinement
+  merely subdivided planned atoms and coarsening merely removed AMR-created
+  subdivisions. Preserve the source geometry revision, publish a fresh mesh
+  revision, and remap lineage, cooldown, boundary metadata, and trace IDs together.
+- Keep construction and mesh scans resumable under the existing work budget. A
+  topology-change or capacity limit may publish a verified partial adaptation as it
+  does today; a work-limit or contract error publishes nothing and leaves the source
+  mesh and adaptation state untouched.
+- The job owns its plan snapshot. The later application cutover must still reject a
+  completed job whose source mesh/settings token is stale before operator assembly
+  or field handoff.
+
+**Tests and cutover gates**
+
+- Retain the legacy AMR suite and add slice-size determinism for the topology path.
+  Compare legacy and topology results for a one-face rectangle, including repeated
+  refine/coarsen generations and cooldown lineage.
+- Exercise region-dependent targets on a transmitting divider and a closed material
+  interface. Verify both incident regions remain connected and their shared chain
+  retains two-element adjacency.
+- Refine and coarsen a free baffle, an outer-attached baffle, a fully separated
+  T-junction, a mixed transmitting/separated junction, and a paired thin gap. Assert
+  stable trace-sector identity, coincident opposite chains, preserved free-tip
+  reconnection, and pinned junction vertices.
+- Cover malformed meshes explicitly: missing or misoriented separated partners,
+  a lost/duplicated trace ID, a boundary edge spanning two planned atoms, an unknown
+  region or span, and incorrect one-/two-sided adjacency. Each must fail before
+  publication without mutating the source or state.
+- Run an end-to-end core regression from topology indicator to AMR, topology
+  operator assembly, quadratic transfer, and several finite wave steps. With an
+  unchanged topology plan, transfer must report no exposed nodes and preserve a
+  quadratic field to tolerance.
+- Completion requires formatting, workspace tests, Clippy with warnings denied,
+  native release compilation, and a release Trunk/WebGPU build. The application
+  continues using legacy AMR until the atomic document cutover; this slice proves
+  the topology numerical path directly without temporarily mixing label models.
+
 - Make meshing consume a completed topology snapshot instead of independently
   rediscovering loop nesting and open-divider regions. Triangulate each active face
   and recover each logical span as a constrained chain with `CurveSpanId`, side,

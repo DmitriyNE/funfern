@@ -60,9 +60,31 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   follow-ups include bounded time-envelope expressions, pulsed/chirped drives,
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
-- [ ] Extend bounded coordinate repair and solution-driven AMR to open material
-  divider graphs. The first junction implementation deliberately uses the robust
-  full-rebuild fallback for graph-edge movement and topology edits.
+- [ ] Implement topology-aware solution-driven AMR on immutable mesh plans as
+  specified below.
+- [ ] Extend bounded coordinate repair to open material-divider graphs. The first
+  junction implementation deliberately uses the robust full-rebuild fallback for
+  graph-edge movement and topology edits.
+
+## 2026-09-13 — Topology-aware fixed-geometry AMR plan
+
+- Scoped the next adaptation slice to solution-driven refinement and coarsening on
+  an immutable `TopologyMeshPlan`. Coordinate motion and graph edits remain typed
+  full rebuilds; they require mutable curve evaluation and junction-sector rewiring
+  and are a separate local-repair problem.
+- The adaptation job will preserve topology trace IDs, pin all plan endpoints and
+  junction sectors, and allow changes only inside one sampled plan interval.
+  Transmitting constraints remain shared, while separated constraints refine and
+  coarsen both sides atomically by curve/span/parameter identity.
+- Preflight and publication validation will check region membership, planned-chain
+  coverage, one- versus two-element adjacency, separated partners, and exact trace
+  equivalence. Contract or work-limit failures retain the source mesh and state.
+- Direct fixtures will cover transmitting dividers, free and attached baffles,
+  mixed and fully separated junctions, thin gaps, malformed topology meshes, repeat
+  generations, and the full indicator-to-AMR-to-transfer numerical handoff.
+- The detailed implementation order and acceptance gates are recorded in
+  `docs/plan.md`. Application wiring remains deferred until the document cutover can
+  switch all numerical consumers to topology labels atomically.
 
 ## 2026-09-13 — Topology-aware AMR indicator
 
