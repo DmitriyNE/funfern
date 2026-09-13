@@ -7,6 +7,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Revisit the EM reconstruction's fixed `0.08 Hz` DC-rejection corner when
+  editable domain extents or deliberately very-low-frequency sources arrive. It
+  should eventually follow a scene time scale or become an advanced presentation
+  control without making ordinary EM examples noisy.
 - [ ] Add probe-data export for point, line, area, and far-field readouts. Preserve
   timestamps, spatial or angular coordinates, quantity names, and coverage metadata
   in a simple format suitable for plotting outside Funfern.
@@ -53,6 +57,21 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   follow-ups include bounded time-envelope expressions, pulsed/chirped drives,
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
+
+## 2026-09-13 — DC-stable EM reconstruction
+
+- Replaced the raw primary-field accumulator with a two-stage, critically damped
+  inverse derivative. Its zero DC response removes the persistent transverse-field
+  bias and stationary source silhouettes caused by startup transients or moving a
+  live point source, while retaining the expected quadrature response above its
+  low cutoff.
+- Used the two spare lanes in the existing state record and the spare transfer-entry
+  lane, so both filter stages survive ordinary remesh and AMR handoffs without a new
+  WebGPU binding or another buffer. Legitimate outgoing waves remain continuous;
+  only stationary reconstruction memory decays.
+- Added numerical regressions for DC rejection and the retained 3 Hz quadrature
+  response. The full workspace suite, warning-denied Clippy, optimized native Metal
+  pipeline startup, and `trunk build --release` pass.
 
 ## 2026-09-13 — Reconstructed EM fields and physical probe observables
 

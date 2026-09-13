@@ -206,17 +206,29 @@ scene layer: PEC is zero `E_z` for TM and zero normal `H_z` flux for TE; PMC is 
 dual. Assembly and the AMR boundary estimator resolve those semantic variants to
 the existing scalar Dirichlet or Neumann implementation before numerical work.
 
-The GPU state stores a time integral `A = integral(u dt)` beside each primary scalar
-DOF and advances it with the same trapezoidal rule used by the centered wave step.
-Transfer interpolates `A` with the displacement and velocity fields, so ordinary
-remeshing and AMR handoffs preserve the reconstructed EM field. At display sample
-points the CPU evaluates its quadratic gradient and reconstructs
-`H = (-A_y, A_x)/mu` for TM or `E = (A_y, -A_x)/epsilon` for TE. The corresponding
-Poynting vector is `S = -k u grad(A)`, where `k` is `1/mu` for TM or `1/epsilon`
-for TE. Screen bins bound arrow density and an exponential display filter reduces
-jitter. Mechanical scenes retain the prior `-k u_t grad(u)` energy-flow display.
-These arrows derive the transverse field belonging to one scalar polarization and
-are not presented as a simultaneous full-vector Maxwell state.
+The scalar wave equation leaves the complementary EM field's integration constant
+unconstrained. A raw `integral(u dt)` therefore retains startup bias and stationary
+imprints after a source carrier moves. The GPU instead applies a critically damped,
+DC-rejecting inverse derivative beside each primary scalar DOF:
+
+```text
+a_t + lambda a = u,    b_t + lambda b = a,    A = a - lambda b.
+```
+
+Its transfer function is `s/(s + lambda)^2`: it approaches `1/s` above the low
+cutoff, has zero response at DC, and makes stale integration constants decay. The
+initial implementation uses `lambda = 0.5`, or about `0.08 Hz`, and trapezoidally
+advances both stages with the centered wave step. Transfer interpolates both stages
+with displacement and velocity, so ordinary remeshing and AMR handoffs preserve the
+reconstructed oscillatory field. At display sample points the CPU evaluates the
+quadratic gradient of `A` and reconstructs `H = (-A_y, A_x)/mu` for TM or
+`E = (A_y, -A_x)/epsilon` for TE. The corresponding Poynting vector is
+`S = -k u grad(A)`, where `k` is `1/mu` for TM or `1/epsilon` for TE. Screen bins
+bound arrow density and an exponential display filter reduces jitter. Mechanical
+scenes retain the prior `-k u_t grad(u)` energy-flow display. These arrows derive
+the transverse field belonging to one scalar polarization and are not presented as
+a simultaneous full-vector Maxwell state.
+
 Autosave retains both the accepted scene and any invalid editable draft, writing to
 browser local storage or an atomic per-user native recovery file after a short
 debounce. On browser startup, a `#scene=v1.…` fragment takes precedence over local
@@ -529,10 +541,10 @@ a near-degenerate element from silently reducing the timestep by many orders of
 magnitude. The f64 CPU implementation is the reference and conserves the scheme's
 discrete half-step energy to roundoff in the undamped test.
 
-The f32 GPU kernel stores both committed time levels, a scratch level, and the
-trapezoidal primary-field integral in one storage buffer. Each solution-DOF
-invocation gathers its CSR row and writes only its own scratch value; a second
-dispatch advances the integral and rotates levels. This avoids scatter atomics.
+The f32 GPU kernel stores both committed time levels, a scratch level, and the two
+inverse-derivative filter stages in one storage buffer. Each solution-DOF invocation
+gathers its CSR row and writes only its own scratch value; a second dispatch advances
+the reconstruction and rotates levels. This avoids scatter atomics.
 The operator, state, sources, and controls use Bevy's render-world buffers and its
 existing wgpu device. State remains GPU-resident; asynchronous readback supplies
 the egui field colors and energy diagnostic. Each readback carries a GPU-written
@@ -546,8 +558,8 @@ extra storage binding is needed.
 
 Point probes compile to seven-node enriched-quadratic interpolation stencils with
 separate gradient weights. A small compute pipeline samples the centered primary
-field, its rate, and its time integral at uniform solver-step intervals. Mechanical
-readouts expose displacement, velocity, and
+field, its rate, and its reconstructed transverse potential at uniform solver-step
+intervals. Mechanical readouts expose displacement, velocity, and
 `rho v²/2 + k |grad u|²/2`. EM readouts expose signed `E_z` or `H_z`, the
 transverse magnitude `k |grad A|`, Poynting magnitude `|u| k |grad A|`, and the
 physical energy density `(m u² + k |grad A|²)/2`. It writes a bounded time-stamped ring

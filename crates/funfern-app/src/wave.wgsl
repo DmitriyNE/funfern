@@ -50,8 +50,14 @@ struct MatrixEntry {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
-    integral: vec4<f32>,
+    reconstruction: vec4<f32>,
 }
+
+// The scalar wave equation does not constrain the DC integration constant of
+// the complementary EM field. This critically damped inverse derivative rejects
+// that null mode below roughly 0.08 Hz while remaining close to 1/(i omega) over
+// the frequencies used by the playground's sources.
+const RECONSTRUCTION_DECAY_RATE: f32 = 0.5;
 
 @group(0) @binding(0) var<storage, read_write> parameters: Parameters;
 @group(0) @binding(1) var<storage, read> forcing: Forcing;
@@ -111,8 +117,9 @@ fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let dt = parameters.time_data.x;
-    // Keep the readback value aligned with auxiliary.w/auxiliary.z at u^n.
-    states[i].integral.y = states[i].integral.x;
+    // Keep the reconstructed potential aligned with auxiliary.w/auxiliary.z at u^n.
+    states[i].reconstruction.y = states[i].reconstruction.x
+        - RECONSTRUCTION_DECAY_RATE * states[i].reconstruction.z;
     let dirichlet = nodes[i].boundary.x;
     if dirichlet != 0u {
         let previous = signal_value(nodes[i].dirichlet_signal, parameters.time_data.z - dt);
@@ -176,8 +183,20 @@ fn rotate(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         states[i].auxiliary.x = 0.0;
     }
-    states[i].integral.x += 0.5 * parameters.time_data.x
-        * (states[i].levels.y + states[i].levels.z);
+    let half_decay_step = 0.5 * RECONSTRUCTION_DECAY_RATE * parameters.time_data.x;
+    let denominator = 1.0 + half_decay_step;
+    let stage_a_previous = states[i].reconstruction.x;
+    let stage_a_next = (
+        (1.0 - half_decay_step) * stage_a_previous
+        + 0.5 * parameters.time_data.x * (states[i].levels.y + states[i].levels.z)
+    ) / denominator;
+    let stage_b_previous = states[i].reconstruction.z;
+    let stage_b_next = (
+        (1.0 - half_decay_step) * stage_b_previous
+        + 0.5 * parameters.time_data.x * (stage_a_previous + stage_a_next)
+    ) / denominator;
+    states[i].reconstruction.x = stage_a_next;
+    states[i].reconstruction.z = stage_b_next;
     states[i].levels.x = states[i].levels.y;
     states[i].levels.y = states[i].levels.z;
     if i == 0u {

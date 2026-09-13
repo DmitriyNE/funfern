@@ -6,7 +6,7 @@ struct Parameters {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
-    integral: vec4<f32>,
+    reconstruction: vec4<f32>,
 }
 
 struct CurveProbeStencil {
@@ -77,32 +77,32 @@ fn sample_curve_probes(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let displacement_b = vec4<f32>(states[b.x].auxiliary.w, states[b.y].auxiliary.w, states[b.z].auxiliary.w, 0.0);
     let velocity_a = vec4<f32>(states[a.x].auxiliary.z, states[a.y].auxiliary.z, states[a.z].auxiliary.z, states[a.w].auxiliary.z);
     let velocity_b = vec4<f32>(states[b.x].auxiliary.z, states[b.y].auxiliary.z, states[b.z].auxiliary.z, 0.0);
-    let integral_a = vec4<f32>(states[a.x].integral.y, states[a.y].integral.y, states[a.z].integral.y, states[a.w].integral.y);
-    let integral_b = vec4<f32>(states[b.x].integral.y, states[b.y].integral.y, states[b.z].integral.y, 0.0);
+    let potential_a = vec4<f32>(states[a.x].reconstruction.y, states[a.y].reconstruction.y, states[a.z].reconstruction.y, states[a.w].reconstruction.y);
+    let potential_b = vec4<f32>(states[b.x].reconstruction.y, states[b.y].reconstruction.y, states[b.z].reconstruction.y, 0.0);
     let displacement = weighted(displacement_a, displacement_b, stencil);
     let velocity = weighted(velocity_a, velocity_b, stencil);
     let gradient_x = dot(displacement_a, stencil.gradient_x_a) + dot(displacement_b, stencil.gradient_x_b);
     let gradient_y = dot(displacement_a, stencil.gradient_y_a) + dot(displacement_b, stencil.gradient_y_b);
-    let integral_gradient_x = dot(integral_a, stencil.gradient_x_a) + dot(integral_b, stencil.gradient_x_b);
-    let integral_gradient_y = dot(integral_a, stencil.gradient_y_a) + dot(integral_b, stencil.gradient_y_b);
+    let potential_gradient_x = dot(potential_a, stencil.gradient_x_a) + dot(potential_b, stencil.gradient_x_b);
+    let potential_gradient_y = dot(potential_a, stencil.gradient_y_a) + dot(potential_b, stencil.gradient_y_b);
     let electromagnetic = control.values.w > 0.5;
     let primary_energy = select(stencil.material.x * velocity * velocity, stencil.material.x * displacement * displacement, electromagnetic);
     let gradient_energy = select(
         stencil.material.y * (gradient_x * gradient_x + gradient_y * gradient_y),
-        stencil.material.y * (integral_gradient_x * integral_gradient_x + integral_gradient_y * integral_gradient_y),
+        stencil.material.y * (potential_gradient_x * potential_gradient_x + potential_gradient_y * potential_gradient_y),
         electromagnetic,
     );
     let energy = 0.5 * (primary_energy + gradient_energy);
     let normal_gradient = gradient_x * stencil.normal_stride_valid.x + gradient_y * stencil.normal_stride_valid.y;
-    let integral_normal_gradient = integral_gradient_x * stencil.normal_stride_valid.x + integral_gradient_y * stencil.normal_stride_valid.y;
+    let potential_normal_gradient = potential_gradient_x * stencil.normal_stride_valid.x + potential_gradient_y * stencil.normal_stride_valid.y;
     let flux = select(
         -stencil.material.y * velocity * normal_gradient,
-        -stencil.material.y * displacement * integral_normal_gradient,
+        -stencil.material.y * displacement * potential_normal_gradient,
         electromagnetic,
     );
     let transverse = select(
         0.0,
-        stencil.material.y * length(vec2<f32>(integral_gradient_x, integral_gradient_y)),
+        stencil.material.y * length(vec2<f32>(potential_gradient_x, potential_gradient_y)),
         electromagnetic,
     );
     output[index].primary = vec4<f32>(displacement, energy, flux, time);

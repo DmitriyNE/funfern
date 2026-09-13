@@ -1296,7 +1296,7 @@ fn create_buffers(
                 if awaits_transfer { -1.0 } else { 0.0 },
             ),
             auxiliary: Vec4::new(*auxiliary as f32, 0.0, 0.0, *current as f32),
-            integral: Vec4::ZERO,
+            reconstruction: Vec4::ZERO,
         })
         .collect::<Vec<_>>();
     Ok((
@@ -1613,8 +1613,9 @@ pub struct WaveDisplay {
     pub indicator_displacement: Vec<f32>,
     pub indicator_velocity: Vec<f32>,
     pub indicator_acceleration: Vec<f32>,
-    /// Time integral of the primary field aligned with the indicator fields.
-    pub indicator_integral: Vec<f32>,
+    /// DC-stabilized inverse time derivative used to reconstruct the transverse
+    /// EM field, aligned with the indicator fields.
+    pub indicator_potential: Vec<f32>,
     pub completed_steps: u64,
     pub readbacks: u64,
 }
@@ -1821,7 +1822,7 @@ struct GpuForcingWeights {
 struct GpuState {
     levels: Vec4,
     auxiliary: Vec4,
-    integral: Vec4,
+    reconstruction: Vec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -2084,7 +2085,9 @@ fn receive_readback(
         return;
     }
     if states.iter().any(|state| {
-        !state.levels.is_finite() || !state.auxiliary.is_finite() || !state.integral.is_finite()
+        !state.levels.is_finite()
+            || !state.auxiliary.is_finite()
+            || !state.reconstruction.is_finite()
     }) {
         tag.stats.status.store(STATUS_ERROR, Ordering::Relaxed);
         return;
@@ -2100,14 +2103,14 @@ fn receive_readback(
     display.indicator_displacement.clear();
     display.indicator_velocity.clear();
     display.indicator_acceleration.clear();
-    display.indicator_integral.clear();
+    display.indicator_potential.clear();
     display.current.reserve(states.len());
     display.previous.reserve(states.len());
     display.auxiliary.reserve(states.len());
     display.indicator_displacement.reserve(states.len());
     display.indicator_velocity.reserve(states.len());
     display.indicator_acceleration.reserve(states.len());
-    display.indicator_integral.reserve(states.len());
+    display.indicator_potential.reserve(states.len());
     for state in states {
         display.current.push(state.levels.y);
         display.previous.push(state.levels.x);
@@ -2115,7 +2118,7 @@ fn receive_readback(
         display.indicator_acceleration.push(state.auxiliary.y);
         display.indicator_velocity.push(state.auxiliary.z);
         display.indicator_displacement.push(state.auxiliary.w);
-        display.indicator_integral.push(state.integral.y);
+        display.indicator_potential.push(state.reconstruction.y);
     }
     display.readbacks = display.readbacks.saturating_add(1);
 }
@@ -3474,27 +3477,66 @@ mod tests {
     }
 
     #[test]
-    fn wave_integral_is_centered_and_transfers_with_the_primary_state() {
+    fn wave_reconstruction_rejects_dc_and_transfers_both_filter_stages() {
         let wave = include_str!("wave.wgsl");
-        assert!(wave.contains("states[i].integral.y = states[i].integral.x"));
-        assert!(wave.contains("states[i].integral.x += 0.5 * parameters.time_data.x"));
+        assert!(wave.contains("states[i].reconstruction.y = states[i].reconstruction.x"));
+        assert!(wave.contains("let stage_a_next = ("));
+        assert!(wave.contains("let stage_b_next = ("));
         let old_transfer = include_str!("wave_transfer_old.wgsl");
         assert!(
-            old_transfer.contains("mapped_integral += weight * states[source_index].integral.x")
+            old_transfer.contains(
+                "mapped_reconstruction_a += weight * states[source_index].reconstruction.x"
+            )
         );
-        assert!(old_transfer.contains("mapped_auxiliary, mapped_integral"));
+        assert!(
+            old_transfer.contains(
+                "mapped_reconstruction_b += weight * states[source_index].reconstruction.z"
+            )
+        );
         let new_transfer = include_str!("wave_transfer_new.wgsl");
-        assert!(new_transfer.contains(
-            "states[i].integral = vec4<f32>(transfers[i].mapped.w, transfers[i].mapped.w"
-        ));
+        assert!(new_transfer.contains("let reconstruction_b = transfers[i].auxiliary.y"));
         for shader in [
             include_str!("probe.wgsl"),
             include_str!("curve_probe.wgsl"),
             include_str!("area_probe.wgsl"),
             include_str!("far_field.wgsl"),
         ] {
-            assert!(shader.contains("integral: vec4<f32>"));
+            assert!(shader.contains("reconstruction: vec4<f32>"));
         }
+
+        let decay = 0.5;
+        let dt = 0.01;
+        let q = 0.5 * decay * dt;
+        let advance = |stage_a: f64, stage_b: f64, previous: f64, next: f64| {
+            let next_a = ((1.0 - q) * stage_a + 0.5 * dt * (previous + next)) / (1.0 + q);
+            let next_b = ((1.0 - q) * stage_b + 0.5 * dt * (stage_a + next_a)) / (1.0 + q);
+            (next_a, next_b)
+        };
+        let mut stage_a = 0.0;
+        let mut stage_b = 0.0;
+        for _ in 0..10_000 {
+            (stage_a, stage_b) = advance(stage_a, stage_b, 1.0, 1.0);
+        }
+        assert!((stage_a - decay * stage_b).abs() < 1.0e-12);
+
+        let angular_frequency = std::f64::consts::TAU * 3.0;
+        stage_a = 0.0;
+        stage_b = 0.0;
+        let mut error_squared = 0.0;
+        let mut reference_squared = 0.0;
+        for step in 0..2_000 {
+            let time = step as f64 * dt;
+            let previous = (angular_frequency * time).sin();
+            let next = (angular_frequency * (time + dt)).sin();
+            (stage_a, stage_b) = advance(stage_a, stage_b, previous, next);
+            if step >= 1_000 {
+                let reconstructed = stage_a - decay * stage_b;
+                let reference = -(angular_frequency * (time + dt)).cos() / angular_frequency;
+                error_squared += (reconstructed - reference).powi(2);
+                reference_squared += reference.powi(2);
+            }
+        }
+        assert!((error_squared / reference_squared).sqrt() < 0.06);
     }
 
     #[test]
@@ -3502,7 +3544,7 @@ mod tests {
         let shader = include_str!("curve_probe.wgsl");
         assert!(shader.contains("let normal_gradient"));
         assert!(shader.contains("-stencil.material.y * velocity * normal_gradient"));
-        assert!(shader.contains("-stencil.material.y * displacement * integral_normal_gradient"));
+        assert!(shader.contains("-stencil.material.y * displacement * potential_normal_gradient"));
         assert!(shader.contains("let transverse = select("));
         assert!(shader.contains("bitcast<f32>(0x7fc00000u | (point & 1u))"));
         assert!(shader.contains("let time = parameters.time_data.z - parameters.time_data.x;"));

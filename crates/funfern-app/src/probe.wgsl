@@ -6,7 +6,7 @@ struct Parameters {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
-    integral: vec4<f32>,
+    reconstruction: vec4<f32>,
 }
 
 struct ProbeStencil {
@@ -77,16 +77,16 @@ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
         states[b.z].auxiliary.z,
         0.0,
     );
-    let integral_a = vec4<f32>(
-        states[a.x].integral.y,
-        states[a.y].integral.y,
-        states[a.z].integral.y,
-        states[a.w].integral.y,
+    let potential_a = vec4<f32>(
+        states[a.x].reconstruction.y,
+        states[a.y].reconstruction.y,
+        states[a.z].reconstruction.y,
+        states[a.w].reconstruction.y,
     );
-    let integral_b = vec4<f32>(
-        states[b.x].integral.y,
-        states[b.y].integral.y,
-        states[b.z].integral.y,
+    let potential_b = vec4<f32>(
+        states[b.x].reconstruction.y,
+        states[b.y].reconstruction.y,
+        states[b.z].reconstruction.y,
         0.0,
     );
     let displacement = weighted(displacement_a, displacement_b, stencil);
@@ -95,10 +95,10 @@ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
         + dot(displacement_b, stencil.gradient_x_b);
     let gradient_y = dot(displacement_a, stencil.gradient_y_a)
         + dot(displacement_b, stencil.gradient_y_b);
-    let integral_gradient_x = dot(integral_a, stencil.gradient_x_a)
-        + dot(integral_b, stencil.gradient_x_b);
-    let integral_gradient_y = dot(integral_a, stencil.gradient_y_a)
-        + dot(integral_b, stencil.gradient_y_b);
+    let potential_gradient_x = dot(potential_a, stencil.gradient_x_a)
+        + dot(potential_b, stencil.gradient_x_b);
+    let potential_gradient_y = dot(potential_a, stencil.gradient_y_a)
+        + dot(potential_b, stencil.gradient_y_b);
     let electromagnetic = control.values.w > 0.5;
     let primary_energy = select(
         stencil.material.x * velocity * velocity,
@@ -107,14 +107,14 @@ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
     );
     let gradient_energy = select(
         stencil.material.y * (gradient_x * gradient_x + gradient_y * gradient_y),
-        stencil.material.y * (integral_gradient_x * integral_gradient_x
-            + integral_gradient_y * integral_gradient_y),
+        stencil.material.y * (potential_gradient_x * potential_gradient_x
+            + potential_gradient_y * potential_gradient_y),
         electromagnetic,
     );
     let energy = 0.5 * (primary_energy + gradient_energy);
     let transverse = select(
         0.0,
-        stencil.material.y * length(vec2<f32>(integral_gradient_x, integral_gradient_y)),
+        stencil.material.y * length(vec2<f32>(potential_gradient_x, potential_gradient_y)),
         electromagnetic,
     );
     let poynting = select(0.0, abs(displacement) * transverse, electromagnetic);

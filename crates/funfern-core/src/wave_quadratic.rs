@@ -752,36 +752,37 @@ impl QuadraticWaveOperator {
             .ok_or(WaveError::InvalidState)
     }
 
-    /// Electromagnetic energy for a TE/TM primary component and the time integral
-    /// used to reconstruct its transverse counterpart.
+    /// Electromagnetic energy for a TE/TM primary component and the scalar
+    /// potential used to reconstruct its transverse counterpart.
     pub fn electromagnetic_energy(
         &self,
         primary: &[f64],
-        integral: &[f64],
+        transverse_potential: &[f64],
     ) -> Result<f64, WaveError> {
-        if primary.len() != self.degrees_of_freedom() || integral.len() != self.degrees_of_freedom()
+        if primary.len() != self.degrees_of_freedom()
+            || transverse_potential.len() != self.degrees_of_freedom()
         {
             return Err(WaveError::SizeMismatch {
                 expected: self.degrees_of_freedom(),
-                actual: primary.len().min(integral.len()),
+                actual: primary.len().min(transverse_potential.len()),
             });
         }
         if primary
             .iter()
-            .chain(integral)
+            .chain(transverse_potential)
             .any(|value| !value.is_finite())
         {
             return Err(WaveError::InvalidState);
         }
-        let integral_force = self.apply_stiffness(integral)?;
+        let potential_force = self.apply_stiffness(transverse_potential)?;
         let primary_energy = primary
             .iter()
             .zip(&self.lumped_mass)
             .map(|(value, mass)| 0.5 * mass * value * value)
             .sum::<f64>();
-        let transverse_energy = integral
+        let transverse_energy = transverse_potential
             .iter()
-            .zip(integral_force)
+            .zip(potential_force)
             .map(|(value, force)| 0.5 * value * force)
             .sum::<f64>();
         let energy = primary_energy + transverse_energy;
@@ -2436,22 +2437,22 @@ mod tests {
     }
 
     #[test]
-    fn electromagnetic_energy_uses_primary_field_and_integrated_gradient() {
+    fn electromagnetic_energy_uses_primary_field_and_transverse_potential() {
         let mesh = square();
         let operator = QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()).unwrap();
         let primary = vec![2.0; operator.degrees_of_freedom()];
-        let integral = operator
+        let transverse_potential = operator
             .node_points()
             .iter()
             .map(|point| point.x)
             .collect::<Vec<_>>();
         let energy = operator
-            .electromagnetic_energy(&primary, &integral)
+            .electromagnetic_energy(&primary, &transverse_potential)
             .unwrap();
         assert!((energy - 2.5).abs() < 1.0e-12);
         assert!(
             operator
-                .electromagnetic_energy(&primary[..2], &integral)
+                .electromagnetic_energy(&primary[..2], &transverse_potential)
                 .is_err()
         );
     }

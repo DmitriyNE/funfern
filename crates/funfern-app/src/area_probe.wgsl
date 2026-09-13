@@ -6,7 +6,7 @@ struct Parameters {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
-    integral: vec4<f32>,
+    reconstruction: vec4<f32>,
 }
 
 struct AreaContribution {
@@ -76,7 +76,7 @@ fn sample_area_elements(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let b = contribution.nodes_b;
     var u: array<f32, 7>;
     var v: array<f32, 7>;
-    var integral: array<f32, 7>;
+    var potential: array<f32, 7>;
     u[0] = states[a.x].auxiliary.w;
     u[1] = states[a.y].auxiliary.w;
     u[2] = states[a.z].auxiliary.w;
@@ -91,13 +91,13 @@ fn sample_area_elements(@builtin(global_invocation_id) invocation: vec3<u32>) {
     v[4] = states[b.x].auxiliary.z;
     v[5] = states[b.y].auxiliary.z;
     v[6] = states[b.z].auxiliary.z;
-    integral[0] = states[a.x].integral.y;
-    integral[1] = states[a.y].integral.y;
-    integral[2] = states[a.z].integral.y;
-    integral[3] = states[a.w].integral.y;
-    integral[4] = states[b.x].integral.y;
-    integral[5] = states[b.y].integral.y;
-    integral[6] = states[b.z].integral.y;
+    potential[0] = states[a.x].reconstruction.y;
+    potential[1] = states[a.y].reconstruction.y;
+    potential[2] = states[a.z].reconstruction.y;
+    potential[3] = states[a.w].reconstruction.y;
+    potential[4] = states[b.x].reconstruction.y;
+    potential[5] = states[b.y].reconstruction.y;
+    potential[6] = states[b.z].reconstruction.y;
 
     let field = dot(vec4<f32>(u[0], u[1], u[2], u[3]), contribution.field_a)
         + dot(vec4<f32>(u[4], u[5], u[6], 0.0), contribution.field_b);
@@ -119,11 +119,11 @@ fn sample_area_elements(@builtin(global_invocation_id) invocation: vec3<u32>) {
             primary_energy += symmetry * packed(contribution.density, entry)
                 * select(v[row] * v[column], u[row] * u[column], electromagnetic);
             gradient_energy += symmetry * stiffness
-                * select(u[row] * u[column], integral[row] * integral[column], electromagnetic);
+                * select(u[row] * u[column], potential[row] * potential[column], electromagnetic);
             if electromagnetic {
                 transverse_squared += symmetry
                     * packed(contribution.stiffness_squared, entry)
-                    * integral[row] * integral[column];
+                    * potential[row] * potential[column];
             }
             entry += 1u;
         }

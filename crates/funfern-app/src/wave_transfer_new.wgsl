@@ -44,8 +44,10 @@ struct MatrixEntry {
 struct State {
     levels: vec4<f32>,
     auxiliary: vec4<f32>,
-    integral: vec4<f32>,
+    reconstruction: vec4<f32>,
 }
+
+const RECONSTRUCTION_DECAY_RATE: f32 = 0.5;
 
 struct TransferEntry {
     indices_a: vec4<u32>,
@@ -163,7 +165,14 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
         aligned_velocity,
         aligned_current,
     );
-    states[i].integral = vec4<f32>(transfers[i].mapped.w, transfers[i].mapped.w, 0.0, 0.0);
+    let reconstruction_a = transfers[i].mapped.w;
+    let reconstruction_b = transfers[i].auxiliary.y;
+    states[i].reconstruction = vec4<f32>(
+        reconstruction_a,
+        reconstruction_a - RECONSTRUCTION_DECAY_RATE * reconstruction_b,
+        reconstruction_b,
+        0.0,
+    );
     if i == 0u {
         parameters.time_data.z = time;
         parameters.time_data.w = 0.0;

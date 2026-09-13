@@ -180,10 +180,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   automatic/manual range controls plus a local-coordinate hover readout. Automatic
   solution AMR evaluates varying coefficients and their gradients directly.
 - **Vector view:** View can overlay arrows derived from the synchronized quadratic
-  field readback. The solver integrates the primary scalar field in time, so TM
-  scenes show the reconstructed in-plane magnetic field `H`, TE scenes show the
-  in-plane electric field `E`, and either polarization can show the corresponding
-  Poynting vector. Mechanical scenes retain their energy-flow view. Arrow spacing
+  field readback. A DC-rejecting inverse time derivative reconstructs the transverse
+  field without retaining stationary startup or source-edit imprints. TM scenes show
+  the in-plane magnetic field `H`, TE scenes show the in-plane electric field `E`,
+  and either polarization can show the corresponding Poynting vector. Mechanical
+  scenes retain their energy-flow view. Arrow spacing
   and gain are screen-space presentation controls, with optional temporal
   smoothing. Each EM mode remains one scalar Maxwell polarization rather than a
   simultaneous six-component field solve.

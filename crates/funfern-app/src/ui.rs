@@ -3619,7 +3619,7 @@ impl Playground {
                 && request.ready()
                 && display.generation == request.generation()
                 && display.current.len() == candidate.operator.degrees_of_freedom()
-                && display.indicator_integral.len() == candidate.operator.degrees_of_freedom()
+                && display.indicator_potential.len() == candidate.operator.degrees_of_freedom()
         });
         if candidate_ready {
             let candidate = self.simulation_candidate.take().unwrap();
@@ -3923,7 +3923,7 @@ impl Playground {
                     .as_ref()
                     .map_or(0, |operator| operator.degrees_of_freedom())
             && (matches!(self.mesh_committed_scene.physics, PhysicsModel::Mechanical)
-                || display.indicator_integral.len() == display.current.len())
+                || display.indicator_potential.len() == display.current.len())
             && display.completed_steps != self.wave_energy_step
             && let Some(operator) = &self.wave_operator
         {
@@ -3948,7 +3948,7 @@ impl Playground {
                         .map(|value| *value as f64)
                         .collect::<Vec<_>>(),
                     &display
-                        .indicator_integral
+                        .indicator_potential
                         .iter()
                         .map(|value| *value as f64)
                         .collect::<Vec<_>>(),
@@ -11840,7 +11840,7 @@ fn vector_overlay_samples(
     if mesh.triangles.len() != operator.element_nodes().len()
         || display.indicator_displacement.len() != operator.degrees_of_freedom()
         || display.indicator_velocity.len() != operator.degrees_of_freedom()
-        || display.indicator_integral.len() != operator.degrees_of_freedom()
+        || display.indicator_potential.len() != operator.degrees_of_freedom()
         || spacing <= 0.0
     {
         return vec![];
@@ -11890,9 +11890,9 @@ fn vector_overlay_samples(
                 &display.indicator_velocity,
                 [1.0 / 3.0; 3],
             )?;
-            let (_, integral_gradient) = operator.element_value_and_gradient(
+            let (_, potential_gradient) = operator.element_value_and_gradient(
                 element,
-                &display.indicator_integral,
+                &display.indicator_potential,
                 [1.0 / 3.0; 3],
             )?;
             let region = scene.region(triangle.region)?;
@@ -11912,15 +11912,15 @@ fn vector_overlay_samples(
                     PhysicsModel::Electromagnetic {
                         polarization: ElectromagneticPolarization::Tm,
                     },
-                ) => Point2::new(-integral_gradient.y, integral_gradient.x) * stiffness,
+                ) => Point2::new(-potential_gradient.y, potential_gradient.x) * stiffness,
                 (
                     VectorOverlay::ComplementaryField,
                     PhysicsModel::Electromagnetic {
                         polarization: ElectromagneticPolarization::Te,
                     },
-                ) => Point2::new(integral_gradient.y, -integral_gradient.x) * stiffness,
+                ) => Point2::new(potential_gradient.y, -potential_gradient.x) * stiffness,
                 (VectorOverlay::RelativeEnergyFlow, PhysicsModel::Electromagnetic { .. }) => {
-                    integral_gradient * (-stiffness * primary)
+                    potential_gradient * (-stiffness * primary)
                 }
                 (VectorOverlay::RelativeEnergyFlow, PhysicsModel::Mechanical) => {
                     gradient * (-stiffness * velocity)
@@ -17298,7 +17298,7 @@ mod tests {
     }
 
     #[test]
-    fn vector_overlay_derives_tm_field_and_poynting_flow_from_integrated_p2_data() {
+    fn vector_overlay_derives_tm_field_and_poynting_flow_from_reconstructed_p2_data() {
         let mut h = Harness::new();
         build_mesh_candidate(&mut h.state);
         commit_mesh_without_gpu(&mut h.state);
@@ -17316,7 +17316,7 @@ mod tests {
                 .collect(),
             indicator_displacement: vec![2.0; operator.degrees_of_freedom()],
             indicator_velocity: vec![2.0; operator.degrees_of_freedom()],
-            indicator_integral: operator
+            indicator_potential: operator
                 .node_points()
                 .iter()
                 .map(|point| point.x as f32)
@@ -17370,7 +17370,7 @@ mod tests {
         let display = WaveDisplay {
             indicator_displacement: vec![2.0; operator.degrees_of_freedom()],
             indicator_velocity: vec![0.0; operator.degrees_of_freedom()],
-            indicator_integral: operator
+            indicator_potential: operator
                 .node_points()
                 .iter()
                 .map(|point| point.x as f32)
