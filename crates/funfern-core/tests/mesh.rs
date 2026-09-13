@@ -442,6 +442,73 @@ fn empty_domain_and_outer_side_labels_mesh() {
 }
 
 #[test]
+fn rectangular_domain_controls_outer_mesh_geometry() {
+    let domain = DomainRect::new(-2.0, 1.0, -0.5, 1.5);
+    let scene = Scene {
+        domain,
+        ..Scene::default()
+    };
+    assert!(validate(&scene).valid());
+    let mesh = mesh_scene(
+        &scene,
+        2,
+        MeshingOptions {
+            target_edge_length: 0.4,
+            minimum_angle_degrees: 10.0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let area = mesh
+        .triangles
+        .iter()
+        .map(|triangle| {
+            let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
+            0.5 * (b - a).cross(c - a)
+        })
+        .sum::<f64>();
+    assert!((area - domain.width() * domain.height()).abs() < 1.0e-10);
+    assert!(mesh.vertices.iter().all(|vertex| {
+        (domain.min_x..=domain.max_x).contains(&vertex.point.x)
+            && (domain.min_y..=domain.max_y).contains(&vertex.point.y)
+    }));
+    for side in OuterSide::ALL {
+        assert!(
+            mesh.boundary_edges
+                .iter()
+                .any(|edge| edge.label == BoundaryLabel::Outer(side))
+        );
+    }
+}
+
+#[test]
+fn domain_resize_uses_a_full_transactional_rebuild() {
+    let options = MeshingOptions {
+        target_edge_length: 0.4,
+        minimum_angle_degrees: 10.0,
+        ..Default::default()
+    };
+    let source_scene = Scene::default();
+    let source = Arc::new(mesh_scene(&source_scene, 1, options).unwrap());
+    let target = Scene {
+        domain: DomainRect::new(-1.4, 1.2, -0.7, 1.5),
+        ..source_scene.clone()
+    };
+    let result = finish_update(
+        MeshUpdateJob::new(Some((source, source_scene)), target.clone(), 2, options),
+        10_000,
+    );
+    assert!(!result.report.local_attempted);
+    assert!(!result.report.used_local);
+    assert!(result.mesh.vertices.iter().all(|vertex| {
+        vertex.point.x >= target.domain.min_x - 1.0e-12
+            && vertex.point.x <= target.domain.max_x + 1.0e-12
+            && vertex.point.y >= target.domain.min_y - 1.0e-12
+            && vertex.point.y <= target.domain.max_y + 1.0e-12
+    }));
+}
+
+#[test]
 fn representative_eight_obstacle_scene_meshes_within_limits() {
     let scene = Scene {
         obstacles: (0..8)
@@ -492,6 +559,7 @@ fn medium(id: u64, name: &str, stiffness: f64, color: [u8; 3]) -> Material {
 
 fn two_region_scene(role: impl FnOnce(RegionId, RegionId) -> LoopRole) -> Scene {
     Scene {
+        domain: DomainRect::default(),
         physics: PhysicsModel::Mechanical,
         obstacles: vec![Obstacle::with_role(
             ObstacleId(20),

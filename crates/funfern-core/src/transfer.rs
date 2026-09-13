@@ -858,6 +858,7 @@ mod tests {
         let mut target = source.clone();
         target.geometry_revision = 8;
         let scene = Scene {
+            domain: crate::DomainRect::default(),
             physics: crate::PhysicsModel::Mechanical,
             obstacles: vec![Obstacle::with_role(
                 ObstacleId(1),

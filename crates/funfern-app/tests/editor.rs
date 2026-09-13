@@ -22,6 +22,50 @@ fn set_file_version(value: &mut serde_json::Value, version: u32) {
     }
 }
 
+#[test]
+fn domain_bounds_are_undoable_persisted_and_keep_invalid_drafts() {
+    let mut editor = Editor::default();
+    let original = editor.document.model.accepted.clone();
+    let resized = DomainRect::new(-1.5, 2.0, -0.8, 1.2);
+    editor.set_domain(resized);
+    settle(&mut editor);
+    assert_eq!(editor.document.model.accepted.domain, resized);
+    assert_eq!(editor.history_len(), (1, 0));
+
+    let json = save(&editor.document).unwrap();
+    let decoded = decode(json.as_bytes()).unwrap();
+    assert_eq!(decoded.model.draft.domain, resized);
+    assert_eq!(decoded.model.accepted.domain, resized);
+
+    editor.undo();
+    assert_eq!(editor.document.model.draft.domain, original.domain);
+    assert_eq!(editor.document.model.accepted.domain, original.domain);
+    editor.redo();
+    settle(&mut editor);
+    assert_eq!(editor.document.model.accepted.domain, resized);
+
+    editor.set_domain(DomainRect::new(0.2, 0.25, -0.8, 1.2));
+    settle(&mut editor);
+    assert!(matches!(
+        editor.acceptance,
+        Acceptance::Invalid(ValidationIssue::Domain)
+    ));
+    assert_eq!(editor.document.model.accepted.domain, resized);
+    assert_ne!(editor.document.model.draft.domain, resized);
+}
+
+#[test]
+fn version_eighteen_migrates_the_fixed_domain() {
+    let document = Document::default();
+    let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+    set_file_version(&mut value, 18);
+    value["draft"].as_object_mut().unwrap().remove("domain");
+    value["accepted"].as_object_mut().unwrap().remove("domain");
+    let decoded = decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+    assert_eq!(decoded.model.draft.domain, DomainRect::default());
+    assert_eq!(decoded.model.accepted.domain, DomainRect::default());
+}
+
 fn downgrade_time_signals_to_v16(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Array(values) => {
@@ -420,7 +464,7 @@ fn area_probe_targets_and_far_field_settings_round_trip() {
         .unwrap();
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 18"));
+    assert!(json.contains("\"version\": 19"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
     assert_eq!(decoded.model.far_field.inset, 0.17);
@@ -511,7 +555,7 @@ fn point_source_round_trips_and_version_ten_uses_the_default() {
     };
     let json = save(&document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 18);
+    assert_eq!(value["version"], 19);
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
     set_file_version(&mut value, 10);
@@ -622,7 +666,7 @@ fn volume_source_round_trips_and_is_one_undoable_region_edit() {
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 18"));
+    assert!(json.contains("\"version\": 19"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -658,8 +702,8 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 19.into(),
-            1 => value["domain"][0] = 0.into(),
+            0 => value["version"] = 20.into(),
+            1 => value["accepted"]["domain"][0] = 1.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
                 value["draft"]["loops"][0]["controls"] = serde_json::json!([[0, 0], [0, 0], [0, 0]])
@@ -735,7 +779,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        18
+        19
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -1228,7 +1272,7 @@ fn spatial_materials_parameters_and_frames_round_trip() {
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 18"));
+    assert!(json.contains("\"version\": 19"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1744,7 +1788,7 @@ fn boundary_probe_round_trips_and_tracks_periodic_insertion() {
     assert_eq!(target.spans(9), vec![7, 8, 0]);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 18"));
+    assert!(json.contains("\"version\": 19"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded.model.probes, editor.document.model.probes);
 

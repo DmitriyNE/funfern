@@ -219,6 +219,7 @@ struct TriangulationDomain {
 }
 
 struct MeshBuilder {
+    domain: crate::DomainRect,
     vertices: Vec<MeshVertex>,
     triangles: Vec<MeshTriangle>,
     boundary_edges: Vec<BoundaryEdge>,
@@ -406,8 +407,9 @@ impl<T, const N: usize> ArrayMapWithIndex<T, N> for [T; N] {
 }
 
 impl MeshBuilder {
-    fn new(options: MeshingOptions) -> Self {
+    fn new(options: MeshingOptions, domain: crate::DomainRect) -> Self {
         Self {
+            domain,
             vertices: vec![],
             triangles: vec![],
             boundary_edges: vec![],
@@ -571,36 +573,25 @@ impl MeshBuilder {
     }
 
     fn add_outer(&mut self) -> Result<Polygon, MeshError> {
-        let per_side = (2.0 / self.options.target_edge_length).ceil() as usize;
-        let per_side = per_side.max(1);
-        if per_side > self.options.max_vertices / 4 {
+        let horizontal = (self.domain.width() / self.options.target_edge_length)
+            .ceil()
+            .max(1.0) as usize;
+        let vertical = (self.domain.height() / self.options.target_edge_length)
+            .ceil()
+            .max(1.0) as usize;
+        if 2 * horizontal.saturating_add(vertical) > self.options.max_vertices {
             return Err(self.capacity_error());
         }
+        let corners = self.domain.corners();
         let sides = [
-            (
-                Point2::new(-1.0, -1.0),
-                Point2::new(1.0, -1.0),
-                OuterSide::Bottom,
-            ),
-            (
-                Point2::new(1.0, -1.0),
-                Point2::new(1.0, 1.0),
-                OuterSide::Right,
-            ),
-            (
-                Point2::new(1.0, 1.0),
-                Point2::new(-1.0, 1.0),
-                OuterSide::Top,
-            ),
-            (
-                Point2::new(-1.0, 1.0),
-                Point2::new(-1.0, -1.0),
-                OuterSide::Left,
-            ),
+            (corners[0], corners[1], OuterSide::Bottom, horizontal),
+            (corners[1], corners[2], OuterSide::Right, vertical),
+            (corners[2], corners[3], OuterSide::Top, horizontal),
+            (corners[3], corners[0], OuterSide::Left, vertical),
         ];
         let mut vertices = vec![];
         let mut edge_metadata = vec![];
-        for (start, end, side) in sides {
+        for (start, end, side, per_side) in sides {
             for index in 0..per_side {
                 let parameter = index as f64 / per_side as f64;
                 let vertex = self.add_vertex(
@@ -1772,6 +1763,7 @@ impl MeshingJob {
         mesh_revision: u64,
         options: MeshingOptions,
     ) -> Self {
+        let domain = scene.domain;
         Self {
             geometry_revision,
             mesh_revision,
@@ -1780,7 +1772,7 @@ impl MeshingJob {
                 geometry_revision,
             ))),
             scene,
-            builder: MeshBuilder::new(options),
+            builder: MeshBuilder::new(options, domain),
             legalization_work: 0,
         }
     }

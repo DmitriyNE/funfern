@@ -519,6 +519,24 @@ fn validation_cases() {
     .unwrap();
     assert!(validate(&scene(vec![crossing])).issue.is_some());
 }
+
+#[test]
+fn validation_uses_scene_domain_and_scale_relative_clearance() {
+    let mut custom = scene(vec![PeriodicCubicSpline::rounded(
+        Point2::new(2.0, 3.0),
+        0.15,
+    )]);
+    custom.domain = DomainRect::new(1.0, 3.0, 2.0, 4.0);
+    assert!(validate(&custom).valid());
+
+    custom.domain = DomainRect::new(1.0, 2.05, 2.0, 4.0);
+    assert!(matches!(
+        validate(&custom).issue,
+        Some(ValidationIssue::Outside(_))
+    ));
+    assert!(!DomainRect::new(0.0, 0.01, -1.0, 1.0).valid());
+    assert!(!DomainRect::new(0.0, f64::INFINITY, -1.0, 1.0).valid());
+}
 #[test]
 fn sampling_exhaustion_is_not_accepted() {
     let s = Scene::initial();

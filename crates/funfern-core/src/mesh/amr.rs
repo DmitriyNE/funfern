@@ -217,6 +217,7 @@ impl MeshAdaptationJob {
         field: Arc<dyn MeshSizeField>,
         options: MeshAdaptationOptions,
     ) -> Self {
+        let domain = scene.domain;
         let next_generation = state.generation.saturating_add(1);
         let mut report = MeshAdaptationReport {
             generation: next_generation,
@@ -235,7 +236,7 @@ impl MeshAdaptationJob {
             field,
             options,
             phase: AdaptationPhase::ImportVertices(0),
-            builder: MeshBuilder::new(options.meshing),
+            builder: MeshBuilder::new(options.meshing, domain),
             state,
             next_generation,
             blocked: BTreeSet::new(),
@@ -1261,11 +1262,12 @@ impl MeshAdaptationJob {
     ) -> Result<Point2, MeshAdaptationError> {
         match label {
             BoundaryLabel::Outer(side) => {
+                let corners = self.scene.domain.corners();
                 let [a, b] = match side {
-                    OuterSide::Bottom => [Point2::new(-1.0, -1.0), Point2::new(1.0, -1.0)],
-                    OuterSide::Right => [Point2::new(1.0, -1.0), Point2::new(1.0, 1.0)],
-                    OuterSide::Top => [Point2::new(1.0, 1.0), Point2::new(-1.0, 1.0)],
-                    OuterSide::Left => [Point2::new(-1.0, 1.0), Point2::new(-1.0, -1.0)],
+                    OuterSide::Bottom => [corners[0], corners[1]],
+                    OuterSide::Right => [corners[1], corners[2]],
+                    OuterSide::Top => [corners[2], corners[3]],
+                    OuterSide::Left => [corners[3], corners[0]],
                 };
                 Ok(a.lerp(b, parameter))
             }

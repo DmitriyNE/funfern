@@ -48,7 +48,7 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
 - [ ] Right-drag and Space+left-drag pan. Wheel zoom preserves the world point
   under the cursor. A drag that starts on the panel never edits geometry.
 - [ ] Resize the window and change display scale. The box stays square, controls
-  stay aligned, and Fit View centers the fixed domain.
+  stay aligned, and Fit View centers the current domain.
 - [ ] Save a valid scene and a scene with an invalid draft. Reload both using
   file upload. IDs and nonuniform intervals survive. History clears on load.
   Cancel dialogs and try malformed JSON, duplicate IDs, unsupported versions,

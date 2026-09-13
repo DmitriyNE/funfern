@@ -637,7 +637,7 @@ pub fn scene_svg(scene: &Scene) -> String {
                     .spline
                     .evaluate(obstacle.spline.period() * index as f64 / 128.0)
             })
-            .map(svg_point)
+            .map(|point| svg_point(scene.domain, point))
             .collect::<Vec<_>>()
             .join(" ");
         let fill = match obstacle.role {
@@ -655,7 +655,7 @@ pub fn scene_svg(scene: &Scene) -> String {
                     .spline
                     .evaluate(boundary.spline.period() * index as f64 / 96.0)
             })
-            .map(svg_point)
+            .map(|point| svg_point(scene.domain, point))
             .collect::<Vec<_>>()
             .join(" ");
         svg.push_str(&format!("<polyline points=\"{points}\" fill=\"none\" stroke=\"#8fd8d0\" stroke-width=\"5\" stroke-linecap=\"round\"/>"));
@@ -664,11 +664,11 @@ pub fn scene_svg(scene: &Scene) -> String {
     svg
 }
 
-fn svg_point(point: Point2) -> String {
+fn svg_point(domain: DomainRect, point: Point2) -> String {
     format!(
         "{:.2},{:.2}",
-        (point.x + 1.0) * 512.0,
-        (1.0 - point.y) * 512.0
+        (point.x - domain.min_x) / domain.width() * 1024.0,
+        (domain.max_y - point.y) / domain.height() * 1024.0
     )
 }
 

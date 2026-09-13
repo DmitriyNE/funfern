@@ -349,8 +349,12 @@ impl MeshUpdateJob {
             moving_trace_segments: vec![],
         };
         if let Some(mesh) = &result.previous {
-            result.report.local_attempted = true;
             result.report.original_triangles = mesh.triangles.len();
+            if result.previous_scene.domain != result.scene.domain {
+                result.full();
+                return result;
+            }
+            result.report.local_attempted = true;
             let supported = result
                 .previous_scene
                 .obstacles
@@ -419,7 +423,7 @@ impl MeshUpdateJob {
             .previous
             .as_ref()
             .expect("local attempt needs a source mesh");
-        let mut builder = MeshBuilder::new(self.options);
+        let mut builder = MeshBuilder::new(self.options, self.scene.domain);
         builder.loop_ids = self.scene.obstacles.iter().map(|loop_| loop_.id).collect();
         builder.loop_roles = self
             .scene
@@ -1522,11 +1526,14 @@ mod tests {
 
     #[test]
     fn interior_collapse_restores_a_refined_fan_without_touching_boundary() {
-        let mut b = MeshBuilder::new(MeshingOptions {
-            target_edge_length: 3.0,
-            minimum_angle_degrees: 10.0,
-            ..Default::default()
-        });
+        let mut b = MeshBuilder::new(
+            MeshingOptions {
+                target_edge_length: 3.0,
+                minimum_angle_degrees: 10.0,
+                ..Default::default()
+            },
+            crate::DomainRect::default(),
+        );
         for p in [
             Point2::new(-1.0, -1.0),
             Point2::new(1.0, -1.0),
@@ -1573,10 +1580,13 @@ mod tests {
 
     #[test]
     fn coarsening_cannot_cross_the_frozen_patch() {
-        let mut b = MeshBuilder::new(MeshingOptions {
-            target_edge_length: 3.0,
-            ..Default::default()
-        });
+        let mut b = MeshBuilder::new(
+            MeshingOptions {
+                target_edge_length: 3.0,
+                ..Default::default()
+            },
+            crate::DomainRect::default(),
+        );
         for p in [
             Point2::new(-1.0, -1.0),
             Point2::new(1.0, -1.0),

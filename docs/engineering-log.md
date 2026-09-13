@@ -12,6 +12,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   **Place pulse**, while still refusing to magnify late numerical noise. Avoid
   relying on manually identified reset points; investigate a noise-aware envelope,
   hysteresis, or a scale derived from the evolving field-energy distribution.
+
 - [ ] Revisit the EM reconstruction's fixed `0.08 Hz` DC-rejection corner when
   editable domain extents or deliberately very-low-frequency sources arrive. It
   should eventually follow a scene time scale or become an advanced presentation
@@ -62,6 +63,27 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   follow-ups include bounded time-envelope expressions, pulsed/chirped drives,
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
+
+## 2026-09-13 — Editable rectangular outer domain
+
+- Moved the axis-aligned domain rectangle into each core `Scene`, so draft and
+  accepted extents participate in validation, history, meshing, handoff decisions,
+  save/load, recovery, examples, and shared links.
+- Added direct edge/corner resizing in the viewport and numeric left/right/bottom/top
+  controls in Edit. Domain drags are one history action, Escape restores the
+  pre-drag document, invalid bounds remain visible as a draft, and Fit View follows
+  the current rectangle.
+- Generalized outer meshing, AMR boundary projection, boundary probes, grid drawing,
+  material-region display, thumbnails, and SVG projection to non-square and shifted
+  rectangles. Outer BC side identities remain stable.
+- Generalized the automatic far-field inset contour to a rectangular equal-arclength
+  sampler and constrained its inset by the shorter domain extent. Arbitrary curved
+  outer domains remain deferred while auxiliary outgoing conditions on curves are
+  still unstable.
+- Scene JSON is version 19. Versions through 18 recover their historical top-level
+  domain; version 19 stores draft and accepted bounds independently.
+- Verification passes: 312 workspace tests, warnings-denied Clippy, optimized native
+  compilation, and `NO_COLOR=true trunk build --release`.
 
 ## 2026-09-13 — Stable vector-overlay exposure
 

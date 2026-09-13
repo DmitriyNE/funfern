@@ -247,7 +247,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   the contour or its `FF` badge to open it. The contour must enclose every modeled boundary
   and stay in the lossless background material; View can hide its overlay.
 - **Navigate:** right-drag or Space + left-drag pans. Wheel zoom stays centered
-  on the cursor. Fit View frames the fixed square. Panel scrolling and text
+  on the cursor. Fit View frames the current domain. Panel scrolling and text
   editing do not manipulate the viewport.
 - **Drafts:** green curves are accepted, amber curves are being checked, red
   curves are invalid. The last accepted scene stays as a subdued reference.
@@ -340,14 +340,16 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   stable boundary ID and left/right face on the old mesh during transfer.
 
 Scenes allow 32 geometric features, 32 materials, one volume source per region, and
-128 controls per curve. Version 17 JSON stores the complete boundary laws,
-constant/formula materials and region frames, and region-owned volume sources in
+128 controls per curve. Version 19 JSON stores editable draft and accepted domain
+rectangles together with the complete boundary laws, constant/formula materials
+and region frames, and region-owned volume sources in
 both draft and accepted scenes, presentation settings, and a tagged shared time-signal
-representation for point, volume, and boundary drives. Versions 2–16 remain compatible,
+representation for point, volume, and boundary drives. Versions 2–18 remain compatible,
 and version 1 files migrate their loops to background holes. Legacy baffles that
 combined a thin-gap spring with face laws load with the thin-gap law taking
-precedence. JSON files are capped at 2 MiB and require finite coordinates. The editor uses a fixed
-world-space validation tolerance of `0.0002`, independent of zoom. The editor
+precedence. JSON files are capped at 2 MiB and require finite coordinates. The editor
+uses a world-space validation clearance of `1e-4` times the larger domain extent,
+independent of zoom. The editor
 validator is deliberately conservative; final mesh topology uses adaptive exact
 orientation and incircle signs rather than geometric epsilons.
 Load [examples/eight-obstacles.json](examples/eight-obstacles.json) for a

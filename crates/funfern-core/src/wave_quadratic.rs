@@ -1517,6 +1517,7 @@ mod tests {
 
     fn two_material_scene() -> Scene {
         Scene {
+            domain: crate::DomainRect::default(),
             physics: PhysicsModel::Mechanical,
             obstacles: vec![Obstacle::with_role(
                 ObstacleId(1),

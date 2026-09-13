@@ -166,7 +166,7 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON version 18 remains the single persistence representation. A `Document`
+Scene JSON version 19 remains the single persistence representation. A `Document`
 owns one `DocumentModel` plus `PresentationSettings`. The model contains the draft
 and accepted scenes, probes, point-source configuration, and far-field settings; it
 is also the exact snapshot type stored by Undo/Redo. Presentation contains the View
@@ -175,7 +175,9 @@ through scene files, examples, shared links, and recovery, but stays outside his
 so model edits never rewind the user's current view. Camera, selection, open panels,
 floating-window positions, solver state, and derived render caches remain transient.
 
-Version 18 adds the scene physics model, polarization, explicit electric/magnetic
+Version 19 moves the editable axis-aligned domain into both draft and accepted
+scenes; older files migrate their historical top-level fixed domain. Version 18
+adds the scene physics model, polarization, explicit electric/magnetic
 wall variants, and a tagged material law whose serialized property names follow
 the active physics. Version-17 and older materials migrate exactly to Mechanical.
 It also persists the derived vector-overlay mode, smoothing, density, and gain.
@@ -269,8 +271,9 @@ merges the deleted interval into its predecessor and is rejected when those two
 conditions differ. Boundary-law edits are excluded from geometry equality, so an
 accepted condition change rebuilds the operator on the existing mesh.
 
-The initial implementation handles obstacle loops and open baffles in a fixed
-outer box. More involved topology remains a future extension.
+The outer domain is an editable axis-aligned rectangle with stable bottom, right,
+top, and left side identities. More involved outer-boundary topology remains a
+future extension.
 
 ## Milestone 1 spline and document model
 
@@ -301,7 +304,7 @@ an independent fixed world-space sampling tolerance of 0.000025, depth 16, and
 segment construction, pair tests, and containment tests resume across frames;
 the application gives each job 12,000 operations per frame. Disjoint loop bounds
 skip segment blocks and containment tests. A 50-million-operation ceiling rejects
-unreasonably expensive scenes. Contact clearance is 0.0002 (1e-4 of box width),
+unreasonably expensive scenes. Contact clearance is `1e-4` of the larger domain extent,
 with sampling uncertainty added. Self-contact checks distinguish nearby samples
 along one local arc from nonlocal contact, so very short spans introduced by knot
 insertion do not falsely reject an unchanged curve. Crossings are still tested.
@@ -368,10 +371,10 @@ Duplication creates new stable geometry IDs, copies knot intervals,
 multiplicities, and span laws, and gives duplicated material-interface or wall
 loops their own interior region with the same material.
 
-Version 8 JSON stores the fixed domain, loop roles, all assigned boundary laws,
-materials, regions, controls, intervals, knot multiplicities, and both scenes.
-Versions 2–7 remain
-compatible; version 1 loads by assigning its loops the background hole role and
+Version 19 JSON stores independent draft and accepted domain rectangles alongside
+the loop roles, all assigned boundary laws, materials, regions, controls, intervals,
+knot multiplicities, and both scenes. Versions 2–18 remain compatible; version 1
+loads by assigning its loops the background hole role and
 creating the default background material/region. Older loop records migrate to a
 reflecting condition on every periodic span. Version-6 baffles that combined a
 thin-gap law with independent face laws migrate with the thin-gap law taking
@@ -385,8 +388,8 @@ geometry is allowed. Failed parsing or validation never replaces the document.
 The viewport and panels share egui's event routing and logical-pixel coordinates.
 Geometry is drawn with the egui painter on Bevy's wgpu device. Input gestures
 start in the viewport; panel/text capture prevents accidental geometry edits.
-Canvas resize/display scale comes from Bevy/egui, and Fit View frames the fixed
-box. JSON excludes the viewport. There is no independent wgpu device, WebGL
+Canvas resize/display scale comes from Bevy/egui, and Fit View frames the current
+draft domain. JSON excludes the viewport. There is no independent wgpu device, WebGL
 fallback, audio subsystem, or 3D rendering pipeline. This editor acceptance model
 is separate from the future solver transaction machinery below.
 
@@ -401,7 +404,7 @@ The editor's proximity tolerance remains separate: exact predicate signs answer
 topology questions, while the editor tolerance decides whether near-contact is
 acceptable input.
 
-Mesh construction samples the fixed outer square and every accepted spline. It
+Mesh construction samples the accepted axis-aligned outer rectangle and every accepted spline. It
 builds one polygonal domain per retained region. A material interface reuses one
 vertex trace for its exterior and interior domains; a wall duplicates the trace
 so the two sides have independent DOFs. A visibility bridge turns each domain and
@@ -620,8 +623,8 @@ area, and geometric coverage. EM records additionally report RMS transverse-fiel
 magnitude. Definitions and host histories survive ordinary
 solver handoffs; stencils rebuild for each committed mesh.
 
-The singleton far-field monitor derives a counterclockwise square contour from the
-fixed outer domain and a document-level inset. It uses 256 midpoint samples with
+The singleton far-field monitor derives a counterclockwise rectangular contour from
+the outer domain and a document-level inset. It uses 256 equal-arclength midpoint samples with
 outward normals and accepts the configuration only when the contour encloses all
 modeled boundaries and every sample lies in the same lossless background region.
 Enclosure is checked against adaptively subdivided periodic and open spline traces
@@ -896,7 +899,7 @@ first-order condition is `∂n u = -u_t/c`. In the weak equation it contributes 
 positive boundary damping `∫Γ sqrt(rho k) v u_t ds`. Each quadratic boundary edge
 uses the diagonal endpoint/midpoint/endpoint Simpson weights `L/6, 2L/3, L/6`, so
 the explicit solver retains a diagonal damping operation. Only edges labeled as
-the fixed outer square receive this term; obstacle edges stay reflecting. At a
+the four outer rectangle sides receive this term; obstacle edges stay reflecting. At a
 corner, the two incident edge integrals both contribute to the corner node.
 
 Reflecting remains the startup default. Each fixed-box side is one logical span.

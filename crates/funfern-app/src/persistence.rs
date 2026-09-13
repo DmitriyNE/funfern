@@ -8,8 +8,6 @@ use funfern_core::*;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
-const DOMAIN: [f64; 4] = [-1.0, 1.0, -1.0, 1.0];
-
 #[derive(Deserialize)]
 struct Header {
     version: u32,
@@ -226,6 +224,8 @@ enum StoredProbeSamplingPreset {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredScene {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    domain: Option<[f64; 4]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     physics: Option<StoredPhysicsModel>,
     materials: Vec<StoredMaterial>,
@@ -453,6 +453,12 @@ enum StoredRole {
 
 fn encode_scene(scene: &Scene) -> StoredScene {
     StoredScene {
+        domain: Some([
+            scene.domain.min_x,
+            scene.domain.max_x,
+            scene.domain.min_y,
+            scene.domain.max_y,
+        ]),
         physics: Some(encode_physics(scene.physics)),
         materials: scene
             .materials
@@ -791,7 +797,15 @@ fn decode_open_spline(
     .map_err(|error| error.to_string())
 }
 
-fn decode_v1(loops: Vec<StoredLoopV1>) -> Result<Scene, String> {
+fn decode_domain(values: [f64; 4]) -> Result<DomainRect, String> {
+    let domain = DomainRect::new(values[0], values[1], values[2], values[3]);
+    domain
+        .valid()
+        .then_some(domain)
+        .ok_or_else(|| "Scene contains invalid domain extents".into())
+}
+
+fn decode_v1(loops: Vec<StoredLoopV1>, domain: DomainRect) -> Result<Scene, String> {
     if loops.len() > MAX_OBSTACLES {
         return Err("Maximum 32 loops".into());
     }
@@ -808,6 +822,7 @@ fn decode_v1(loops: Vec<StoredLoopV1>) -> Result<Scene, String> {
         })
         .collect::<Result<Vec<_>, String>>()?;
     let scene = Scene {
+        domain,
         obstacles,
         ..Scene::default()
     };
@@ -817,15 +832,29 @@ fn decode_v1(loops: Vec<StoredLoopV1>) -> Result<Scene, String> {
     Ok(scene)
 }
 
-fn decode_scene(
-    stored: StoredScene,
+#[derive(Clone, Copy)]
+struct SceneDecodeOptions {
+    legacy_domain: DomainRect,
+    require_domain: bool,
     require_loop_conditions: bool,
     require_outer_boundaries: bool,
     normalize_legacy_parallel_gap: bool,
     require_material_frames: bool,
     require_volume_sources: bool,
     require_physics: bool,
-) -> Result<Scene, String> {
+}
+
+fn decode_scene(stored: StoredScene, options: SceneDecodeOptions) -> Result<Scene, String> {
+    let SceneDecodeOptions {
+        legacy_domain,
+        require_domain,
+        require_loop_conditions,
+        require_outer_boundaries,
+        normalize_legacy_parallel_gap,
+        require_material_frames,
+        require_volume_sources,
+        require_physics,
+    } = options;
     if stored.loops.len() > MAX_OBSTACLES
         || stored.internal_boundaries.len() > MAX_INTERNAL_BOUNDARIES
         || stored.loops.len() + stored.internal_boundaries.len() > MAX_OBSTACLES
@@ -1072,7 +1101,14 @@ fn decode_scene(
             };
         }
     }
+    let domain = match stored.domain {
+        Some(domain) if require_domain => decode_domain(domain)?,
+        Some(_) | None if !require_domain => legacy_domain,
+        None => return Err("Scene has no domain extents".into()),
+        Some(_) => unreachable!(),
+    };
     let scene = Scene {
+        domain,
         physics,
         obstacles,
         internal_boundaries,
@@ -1123,8 +1159,13 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 18,
-        domain: DOMAIN,
+        version: 19,
+        domain: [
+            document.model.accepted.domain.min_x,
+            document.model.accepted.domain.max_x,
+            document.model.accepted.domain.min_y,
+            document.model.accepted.domain.max_y,
+        ],
         draft: encode_scene(&document.model.draft),
         accepted: encode_scene(&document.model.accepted),
         probes: document
@@ -1514,13 +1555,11 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
     let document = match header.version {
         1 => {
             let file: FileV1 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-            if file.domain != DOMAIN {
-                return Err("Unsupported scene domain".into());
-            }
+            let domain = decode_domain(file.domain)?;
             Document {
                 model: DocumentModel {
-                    draft: decode_v1(file.draft)?,
-                    accepted: decode_v1(file.accepted)?,
+                    draft: decode_v1(file.draft, domain)?,
+                    accepted: decode_v1(file.accepted, domain)?,
                     probes: vec![],
                     source: PointSource::default(),
                     far_field: FarFieldSettings::default(),
@@ -1528,29 +1567,21 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 presentation: PresentationSettings::default(),
             }
         }
-        2..=18 => {
+        2..=19 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-            if file.domain != DOMAIN {
-                return Err("Unsupported scene domain".into());
-            }
-            let draft = decode_scene(
-                file.draft,
-                header.version >= 5,
-                header.version >= 6,
-                header.version < 7,
-                header.version >= 14,
-                header.version >= 15,
-                header.version >= 18,
-            )?;
-            let accepted = decode_scene(
-                file.accepted,
-                header.version >= 5,
-                header.version >= 6,
-                header.version < 7,
-                header.version >= 14,
-                header.version >= 15,
-                header.version >= 18,
-            )?;
+            let legacy_domain = decode_domain(file.domain)?;
+            let options = SceneDecodeOptions {
+                legacy_domain,
+                require_domain: header.version >= 19,
+                require_loop_conditions: header.version >= 5,
+                require_outer_boundaries: header.version >= 6,
+                normalize_legacy_parallel_gap: header.version < 7,
+                require_material_frames: header.version >= 14,
+                require_volume_sources: header.version >= 15,
+                require_physics: header.version >= 18,
+            };
+            let draft = decode_scene(file.draft, options)?;
+            let accepted = decode_scene(file.accepted, options)?;
             let source = decode_source(file.source, &accepted)?;
             let probes = decode_probes(
                 file.probes,
@@ -1568,6 +1599,9 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
             };
             if !far_field.valid() {
                 return Err("Scene contains invalid far-field settings".into());
+            }
+            if 2.0 * far_field.inset >= accepted.domain.minimum_extent() {
+                return Err("Far-field inset leaves no contour inside the accepted domain".into());
             }
             let presentation = match file.presentation {
                 Some(stored) if header.version >= 16 => decode_presentation(stored)?,

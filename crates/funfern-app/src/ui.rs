@@ -420,6 +420,12 @@ enum ProbeDrag {
 }
 
 #[derive(Clone, Copy)]
+enum DomainDrag {
+    Side { side: OuterSide, start: DomainRect },
+    Corner { index: usize, start: DomainRect },
+}
+
+#[derive(Clone, Copy)]
 enum ProbeHit {
     Point(ProbeId),
     SegmentEndpoint(ProbeId, bool),
@@ -773,6 +779,7 @@ pub struct Playground {
     probe_sample_rate: f64,
     probe_history_seconds: f64,
     probe_drag: Option<ProbeDrag>,
+    domain_drag: Option<DomainDrag>,
     source_dragging: bool,
     segment_probe_start: Option<Point2>,
     area_probe_center: Option<Point2>,
@@ -944,6 +951,7 @@ impl Default for Playground {
             probe_sample_rate: 120.0,
             probe_history_seconds: 10.0,
             probe_drag: None,
+            domain_drag: None,
             source_dragging: false,
             segment_probe_start: None,
             area_probe_center: None,
@@ -1324,12 +1332,7 @@ impl Playground {
         }
         match target.feature {
             BoundaryProbeFeature::Outer => {
-                let corners = [
-                    Point2::new(-1.0, -1.0),
-                    Point2::new(1.0, -1.0),
-                    Point2::new(1.0, 1.0),
-                    Point2::new(-1.0, 1.0),
-                ];
+                let corners = scene.domain.corners();
                 for span in spans {
                     segments.push(BoundaryPathSegment {
                         label: BoundaryLabel::Outer(OuterSide::ALL[span]),
@@ -1489,22 +1492,37 @@ impl Playground {
         Some((samples, path.length, path.closed))
     }
 
-    fn far_field_contour(inset: f64) -> Vec<(Point2, Point2)> {
-        let half_extent = 1.0 - inset;
-        let points_per_side = FAR_FIELD_CONTOUR_POINTS / 4;
+    fn far_field_contour(domain: DomainRect, inset: f64) -> Vec<(Point2, Point2)> {
+        let min_x = domain.min_x + inset;
+        let max_x = domain.max_x - inset;
+        let min_y = domain.min_y + inset;
+        let max_y = domain.max_y - inset;
+        let width = max_x - min_x;
+        let height = max_y - min_y;
+        let perimeter = 2.0 * (width + height);
+        let spacing = perimeter / FAR_FIELD_CONTOUR_POINTS as f64;
         let mut samples = Vec::with_capacity(FAR_FIELD_CONTOUR_POINTS);
-        for side in 0..4 {
-            for index in 0..points_per_side {
-                let fraction = (index as f64 + 0.5) / points_per_side as f64;
-                let along = -half_extent + 2.0 * half_extent * fraction;
-                let sample = match side {
-                    0 => (Point2::new(along, -half_extent), Point2::new(0.0, -1.0)),
-                    1 => (Point2::new(half_extent, along), Point2::new(1.0, 0.0)),
-                    2 => (Point2::new(-along, half_extent), Point2::new(0.0, 1.0)),
-                    _ => (Point2::new(-half_extent, -along), Point2::new(-1.0, 0.0)),
-                };
-                samples.push(sample);
-            }
+        for index in 0..FAR_FIELD_CONTOUR_POINTS {
+            let distance = (index as f64 + 0.5) * spacing;
+            let sample = if distance < width {
+                (Point2::new(min_x + distance, min_y), Point2::new(0.0, -1.0))
+            } else if distance < width + height {
+                (
+                    Point2::new(max_x, min_y + distance - width),
+                    Point2::new(1.0, 0.0),
+                )
+            } else if distance < 2.0 * width + height {
+                (
+                    Point2::new(max_x - (distance - width - height), max_y),
+                    Point2::new(0.0, 1.0),
+                )
+            } else {
+                (
+                    Point2::new(min_x, max_y - (distance - 2.0 * width - height)),
+                    Point2::new(-1.0, 0.0),
+                )
+            };
+            samples.push(sample);
         }
         samples
     }
@@ -1515,11 +1533,10 @@ impl Playground {
         scene: &Scene,
         settings: FarFieldSettings,
     ) -> Result<FarFieldInput, String> {
-        if !settings.valid() {
-            return Err("Far-field inset must lie between 0 and 1".into());
+        if !settings.valid() || 2.0 * settings.inset >= scene.domain.minimum_extent() {
+            return Err("Far-field inset must leave a nonempty contour inside the domain".into());
         }
-        let half_extent = 1.0 - settings.inset;
-        Self::validate_far_field_clearance(scene, half_extent)?;
+        Self::validate_far_field_clearance(scene, settings.inset)?;
         let material = scene
             .region_material(BACKGROUND_REGION)
             .ok_or("The background material is missing")?;
@@ -1537,7 +1554,7 @@ impl Playground {
         if !wave_speed.is_finite() || wave_speed <= 0.0 {
             return Err("The background wave speed is invalid".into());
         }
-        let samples = Self::far_field_contour(settings.inset)
+        let samples = Self::far_field_contour(scene.domain, settings.inset)
             .into_iter()
             .map(|(position, normal)| {
                 let stencil = QuadraticPointStencil::build(mesh, operator, scene, position)
@@ -1551,21 +1568,31 @@ impl Playground {
         Ok(FarFieldInput {
             samples,
             wave_speed,
-            sample_spacing: 8.0 * half_extent / FAR_FIELD_CONTOUR_POINTS as f64,
-            delay_margin: std::f64::consts::SQRT_2 * half_extent / wave_speed,
+            sample_spacing: 2.0
+                * (scene.domain.width() + scene.domain.height() - 4.0 * settings.inset)
+                / FAR_FIELD_CONTOUR_POINTS as f64,
+            delay_margin: scene
+                .domain
+                .corners()
+                .into_iter()
+                .map(Point2::norm)
+                .fold(0.0, f64::max)
+                / wave_speed,
         })
     }
 
-    fn validate_far_field_clearance(scene: &Scene, half_extent: f64) -> Result<(), String> {
-        const CURVE_TOLERANCE: f64 = WORLD_TOLERANCE * 0.25;
+    fn validate_far_field_clearance(scene: &Scene, inset: f64) -> Result<(), String> {
+        let curve_tolerance = scene.domain.tolerance() * 0.25;
         let options = SamplingOptions {
-            tolerance: CURVE_TOLERANCE,
+            tolerance: curve_tolerance,
             max_depth: 16,
             max_points: 4096,
         };
         let enclosed = |point: Point2| {
-            point.x.abs() < half_extent - CURVE_TOLERANCE
-                && point.y.abs() < half_extent - CURVE_TOLERANCE
+            point.x > scene.domain.min_x + inset + curve_tolerance
+                && point.x < scene.domain.max_x - inset - curve_tolerance
+                && point.y > scene.domain.min_y + inset + curve_tolerance
+                && point.y < scene.domain.max_y - inset - curve_tolerance
         };
         for loop_ in &scene.obstacles {
             let samples = sample(&loop_.spline, options).map_err(|_| {
@@ -1893,6 +1920,7 @@ impl Playground {
         self.selected_spans.clear();
         self.selected_probe = None;
         self.probe_drag = None;
+        self.domain_drag = None;
         self.source_dragging = false;
         self.segment_probe_start = None;
         self.area_probe_center = None;
@@ -2196,7 +2224,7 @@ impl Playground {
             }
         };
         for side in OuterSide::ALL {
-            let [a, b] = outer_side_points(side);
+            let [a, b] = outer_side_points(self.editor.document.model.draft.domain, side);
             if segment_intersects_rect(self.screen(a, viewport), self.screen(b, viewport), marquee)
             {
                 add(GeometrySpan::Outer(side));
@@ -6962,7 +6990,7 @@ impl Playground {
                 far_field.enabled,
                 egui::DragValue::new(&mut far_field.inset)
                     .speed(0.005)
-                    .range(0.01..=0.9)
+                    .range(0.001..=self.editor.document.model.draft.domain.minimum_extent() * 0.49)
                     .prefix("inset ")
                     .update_while_editing(false),
             )
@@ -7768,6 +7796,53 @@ impl Playground {
                 self.set_span_selection(vec![]);
             }
         });
+        ui.add_space(8.0);
+        ui.label("Domain bounds");
+        let mut domain = self.editor.document.model.draft.domain;
+        let responses = ui
+            .push_id("domain_bounds", |ui| {
+                [
+                    ui.add(
+                        egui::DragValue::new(&mut domain.min_x)
+                            .speed(0.01)
+                            .prefix("left ")
+                            .update_while_editing(false),
+                    ),
+                    ui.add(
+                        egui::DragValue::new(&mut domain.max_x)
+                            .speed(0.01)
+                            .prefix("right ")
+                            .update_while_editing(false),
+                    ),
+                    ui.add(
+                        egui::DragValue::new(&mut domain.min_y)
+                            .speed(0.01)
+                            .prefix("bottom ")
+                            .update_while_editing(false),
+                    ),
+                    ui.add(
+                        egui::DragValue::new(&mut domain.max_y)
+                            .speed(0.01)
+                            .prefix("top ")
+                            .update_while_editing(false),
+                    ),
+                ]
+            })
+            .inner;
+        if responses.iter().any(|response| {
+            response.gained_focus() || response.drag_started() || response.changed()
+        }) {
+            self.editor.begin();
+        }
+        if responses.iter().any(egui::Response::changed) {
+            self.editor.set_domain_during_edit(domain);
+        }
+        if responses
+            .iter()
+            .any(|response| response.lost_focus() || response.drag_stopped())
+        {
+            self.editor.commit();
+        }
         if let InteractionMode::DrawCustom { .. } = self.interaction_mode {
             ui.horizontal(|ui| {
                 ui.label(format!("{} / 128 points", self.custom.len()));
@@ -9121,8 +9196,12 @@ impl Playground {
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let r = response.rect;
         if self.fit {
-            self.center = Point2::default();
-            self.scale = (r.width().min(r.height()) as f64 / 2.5).max(20.0);
+            let domain = self.editor.document.model.draft.domain;
+            self.center = domain.center();
+            self.scale = ((r.width() as f64
+                / (domain.width().abs().max(MIN_DOMAIN_EXTENT) * 1.25))
+                .min(r.height() as f64 / (domain.height().abs().max(MIN_DOMAIN_EXTENT) * 1.25)))
+            .max(2.0);
             self.fit = false;
         }
         let ctx = ui.ctx();
@@ -9142,6 +9221,15 @@ impl Playground {
                     egui::CursorIcon::PointingHand
                 } else if self.hit_source(point, r) || self.hit_probe(point, r).is_some() {
                     egui::CursorIcon::Grab
+                } else if self.hit_domain_corner(point, r).is_some() {
+                    egui::CursorIcon::ResizeNwSe
+                } else if matches!(
+                    self.hit_outer_boundary(point, r),
+                    Some(OuterSide::Left | OuterSide::Right)
+                ) {
+                    egui::CursorIcon::ResizeHorizontal
+                } else if self.hit_outer_boundary(point, r).is_some() {
+                    egui::CursorIcon::ResizeVertical
                 } else {
                     match self.hit_gizmo(point, r) {
                         Some(GizmoHit::Scale) => egui::CursorIcon::ResizeNwSe,
@@ -9168,6 +9256,7 @@ impl Playground {
                     && self.area_probe_center.take().is_some();
                 let source_dragging = std::mem::take(&mut self.source_dragging);
                 let probe_drag = self.probe_drag.take();
+                let domain_drag = self.domain_drag.take();
                 let material_frame_drag = self.material_frame_drag.take();
                 let drag = self.drag.take();
                 match &drag {
@@ -9183,6 +9272,7 @@ impl Playground {
                 self.pending_span_click = None;
                 if source_dragging
                     || probe_drag.is_some()
+                    || domain_drag.is_some()
                     || material_frame_drag.is_some()
                     || drag.is_some()
                     || self.editor.editing()
@@ -9382,6 +9472,31 @@ impl Playground {
                                 ProbeHit::Boundary(_) | ProbeHit::AreaRegion(_) => unreachable!(),
                             });
                         }
+                    } else if let Some(index) = self.hit_domain_corner(p, r) {
+                        let sides = match index {
+                            0 => vec![
+                                GeometrySpan::Outer(OuterSide::Bottom),
+                                GeometrySpan::Outer(OuterSide::Left),
+                            ],
+                            1 => vec![
+                                GeometrySpan::Outer(OuterSide::Bottom),
+                                GeometrySpan::Outer(OuterSide::Right),
+                            ],
+                            2 => vec![
+                                GeometrySpan::Outer(OuterSide::Top),
+                                GeometrySpan::Outer(OuterSide::Right),
+                            ],
+                            _ => vec![
+                                GeometrySpan::Outer(OuterSide::Top),
+                                GeometrySpan::Outer(OuterSide::Left),
+                            ],
+                        };
+                        self.set_span_selection(sides);
+                        self.editor.begin();
+                        self.domain_drag = Some(DomainDrag::Corner {
+                            index,
+                            start: self.editor.document.model.draft.domain,
+                        });
                     } else if let Some((id, index)) = self.hit_handle(p, r) {
                         let control = GeometryControl::Loop(id, index);
                         self.select_control(control);
@@ -9480,6 +9595,16 @@ impl Playground {
                             } else {
                                 self.set_span_selection(vec![span]);
                             }
+                            if let GeometrySpan::Outer(side) = span
+                                && !modifiers.command
+                                && !modifiers.shift
+                            {
+                                self.editor.begin();
+                                self.domain_drag = Some(DomainDrag::Side {
+                                    side,
+                                    start: self.editor.document.model.draft.domain,
+                                });
+                            }
                             if !(modifiers.command && modifiers.shift)
                                 && self.selected_spans.contains(&span)
                                 && let Some(pivot) = self.selection_pivot()
@@ -9535,6 +9660,23 @@ impl Playground {
                             .unwrap_or(BACKGROUND_REGION);
                         self.editor.document.model.source = self.wave_source;
                         self.wave_source_dirty = true;
+                    } else if let Some(drag) = self.domain_drag {
+                        let start = match drag {
+                            DomainDrag::Side { start, .. } | DomainDrag::Corner { start, .. } => {
+                                start
+                            }
+                        };
+                        let point = if self.snap_to_grid || ctx.input(|input| input.modifiers.shift)
+                        {
+                            Point2::new(
+                                (world.x / self.snap_step).round() * self.snap_step,
+                                (world.y / self.snap_step).round() * self.snap_step,
+                            )
+                        } else {
+                            world
+                        };
+                        self.editor
+                            .set_domain_during_edit(Self::resize_domain(start, drag, point));
                     } else if let Some(material_drag) = self.material_frame_drag.as_ref() {
                         let snap = |point: Point2| {
                             if self.snap_to_grid || ctx.input(|input| input.modifiers.shift) {
@@ -9930,6 +10072,9 @@ impl Playground {
             if self.probe_drag.take().is_some() {
                 self.editor.commit();
             }
+            if self.domain_drag.take().is_some() {
+                self.editor.commit();
+            }
             if self.material_frame_drag.take().is_some() {
                 self.editor.commit();
             }
@@ -9981,22 +10126,50 @@ impl Playground {
         self.refresh_curves();
         painter.rect_filled(r, 0.0, Color32::from_rgb(16, 23, 31));
         if self.editor.document.presentation.grid {
-            for i in -10..=10 {
-                let t = i as f64 / 10.0;
+            let domain = self.editor.document.model.draft.domain;
+            let spacing = 10.0_f64.powf(
+                (domain
+                    .width()
+                    .abs()
+                    .max(domain.height().abs())
+                    .max(MIN_DOMAIN_EXTENT)
+                    / 10.0)
+                    .log10()
+                    .floor(),
+            );
+            let first_x = (domain.min_x.min(domain.max_x) / spacing).ceil() as i32;
+            let last_x = (domain.min_x.max(domain.max_x) / spacing).floor() as i32;
+            let first_y = (domain.min_y.min(domain.max_y) / spacing).ceil() as i32;
+            let last_y = (domain.min_y.max(domain.max_y) / spacing).floor() as i32;
+            for i in first_x..=last_x {
+                let t = i as f64 * spacing;
                 let color = if i == 0 {
                     Color32::from_rgb(40, 57, 70)
                 } else {
                     Color32::from_rgb(27, 39, 49)
                 };
-                for (a, b) in [
-                    (Point2::new(t, -1.0), Point2::new(t, 1.0)),
-                    (Point2::new(-1.0, t), Point2::new(1.0, t)),
-                ] {
-                    painter.line_segment(
-                        [self.screen(a, r), self.screen(b, r)],
-                        Stroke::new(1.0, color),
-                    );
-                }
+                painter.line_segment(
+                    [
+                        self.screen(Point2::new(t, domain.min_y), r),
+                        self.screen(Point2::new(t, domain.max_y), r),
+                    ],
+                    Stroke::new(1.0, color),
+                );
+            }
+            for i in first_y..=last_y {
+                let t = i as f64 * spacing;
+                let color = if i == 0 {
+                    Color32::from_rgb(40, 57, 70)
+                } else {
+                    Color32::from_rgb(27, 39, 49)
+                };
+                painter.line_segment(
+                    [
+                        self.screen(Point2::new(domain.min_x, t), r),
+                        self.screen(Point2::new(domain.max_x, t), r),
+                    ],
+                    Stroke::new(1.0, color),
+                );
             }
         }
         if self.editor.document.presentation.material_overlay == MaterialOverlay::Regions
@@ -10154,16 +10327,19 @@ impl Playground {
             }
             painter.add(egui::Shape::mesh(target_mesh));
         }
-        let domain = [
-            Point2::new(-1.0, -1.0),
-            Point2::new(1.0, -1.0),
-            Point2::new(1.0, 1.0),
-            Point2::new(-1.0, 1.0),
-            Point2::new(-1.0, -1.0),
-        ];
+        let domain_rect = self.editor.document.model.draft.domain;
+        let corners = domain_rect.corners();
+        let domain = [corners[0], corners[1], corners[2], corners[3], corners[0]];
         painter.add(egui::Shape::line(
             domain.map(|p| self.screen(p, r)).to_vec(),
-            Stroke::new(1.5, Color32::from_rgb(100, 123, 140)),
+            Stroke::new(
+                1.5,
+                match self.editor.acceptance {
+                    Acceptance::Valid => Color32::from_rgb(100, 123, 140),
+                    Acceptance::Pending => GOLD,
+                    Acceptance::Invalid(_) => RED,
+                },
+            ),
         ));
         if self.editor.document.presentation.mesh
             && let Some(mesh) = &self.mesh
@@ -10223,9 +10399,36 @@ impl Playground {
                 Stroke::new(3.5, SELECT),
             );
         }
+        if self
+            .selected_spans
+            .iter()
+            .any(|span| matches!(span, GeometrySpan::Outer(_)))
+        {
+            for corner in domain_rect.corners() {
+                let point = self.screen(corner, r);
+                painter.circle_filled(point, 4.5, SELECT);
+                painter.circle_stroke(point, 6.5, Stroke::new(1.5, Color32::WHITE));
+            }
+        }
         if self.editor.document.presentation.accepted_reference
             && self.editor.document.model.draft != self.editor.document.model.accepted
         {
+            if self.editor.document.model.draft.domain != self.editor.document.model.accepted.domain
+            {
+                let accepted = self.editor.document.model.accepted.domain.corners();
+                painter.add(egui::Shape::line(
+                    [
+                        accepted[0],
+                        accepted[1],
+                        accepted[2],
+                        accepted[3],
+                        accepted[0],
+                    ]
+                    .map(|point| self.screen(point, r))
+                    .to_vec(),
+                    Stroke::new(1.5, Color32::from_rgb(66, 100, 98)),
+                ));
+            }
             for curve in &self.accepted_curves {
                 self.draw_curve(&painter, r, curve, Color32::from_rgb(66, 100, 98), 3.0);
             }
@@ -10246,7 +10449,8 @@ impl Playground {
         }
         if self.editor.document.presentation.boundary_conditions {
             for side in OuterSide::ALL {
-                let points = outer_side_points(side).map(|point| self.screen(point, r));
+                let points =
+                    outer_side_points(domain_rect, side).map(|point| self.screen(point, r));
                 painter.line_segment(
                     points,
                     Stroke::new(
@@ -10355,7 +10559,8 @@ impl Playground {
                 }
                 GeometrySpan::Outer(side) => {
                     painter.line_segment(
-                        outer_side_points(side).map(|point| self.screen(point, r)),
+                        outer_side_points(self.editor.document.model.draft.domain, side)
+                            .map(|point| self.screen(point, r)),
                         Stroke::new(3.5, Color32::WHITE),
                     );
                 }
@@ -10754,15 +10959,12 @@ impl Playground {
         if self.editor.document.model.far_field.enabled
             && self.editor.document.presentation.far_field_contour
         {
-            let half_extent = 1.0 - self.editor.document.model.far_field.inset;
-            let corners = [
-                Point2::new(-half_extent, -half_extent),
-                Point2::new(half_extent, -half_extent),
-                Point2::new(half_extent, half_extent),
-                Point2::new(-half_extent, half_extent),
-                Point2::new(-half_extent, -half_extent),
-            ]
-            .map(|point| self.screen(point, r));
+            let domain = inset_domain(
+                self.editor.document.model.draft.domain,
+                self.editor.document.model.far_field.inset,
+            );
+            let c = domain.corners();
+            let corners = [c[0], c[1], c[2], c[3], c[0]].map(|point| self.screen(point, r));
             painter.add(egui::Shape::line(
                 corners.to_vec(),
                 Stroke::new(1.5, Color32::from_rgb(172, 122, 255)),
@@ -10917,9 +11119,10 @@ impl Playground {
                     }
                     ProbeTarget::AreaRegion { region } => {
                         if region == BACKGROUND_REGION {
+                            let bounds = self.editor.document.model.draft.domain;
                             let domain = Rect::from_two_pos(
-                                self.screen(Point2::new(-1.0, 1.0), r),
-                                self.screen(Point2::new(1.0, -1.0), r),
+                                self.screen(Point2::new(bounds.min_x, bounds.max_y), r),
+                                self.screen(Point2::new(bounds.max_x, bounds.min_y), r),
                             );
                             painter.rect_stroke(
                                 domain,
@@ -11075,33 +11278,63 @@ impl Playground {
 
     fn hit_outer_boundary(&self, p: Pos2, r: Rect) -> Option<OuterSide> {
         let point = self.world(p, r);
-        [
-            (
-                OuterSide::Bottom,
-                Point2::new(-1.0, -1.0),
-                Point2::new(1.0, -1.0),
-            ),
-            (
-                OuterSide::Right,
-                Point2::new(1.0, -1.0),
-                Point2::new(1.0, 1.0),
-            ),
-            (
-                OuterSide::Top,
-                Point2::new(1.0, 1.0),
-                Point2::new(-1.0, 1.0),
-            ),
-            (
-                OuterSide::Left,
-                Point2::new(-1.0, 1.0),
-                Point2::new(-1.0, -1.0),
-            ),
-        ]
-        .into_iter()
-        .map(|(side, a, b)| (side, point_segment_distance(point, a, b)))
-        .filter(|(_, distance)| *distance * self.scale <= 8.0)
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(side, _)| side)
+        let domain = self.editor.document.model.draft.domain;
+        OuterSide::ALL
+            .map(|side| {
+                let [a, b] = outer_side_points(domain, side);
+                (side, a, b)
+            })
+            .into_iter()
+            .map(|(side, a, b)| (side, point_segment_distance(point, a, b)))
+            .filter(|(_, distance)| *distance * self.scale <= 8.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(side, _)| side)
+    }
+
+    fn hit_domain_corner(&self, point: Pos2, viewport: Rect) -> Option<usize> {
+        self.editor
+            .document
+            .model
+            .draft
+            .domain
+            .corners()
+            .into_iter()
+            .enumerate()
+            .map(|(index, corner)| (index, self.screen(corner, viewport).distance(point)))
+            .filter(|(_, distance)| *distance <= 10.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(index, _)| index)
+    }
+
+    fn resize_domain(start: DomainRect, drag: DomainDrag, point: Point2) -> DomainRect {
+        let mut domain = start;
+        match drag {
+            DomainDrag::Side { side, .. } => match side {
+                OuterSide::Bottom => domain.min_y = point.y,
+                OuterSide::Right => domain.max_x = point.x,
+                OuterSide::Top => domain.max_y = point.y,
+                OuterSide::Left => domain.min_x = point.x,
+            },
+            DomainDrag::Corner { index, .. } => match index {
+                0 => {
+                    domain.min_x = point.x;
+                    domain.min_y = point.y;
+                }
+                1 => {
+                    domain.max_x = point.x;
+                    domain.min_y = point.y;
+                }
+                2 => {
+                    domain.max_x = point.x;
+                    domain.max_y = point.y;
+                }
+                _ => {
+                    domain.min_x = point.x;
+                    domain.max_y = point.y;
+                }
+            },
+        }
+        domain
     }
 
     fn curve_spans(&self, span: GeometrySpan) -> Vec<GeometrySpan> {
@@ -11230,13 +11463,11 @@ impl Playground {
         {
             return false;
         }
-        let half_extent = 1.0 - self.editor.document.model.far_field.inset;
-        let corners = [
-            Point2::new(-half_extent, -half_extent),
-            Point2::new(half_extent, -half_extent),
-            Point2::new(half_extent, half_extent),
-            Point2::new(-half_extent, half_extent),
-        ]
+        let corners = inset_domain(
+            self.editor.document.model.draft.domain,
+            self.editor.document.model.far_field.inset,
+        )
+        .corners()
         .map(|world| self.screen(world, viewport));
         corners
             .iter()
@@ -11269,7 +11500,13 @@ impl Playground {
                     .fold(Point2::default(), |sum, point| sum + point)
                     / controls.len().max(1) as f64
             })
-            .unwrap_or_else(|| Point2::new(-0.86, 0.86))
+            .unwrap_or_else(|| {
+                let domain = self.editor.document.model.draft.domain;
+                Point2::new(
+                    domain.min_x + 0.07 * domain.width(),
+                    domain.max_y - 0.07 * domain.height(),
+                )
+            })
     }
 
     fn hit_probe(&self, point: Pos2, viewport: Rect) -> Option<ProbeHit> {
@@ -11661,13 +11898,23 @@ impl Playground {
     }
 }
 
-fn outer_side_points(side: OuterSide) -> [Point2; 2] {
+fn outer_side_points(domain: DomainRect, side: OuterSide) -> [Point2; 2] {
+    let corners = domain.corners();
     match side {
-        OuterSide::Bottom => [Point2::new(-1.0, -1.0), Point2::new(1.0, -1.0)],
-        OuterSide::Right => [Point2::new(1.0, -1.0), Point2::new(1.0, 1.0)],
-        OuterSide::Top => [Point2::new(1.0, 1.0), Point2::new(-1.0, 1.0)],
-        OuterSide::Left => [Point2::new(-1.0, 1.0), Point2::new(-1.0, -1.0)],
+        OuterSide::Bottom => [corners[0], corners[1]],
+        OuterSide::Right => [corners[1], corners[2]],
+        OuterSide::Top => [corners[2], corners[3]],
+        OuterSide::Left => [corners[3], corners[0]],
     }
+}
+
+fn inset_domain(domain: DomainRect, inset: f64) -> DomainRect {
+    DomainRect::new(
+        domain.min_x + inset,
+        domain.max_x - inset,
+        domain.min_y + inset,
+        domain.max_y - inset,
+    )
 }
 
 fn geometry_span_key(span: GeometrySpan) -> (u8, u64, usize) {
@@ -12298,6 +12545,7 @@ pub fn wave_gpu_check_scene() -> Playground {
         ..Default::default()
     };
     let scene = Scene {
+        domain: DomainRect::default(),
         physics: PhysicsModel::Mechanical,
         obstacles: vec![Obstacle::with_role(
             ObstacleId(1),
@@ -14181,14 +14429,15 @@ fn paint_example_thumbnail(
         egui::StrokeKind::Inside,
     );
     let project = |point: Point2| {
+        let domain = scene.domain;
         egui::pos2(
             egui::lerp(
                 rect.left() + 7.0..=rect.right() - 7.0,
-                ((point.x + 1.0) * 0.5) as f32,
+                ((point.x - domain.min_x) / domain.width()) as f32,
             ),
             egui::lerp(
                 rect.bottom() - 7.0..=rect.top() + 7.0,
-                ((point.y + 1.0) * 0.5) as f32,
+                ((point.y - domain.min_y) / domain.height()) as f32,
             ),
         )
     };
@@ -14745,6 +14994,30 @@ mod tests {
             OuterBoundaryCondition::FirstOrderOutgoing
         );
         assert_eq!(harness.state.editor.history_len().0, history + 1);
+    }
+
+    #[test]
+    fn domain_edges_and_corners_drag_as_single_history_actions() {
+        let mut harness = Harness::new();
+        let right = harness.point(Point2::new(1.0, 0.45));
+        let moved_right = harness.point(Point2::new(1.3, 0.45));
+        harness.drag_with_modifiers(right, moved_right, Modifiers::NONE);
+        harness.settle();
+        assert!(
+            (harness.state.editor.document.model.accepted.domain.max_x - 1.3).abs() < 1e-6,
+            "{:?}",
+            harness.state.editor.document.model.accepted.domain
+        );
+        assert_eq!(harness.state.editor.history_len(), (1, 0));
+
+        let corner = harness.point(Point2::new(-1.0, -1.0));
+        let moved_corner = harness.point(Point2::new(-1.2, -0.8));
+        harness.drag_with_modifiers(corner, moved_corner, Modifiers::NONE);
+        harness.settle();
+        let domain = harness.state.editor.document.model.accepted.domain;
+        assert!((domain.min_x + 1.2).abs() < 1e-6);
+        assert!((domain.min_y + 0.8).abs() < 1e-6);
+        assert_eq!(harness.state.editor.history_len(), (2, 0));
     }
 
     fn commit_mesh_without_gpu(state: &mut Playground) {
@@ -16224,7 +16497,7 @@ mod tests {
     fn far_field_contour_is_counterclockwise_with_outward_normals() {
         let inset = 0.12;
         let half_extent = 1.0 - inset;
-        let contour = Playground::far_field_contour(inset);
+        let contour = Playground::far_field_contour(DomainRect::default(), inset);
         assert_eq!(contour.len(), FAR_FIELD_CONTOUR_POINTS);
         assert_eq!(contour[0].1, Point2::new(0.0, -1.0));
         assert_eq!(
@@ -16327,7 +16600,7 @@ mod tests {
                 .iter()
                 .any(|point| point.x >= half_extent)
         );
-        Playground::validate_far_field_clearance(&scene, half_extent).unwrap();
+        Playground::validate_far_field_clearance(&scene, 1.0 - half_extent).unwrap();
     }
 
     #[test]

@@ -212,7 +212,7 @@ pub struct FarFieldSettings {
 
 impl FarFieldSettings {
     pub fn valid(self) -> bool {
-        self.inset.is_finite() && self.inset > 0.0 && self.inset < 1.0
+        self.inset.is_finite() && self.inset > 0.0
     }
 }
 
@@ -442,6 +442,22 @@ impl Default for Editor {
     }
 }
 impl Editor {
+    pub fn set_domain_during_edit(&mut self, domain: DomainRect) {
+        if self.document.model.draft.domain != domain {
+            self.document.model.draft.domain = domain;
+            self.changed();
+        }
+    }
+
+    pub fn set_domain(&mut self, domain: DomainRect) {
+        if self.document.model.draft.domain == domain {
+            return;
+        }
+        self.begin();
+        self.set_domain_during_edit(domain);
+        self.commit();
+    }
+
     pub fn set_physics(&mut self, physics: PhysicsModel) {
         if self.document.model.draft.physics == physics {
             return;

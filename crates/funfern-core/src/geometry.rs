@@ -9,8 +9,86 @@ pub const MAX_INTERNAL_BOUNDARIES: usize = 32;
 pub const MAX_MATERIALS: usize = 32;
 pub const MAX_VOLUME_SOURCES: usize = MAX_OBSTACLES + 1;
 pub const WORLD_TOLERANCE: f64 = 2.0e-4;
+pub const MIN_DOMAIN_EXTENT: f64 = 0.1;
+pub const MAX_DOMAIN_EXTENT: f64 = 100.0;
 pub const BACKGROUND_REGION: RegionId = RegionId(1);
 pub const DEFAULT_MATERIAL: MaterialId = MaterialId(1);
+
+/// Axis-aligned simulated domain. Coordinates and extents are world-space values.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DomainRect {
+    pub min_x: f64,
+    pub max_x: f64,
+    pub min_y: f64,
+    pub max_y: f64,
+}
+
+impl DomainRect {
+    pub const UNIT: Self = Self {
+        min_x: -1.0,
+        max_x: 1.0,
+        min_y: -1.0,
+        max_y: 1.0,
+    };
+
+    pub const fn new(min_x: f64, max_x: f64, min_y: f64, max_y: f64) -> Self {
+        Self {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        }
+    }
+
+    pub fn valid(self) -> bool {
+        let width = self.width();
+        let height = self.height();
+        [self.min_x, self.max_x, self.min_y, self.max_y]
+            .into_iter()
+            .all(f64::is_finite)
+            && (MIN_DOMAIN_EXTENT..=MAX_DOMAIN_EXTENT).contains(&width)
+            && (MIN_DOMAIN_EXTENT..=MAX_DOMAIN_EXTENT).contains(&height)
+    }
+
+    pub fn width(self) -> f64 {
+        self.max_x - self.min_x
+    }
+    pub fn height(self) -> f64 {
+        self.max_y - self.min_y
+    }
+    pub fn center(self) -> Point2 {
+        Point2::new(
+            (self.min_x + self.max_x) * 0.5,
+            (self.min_y + self.max_y) * 0.5,
+        )
+    }
+    pub fn minimum_extent(self) -> f64 {
+        self.width().min(self.height())
+    }
+    pub fn tolerance(self) -> f64 {
+        self.width().max(self.height()) * 1.0e-4
+    }
+    pub fn contains_with_margin(self, point: Point2, margin: f64) -> bool {
+        point.x > self.min_x + margin
+            && point.x < self.max_x - margin
+            && point.y > self.min_y + margin
+            && point.y < self.max_y - margin
+    }
+    pub fn corners(self) -> [Point2; 4] {
+        [
+            Point2::new(self.min_x, self.min_y),
+            Point2::new(self.max_x, self.min_y),
+            Point2::new(self.max_x, self.max_y),
+            Point2::new(self.min_x, self.max_y),
+        ]
+    }
+}
+
+impl Default for DomainRect {
+    fn default() -> Self {
+        Self::UNIT
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ObstacleId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -423,6 +501,7 @@ impl Obstacle {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Scene {
+    pub domain: DomainRect,
     pub physics: crate::PhysicsModel,
     pub obstacles: Vec<Obstacle>,
     pub internal_boundaries: Vec<InternalBoundary>,
@@ -435,6 +514,7 @@ pub struct Scene {
 impl Default for Scene {
     fn default() -> Self {
         Self {
+            domain: DomainRect::default(),
             physics: crate::PhysicsModel::Mechanical,
             obstacles: vec![],
             internal_boundaries: vec![],
@@ -468,6 +548,7 @@ impl Scene {
             || self.regions.is_empty()
             || self.regions.len() > MAX_OBSTACLES + 1
             || self.volume_sources.len() > MAX_VOLUME_SOURCES
+            || !self.domain.valid()
             || !self.outer_boundaries.valid()
         {
             return false;
@@ -616,7 +697,8 @@ impl Scene {
     /// Equality of everything that contributes to the mesh or wave operator.
     /// Volume sources are compiled into independent forcing buffers.
     pub fn operator_eq(&self, other: &Self) -> bool {
-        self.physics == other.physics
+        self.domain == other.domain
+            && self.physics == other.physics
             && self.obstacles == other.obstacles
             && self.internal_boundaries == other.internal_boundaries
             && self.materials == other.materials
@@ -669,7 +751,8 @@ impl Scene {
     /// Geometry and topology equality excludes names, colors, coefficients, and
     /// region-to-material assignments so those edits can reuse the mesh.
     pub fn geometry_eq(&self, other: &Self) -> bool {
-        self.obstacles.len() == other.obstacles.len()
+        self.domain == other.domain
+            && self.obstacles.len() == other.obstacles.len()
             && self
                 .obstacles
                 .iter()
@@ -691,6 +774,7 @@ impl Scene {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValidationIssue {
+    Domain,
     Structure,
     Subdivision(ObstacleId),
     Outside(ObstacleId),
@@ -710,6 +794,10 @@ pub enum ValidationIssue {
 impl std::fmt::Display for ValidationIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Domain => write!(
+                f,
+                "Domain bounds must be finite with width and height between {MIN_DOMAIN_EXTENT} and {MAX_DOMAIN_EXTENT}"
+            ),
             Self::Structure => write!(
                 f,
                 "Scene has invalid IDs, materials, regions, or too many loops"
@@ -719,7 +807,7 @@ impl std::fmt::Display for ValidationIssue {
                 "Loop {}: sampling is exhausted or numerically ambiguous",
                 id.0
             ),
-            Self::Outside(id) => write!(f, "Loop {} leaves or nearly touches the outer box", id.0),
+            Self::Outside(id) => write!(f, "Loop {} leaves or nearly touches the domain", id.0),
             Self::Degenerate(id) => write!(f, "Loop {} is degenerate or too small", id.0),
             Self::SelfContact(id) => {
                 write!(f, "Loop {} crosses or nearly touches itself", id.0)
@@ -744,7 +832,7 @@ impl std::fmt::Display for ValidationIssue {
             ),
             Self::BoundaryOutside(id) => write!(
                 f,
-                "Internal boundary {} leaves or nearly touches the outer box",
+                "Internal boundary {} leaves or nearly touches the domain",
                 id.0
             ),
             Self::BoundaryDegenerate(id) => {
@@ -822,7 +910,9 @@ impl ValidationJob {
     }
     pub fn with_options(scene: Scene, revision: u64, options: SamplingOptions) -> Self {
         let loop_count = scene.obstacles.len();
-        let issue = if scene.structure_valid() {
+        let issue = if !scene.domain.valid() {
+            Some(ValidationIssue::Domain)
+        } else if scene.structure_valid() {
             None
         } else {
             Some(ValidationIssue::Structure)
@@ -884,14 +974,16 @@ impl ValidationJob {
                 if self.build_index + 1 == points.len() {
                     let issue = if is_open {
                         let boundary = &self.scene.internal_boundaries[self.open_boundaries.len()];
-                        (self.perimeter <= WORLD_TOLERANCE
+                        (self.perimeter <= self.scene.domain.tolerance()
                             || (points.last().unwrap().point - points[0].point).norm()
-                                <= WORLD_TOLERANCE)
-                            .then_some(ValidationIssue::BoundaryDegenerate(boundary.id))
+                                <= self.scene.domain.tolerance())
+                        .then_some(ValidationIssue::BoundaryDegenerate(boundary.id))
                     } else {
-                        (self.area.abs() * 0.5 <= WORLD_TOLERANCE * WORLD_TOLERANCE).then_some(
-                            ValidationIssue::Degenerate(self.scene.obstacles[self.loops.len()].id),
-                        )
+                        (self.area.abs() * 0.5
+                            <= self.scene.domain.tolerance() * self.scene.domain.tolerance())
+                        .then_some(ValidationIssue::Degenerate(
+                            self.scene.obstacles[self.loops.len()].id,
+                        ))
                     };
                     if issue.is_some() {
                         self.finish(issue);
@@ -914,10 +1006,10 @@ impl ValidationJob {
                 }
                 let a = points[self.build_index].point;
                 let b = points[self.build_index + 1].point;
-                let margin = WORLD_TOLERANCE + self.options.tolerance;
+                let margin = self.scene.domain.tolerance() + self.options.tolerance;
                 if [a, b]
                     .iter()
-                    .any(|point| point.x.abs() >= 1.0 - margin || point.y.abs() >= 1.0 - margin)
+                    .any(|point| !self.scene.domain.contains_with_margin(*point, margin))
                 {
                     let issue = if is_open {
                         ValidationIssue::BoundaryOutside(
@@ -983,7 +1075,7 @@ impl ValidationJob {
                 let a = self.segments[self.i];
                 let b = self.segments[self.j];
                 self.j += 1;
-                let margin = WORLD_TOLERANCE + 2.0 * self.options.tolerance;
+                let margin = self.scene.domain.tolerance() + 2.0 * self.options.tolerance;
                 let mut local_neighbors = false;
                 if a.curve == b.curve {
                     let closed = a.curve < self.loops.len();
