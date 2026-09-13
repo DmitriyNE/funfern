@@ -7,6 +7,21 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Near-term product-polish order: phone/touch interactions, then drawing
+  primitives and generalized C0-piece straightening, then screenshot/video capture.
+  Reassess the remaining product roadmap after these three groups land.
+- [ ] Give marquee selection conventional directional semantics: left-to-right
+  selects only fully enclosed logical spans; right-to-left selects spans that cross
+  or lie inside the rectangle. Keep span filters and replace/add/subtract behavior,
+  and expose marquee as an explicit touch tool because an empty one-finger drag pans.
+- [ ] In the drawing slice, make an arbitrarily oriented straight baffle a two-point
+  workflow. Finishing a custom baffle with exactly two entered vertices should use
+  the same constructor, inserting the required cubic controls equidistantly. Add
+  open **Polyline** and closed **Polygon** primitives whose clicked vertices are
+  interpolation corners and whose straight pieces become ordinary C0-bounded cubic
+  spans. Add generalized **Straighten selected piece** for eligible C0-isolated
+  selections; generated primitives remain normal editable splines rather than a
+  second persistent geometry model.
 - [ ] Replace the vector overlay's run-peak exposure heuristic with a robust
   automatic scale that can recover after a legitimate transient spike such as
   **Place pulse**, while still refusing to magnify late numerical noise. Avoid
@@ -63,6 +78,46 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   follow-ups include bounded time-envelope expressions, pulsed/chirped drives,
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
+
+## 2026-09-13 — Phone interaction slice plan
+
+- Preserve the desktop interaction contract. On touch, a tap uses the existing hit
+  priority and selection behavior; a one-finger drag beginning on an editable
+  handle, curve, source, probe, domain edge, or gizmo directly manipulates it. An
+  empty one-finger drag pans after the normal drag threshold, while an empty tap
+  keeps the existing clear-selection/region-selection behavior.
+- Add a transient touch-gesture owner so the synthetic primary-pointer events from
+  the browser cannot compete with multi-touch navigation. A second finger cancels
+  any uncommitted one-finger document drag back to its pre-drag snapshot, suppresses
+  the associated synthetic click, and gives the gesture to viewport navigation
+  until all fingers lift.
+- Use egui's multi-touch centroid, translation delta, and zoom delta for two-finger
+  pan and cursor-centered pinch zoom. Ignore gesture rotation. Clamp scale through
+  the existing camera bounds; navigation never enters document history.
+- Add a persistent-until-dismissed **Area select** interaction mode near the span
+  filter. It supplies Replace, Add, and Subtract choices for touch users. A
+  one-finger drag in that mode draws the marquee; Done or Escape returns to ordinary
+  selection. Mouse modifiers continue to provide the existing shortcuts.
+- Derive marquee containment from horizontal drag direction. Left-to-right uses a
+  conservative full-enclosure test over each complete adaptively sampled logical
+  span; right-to-left uses the current rectangle-crossing test. Render the two modes
+  distinctly, including a dashed crossing border, while retaining operation color
+  for replace/add/subtract.
+- Centralize viewport hit tolerances and expand their invisible radius only for an
+  active touch. Keep the current handle/curve/source/probe/domain/gizmo priority so
+  larger targets do not change which overlapping feature wins. Do not persist touch,
+  marquee-tool, or gesture state.
+- Set `touch-action: none` and contain overscroll on the WebGPU canvas so the browser
+  does not steal viewport gestures. Egui panels retain normal scrolling and text
+  editing because geometry input remains gated by the viewport response.
+- Add synthetic egui touch coverage for taps, direct manipulation with one history
+  entry, empty-drag pan, pinch-center invariance, transition from one to two fingers,
+  click suppression after pinch, panel capture, repeated placement tools, enlarged
+  hit targets, and touch Area-select operations. Add desktop regressions for
+  directional enclosure/crossing, filters, modifiers, and Escape restoration.
+  Finish with formatting, workspace tests, warning-denied Clippy, native release
+  compilation, and a release Trunk build. Real-device touch behavior remains a
+  short manual browser check.
 
 ## 2026-09-13 — Editable rectangular outer domain
 
