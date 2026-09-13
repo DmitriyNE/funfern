@@ -151,11 +151,15 @@ pub fn mesh_topology_plan(
     }
 
     triangulate_topology_domains(&mut builder)?;
+    let mut slit_steps = vec![];
     for ((region, _), steps) in free_slits {
         for run in split_slit_runs(&steps)? {
-            cut_free_slit(&mut builder, region, &run, &trace_vertices)?;
+            cut_free_slit(&mut builder, region, &run, &mut trace_vertices)?;
+            slit_steps.extend(run);
         }
     }
+    split_slit_trace_vertices(&mut builder, &slit_steps, &mut trace_vertices)?;
+    apply_slit_trace_lineage(&mut builder, &slit_steps, &mut trace_vertices)?;
     while !builder.dirty_edges.is_empty() {
         builder.legalize_one()?;
     }
@@ -189,26 +193,48 @@ fn split_slit_runs(steps: &[PlannedFaceStep]) -> Result<Vec<Vec<PlannedFaceStep>
     if left.is_empty() {
         return Err(MeshError::Topology("free slit has no left trace"));
     }
-    let mut ranges = vec![];
-    let mut start = left[0].boundary.parameter[0];
-    let mut end = left[0].boundary.parameter[1];
-    for step in &left[1..] {
-        if step.boundary.parameter[0] != end {
-            ranges.push([start, end]);
-            start = step.boundary.parameter[0];
-        }
-        end = step.boundary.parameter[1];
+    let right = steps
+        .iter()
+        .filter_map(|step| {
+            matches!(
+                step.boundary.source,
+                PlannedBoundarySource::Curve {
+                    side: CurveTraceSide::Right,
+                    ..
+                }
+            )
+            .then_some((step.edge, *step))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if left.iter().any(|step| !right.contains_key(&step.edge)) {
+        return Err(MeshError::Topology("free slit is missing its right trace"));
     }
-    ranges.push([start, end]);
-    Ok(ranges
+    let mut runs = vec![];
+    let mut run_edges = vec![left[0].edge];
+    let mut previous = left[0];
+    for step in &left[1..] {
+        let previous_right = right[&previous.edge];
+        let next_right = right[&step.edge];
+        let parameter_continues = previous.boundary.parameter[1] == step.boundary.parameter[0];
+        let left_trace_continues = previous.boundary.traces[1] == step.boundary.traces[0];
+        // Right steps run opposite to curve parameter, hence endpoint 0 is the
+        // preceding span's end and endpoint 1 is the following span's start.
+        let right_trace_continues =
+            previous_right.boundary.traces[0] == next_right.boundary.traces[1];
+        if !(parameter_continues && left_trace_continues && right_trace_continues) {
+            runs.push(std::mem::take(&mut run_edges));
+        }
+        run_edges.push(step.edge);
+        previous = *step;
+    }
+    runs.push(run_edges);
+    Ok(runs
         .into_iter()
-        .map(|[start, end]| {
+        .map(|edges| {
+            let edges = edges.into_iter().collect::<BTreeSet<_>>();
             steps
                 .iter()
-                .filter(|step| {
-                    let midpoint = 0.5 * (step.boundary.parameter[0] + step.boundary.parameter[1]);
-                    midpoint >= start && midpoint <= end
-                })
+                .filter(|step| edges.contains(&step.edge))
                 .copied()
                 .collect()
         })
@@ -219,7 +245,7 @@ fn cut_free_slit(
     builder: &mut MeshBuilder,
     region: RegionId,
     steps: &[PlannedFaceStep],
-    trace_vertices: &BTreeMap<TraceVertexId, usize>,
+    trace_vertices: &mut BTreeMap<TraceVertexId, usize>,
 ) -> Result<(), MeshError> {
     let mut left = steps
         .iter()
@@ -297,12 +323,11 @@ fn cut_free_slit(
     });
     builder.internal_chains.push(vec![]);
     for (sample, trace) in samples {
-        let vertex = trace
-            .and_then(|trace| trace_vertices.get(&trace).copied())
-            .map_or_else(
-                || builder.insert_constraint_point(constraint, sample.point),
-                Ok,
-            )?;
+        let vertex = if let Some(vertex) = trace.and_then(|trace| trace_vertices.get(&trace)) {
+            *vertex
+        } else {
+            builder.insert_constraint_point(constraint, sample.point)?
+        };
         builder.internal_chains[constraint].push((vertex, sample.t));
     }
     let chain = builder.internal_chains[constraint].clone();
@@ -371,7 +396,6 @@ fn cut_free_slit(
             separated: true,
         };
     }
-    apply_slit_trace_lineage(builder, steps)?;
     builder.boundary_regions.retain(|(label, _)| {
         !matches!(label, BoundaryLabel::InternalBoundary { id, .. } if *id == legacy_id)
     });
@@ -397,43 +421,37 @@ fn cut_free_slit(
 fn apply_slit_trace_lineage(
     builder: &mut MeshBuilder,
     steps: &[PlannedFaceStep],
+    trace_vertices: &mut BTreeMap<TraceVertexId, usize>,
 ) -> Result<(), MeshError> {
     for step in steps {
         let label = topology_label(step.boundary);
-        let BoundaryLabel::Curve {
-            curve,
-            side,
-            separated,
-            ..
-        } = label
-        else {
+        if !matches!(label, BoundaryLabel::Curve { .. }) {
             return Err(MeshError::Topology("slit trace has a non-curve label"));
-        };
+        }
         for (point, trace) in step.boundary.points.into_iter().zip(step.boundary.traces) {
             let vertices = builder
                 .boundary_edges
                 .iter()
-                .filter(|edge| {
-                    matches!(
-                        edge.label,
-                        BoundaryLabel::Curve {
-                            curve: candidate_curve,
-                            side: candidate_side,
-                            separated: candidate_separated,
-                            ..
-                        } if candidate_curve == curve
-                            && candidate_side == side
-                            && candidate_separated == separated
-                    )
-                })
+                .filter(|edge| edge.label == label)
                 .flat_map(|edge| edge.vertices)
                 .filter(|vertex| {
                     (builder.point(*vertex) - point).norm() <= builder.options.curve_tolerance
                 })
                 .collect::<BTreeSet<_>>();
-            let vertex = vertices.into_iter().next().ok_or(MeshError::Topology(
-                "slit trace lineage endpoint is missing",
-            ))?;
+            let vertex = trace_vertices
+                .get(&trace)
+                .copied()
+                .filter(|mapped| vertices.contains(mapped))
+                .or_else(|| {
+                    vertices
+                        .iter()
+                        .find(|vertex| builder.vertices[**vertex].trace.is_none())
+                        .copied()
+                })
+                .or_else(|| vertices.iter().next().copied())
+                .ok_or(MeshError::Topology(
+                    "slit trace lineage endpoint is missing",
+                ))?;
             if builder.vertices[vertex]
                 .trace
                 .is_some_and(|existing| existing != trace)
@@ -441,6 +459,217 @@ fn apply_slit_trace_lineage(
                 return Err(MeshError::Topology("slit trace lineage is inconsistent"));
             }
             builder.vertices[vertex].trace = Some(trace);
+            if trace_vertices
+                .insert(trace, vertex)
+                .is_some_and(|mapped| mapped != vertex)
+            {
+                return Err(MeshError::Topology("slit trace lineage is duplicated"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn split_slit_trace_vertices(
+    builder: &mut MeshBuilder,
+    steps: &[PlannedFaceStep],
+    trace_vertices: &mut BTreeMap<TraceVertexId, usize>,
+) -> Result<(), MeshError> {
+    let separated_keys = builder
+        .boundary_edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                edge.label,
+                BoundaryLabel::Curve {
+                    separated: true,
+                    ..
+                }
+            )
+        })
+        .map(|edge| edge_key(edge.vertices[0], edge.vertices[1]))
+        .collect::<BTreeSet<_>>();
+    let planned_trace = |label: BoundaryLabel, point: Point2| {
+        steps.iter().find_map(|step| {
+            (topology_label(step.boundary) == label).then(|| {
+                step.boundary
+                    .points
+                    .iter()
+                    .zip(step.boundary.traces)
+                    .find_map(|(candidate, trace)| {
+                        ((*candidate - point).norm() <= builder.options.curve_tolerance)
+                            .then_some(trace)
+                    })
+            })?
+        })
+    };
+    let mut seeds = BTreeMap::<usize, BTreeMap<TraceVertexId, BTreeSet<usize>>>::new();
+    for edge in &builder.boundary_edges {
+        if !matches!(
+            edge.label,
+            BoundaryLabel::Curve {
+                separated: true,
+                ..
+            }
+        ) {
+            continue;
+        }
+        let Some([(triangle, _)]) = builder
+            .adjacency
+            .get(&edge_key(edge.vertices[0], edge.vertices[1]))
+            .map(Vec::as_slice)
+        else {
+            return Err(MeshError::Topology(
+                "separated trace edge has invalid adjacency",
+            ));
+        };
+        for vertex in edge.vertices {
+            let Some(trace) = planned_trace(edge.label, builder.point(vertex)) else {
+                continue;
+            };
+            seeds
+                .entry(vertex)
+                .or_default()
+                .entry(trace)
+                .or_default()
+                .insert(*triangle);
+        }
+    }
+
+    for (vertex, trace_seeds) in seeds {
+        let incident = builder.incident[vertex]
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if incident.is_empty() {
+            return Err(MeshError::Topology(
+                "separated trace endpoint has no incident element",
+            ));
+        }
+        let mut remaining = incident.clone();
+        let mut components = vec![];
+        while let Some(seed) = remaining.pop_first() {
+            let mut component = BTreeSet::from([seed]);
+            let mut pending = vec![seed];
+            while let Some(triangle_index) = pending.pop() {
+                let triangle = builder.triangles[triangle_index];
+                for other in triangle
+                    .vertices
+                    .iter()
+                    .copied()
+                    .filter(|candidate| *candidate != vertex)
+                {
+                    let radial = edge_key(vertex, other);
+                    if separated_keys.contains(&radial) {
+                        continue;
+                    }
+                    if let Some(sides) = builder.adjacency.get(&radial) {
+                        for (neighbor, _) in sides {
+                            if incident.contains(neighbor) && component.insert(*neighbor) {
+                                remaining.remove(neighbor);
+                                pending.push(*neighbor);
+                            }
+                        }
+                    }
+                }
+            }
+            components.push(component);
+        }
+
+        let components = components
+            .into_iter()
+            .map(|component| {
+                let traces = trace_seeds
+                    .iter()
+                    .filter(|(_, triangles)| !triangles.is_disjoint(&component))
+                    .map(|(trace, _)| *trace)
+                    .collect::<BTreeSet<_>>();
+                let mut traces = traces.into_iter();
+                let Some(trace) = traces.next() else {
+                    return Err(MeshError::Topology(
+                        "separated junction sector has inconsistent lineage",
+                    ));
+                };
+                if traces.next().is_some() {
+                    return Err(MeshError::Topology(
+                        "separated junction sector has inconsistent lineage",
+                    ));
+                }
+                let boundaries = builder
+                    .boundary_edges
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, edge)| {
+                        if !edge.vertices.contains(&vertex) {
+                            return None;
+                        }
+                        builder
+                            .adjacency
+                            .get(&edge_key(edge.vertices[0], edge.vertices[1]))
+                            .is_some_and(|sides| {
+                                sides
+                                    .iter()
+                                    .any(|(triangle, _)| component.contains(triangle))
+                            })
+                            .then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                Ok((component, trace, boundaries))
+            })
+            .collect::<Result<Vec<_>, MeshError>>()?;
+        let retained = builder.vertices[vertex]
+            .trace
+            .and_then(|trace| {
+                components
+                    .iter()
+                    .position(|(_, candidate, _)| *candidate == trace)
+            })
+            .unwrap_or(0);
+        for (index, (component, trace, boundaries)) in components.into_iter().enumerate() {
+            let replacement = if index == retained {
+                vertex
+            } else {
+                let replacement = builder.add_vertex(builder.point(vertex), None)?;
+                builder.internal_trace_vertices.insert(replacement);
+                replacement
+            };
+            builder.vertices[replacement].trace = Some(trace);
+            if trace_vertices
+                .insert(trace, replacement)
+                .is_some_and(|existing| existing != replacement && existing != vertex)
+            {
+                return Err(MeshError::Topology(
+                    "separated junction trace is represented twice",
+                ));
+            }
+            if replacement == vertex {
+                continue;
+            }
+            for triangle_index in component {
+                let mut triangle = builder.triangles[triangle_index];
+                if triangle.vertices.contains(&replacement) {
+                    return Err(MeshError::Topology(
+                        "separated junction split would degenerate an element",
+                    ));
+                }
+                for candidate in &mut triangle.vertices {
+                    if *candidate == vertex {
+                        *candidate = replacement;
+                    }
+                }
+                builder.replace_triangle(triangle_index, triangle);
+            }
+            for boundary_index in boundaries {
+                let old = builder.boundary_edges[boundary_index].vertices;
+                builder.boundary_keys.remove(&edge_key(old[0], old[1]));
+                for candidate in &mut builder.boundary_edges[boundary_index].vertices {
+                    if *candidate == vertex {
+                        *candidate = replacement;
+                    }
+                }
+                let new = builder.boundary_edges[boundary_index].vertices;
+                builder.boundary_keys.insert(edge_key(new[0], new[1]));
+            }
         }
     }
     Ok(())
@@ -1629,6 +1858,178 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn topology_mesher_recovers_three_separated_arms_at_a_junction() {
+        let center = TopologyVertexId(30);
+        let mut horizontal = TopologyCurve::new(
+            CurveId(30),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.7, 0.0),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.7, 0.0),
+                ])
+                .unwrap(),
+            ),
+            spans(300, 2, SpanBehavior::REFLECTING),
+        )
+        .unwrap();
+        horizontal.nodes[1].vertex = Some(center);
+        let mut branch = TopologyCurve::new(
+            CurveId(31),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, 0.0), Point2::new(0.0, 0.7)])
+                    .unwrap(),
+            ),
+            spans(302, 1, SpanBehavior::REFLECTING),
+        )
+        .unwrap();
+        branch.nodes[0].vertex = Some(center);
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![horizontal, branch],
+                vertices: vec![TopologyVertex {
+                    id: center,
+                    location: TopologyVertexLocation::Interior(Point2::new(0.0, 0.0)),
+                }],
+                ..TopologyGeometry::default()
+            },
+            20,
+        )
+        .unwrap();
+        let plan = TopologyMeshPlan::new(&topology, &assign_each_face(&topology)).unwrap();
+        assert_eq!(plan.domains.len(), 1);
+        assert_eq!(plan.junctions[0].faces.len(), 3);
+        let expected = plan
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.point == Point2::new(0.0, 0.0))
+            .map(|vertex| vertex.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected.len(), 3);
+
+        let mesh = mesh_topology_plan(&plan, 77, mesh_options()).unwrap();
+        assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9);
+        let actual = mesh
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.point == Point2::new(0.0, 0.0))
+            .filter_map(|vertex| vertex.trace)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert!(mesh.boundary_edges.iter().all(|edge| {
+            !matches!(
+                edge.label,
+                BoundaryLabel::Curve {
+                    separated: true,
+                    ..
+                }
+            ) || mesh
+                .triangles
+                .iter()
+                .filter(|triangle| {
+                    triangle.vertices.contains(&edge.vertices[0])
+                        && triangle.vertices.contains(&edge.vertices[1])
+                })
+                .count()
+                == 1
+        }));
+    }
+
+    #[test]
+    fn topology_mesher_recovers_a_separated_branch_on_a_transmitting_divider() {
+        let left = TopologyVertexId(40);
+        let right = TopologyVertexId(41);
+        let center = TopologyVertexId(42);
+        let mut divider = TopologyCurve::new(
+            CurveId(40),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-1.0, 0.0),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(1.0, 0.0),
+                ])
+                .unwrap(),
+            ),
+            spans(400, 2, SpanBehavior::Transmitting),
+        )
+        .unwrap();
+        divider.nodes[0].vertex = Some(left);
+        divider.nodes[1].vertex = Some(center);
+        divider.nodes[2].vertex = Some(right);
+        let mut branch = TopologyCurve::new(
+            CurveId(41),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, 0.0), Point2::new(0.0, 0.7)])
+                    .unwrap(),
+            ),
+            spans(402, 1, SpanBehavior::REFLECTING),
+        )
+        .unwrap();
+        branch.nodes[0].vertex = Some(center);
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![divider, branch],
+                vertices: vec![
+                    TopologyVertex {
+                        id: left,
+                        location: TopologyVertexLocation::Outer {
+                            side: crate::OuterSide::Left,
+                            fraction: 0.5,
+                        },
+                    },
+                    TopologyVertex {
+                        id: right,
+                        location: TopologyVertexLocation::Outer {
+                            side: crate::OuterSide::Right,
+                            fraction: 0.5,
+                        },
+                    },
+                    TopologyVertex {
+                        id: center,
+                        location: TopologyVertexLocation::Interior(Point2::new(0.0, 0.0)),
+                    },
+                ],
+                ..TopologyGeometry::default()
+            },
+            21,
+        )
+        .unwrap();
+        let plan = TopologyMeshPlan::new(&topology, &assign_each_face(&topology)).unwrap();
+        assert_eq!(plan.domains.len(), 2);
+        assert_eq!(
+            plan.junctions
+                .iter()
+                .find(|junction| junction.vertex == center)
+                .unwrap()
+                .faces
+                .len(),
+            2
+        );
+        let mesh = mesh_topology_plan(&plan, 78, mesh_options()).unwrap();
+        assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9);
+        assert_eq!(
+            mesh.triangles
+                .iter()
+                .map(|triangle| triangle.region)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2
+        );
+        let center_traces = mesh
+            .vertices
+            .iter()
+            .filter(|vertex| {
+                (vertex.point - Point2::new(0.0, 0.0)).norm() <= mesh_options().curve_tolerance
+            })
+            .filter_map(|vertex| vertex.trace)
+            .collect::<BTreeSet<_>>();
+        // The transmitting divider joins both sides around the branch point,
+        // so the exact junction node has one conforming trace even though the
+        // branch itself has two separated faces away from the endpoint.
+        assert_eq!(center_traces.len(), 1);
     }
 
     #[test]

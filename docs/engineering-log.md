@@ -63,11 +63,22 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend bounded coordinate repair and solution-driven AMR to open material
   divider graphs. The first junction implementation deliberately uses the robust
   full-rebuild fallback for graph-edge movement and topology edits.
-- [ ] Extend the topology mesher's free-slit recovery to a separated T-junction.
-  The topology compiler produces the three sector traces, but direct meshing of
-  two separated curves sharing the branch point currently reports inconsistent
-  slit trace lineage. This does not affect transmitting T/X junctions or the
-  transfer consumer implemented below.
+
+## 2026-09-13 — Separated and mixed junction meshing
+
+- Separated curves are now divided into recovery runs whenever either side's
+  compiled trace changes at a junction. All runs are cut before junction vertices
+  are resolved, so every incident arm is present when the triangle fan is split.
+- The final fan pass treats separated curve edges as barriers, follows transmitting
+  edges across the junction, and assigns each resulting angular sector to the
+  `TraceVertexId` supplied by the topology plan. Free tips still reconnect, while
+  three reflecting arms receive three coincident finite-element vertices.
+- Added direct meshing coverage for a fully separated T-junction and for a
+  separated branch attached to a transmitting material divider. The former also
+  assembles a quadratic operator and round-trips an arbitrary nodal state through
+  the topology-aware transfer map without mixing sectors.
+- All **411 workspace tests**, workspace Clippy with warnings denied, native
+  release compilation, and release Trunk WebGPU packaging pass.
 
 ## 2026-09-13 — Topology-aware quadratic solution transfer
 

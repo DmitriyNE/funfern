@@ -621,7 +621,10 @@ supplies directed face cycles, stable curve/span labels, and snapshot-local sect
 trace IDs; the triangulator no longer infers region ownership from object classes.
 Transmitting sides share the same constrained vertex chain. Separated free or
 attached baffles are recovered into the face mesh and cut into the exact trace
-sectors, including distinct coincident vertices at an outer attachment. An
+sectors, including distinct coincident vertices at an outer attachment. At a
+branched separated junction, recovery first installs every incident run; a final
+fan pass crosses transmitting edges, stops at separated edges, and duplicates the
+junction vertex once per compiled sector trace. An
 unchanged plan reuses its mesh, and changing only a boundary law does not remesh.
 Coordinate edits use a typed full rebuild until the patch repair receives unified
 curve evaluation and junction-sector rewiring.

@@ -913,6 +913,54 @@ mod tests {
         }
     }
 
+    fn separated_t_junction() -> TopologyGeometry {
+        let center = TopologyVertexId(10);
+        let mut horizontal = TopologyCurve::new(
+            CurveId(10),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.7, 0.0),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.7, 0.0),
+                ])
+                .unwrap(),
+            ),
+            vec![
+                CurveSpan {
+                    id: CurveSpanId(10),
+                    behavior: SpanBehavior::REFLECTING,
+                },
+                CurveSpan {
+                    id: CurveSpanId(11),
+                    behavior: SpanBehavior::REFLECTING,
+                },
+            ],
+        )
+        .unwrap();
+        horizontal.nodes[1].vertex = Some(center);
+        let mut branch = TopologyCurve::new(
+            CurveId(11),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, 0.0), Point2::new(0.0, 0.7)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(12),
+                behavior: SpanBehavior::REFLECTING,
+            }],
+        )
+        .unwrap();
+        branch.nodes[0].vertex = Some(center);
+        TopologyGeometry {
+            curves: vec![horizontal, branch],
+            vertices: vec![TopologyVertex {
+                id: center,
+                location: TopologyVertexLocation::Interior(Point2::new(0.0, 0.0)),
+            }],
+            ..TopologyGeometry::default()
+        }
+    }
+
     #[test]
     fn affine_fields_transfer_exactly_and_revisions_are_recorded() {
         let source = mesh(
@@ -1282,88 +1330,39 @@ mod tests {
     }
 
     #[test]
-    fn topology_transfer_uses_junction_sector_trace_ids() {
-        // Three sector vertices occupy the same junction point. Each boundary
-        // side is also present on a neighboring sector, so the trace ID is what
-        // narrows the candidate set to the correct angular sector.
-        let points = [
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [0.0, 0.0],
-            [0.0, 1.0],
-            [-1.0, 0.0],
-            [0.0, 0.0],
-            [-1.0, 0.0],
-            [0.0, -1.0],
-        ];
-        let mut source = mesh(40, &points, &[[0, 1, 2], [3, 4, 5], [6, 7, 8]]);
-        source.vertices[0].trace = Some(TraceVertexId(1));
-        source.vertices[3].trace = Some(TraceVertexId(2));
-        source.vertices[6].trace = Some(TraceVertexId(3));
-        let label = |curve, side| BoundaryLabel::Curve {
-            curve: CurveId(curve),
-            span: CurveSpanId(curve),
-            side,
-            separated: true,
-        };
-        source.boundary_edges = vec![
-            BoundaryEdge {
-                vertices: [0, 1],
-                label: label(10, CurveTraceSide::Left),
-                parameters: [0.0, 1.0],
+    fn topology_transfer_preserves_separated_junction_sectors() {
+        let (source, plan) = topology_mesh(&separated_t_junction(), 40);
+        assert!(
+            plan.junctions
+                .iter()
+                .any(|junction| junction.faces.len() == 3)
+        );
+        let materials = [Material::default_medium()];
+        let regions = [Region {
+            id: RegionId(1),
+            material: MaterialId(1),
+            frame: crate::MaterialFrame::world(),
+        }];
+        let operator = QuadraticWaveOperator::assemble_topology(
+            &source,
+            &plan,
+            TopologyWaveModel {
+                physics: crate::PhysicsModel::Mechanical,
+                materials: &materials,
+                regions: &regions,
+                outer_boundaries: OuterBoundaryConditions::default(),
             },
-            BoundaryEdge {
-                vertices: [2, 0],
-                label: label(11, CurveTraceSide::Right),
-                parameters: [1.0, 0.0],
-            },
-            BoundaryEdge {
-                vertices: [3, 4],
-                label: label(11, CurveTraceSide::Right),
-                parameters: [0.0, 1.0],
-            },
-            BoundaryEdge {
-                vertices: [5, 3],
-                label: label(10, CurveTraceSide::Right),
-                parameters: [1.0, 0.0],
-            },
-            BoundaryEdge {
-                vertices: [6, 7],
-                label: label(10, CurveTraceSide::Right),
-                parameters: [0.0, 1.0],
-            },
-            BoundaryEdge {
-                vertices: [8, 6],
-                label: label(10, CurveTraceSide::Left),
-                parameters: [1.0, 0.0],
-            },
-        ];
-        let mut target = source.clone();
-        target.geometry_revision = 41;
-        let source_operator =
-            QuadraticWaveOperator::assemble(&source, WaveCoefficients::default()).unwrap();
-        let target_operator =
-            QuadraticWaveOperator::assemble(&target, WaveCoefficients::default()).unwrap();
-        let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
-            .unwrap();
-        let mut values = vec![0.0; source_operator.degrees_of_freedom()];
-        values[source_operator.element_nodes()[0][0] as usize] = 1.0;
-        values[source_operator.element_nodes()[1][0] as usize] = 2.0;
-        values[source_operator.element_nodes()[2][0] as usize] = 3.0;
+        )
+        .unwrap();
+        let map = QuadraticTransferMap::build(&source, &operator, &source, &operator).unwrap();
+        assert_eq!(map.exposed_nodes(), 0);
+        let values = (0..operator.degrees_of_freedom())
+            .map(|index| (index as f64 * 0.731).sin() + index as f64 * 0.01)
+            .collect::<Vec<_>>();
         let transferred = map.interpolate(&values, -10.0).unwrap();
-        assert_eq!(
-            transferred[target_operator.element_nodes()[0][0] as usize],
-            1.0
-        );
-        assert_eq!(
-            transferred[target_operator.element_nodes()[1][0] as usize],
-            2.0
-        );
-        assert_eq!(
-            transferred[target_operator.element_nodes()[2][0] as usize],
-            3.0
-        );
+        for (actual, expected) in transferred.iter().zip(values) {
+            assert!((actual - expected).abs() < 3.0e-12);
+        }
     }
 
     #[test]

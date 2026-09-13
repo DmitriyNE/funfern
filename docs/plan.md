@@ -328,6 +328,9 @@ scene path. The quadratic operator now also assembles directly from the plan: it
 evaluates each
 triangle's assigned region, resolves outer and curve-side conditions from stable
 labels, supports paired thin-gap traces, and accepts multi-region junction nodes.
+Separated T-junctions are recovered only after all incident arms are installed, so
+the mesher emits the same sector equivalence as the topology compiler; mixed
+transmitting/separated junctions retain their conforming paths.
 Law-only plan changes reuse the existing mesh. The application cutover waits for
 the remaining numerical consumers so one transaction cannot mix label models.
 GPU upload no longer caps a node at two incident regions: host-filtered source
