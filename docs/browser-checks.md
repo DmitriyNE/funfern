@@ -75,6 +75,13 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   file upload. IDs and nonuniform intervals survive. History clears on load.
   Cancel dialogs and try malformed JSON, duplicate IDs, unsupported versions,
   oversized files, and an invalid accepted scene; the document remains intact.
+- [ ] Export a viewport PNG with the inspector open, floating probe/performance
+  windows open, an active selection, and several View overlays enabled. The download
+  should contain only the central viewport at its physical pixel dimensions: active
+  View overlays and the logo remain, while menus, panels, readouts, selection
+  emphasis, gizmos, marquees, and tool prompts are absent. Repeat after resize and
+  at a non-1× display scale; capture must not pause playback or alter camera,
+  document, presentation, selection, or history.
 - [ ] In Simulation, toggle Place pulse on and off by clicking the selected button;
   it persists across repeated viewport clicks and inspector changes until explicitly
   ended. Enable the continuous source and drag its marker directly. Verify that a

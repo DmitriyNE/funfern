@@ -415,6 +415,16 @@ Egui's multi-touch centroid supplies cursor-centered pinch zoom and pan; once a
 second finger joins, navigation owns the gesture until every finger lifts and any
 tentative document drag or marquee is rolled back. Marquee direction distinguishes
 fully enclosed logical spans from crossing spans.
+
+Viewport PNG export uses Bevy's primary-window screenshot pipeline on the existing
+wgpu device. A request waits one UI frame for its menu to close, records the logical
+central-panel rectangle, and maps that rectangle onto the returned physical image
+dimensions before cropping and PNG encoding. The capture frame suppresses transient
+editor emphasis and floating windows while retaining persisted View overlays and
+the logo. Capture state, framing, and output never enter the document or history.
+Native builds pass encoded bytes to the existing save dialog; browser builds create
+a Blob download after asynchronous GPU readback.
+
 Canvas resize/display scale comes from Bevy/egui, and Fit View frames the current
 draft domain. JSON excludes the viewport. There is no independent wgpu device, WebGL
 fallback, audio subsystem, or 3D rendering pipeline. This editor acceptance model

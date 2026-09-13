@@ -2,6 +2,7 @@ use funfern_app::persistence::MAX_FILE_BYTES;
 use std::sync::mpsc::Sender;
 pub enum FileEvent {
     Loaded(Vec<u8>),
+    SnapshotCaptured(Vec<u8>),
     Saved(&'static str),
     Cancelled,
     Error(String),
@@ -11,6 +12,7 @@ pub enum FileEvent {
 pub enum SaveKind {
     Scene,
     SceneSvg,
+    SnapshotPng,
 }
 
 impl SaveKind {
@@ -18,6 +20,7 @@ impl SaveKind {
         match self {
             Self::Scene => "funfern-scene.json",
             Self::SceneSvg => "funfern-scene.svg",
+            Self::SnapshotPng => "funfern-snapshot.png",
         }
     }
 
@@ -26,6 +29,7 @@ impl SaveKind {
         match self {
             Self::Scene => ("funfern scene", &["json"]),
             Self::SceneSvg => ("SVG image", &["svg"]),
+            Self::SnapshotPng => ("PNG image", &["png"]),
         }
     }
 
@@ -33,6 +37,7 @@ impl SaveKind {
         match self {
             Self::Scene => "Scene saved",
             Self::SceneSvg => "Scene SVG exported",
+            Self::SnapshotPng => "Snapshot exported",
         }
     }
 }
@@ -97,6 +102,15 @@ pub fn load(sender: Sender<FileEvent>) {
 }
 #[cfg(target_arch = "wasm32")]
 pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>, kind: SaveKind) {
+    if matches!(kind, SaveKind::SnapshotPng) {
+        let result = download(&bytes, kind.file_name())
+            .map(|()| FileEvent::Saved(kind.success()))
+            .unwrap_or_else(|error| {
+                FileEvent::Error(format!("Could not download snapshot: {error:?}"))
+            });
+        let _ = sender.send(result);
+        return;
+    }
     wasm_bindgen_futures::spawn_local(async move {
         let result = if let Some(file) = rfd::AsyncFileDialog::new()
             .set_file_name(kind.file_name())
@@ -112,4 +126,23 @@ pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>, kind: SaveKind) {
         };
         let _ = sender.send(result);
     });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn download(bytes: &[u8], file_name: &str) -> Result<(), wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsCast;
+
+    let bytes = js_sys::Uint8Array::from(bytes);
+    let parts = js_sys::Array::of1(&bytes.into());
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob)?;
+    let document = web_sys::window().unwrap().document().unwrap();
+    let link = document
+        .create_element("a")?
+        .dyn_into::<web_sys::HtmlElement>()?;
+    link.set_attribute("href", &url)?;
+    link.set_attribute("download", file_name)?;
+    link.click();
+    web_sys::Url::revoke_object_url(&url)?;
+    Ok(())
 }

@@ -18,6 +18,7 @@ use crate::{
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
+use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy_egui::{
     EguiContexts,
     egui::{self, Color32, Pos2, Rect, Stroke},
@@ -778,6 +779,14 @@ enum TouchGesture {
     Direct,
     Navigate,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SnapshotState {
+    #[default]
+    Idle,
+    Armed,
+    Capturing,
+    Saving,
+}
 #[derive(Clone, Copy)]
 enum GizmoHit {
     Pivot,
@@ -923,6 +932,7 @@ pub struct Playground {
     sender: Sender<FileEvent>,
     receiver: Mutex<Receiver<FileEvent>>,
     file_busy: bool,
+    snapshot_state: SnapshotState,
     load: Option<LoadCandidate>,
     load_mode: LoadMode,
     load_notice: &'static str,
@@ -1101,6 +1111,7 @@ impl Default for Playground {
             sender,
             receiver: Mutex::new(receiver),
             file_busy: false,
+            snapshot_state: SnapshotState::Idle,
             load: None,
             load_mode: LoadMode::Replace,
             load_notice: "Scene loaded; history cleared",
@@ -3188,9 +3199,20 @@ impl Playground {
                     }
                     Err(e) => self.message = e,
                 },
-                FileEvent::Saved(message) => self.notify(message),
-                FileEvent::Cancelled => {}
-                FileEvent::Error(e) => self.message = e,
+                FileEvent::SnapshotCaptured(bytes) => {
+                    self.snapshot_state = SnapshotState::Saving;
+                    files::save(self.sender.clone(), bytes, SaveKind::SnapshotPng);
+                    self.file_busy = true;
+                }
+                FileEvent::Saved(message) => {
+                    self.snapshot_state = SnapshotState::Idle;
+                    self.notify(message);
+                }
+                FileEvent::Cancelled => self.snapshot_state = SnapshotState::Idle,
+                FileEvent::Error(e) => {
+                    self.snapshot_state = SnapshotState::Idle;
+                    self.message = e;
+                }
             }
         }
         if let Some(load) = &mut self.load
@@ -4476,6 +4498,13 @@ impl Playground {
         self.file_busy = true;
     }
 
+    fn export_viewport_png(&mut self) {
+        if self.snapshot_state == SnapshotState::Idle {
+            self.snapshot_state = SnapshotState::Armed;
+            self.file_busy = true;
+        }
+    }
+
     fn copy_scene_link(&mut self, context: &egui::Context) {
         match sharing::encode(&self.editor.document).and_then(|fragment| sharing::link(&fragment)) {
             Ok(url) => {
@@ -4531,6 +4560,10 @@ impl Playground {
                         self.copy_scene_link(ui.ctx());
                         ui.close();
                     }
+                    if ui.button("Export viewport PNG").clicked() {
+                        self.export_viewport_png();
+                        ui.close();
+                    }
                     if ui.button("Export scene SVG").clicked() {
                         self.export_scene_svg();
                         ui.close();
@@ -4560,6 +4593,10 @@ impl Playground {
                 ui.menu_button("Export", |ui| {
                     if ui.button("Copy scene link").clicked() {
                         self.copy_scene_link(ui.ctx());
+                        ui.close();
+                    }
+                    if ui.button("Viewport PNG").clicked() {
+                        self.export_viewport_png();
                         ui.close();
                     }
                     if ui.button("Scene SVG").clicked() {
@@ -9699,6 +9736,7 @@ impl Playground {
 
     fn viewport(&mut self, ui: &mut egui::Ui, wave_display: Option<&WaveDisplay>) -> Rect {
         self.refresh_material_overlay();
+        let clean_capture = self.snapshot_state == SnapshotState::Armed;
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let r = response.rect;
@@ -10929,10 +10967,15 @@ impl Playground {
                 }
             }
         }
-        for side in self.selected_spans.iter().filter_map(|span| match span {
-            GeometrySpan::Outer(side) => Some(*side),
-            _ => None,
-        }) {
+        for side in self
+            .selected_spans
+            .iter()
+            .filter(|_| !clean_capture)
+            .filter_map(|span| match span {
+                GeometrySpan::Outer(side) => Some(*side),
+                _ => None,
+            })
+        {
             let selected_outer = match side {
                 OuterSide::Bottom => [domain[0], domain[1]],
                 OuterSide::Right => [domain[1], domain[2]],
@@ -10944,10 +10987,11 @@ impl Playground {
                 Stroke::new(3.5, SELECT),
             );
         }
-        if self
-            .selected_spans
-            .iter()
-            .any(|span| matches!(span, GeometrySpan::Outer(_)))
+        if !clean_capture
+            && self
+                .selected_spans
+                .iter()
+                .any(|span| matches!(span, GeometrySpan::Outer(_)))
         {
             for corner in domain_rect.corners() {
                 let point = self.screen(corner, r);
@@ -11077,7 +11121,7 @@ impl Playground {
                 }
             }
         }
-        for selected in &self.selected_spans {
+        for selected in self.selected_spans.iter().filter(|_| !clean_capture) {
             match *selected {
                 GeometrySpan::Loop(id, span) => {
                     if let Some(curve) = self.draft_curves.iter().find(|curve| curve.id == id)
@@ -11111,7 +11155,7 @@ impl Playground {
                 }
             }
         }
-        if let Some(endpoint) = self.selected_topology_endpoint() {
+        if !clean_capture && let Some(endpoint) = self.selected_topology_endpoint() {
             let center = self.screen(endpoint, r);
             let radius = 6.0;
             painter.add(egui::Shape::convex_polygon(
@@ -11186,11 +11230,12 @@ impl Playground {
             }
         }
         for o in &self.editor.document.model.draft.obstacles {
-            let selected = self.selection.is_some_and(|s| s.0 == o.id)
-                || self
-                    .selected_spans
-                    .iter()
-                    .any(|span| matches!(span, GeometrySpan::Loop(id, _) if *id == o.id));
+            let selected = !clean_capture
+                && (self.selection.is_some_and(|s| s.0 == o.id)
+                    || self
+                        .selected_spans
+                        .iter()
+                        .any(|span| matches!(span, GeometrySpan::Loop(id, _) if *id == o.id)));
             let points = o.spline.controls();
             if self.editor.document.presentation.control_polygons {
                 let mut polygon: Vec<_> = points.iter().map(|p| self.screen(*p, r)).collect();
@@ -11210,7 +11255,7 @@ impl Playground {
             if self.editor.document.presentation.handles {
                 for (i, p) in points.iter().enumerate() {
                     let pos = self.screen(*p, r);
-                    let active = self.selection == Some((o.id, Some(i)));
+                    let active = !clean_capture && self.selection == Some((o.id, Some(i)));
                     painter.circle_filled(
                         pos,
                         if active { 6.0 } else { 4.0 },
@@ -11236,12 +11281,13 @@ impl Playground {
             }
         }
         for boundary in &self.editor.document.model.draft.internal_boundaries {
-            let selected =
-                self.internal_selection
+            let selected = !clean_capture
+                && (self
+                    .internal_selection
                     .is_some_and(|selection| selection.0 == boundary.id)
                     || self.selected_spans.iter().any(
                         |span| matches!(span, GeometrySpan::Baffle(id, _) if *id == boundary.id),
-                    );
+                    ));
             let points = boundary.spline.controls();
             if self.editor.document.presentation.control_polygons {
                 painter.add(egui::Shape::line(
@@ -11259,7 +11305,8 @@ impl Playground {
             if self.editor.document.presentation.handles {
                 for (index, point) in points.iter().enumerate() {
                     let position = self.screen(*point, r);
-                    let active = self.internal_selection == Some((boundary.id, Some(index)));
+                    let active = !clean_capture
+                        && self.internal_selection == Some((boundary.id, Some(index)));
                     painter.circle_filled(
                         position,
                         if active { 6.0 } else { 4.0 },
@@ -11277,7 +11324,8 @@ impl Playground {
                 }
             }
         }
-        if self.transformable_curve_controls().is_some()
+        if !clean_capture
+            && self.transformable_curve_controls().is_some()
             && let Some(pivot) = self.selection_pivot()
         {
             let center = self.screen(pivot, r);
@@ -11309,7 +11357,7 @@ impl Playground {
                 Stroke::new(1.0, GOLD),
             );
         }
-        if let Some((_, frame)) = self.selected_material_frame() {
+        if !clean_capture && let Some((_, frame)) = self.selected_material_frame() {
             let center = self.screen(frame.origin, r);
             let radius = 42.0;
             let (sin, cos) = frame.angle_radians.sin_cos();
@@ -11340,7 +11388,8 @@ impl Playground {
                 TEAL,
             );
         }
-        if let InteractionMode::Draw { role, tool } = self.interaction_mode
+        if !clean_capture
+            && let InteractionMode::Draw { role, tool } = self.interaction_mode
             && !self.custom.is_empty()
         {
             let candidate = (over && self.custom.len() < tool.maximum_points())
@@ -11438,12 +11487,13 @@ impl Playground {
                 }
             }
         }
-        if let Some(Drag::Marquee {
-            anchor,
-            current,
-            operation,
-            ..
-        }) = &self.drag
+        if !clean_capture
+            && let Some(Drag::Marquee {
+                anchor,
+                current,
+                operation,
+                ..
+            }) = &self.drag
         {
             let marquee = Rect::from_two_pos(*anchor, *current).intersect(r);
             let operation_color = match operation {
@@ -11506,7 +11556,7 @@ impl Playground {
                 GOLD,
             );
         }
-        if let Some(pointer) = pointer.filter(|point| r.contains(*point)) {
+        if !clean_capture && let Some(pointer) = pointer.filter(|point| r.contains(*point)) {
             match self.interaction_mode {
                 InteractionMode::Draw {
                     tool: DrawTool::Circle,
@@ -11618,7 +11668,7 @@ impl Playground {
                 if !self.probe_visible(probe.target) {
                     continue;
                 }
-                let selected = self.selected_probe == Some(probe.id);
+                let selected = !clean_capture && self.selected_probe == Some(probe.id);
                 let color = if self.probe_status.contains_key(&probe.id) {
                     RED
                 } else if !probe.enabled {
@@ -11805,7 +11855,9 @@ impl Playground {
                 );
             }
         }
-        self.interaction_mode_overlay(ctx, r);
+        if !clean_capture {
+            self.interaction_mode_overlay(ctx, r);
+        }
         r
     }
 
@@ -13142,7 +13194,25 @@ pub fn frame(
             .layer_id(egui::LayerId::background())
             .max_rect(ctx.viewport_rect()),
     );
-    state.show(&mut root, Some(&display));
+    let logical_canvas = ctx.viewport_rect();
+    let logical_viewport = state.show(&mut root, Some(&display));
+    if state.snapshot_state == SnapshotState::Armed {
+        state.snapshot_state = SnapshotState::Capturing;
+        let sender = state.sender.clone();
+        commands.spawn(Screenshot::primary_window()).observe(
+            move |captured: On<ScreenshotCaptured>| {
+                let event = match crate::capture::encode_viewport_png(
+                    captured.image.clone(),
+                    logical_canvas,
+                    logical_viewport,
+                ) {
+                    Ok(bytes) => FileEvent::SnapshotCaptured(bytes),
+                    Err(error) => FileEvent::Error(error),
+                };
+                let _ = sender.send(event);
+            },
+        );
+    }
     state.editor.validate_frame(12_000);
     state.refresh_mesh();
     state.refresh_mesh_adaptation();
@@ -14996,7 +15066,14 @@ impl Playground {
                         }
                     };
                     ui.colored_label(color, text);
-                    if state.load.is_some() {
+                    if matches!(
+                        state.snapshot_state,
+                        SnapshotState::Armed | SnapshotState::Capturing
+                    ) {
+                        ui.colored_label(GOLD, "Capturing snapshot…");
+                    } else if state.snapshot_state == SnapshotState::Saving {
+                        ui.colored_label(GOLD, "Saving snapshot…");
+                    } else if state.load.is_some() {
                         ui.colored_label(GOLD, "Validating scene file…");
                     } else if let Some(job) = &state.mesh_job {
                         ui.colored_label(GOLD, format!("Mesh rebuilding: {}", job.phase()));
@@ -15065,11 +15142,13 @@ impl Playground {
                     });
                 });
         }
-        state.add_geometry_popover(root.ctx());
-        state.example_gallery(root.ctx());
-        state.performance_window(root.ctx());
-        state.probe_readout_windows(root.ctx());
-        state.far_field_readout_window(root.ctx());
+        if state.snapshot_state != SnapshotState::Armed {
+            state.add_geometry_popover(root.ctx());
+            state.example_gallery(root.ctx());
+            state.performance_window(root.ctx());
+            state.probe_readout_windows(root.ctx());
+            state.far_field_readout_window(root.ctx());
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(root, |ui| state.viewport(ui, wave_display))
@@ -17111,6 +17190,59 @@ mod tests {
         assert!(!h.texts.iter().any(|(text, _)| text == "Circle"));
         assert!(!h.texts.iter().any(|(text, _)| text == "Rectangle"));
         assert!(!h.texts.iter().any(|(text, _)| text == "Polygon"));
+    }
+
+    #[test]
+    fn viewport_snapshot_is_ordered_in_export_and_arms_without_document_changes() {
+        let mut harness = Harness::new();
+        let document = harness.state.editor.document.clone();
+        let history = harness.state.editor.history_len();
+        let center = harness.state.center;
+        let scale = harness.state.scale;
+
+        harness.click_text("Export");
+        harness.frame(vec![]);
+        let menu_y = ["Copy scene link", "Viewport PNG", "Scene SVG"].map(|label| {
+            harness
+                .texts
+                .iter()
+                .find(|(text, _)| text == label)
+                .unwrap_or_else(|| panic!("missing export action {label:?}"))
+                .1
+                .center()
+                .y
+        });
+        assert!(menu_y[0] < menu_y[1] && menu_y[1] < menu_y[2]);
+
+        harness.click_text("Viewport PNG");
+        assert_eq!(harness.state.snapshot_state, SnapshotState::Armed);
+        assert!(harness.state.file_busy);
+        assert_eq!(harness.state.editor.document, document);
+        assert_eq!(harness.state.editor.history_len(), history);
+        assert_eq!(harness.state.center, center);
+        assert_eq!(harness.state.scale, scale);
+
+        harness.state.performance_open = true;
+        harness.state.add_geometry_open = true;
+        harness.frame(vec![]);
+        assert!(
+            harness
+                .texts
+                .iter()
+                .any(|(text, _)| text == "Capturing snapshot…")
+        );
+        assert!(
+            !harness
+                .texts
+                .iter()
+                .any(|(text, _)| text == "Performance diagnostics")
+        );
+        assert!(
+            !harness
+                .texts
+                .iter()
+                .any(|(text, _)| text == "Draw geometry")
+        );
     }
 
     #[test]

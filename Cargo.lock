@@ -2456,6 +2456,8 @@ dependencies = [
  "bevy_egui",
  "flate2",
  "funfern-core",
+ "image",
+ "js-sys",
  "rfd",
  "serde",
  "serde_json",

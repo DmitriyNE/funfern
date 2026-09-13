@@ -281,10 +281,13 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   dialog. Load scene uses file upload/native selection and validates before
   replacement. Successful loading clears history; malformed files leave the
   current document intact. Examples opens a thumbnail gallery; opening one is
-  undoable. Export writes a scene-only SVG. Documents autosave after edits and
-  restore on startup from browser local storage or the native per-user recovery
-  file. Copy scene link embeds compressed, validated scene data in a `#scene=v1.…`
-  URL fragment; while that fragment is active, later autosaves keep it current.
+  undoable. Export can write a geometry SVG or a PNG snapshot of the current
+  viewport at its physical pixel resolution. PNG snapshots follow the active View
+  settings while omitting panels, floating readouts, selection emphasis, gizmos,
+  marquees, and active-tool prompts. Documents autosave after edits and restore on
+  startup from browser local storage or the native per-user recovery file. Copy
+  scene link embeds compressed, validated scene data in a `#scene=v1.…` URL
+  fragment; while that fragment is active, later autosaves keep it current.
   The catalog includes ready-to-run GRIN rod and circular Luneburg profiles with
   their drivers, probes, and wave-speed view presets. View toggles, field intensity,
   and material-overlay settings travel through files, links, recovery, and examples.

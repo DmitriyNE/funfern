@@ -1,3 +1,4 @@
+mod capture;
 mod examples;
 mod files;
 mod material_overlay;

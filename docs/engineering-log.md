@@ -7,8 +7,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-- [ ] Next product-polish slice after the completed phone/touch and drawing work:
-  screenshot/video capture. Reassess the remaining product roadmap afterward.
+- [ ] Add browser video capture using the scene-only presentation fence established
+  by viewport PNG export, then reassess the remaining product roadmap. Keep playback
+  live, show a clear recording indicator, and keep panels outside the recording.
 - [ ] Replace the vector overlay's run-peak exposure heuristic with a robust
   automatic scale that can recover after a legitimate transient spike such as
   **Place pulse**, while still refusing to magnify late numerical noise. Avoid
@@ -58,6 +59,26 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   follow-ups include bounded time-envelope expressions, pulsed/chirped drives,
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
+
+## 2026-09-13 — Scene-only viewport PNG capture
+
+- Added **Viewport PNG** between scene-link copying and SVG export. A request waits
+  for the export menu to close, captures the current Bevy window through the existing
+  wgpu screenshot path, converts the logical central viewport to physical image
+  pixels, crops it, and encodes `funfern-snapshot.png`.
+- The capture frame follows persisted View settings and retains the in-scene logo,
+  field, geometry, source, probes, and requested overlays. It suppresses floating
+  windows, selection emphasis, transform/material gizmos, staged construction,
+  marquees, cursor previews, and active-tool prompts without mutating live editor
+  state. Camera, playback, documents, presentation settings, and history are left
+  untouched.
+- Native output uses the existing save-dialog path. Browser output uses a Blob
+  download after GPU readback, avoiding a delayed file picker that could lose its
+  user-activation window. Pixel-mapping and PNG tests cover ordinary, fractional,
+  clamped, empty, and orientation-sensitive crops.
+- All 342 workspace tests, warning-denied Clippy, native and WASM checks, native
+  release compilation, and the release Trunk build pass. Interactive snapshot
+  inspection remains on the manual browser checklist.
 
 ## 2026-09-13 — Per-span and per-selection straightening
 
