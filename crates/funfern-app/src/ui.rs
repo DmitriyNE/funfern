@@ -7196,7 +7196,22 @@ impl Playground {
                     &mut self.material_formula_errors[2],
                 ),
             );
-            ui.small("Nondimensional material properties");
+            ui.horizontal(|ui| {
+                ui.small("Nondimensional material properties");
+                ui.menu_button("?", |ui| {
+                    ui.set_min_width(300.0);
+                    ui.strong("Formula syntax");
+                    ui.small("Coordinates: x, y, r in world units; theta in radians");
+                    ui.small("Named material parameters can be used directly");
+                    ui.separator();
+                    ui.monospace("Operators: +  -  *  /  ^  ( )");
+                    ui.monospace("sqrt(v)  abs(v)  sin(v)  cos(v)  tan(v)");
+                    ui.monospace("exp(v)  log(v)  min(a,b)  max(a,b)");
+                    ui.monospace("clamp(min,max,v)  smoothstep(edge0,edge1,v)");
+                })
+                .response
+                .on_hover_text("Formula reference");
+            });
             if values_changed && material.valid() {
                 let result = self.editor.update_material(material.clone());
                 self.error(result);
@@ -17482,6 +17497,26 @@ mod tests {
         assert_eq!(h.state.inspector_panel, Some(InspectorPanel::Materials));
         h.click_text("Probes");
         assert_eq!(h.state.inspector_panel, Some(InspectorPanel::Probes));
+    }
+
+    #[test]
+    fn material_panel_has_a_compact_formula_reference() {
+        let mut h = Harness::new();
+        h.click_text("Materials");
+        assert!(h.texts.iter().any(|(text, _)| text == "?"));
+        h.click_text("?");
+        h.frame(vec![]);
+        for text in [
+            "Formula syntax",
+            "Operators: +  -  *  /  ^  ( )",
+            "sqrt(v)  abs(v)  sin(v)  cos(v)  tan(v)",
+            "clamp(min,max,v)  smoothstep(edge0,edge1,v)",
+        ] {
+            assert!(
+                h.texts.iter().any(|(candidate, _)| candidate == text),
+                "missing formula help line {text:?}"
+            );
+        }
     }
 
     #[test]

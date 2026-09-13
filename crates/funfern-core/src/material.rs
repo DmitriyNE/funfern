@@ -460,8 +460,14 @@ impl Expression {
                     BinaryOperator::Add if right.is_zero() => Some((**left).clone()),
                     BinaryOperator::Add if left.is_zero() => Some((**right).clone()),
                     BinaryOperator::Sub if right.is_zero() => Some((**left).clone()),
+                    BinaryOperator::Mul if left.is_zero() || right.is_zero() => {
+                        Some(Self::Constant(0.0))
+                    }
                     BinaryOperator::Mul if right.is_one() => Some((**left).clone()),
                     BinaryOperator::Mul if left.is_one() => Some((**right).clone()),
+                    BinaryOperator::Div if left.is_zero() && !right.is_zero() => {
+                        Some(Self::Constant(0.0))
+                    }
                     BinaryOperator::Div if right.is_one() => Some((**left).clone()),
                     BinaryOperator::Div if left.is_one() => {
                         if let Self::Binary {
@@ -1139,6 +1145,12 @@ mod tests {
 
         let damping = ScalarField::formula("0.2 + y*y").unwrap();
         let density = ScalarField::formula("2 + x*x").unwrap();
+        let zero_loss = ScalarField::constant(0.0).divide(&density).unwrap();
+        assert_eq!(zero_loss, ScalarField::constant(0.0));
+        assert_eq!(
+            zero_loss.multiply(&density).unwrap(),
+            ScalarField::constant(0.0)
+        );
         let normalized = damping.divide(&density).unwrap();
         let round_trip = normalized.multiply(&density).unwrap();
         assert_eq!(round_trip.source(), Some("0.2 + y * y"));

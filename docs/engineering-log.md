@@ -72,12 +72,16 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   existing bounded postfix program. Normal formula entry keeps source text verbatim;
   only physics conversion invokes structural simplification and canonical printing.
   Double reciprocals and exact damping product/quotient pairs cancel, so repeated
-  switches do not accumulate wrappers.
+  switches do not accumulate wrappers. Zero products and a zero numerator over a
+  structurally nonzero material coefficient reduce to constant zero, keeping a
+  lossless material's converted `alpha` readable.
+- Added a small `?` menu beside the Materials property note with coordinates,
+  operators, parameter use, and every available formula function.
 - Material conversion is prepared before the editor transaction and fails atomically
   if a generated expression exceeds existing limits. One successful switch remains
   one undo entry. A divergent formula text draft blocks switching rather than being
   silently discarded.
-- All 347 workspace tests pass, including spatial invariance, 32 repeated conversion
+- All 348 workspace tests pass, including spatial invariance, 32 repeated conversion
   cycles, persistence, exact undo/redo, atomic failure, and pending-formula coverage.
 
 ## 2026-09-13 — Scene-only viewport PNG capture
