@@ -67,8 +67,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - Suppressed the overlay when its current 90th percentile falls below an absolute
   numerical floor or 0.01% of the held peak. Once outgoing energy leaves, arrows
   now shrink and disappear instead of expanding residual noise to full length.
-  Fresh fields and quantity changes reset exposure; ordinary handoffs and toggling
-  the same overlay retain it.
+  Fresh fields, direct solver resets, source changes, same-mesh physics-setting
+  changes, and quantity changes reset exposure; ordinary geometry handoffs and
+  toggling the same overlay retain it.
 - Added a regression for peak retention, bounded late-field scaling, and silence
   thresholds. The 305-test workspace suite, warning-denied Clippy, and release
   Trunk build pass.

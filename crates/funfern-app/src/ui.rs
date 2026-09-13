@@ -1086,6 +1086,12 @@ impl Default for Playground {
     }
 }
 impl Playground {
+    fn reset_vector_overlay_exposure(&mut self) {
+        self.vector_overlay_average.clear();
+        self.vector_overlay_step = u64::MAX;
+        self.vector_overlay_peak_reference = 0.0;
+    }
+
     fn screen(&self, p: Point2, r: Rect) -> Pos2 {
         Pos2::new(
             r.center().x + ((p.x - self.center.x) * self.scale).clamp(-1e7, 1e7) as f32,
@@ -2740,6 +2746,7 @@ impl Playground {
                     if fresh_simulation {
                         self.wave_pending_pulse = None;
                         self.fresh_simulation_requested = true;
+                        self.reset_vector_overlay_exposure();
                     }
                     if !self.load_notice.is_empty() {
                         self.notify(self.load_notice);
@@ -2874,9 +2881,7 @@ impl Playground {
             self.solution_indicator_job = None;
             self.solution_indicator_result = None;
             self.solution_indicator_source = None;
-            self.vector_overlay_average.clear();
-            self.vector_overlay_step = u64::MAX;
-            self.vector_overlay_peak_reference = 0.0;
+            self.reset_vector_overlay_exposure();
         }
         // Prepare from the displayed mesh's own scene, never an obsolete
         // in-flight request. Geometry edits are coalesced until the drag ends.
@@ -3526,6 +3531,7 @@ impl Playground {
     ) {
         if self.wave_reset_requested && self.simulation_candidate.is_none() {
             self.wave_reset_requested = false;
+            self.reset_vector_overlay_exposure();
             self.wave_running = false;
             self.wave_accumulator = 0.0;
             self.wave_time_offset = 0.0;
@@ -3672,9 +3678,9 @@ impl Playground {
                 self.wave_active_wall_seconds = 0.0;
                 self.wave_dispatches = 0;
                 self.wave_step_requested = false;
-                self.vector_overlay_average.clear();
-                self.vector_overlay_step = u64::MAX;
-                self.vector_overlay_peak_reference = 0.0;
+                self.reset_vector_overlay_exposure();
+            } else if same_mesh && scene_settings_changed {
+                self.reset_vector_overlay_exposure();
             }
             self.wave_completed_steps = 0;
             self.wave_steps_per_second = 0.0;
@@ -4146,6 +4152,7 @@ impl Playground {
         ui.add_enabled_ui(wave_available, |ui| {
             if ui.button("Reset").clicked() {
                 self.wave_reset_requested = true;
+                self.reset_vector_overlay_exposure();
             }
             if ui
                 .add_enabled(!self.wave_running, egui::Button::new("Step"))
@@ -6301,7 +6308,9 @@ impl Playground {
             });
             if selected != region.material {
                 let result = self.editor.set_region_material(region.id, selected);
-                self.error(result);
+                if self.error(result).is_some() {
+                    self.reset_vector_overlay_exposure();
+                }
             }
         }
         ui.separator();
@@ -6461,7 +6470,9 @@ impl Playground {
             });
             if source_changed && source.valid() {
                 let result = self.editor.set_volume_source(source_region, Some(source));
-                self.error(result);
+                if self.error(result).is_some() {
+                    self.reset_vector_overlay_exposure();
+                }
             }
         }
         if let Some(region) = self
@@ -7679,6 +7690,7 @@ impl Playground {
                     .any(|response| response.lost_focus() || response.drag_stopped())
             {
                 self.editor.commit();
+                self.reset_vector_overlay_exposure();
             }
         });
         if let Some(operator) = &self.wave_operator {
@@ -9913,6 +9925,7 @@ impl Playground {
         if !ctx.input(|i| i.pointer.primary_down()) {
             if std::mem::take(&mut self.source_dragging) {
                 self.editor.commit();
+                self.reset_vector_overlay_exposure();
             }
             if self.probe_drag.take().is_some() {
                 self.editor.commit();
@@ -17401,6 +17414,22 @@ mod tests {
 
         peak = 0.0;
         assert_eq!(stable_vector_overlay_reference(0.01, &mut peak), Some(0.01));
+    }
+
+    #[test]
+    fn fresh_field_reset_clears_vector_overlay_exposure() {
+        let mut state = Playground::default();
+        state
+            .vector_overlay_average
+            .insert((0, 0), Point2::new(3.0, 4.0));
+        state.vector_overlay_step = 42;
+        state.vector_overlay_peak_reference = 10.0;
+
+        state.reset_vector_overlay_exposure();
+
+        assert!(state.vector_overlay_average.is_empty());
+        assert_eq!(state.vector_overlay_step, u64::MAX);
+        assert_eq!(state.vector_overlay_peak_reference, 0.0);
     }
 
     #[test]

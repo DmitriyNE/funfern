@@ -231,9 +231,12 @@ reference, so weaker fields stay proportionally shorter instead of being expande
 back to full-size arrows. The overlay becomes silent when its current 90th
 percentile falls below the absolute floor or 0.01% of the peak. The scale survives
 ordinary solver handoffs and toggling the same overlay, but resets with a fresh field
-or a different vector quantity. Mechanical scenes retain the prior `-k u_t grad(u)` energy-flow
-display. These arrows derive the transverse field belonging to one scalar
-polarization and are not presented as a simultaneous full-vector Maxwell state.
+or a different vector quantity. Direct GPU resets, fresh-scene replacement, and
+source or same-mesh physics-setting changes clear the exposure, so a newly configured
+field establishes its own scale. Mechanical scenes retain the prior
+`-k u_t grad(u)` energy-flow display. These arrows derive the transverse field
+belonging to one scalar polarization and are not presented as a simultaneous
+full-vector Maxwell state.
 
 Autosave retains both the accepted scene and any invalid editable draft, writing to
 browser local storage or an atomic per-user native recovery file after a short
