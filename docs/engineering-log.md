@@ -10,14 +10,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Near-term product-polish order after the completed phone/touch slice: drawing
   primitives and generalized C0-piece straightening, then screenshot/video capture.
   Reassess the remaining product roadmap after those groups land.
-- [ ] In the drawing slice, make an arbitrarily oriented straight baffle a two-point
-  workflow. Finishing a custom baffle with exactly two entered vertices should use
-  the same constructor, inserting the required cubic controls equidistantly. Add
-  open **Polyline** and closed **Polygon** primitives whose clicked vertices are
-  interpolation corners and whose straight pieces become ordinary C0-bounded cubic
-  spans. Add generalized **Straighten selected piece** for eligible C0-isolated
-  selections; generated primitives remain normal editable splines rather than a
-  second persistent geometry model.
+- [ ] Implement the bounded drawing-primitives slice described below: a contextual
+  Loop/Baffle catalog, two-point Straight, Rectangle, Polygon, Polyline, an explicitly
+  named Spline tool, and generalized C0-piece straightening. Keep advanced
+  construction operations outside this slice.
 - [ ] Replace the vector overlay's run-peak exposure heuristic with a robust
   automatic scale that can recover after a legitimate transient spike such as
   **Place pulse**, while still refusing to magnify late numerical noise. Avoid
@@ -40,10 +36,6 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Revisit generalized far-field sampling contours when editable outer-domain
   shapes arrive. Keep the automatic inset contour as the simple default and only
   expose custom contour geometry if non-rectangular domains require it.
-- [ ] Design phone-adjusted interactions. The responsive toolbar is usable at phone
-  widths, but viewport editing still assumes a mouse: add touch selection, one-finger
-  object manipulation, unambiguous canvas pan/zoom gestures, larger hit targets, and
-  mobile-friendly numeric entry without covering the active geometry.
 - [ ] Diagnose and stabilize second-order outgoing conditions on curved hole or
   internal-boundary spans. They can inject energy and make the solution diverge;
   keep examples on reflecting or first-order curved faces until this is resolved.
@@ -54,9 +46,6 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Evaluate a dissipative relative dashpot for thin gaps. Keeping centered time
   integration would require an off-diagonal damping solve; the implemented gap
   spring is conservative.
-- [ ] Add standard primitive entries to the Draw catalog beyond Circle, Straight,
-  and Custom. Keep creation role selection and primitive parameters in the
-  transient popover.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
   and local-repair cases. The user reports that the end-to-end handoff still feels
   slow even though the small scripted transfer case is much faster.
@@ -74,6 +63,41 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   follow-ups include bounded time-envelope expressions, pulsed/chirped drives,
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
+
+## 2026-09-13 — Revised drawing-primitives slice
+
+- Keep creation choices local to the **Draw** popup rather than adding a persistent
+  Poly/Spline mode. The first choice remains the target role. Hole and Interface
+  then offer **Circle**, **Rectangle**, **Polygon**, and **Spline**; Baffle offers
+  **Straight**, **Polyline**, and **Spline**. Rename the current **Custom** action to
+  **Spline** without changing its control-point semantics.
+- Make construction semantics visible in the active-tool overlay and preview.
+  Polygon and Polyline clicks place interpolation vertices joined by exact straight
+  pieces. Spline clicks place control points and continues to show its control
+  polygon. All completed primitives become the existing periodic or open spline
+  representation, so files, validation, meshing, selection, BC assignment, and
+  transforms do not gain a second geometry model.
+- Replace the fixed one-click baffle preset with **Straight** as a two-endpoint
+  workflow. Its required cubic controls are inserted equidistantly along the chord.
+  **Polyline** accepts two or more vertices and finishes with Enter; **Polygon**
+  accepts three or more vertices and finishes with Enter or by clicking its first
+  vertex. **Rectangle** takes two opposite corners and creates four exact C0 sides.
+  Backspace removes the latest staged vertex and Escape cancels every staged tool.
+- Generalize **Straighten baffle** into **Straighten selected piece** for a contiguous
+  span run bounded by C0 breaks or open endpoints. Preserve the piece endpoints,
+  distribute its controls along the chord, and retain span boundary conditions,
+  baffle face coherence, and geometry-attached probe references. A complete curve
+  remains eligible.
+- Each completed primitive and each straighten operation is one undoable document
+  action. Failed or invalid placement remains governed by the existing draft and
+  validator behavior. Respect the 32-feature and 128-control limits, and keep all
+  constructors independent of camera zoom.
+- Cover exact straightness, C0 corners, vertex ordering, closure, two-point baffles,
+  cancellation, limits, role/region inheritance, BC and probe preservation, history,
+  and scene round-trips. Exercise mouse and touch construction in the manual browser
+  checklist.
+- Ellipses, arcs, rounded rectangles, capsules, freehand drawing, arrays, mirrors,
+  offsets, fillets, trim/extend, and construction guides are explicitly deferred.
 
 ## 2026-09-13 — Phone interactions and directional marquees
 
