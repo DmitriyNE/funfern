@@ -7796,6 +7796,103 @@ impl Playground {
                 self.set_span_selection(vec![]);
             }
         });
+        if let InteractionMode::DrawCustom { .. } = self.interaction_mode {
+            ui.horizontal(|ui| {
+                ui.label(format!("{} / 128 points", self.custom.len()));
+                if ui
+                    .add_enabled(self.custom.len() >= 4, egui::Button::new("Finish"))
+                    .clicked()
+                {
+                    self.finish_custom();
+                }
+                if ui.button("Cancel").clicked() {
+                    self.custom.clear();
+                    self.interaction_mode = InteractionMode::Select;
+                }
+            });
+            ui.small("Enter finishes · Backspace removes the last point");
+        }
+        if let Some(summary) = self.selection_summary() {
+            ui.add_space(8.0);
+            ui.strong(summary);
+        }
+        ui.add_space(10.0);
+        ui.separator();
+        egui::CollapsingHeader::new(format!(
+            "Features  {} / 32",
+            self.editor.document.model.draft.obstacles.len()
+                + self.editor.document.model.draft.internal_boundaries.len()
+        ))
+        .id_salt("feature_list")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("obstacles")
+                .max_height(135.0)
+                .show(ui, |ui| {
+                    let obstacles = self.editor.document.model.draft.obstacles.clone();
+                    let boundaries = self.editor.document.model.draft.internal_boundaries.clone();
+                    for o in &obstacles {
+                        let assignment = if matches!(o.role, LoopRole::Hole { .. }) {
+                            if o.span_conditions
+                                .iter()
+                                .all(|condition| *condition == FaceBoundaryCondition::Reflecting)
+                            {
+                                " · Reflecting"
+                            } else {
+                                " · Assigned BCs"
+                            }
+                        } else {
+                            ""
+                        };
+                        if ui
+                            .selectable_label(
+                                self.selected_spans.iter().any(
+                                    |span| matches!(span, GeometrySpan::Loop(id, _) if *id == o.id),
+                                ) || self.focused_feature == Some(FocusedFeature::Loop(o.id)),
+                                format!(
+                                    "{} {}{} · {} controls",
+                                    o.role.label(),
+                                    o.id.0,
+                                    assignment,
+                                    o.spline.controls().len()
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.select_loop(o.id);
+                        }
+                    }
+                    for boundary in &boundaries {
+                        if ui
+                            .selectable_label(
+                                self.selected_spans.iter().any(|span| {
+                                    matches!(span, GeometrySpan::Baffle(id, _) if *id == boundary.id)
+                                }) || self.focused_feature
+                                    == Some(FocusedFeature::Baffle(boundary.id)),
+                                format!(
+                                    "Baffle {:02} · {} · {} controls",
+                                    boundary.id.0,
+                                    if boundary
+                                        .span_laws
+                                        .iter()
+                                        .all(|law| *law == InternalBoundaryLaw::REFLECTING)
+                                    {
+                                        "Reflecting"
+                                    } else {
+                                        "Assigned laws"
+                                    },
+                                    boundary.spline.controls().len()
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.select_baffle(boundary.id);
+                        }
+                    }
+                });
+        });
+
         if self
             .selected_spans
             .iter()
@@ -7849,98 +7946,6 @@ impl Playground {
                 self.editor.commit();
             }
         }
-        if let InteractionMode::DrawCustom { .. } = self.interaction_mode {
-            ui.horizontal(|ui| {
-                ui.label(format!("{} / 128 points", self.custom.len()));
-                if ui
-                    .add_enabled(self.custom.len() >= 4, egui::Button::new("Finish"))
-                    .clicked()
-                {
-                    self.finish_custom();
-                }
-                if ui.button("Cancel").clicked() {
-                    self.custom.clear();
-                    self.interaction_mode = InteractionMode::Select;
-                }
-            });
-            ui.small("Enter finishes · Backspace removes the last point");
-        }
-        if let Some(summary) = self.selection_summary() {
-            ui.add_space(8.0);
-            ui.strong(summary);
-        }
-        ui.add_space(10.0);
-        ui.separator();
-        ui.label(format!(
-            "Features  {} / 32",
-            self.editor.document.model.draft.obstacles.len()
-                + self.editor.document.model.draft.internal_boundaries.len()
-        ));
-        egui::ScrollArea::vertical()
-            .id_salt("obstacles")
-            .max_height(135.0)
-            .show(ui, |ui| {
-                let obstacles = self.editor.document.model.draft.obstacles.clone();
-                let boundaries = self.editor.document.model.draft.internal_boundaries.clone();
-                for o in &obstacles {
-                    let assignment = if matches!(o.role, LoopRole::Hole { .. }) {
-                        if o.span_conditions
-                            .iter()
-                            .all(|condition| *condition == FaceBoundaryCondition::Reflecting)
-                        {
-                            " · Reflecting"
-                        } else {
-                            " · Assigned BCs"
-                        }
-                    } else {
-                        ""
-                    };
-                    if ui
-                        .selectable_label(
-                            self.selected_spans.iter().any(
-                                |span| matches!(span, GeometrySpan::Loop(id, _) if *id == o.id),
-                            ) || self.focused_feature == Some(FocusedFeature::Loop(o.id)),
-                            format!(
-                                "{} {}{} · {} controls",
-                                o.role.label(),
-                                o.id.0,
-                                assignment,
-                                o.spline.controls().len()
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.select_loop(o.id);
-                    }
-                }
-                for boundary in &boundaries {
-                    if ui
-                        .selectable_label(
-                            self.selected_spans.iter().any(|span| {
-                                matches!(span, GeometrySpan::Baffle(id, _) if *id == boundary.id)
-                            }) || self.focused_feature
-                                == Some(FocusedFeature::Baffle(boundary.id)),
-                            format!(
-                                "Baffle {:02} · {} · {} controls",
-                                boundary.id.0,
-                                if boundary
-                                    .span_laws
-                                    .iter()
-                                    .all(|law| *law == InternalBoundaryLaw::REFLECTING)
-                                {
-                                    "Reflecting"
-                                } else {
-                                    "Assigned laws"
-                                },
-                                boundary.spline.controls().len()
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.select_baffle(boundary.id);
-                    }
-                }
-            });
 
         if let Some(FocusedFeature::Loop(id)) = self.focused_feature
             && self.complete_selected_feature() == Some(FocusedFeature::Loop(id))
@@ -9227,8 +9232,8 @@ impl Playground {
                     egui::CursorIcon::PointingHand
                 } else if self.hit_source(point, r) || self.hit_probe(point, r).is_some() {
                     egui::CursorIcon::Grab
-                } else if self.hit_domain_corner(point, r).is_some() {
-                    egui::CursorIcon::ResizeNwSe
+                } else if let Some(index) = self.hit_domain_corner(point, r) {
+                    Self::domain_corner_cursor(index)
                 } else if matches!(
                     self.hit_outer_boundary(point, r),
                     Some(OuterSide::Left | OuterSide::Right)
@@ -11310,6 +11315,13 @@ impl Playground {
             .filter(|(_, distance)| *distance <= 10.0)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(index, _)| index)
+    }
+
+    fn domain_corner_cursor(index: usize) -> egui::CursorIcon {
+        match index {
+            0 | 2 => egui::CursorIcon::ResizeNeSw,
+            _ => egui::CursorIcon::ResizeNwSe,
+        }
     }
 
     fn resize_domain(start: DomainRect, drag: DomainDrag, point: Point2) -> DomainRect {
@@ -15014,12 +15026,23 @@ mod tests {
 
         harness.click(harness.point(Point2::new(0.35, 1.0)));
         harness.frame(vec![]);
-        assert!(
-            harness
-                .texts
-                .iter()
-                .any(|(text, _)| text == "Domain bounds")
-        );
+        let features_y = harness
+            .texts
+            .iter()
+            .find(|(text, _)| text.starts_with("Features  "))
+            .expect("feature-list header")
+            .1
+            .center()
+            .y;
+        let domain_y = harness
+            .texts
+            .iter()
+            .find(|(text, _)| text == "Domain bounds")
+            .expect("contextual domain controls")
+            .1
+            .center()
+            .y;
+        assert!(domain_y > features_y);
 
         harness.click(harness.point(Point2::new(0.15, 0.0)));
         harness.frame(vec![]);
@@ -15028,6 +15051,28 @@ mod tests {
                 .texts
                 .iter()
                 .any(|(text, _)| text == "Domain bounds")
+        );
+    }
+
+    #[test]
+    fn feature_list_is_collapsible_and_open_by_default() {
+        let mut harness = Harness::new();
+        assert!(
+            harness
+                .texts
+                .iter()
+                .any(|(text, _)| text.starts_with("Hole 1 "))
+        );
+
+        harness.click_text("Features  1 / 32");
+        for _ in 0..20 {
+            harness.frame(vec![]);
+        }
+        assert!(
+            !harness
+                .texts
+                .iter()
+                .any(|(text, _)| text.starts_with("Hole 1 "))
         );
     }
 
@@ -15053,6 +15098,26 @@ mod tests {
         assert!((domain.min_x + 1.2).abs() < 1e-6);
         assert!((domain.min_y + 0.8).abs() < 1e-6);
         assert_eq!(harness.state.editor.history_len(), (2, 0));
+    }
+
+    #[test]
+    fn opposite_domain_corners_use_matching_diagonal_cursors() {
+        assert_eq!(
+            Playground::domain_corner_cursor(0),
+            egui::CursorIcon::ResizeNeSw
+        );
+        assert_eq!(
+            Playground::domain_corner_cursor(2),
+            egui::CursorIcon::ResizeNeSw
+        );
+        assert_eq!(
+            Playground::domain_corner_cursor(1),
+            egui::CursorIcon::ResizeNwSe
+        );
+        assert_eq!(
+            Playground::domain_corner_cursor(3),
+            egui::CursorIcon::ResizeNwSe
+        );
     }
 
     fn commit_mesh_without_gpu(state: &mut Playground) {
