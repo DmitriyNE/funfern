@@ -28,7 +28,7 @@ struct Forcing {
 
 struct NodeData {
     position_damping: vec4<f32>,
-    regions: vec4<u32>,
+    source_membership: vec4<u32>,
     boundary: vec4<u32>,
     neumann_weights: vec4<f32>,
     dirichlet_signal: TimeSignal,
@@ -66,13 +66,6 @@ struct TransferEntry {
 @group(0) @binding(5) var<storage, read> nodes: array<NodeData>;
 @group(0) @binding(6) var<storage, read_write> states: array<State>;
 @group(0) @binding(7) var<storage, read_write> transfers: array<TransferEntry>;
-
-fn region_match(node: vec4<u32>, region: vec4<u32>) -> f32 {
-    let first = node.x == region.x && node.y == region.y;
-    let second = (node.z != 0u || node.w != 0u)
-        && node.z == region.x && node.w == region.y;
-    return select(0.0, 1.0, first || second);
-}
 
 fn signal_value(signal: TimeSignal, time: f32) -> f32 {
     return signal.values.x
@@ -137,7 +130,7 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     let delta = nodes[i].position_damping.xy - forcing.source.position_width_enabled.xy;
     let gaussian = exp(-0.5 * dot(delta, delta) / forcing.source.position_width_enabled.z);
     let source_forcing = forcing.source.position_width_enabled.w
-        * region_match(nodes[i].regions, forcing.source.region)
+        * select(0.0, 1.0, nodes[i].source_membership.x != 0u)
         * gaussian
         * signal_value(forcing.source.signal, time);
     let gamma = nodes[i].position_damping.z;

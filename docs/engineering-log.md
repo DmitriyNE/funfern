@@ -64,6 +64,33 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   divider graphs. The first junction implementation deliberately uses the robust
   full-rebuild fallback for graph-edge movement and topology edits.
 
+## 2026-09-13 — Topology-capable GPU solver upload
+
+- Removed the fixed two-region membership table from GPU node packing. Arbitrary
+  region membership is collected on the host, while the packed node stores only
+  whether it belongs to the active point-source region. Both transfer shaders use
+  that boolean when reconstructing acceleration; ordinary wave stepping and pulse
+  injection use their already region-filtered spatial weights.
+- Changing a point source's region now transactionally regenerates both its
+  spatial weights and source-membership node buffer. Signal-only updates retain
+  both buffers. This preserves exact 64-bit `RegionId` semantics without adding a
+  ninth WebGPU storage binding or imposing a new junction-degree limit.
+- Unified separated-curve labels now activate mesh-path forcing distance just as
+  legacy baffle labels do, so a Gaussian source cannot leak directly across a
+  topology-plan baffle trace.
+- Added host-side GPU upload coverage for a quadratic node shared by four material
+  regions, source-region buffer refresh, signal-only buffer reuse, and equivalent
+  forcing behavior for legacy and unified baffle labels.
+- Verification passes: formatting, all **406 workspace tests**, Clippy across all
+  targets with warnings denied, native and WASM release builds, and native Metal
+  startup through live solver execution without a shader or pipeline error. The
+  expected forced-shutdown readback warnings appeared after Ctrl-C. Interactive
+  browser testing was not repeated.
+- The GPU handoff entry points now accept a topology mesh/operator pair. Creating
+  those pairs in the interactive editor still awaits the version-22 document
+  model; volume-source compilation, transfer maps, AMR, and probes remain the next
+  numerical consumers to migrate.
+
 ## 2026-09-13 — Topology-plan quadratic operator assembly
 
 - Added direct enriched-quadratic assembly from `TopologyMeshPlan` plus the
@@ -74,9 +101,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   laws. Impedance, prescribed Neumann/Dirichlet, and second-order auxiliary terms
   share the existing numerical assembly. Matching left/right trace segments add
   the conservative thin-gap spring using both adjacent materials.
-- A boundary-law-only plan revision rebuilds the operator against the same mesh
-  and adopts the new document revision. Four-region crossing junctions assemble
-  without the former two-region node assumption; constant fields remain in the
+- A boundary-law-only plan revision rebuilds the operator against the same mesh.
+  The operator retains that mesh's geometry/mesh revisions so GPU validation and
+  identity transfer remain coherent. Four-region crossing junctions assemble
+  without a two-region operator assumption; constant fields remain in the
   stiffness nullspace.
 - Corrected free-slit trace lineage at logical knots to use the configured curve
   tolerance. Exact coordinate equality could miss a recovered collinear vertex by
@@ -88,9 +116,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   targets with warnings denied, native release compilation, and the release Trunk
   WebGPU build. Interactive browser testing was not repeated for this numerical
   core slice.
-- The application/GPU transaction, sources, AMR, transfer, and probes still use
-  legacy scene labels. They will move as one follow-up consumer slice; the new CPU
-  entry point does not yet change interactive behavior.
+- The application transaction, sources, AMR, transfer, and probes still use legacy
+  scene labels. They will move in follow-up consumer slices; this CPU entry point
+  alone does not change interactive behavior.
 
 ## 2026-09-13 — Topology-plan full meshing baseline
 

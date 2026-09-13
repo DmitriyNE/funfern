@@ -147,16 +147,14 @@ impl QuadraticWaveOperator {
         if !model.valid(plan) {
             return Err(WaveError::InvalidCoefficients);
         }
-        let mut operator = Self::assemble_with_provider(
+        Self::assemble_with_provider(
             mesh,
             CoefficientProvider::Topology(model),
             model.outer_boundaries,
             None,
             Some(plan),
             model.physics,
-        )?;
-        operator.geometry_revision = plan.geometry_revision;
-        Ok(operator)
+        )
     }
 
     fn assemble_regions(
@@ -2163,7 +2161,7 @@ mod tests {
             TopologyWaveModel::from_scene(&scene),
         )
         .unwrap();
-        assert_eq!(reflecting.geometry_revision(), 41);
+        assert_eq!(reflecting.geometry_revision(), mesh.geometry_revision);
         assert_eq!(reflecting.mesh_revision(), mesh.mesh_revision);
         assert!(
             reflecting.lumped_damping().iter().sum::<f64>()

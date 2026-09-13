@@ -635,9 +635,18 @@ left/right condition, while a thin gap pairs matching curve/span parameter range
 and adds a symmetric spring between the two trace DOFs. The same face-condition
 routine is shared with legacy assembly, so impedance, prescribed data, and the
 second-order auxiliary term retain their numerical definitions. Plan revisions
-that change only laws may rebuild the operator on the existing mesh. The GPU
-packing and transaction path remain on the legacy model until source, AMR,
-transfer, and probe metadata have migrated together.
+that change only laws may rebuild the operator on the existing mesh; the operator
+retains the mesh's revisions for upload and transfer compatibility.
+
+GPU node packing does not encode a bounded list of incident regions. Point and
+pulse stencils are filtered on the host, and each packed node carries one boolean
+for membership in the current continuous-source region so transfer-time
+acceleration can be reconstructed. Moving that source between regions replaces
+the membership buffer together with its weights. This admits arbitrary-degree
+material junctions without another storage binding. The upload/handoff boundary
+therefore accepts topology-plan meshes and operators, while source compilation,
+AMR, transfer, and probe metadata remain on the legacy model until their consumer
+slices are complete.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a

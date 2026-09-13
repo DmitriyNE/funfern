@@ -1045,26 +1045,41 @@ impl WaveGpuRequest {
             .as_mut()
             .ok_or("The wave solver is not initialized")?;
         let spatial_changed = !handles.source.spatial_eq(source);
+        let region_changed = handles.source.region != source.region;
         let source_weights = if spatial_changed {
             forcing_weights(mesh, operator, source.position, source.width, source.region)?
         } else {
             handles.source_weights.to_vec()
         };
-        let forcing = assets.add(ShaderBuffer::from(gpu_forcing(
+        let nodes = region_changed
+            .then(|| gpu_nodes(mesh, operator, source.region))
+            .transpose()?;
+        let forcing = gpu_forcing(
             source,
             handles.pulse,
             operator.outer_boundaries(),
             &handles.volume_sources,
-        )?));
+        )?;
+        let weights = spatial_changed
+            .then(|| {
+                zip_forcing_weights(
+                    &source_weights,
+                    &handles.pulse_weights,
+                    &handles.volume_sources,
+                )
+            })
+            .transpose()?;
+        let forcing = assets.add(ShaderBuffer::from(forcing));
         let old = std::mem::replace(&mut handles.forcing, forcing);
         assets.remove(old.id());
-        if spatial_changed {
-            let weights = assets.add(ShaderBuffer::from(zip_forcing_weights(
-                &source_weights,
-                &handles.pulse_weights,
-                &handles.volume_sources,
-            )?));
+        if let Some(weights) = weights {
+            let weights = assets.add(ShaderBuffer::from(weights));
             let old = std::mem::replace(&mut handles.forcing_weights, weights);
+            assets.remove(old.id());
+        }
+        if let Some(nodes) = nodes {
+            let nodes = assets.add(ShaderBuffer::from(nodes));
+            let old = std::mem::replace(&mut handles.nodes, nodes);
             assets.remove(old.id());
         }
         handles.source = source;
@@ -1220,48 +1235,7 @@ fn create_buffers(
         .damping_ratios_f32()
         .map_err(|error| error.to_string())?;
     let dt = time_step as f32;
-    let regions = node_regions(mesh, operator)?;
-    let nodes: Vec<_> = operator
-        .node_points()
-        .iter()
-        .enumerate()
-        .map(|(index, point)| {
-            let dirichlet = operator.dirichlet_signals()[index];
-            let face_loads = operator.face_neumann_loads()[index];
-            GpuNode {
-                position_damping: Vec4::new(
-                    point.x as f32,
-                    point.y as f32,
-                    damping[index],
-                    if operator.auxiliary_active()[index] {
-                        1.0
-                    } else {
-                        0.0
-                    },
-                ),
-                regions: gpu_region_pair(regions[index][0], regions[index][1]),
-                boundary: UVec4::new(u32::from(dirichlet.is_some()), 0, 0, 0),
-                neumann_weights: Vec4::from_array(
-                    operator.normalized_neumann_weights()[index].map(|value| value as f32),
-                ),
-                dirichlet_signal: gpu_boundary_signal(dirichlet.unwrap_or(TimeSignal::ZERO)),
-                face_neumann_signal_a: gpu_boundary_signal(face_loads[0].signal),
-                face_neumann_signal_b: gpu_boundary_signal(face_loads[1].signal),
-                face_neumann_weights: Vec4::new(
-                    face_loads[0].normalized_weight as f32,
-                    face_loads[1].normalized_weight as f32,
-                    0.0,
-                    0.0,
-                ),
-            }
-        })
-        .collect();
-    if nodes
-        .iter()
-        .any(|node| !node.position_damping.x.is_finite() || !node.position_damping.y.is_finite())
-    {
-        return Err("Mesh coordinates cannot be represented on the GPU".into());
-    }
+    let nodes = gpu_nodes_with_damping(mesh, operator, source.region, &damping)?;
     let parameters = GpuParameters {
         time_data: Vec4::new(dt, dt * dt, 0.0, 0.0),
         count_data: UVec4::new(dof_count, 0, 0, 0),
@@ -1438,27 +1412,99 @@ fn zip_forcing_weights(
 fn node_regions(
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
-) -> Result<Vec<[RegionId; 2]>, String> {
-    let mut regions = vec![[RegionId(0); 2]; operator.degrees_of_freedom()];
+) -> Result<Vec<Vec<RegionId>>, String> {
+    let mut regions = vec![vec![]; operator.degrees_of_freedom()];
     for (triangle, nodes) in mesh.triangles.iter().zip(operator.element_nodes()) {
         for node in nodes {
             let assigned = &mut regions[*node as usize];
-            if assigned.contains(&triangle.region) {
-                continue;
-            }
-            if assigned[0].0 == 0 {
-                assigned[0] = triangle.region;
-            } else if assigned[1].0 == 0 {
-                assigned[1] = triangle.region;
-            } else {
-                return Err("A wave node belongs to more than two material regions".into());
+            if !assigned.contains(&triangle.region) {
+                assigned.push(triangle.region);
             }
         }
     }
-    if regions.iter().any(|regions| regions[0].0 == 0) {
+    if regions.iter().any(Vec::is_empty) {
         return Err("A wave node does not belong to a material region".into());
     }
     Ok(regions)
+}
+
+fn gpu_region_pair(first: RegionId, second: RegionId) -> UVec4 {
+    UVec4::new(
+        first.0 as u32,
+        (first.0 >> 32) as u32,
+        second.0 as u32,
+        (second.0 >> 32) as u32,
+    )
+}
+
+fn gpu_nodes(
+    mesh: &TriMesh,
+    operator: &QuadraticWaveOperator,
+    source_region: RegionId,
+) -> Result<Vec<GpuNode>, String> {
+    let damping = operator
+        .damping_ratios_f32()
+        .map_err(|error| error.to_string())?;
+    gpu_nodes_with_damping(mesh, operator, source_region, &damping)
+}
+
+fn gpu_nodes_with_damping(
+    mesh: &TriMesh,
+    operator: &QuadraticWaveOperator,
+    source_region: RegionId,
+    damping: &[f32],
+) -> Result<Vec<GpuNode>, String> {
+    let regions = node_regions(mesh, operator)?;
+    if damping.len() != operator.degrees_of_freedom() {
+        return Err("Wave damping does not match the wave discretization".into());
+    }
+    let nodes = operator
+        .node_points()
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            let dirichlet = operator.dirichlet_signals()[index];
+            let face_loads = operator.face_neumann_loads()[index];
+            GpuNode {
+                position_damping: Vec4::new(
+                    point.x as f32,
+                    point.y as f32,
+                    damping[index],
+                    if operator.auxiliary_active()[index] {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                ),
+                source_membership: UVec4::new(
+                    u32::from(regions[index].contains(&source_region)),
+                    0,
+                    0,
+                    0,
+                ),
+                boundary: UVec4::new(u32::from(dirichlet.is_some()), 0, 0, 0),
+                neumann_weights: Vec4::from_array(
+                    operator.normalized_neumann_weights()[index].map(|value| value as f32),
+                ),
+                dirichlet_signal: gpu_boundary_signal(dirichlet.unwrap_or(TimeSignal::ZERO)),
+                face_neumann_signal_a: gpu_boundary_signal(face_loads[0].signal),
+                face_neumann_signal_b: gpu_boundary_signal(face_loads[1].signal),
+                face_neumann_weights: Vec4::new(
+                    face_loads[0].normalized_weight as f32,
+                    face_loads[1].normalized_weight as f32,
+                    0.0,
+                    0.0,
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    if nodes
+        .iter()
+        .any(|node| !node.position_damping.x.is_finite() || !node.position_damping.y.is_finite())
+    {
+        return Err("Mesh coordinates cannot be represented on the GPU".into());
+    }
+    Ok(nodes)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1507,6 +1553,10 @@ pub(crate) fn forcing_weights(
         matches!(
             edge.label,
             funfern_core::BoundaryLabel::InternalBoundary { .. }
+                | funfern_core::BoundaryLabel::Curve {
+                    separated: true,
+                    ..
+                }
         )
     }) {
         return Ok(operator
@@ -1591,15 +1641,6 @@ pub(crate) fn forcing_weights(
             }
         })
         .collect())
-}
-
-fn gpu_region_pair(first: RegionId, second: RegionId) -> UVec4 {
-    UVec4::new(
-        first.0 as u32,
-        (first.0 >> 32) as u32,
-        second.0 as u32,
-        (second.0 >> 32) as u32,
-    )
 }
 
 #[derive(Resource, Default)]
@@ -1797,7 +1838,7 @@ struct GpuForcing {
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuNode {
     position_damping: Vec4,
-    regions: UVec4,
+    source_membership: UVec4,
     boundary: UVec4,
     neumann_weights: Vec4,
     dirichlet_signal: GpuTimeSignal,
@@ -3236,7 +3277,178 @@ fn compute_wave(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_core::VolumeSourceNode;
+    use funfern_core::{
+        CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline, FaceRegionAssignment,
+        MeshingOptions, OpenCubicSpline, OuterSide, Region, Scene, SpanBehavior, TopologyCurve,
+        TopologyGeometry, TopologyMeshPlan, TopologyVertex, TopologyVertexId,
+        TopologyVertexLocation, TopologyWaveModel, VolumeSourceNode, compile_topology,
+        mesh_topology_plan,
+    };
+
+    fn four_region_topology() -> (TriMesh, QuadraticWaveOperator) {
+        let ids = [
+            TopologyVertexId(1),
+            TopologyVertexId(2),
+            TopologyVertexId(3),
+            TopologyVertexId(4),
+        ];
+        let divider = |id, points: [Point2; 2], endpoints: [TopologyVertexId; 2]| {
+            let mut curve = TopologyCurve::new(
+                CurveId(id),
+                CurveSpline::Open(OpenCubicSpline::polyline(points.to_vec()).unwrap()),
+                vec![CurveSpan {
+                    id: CurveSpanId(id),
+                    behavior: SpanBehavior::Transmitting,
+                }],
+            )
+            .unwrap();
+            curve.nodes = endpoints
+                .map(|vertex| CurveNode {
+                    vertex: Some(vertex),
+                })
+                .to_vec();
+            curve
+        };
+        let geometry = TopologyGeometry {
+            curves: vec![
+                divider(
+                    1,
+                    [Point2::new(-1.0, 0.0), Point2::new(1.0, 0.0)],
+                    [ids[0], ids[1]],
+                ),
+                divider(
+                    2,
+                    [Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)],
+                    [ids[2], ids[3]],
+                ),
+            ],
+            vertices: [
+                (ids[0], OuterSide::Left),
+                (ids[1], OuterSide::Right),
+                (ids[2], OuterSide::Bottom),
+                (ids[3], OuterSide::Top),
+            ]
+            .map(|(id, side)| TopologyVertex {
+                id,
+                location: TopologyVertexLocation::Outer {
+                    side,
+                    fraction: 0.5,
+                },
+            })
+            .to_vec(),
+            ..TopologyGeometry::default()
+        };
+        let snapshot = compile_topology(&geometry, 7).unwrap();
+        let assignments = snapshot
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(index, face)| FaceRegionAssignment {
+                face: face.id,
+                region: Some(RegionId(index as u64 + 1)),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&snapshot, &assignments).unwrap();
+        let mesh = mesh_topology_plan(
+            &plan,
+            9,
+            MeshingOptions {
+                target_edge_length: 0.35,
+                minimum_angle_degrees: 8.0,
+                max_vertices: 20_000,
+                max_triangles: 40_000,
+                max_refinement_steps: 20_000,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scene = Scene {
+            regions: assignments
+                .iter()
+                .map(|assignment| Region {
+                    id: assignment.region.unwrap(),
+                    material: funfern_core::DEFAULT_MATERIAL,
+                    frame: funfern_core::MaterialFrame::world(),
+                })
+                .collect(),
+            ..Scene::default()
+        };
+        let operator = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        (mesh, operator)
+    }
+
+    #[test]
+    fn gpu_upload_accepts_a_node_in_four_regions_and_tracks_source_membership() {
+        let (mesh, operator) = four_region_topology();
+        let memberships = node_regions(&mesh, &operator).unwrap();
+        let center = operator
+            .node_points()
+            .iter()
+            .position(|point| *point == Point2::default())
+            .unwrap();
+        assert_eq!(memberships[center].len(), 4);
+        let packed = gpu_nodes(&mesh, &operator, RegionId(4)).unwrap();
+        assert_eq!(packed[center].source_membership.x, 1);
+        let outside = memberships
+            .iter()
+            .position(|regions| !regions.contains(&RegionId(4)))
+            .unwrap();
+        assert_eq!(packed[outside].source_membership.x, 0);
+
+        let sources = CompiledVolumeSources::empty(operator.degrees_of_freedom());
+        let source = PointSource {
+            region: RegionId(4),
+            ..PointSource::default()
+        };
+        let mut assets = Assets::<ShaderBuffer>::default();
+        let (handles, dof_count) = create_buffers(
+            &mut assets,
+            &mesh,
+            &operator,
+            operator.recommended_time_step(),
+            source,
+            &sources,
+            false,
+        )
+        .unwrap();
+        let original_nodes = handles.nodes.id();
+        let mut request = WaveGpuRequest {
+            buffers: Some(handles),
+            dof_count,
+            ..Default::default()
+        };
+        request
+            .update_source(
+                &mut assets,
+                &mesh,
+                &operator,
+                PointSource {
+                    region: RegionId(2),
+                    ..source
+                },
+            )
+            .unwrap();
+        assert_ne!(request.buffers.as_ref().unwrap().nodes.id(), original_nodes);
+    }
+
+    #[test]
+    fn wave_shaders_do_not_encode_a_fixed_region_membership_list() {
+        let wave = include_str!("wave.wgsl");
+        assert!(!wave.contains("region_match"));
+        for transfer in [
+            include_str!("wave_transfer_old.wgsl"),
+            include_str!("wave_transfer_new.wgsl"),
+        ] {
+            assert!(transfer.contains("source_membership: vec4<u32>"));
+            assert!(transfer.contains("nodes[i].source_membership.x != 0u"));
+            assert!(!transfer.contains("region_match"));
+        }
+    }
 
     #[test]
     fn source_upload_uses_angular_frequency_and_squared_width() {
@@ -3335,6 +3547,7 @@ mod tests {
         .unwrap();
         let original_weights = handles.forcing_weights.id();
         let original_forcing = handles.forcing.id();
+        let original_nodes = handles.nodes.id();
         let mut request = WaveGpuRequest {
             buffers: Some(handles),
             dof_count,
@@ -3355,6 +3568,7 @@ mod tests {
         let handles = request.buffers.as_ref().unwrap();
         assert_eq!(handles.forcing_weights.id(), original_weights);
         assert_ne!(handles.forcing.id(), original_forcing);
+        assert_eq!(handles.nodes.id(), original_nodes);
 
         let point_forcing = handles.forcing.id();
         request
@@ -3439,6 +3653,31 @@ mod tests {
         assert!(weights[left] > 0.4);
         assert_eq!(weights[right], 0.0);
         assert_eq!(mesh.vertices[left].point, mesh.vertices[right].point);
+
+        let mut topology_mesh = mesh.clone();
+        for edge in &mut topology_mesh.boundary_edges {
+            let BoundaryLabel::InternalBoundary { side, .. } = edge.label else {
+                continue;
+            };
+            edge.label = BoundaryLabel::Curve {
+                curve: funfern_core::CurveId(4),
+                span: funfern_core::CurveSpanId(1),
+                side: match side {
+                    InternalBoundarySide::Left => funfern_core::CurveTraceSide::Left,
+                    InternalBoundarySide::Right => funfern_core::CurveTraceSide::Right,
+                },
+                separated: true,
+            };
+        }
+        let topology_weights = forcing_weights(
+            &topology_mesh,
+            &operator,
+            Point2::new(0.0, 0.05),
+            0.06,
+            BACKGROUND_REGION,
+        )
+        .unwrap();
+        assert_eq!(topology_weights, weights);
     }
 
     #[test]
