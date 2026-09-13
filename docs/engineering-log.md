@@ -64,6 +64,31 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   divider graphs. The first junction implementation deliberately uses the robust
   full-rebuild fallback for graph-edge movement and topology edits.
 
+## 2026-09-13 — Unified curve topology kernel
+
+- Added the dependency-free migration target for one open/closed curve model,
+  stable logical spans, authoritative free/interior/outer topology vertices, and
+  transmitting or separated trace behavior. Hole, region, divider, and baffle will
+  become creation presets rather than stored geometry classes when the app moves
+  to this model.
+- Added a revisioned topology job that adaptively samples curves and checks segment
+  pairs cooperatively. The compiler builds a directed planar arrangement, traces
+  bounded faces, reports each span side's face, and retains same-face but distinct
+  baffle sides.
+- Added exact shape-preserving topology-breakpoint insertion with span-ID lineage
+  and periodic C0 breakpoint movement. Outer-constrained vertices recompute their
+  world position when the rectangular domain changes and update every incident
+  spline breakpoint.
+- Added direct core coverage for closed-loop faces, outer-to-outer dividers,
+  attachment to a closed loop, T and X junctions, free and one-ended baffles,
+  invalid free transmitting ends, incompatible crossings, overlap/near-contact,
+  subdivision exhaustion, resize propagation, and revision tagging.
+- The planned document cut deliberately drops scene schemas 1 through 21. Built-in
+  examples and the checked-in example scene will be regenerated in the new schema;
+  obsolete loads will fail atomically with an unsupported-version message.
+- The new topology is not yet connected to the legacy `Scene`, mesher, solver, or
+  editor. That consumer cutover is the next stage; current behavior is unchanged.
+
 ## 2026-09-13 — Open material dividers and junction topology
 
 - Added stable open material-interface, breakpoint-node, and junction IDs. Interface

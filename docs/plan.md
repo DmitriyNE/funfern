@@ -240,6 +240,201 @@ labels, piecewise coefficients reach both CPU and GPU solvers, assignments survi
 save/load and undo/redo, and coefficient edits preserve the running field without
 remeshing.
 
+### Unified curve and face topology refactor
+
+The first open-divider implementation exposed a structural split between closed
+`Obstacle` loops, open `InternalBoundary` baffles, and `MaterialInterface` graph
+edges. It prevents an open curve from changing role, prevents a divider from
+attaching to a legacy closed interface, duplicates curve editing and hit testing,
+and leaves the editor overlay and mesher with different notions of a region. The
+replacement is one planar arrangement of curves and topology vertices.
+
+The target model has four independent layers:
+
+- A curve is a stable `CurveId`, an open or closed cubic spline, stable logical
+  spans, and optional topology-vertex references at spline breakpoints. Open and
+  periodic splines retain their existing exact insertion, continuity, and editing
+  operations; the surrounding object type no longer determines which operations
+  are available.
+- A topology vertex is free, interior, or constrained to an outer side and a
+  normalized side fraction. Every incident curve breakpoint references the same
+  vertex. The vertex position is authoritative, so moving a junction updates all
+  incident splines and resizing the rectangle recomputes every attached endpoint.
+- The topology compiler derives directed half-edges, ordered sectors, boundary
+  cycles, and planar faces from the domain and curves. Each curve side points to a
+  derived face. The two sides of a free-ended baffle may deliberately point to the
+  same face while retaining distinct finite-element traces.
+- Span behavior is separate from curve geometry. A span either transmits with one
+  shared trace, separates its two traces with independent per-side boundary
+  conditions, or separates them with an explicit coupling such as the thin-gap
+  law. An active face owns a stable `RegionId`, material/frame assignment, and
+  region source. The exterior and hole interiors are excluded faces.
+
+`Hole`, `material region`, `divider`, and `baffle` remain useful drawing presets,
+but are not stored geometry classes. The rectangular outer domain remains a
+special editable primitive for this refactor, while its four sides participate in
+the same compiled face adjacency and boundary-law representation. General outer
+curves are a later slice.
+
+#### Stage 1: topology kernel and immutable snapshots
+
+- Introduce `CurveId`, `CurveSpanId`, `TopologyVertexId`, and `FaceId`, plus unified
+  open/closed curve and span-behavior types in `funfern-core`. Keep the types free
+  of Bevy, egui, and serde.
+- Add exact spline operations needed by topology edits: cut a periodic spline at a
+  breakpoint, join compatible open pieces, insert a breakpoint with the required
+  knot multiplicity without changing shape, and propagate stable span identities
+  through insertion, deletion, split, and merge.
+- Build a revisioned, resumable arrangement compiler. It adaptively samples curves
+  at the fixed validation tolerance, uses exact orientation predicates for
+  intersections, orders incident arms around vertices, traces all face cycles,
+  and exposes face lookup for a point and directed adjacency for every span.
+- Treat a proper crossing of transmitting spans as an inserted junction. Reject
+  tangencies, overlaps, near-contact ambiguity, and crossings involving separated
+  or coupled traces until the user resolves them explicitly. Bound subdivision,
+  intersection work, vertices, faces, and total compiler work.
+- Define draft validity in topology terms. A transmitting open curve is incomplete
+  until its endpoints participate in closed face cycles. A separated curve may
+  have zero, one, or two free ends. Coupled spans require two active sides. Invalid
+  or unfinished graphs remain editable and never replace the accepted snapshot.
+- Return structured errors with curve/span/vertex IDs and locations so the UI can
+  highlight the exact cause rather than report a generic invalid scene.
+
+The kernel test matrix covers an empty rectangle, nested closed loops, a divider
+between outer sides, a branch into a closed interface, T and X junctions, a
+same-face free baffle, a one-ended baffle, mixed transmitting/separated sectors,
+hole exclusion, crossings, tangencies, overlaps, exhausted work, and domain
+resize with attached vertices. Face cycles, orientation, adjacency, and point
+lookup are checked without a browser.
+
+**Exit criterion:** the compiler deterministically produces the expected faces and
+span adjacency for these fixtures, and stale jobs cannot publish their result.
+
+#### Stage 2: mesher, solver, AMR, transfer, and probes
+
+- Make meshing consume a completed topology snapshot instead of independently
+  rediscovering loop nesting and open-divider regions. Triangulate each active face
+  and recover each logical span as a constrained chain with `CurveSpanId`, side,
+  and adjacent `RegionId` labels.
+- Derive degree-of-freedom equivalence from span behavior. Transmitting spans share
+  nodes across material jumps; separated spans duplicate their traces; coupled
+  spans use the duplicated traces plus the coupling operator. At a junction,
+  sector connectivity determines which coincident nodes are shared.
+- Replace the current assumption that a wave node belongs to at most two regions
+  with topology-supplied trace/sector memberships. This is required for three or
+  more regions meeting at a point.
+- Update boundary assembly, higher-order auxiliary state, thin-gap assembly,
+  timestep estimation, material/source lookup, AMR indicators, local-repair
+  eligibility, solution transfer, and point/line/boundary/area probes to consume
+  the new labels. Preserve the existing full-remesh transaction as the safe first
+  path for graph edits; local graph repair is a later optimization.
+- Compile far-field contours only when the inset contour lies wholly in one
+  uniform exterior face. Disable it with a precise reason when interfaces or
+  varying exterior material cross that face.
+- Add numerical comparisons for old supported scenes, multi-region junction
+  assembly, separated same-face traces, transfer through face split/merge, AMR
+  commit continuity, and finite long runs with all supported boundary laws.
+- Preserve expected active area, boundary chains, side orientation,
+  material-at-point results, and region connectivity from representative current
+  examples as fixtures. Do not retain a production legacy-geometry adapter solely
+  for these comparisons.
+
+**Exit criterion:** the solver and probes use no coordinate-side guesses for
+region or trace identity, existing examples retain their behavior, and junction
+fixtures assemble and step without leaks or invalid node-membership errors.
+
+#### Stage 3: document model, face assignments, and persistence
+
+- Replace `Scene.obstacles`, `Scene.internal_boundaries`,
+  `Scene.material_interfaces`, and `Scene.junctions` with unified curves,
+  topology vertices, span behaviors, and face assignments. Keep materials in the
+  library and keep region frames/sources on active-face assignments.
+- Store only user-authored geometry and semantic assignments in the document.
+  Store compiled faces as a revision-keyed cache, never as a second editable source
+  of truth. Draft and accepted scenes each receive their own compiled snapshot.
+- Preserve semantic IDs across harmless edits. When a face splits, retain the old
+  region on the side containing its stable anchor and allocate a region for the
+  other face; when faces merge, prefer the background/root assignment and otherwise
+  require the edit command to state which assignment survives. Retarget or remove
+  region probes and sources in the same undoable transaction.
+- Add scene-file version 22 as a deliberate compatibility break and remove the
+  versions 1 through 21 decoders. Rewrite the built-in examples and regenerate the
+  checked-in example JSON in version 22. Loading an obsolete or malformed file
+  reports the unsupported version and leaves the current document untouched.
+- Keep one complete topology edit as one `DocumentModel` history entry. Loading
+  clears history as it does now; invalid drafts remain serializable.
+
+**Exit criterion:** version 22 round-trips exact semantic state, obsolete schemas
+fail atomically with a useful message, and undo/redo restores geometry, face
+assignments, probes, sources, and accepted/draft pairs together.
+
+#### Stage 4: drawing, selection, attachment, and face UI
+
+- Replace separate geometry tools with `Open curve` and `Closed curve`, plus
+  friendly initial-configuration controls:
+  - Closed + **Material region** creates a transmitting loop and assigns the chosen
+    material to the new interior face.
+  - Closed + **Hole** excludes the new interior face and applies the chosen boundary
+    condition to its active side.
+  - Open + **Divider** creates transmitting spans and previews which directed side
+    receives the chosen material. It remains an invalid draft until it completes a
+    partition.
+  - Open + **Baffle** creates separated spans and applies the chosen initial
+    condition to both sides. Thin gap remains a separate coupling choice, not a
+    boundary-condition option.
+- Keep Circle, Rectangle, spline, and polygonal construction as geometric shape
+  choices under those two tools. The two-point spline-baffle shortcut continues to
+  insert the intermediate controls needed for a straight cubic.
+- Make attachment primarily a snap operation. Dragging or drawing an endpoint near
+  an outer side, existing topology vertex, or curve shows a strong gold target.
+  Dropping on a curve performs shape-preserving breakpoint insertion and creates or
+  reuses a junction. Endpoint-to-endpoint drops merge vertices. Dragging a branch
+  endpoint away detaches it when its span behavior permits a free end.
+- Paint targets after curves and boundary-condition overlays so they cannot be
+  obscured. Make inner and outer attachment targets use the same hit-testing path.
+  Add keyboard-accessible attach/detach actions as a fallback to precise dragging.
+- Preserve the current selection model: one control or topology vertex for point
+  editing, multiple spans for rigid transforms and bulk law assignment, and a
+  whole-curve selection command. A topology vertex has one visible handle even
+  when several splines meet there.
+- Derive both **Materials** and **Subdomains** overlays from the current compiled
+  draft. Materials colors by assigned material; Subdomains uses categorical
+  `RegionId` colors so equal-material faces remain visibly distinct. Never use the
+  last committed mesh to preview draft topology.
+- Use one contextual inspector below the feature list. Curve geometry controls,
+  span behavior/conditions, junction attachment, face material/frame/source, and
+  divider removal appear according to selection. Removing a divider previews the
+  face merge and asks which material survives only when the two assignments differ.
+
+Editor tests use synthesized egui pointer events for both attachment paths,
+creation presets, selection priority, junction dragging, detach, divider removal,
+bulk span conditions, overlays, Delete, Escape, and one-entry history. A short
+manual native/browser pass checks touch targets and visual layering; browser
+WebGPU execution remains a local smoke check rather than a CI requirement.
+
+**Exit criterion:** users can build, attach, reconfigure, and remove the same curve
+without knowing its former object class, and the draft overlay agrees with the mesh
+that will be committed.
+
+#### Stage 5: remove the parallel models and document the result
+
+- Delete the legacy object-specific topology, validation, region flood, mesher
+  branches, editor selection variants, and persistence writers after all consumers
+  use the unified snapshot. Remove the obsolete file decoders as part of the same
+  hard cut.
+- Update architecture notes, file-format documentation, examples, help text, and
+  the engineering log. Record the initial full-remesh limitation and the later
+  local-repair work explicitly.
+- Run formatting, Clippy with warnings denied, core/app tests, native compilation,
+  release WASM compilation, scene migration fixtures, and the local browser smoke
+  suite where WebGPU is available.
+
+**Completion:** one stored curve model, one compiled face map, and one span-law
+model drive validation, rendering, meshing, simulation, probes, persistence, and
+editing. Inner-loop attachment, outer-resize propagation, same-material subdomain
+display, divider removal, and multi-region junction behavior all have direct
+non-browser regressions.
+
 ## 8. Boundary spans and assigned conditions
 
 Open-baffle knot spans are implemented. A selected span exposes its left and right

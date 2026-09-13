@@ -455,7 +455,7 @@ impl InterfaceSpline {
     pub fn set_node_point(&mut self, index: usize, point: Point2) -> Result<(), SplineError> {
         match self {
             Self::Open(spline) => spline.set_breakpoint_point(index, point),
-            Self::Closed(_) => Err(SplineError::NotRemovable),
+            Self::Closed(spline) => spline.set_breakpoint_point(index, point),
         }
     }
 }

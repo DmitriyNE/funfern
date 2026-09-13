@@ -11,7 +11,7 @@ mod amr;
 pub use adaptation::*;
 pub use amr::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OuterSide {
     Bottom,
     Right,

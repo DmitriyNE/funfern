@@ -812,6 +812,36 @@ impl PeriodicCubicSpline {
         *self.controls.get_mut(i).ok_or(SplineError::Index)? = p;
         Ok(())
     }
+
+    /// Moves an interpolating periodic C0 breakpoint.
+    ///
+    /// A repeated cubic knot has one control at the curve point shared by the
+    /// spans on either side. Moving that control preserves the remaining
+    /// controls and is the periodic counterpart of
+    /// [`OpenCubicSpline::set_breakpoint_point`].
+    pub fn set_breakpoint_point(
+        &mut self,
+        breakpoint: usize,
+        point: Point2,
+    ) -> Result<(), SplineError> {
+        if !point.finite() || breakpoint >= self.intervals.len() {
+            return Err(SplineError::Index);
+        }
+        if self.continuity(breakpoint) != Some(0) {
+            return Err(SplineError::NotRemovable);
+        }
+        let control = if breakpoint == 0 {
+            self.controls.len() - 1
+        } else {
+            self.multiplicities[..breakpoint]
+                .iter()
+                .map(|value| *value as usize)
+                .sum::<usize>()
+                - 1
+        };
+        self.controls[control] = point;
+        Ok(())
+    }
     fn derivative_control(&self, i: isize, order: usize) -> Point2 {
         if order == 0 {
             return self.control(i);
