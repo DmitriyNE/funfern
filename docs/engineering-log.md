@@ -7,6 +7,11 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+- [ ] Replace the vector overlay's run-peak exposure heuristic with a robust
+  automatic scale that can recover after a legitimate transient spike such as
+  **Place pulse**, while still refusing to magnify late numerical noise. Avoid
+  relying on manually identified reset points; investigate a noise-aware envelope,
+  hysteresis, or a scale derived from the evolving field-energy distribution.
 - [ ] Revisit the EM reconstruction's fixed `0.08 Hz` DC-rejection corner when
   editable domain extents or deliberately very-low-frequency sources arrive. It
   should eventually follow a scene time scale or become an advanced presentation
