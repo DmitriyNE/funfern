@@ -2442,6 +2442,175 @@ impl Editor {
         Ok(())
     }
 
+    /// Makes every selected logical spline span an exact straight cubic while
+    /// preserving its two curve endpoints. Selected spans are first isolated at
+    /// C0, without changing their shape, and the complete operation is one
+    /// history action.
+    pub fn straighten_spans_individually(
+        &mut self,
+        loop_spans: &[(ObstacleId, usize)],
+        baffle_spans: &[(InternalBoundaryId, usize)],
+    ) -> Result<(), String> {
+        if loop_spans.is_empty() && baffle_spans.is_empty() {
+            return Err("Select spline spans to straighten".into());
+        }
+
+        let mut loop_ids = Vec::new();
+        for &(id, _) in loop_spans {
+            if !loop_ids.contains(&id) {
+                loop_ids.push(id);
+            }
+        }
+        let mut loop_updates = Vec::new();
+        for id in loop_ids {
+            let original = &self.obstacle(id).ok_or("Missing obstacle")?.spline;
+            let span_count = original.intervals().len();
+            let spans = loop_spans
+                .iter()
+                .filter_map(|(candidate, span)| (*candidate == id).then_some(*span))
+                .collect::<BTreeSet<_>>();
+            if spans.iter().any(|span| *span >= span_count) {
+                return Err("Missing obstacle span".into());
+            }
+            let mut spline = original.clone();
+            let breakpoints = spans
+                .iter()
+                .flat_map(|span| [*span, (*span + 1) % span_count])
+                .collect::<BTreeSet<_>>();
+            for breakpoint in breakpoints {
+                while spline.continuity(breakpoint).ok_or("Missing loop knot")? > 0 {
+                    spline
+                        .increase_multiplicity(breakpoint)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            let segments = spans
+                .iter()
+                .map(|span| {
+                    let bounds = spline.span_bounds(*span).ok_or("Missing obstacle span")?;
+                    let start = spline.evaluate(bounds[0]);
+                    let end = spline.evaluate(bounds[1]);
+                    if (end - start).norm() <= f64::EPSILON {
+                        return Err("Cannot straighten a span with coincident endpoints".into());
+                    }
+                    Ok((
+                        spline
+                            .span_control_indices(*span)
+                            .ok_or("Missing obstacle span")?,
+                        start,
+                        end,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            for (controls, start, end) in segments {
+                for (offset, control) in controls.into_iter().enumerate() {
+                    spline
+                        .set_control(control, start.lerp(end, offset as f64 / 3.0))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            loop_updates.push((id, spline));
+        }
+
+        let mut baffle_ids = Vec::new();
+        for &(id, _) in baffle_spans {
+            if !baffle_ids.contains(&id) {
+                baffle_ids.push(id);
+            }
+        }
+        let mut baffle_updates = Vec::new();
+        for id in baffle_ids {
+            let original = &self
+                .internal_boundary(id)
+                .ok_or("Missing internal boundary")?
+                .spline;
+            let span_count = original.intervals().len();
+            let spans = baffle_spans
+                .iter()
+                .filter_map(|(candidate, span)| (*candidate == id).then_some(*span))
+                .collect::<BTreeSet<_>>();
+            if spans.iter().any(|span| *span >= span_count) {
+                return Err("Missing internal-boundary span".into());
+            }
+            let mut spline = original.clone();
+            let breakpoints = spans
+                .iter()
+                .flat_map(|span| [*span, *span + 1])
+                .filter(|breakpoint| *breakpoint > 0 && *breakpoint < span_count)
+                .collect::<BTreeSet<_>>();
+            for breakpoint in breakpoints {
+                while spline.continuity(breakpoint).ok_or("Missing baffle knot")? > 0 {
+                    spline
+                        .increase_multiplicity(breakpoint)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            let segments = spans
+                .iter()
+                .map(|span| {
+                    let bounds = spline
+                        .span_bounds(*span)
+                        .ok_or("Missing internal-boundary span")?;
+                    let start = spline.evaluate(bounds[0]);
+                    let end = spline.evaluate(bounds[1]);
+                    if (end - start).norm() <= f64::EPSILON {
+                        return Err("Cannot straighten a span with coincident endpoints".into());
+                    }
+                    Ok((
+                        spline
+                            .span_control_indices(*span)
+                            .ok_or("Missing internal-boundary span")?,
+                        start,
+                        end,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            for (controls, start, end) in segments {
+                for (offset, control) in controls.into_iter().enumerate() {
+                    spline
+                        .set_control(control, start.lerp(end, offset as f64 / 3.0))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            baffle_updates.push((id, spline));
+        }
+
+        let changed = loop_updates.iter().any(|(id, spline)| {
+            self.obstacle(*id)
+                .is_some_and(|obstacle| obstacle.spline != *spline)
+        }) || baffle_updates.iter().any(|(id, spline)| {
+            self.internal_boundary(*id)
+                .is_some_and(|boundary| boundary.spline != *spline)
+        });
+        if !changed {
+            return Ok(());
+        }
+        self.begin();
+        for (id, spline) in loop_updates {
+            self.document
+                .model
+                .draft
+                .obstacles
+                .iter_mut()
+                .find(|obstacle| obstacle.id == id)
+                .unwrap()
+                .spline = spline;
+        }
+        for (id, spline) in baffle_updates {
+            self.document
+                .model
+                .draft
+                .internal_boundaries
+                .iter_mut()
+                .find(|boundary| boundary.id == id)
+                .unwrap()
+                .spline = spline;
+        }
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
     pub fn set_obstacle_boundary_condition(
         &mut self,
         id: ObstacleId,

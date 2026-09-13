@@ -59,6 +59,20 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-13 — Per-span and per-selection straightening
+
+- Split straightening into two explicit scopes. **Straighten spans** turns every
+  selected logical span into its own exact endpoint-to-endpoint line, automatically
+  increasing all necessary boundary-knot multiplicities to C0 without first
+  reshaping the curve. **Straighten selection** retains the previous behavior of
+  replacing each contiguous, already isolated selected run with one chord.
+- Per-span straightening prepares all loop and baffle spline replacements before
+  mutation, keeps interval and logical-span indices stable, and preserves boundary
+  assignments and geometry-attached probes. Isolation plus reshaping is one document
+  revision and at most one undo entry.
+- All 337 workspace tests, warning-denied Clippy, native release compilation, and
+  the release Trunk build pass.
+
 ## 2026-09-13 — Touch marquee and two-point spline baffles
 
 - Reserved viewport navigation on touch for the two-finger centroid/pinch gesture.

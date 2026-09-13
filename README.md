@@ -168,9 +168,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   baffle; Enter or clicking the first handle closes a loop. Its control polygon
   distinguishes it from the vertex-based tools. Backspace removes the latest staged
   point and Escape cancels construction.
-- **Straighten:** a complete baffle or a partial span selection isolated by C0
-  breaks can be made exactly straight while preserving its endpoints, span laws,
-  and attached probes. Closed complete loops cannot collapse into a line.
+- **Straighten:** **Straighten spans** makes every selected logical span an exact
+  line between its own endpoints, inserting exact C0 isolation where needed.
+  **Straighten selection** retains the broader chord operation for each contiguous
+  C0-bounded selected run. Both preserve span laws and attached probes and commit as
+  one history action. A complete closed loop is available to the per-span operation
+  but cannot collapse into one selection chord.
 - **Remove:** Delete or the panel action removes the selected control and its
   associated knot. This can reshape the curve. At least four controls must remain.
   A removal that would merge different span conditions is rejected until the two

@@ -293,6 +293,13 @@ spline representation. A two-control baffle Spline expands its endpoints into on
 such exact straight span, and the rectangular tool uses the periodic constructor;
 no separate polygon geometry reaches validation or meshing.
 
+The contextual straightening tools have two scopes. Per-span straightening raises
+every selected span boundary to C0 exactly, then places that span's four Bézier
+controls along its own endpoint chord. Selection straightening treats each already
+isolated contiguous run as one chord. Both prepare all affected splines before an
+atomic document update, retain logical span indices and assignments, and create at
+most one history entry.
+
 Periodic knot insertion updates a whole period of the affected control sequence,
 including controls crossing the seam, and preserves position and derivatives.
 Existing knots select their associated handles. Removal drops a control and its

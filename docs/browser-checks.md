@@ -48,11 +48,14 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   verify coherent left/right face selection and that Thin gap replaces the two
   independent face conditions instead of competing with them. Enable View >
   Boundary conditions and compare the canvas colors with the legend.
-- [ ] Use C0 isolation, continuity downgrade/reshape, Straighten selected piece on
-  both a complete baffle and a partial C0-bounded loop piece, splitting, and endpoint
-  merging. Straightening preserves endpoints, conditions, and probe attachments.
-  Endpoint-only actions appear only for a valid endpoint selection; merge is enabled
-  only for two complete baffles within the join distance.
+- [ ] Use C0 isolation, continuity downgrade/reshape, both straightening actions on
+  a complete baffle and a partial C0-bounded loop piece, splitting, and endpoint
+  merging. **Straighten spans** should isolate and straighten every selected span
+  independently; **Straighten selection** should make each contiguous C0-bounded
+  run one chord. Both preserve the relevant endpoints, conditions, and probe
+  attachments in one undo entry. Endpoint-only actions appear only for a valid
+  endpoint selection; merge is enabled only for two complete baffles within the
+  join distance.
 - [ ] Undo/redo each action through buttons and Ctrl/Cmd shortcuts. One drag or
   completed coordinate edit is one action. Undo/redo restores invalid drafts.
 - [ ] Type coordinates. Delete, Space, and Ctrl/Cmd+Z while typing are captured

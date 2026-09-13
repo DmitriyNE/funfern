@@ -2979,6 +2979,53 @@ impl Playground {
         }
     }
 
+    fn individually_straightenable_spans(&self) -> bool {
+        !self.selected_spans.is_empty()
+            && self.selected_spans.iter().all(|selected| {
+                let endpoints = match *selected {
+                    GeometrySpan::Loop(id, span) => self.editor.obstacle(id).and_then(|obstacle| {
+                        let bounds = obstacle.spline.span_bounds(span)?;
+                        Some((
+                            obstacle.spline.evaluate(bounds[0]),
+                            obstacle.spline.evaluate(bounds[1]),
+                        ))
+                    }),
+                    GeometrySpan::Baffle(id, span) => {
+                        self.editor.internal_boundary(id).and_then(|boundary| {
+                            let bounds = boundary.spline.span_bounds(span)?;
+                            Some((
+                                boundary.spline.evaluate(bounds[0]),
+                                boundary.spline.evaluate(bounds[1]),
+                            ))
+                        })
+                    }
+                    GeometrySpan::Outer(_) => None,
+                };
+                endpoints.is_some_and(|(start, end)| (end - start).norm() > f64::EPSILON)
+            })
+    }
+
+    fn straighten_spans_individually(&mut self) {
+        let mut loop_spans = Vec::new();
+        let mut baffle_spans = Vec::new();
+        for selected in &self.selected_spans {
+            match *selected {
+                GeometrySpan::Loop(id, span) => loop_spans.push((id, span)),
+                GeometrySpan::Baffle(id, span) => baffle_spans.push((id, span)),
+                GeometrySpan::Outer(_) => {
+                    self.message = "Select spline spans to straighten".into();
+                    return;
+                }
+            }
+        }
+        let result = self
+            .editor
+            .straighten_spans_individually(&loop_spans, &baffle_spans);
+        if self.error(result).is_some() {
+            self.gizmo_pivot = None;
+        }
+    }
+
     fn finish_drawing(&mut self) {
         let InteractionMode::Draw { role, tool } = self.interaction_mode else {
             return;
@@ -8679,22 +8726,41 @@ impl Playground {
                         self.align_selection(false);
                     }
                 });
-                if ui
-                    .add_enabled(
-                        self.straightenable_control_groups().is_some(),
-                        egui::Button::new(if piece_count == 1 {
-                            "Straighten selected piece"
-                        } else {
-                            "Straighten selected pieces"
-                        }),
-                    )
-                    .on_disabled_hover_text(
-                        "Straightening needs open endpoints or C0 breaks on both sides",
-                    )
-                    .clicked()
-                {
-                    self.straighten_selection();
-                }
+            }
+            if self
+                .selected_spans
+                .iter()
+                .all(|span| !matches!(span, GeometrySpan::Outer(_)))
+            {
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(
+                            self.individually_straightenable_spans(),
+                            egui::Button::new("Straighten spans"),
+                        )
+                        .on_hover_text(
+                            "Make every selected span straight between its own endpoints",
+                        )
+                        .clicked()
+                    {
+                        self.straighten_spans_individually();
+                    }
+                    if ui
+                        .add_enabled(
+                            self.straightenable_control_groups().is_some(),
+                            egui::Button::new("Straighten selection"),
+                        )
+                        .on_hover_text(
+                            "Make each contiguous selected piece one straight endpoint-to-endpoint chord",
+                        )
+                        .on_disabled_hover_text(
+                            "The selection needs open endpoints or C0 breaks on both sides",
+                        )
+                        .clicked()
+                    {
+                        self.straighten_selection();
+                    }
+                });
             }
         }
         self.topology_inspector(ui);
@@ -16575,7 +16641,7 @@ mod tests {
         let direction = end - start;
         let history = harness.state.editor.history_len().0;
 
-        harness.click_text("Straighten selected piece");
+        harness.click_text("Straighten selection");
 
         let after = &harness.state.editor.obstacle(id).unwrap().spline;
         for parameter in [7.0, 7.25, 7.75, 0.0, 0.25, 0.75, 1.0] {
@@ -16588,6 +16654,126 @@ mod tests {
             harness.state.editor.obstacle(id).unwrap().span_conditions,
             conditions
         );
+        assert_eq!(harness.state.editor.document.model.probes, probes);
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
+    }
+
+    #[test]
+    fn straighten_spans_isolates_and_straightens_each_span_in_one_action() {
+        let mut harness = Harness::new();
+        let id = ObstacleId(1);
+        harness
+            .state
+            .set_span_selection(vec![GeometrySpan::Loop(id, 0), GeometrySpan::Loop(id, 1)]);
+        assert!(harness.state.transformable_curve_controls().is_none());
+        let target = harness
+            .state
+            .boundary_probe_target_from_selection()
+            .unwrap();
+        harness.state.editor.create_boundary_probe(target).unwrap();
+        let before = harness.state.editor.obstacle(id).unwrap().spline.clone();
+        let endpoints = [
+            before.evaluate(before.span_bounds(0).unwrap()[0]),
+            before.evaluate(before.span_bounds(0).unwrap()[1]),
+            before.evaluate(before.span_bounds(1).unwrap()[1]),
+        ];
+        let untouched = before.evaluate(4.5);
+        let conditions = harness
+            .state
+            .editor
+            .obstacle(id)
+            .unwrap()
+            .span_conditions
+            .clone();
+        let probes = harness.state.editor.document.model.probes.clone();
+        let history = harness.state.editor.history_len().0;
+
+        harness.click_text("Straighten spans");
+
+        let after = &harness.state.editor.obstacle(id).unwrap().spline;
+        assert_eq!(&after.multiplicities()[0..=2], &[3, 3, 3]);
+        for (span, segment) in [
+            (0, [endpoints[0], endpoints[1]]),
+            (1, [endpoints[1], endpoints[2]]),
+        ] {
+            let bounds = after.span_bounds(span).unwrap();
+            let direction = segment[1] - segment[0];
+            for step in 0..=12 {
+                let parameter = bounds[0] + (bounds[1] - bounds[0]) * step as f64 / 12.0;
+                let relative = after.evaluate(parameter) - segment[0];
+                assert!(relative.cross(direction).abs() / direction.norm() < 1.0e-10);
+            }
+        }
+        assert!((after.evaluate(4.5) - untouched).norm() < 1.0e-12);
+        assert_eq!(
+            harness.state.editor.obstacle(id).unwrap().span_conditions,
+            conditions
+        );
+        assert_eq!(harness.state.editor.document.model.probes, probes);
+        assert_eq!(harness.state.editor.history_len().0, history + 1);
+    }
+
+    #[test]
+    fn straighten_baffle_spans_preserves_laws_and_probe_attachment() {
+        let mut harness = Harness::new();
+        let id = harness
+            .state
+            .editor
+            .create_internal_boundary(
+                OpenCubicSpline::uniform(vec![
+                    Point2::new(-0.85, 0.62),
+                    Point2::new(-0.62, 0.78),
+                    Point2::new(-0.28, 0.47),
+                    Point2::new(0.12, 0.72),
+                    Point2::new(0.48, 0.5),
+                    Point2::new(0.82, 0.66),
+                ])
+                .unwrap(),
+                BACKGROUND_REGION,
+            )
+            .unwrap();
+        harness.state.set_span_selection(vec![
+            GeometrySpan::Baffle(id, 0),
+            GeometrySpan::Baffle(id, 1),
+        ]);
+        let target = harness
+            .state
+            .boundary_probe_target_from_selection()
+            .unwrap();
+        harness.state.editor.create_boundary_probe(target).unwrap();
+        let before = harness
+            .state
+            .editor
+            .internal_boundary(id)
+            .unwrap()
+            .spline
+            .clone();
+        let laws = harness
+            .state
+            .editor
+            .internal_boundary(id)
+            .unwrap()
+            .span_laws
+            .clone();
+        let probes = harness.state.editor.document.model.probes.clone();
+        let history = harness.state.editor.history_len().0;
+
+        harness.click_text("Straighten spans");
+
+        let boundary = harness.state.editor.internal_boundary(id).unwrap();
+        assert_eq!(boundary.spline.multiplicities(), &[3, 3]);
+        for span in 0..=1 {
+            let bounds = boundary.spline.span_bounds(span).unwrap();
+            let start = before.evaluate(bounds[0]);
+            let end = before.evaluate(bounds[1]);
+            let direction = end - start;
+            for step in 0..=12 {
+                let parameter = bounds[0] + (bounds[1] - bounds[0]) * step as f64 / 12.0;
+                let relative = boundary.spline.evaluate(parameter) - start;
+                assert!(relative.cross(direction).abs() / direction.norm() < 1.0e-10);
+            }
+        }
+        assert_eq!(boundary.span_laws, laws);
         assert_eq!(harness.state.editor.document.model.probes, probes);
         assert_eq!(harness.state.editor.history_len().0, history + 1);
     }
