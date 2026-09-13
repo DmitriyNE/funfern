@@ -63,6 +63,29 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [ ] Extend bounded coordinate repair and solution-driven AMR to open material
   divider graphs. The first junction implementation deliberately uses the robust
   full-rebuild fallback for graph-edge movement and topology edits.
+- [ ] Extend the topology mesher's free-slit recovery to a separated T-junction.
+  The topology compiler produces the three sector traces, but direct meshing of
+  two separated curves sharing the branch point currently reports inconsistent
+  slit trace lineage. This does not affect transmitting T/X junctions or the
+  transfer consumer implemented below.
+
+## 2026-09-13 — Topology-aware quadratic solution transfer
+
+- Unified separated curves now retain their stable `CurveId` plus left/right side
+  through quadratic handoff. Span IDs are deliberately omitted from transfer
+  identity, so knot insertion and span splitting do not break side lineage.
+- Junction vertices use snapshot trace IDs to narrow coincident source candidates
+  within the matching curve sides. When an edit renumbers a snapshot trace or
+  moves the trace outside its old adjacent element, transfer falls back first to
+  the stable curve side and then to ordinary containing-element lookup.
+- Topology meshes no longer require equal region IDs across a handoff. A direct
+  full-mesh fixture splits one face with a transmitting divider and merges it back;
+  a quadratic field transfers in both directions with zero exposed nodes. Legacy
+  scene meshes retain their material-component restriction for closed walls.
+- Added direct regressions for unified baffle-side isolation, three coincident
+  junction sectors, and transmitting face split/merge. The focused **11 transfer
+  tests** pass. All **409 workspace tests**, workspace Clippy with warnings denied,
+  native release compilation, and release Trunk WebGPU packaging also pass.
 
 ## 2026-09-13 — Topology-capable GPU solver upload
 

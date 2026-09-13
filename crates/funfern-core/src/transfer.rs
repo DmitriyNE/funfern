@@ -1,32 +1,56 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    BoundaryLabel, InternalBoundaryId, InternalBoundarySide, MeshVertex, Point2,
-    QuadraticWaveOperator, TriMesh, enriched_quadratic_basis,
+    BoundaryLabel, CurveId, CurveTraceSide, InternalBoundaryId, InternalBoundarySide, MeshVertex,
+    Point2, QuadraticWaveOperator, TraceVertexId, TriMesh, enriched_quadratic_basis,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct InternalTraceKey {
-    id: InternalBoundaryId,
-    right: bool,
+enum BoundaryTraceKey {
+    Internal {
+        id: InternalBoundaryId,
+        right: bool,
+    },
+    Curve {
+        curve: CurveId,
+        side: CurveTraceSide,
+    },
 }
 
-impl InternalTraceKey {
+impl BoundaryTraceKey {
     fn from_label(label: BoundaryLabel) -> Option<Self> {
-        let BoundaryLabel::InternalBoundary { id, side } = label else {
-            return None;
-        };
-        Some(Self {
-            id,
-            right: side == InternalBoundarySide::Right,
-        })
+        match label {
+            BoundaryLabel::InternalBoundary { id, side } => Some(Self::Internal {
+                id,
+                right: side == InternalBoundarySide::Right,
+            }),
+            BoundaryLabel::Curve {
+                curve,
+                side,
+                separated: true,
+                ..
+            } => Some(Self::Curve { curve, side }),
+            _ => None,
+        }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TargetTracePreference {
+    vertex: Option<TraceVertexId>,
+    boundaries: BTreeSet<BoundaryTraceKey>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SourceTraceTriangles {
+    vertices: BTreeMap<TraceVertexId, BTreeSet<u32>>,
+    boundaries: BTreeMap<BoundaryTraceKey, BTreeSet<u32>>,
 }
 
 #[derive(Clone, Copy)]
 struct TraceRestrictions<'a> {
-    target: &'a [Option<InternalTraceKey>],
-    source: &'a BTreeMap<InternalTraceKey, BTreeSet<u32>>,
+    target: &'a [TargetTracePreference],
+    source: &'a SourceTraceTriangles,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -155,7 +179,7 @@ impl TransferMap {
             let [x, y] = bin_index(point, minimum, cell, dimension);
             let mut found = None;
             let preferred = trace_restrictions.and_then(|traces| {
-                traces.target[target_index].and_then(|trace| traces.source.get(&trace))
+                preferred_trace_triangles(&traces.target[target_index], traces.source)
             });
             for require_preferred in [true, false] {
                 if require_preferred && preferred.is_none() {
@@ -163,7 +187,9 @@ impl TransferMap {
                 }
                 for &triangle_index in &bins[y * dimension + x] {
                     if require_preferred
-                        && preferred.is_some_and(|triangles| !triangles.contains(&triangle_index))
+                        && preferred
+                            .as_ref()
+                            .is_some_and(|triangles| !triangles.contains(&triangle_index))
                     {
                         continue;
                     }
@@ -264,6 +290,39 @@ impl TransferMap {
     }
 }
 
+fn preferred_trace_triangles(
+    target: &TargetTracePreference,
+    source: &SourceTraceTriangles,
+) -> Option<BTreeSet<u32>> {
+    let boundary_triangles = target
+        .boundaries
+        .iter()
+        .filter_map(|boundary| source.boundaries.get(boundary))
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if boundary_triangles.is_empty() {
+        return None;
+    }
+
+    // Trace IDs identify a particular angular sector at a junction. They are
+    // snapshot-local, so use them only to narrow a stable curve-side match. If
+    // an edit changed trace numbering, the curve side remains the safe lineage.
+    if let Some(vertex_triangles) = target
+        .vertex
+        .and_then(|vertex| source.vertices.get(&vertex))
+    {
+        let intersection = boundary_triangles
+            .intersection(vertex_triangles)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !intersection.is_empty() {
+            return Some(intersection);
+        }
+    }
+    Some(boundary_triangles)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QuadraticTransferSample {
     pub nodes: [u32; 7],
@@ -339,22 +398,33 @@ impl QuadraticTransferMap {
                 trace: None,
             })
             .collect();
-        let region_groups = region_components(target_mesh)?;
+        // Unified topology meshes carry exact separated curve sides and sector
+        // trace lineage. Region IDs may legitimately appear or disappear when a
+        // transmitting divider splits or merges a face, so spatial transfer must
+        // not require the same RegionId on both revisions. Legacy meshes retain
+        // their region-component restriction for closed two-sided walls.
+        let unified_topology =
+            has_unified_topology(source_mesh) || has_unified_topology(target_mesh);
+        let region_groups = (!unified_topology)
+            .then(|| region_components(target_mesh))
+            .transpose()?;
         let mut target_groups = vec![None; target_operator.degrees_of_freedom()];
-        for (triangle, nodes) in target_mesh
-            .triangles
-            .iter()
-            .zip(target_operator.element_nodes())
-        {
-            let group = *region_groups
-                .get(&triangle.region)
-                .ok_or(TransferError::InvalidTarget)?;
-            for node in nodes {
-                let assigned = &mut target_groups[*node as usize];
-                if assigned.is_some_and(|assigned| assigned != group) {
-                    return Err(TransferError::InvalidTarget);
+        if let Some(region_groups) = &region_groups {
+            for (triangle, nodes) in target_mesh
+                .triangles
+                .iter()
+                .zip(target_operator.element_nodes())
+            {
+                let group = *region_groups
+                    .get(&triangle.region)
+                    .ok_or(TransferError::InvalidTarget)?;
+                for node in nodes {
+                    let assigned = &mut target_groups[*node as usize];
+                    if assigned.is_some_and(|assigned| assigned != group) {
+                        return Err(TransferError::InvalidTarget);
+                    }
+                    *assigned = Some(group);
                 }
-                *assigned = Some(group);
             }
         }
         let target_traces = quadratic_trace_nodes(target_mesh, target_operator)?;
@@ -363,7 +433,7 @@ impl QuadraticTransferMap {
             source_mesh,
             &expanded_target,
             &target_groups,
-            Some(&region_groups),
+            region_groups.as_ref(),
             Some(TraceRestrictions {
                 target: &target_traces,
                 source: &source_traces,
@@ -470,19 +540,20 @@ impl QuadraticTransferMap {
 fn quadratic_trace_nodes(
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
-) -> Result<Vec<Option<InternalTraceKey>>, TransferError> {
-    let mut traces = vec![None; operator.degrees_of_freedom()];
+) -> Result<Vec<TargetTracePreference>, TransferError> {
+    let mut traces = vec![TargetTracePreference::default(); operator.degrees_of_freedom()];
     for (vertex_index, vertex) in mesh.vertices.iter().enumerate() {
-        if let Some(trace) = vertex
+        traces[vertex_index].vertex = vertex.trace;
+        if let Some(boundary) = vertex
             .boundary
-            .and_then(|boundary| InternalTraceKey::from_label(boundary.label))
+            .and_then(|boundary| BoundaryTraceKey::from_label(boundary.label))
         {
-            traces[vertex_index] = Some(trace);
+            traces[vertex_index].boundaries.insert(boundary);
         }
     }
     let owners = triangle_edge_owners(mesh);
     for edge in &mesh.boundary_edges {
-        let Some(trace) = InternalTraceKey::from_label(edge.label) else {
+        let Some(boundary) = BoundaryTraceKey::from_label(edge.label) else {
             continue;
         };
         let Some([(triangle_index, local_midpoint)]) = owners
@@ -491,22 +562,33 @@ fn quadratic_trace_nodes(
         else {
             return Err(TransferError::InvalidTarget);
         };
-        let node = operator.element_nodes()[*triangle_index][*local_midpoint] as usize;
-        if traces[node].is_some_and(|assigned| assigned != trace) {
-            return Err(TransferError::InvalidTarget);
+        for vertex in edge.vertices {
+            traces[vertex].boundaries.insert(boundary);
         }
-        traces[node] = Some(trace);
+        let node = operator.element_nodes()[*triangle_index][*local_midpoint] as usize;
+        traces[node].boundaries.insert(boundary);
     }
     Ok(traces)
 }
 
-fn source_trace_triangles(
-    mesh: &TriMesh,
-) -> Result<BTreeMap<InternalTraceKey, BTreeSet<u32>>, TransferError> {
-    let mut traces = BTreeMap::<InternalTraceKey, BTreeSet<u32>>::new();
+fn source_trace_triangles(mesh: &TriMesh) -> Result<SourceTraceTriangles, TransferError> {
+    let mut traces = SourceTraceTriangles::default();
     let owners = triangle_edge_owners(mesh);
+    for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+        let triangle_index =
+            u32::try_from(triangle_index).map_err(|_| TransferError::InvalidSource)?;
+        for vertex_index in triangle.vertices {
+            if let Some(trace) = mesh.vertices[vertex_index].trace {
+                traces
+                    .vertices
+                    .entry(trace)
+                    .or_default()
+                    .insert(triangle_index);
+            }
+        }
+    }
     for edge in &mesh.boundary_edges {
-        let Some(trace) = InternalTraceKey::from_label(edge.label) else {
+        let Some(boundary) = BoundaryTraceKey::from_label(edge.label) else {
             continue;
         };
         let Some([(triangle, _)]) = owners
@@ -516,11 +598,20 @@ fn source_trace_triangles(
             return Err(TransferError::InvalidSource);
         };
         traces
-            .entry(trace)
+            .boundaries
+            .entry(boundary)
             .or_default()
             .insert(u32::try_from(*triangle).map_err(|_| TransferError::InvalidSource)?);
     }
     Ok(traces)
+}
+
+fn has_unified_topology(mesh: &TriMesh) -> bool {
+    mesh.vertices.iter().any(|vertex| vertex.trace.is_some())
+        || mesh
+            .boundary_edges
+            .iter()
+            .any(|edge| matches!(edge.label, BoundaryLabel::Curve { .. }))
 }
 
 fn transfer_edge_key(vertices: [usize; 2]) -> (usize, usize) {
@@ -715,10 +806,13 @@ fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, BoundarySide, LoopRole, Material,
-        MaterialId, MeshQuality, MeshTriangle, MeshVertex, Obstacle, ObstacleId,
-        OuterBoundaryCondition, OuterBoundaryConditions, PeriodicCubicSpline, Region, RegionId,
-        Scene, WaveCoefficients,
+        BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, BoundarySide, CurveNode, CurveSpan,
+        CurveSpanId, CurveSpline, FaceRegionAssignment, LoopRole, Material, MaterialId,
+        MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, Obstacle, ObstacleId,
+        OpenCubicSpline, OuterBoundaryCondition, OuterBoundaryConditions, PeriodicCubicSpline,
+        Region, RegionId, Scene, SpanBehavior, TopologyCurve, TopologyGeometry, TopologyMeshPlan,
+        TopologyVertex, TopologyVertexId, TopologyVertexLocation, TopologyWaveModel,
+        WaveCoefficients, compile_topology, mesh_topology_plan,
     };
 
     fn mesh(revision: u64, points: &[[f64; 2]], triangles: &[[usize; 3]]) -> TriMesh {
@@ -745,6 +839,77 @@ mod tests {
                 minimum_angle_degrees: 45.0,
                 maximum_edge_length: 1.0,
             },
+        }
+    }
+
+    fn topology_mesh(geometry: &TopologyGeometry, revision: u64) -> (TriMesh, TopologyMeshPlan) {
+        let topology = compile_topology(geometry, revision).unwrap();
+        let assignments = topology
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(index, face)| FaceRegionAssignment {
+                face: face.id,
+                region: Some(RegionId(index as u64 + 1)),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        let mesh = mesh_topology_plan(
+            &plan,
+            revision,
+            MeshingOptions {
+                target_edge_length: 0.4,
+                minimum_angle_degrees: 8.0,
+                max_vertices: 20_000,
+                max_triangles: 40_000,
+                max_refinement_steps: 20_000,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        (mesh, plan)
+    }
+
+    fn transmitting_divider() -> TopologyGeometry {
+        let bottom = TopologyVertexId(1);
+        let top = TopologyVertexId(2);
+        let mut divider = TopologyCurve::new(
+            CurveId(1),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(1),
+                behavior: SpanBehavior::Transmitting,
+            }],
+        )
+        .unwrap();
+        divider.nodes = vec![
+            CurveNode {
+                vertex: Some(bottom),
+            },
+            CurveNode { vertex: Some(top) },
+        ];
+        TopologyGeometry {
+            curves: vec![divider],
+            vertices: vec![
+                TopologyVertex {
+                    id: bottom,
+                    location: TopologyVertexLocation::Outer {
+                        side: crate::OuterSide::Bottom,
+                        fraction: 0.5,
+                    },
+                },
+                TopologyVertex {
+                    id: top,
+                    location: TopologyVertexLocation::Outer {
+                        side: crate::OuterSide::Top,
+                        fraction: 0.5,
+                    },
+                },
+            ],
+            ..TopologyGeometry::default()
         }
     }
 
@@ -978,6 +1143,227 @@ mod tests {
         let transferred = map.interpolate(&values, -1.0).unwrap();
         assert!((transferred[target_left] - 1.0).abs() < 1.0e-12);
         assert!((transferred[target_right] - 9.0).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn quadratic_transfer_keeps_unified_curve_sides_separate() {
+        let points = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ];
+        let mut source = mesh(3, &points, &[[0, 1, 2], [3, 4, 5]]);
+        for vertex in &mut source.vertices[..3] {
+            vertex.trace = Some(TraceVertexId(1));
+        }
+        for vertex in &mut source.vertices[3..] {
+            vertex.trace = Some(TraceVertexId(2));
+        }
+        source.boundary_edges = vec![
+            BoundaryEdge {
+                vertices: [0, 1],
+                label: BoundaryLabel::Curve {
+                    curve: CurveId(7),
+                    span: CurveSpanId(70),
+                    side: CurveTraceSide::Left,
+                    separated: true,
+                },
+                parameters: [0.0, 1.0],
+            },
+            BoundaryEdge {
+                vertices: [4, 3],
+                label: BoundaryLabel::Curve {
+                    curve: CurveId(7),
+                    span: CurveSpanId(70),
+                    side: CurveTraceSide::Right,
+                    separated: true,
+                },
+                parameters: [1.0, 0.0],
+            },
+        ];
+        let mut target = source.clone();
+        target.geometry_revision = 8;
+        let source_operator =
+            QuadraticWaveOperator::assemble(&source, WaveCoefficients::default()).unwrap();
+        let target_operator =
+            QuadraticWaveOperator::assemble(&target, WaveCoefficients::default()).unwrap();
+        let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
+            .unwrap();
+        let mut values = vec![0.0; source_operator.degrees_of_freedom()];
+        for node in source_operator.element_nodes()[0] {
+            values[node as usize] = 1.0;
+        }
+        for node in source_operator.element_nodes()[1] {
+            values[node as usize] = 9.0;
+        }
+        let transferred = map.interpolate(&values, -1.0).unwrap();
+        for node in [
+            target_operator.element_nodes()[0][0],
+            target_operator.element_nodes()[0][1],
+            target_operator.element_nodes()[0][3],
+        ] {
+            assert!((transferred[node as usize] - 1.0).abs() < 1.0e-12);
+        }
+        for node in [
+            target_operator.element_nodes()[1][0],
+            target_operator.element_nodes()[1][1],
+            target_operator.element_nodes()[1][3],
+        ] {
+            assert!((transferred[node as usize] - 9.0).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn topology_transfer_survives_transmitting_face_split_and_merge() {
+        let (unsplit, unsplit_plan) = topology_mesh(&TopologyGeometry::default(), 30);
+        let (split, split_plan) = topology_mesh(&transmitting_divider(), 31);
+        assert_eq!(
+            split
+                .triangles
+                .iter()
+                .map(|triangle| triangle.region)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2
+        );
+        let materials = [Material::default_medium()];
+        let regions = [
+            Region {
+                id: RegionId(1),
+                material: MaterialId(1),
+                frame: crate::MaterialFrame::world(),
+            },
+            Region {
+                id: RegionId(2),
+                material: MaterialId(1),
+                frame: crate::MaterialFrame::world(),
+            },
+        ];
+        let model = TopologyWaveModel {
+            physics: crate::PhysicsModel::Mechanical,
+            materials: &materials,
+            regions: &regions,
+            outer_boundaries: OuterBoundaryConditions::default(),
+        };
+        let unsplit_operator =
+            QuadraticWaveOperator::assemble_topology(&unsplit, &unsplit_plan, model).unwrap();
+        let split_operator =
+            QuadraticWaveOperator::assemble_topology(&split, &split_plan, model).unwrap();
+        let polynomial = |point: Point2| {
+            0.3 - 0.7 * point.x + 1.1 * point.y + 0.4 * point.x * point.x - 0.2 * point.x * point.y
+                + 0.6 * point.y * point.y
+        };
+
+        let unsplit_values = unsplit_operator
+            .node_points()
+            .iter()
+            .map(|point| polynomial(*point))
+            .collect::<Vec<_>>();
+        let split_map =
+            QuadraticTransferMap::build(&unsplit, &unsplit_operator, &split, &split_operator)
+                .unwrap();
+        assert_eq!(split_map.exposed_nodes(), 0);
+        let split_values = split_map.interpolate(&unsplit_values, -10.0).unwrap();
+        for (point, value) in split_operator.node_points().iter().zip(&split_values) {
+            assert!((*value - polynomial(*point)).abs() < 3.0e-12);
+        }
+
+        let merge_map =
+            QuadraticTransferMap::build(&split, &split_operator, &unsplit, &unsplit_operator)
+                .unwrap();
+        assert_eq!(merge_map.exposed_nodes(), 0);
+        let merged_values = merge_map.interpolate(&split_values, -10.0).unwrap();
+        for (point, value) in unsplit_operator.node_points().iter().zip(merged_values) {
+            assert!((value - polynomial(*point)).abs() < 3.0e-12);
+        }
+    }
+
+    #[test]
+    fn topology_transfer_uses_junction_sector_trace_ids() {
+        // Three sector vertices occupy the same junction point. Each boundary
+        // side is also present on a neighboring sector, so the trace ID is what
+        // narrows the candidate set to the correct angular sector.
+        let points = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [0.0, 0.0],
+            [-1.0, 0.0],
+            [0.0, -1.0],
+        ];
+        let mut source = mesh(40, &points, &[[0, 1, 2], [3, 4, 5], [6, 7, 8]]);
+        source.vertices[0].trace = Some(TraceVertexId(1));
+        source.vertices[3].trace = Some(TraceVertexId(2));
+        source.vertices[6].trace = Some(TraceVertexId(3));
+        let label = |curve, side| BoundaryLabel::Curve {
+            curve: CurveId(curve),
+            span: CurveSpanId(curve),
+            side,
+            separated: true,
+        };
+        source.boundary_edges = vec![
+            BoundaryEdge {
+                vertices: [0, 1],
+                label: label(10, CurveTraceSide::Left),
+                parameters: [0.0, 1.0],
+            },
+            BoundaryEdge {
+                vertices: [2, 0],
+                label: label(11, CurveTraceSide::Right),
+                parameters: [1.0, 0.0],
+            },
+            BoundaryEdge {
+                vertices: [3, 4],
+                label: label(11, CurveTraceSide::Right),
+                parameters: [0.0, 1.0],
+            },
+            BoundaryEdge {
+                vertices: [5, 3],
+                label: label(10, CurveTraceSide::Right),
+                parameters: [1.0, 0.0],
+            },
+            BoundaryEdge {
+                vertices: [6, 7],
+                label: label(10, CurveTraceSide::Right),
+                parameters: [0.0, 1.0],
+            },
+            BoundaryEdge {
+                vertices: [8, 6],
+                label: label(10, CurveTraceSide::Left),
+                parameters: [1.0, 0.0],
+            },
+        ];
+        let mut target = source.clone();
+        target.geometry_revision = 41;
+        let source_operator =
+            QuadraticWaveOperator::assemble(&source, WaveCoefficients::default()).unwrap();
+        let target_operator =
+            QuadraticWaveOperator::assemble(&target, WaveCoefficients::default()).unwrap();
+        let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
+            .unwrap();
+        let mut values = vec![0.0; source_operator.degrees_of_freedom()];
+        values[source_operator.element_nodes()[0][0] as usize] = 1.0;
+        values[source_operator.element_nodes()[1][0] as usize] = 2.0;
+        values[source_operator.element_nodes()[2][0] as usize] = 3.0;
+        let transferred = map.interpolate(&values, -10.0).unwrap();
+        assert_eq!(
+            transferred[target_operator.element_nodes()[0][0] as usize],
+            1.0
+        );
+        assert_eq!(
+            transferred[target_operator.element_nodes()[1][0] as usize],
+            2.0
+        );
+        assert_eq!(
+            transferred[target_operator.element_nodes()[2][0] as usize],
+            3.0
+        );
     }
 
     #[test]

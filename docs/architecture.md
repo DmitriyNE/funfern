@@ -644,9 +644,11 @@ for membership in the current continuous-source region so transfer-time
 acceleration can be reconstructed. Moving that source between regions replaces
 the membership buffer together with its weights. This admits arbitrary-degree
 material junctions without another storage binding. The upload/handoff boundary
-therefore accepts topology-plan meshes and operators, while source compilation,
-AMR, transfer, and probe metadata remain on the legacy model until their consumer
-slices are complete.
+therefore accepts topology-plan meshes and operators. Quadratic solution transfer
+also consumes the unified mesh lineage: separated nodes prefer source elements on
+the same stable curve side, and matching snapshot trace IDs narrow coincident
+junction candidates to the same angular sector. Source compilation, AMR, and probe
+metadata remain on the legacy model until their consumer slices are complete.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a
@@ -885,17 +887,24 @@ obstacle. Nodes newly exposed by a shrinking or moved obstacle start with zero
 displacement and velocity. Mild local smoothing is a possible response to
 edit-induced bursts, not a substitute for stable stepping.
 
-Transfer for closed regions respects topological connectivity. Regions joined
-through material interfaces form one transferable component, while a two-sided
-wall separates its components even where old and new domains overlap geometrically.
-Closed-wall sources use the same region membership. Quadratic nodes on an open
-baffle carry its stable boundary ID and face. At a coincident location, the locator
-prefers a source element adjacent to the same face; when a moved trace no longer
-overlaps an old face element, it falls back to the containing bulk element. Thus a
-stationary jump across the baffle is not mixed during handoff, while newly moved
-faces receive the field from their former physical location. Pulse and continuous
-source stencils separately use shortest paths through the cut finite-element graph,
-so they can reach the opposite bank only by travelling around a free tip.
+Legacy transfer for closed regions respects topological connectivity. Regions
+joined through material interfaces form one transferable component, while a
+two-sided wall separates its components even where old and new domains overlap
+geometrically. Closed-wall sources use the same region membership.
+
+Unified-topology transfer does not require target region IDs to exist in the
+source. This lets a transmitting divider split one face into several assigned
+regions, or let several faces merge, while field values follow geometric overlap.
+Quadratic nodes on a separated curve carry its stable curve side; authored and
+derived junction nodes additionally carry their sector trace ID. At a coincident
+location, the locator first intersects those two restrictions. Because trace IDs
+are snapshot-local, a changed or absent ID falls back to the curve-side lineage;
+if a moved trace no longer overlaps an old face element, location finally falls
+back to the containing bulk element. Thus stationary jumps are not mixed during
+handoff, harmless span splitting keeps the same side lineage, and new regions from
+a transmitting face split inherit the old field. Pulse and continuous source
+stencils separately use shortest paths through the cut finite-element graph, so
+they can reach the opposite bank only by travelling around a free tip.
 
 The hard zero policy is intentionally temporary. When newly exposed nodes meet a
 nonzero retained field, it creates a steep artificial front and injects broadband

@@ -320,9 +320,12 @@ traces, and a free baffle tip reconnects because it has one surrounding sector.
 compiled face cycles and oriented curve sides into region-labelled trace cycles.
 The full-rebuild triangulator now consumes that plan directly, preserving stable
 curve/span labels and snapshot trace identities through holes, transmitting
-interfaces, free and attached baffles, outer dividers, and junctions. The app,
-AMR, transfer, and probes still use the legacy scene path. The
-quadratic operator now also assembles directly from the plan: it evaluates each
+interfaces, free and attached baffles, outer dividers, and junctions. Quadratic
+solution transfer now follows unified curve sides and junction-sector traces;
+transmitting face split/merge handoffs use geometric overlap instead of requiring
+the same region ID on both plans. The app, AMR, and probes still use the legacy
+scene path. The quadratic operator now also assembles directly from the plan: it
+evaluates each
 triangle's assigned region, resolves outer and curve-side conditions from stable
 labels, supports paired thin-gap traces, and accepts multi-region junction nodes.
 Law-only plan changes reuse the existing mesh. The application cutover waits for
@@ -343,11 +346,10 @@ also participate in the source's mesh-path distance calculation.
 - Replace the current assumption that a wave node belongs to at most two regions
   with topology-supplied trace/sector memberships. This is required for three or
   more regions meeting at a point.
-- Update boundary assembly, higher-order auxiliary state, thin-gap assembly,
-  timestep estimation, material/source lookup, AMR indicators, local-repair
-  eligibility, solution transfer, and point/line/boundary/area probes to consume
-  the new labels. Preserve the existing full-remesh transaction as the safe first
-  path for graph edits; local graph repair is a later optimization.
+- Update material/source lookup, AMR indicators, local-repair eligibility, and
+  point/line/boundary/area probes to consume the new labels. Preserve the existing
+  full-remesh transaction as the safe first path for graph edits; local graph
+  repair is a later optimization.
 - Compile far-field contours only when the inset contour lies wholly in one
   uniform exterior face. Disable it with a precise reason when interfaces or
   varying exterior material cross that face.
