@@ -236,6 +236,10 @@ struct StoredScene {
     loops: Vec<StoredLoop>,
     #[serde(default)]
     internal_boundaries: Vec<StoredInternalBoundary>,
+    #[serde(default)]
+    material_interfaces: Vec<StoredMaterialInterface>,
+    #[serde(default)]
+    junctions: Vec<StoredJunction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     outer_boundaries: Option<[StoredOuterBoundaryCondition; 4]>,
 }
@@ -371,6 +375,60 @@ struct StoredInternalBoundary {
     intervals: Vec<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     multiplicities: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredMaterialInterface {
+    id: u64,
+    closed: bool,
+    controls: Vec<[f64; 2]>,
+    intervals: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    multiplicities: Vec<u8>,
+    nodes: Vec<StoredInterfaceNode>,
+    span_sides: Vec<StoredInterfaceSpanSides>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredInterfaceNode {
+    id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    junction: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredInterfaceSpanSides {
+    left: u64,
+    right: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredJunction {
+    id: u64,
+    location: StoredJunctionLocation,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredJunctionLocation {
+    Interior,
+    Outer {
+        side: StoredOuterSide,
+        fraction: f64,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredOuterSide {
+    Bottom,
+    Right,
+    Top,
+    Left,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -600,6 +658,68 @@ fn encode_scene(scene: &Scene) -> StoredScene {
                     .collect(),
                 intervals: boundary.spline.intervals().to_vec(),
                 multiplicities: boundary.spline.multiplicities().to_vec(),
+            })
+            .collect(),
+        material_interfaces: scene
+            .material_interfaces
+            .iter()
+            .map(|interface| {
+                let (closed, controls, intervals, multiplicities) = match &interface.spline {
+                    InterfaceSpline::Closed(spline) => (
+                        true,
+                        spline.controls(),
+                        spline.intervals(),
+                        spline.multiplicities(),
+                    ),
+                    InterfaceSpline::Open(spline) => (
+                        false,
+                        spline.controls(),
+                        spline.intervals(),
+                        spline.multiplicities(),
+                    ),
+                };
+                StoredMaterialInterface {
+                    id: interface.id.0,
+                    closed,
+                    controls: controls.iter().map(|point| [point.x, point.y]).collect(),
+                    intervals: intervals.to_vec(),
+                    multiplicities: multiplicities.to_vec(),
+                    nodes: interface
+                        .nodes
+                        .iter()
+                        .map(|node| StoredInterfaceNode {
+                            id: node.id.0,
+                            junction: node.junction.map(|id| id.0),
+                        })
+                        .collect(),
+                    span_sides: interface
+                        .span_sides
+                        .iter()
+                        .map(|sides| StoredInterfaceSpanSides {
+                            left: sides.left.0,
+                            right: sides.right.0,
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+        junctions: scene
+            .junctions
+            .iter()
+            .map(|junction| StoredJunction {
+                id: junction.id.0,
+                location: match junction.location {
+                    JunctionLocation::Interior => StoredJunctionLocation::Interior,
+                    JunctionLocation::Outer { side, fraction } => StoredJunctionLocation::Outer {
+                        side: match side {
+                            OuterSide::Bottom => StoredOuterSide::Bottom,
+                            OuterSide::Right => StoredOuterSide::Right,
+                            OuterSide::Top => StoredOuterSide::Top,
+                            OuterSide::Left => StoredOuterSide::Left,
+                        },
+                        fraction,
+                    },
+                },
             })
             .collect(),
         outer_boundaries: Some(scene.outer_boundaries.sides.map(encode_outer_condition)),
@@ -862,7 +982,10 @@ fn decode_scene(stored: StoredScene, options: SceneDecodeOptions) -> Result<Scen
     } = options;
     if stored.loops.len() > MAX_OBSTACLES
         || stored.internal_boundaries.len() > MAX_INTERNAL_BOUNDARIES
-        || stored.loops.len() + stored.internal_boundaries.len() > MAX_OBSTACLES
+        || stored.material_interfaces.len() > MAX_MATERIAL_INTERFACES
+        || stored.junctions.len() > MAX_JUNCTIONS
+        || stored.loops.len() + stored.internal_boundaries.len() + stored.material_interfaces.len()
+            > MAX_OBSTACLES
         || stored.materials.len() > MAX_MATERIALS
         || stored.volume_sources.len() > MAX_VOLUME_SOURCES
     {
@@ -1081,6 +1204,64 @@ fn decode_scene(stored: StoredScene, options: SceneDecodeOptions) -> Result<Scen
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let material_interfaces = stored
+        .material_interfaces
+        .into_iter()
+        .map(|interface| {
+            let spline = if interface.closed {
+                InterfaceSpline::Closed(decode_spline(
+                    interface.controls,
+                    interface.intervals,
+                    interface.multiplicities,
+                )?)
+            } else {
+                InterfaceSpline::Open(decode_open_spline(
+                    interface.controls,
+                    interface.intervals,
+                    interface.multiplicities,
+                )?)
+            };
+            Ok(MaterialInterface {
+                id: MaterialInterfaceId(interface.id),
+                spline,
+                nodes: interface
+                    .nodes
+                    .into_iter()
+                    .map(|node| InterfaceNode {
+                        id: InterfaceNodeId(node.id),
+                        junction: node.junction.map(JunctionId),
+                    })
+                    .collect(),
+                span_sides: interface
+                    .span_sides
+                    .into_iter()
+                    .map(|sides| InterfaceSpanSides {
+                        left: RegionId(sides.left),
+                        right: RegionId(sides.right),
+                    })
+                    .collect(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let junctions = stored
+        .junctions
+        .into_iter()
+        .map(|junction| Junction {
+            id: JunctionId(junction.id),
+            location: match junction.location {
+                StoredJunctionLocation::Interior => JunctionLocation::Interior,
+                StoredJunctionLocation::Outer { side, fraction } => JunctionLocation::Outer {
+                    side: match side {
+                        StoredOuterSide::Bottom => OuterSide::Bottom,
+                        StoredOuterSide::Right => OuterSide::Right,
+                        StoredOuterSide::Top => OuterSide::Top,
+                        StoredOuterSide::Left => OuterSide::Left,
+                    },
+                    fraction,
+                },
+            },
+        })
+        .collect();
     let outer_boundaries = match stored.outer_boundaries {
         Some(conditions) => OuterBoundaryConditions {
             sides: conditions.map(decode_outer_condition),
@@ -1122,6 +1303,8 @@ fn decode_scene(stored: StoredScene, options: SceneDecodeOptions) -> Result<Scen
         physics,
         obstacles,
         internal_boundaries,
+        material_interfaces,
+        junctions,
         materials,
         regions,
         volume_sources,
@@ -1169,7 +1352,7 @@ pub fn save_compact(document: &Document) -> Result<Vec<u8>, String> {
 
 fn encode_document(document: &Document) -> FileV2 {
     FileV2 {
-        version: 20,
+        version: 21,
         domain: [
             document.model.accepted.domain.min_x,
             document.model.accepted.domain.max_x,
@@ -1579,7 +1762,7 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document, String> {
                 presentation: PresentationSettings::default(),
             }
         }
-        2..=20 => {
+        2..=21 => {
             let file: FileV2 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             let legacy_domain = decode_domain(file.domain)?;
             let options = SceneDecodeOptions {

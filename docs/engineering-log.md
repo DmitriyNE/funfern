@@ -60,6 +60,34 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   follow-ups include bounded time-envelope expressions, pulsed/chirped drives,
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
+- [ ] Extend bounded coordinate repair and solution-driven AMR to open material
+  divider graphs. The first junction implementation deliberately uses the robust
+  full-rebuild fallback for graph-edge movement and topology edits.
+
+## 2026-09-13 — Open material dividers and junction topology
+
+- Added stable open material-interface, breakpoint-node, and junction IDs. Interface
+  spans own explicit left/right regions; interior attachments require C0 and outer
+  attachments store an edge plus normalized coordinate.
+- Added the staged **Divider** polyline/spline tool. The document changes only after
+  both endpoints attach. C0 node hits form T junctions, and a drawn curve may cross
+  existing C0 nodes while assigning the source region independently per span.
+- Added junction diamonds and direct junction dragging. Interior moves update every
+  attached curve node; outer moves remain constrained to their selected domain edge.
+  A complete drag is one undoable edit and Escape restores its snapshot.
+- Divider-span selection identifies its junction-to-junction section. Removal merges
+  the two adjacent regions with the older ID surviving, splits retained curve pieces,
+  collapses redundant two-arm junctions, and removes unused region state.
+- The mesher recovers the complete interface graph before flooding faces, retains a
+  single conforming trace at T junctions, and assembles the quadratic operator over
+  all incident material regions. The incremental validator samples divider geometry
+  and rejects free ends, incompatible contacts, invalid sectors, and ambiguous arms.
+- Far-field compilation now examines the complete shell outside its inset contour.
+  It requires one effective uniform, isotropic, lossless, source-free medium even if
+  that shell contains several region IDs.
+- Scene JSON is version 21; version 20 and older documents load with empty graph
+  fields. Automated coverage includes T/crossing creation, removal, junction drag,
+  persistence, three-region meshing/operator assembly, and exterior-shell rejection.
 
 ## 2026-09-13 — Directional material tensors
 

@@ -196,7 +196,7 @@ modes.
 
 ## 7. Interior topology and material assignment
 
-Implemented for closed spline loops and open baffles. Stable regions
+Implemented for closed spline loops, open material dividers, and open baffles. Stable regions
 and materials distinguish holes and conforming transmitting interfaces. Closed
 walls and open baffles have two finite-element traces; baffle traces reconnect at
 their free tips so waves can diffract around them. Nested
@@ -205,6 +205,14 @@ coefficient edits use a same-mesh field-transfer transaction. Version 4 scene
 files introduced open-spline span laws; version 5 also preserves periodic hole-span
 conditions. Older loops migrate to reflecting spans. Multi-region coordinate edits currently take the full-mesh path; extending
 bounded repair across region topology remains adaptation work.
+
+Open dividers stay staged until both ends attach to an outer edge or an existing
+C0 breakpoint. The graph stores per-span left/right regions and explicit junctions,
+meshes all transmitting branches as one conforming trace, and supports T/crossing
+sector relabeling, junction dragging, and region-merge removal by selected
+junction-to-junction section. Version 21 persists the graph in draft and accepted
+scenes. Coordinate-edit local repair currently falls back to a full rebuild for
+these graph edges.
 
 - Give regions, materials, interfaces, and internal walls stable semantic IDs
   independent of mesh vertices and element indices. Keep holes, transmitting

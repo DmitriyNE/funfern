@@ -869,6 +869,8 @@ mod tests {
                 },
             )],
             internal_boundaries: vec![],
+            material_interfaces: vec![],
+            junctions: vec![],
             materials: vec![
                 Material::default_medium(),
                 Material {

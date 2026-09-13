@@ -7,6 +7,29 @@ pub enum GeometryControl {
     Baffle(InternalBoundaryId, usize),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DividerEndpoint {
+    Outer {
+        side: OuterSide,
+        fraction: f64,
+    },
+    Junction(JunctionId),
+    InterfaceNode {
+        interface: MaterialInterfaceId,
+        node: InterfaceNodeId,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct DividerJunctionArm {
+    angle: f64,
+    interface: usize,
+    span: usize,
+    forward: bool,
+    left: RegionId,
+    right: RegionId,
+}
+
 pub const MAX_PROBES: usize = 16;
 pub const MAX_SEGMENT_PROBE_POINTS: usize = 512;
 
@@ -424,6 +447,9 @@ pub struct Editor {
     job: Option<ValidationJob>,
     next_obstacle_id: u64,
     next_internal_boundary_id: u64,
+    next_material_interface_id: u64,
+    next_interface_node_id: u64,
+    next_junction_id: u64,
     next_region_id: u64,
     next_material_id: u64,
     next_probe_id: u64,
@@ -440,6 +466,9 @@ impl Default for Editor {
             job: None,
             next_obstacle_id: 2,
             next_internal_boundary_id: 1,
+            next_material_interface_id: 1,
+            next_interface_node_id: 1,
+            next_junction_id: 1,
             next_region_id: 2,
             next_material_id: 2,
             next_probe_id: 1,
@@ -1125,6 +1154,458 @@ impl Editor {
         self.changed();
         self.commit();
         Ok(id)
+    }
+
+    /// Adds one transmitting divider as an atomic region split. The curve is
+    /// oriented from `start` to `end`; the selected material occupies its left
+    /// side and the existing source region of each crossed span remains on its
+    /// right.
+    pub fn create_material_divider(
+        &mut self,
+        spline: OpenCubicSpline,
+        start: DividerEndpoint,
+        end: DividerEndpoint,
+        source_regions: Vec<RegionId>,
+        material: MaterialId,
+    ) -> Result<MaterialInterfaceId, String> {
+        if self.document.model.draft.material(material).is_none() {
+            return Err("Choose an existing material for the new subdomain".into());
+        }
+        if source_regions.len() != spline.intervals().len()
+            || source_regions
+                .iter()
+                .any(|region| self.document.model.draft.region(*region).is_none())
+        {
+            return Err("The divider is not inside an existing subdomain".into());
+        }
+        if self.document.model.draft.material_interfaces.len() >= MAX_MATERIAL_INTERFACES {
+            return Err(format!(
+                "Maximum {MAX_MATERIAL_INTERFACES} material dividers"
+            ));
+        }
+        let mut candidate = self.document.model.draft.clone();
+        let mut next_junction_id = self.next_junction_id;
+        let internal_targets = (1..spline.intervals().len())
+            .map(|index| {
+                let point = spline.evaluate(spline.breakpoint(index).unwrap());
+                candidate.material_interfaces.iter().find_map(|interface| {
+                    interface
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .find_map(|(node_index, node)| {
+                            interface
+                                .spline
+                                .node_point(node_index)
+                                .filter(|candidate_point| {
+                                    (*candidate_point - point).norm()
+                                        <= candidate.domain.tolerance()
+                                })
+                                .map(|_| DividerEndpoint::InterfaceNode {
+                                    interface: interface.id,
+                                    node: node.id,
+                                })
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut resolve_endpoint = |target: DividerEndpoint,
+                                    point: Point2|
+         -> Result<JunctionId, String> {
+            match target {
+                DividerEndpoint::InterfaceNode { interface, node } => {
+                    let interface_index = candidate
+                        .material_interfaces
+                        .iter()
+                        .position(|candidate| candidate.id == interface)
+                        .ok_or("The selected divider no longer exists")?;
+                    let node_index = candidate.material_interfaces[interface_index]
+                        .node_index(node)
+                        .ok_or("The selected divider node no longer exists")?;
+                    let expected = candidate.material_interfaces[interface_index]
+                        .spline
+                        .node_point(node_index)
+                        .ok_or("The selected divider node has no position")?;
+                    if (expected - point).norm() > candidate.domain.tolerance() {
+                        return Err("The divider endpoint misses its node".into());
+                    }
+                    if let Some(junction) =
+                        candidate.material_interfaces[interface_index].nodes[node_index].junction
+                    {
+                        return Ok(junction);
+                    }
+                    if node_index == 0
+                        || node_index + 1
+                            == candidate.material_interfaces[interface_index].nodes.len()
+                    {
+                        return Err(
+                            "A free interface end cannot become an interior junction".into()
+                        );
+                    }
+                    if candidate.material_interfaces[interface_index]
+                        .spline
+                        .continuity(node_index)
+                        != Some(0)
+                    {
+                        return Err("Sharpen the attachment node to C0 before branching".into());
+                    }
+                    let id = JunctionId(next_junction_id);
+                    next_junction_id = next_junction_id
+                        .checked_add(1)
+                        .ok_or("Junction IDs exhausted")?;
+                    candidate.junctions.push(Junction {
+                        id,
+                        location: JunctionLocation::Interior,
+                    });
+                    candidate.material_interfaces[interface_index].nodes[node_index].junction =
+                        Some(id);
+                    Ok(id)
+                }
+                DividerEndpoint::Junction(id) => {
+                    let junction = candidate
+                        .junctions
+                        .iter()
+                        .find(|junction| junction.id == id)
+                        .copied()
+                        .ok_or("The selected junction no longer exists")?;
+                    let expected = candidate
+                        .junction_point(junction)
+                        .ok_or("The selected junction has no position")?;
+                    if (expected - point).norm() > candidate.domain.tolerance() {
+                        return Err("The divider endpoint misses its junction".into());
+                    }
+                    Ok(id)
+                }
+                DividerEndpoint::Outer { side, fraction } => {
+                    if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                        return Err("Outer-boundary attachment is invalid".into());
+                    }
+                    if let Some(existing) = candidate.junctions.iter().find(|junction| {
+                        matches!(
+                            junction.location,
+                            JunctionLocation::Outer {
+                                side: existing_side,
+                                fraction: existing_fraction,
+                            } if existing_side == side
+                                && (existing_fraction - fraction).abs() <= 1.0e-10
+                        )
+                    }) {
+                        return Ok(existing.id);
+                    }
+                    if candidate.junctions.len() >= MAX_JUNCTIONS {
+                        return Err(format!("Maximum {MAX_JUNCTIONS} junctions"));
+                    }
+                    let id = JunctionId(next_junction_id);
+                    next_junction_id = next_junction_id
+                        .checked_add(1)
+                        .ok_or("Junction IDs exhausted")?;
+                    candidate.junctions.push(Junction {
+                        id,
+                        location: JunctionLocation::Outer { side, fraction },
+                    });
+                    let expected = candidate
+                        .junction_point(*candidate.junctions.last().unwrap())
+                        .unwrap();
+                    if (expected - point).norm() > candidate.domain.tolerance() {
+                        return Err("The divider endpoint must lie on the outer boundary".into());
+                    }
+                    Ok(id)
+                }
+            }
+        };
+        let start_point = spline.evaluate(0.0);
+        let end_point = spline.evaluate(spline.period());
+        let start_junction = resolve_endpoint(start, start_point)?;
+        let end_junction = resolve_endpoint(end, end_point)?;
+        if start_junction == end_junction {
+            return Err("A divider needs two distinct junctions".into());
+        }
+        let interface_id = MaterialInterfaceId(self.next_material_interface_id);
+        let region_id = RegionId(self.next_region_id);
+        let mut next_node_id = self.next_interface_node_id;
+        let mut attachments = vec![None; spline.intervals().len() + 1];
+        attachments[0] = Some(start_junction);
+        *attachments.last_mut().unwrap() = Some(end_junction);
+        for (index, attachment) in attachments
+            .iter_mut()
+            .enumerate()
+            .take(spline.intervals().len())
+            .skip(1)
+        {
+            let point = spline.evaluate(spline.breakpoint(index).unwrap());
+            if let Some(target) = internal_targets[index - 1] {
+                *attachment = Some(resolve_endpoint(target, point)?);
+            }
+        }
+        let mut nodes = Vec::with_capacity(spline.intervals().len() + 1);
+        for junction in attachments.iter().copied() {
+            let id = InterfaceNodeId(next_node_id);
+            next_node_id = next_node_id
+                .checked_add(1)
+                .ok_or("Interface-node IDs exhausted")?;
+            nodes.push(InterfaceNode { id, junction });
+        }
+        candidate.regions.push(Region {
+            id: region_id,
+            material,
+            frame: MaterialFrame::world(),
+        });
+        for (node_index, junction) in attachments.iter().copied().enumerate() {
+            let Some(junction) = junction else { continue };
+            let interior = candidate
+                .junctions
+                .iter()
+                .find(|candidate| candidate.id == junction)
+                .is_some_and(|candidate| matches!(candidate.location, JunctionLocation::Interior));
+            if !interior {
+                continue;
+            }
+            let point = spline.evaluate(spline.breakpoint(node_index).unwrap());
+            if node_index < spline.intervals().len() {
+                let bounds = spline.span_bounds(node_index).unwrap();
+                split_divider_junction_sector(
+                    &mut candidate,
+                    junction,
+                    spline.evaluate(bounds[0] + (bounds[1] - bounds[0]) * 1.0e-6) - point,
+                    source_regions[node_index],
+                    region_id,
+                    true,
+                )?;
+            }
+            if node_index > 0 {
+                let bounds = spline.span_bounds(node_index - 1).unwrap();
+                split_divider_junction_sector(
+                    &mut candidate,
+                    junction,
+                    spline.evaluate(bounds[1] - (bounds[1] - bounds[0]) * 1.0e-6) - point,
+                    source_regions[node_index - 1],
+                    region_id,
+                    false,
+                )?;
+            }
+        }
+        candidate.material_interfaces.push(MaterialInterface {
+            id: interface_id,
+            span_sides: vec![
+                InterfaceSpanSides {
+                    left: region_id,
+                    right: source_regions[0],
+                };
+                spline.intervals().len()
+            ],
+            nodes,
+            spline: InterfaceSpline::Open(spline),
+        });
+        let interface = candidate.material_interfaces.last_mut().unwrap();
+        for (span, source) in interface.span_sides.iter_mut().zip(source_regions) {
+            span.right = source;
+        }
+        trim_redundant_interface_ends(&mut candidate)?;
+        let result = validate(&candidate);
+        if let Some(issue) = result.issue {
+            return Err(issue.to_string());
+        }
+        self.begin();
+        self.document.model.draft = candidate;
+        self.next_material_interface_id = self
+            .next_material_interface_id
+            .checked_add(1)
+            .ok_or("Material-interface IDs exhausted")?;
+        self.next_region_id = self
+            .next_region_id
+            .checked_add(1)
+            .ok_or("Region IDs exhausted")?;
+        self.next_interface_node_id = next_node_id;
+        self.next_junction_id = next_junction_id;
+        self.changed();
+        self.commit();
+        Ok(interface_id)
+    }
+
+    pub fn delete_material_divider(
+        &mut self,
+        id: MaterialInterfaceId,
+        selected_span: usize,
+    ) -> Result<(), String> {
+        let interface = self
+            .document
+            .model
+            .draft
+            .material_interfaces
+            .iter()
+            .find(|interface| interface.id == id)
+            .cloned()
+            .ok_or("Missing material divider")?;
+        let sides = interface
+            .span_sides
+            .get(selected_span)
+            .copied()
+            .ok_or("Missing material-divider span")?;
+        let mut first_span = selected_span;
+        while first_span > 0 && interface.nodes[first_span].junction.is_none() {
+            first_span -= 1;
+        }
+        let mut after_last_span = selected_span + 1;
+        while after_last_span < interface.span_sides.len()
+            && interface.nodes[after_last_span].junction.is_none()
+        {
+            after_last_span += 1;
+        }
+        let (survivor, removed) = if sides.left.0 <= sides.right.0 {
+            (sides.left, sides.right)
+        } else {
+            (sides.right, sides.left)
+        };
+        let mut candidate = self.document.model.clone();
+        let mut next_material_interface_id = self.next_material_interface_id;
+        let scene = &mut candidate.draft;
+        scene
+            .material_interfaces
+            .retain(|interface| interface.id != id);
+        let InterfaceSpline::Open(spline) = interface.spline else {
+            return Err("Closed material interfaces are removed as loops".into());
+        };
+        let mut pieces = Vec::new();
+        if first_span > 0 {
+            let (left, _) = spline
+                .clone()
+                .split(first_span)
+                .map_err(|error| error.to_string())?;
+            pieces.push(MaterialInterface {
+                id,
+                spline: InterfaceSpline::Open(left),
+                nodes: interface.nodes[..=first_span].to_vec(),
+                span_sides: interface.span_sides[..first_span].to_vec(),
+            });
+        }
+        if after_last_span < interface.span_sides.len() {
+            let (_, right) = spline
+                .split(after_last_span)
+                .map_err(|error| error.to_string())?;
+            let piece_id = if pieces.is_empty() {
+                id
+            } else {
+                let id = MaterialInterfaceId(next_material_interface_id);
+                next_material_interface_id = next_material_interface_id
+                    .checked_add(1)
+                    .ok_or("Material-interface IDs exhausted")?;
+                id
+            };
+            pieces.push(MaterialInterface {
+                id: piece_id,
+                spline: InterfaceSpline::Open(right),
+                nodes: interface.nodes[after_last_span..].to_vec(),
+                span_sides: interface.span_sides[after_last_span..].to_vec(),
+            });
+        }
+        scene.material_interfaces.extend(pieces);
+        for interface in &mut scene.material_interfaces {
+            for span in &mut interface.span_sides {
+                if span.left == removed {
+                    span.left = survivor;
+                }
+                if span.right == removed {
+                    span.right = survivor;
+                }
+            }
+        }
+        scene
+            .material_interfaces
+            .retain(|interface| interface.span_sides.iter().any(|s| s.left != s.right));
+        for obstacle in &mut scene.obstacles {
+            obstacle.role = replace_region_in_role(obstacle.role, removed, survivor);
+        }
+        for boundary in &mut scene.internal_boundaries {
+            if boundary.region == removed {
+                boundary.region = survivor;
+            }
+        }
+        scene
+            .volume_sources
+            .retain(|source| source.region != removed);
+        scene.regions.retain(|region| region.id != removed);
+        candidate.probes.retain(|probe| {
+            !matches!(probe.target, ProbeTarget::AreaRegion { region } if region == removed)
+        });
+        if candidate.source.region == removed {
+            candidate.source.region = survivor;
+        }
+        trim_redundant_interface_ends(scene)?;
+        collapse_weak_divider_junctions(scene)?;
+        let used_junctions = scene
+            .material_interfaces
+            .iter()
+            .flat_map(|interface| interface.nodes.iter().filter_map(|node| node.junction))
+            .collect::<BTreeSet<_>>();
+        scene
+            .junctions
+            .retain(|junction| used_junctions.contains(&junction.id));
+        self.begin();
+        self.document.model = candidate;
+        self.next_material_interface_id = next_material_interface_id;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_junction_point_during_edit(
+        &mut self,
+        id: JunctionId,
+        point: Point2,
+    ) -> Result<Point2, String> {
+        if !point.finite() {
+            return Err("Junction coordinates must be finite".into());
+        }
+        let scene = &mut self.document.model.draft;
+        let junction_index = scene
+            .junctions
+            .iter()
+            .position(|junction| junction.id == id)
+            .ok_or("Missing junction")?;
+        let target = match scene.junctions[junction_index].location {
+            JunctionLocation::Interior => point,
+            JunctionLocation::Outer { side, .. } => {
+                let [start, end] = match side {
+                    OuterSide::Bottom => [
+                        Point2::new(scene.domain.min_x, scene.domain.min_y),
+                        Point2::new(scene.domain.max_x, scene.domain.min_y),
+                    ],
+                    OuterSide::Right => [
+                        Point2::new(scene.domain.max_x, scene.domain.min_y),
+                        Point2::new(scene.domain.max_x, scene.domain.max_y),
+                    ],
+                    OuterSide::Top => [
+                        Point2::new(scene.domain.max_x, scene.domain.max_y),
+                        Point2::new(scene.domain.min_x, scene.domain.max_y),
+                    ],
+                    OuterSide::Left => [
+                        Point2::new(scene.domain.min_x, scene.domain.max_y),
+                        Point2::new(scene.domain.min_x, scene.domain.min_y),
+                    ],
+                };
+                let delta = end - start;
+                let fraction = ((point - start).dot(delta) / delta.dot(delta)).clamp(0.0, 1.0);
+                scene.junctions[junction_index].location =
+                    JunctionLocation::Outer { side, fraction };
+                start.lerp(end, fraction)
+            }
+        };
+        let mut changed = false;
+        for interface in &mut scene.material_interfaces {
+            for (index, node) in interface.nodes.iter().enumerate() {
+                if node.junction == Some(id) {
+                    interface
+                        .spline
+                        .set_node_point(index, target)
+                        .map_err(|_| "Attached junction nodes must be C0".to_string())?;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.changed();
+        }
+        Ok(target)
     }
 
     pub fn set_internal_boundary_point(
@@ -3156,6 +3637,37 @@ impl Editor {
             .max()
             .unwrap_or(0)
             .saturating_add(1);
+        self.next_material_interface_id = document
+            .model
+            .draft
+            .material_interfaces
+            .iter()
+            .chain(&document.model.accepted.material_interfaces)
+            .map(|interface| interface.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.next_interface_node_id = document
+            .model
+            .draft
+            .material_interfaces
+            .iter()
+            .chain(&document.model.accepted.material_interfaces)
+            .flat_map(|interface| &interface.nodes)
+            .map(|node| node.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.next_junction_id = document
+            .model
+            .draft
+            .junctions
+            .iter()
+            .chain(&document.model.accepted.junctions)
+            .map(|junction| junction.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         self.next_material_id = document
             .model
             .draft
@@ -3175,6 +3687,298 @@ impl Editor {
             .unwrap_or(0)
             .saturating_add(1);
         self.document = document;
+    }
+}
+
+fn divider_junction_arms(scene: &Scene, junction: JunctionId) -> Vec<DividerJunctionArm> {
+    let mut arms = Vec::new();
+    for (interface_index, interface) in scene.material_interfaces.iter().enumerate() {
+        let span_count = interface.spline.span_count();
+        for (node_index, node) in interface.nodes.iter().enumerate() {
+            if node.junction != Some(junction) {
+                continue;
+            }
+            let point = interface.spline.node_point(node_index).unwrap();
+            let mut add = |span: usize, forward: bool| {
+                let bounds = match &interface.spline {
+                    InterfaceSpline::Closed(spline) => spline.span_bounds(span),
+                    InterfaceSpline::Open(spline) => spline.span_bounds(span),
+                }
+                .unwrap();
+                let parameter = if forward {
+                    bounds[0] + (bounds[1] - bounds[0]) * 1.0e-6
+                } else {
+                    bounds[1] - (bounds[1] - bounds[0]) * 1.0e-6
+                };
+                let nearby = match &interface.spline {
+                    InterfaceSpline::Closed(spline) => spline.evaluate(parameter),
+                    InterfaceSpline::Open(spline) => spline.evaluate(parameter),
+                };
+                let direction = nearby - point;
+                let sides = interface.span_sides[span];
+                let (left, right) = if forward {
+                    (sides.left, sides.right)
+                } else {
+                    (sides.right, sides.left)
+                };
+                arms.push(DividerJunctionArm {
+                    angle: direction.y.atan2(direction.x),
+                    interface: interface_index,
+                    span,
+                    forward,
+                    left,
+                    right,
+                });
+            };
+            match interface.spline {
+                InterfaceSpline::Closed(_) => {
+                    add((node_index + span_count - 1) % span_count, false);
+                    add(node_index % span_count, true);
+                }
+                InterfaceSpline::Open(_) => {
+                    if node_index > 0 {
+                        add(node_index - 1, false);
+                    }
+                    if node_index < span_count {
+                        add(node_index, true);
+                    }
+                }
+            }
+        }
+    }
+    arms
+}
+
+fn replace_divider_arm_side(
+    scene: &mut Scene,
+    arm: DividerJunctionArm,
+    outgoing_left: bool,
+    from: RegionId,
+    to: RegionId,
+) -> Result<(), String> {
+    let interface = &mut scene.material_interfaces[arm.interface];
+    let replace_left = if arm.forward {
+        outgoing_left
+    } else {
+        !outgoing_left
+    };
+    let mut span = arm.span;
+    let limit = interface.span_sides.len();
+    for _ in 0..limit {
+        let side = if replace_left {
+            &mut interface.span_sides[span].left
+        } else {
+            &mut interface.span_sides[span].right
+        };
+        if *side != from {
+            return Err("The junction sector does not belong to the containing region".into());
+        }
+        *side = to;
+        let destination_node = if arm.forward { span + 1 } else { span };
+        if interface.nodes[destination_node % interface.nodes.len()]
+            .junction
+            .is_some()
+        {
+            return Ok(());
+        }
+        span = if arm.forward {
+            (span + 1) % limit
+        } else {
+            (span + limit - 1) % limit
+        };
+    }
+    Err("The adjacent divider section does not end at a junction".into())
+}
+
+fn split_divider_junction_sector(
+    scene: &mut Scene,
+    junction: JunctionId,
+    direction: Point2,
+    source: RegionId,
+    new_region: RegionId,
+    new_region_on_left: bool,
+) -> Result<(), String> {
+    let mut arms = divider_junction_arms(scene, junction);
+    if arms.is_empty() {
+        return Err("The selected interior junction has no incident divider".into());
+    }
+    arms.sort_by(|left, right| left.angle.total_cmp(&right.angle));
+    let angle = direction.y.atan2(direction.x);
+    let next = arms
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| {
+            (left.angle - angle)
+                .rem_euclid(std::f64::consts::TAU)
+                .total_cmp(&(right.angle - angle).rem_euclid(std::f64::consts::TAU))
+        })
+        .map(|(index, _)| index)
+        .unwrap();
+    let previous = (next + arms.len() - 1) % arms.len();
+    if arms[previous].left != source || arms[next].right != source {
+        return Err("The new divider does not enter the selected material sector".into());
+    }
+    if new_region_on_left {
+        replace_divider_arm_side(scene, arms[next], false, source, new_region)
+    } else {
+        replace_divider_arm_side(scene, arms[previous], true, source, new_region)
+    }
+}
+
+fn trim_redundant_interface_ends(scene: &mut Scene) -> Result<(), String> {
+    for interface in &mut scene.material_interfaces {
+        let InterfaceSpline::Open(mut spline) = interface.spline.clone() else {
+            continue;
+        };
+        while interface.span_sides.len() > 1
+            && interface
+                .span_sides
+                .first()
+                .is_some_and(|sides| sides.left == sides.right)
+        {
+            let (_, right) = spline.split(1).map_err(|error| error.to_string())?;
+            spline = right;
+            interface.span_sides.remove(0);
+            interface.nodes.remove(0);
+        }
+        while interface.span_sides.len() > 1
+            && interface
+                .span_sides
+                .last()
+                .is_some_and(|sides| sides.left == sides.right)
+        {
+            let last = spline.intervals().len() - 1;
+            let (left, _) = spline.split(last).map_err(|error| error.to_string())?;
+            spline = left;
+            interface.span_sides.pop();
+            interface.nodes.pop();
+        }
+        interface.spline = InterfaceSpline::Open(spline);
+    }
+    scene.material_interfaces.retain(|interface| {
+        interface
+            .span_sides
+            .iter()
+            .any(|sides| sides.left != sides.right)
+    });
+    let used = scene
+        .material_interfaces
+        .iter()
+        .flat_map(|interface| interface.nodes.iter().filter_map(|node| node.junction))
+        .collect::<BTreeSet<_>>();
+    scene
+        .junctions
+        .retain(|junction| used.contains(&junction.id));
+    Ok(())
+}
+
+fn collapse_weak_divider_junctions(scene: &mut Scene) -> Result<(), String> {
+    loop {
+        let Some(junction) = scene
+            .junctions
+            .iter()
+            .find(|junction| matches!(junction.location, JunctionLocation::Interior))
+            .filter(|junction| {
+                scene
+                    .material_interfaces
+                    .iter()
+                    .map(|interface| {
+                        interface
+                            .nodes
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, node)| node.junction == Some(junction.id))
+                            .map(|(index, _)| match interface.spline {
+                                InterfaceSpline::Closed(_) => 2,
+                                InterfaceSpline::Open(_)
+                                    if index > 0 && index + 1 < interface.nodes.len() =>
+                                {
+                                    2
+                                }
+                                InterfaceSpline::Open(_) => 1,
+                            })
+                            .sum::<usize>()
+                    })
+                    .sum::<usize>()
+                    < 3
+            })
+            .copied()
+        else {
+            return Ok(());
+        };
+        let occurrences = scene
+            .material_interfaces
+            .iter()
+            .enumerate()
+            .flat_map(|(interface, curve)| {
+                curve
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, node)| node.junction == Some(junction.id))
+                    .map(move |(node, _)| (interface, node))
+            })
+            .collect::<Vec<_>>();
+        match occurrences.as_slice() {
+            [(interface, node)] => {
+                scene.material_interfaces[*interface].nodes[*node].junction = None;
+            }
+            [(first, first_node), (second, second_node)] if first != second => {
+                let mut a = scene.material_interfaces[*first].clone();
+                let mut b = scene.material_interfaces[*second].clone();
+                let InterfaceSpline::Open(mut a_spline) = a.spline else {
+                    return Err("Cannot collapse a closed divider junction".into());
+                };
+                let InterfaceSpline::Open(mut b_spline) = b.spline else {
+                    return Err("Cannot collapse a closed divider junction".into());
+                };
+                if *first_node == 0 {
+                    a_spline = a_spline.reversed();
+                    a.nodes.reverse();
+                    a.span_sides.reverse();
+                    for sides in &mut a.span_sides {
+                        std::mem::swap(&mut sides.left, &mut sides.right);
+                    }
+                } else if *first_node + 1 != a.nodes.len() {
+                    return Err("A two-arm junction lies inside an unsplit divider".into());
+                }
+                if *second_node + 1 == b.nodes.len() {
+                    b_spline = b_spline.reversed();
+                    b.nodes.reverse();
+                    b.span_sides.reverse();
+                    for sides in &mut b.span_sides {
+                        std::mem::swap(&mut sides.left, &mut sides.right);
+                    }
+                } else if *second_node != 0 {
+                    return Err("A two-arm junction lies inside an unsplit divider".into());
+                }
+                let joined = a_spline
+                    .join(b_spline, scene.domain.tolerance())
+                    .map_err(|error| error.to_string())?;
+                a.spline = InterfaceSpline::Open(joined);
+                a.nodes.last_mut().unwrap().junction = None;
+                a.nodes.extend_from_slice(&b.nodes[1..]);
+                a.span_sides.extend(b.span_sides);
+                a.id = if a.id.0 <= b.id.0 { a.id } else { b.id };
+                let mut remove = [*first, *second];
+                remove.sort_unstable();
+                scene.material_interfaces.remove(remove[1]);
+                scene.material_interfaces.remove(remove[0]);
+                scene.material_interfaces.push(a);
+            }
+            _ => {
+                for interface in &mut scene.material_interfaces {
+                    for node in &mut interface.nodes {
+                        if node.junction == Some(junction.id) {
+                            node.junction = None;
+                        }
+                    }
+                }
+            }
+        }
+        scene
+            .junctions
+            .retain(|candidate| candidate.id != junction.id);
     }
 }
 
@@ -3336,6 +4140,22 @@ fn replace_exterior(role: LoopRole, from: RegionId, to: RegionId) -> LoopRole {
         LoopRole::Wall { interior, .. } => LoopRole::Wall {
             exterior: to,
             interior,
+        },
+    }
+}
+
+fn replace_region_in_role(role: LoopRole, from: RegionId, to: RegionId) -> LoopRole {
+    match role {
+        LoopRole::Hole { exterior } => LoopRole::Hole {
+            exterior: if exterior == from { to } else { exterior },
+        },
+        LoopRole::MaterialInterface { exterior, interior } => LoopRole::MaterialInterface {
+            exterior: if exterior == from { to } else { exterior },
+            interior: if interior == from { to } else { interior },
+        },
+        LoopRole::Wall { exterior, interior } => LoopRole::Wall {
+            exterior: if exterior == from { to } else { exterior },
+            interior: if interior == from { to } else { interior },
         },
     }
 }

@@ -1,11 +1,14 @@
 use crate::{
     EvaluatedMaterial, MAX_MATERIAL_PARAMETERS, MaterialError, MaterialFrame,
     MaterialFrameAttachment, MaterialParameter, OpenCubicSpline, OpenSampler, PeriodicCubicSpline,
-    Point2, Sample, Sampler, SamplingOptions, ScalarField, TimeSignal, point_segment_distance,
-    reserved_identifier, valid_identifier,
+    Point2, Sample, Sampler, SamplingOptions, ScalarField, SplineError, TimeSignal,
+    point_segment_distance, reserved_identifier, valid_identifier,
 };
+use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_OBSTACLES: usize = 32;
 pub const MAX_INTERNAL_BOUNDARIES: usize = 32;
+pub const MAX_MATERIAL_INTERFACES: usize = 32;
+pub const MAX_JUNCTIONS: usize = 64;
 pub const MAX_MATERIALS: usize = 32;
 pub const MAX_VOLUME_SOURCES: usize = MAX_OBSTACLES + 1;
 pub const WORLD_TOLERANCE: f64 = 2.0e-4;
@@ -93,6 +96,12 @@ impl Default for DomainRect {
 pub struct ObstacleId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InternalBoundaryId(pub u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MaterialInterfaceId(pub u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InterfaceNodeId(pub u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct JunctionId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -318,6 +327,7 @@ pub enum LoopRole {
     Hole {
         exterior: RegionId,
     },
+    #[doc(hidden)]
     MaterialInterface {
         exterior: RegionId,
         interior: RegionId,
@@ -364,6 +374,157 @@ pub struct Obstacle {
     /// Conditions are currently assembled for holes; retaining the vector on
     /// every loop keeps spline edits and future closed-wall assignment uniform.
     pub span_conditions: Vec<FaceBoundaryCondition>,
+}
+
+/// The two material regions adjacent to an oriented interface span.
+/// `left` and `right` are measured while traversing the spline in increasing
+/// parameter order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InterfaceSpanSides {
+    pub left: RegionId,
+    pub right: RegionId,
+}
+
+/// A stable topological point associated with one logical spline breakpoint.
+/// Ordinary spline controls are not curve points and therefore cannot carry a
+/// junction directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InterfaceNode {
+    pub id: InterfaceNodeId,
+    pub junction: Option<JunctionId>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum InterfaceSpline {
+    Closed(PeriodicCubicSpline),
+    Open(OpenCubicSpline),
+}
+
+impl InterfaceSpline {
+    pub fn span_count(&self) -> usize {
+        match self {
+            Self::Closed(spline) => spline.intervals().len(),
+            Self::Open(spline) => spline.intervals().len(),
+        }
+    }
+
+    pub fn node_count(&self) -> usize {
+        match self {
+            Self::Closed(spline) => spline.intervals().len(),
+            Self::Open(spline) => spline.intervals().len() + 1,
+        }
+    }
+
+    pub fn node_point(&self, index: usize) -> Option<Point2> {
+        match self {
+            Self::Closed(spline) => {
+                let parameter = *spline.knots().get(index)?;
+                Some(spline.evaluate(parameter))
+            }
+            Self::Open(spline) => {
+                let parameter = spline.breakpoint(index)?;
+                Some(spline.evaluate(parameter))
+            }
+        }
+    }
+
+    pub fn node_parameter(&self, index: usize) -> Option<f64> {
+        match self {
+            Self::Closed(spline) => spline.knots().get(index).copied(),
+            Self::Open(spline) => spline.breakpoint(index),
+        }
+    }
+
+    pub fn continuity(&self, index: usize) -> Option<u8> {
+        match self {
+            Self::Closed(spline) => spline.continuity(index),
+            Self::Open(spline) => {
+                if index == 0 || index + 1 == self.node_count() {
+                    Some(0)
+                } else {
+                    spline.continuity(index)
+                }
+            }
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+
+    pub fn set_node_point(&mut self, index: usize, point: Point2) -> Result<(), SplineError> {
+        match self {
+            Self::Open(spline) => spline.set_breakpoint_point(index, point),
+            Self::Closed(_) => Err(SplineError::NotRemovable),
+        }
+    }
+}
+
+/// A user-facing transmitting curve. Region adjacency is stored per span so a
+/// curve may pass through a junction where the material sector on one side
+/// changes while the curve itself retains its stable identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialInterface {
+    pub id: MaterialInterfaceId,
+    pub spline: InterfaceSpline,
+    pub nodes: Vec<InterfaceNode>,
+    pub span_sides: Vec<InterfaceSpanSides>,
+}
+
+impl MaterialInterface {
+    pub fn structure_valid(&self) -> bool {
+        self.id.0 > 0
+            && self.nodes.len() == self.spline.node_count()
+            && self.span_sides.len() == self.spline.span_count()
+            && self.nodes.iter().enumerate().all(|(index, node)| {
+                node.id.0 > 0
+                    && self.nodes[..index]
+                        .iter()
+                        .all(|previous| previous.id != node.id)
+            })
+            && self
+                .span_sides
+                .iter()
+                .all(|sides| sides.left.0 > 0 && sides.right.0 > 0 && sides.left != sides.right)
+    }
+
+    pub fn node_index(&self, id: InterfaceNodeId) -> Option<usize> {
+        self.nodes.iter().position(|node| node.id == id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum JunctionLocation {
+    Interior,
+    Outer {
+        side: crate::OuterSide,
+        fraction: f64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Junction {
+    pub id: JunctionId,
+    pub location: JunctionLocation,
+}
+
+impl Junction {
+    pub fn structure_valid(self) -> bool {
+        self.id.0 > 0
+            && match self.location {
+                JunctionLocation::Interior => true,
+                JunctionLocation::Outer { fraction, .. } => {
+                    fraction.is_finite() && (0.0..=1.0).contains(&fraction)
+                }
+            }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct JunctionArm {
+    direction: Point2,
+    left: RegionId,
+    right: RegionId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -529,6 +690,8 @@ pub struct Scene {
     pub physics: crate::PhysicsModel,
     pub obstacles: Vec<Obstacle>,
     pub internal_boundaries: Vec<InternalBoundary>,
+    pub material_interfaces: Vec<MaterialInterface>,
+    pub junctions: Vec<Junction>,
     pub materials: Vec<Material>,
     pub regions: Vec<Region>,
     pub volume_sources: Vec<VolumeSource>,
@@ -542,6 +705,8 @@ impl Default for Scene {
             physics: crate::PhysicsModel::Mechanical,
             obstacles: vec![],
             internal_boundaries: vec![],
+            material_interfaces: vec![],
+            junctions: vec![],
             materials: vec![Material::default_medium()],
             regions: vec![Region {
                 id: BACKGROUND_REGION,
@@ -566,7 +731,12 @@ impl Scene {
     pub fn structure_valid(&self) -> bool {
         if self.obstacles.len() > MAX_OBSTACLES
             || self.internal_boundaries.len() > MAX_INTERNAL_BOUNDARIES
-            || self.obstacles.len() + self.internal_boundaries.len() > MAX_OBSTACLES
+            || self.material_interfaces.len() > MAX_MATERIAL_INTERFACES
+            || self.junctions.len() > MAX_JUNCTIONS
+            || self.obstacles.len()
+                + self.internal_boundaries.len()
+                + self.material_interfaces.len()
+                > MAX_OBSTACLES
             || self.materials.is_empty()
             || self.materials.len() > MAX_MATERIALS
             || self.regions.is_empty()
@@ -598,6 +768,36 @@ impl Scene {
                             .iter()
                             .any(|previous| previous.id == boundary.id)
                 });
+        let mut interface_nodes = BTreeSet::new();
+        let unique_interfaces =
+            self.material_interfaces
+                .iter()
+                .enumerate()
+                .all(|(index, interface)| {
+                    interface.structure_valid()
+                        && interface
+                            .nodes
+                            .iter()
+                            .all(|node| interface_nodes.insert(node.id))
+                        && interface.span_sides.iter().all(|sides| {
+                            self.region(sides.left).is_some() && self.region(sides.right).is_some()
+                        })
+                        && !self.material_interfaces[..index]
+                            .iter()
+                            .any(|previous| previous.id == interface.id)
+                });
+        let unique_junctions = self.junctions.iter().enumerate().all(|(index, junction)| {
+            junction.structure_valid()
+                && !self.junctions[..index]
+                    .iter()
+                    .any(|previous| previous.id == junction.id)
+        });
+        let junction_references_exist = self.material_interfaces.iter().all(|interface| {
+            interface.nodes.iter().all(|node| {
+                node.junction
+                    .is_none_or(|id| self.junctions.iter().any(|junction| junction.id == id))
+            })
+        });
         let unique_materials = self.materials.iter().enumerate().all(|(i, material)| {
             material.valid()
                 && !self.materials[..i]
@@ -629,6 +829,9 @@ impl Scene {
             || !unique_materials
             || !unique_regions
             || !unique_boundaries
+            || !unique_interfaces
+            || !unique_junctions
+            || !junction_references_exist
             || !unique_sources
             || self.region(BACKGROUND_REGION).is_none()
         {
@@ -662,9 +865,202 @@ impl Scene {
                 interiors.push(interior);
             }
         }
-        self.regions
-            .iter()
-            .all(|region| region.id == BACKGROUND_REGION || interiors.contains(&region.id))
+        self.regions.iter().all(|region| {
+            region.id == BACKGROUND_REGION
+                || interiors.contains(&region.id)
+                || self.material_interfaces.iter().any(|interface| {
+                    interface
+                        .span_sides
+                        .iter()
+                        .any(|sides| sides.left == region.id || sides.right == region.id)
+                })
+        })
+    }
+
+    fn interface_arms_at_node(
+        &self,
+        interface: &MaterialInterface,
+        node_index: usize,
+    ) -> Option<Vec<JunctionArm>> {
+        let count = interface.spline.span_count();
+        let node = interface.spline.node_point(node_index)?;
+        let mut arms = Vec::with_capacity(2);
+        let mut add_span = |span: usize, forward: bool| {
+            let bounds = match &interface.spline {
+                InterfaceSpline::Closed(spline) => spline.span_bounds(span),
+                InterfaceSpline::Open(spline) => spline.span_bounds(span),
+            }?;
+            let parameter = if forward {
+                bounds[0] + (bounds[1] - bounds[0]) * 1.0e-6
+            } else {
+                bounds[1] - (bounds[1] - bounds[0]) * 1.0e-6
+            };
+            let nearby = match &interface.spline {
+                InterfaceSpline::Closed(spline) => spline.evaluate(parameter),
+                InterfaceSpline::Open(spline) => spline.evaluate(parameter),
+            };
+            let direction = nearby - node;
+            if !direction.finite() || direction.norm() <= self.domain.tolerance() * 1.0e-4 {
+                return None;
+            }
+            let sides = interface.span_sides[span];
+            arms.push(if forward {
+                JunctionArm {
+                    direction,
+                    left: sides.left,
+                    right: sides.right,
+                }
+            } else {
+                JunctionArm {
+                    direction,
+                    left: sides.right,
+                    right: sides.left,
+                }
+            });
+            Some(())
+        };
+        match interface.spline {
+            InterfaceSpline::Closed(_) => {
+                add_span((node_index + count - 1) % count, false)?;
+                add_span(node_index, true)?;
+            }
+            InterfaceSpline::Open(_) => {
+                if node_index > 0 {
+                    add_span(node_index - 1, false)?;
+                }
+                if node_index < count {
+                    add_span(node_index, true)?;
+                }
+            }
+        }
+        Some(arms)
+    }
+
+    pub fn junction_point(&self, junction: Junction) -> Option<Point2> {
+        match junction.location {
+            JunctionLocation::Interior => self.material_interfaces.iter().find_map(|interface| {
+                interface
+                    .nodes
+                    .iter()
+                    .position(|node| node.junction == Some(junction.id))
+                    .and_then(|index| interface.spline.node_point(index))
+            }),
+            JunctionLocation::Outer { side, fraction } => {
+                let [a, b] = match side {
+                    crate::OuterSide::Bottom => [
+                        Point2::new(self.domain.min_x, self.domain.min_y),
+                        Point2::new(self.domain.max_x, self.domain.min_y),
+                    ],
+                    crate::OuterSide::Right => [
+                        Point2::new(self.domain.max_x, self.domain.min_y),
+                        Point2::new(self.domain.max_x, self.domain.max_y),
+                    ],
+                    crate::OuterSide::Top => [
+                        Point2::new(self.domain.max_x, self.domain.max_y),
+                        Point2::new(self.domain.min_x, self.domain.max_y),
+                    ],
+                    crate::OuterSide::Left => [
+                        Point2::new(self.domain.min_x, self.domain.max_y),
+                        Point2::new(self.domain.min_x, self.domain.min_y),
+                    ],
+                };
+                Some(a.lerp(b, fraction))
+            }
+        }
+    }
+
+    fn interface_topology_issue(&self) -> Option<ValidationIssue> {
+        let mut incidence = BTreeMap::<JunctionId, Vec<(&MaterialInterface, usize)>>::new();
+        for interface in &self.material_interfaces {
+            let count = interface.spline.span_count();
+            for (node_index, node) in interface.nodes.iter().enumerate() {
+                let previous = if node_index > 0 {
+                    Some(node_index - 1)
+                } else if matches!(interface.spline, InterfaceSpline::Closed(_)) {
+                    Some(count - 1)
+                } else {
+                    None
+                };
+                let next = if node_index < count {
+                    Some(node_index)
+                } else if matches!(interface.spline, InterfaceSpline::Closed(_)) {
+                    Some(0)
+                } else {
+                    None
+                };
+                if let Some(junction) = node.junction {
+                    if interface.spline.continuity(node_index) != Some(0) {
+                        return Some(ValidationIssue::InterfaceJunctionContinuity(interface.id));
+                    }
+                    incidence
+                        .entry(junction)
+                        .or_default()
+                        .push((interface, node_index));
+                } else {
+                    if previous.is_none() || next.is_none() {
+                        return Some(ValidationIssue::FreeInterfaceEnd(interface.id));
+                    }
+                    if interface.span_sides[previous.unwrap()]
+                        != interface.span_sides[next.unwrap()]
+                    {
+                        return Some(ValidationIssue::InterfaceRegionTopology(interface.id));
+                    }
+                }
+            }
+        }
+        let tolerance = self.domain.tolerance();
+        for junction in &self.junctions {
+            let Some(point) = self.junction_point(*junction) else {
+                return Some(ValidationIssue::UnusedJunction(junction.id));
+            };
+            let Some(nodes) = incidence.get(&junction.id) else {
+                return Some(ValidationIssue::UnusedJunction(junction.id));
+            };
+            let mut arms = Vec::new();
+            for (interface, node_index) in nodes {
+                let Some(candidate) = interface.spline.node_point(*node_index) else {
+                    return Some(ValidationIssue::JunctionMismatch(junction.id));
+                };
+                if (candidate - point).norm() > tolerance {
+                    return Some(ValidationIssue::JunctionMismatch(junction.id));
+                }
+                let Some(mut incident) = self.interface_arms_at_node(interface, *node_index) else {
+                    return Some(ValidationIssue::JunctionDegenerate(junction.id));
+                };
+                arms.append(&mut incident);
+            }
+            arms.sort_by(|left, right| {
+                left.direction
+                    .y
+                    .atan2(left.direction.x)
+                    .total_cmp(&right.direction.y.atan2(right.direction.x))
+            });
+            if matches!(junction.location, JunctionLocation::Interior) {
+                if arms.len() < 3 {
+                    return Some(ValidationIssue::JunctionDegree(junction.id));
+                }
+                for index in 0..arms.len() {
+                    let next = (index + 1) % arms.len();
+                    let cross = arms[index].direction.cross(arms[next].direction);
+                    let scale = arms[index].direction.norm() * arms[next].direction.norm();
+                    // Collinear arms pointing away from one another are the
+                    // ordinary straight-through pair of a T or X junction.
+                    // Arms pointing in the same direction overlap and leave
+                    // the material sector ordering ambiguous.
+                    if cross.abs() <= scale * 1.0e-8
+                        && arms[index].direction.dot(arms[next].direction) > 0.0
+                    {
+                        return Some(ValidationIssue::JunctionDegenerate(junction.id));
+                    }
+                    if arms[index].left != arms[next].right {
+                        return Some(ValidationIssue::JunctionRegionTopology(junction.id));
+                    }
+                }
+            } else if arms.is_empty() {
+                return Some(ValidationIssue::JunctionDegree(junction.id));
+            }
+        }
+        None
     }
 
     pub fn material(&self, id: MaterialId) -> Option<&Material> {
@@ -745,6 +1141,8 @@ impl Scene {
             && self.physics == other.physics
             && self.obstacles == other.obstacles
             && self.internal_boundaries == other.internal_boundaries
+            && self.material_interfaces == other.material_interfaces
+            && self.junctions == other.junctions
             && self.materials == other.materials
             && self.regions.len() == other.regions.len()
             && self
@@ -816,6 +1214,8 @@ impl Scene {
                         && left.spline == right.spline
                         && left.region == right.region
                 })
+            && self.material_interfaces == other.material_interfaces
+            && self.junctions == other.junctions
     }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -835,6 +1235,19 @@ pub enum ValidationIssue {
     BoundarySelfContact(InternalBoundaryId),
     BoundaryContact(InternalBoundaryId),
     BoundaryRegionTopology(InternalBoundaryId),
+    InterfaceSubdivision(MaterialInterfaceId),
+    InterfaceOutside(MaterialInterfaceId),
+    InterfaceDegenerate(MaterialInterfaceId),
+    InterfaceSelfContact(MaterialInterfaceId),
+    InterfaceContact(MaterialInterfaceId),
+    FreeInterfaceEnd(MaterialInterfaceId),
+    InterfaceRegionTopology(MaterialInterfaceId),
+    InterfaceJunctionContinuity(MaterialInterfaceId),
+    UnusedJunction(JunctionId),
+    JunctionMismatch(JunctionId),
+    JunctionDegree(JunctionId),
+    JunctionDegenerate(JunctionId),
+    JunctionRegionTopology(JunctionId),
     WorkLimit,
 }
 impl std::fmt::Display for ValidationIssue {
@@ -899,6 +1312,57 @@ impl std::fmt::Display for ValidationIssue {
                 "Internal boundary {} has a region assignment inconsistent with its location",
                 id.0
             ),
+            Self::InterfaceSubdivision(id) => write!(
+                f,
+                "Material divider {}: sampling is exhausted or numerically ambiguous",
+                id.0
+            ),
+            Self::InterfaceOutside(id) => {
+                write!(f, "Material divider {} leaves the domain", id.0)
+            }
+            Self::InterfaceDegenerate(id) => {
+                write!(f, "Material divider {} is degenerate or too short", id.0)
+            }
+            Self::InterfaceSelfContact(id) => {
+                write!(
+                    f,
+                    "Material divider {} crosses or nearly touches itself",
+                    id.0
+                )
+            }
+            Self::InterfaceContact(id) => write!(
+                f,
+                "Material divider {} crosses or nearly touches incompatible geometry",
+                id.0
+            ),
+            Self::FreeInterfaceEnd(id) => {
+                write!(f, "Material interface {} has a free endpoint", id.0)
+            }
+            Self::InterfaceRegionTopology(id) => write!(
+                f,
+                "Material interface {} changes adjacent regions away from a junction",
+                id.0
+            ),
+            Self::InterfaceJunctionContinuity(id) => write!(
+                f,
+                "Material interface {} must be C0 at an attached junction",
+                id.0
+            ),
+            Self::UnusedJunction(id) => write!(f, "Junction {} has no attached curve", id.0),
+            Self::JunctionMismatch(id) => {
+                write!(f, "Curves attached to junction {} do not meet", id.0)
+            }
+            Self::JunctionDegree(id) => {
+                write!(f, "Junction {} has too few incident curve arms", id.0)
+            }
+            Self::JunctionDegenerate(id) => write!(
+                f,
+                "Junction {} has coincident, tangent, or degenerate curve arms",
+                id.0
+            ),
+            Self::JunctionRegionTopology(id) => {
+                write!(f, "Junction {} has inconsistent material sectors", id.0)
+            }
             Self::WorkLimit => write!(f, "Validation work limit reached; simplify the scene"),
         }
     }
@@ -931,6 +1395,7 @@ pub struct ValidationJob {
     open_sampler: Option<OpenSampler>,
     loops: Vec<Vec<Sample>>,
     open_boundaries: Vec<Vec<Sample>>,
+    sampled_interfaces: usize,
     segments: Vec<Segment>,
     bounds: Vec<(Point2, Point2)>,
     perimeters: Vec<f64>,
@@ -959,7 +1424,7 @@ impl ValidationJob {
         let issue = if !scene.domain.valid() {
             Some(ValidationIssue::Domain)
         } else if scene.structure_valid() {
-            None
+            scene.interface_topology_issue()
         } else {
             Some(ValidationIssue::Structure)
         };
@@ -971,6 +1436,7 @@ impl ValidationJob {
             open_sampler: None,
             loops: vec![],
             open_boundaries: vec![],
+            sampled_interfaces: 0,
             segments: vec![],
             bounds: vec![],
             perimeters: vec![],
@@ -1019,11 +1485,21 @@ impl ValidationJob {
                 };
                 if self.build_index + 1 == points.len() {
                     let issue = if is_open {
-                        let boundary = &self.scene.internal_boundaries[self.open_boundaries.len()];
-                        (self.perimeter <= self.scene.domain.tolerance()
+                        let open_index = self.open_boundaries.len();
+                        let degenerate = self.perimeter <= self.scene.domain.tolerance()
                             || (points.last().unwrap().point - points[0].point).norm()
-                                <= self.scene.domain.tolerance())
-                        .then_some(ValidationIssue::BoundaryDegenerate(boundary.id))
+                                <= self.scene.domain.tolerance();
+                        if open_index < self.scene.internal_boundaries.len() {
+                            degenerate.then_some(ValidationIssue::BoundaryDegenerate(
+                                self.scene.internal_boundaries[open_index].id,
+                            ))
+                        } else {
+                            degenerate.then_some(ValidationIssue::InterfaceDegenerate(
+                                self.scene.material_interfaces
+                                    [open_index - self.scene.internal_boundaries.len()]
+                                .id,
+                            ))
+                        }
                     } else {
                         (self.area.abs() * 0.5
                             <= self.scene.domain.tolerance() * self.scene.domain.tolerance())
@@ -1053,14 +1529,31 @@ impl ValidationJob {
                 let a = points[self.build_index].point;
                 let b = points[self.build_index + 1].point;
                 let margin = self.scene.domain.tolerance() + self.options.tolerance;
-                if [a, b]
-                    .iter()
-                    .any(|point| !self.scene.domain.contains_with_margin(*point, margin))
-                {
+                let open_index = self.open_boundaries.len();
+                let graph_interface = is_open && open_index >= self.scene.internal_boundaries.len();
+                let outside = [a, b].iter().any(|point| {
+                    if graph_interface {
+                        point.x < self.scene.domain.min_x - margin
+                            || point.x > self.scene.domain.max_x + margin
+                            || point.y < self.scene.domain.min_y - margin
+                            || point.y > self.scene.domain.max_y + margin
+                    } else {
+                        !self.scene.domain.contains_with_margin(*point, margin)
+                    }
+                });
+                if outside {
                     let issue = if is_open {
-                        ValidationIssue::BoundaryOutside(
-                            self.scene.internal_boundaries[self.open_boundaries.len()].id,
-                        )
+                        if graph_interface {
+                            ValidationIssue::InterfaceOutside(
+                                self.scene.material_interfaces
+                                    [open_index - self.scene.internal_boundaries.len()]
+                                .id,
+                            )
+                        } else {
+                            ValidationIssue::BoundaryOutside(
+                                self.scene.internal_boundaries[open_index].id,
+                            )
+                        }
                     } else {
                         ValidationIssue::Outside(self.scene.obstacles[self.loops.len()].id)
                     };
@@ -1112,6 +1605,26 @@ impl ValidationJob {
                         Ok(points) => self.pending_points = Some(points),
                     }
                 }
+            } else if self.sampled_interfaces < self.scene.material_interfaces.len() {
+                let interface = &self.scene.material_interfaces[self.sampled_interfaces];
+                let InterfaceSpline::Open(spline) = &interface.spline else {
+                    self.finish(Some(ValidationIssue::InterfaceSubdivision(interface.id)));
+                    continue;
+                };
+                let sampler = self
+                    .open_sampler
+                    .get_or_insert_with(|| OpenSampler::new(spline, self.options));
+                if sampler.step() {
+                    match self.open_sampler.take().unwrap().finish() {
+                        Err(_) => {
+                            self.finish(Some(ValidationIssue::InterfaceSubdivision(interface.id)))
+                        }
+                        Ok(points) => {
+                            self.sampled_interfaces += 1;
+                            self.pending_points = Some(points);
+                        }
+                    }
+                }
             } else if self.i < self.segments.len() {
                 if self.j >= self.segments.len() {
                     self.i += 1;
@@ -1156,6 +1669,25 @@ impl ValidationJob {
                         let b_open = b.curve - open_offset;
                         let a_points = &self.open_boundaries[a_open];
                         let b_points = &self.open_boundaries[b_open];
+                        let both_interfaces = a_open >= self.scene.internal_boundaries.len()
+                            && b_open >= self.scene.internal_boundaries.len();
+                        if both_interfaces {
+                            let shared_junction = [a.a, a.b].into_iter().any(|a_point| {
+                                [b.a, b.b].into_iter().any(|b_point| {
+                                    (a_point - b_point).norm() <= margin
+                                        && self.scene.junctions.iter().any(|junction| {
+                                            self.scene.junction_point(*junction).is_some_and(
+                                                |junction_point| {
+                                                    (junction_point - a_point).norm() <= margin
+                                                },
+                                            )
+                                        })
+                                })
+                            });
+                            if shared_junction {
+                                continue;
+                            }
+                        }
                         let a_last_segment = a_points.len() - 2;
                         let b_last_segment = b_points.len() - 2;
                         let shared_incident_tip = [
@@ -1178,10 +1710,18 @@ impl ValidationJob {
                         ]
                         .into_iter()
                         .any(|(a_tip, b_tip, incident)| {
-                            incident
-                                && self.scene.internal_boundaries[a_open].region
-                                    == self.scene.internal_boundaries[b_open].region
-                                && (a_points[a_tip].point - b_points[b_tip].point).norm() <= 1.0e-12
+                            if !incident
+                                || (a_points[a_tip].point - b_points[b_tip].point).norm() > 1.0e-12
+                            {
+                                return false;
+                            }
+                            if a_open < self.scene.internal_boundaries.len()
+                                && b_open < self.scene.internal_boundaries.len()
+                            {
+                                return self.scene.internal_boundaries[a_open].region
+                                    == self.scene.internal_boundaries[b_open].region;
+                            }
+                            false
                         });
                         if shared_incident_tip {
                             continue;
@@ -1215,12 +1755,28 @@ impl ValidationJob {
                         if a.curve < self.scene.obstacles.len() {
                             ValidationIssue::SelfContact(self.scene.obstacles[a.curve].id)
                         } else {
-                            ValidationIssue::BoundarySelfContact(
-                                self.scene.internal_boundaries
-                                    [a.curve - self.scene.obstacles.len()]
-                                .id,
-                            )
+                            let open = a.curve - self.scene.obstacles.len();
+                            if open < self.scene.internal_boundaries.len() {
+                                ValidationIssue::BoundarySelfContact(
+                                    self.scene.internal_boundaries[open].id,
+                                )
+                            } else {
+                                ValidationIssue::InterfaceSelfContact(
+                                    self.scene.material_interfaces
+                                        [open - self.scene.internal_boundaries.len()]
+                                    .id,
+                                )
+                            }
                         }
+                    } else if let Some(interface) =
+                        [a.curve, b.curve].into_iter().find_map(|curve| {
+                            let open = curve.checked_sub(self.scene.obstacles.len())?;
+                            let interface =
+                                open.checked_sub(self.scene.internal_boundaries.len())?;
+                            self.scene.material_interfaces.get(interface)
+                        })
+                    {
+                        ValidationIssue::InterfaceContact(interface.id)
                     } else if a.curve >= self.scene.obstacles.len() {
                         ValidationIssue::BoundaryContact(
                             self.scene.internal_boundaries[a.curve - self.scene.obstacles.len()].id,

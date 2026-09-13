@@ -710,6 +710,24 @@ impl MeshAdaptationJob {
                         parameter == breakpoint
                     })
                 }),
+            BoundaryLabel::OpenMaterialInterface(id) => self
+                .scene
+                .material_interfaces
+                .iter()
+                .find(|interface| interface.id == id)
+                .is_none_or(|interface| {
+                    let crate::InterfaceSpline::Open(spline) = &interface.spline else {
+                        return true;
+                    };
+                    let mut breakpoint = 0.0;
+                    if parameter == 0.0 || parameter == spline.period() {
+                        return true;
+                    }
+                    spline.intervals().iter().any(|interval| {
+                        breakpoint += interval;
+                        parameter == breakpoint
+                    })
+                }),
         }
     }
 
@@ -906,6 +924,27 @@ impl MeshAdaptationJob {
                     .find(|boundary| boundary.id == id)
                     .ok_or(MeshAdaptationError::InvalidSource("unknown open boundary"))?
                     .spline;
+                [
+                    spline.evaluate(t0),
+                    spline.evaluate(t0) + spline.derivative(t0, 1) * ((t1 - t0) / 3.0),
+                    spline.evaluate(t1) - spline.derivative(t1, 1) * ((t1 - t0) / 3.0),
+                    spline.evaluate(t1),
+                ]
+            }
+            BoundaryLabel::OpenMaterialInterface(id) => {
+                let interface = self
+                    .scene
+                    .material_interfaces
+                    .iter()
+                    .find(|interface| interface.id == id)
+                    .ok_or(MeshAdaptationError::InvalidSource(
+                        "unknown material interface",
+                    ))?;
+                let crate::InterfaceSpline::Open(spline) = &interface.spline else {
+                    return Err(MeshAdaptationError::InvalidSource(
+                        "unsupported closed graph interface",
+                    ));
+                };
                 [
                     spline.evaluate(t0),
                     spline.evaluate(t0) + spline.derivative(t0, 1) * ((t1 - t0) / 3.0),
@@ -1287,6 +1326,18 @@ impl MeshAdaptationJob {
                 .find(|boundary| boundary.id == id)
                 .map(|boundary| boundary.spline.evaluate(parameter))
                 .ok_or(MeshAdaptationError::InvalidSource("unknown open boundary")),
+            BoundaryLabel::OpenMaterialInterface(id) => self
+                .scene
+                .material_interfaces
+                .iter()
+                .find(|interface| interface.id == id)
+                .and_then(|interface| match &interface.spline {
+                    crate::InterfaceSpline::Open(spline) => Some(spline.evaluate(parameter)),
+                    crate::InterfaceSpline::Closed(_) => None,
+                })
+                .ok_or(MeshAdaptationError::InvalidSource(
+                    "unknown material interface",
+                )),
         }
     }
 

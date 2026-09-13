@@ -29,7 +29,7 @@ use funfern_app::editor::DocumentModel;
 use funfern_app::{
     editor::{
         Acceptance, BoundaryFaceTarget, BoundaryProbeFeature, BoundaryProbeSide,
-        BoundaryProbeTarget, Editor, FarFieldSettings, GeometryControl, LoopKind,
+        BoundaryProbeTarget, DividerEndpoint, Editor, FarFieldSettings, GeometryControl, LoopKind,
         PresentationSettings, ProbeDefinition, ProbeId, ProbeSamplingPreset, ProbeTarget,
         VectorOverlay,
     },
@@ -55,6 +55,7 @@ enum CreationRole {
     #[default]
     Hole,
     MaterialInterface,
+    Divider,
     InternalBoundary,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +79,7 @@ impl DrawTool {
 
     const fn minimum_points(self, role: CreationRole) -> usize {
         match (self, role) {
-            (Self::Spline, CreationRole::InternalBoundary) => 2,
+            (Self::Spline, CreationRole::InternalBoundary | CreationRole::Divider) => 2,
             (Self::Circle, _) => 0,
             (Self::Rectangle | Self::Polyline, _) => 2,
             (Self::Polygon, _) => 3,
@@ -88,7 +89,9 @@ impl DrawTool {
 
     const fn can_finish(self, role: CreationRole, points: usize) -> bool {
         match (self, role) {
-            (Self::Spline, CreationRole::InternalBoundary) => points == 2 || points >= 4,
+            (Self::Spline, CreationRole::InternalBoundary | CreationRole::Divider) => {
+                points == 2 || points >= 4
+            }
             _ => points >= self.minimum_points(role),
         }
     }
@@ -913,6 +916,9 @@ pub struct Playground {
     region_selection: RegionId,
     selection: Option<(ObstacleId, Option<usize>)>,
     internal_selection: Option<(InternalBoundaryId, Option<usize>)>,
+    material_interface_selection: Option<(MaterialInterfaceId, usize)>,
+    selected_junction: Option<JunctionId>,
+    junction_drag: Option<JunctionId>,
     focused_feature: Option<FocusedFeature>,
     selected_spans: Vec<GeometrySpan>,
     span_selection_filter: SpanSelectionFilter,
@@ -1098,6 +1104,9 @@ impl Default for Playground {
             region_selection: BACKGROUND_REGION,
             selection: None,
             internal_selection: None,
+            material_interface_selection: None,
+            selected_junction: None,
+            junction_drag: None,
             focused_feature: Some(FocusedFeature::Loop(ObstacleId(1))),
             selected_spans: (0..8)
                 .map(|span| GeometrySpan::Loop(ObstacleId(1), span))
@@ -1679,18 +1688,61 @@ impl Playground {
             return Err("Far-field inset must leave a nonempty contour inside the domain".into());
         }
         Self::validate_far_field_clearance(scene, settings.inset)?;
-        let material = scene
-            .region_material(BACKGROUND_REGION)
-            .ok_or("The background material is missing")?;
-        let material = material
-            .uniform()
-            .ok_or("Far-field projection requires a uniform lossless background material")?;
-        if material.damping.abs() > 1.0e-12 {
-            return Err("Far-field projection requires a lossless background material".into());
+        let contour = inset_domain(scene.domain, settings.inset);
+        let exterior_regions = mesh
+            .triangles
+            .iter()
+            .filter_map(|triangle| {
+                let center = triangle
+                    .vertices
+                    .into_iter()
+                    .map(|vertex| mesh.vertices[vertex].point)
+                    .fold(Point2::default(), |sum, point| sum + point)
+                    / 3.0;
+                (center.x <= contour.min_x
+                    || center.x >= contour.max_x
+                    || center.y <= contour.min_y
+                    || center.y >= contour.max_y)
+                    .then_some(triangle.region)
+            })
+            .collect::<BTreeSet<_>>();
+        let mut exterior_material = None::<EvaluatedMaterial>;
+        for region in &exterior_regions {
+            let material = scene
+                .region_material(*region)
+                .and_then(Material::uniform)
+                .ok_or("Far-field projection requires a uniform exterior medium")?;
+            if material.damping.abs() > 1.0e-12 {
+                return Err("Far-field projection requires a lossless exterior medium".into());
+            }
+            if (material.axis_ratio - 1.0).abs() > 1.0e-12 {
+                return Err("Far-field projection requires an isotropic exterior medium".into());
+            }
+            if scene
+                .volume_source(*region)
+                .is_some_and(|source| source.enabled)
+            {
+                return Err("Far-field projection requires a source-free exterior medium".into());
+            }
+            if let Some(reference) = exterior_material {
+                let close = |left: f64, right: f64| {
+                    (left - right).abs() <= 1.0e-12 * left.abs().max(right.abs()).max(1.0)
+                };
+                if !close(reference.mass_density, material.mass_density)
+                    || !close(reference.stiffness, material.stiffness)
+                    || !close(reference.damping, material.damping)
+                    || !close(reference.axis_ratio, material.axis_ratio)
+                {
+                    return Err(
+                        "Far-field projection requires one effective medium outside the contour"
+                            .into(),
+                    );
+                }
+            } else {
+                exterior_material = Some(material);
+            }
         }
-        if (material.axis_ratio - 1.0).abs() > 1.0e-12 {
-            return Err("Far-field projection requires an isotropic background material".into());
-        }
+        let material = exterior_material.ok_or("Far-field exterior contains no mesh elements")?;
         let wave_speed = scene.physics.wave_speed(WaveCoefficients {
             mass_density: material.mass_density,
             stiffness: material.stiffness,
@@ -1704,8 +1756,8 @@ impl Playground {
             .map(|(position, normal)| {
                 let stencil = QuadraticPointStencil::build(mesh, operator, scene, position)
                     .map_err(|error| format!("Far-field contour is unavailable: {error}"))?;
-                if stencil.region != BACKGROUND_REGION {
-                    return Err("Far-field contour must stay in the background material".into());
+                if !exterior_regions.contains(&stencil.region) {
+                    return Err("Far-field contour leaves the uniform exterior medium".into());
                 }
                 Ok((stencil, position, normal))
             })
@@ -2061,6 +2113,9 @@ impl Playground {
     fn clear_transient(&mut self) {
         self.selection = None;
         self.internal_selection = None;
+        self.material_interface_selection = None;
+        self.selected_junction = None;
+        self.junction_drag = None;
         self.focused_feature = None;
         self.selected_spans.clear();
         self.selected_probe = None;
@@ -2084,6 +2139,7 @@ impl Playground {
     }
 
     fn cancel_pointer_edit(&mut self) -> bool {
+        let junction_drag = self.junction_drag.take();
         let source_dragging = std::mem::take(&mut self.source_dragging);
         let probe_drag = self.probe_drag.take();
         let domain_drag = self.domain_drag.take();
@@ -2097,6 +2153,7 @@ impl Playground {
         }
         self.pending_span_click = None;
         let cancelled = source_dragging
+            || junction_drag.is_some()
             || probe_drag.is_some()
             || domain_drag.is_some()
             || material_frame_drag.is_some()
@@ -2475,6 +2532,13 @@ impl Playground {
             self.delete_probe_and_ui_state(id);
             return;
         }
+        if let Some((id, span)) = self.material_interface_selection {
+            let result = self.editor.delete_material_divider(id, span);
+            if self.error(result).is_some() {
+                self.material_interface_selection = None;
+            }
+            return;
+        }
         if let Some((id, Some(index))) = self.selection {
             let result = self.editor.remove_point(id, index);
             if self.error(result).is_some() {
@@ -2643,6 +2707,18 @@ impl Playground {
         if !focus_valid {
             self.focused_feature = None;
             self.loop_role_edit = None;
+        }
+        if self.material_interface_selection.is_some_and(|(id, span)| {
+            !self
+                .editor
+                .document
+                .model
+                .draft
+                .material_interfaces
+                .iter()
+                .any(|interface| interface.id == id && span < interface.span_sides.len())
+        }) {
+            self.material_interface_selection = None;
         }
     }
 
@@ -3099,6 +3175,41 @@ impl Playground {
             .copied()
             .fold(Point2::default(), |sum, point| sum + point)
             / self.custom.len() as f64;
+        if role == CreationRole::Divider {
+            let spline = if tool == DrawTool::Polyline || self.custom.len() == 2 {
+                OpenCubicSpline::polyline(self.custom.clone())
+            } else {
+                OpenCubicSpline::uniform(self.custom.clone())
+            };
+            let result = spline
+                .map_err(|error| error.to_string())
+                .and_then(|spline| {
+                    let start = self
+                        .divider_endpoint(spline.evaluate(0.0))
+                        .ok_or("Start the divider on an outer edge or junction")?;
+                    let end = self
+                        .divider_endpoint(spline.evaluate(spline.period()))
+                        .ok_or("End the divider on an outer edge or junction")?;
+                    let sources = (0..spline.intervals().len())
+                        .map(|span| {
+                            let bounds = spline.span_bounds(span).unwrap();
+                            self.region_at(spline.evaluate((bounds[0] + bounds[1]) * 0.5))
+                        })
+                        .collect();
+                    self.editor.create_material_divider(
+                        spline,
+                        start,
+                        end,
+                        sources,
+                        self.material_selection,
+                    )
+                });
+            if let Some(id) = self.error(result) {
+                self.clear_transient();
+                self.material_interface_selection = Some((id, 0));
+            }
+            return;
+        }
         let result = match (role, tool) {
             (CreationRole::InternalBoundary, DrawTool::Polyline) => {
                 OpenCubicSpline::polyline(self.custom.clone())
@@ -3179,7 +3290,83 @@ impl Playground {
                     .create_region_loop(spline, exterior, self.material_selection, false)
             }
             CreationRole::InternalBoundary => Err("Open boundaries use an open spline".into()),
+            CreationRole::Divider => Err("Dividers use an open spline".into()),
         }
+    }
+
+    fn divider_endpoint(&self, point: Point2) -> Option<DividerEndpoint> {
+        let scene = &self.editor.document.model.draft;
+        if let Some((interface, node)) = scene.material_interfaces.iter().find_map(|interface| {
+            interface
+                .nodes
+                .iter()
+                .enumerate()
+                .find_map(|(index, node)| {
+                    interface
+                        .spline
+                        .node_point(index)
+                        .filter(|candidate| (*candidate - point).norm() <= scene.domain.tolerance())
+                        .map(|_| (interface, node))
+                })
+        }) {
+            return Some(node.junction.map_or(
+                DividerEndpoint::InterfaceNode {
+                    interface: interface.id,
+                    node: node.id,
+                },
+                DividerEndpoint::Junction,
+            ));
+        }
+        if let Some(junction) = scene.junctions.iter().find(|junction| {
+            scene
+                .junction_point(**junction)
+                .is_some_and(|candidate| (candidate - point).norm() <= scene.domain.tolerance())
+        }) {
+            return Some(DividerEndpoint::Junction(junction.id));
+        }
+        OuterSide::ALL.into_iter().find_map(|side| {
+            let [start, end] = outer_side_points(scene.domain, side);
+            let delta = end - start;
+            let fraction = (point - start).dot(delta) / delta.dot(delta);
+            let projected = start.lerp(end, fraction.clamp(0.0, 1.0));
+            ((projected - point).norm() <= scene.domain.tolerance()).then_some(
+                DividerEndpoint::Outer {
+                    side,
+                    fraction: fraction.clamp(0.0, 1.0),
+                },
+            )
+        })
+    }
+
+    fn snap_divider_point(&self, screen: Pos2, viewport: Rect) -> Point2 {
+        let scene = &self.editor.document.model.draft;
+        if let Some((_, point)) = scene
+            .material_interfaces
+            .iter()
+            .flat_map(|interface| {
+                (0..interface.spline.node_count())
+                    .filter_map(|index| interface.spline.node_point(index))
+            })
+            .chain(
+                scene
+                    .junctions
+                    .iter()
+                    .filter_map(|junction| scene.junction_point(*junction)),
+            )
+            .map(|point| (self.screen(point, viewport).distance(screen), point))
+            .filter(|(distance, _)| *distance <= self.hit_tolerance(12.0))
+            .min_by(|left, right| left.0.total_cmp(&right.0))
+        {
+            return point;
+        }
+        if let Some(side) = self.hit_outer_boundary(screen, viewport) {
+            let point = self.world(screen, viewport);
+            let [start, end] = outer_side_points(scene.domain, side);
+            let delta = end - start;
+            let fraction = ((point - start).dot(delta) / delta.dot(delta)).clamp(0.0, 1.0);
+            return start.lerp(end, fraction);
+        }
+        self.world(screen, viewport)
     }
 
     fn region_at(&self, point: Point2) -> RegionId {
@@ -4915,12 +5102,16 @@ impl Playground {
                     for (role, label) in [
                         (CreationRole::Hole, "Hole"),
                         (CreationRole::MaterialInterface, "Interface"),
+                        (CreationRole::Divider, "Divider"),
                         (CreationRole::InternalBoundary, "Baffle"),
                     ] {
                         ui.selectable_value(&mut self.creation_role, role, label);
                     }
                 });
-                if self.creation_role == CreationRole::MaterialInterface {
+                if matches!(
+                    self.creation_role,
+                    CreationRole::MaterialInterface | CreationRole::Divider
+                ) {
                     let materials = self.editor.document.model.draft.materials.clone();
                     egui::ComboBox::from_label("Interior material")
                         .selected_text(
@@ -4944,8 +5135,10 @@ impl Playground {
                 ui.separator();
                 ui.label("Shape");
                 ui.horizontal_wrapped(|ui| {
-                    let tools: &[DrawTool] = if self.creation_role == CreationRole::InternalBoundary
-                    {
+                    let tools: &[DrawTool] = if matches!(
+                        self.creation_role,
+                        CreationRole::InternalBoundary | CreationRole::Divider
+                    ) {
                         &[DrawTool::Polyline, DrawTool::Spline]
                     } else {
                         &[
@@ -8636,6 +8829,7 @@ impl Playground {
             "Features  {} / 32",
             self.editor.document.model.draft.obstacles.len()
                 + self.editor.document.model.draft.internal_boundaries.len()
+                + self.editor.document.model.draft.material_interfaces.len()
         ))
         .id_salt("feature_list")
         .default_open(true)
@@ -8646,6 +8840,7 @@ impl Playground {
                 .show(ui, |ui| {
                     let obstacles = self.editor.document.model.draft.obstacles.clone();
                     let boundaries = self.editor.document.model.draft.internal_boundaries.clone();
+                    let dividers = self.editor.document.model.draft.material_interfaces.clone();
                     for o in &obstacles {
                         let assignment = if matches!(o.role, LoopRole::Hole { .. }) {
                             if o.span_conditions
@@ -8704,8 +8899,38 @@ impl Playground {
                             self.select_baffle(boundary.id);
                         }
                     }
+                    for divider in &dividers {
+                        if ui
+                            .selectable_label(
+                                self.material_interface_selection
+                                    .is_some_and(|(id, _)| id == divider.id),
+                                format!(
+                                    "Divider {:02} · {} spans",
+                                    divider.id.0,
+                                    divider.span_sides.len()
+                                ),
+                            )
+                            .clicked()
+                        {
+                            self.clear_transient();
+                            self.material_interface_selection = Some((divider.id, 0));
+                        }
+                    }
                 });
         });
+
+        if let Some((id, span)) = self.material_interface_selection {
+            ui.add_space(8.0);
+            if ui
+                .button(egui::RichText::new("Remove divider section").color(RED))
+                .clicked()
+            {
+                let result = self.editor.delete_material_divider(id, span);
+                if self.error(result).is_some() {
+                    self.material_interface_selection = None;
+                }
+            }
+        }
 
         if self
             .selected_spans
@@ -10257,7 +10482,12 @@ impl Playground {
                     }
                     self.refresh_curves();
                     let modifiers = ctx.input(|input| input.modifiers);
-                    if let Some(hit) = self.hit_material_frame_gizmo(p, r)
+                    if let Some(id) = self.hit_junction(p, r) {
+                        self.clear_transient();
+                        self.selected_junction = Some(id);
+                        self.editor.begin();
+                        self.junction_drag = Some(id);
+                    } else if let Some(hit) = self.hit_material_frame_gizmo(p, r)
                         && let Some((region, frame)) = self.selected_material_frame()
                     {
                         self.editor.begin();
@@ -10353,6 +10583,9 @@ impl Playground {
                                 ProbeHit::Boundary(_) | ProbeHit::AreaRegion(_) => unreachable!(),
                             });
                         }
+                    } else if let Some(id) = self.hit_material_interface(p, r) {
+                        self.clear_transient();
+                        self.material_interface_selection = Some(id);
                     } else if let Some(index) = self.hit_domain_corner(p, r) {
                         let sides = match index {
                             0 => vec![
@@ -10522,7 +10755,10 @@ impl Playground {
                         + Point2::new(-delta.x as f64 / self.scale, delta.y as f64 / self.scale);
                 } else if response.dragged_by(egui::PointerButton::Primary) {
                     let world = self.world(p, r);
-                    if self.source_dragging {
+                    if let Some(junction) = self.junction_drag {
+                        let result = self.editor.set_junction_point_during_edit(junction, world);
+                        self.error(result);
+                    } else if self.source_dragging {
                         let position =
                             if self.snap_to_grid || ctx.input(|input| input.modifiers.shift) {
                                 Point2::new(
@@ -10853,7 +11089,11 @@ impl Playground {
                     match self.interaction_mode {
                         InteractionMode::Draw { role, tool } => {
                             self.creation_role = role;
-                            let point = self.world(p, r);
+                            let point = if role == CreationRole::Divider {
+                                self.snap_divider_point(p, r)
+                            } else {
+                                self.world(p, r)
+                            };
                             if tool == DrawTool::Circle {
                                 let result = self.create_spline(
                                     role,
@@ -10867,7 +11107,10 @@ impl Playground {
                             } else {
                                 let closes_on_first = tool == DrawTool::Polygon
                                     || (tool == DrawTool::Spline
-                                        && role != CreationRole::InternalBoundary);
+                                        && matches!(
+                                            role,
+                                            CreationRole::Hole | CreationRole::MaterialInterface
+                                        ));
                                 if closes_on_first
                                     && tool.can_finish(role, self.custom.len())
                                     && self.screen(self.custom[0], r).distance(p)
@@ -10951,6 +11194,9 @@ impl Playground {
             }
         }
         if !ctx.input(|i| i.pointer.primary_down()) {
+            if self.junction_drag.take().is_some() {
+                self.editor.commit();
+            }
             if std::mem::take(&mut self.source_dragging) {
                 self.editor.commit();
                 self.reset_vector_overlay_exposure();
@@ -11305,7 +11551,10 @@ impl Playground {
                     let color = match edge.label {
                         BoundaryLabel::Outer(_) => Color32::from_rgb(142, 161, 175),
                         BoundaryLabel::Obstacle(_) => Color32::from_rgb(119, 155, 255),
-                        BoundaryLabel::MaterialInterface(_) => Color32::from_rgb(102, 210, 178),
+                        BoundaryLabel::MaterialInterface(_)
+                        | BoundaryLabel::OpenMaterialInterface(_) => {
+                            Color32::from_rgb(102, 210, 178)
+                        }
                         BoundaryLabel::Wall { side, .. } => match side {
                             BoundarySide::Exterior => Color32::from_rgb(235, 132, 115),
                             BoundarySide::Interior => Color32::from_rgb(235, 183, 115),
@@ -11380,6 +11629,13 @@ impl Playground {
             for curve in &self.accepted_internal_curves {
                 self.draw_internal_curve(&painter, r, curve, Color32::from_rgb(85, 83, 70), 3.0);
             }
+            self.draw_material_interfaces(
+                &painter,
+                r,
+                &self.editor.document.model.accepted,
+                Color32::from_rgb(66, 100, 98),
+                3.0,
+            );
         }
         let color = match self.editor.acceptance {
             Acceptance::Valid => TEAL,
@@ -11391,6 +11647,47 @@ impl Playground {
         }
         for curve in &self.draft_internal_curves {
             self.draw_internal_curve(&painter, r, curve, color, 3.0);
+        }
+        self.draw_material_interfaces(&painter, r, &self.editor.document.model.draft, color, 2.5);
+        if !clean_capture {
+            if self.editor.document.presentation.handles {
+                for interface in &self.editor.document.model.draft.material_interfaces {
+                    for index in 0..interface.spline.node_count() {
+                        if let Some(point) = interface.spline.node_point(index) {
+                            let center = self.screen(point, r);
+                            painter.circle_filled(center, 3.0, Color32::from_rgb(20, 35, 42));
+                            painter.circle_stroke(center, 3.0, Stroke::new(1.2, TEAL));
+                        }
+                    }
+                }
+            }
+            for junction in &self.editor.document.model.draft.junctions {
+                if let Some(point) = self.editor.document.model.draft.junction_point(*junction) {
+                    let center = self.screen(point, r);
+                    let radius = 5.0;
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            center + egui::vec2(0.0, -radius),
+                            center + egui::vec2(radius, 0.0),
+                            center + egui::vec2(0.0, radius),
+                            center + egui::vec2(-radius, 0.0),
+                        ],
+                        if self.selected_junction == Some(junction.id) {
+                            GOLD
+                        } else {
+                            Color32::from_rgb(20, 35, 42)
+                        },
+                        Stroke::new(
+                            1.5,
+                            if self.selected_junction == Some(junction.id) {
+                                Color32::WHITE
+                            } else {
+                                TEAL
+                            },
+                        ),
+                    ));
+                }
+            }
         }
         if self.editor.document.presentation.boundary_conditions {
             for side in OuterSide::ALL {
@@ -11798,7 +12095,12 @@ impl Playground {
                 } else {
                     painter.circle_stroke(
                         position,
-                        if index == 0 && role != CreationRole::InternalBoundary {
+                        if index == 0
+                            && !matches!(
+                                role,
+                                CreationRole::InternalBoundary | CreationRole::Divider
+                            )
+                        {
                             7.0
                         } else {
                             4.0
@@ -11812,7 +12114,7 @@ impl Playground {
                     tolerance: 0.6 / self.scale,
                     ..Default::default()
                 };
-                if role == CreationRole::InternalBoundary {
+                if matches!(role, CreationRole::InternalBoundary | CreationRole::Divider) {
                     if let Ok(spline) = OpenCubicSpline::uniform(self.custom.clone())
                         && let Ok(samples) = sample_open(&spline, options)
                     {
@@ -12226,6 +12528,7 @@ impl Playground {
                     match role {
                         CreationRole::Hole => "hole",
                         CreationRole::MaterialInterface => "interface",
+                        CreationRole::Divider => "divider",
                         CreationRole::InternalBoundary => "baffle",
                     },
                     tool.label()
@@ -12240,7 +12543,12 @@ impl Playground {
                         }
                     }
                     DrawTool::Polygon | DrawTool::Polyline => "Click to add vertices",
-                    DrawTool::Spline if role == CreationRole::InternalBoundary => {
+                    DrawTool::Spline
+                        if matches!(
+                            role,
+                            CreationRole::InternalBoundary | CreationRole::Divider
+                        ) =>
+                    {
                         match self.custom.len() {
                             0 => "Click endpoints or add spline controls",
                             1 => "Click the second endpoint",
@@ -12357,6 +12665,20 @@ impl Playground {
             .filter(|(_, distance)| *distance * self.scale <= self.hit_tolerance(8.0) as f64)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(side, _)| side)
+    }
+
+    fn hit_junction(&self, point: Pos2, viewport: Rect) -> Option<JunctionId> {
+        let scene = &self.editor.document.model.draft;
+        scene
+            .junctions
+            .iter()
+            .filter_map(|junction| {
+                let position = scene.junction_point(*junction)?;
+                Some((junction.id, self.screen(position, viewport).distance(point)))
+            })
+            .filter(|(_, distance)| *distance <= self.hit_tolerance(10.0))
+            .min_by(|left, right| left.1.total_cmp(&right.1))
+            .map(|(id, _)| id)
     }
 
     fn hit_domain_corner(&self, point: Pos2, viewport: Rect) -> Option<usize> {
@@ -12745,6 +13067,49 @@ impl Playground {
             })
     }
 
+    fn hit_material_interface(
+        &self,
+        point: Pos2,
+        viewport: Rect,
+    ) -> Option<(MaterialInterfaceId, usize)> {
+        let world = self.world(point, viewport);
+        let options = SamplingOptions {
+            tolerance: 0.6 / self.scale,
+            max_depth: 14,
+            max_points: 4096,
+        };
+        self.editor
+            .document
+            .model
+            .draft
+            .material_interfaces
+            .iter()
+            .filter_map(|interface| {
+                let samples = match &interface.spline {
+                    InterfaceSpline::Open(spline) => sample_open(spline, options),
+                    InterfaceSpline::Closed(spline) => sample(spline, options),
+                }
+                .ok()?;
+                let segment = samples
+                    .windows(2)
+                    .map(|segment| {
+                        (
+                            point_segment_distance(world, segment[0].point, segment[1].point),
+                            (segment[0].t + segment[1].t) * 0.5,
+                        )
+                    })
+                    .min_by(|left, right| left.0.total_cmp(&right.0))?;
+                let span = match &interface.spline {
+                    InterfaceSpline::Open(spline) => spline.span_index(segment.1),
+                    InterfaceSpline::Closed(spline) => spline.span_index(segment.1),
+                }?;
+                (segment.0 * self.scale <= self.hit_tolerance(8.0) as f64)
+                    .then_some(((interface.id, span), segment.0))
+            })
+            .min_by(|left, right| left.1.total_cmp(&right.1))
+            .map(|(target, _)| target)
+    }
+
     fn draw_vector_overlay(
         &mut self,
         painter: &egui::Painter,
@@ -12851,6 +13216,58 @@ impl Playground {
                     .collect(),
                 Stroke::new(width, color),
             ));
+        }
+    }
+
+    fn draw_material_interfaces(
+        &self,
+        painter: &egui::Painter,
+        viewport: Rect,
+        scene: &Scene,
+        color: Color32,
+        width: f32,
+    ) {
+        let options = SamplingOptions {
+            tolerance: (0.6 / self.scale).max(scene.domain.tolerance() * 0.1),
+            max_depth: 14,
+            max_points: 4096,
+        };
+        for interface in &scene.material_interfaces {
+            let samples = match &interface.spline {
+                InterfaceSpline::Open(spline) => sample_open(spline, options),
+                InterfaceSpline::Closed(spline) => sample(spline, options),
+            };
+            if let Ok(samples) = samples
+                && samples.len() > 1
+            {
+                painter.add(egui::Shape::line(
+                    samples
+                        .iter()
+                        .map(|sample| self.screen(sample.point, viewport))
+                        .collect(),
+                    Stroke::new(width, color),
+                ));
+                if let Some((id, selected_span)) = self.material_interface_selection
+                    && id == interface.id
+                {
+                    for segment in samples.windows(2) {
+                        let parameter = (segment[0].t + segment[1].t) * 0.5;
+                        let span = match &interface.spline {
+                            InterfaceSpline::Open(spline) => spline.span_index(parameter),
+                            InterfaceSpline::Closed(spline) => spline.span_index(parameter),
+                        };
+                        if span == Some(selected_span) {
+                            painter.line_segment(
+                                [
+                                    self.screen(segment[0].point, viewport),
+                                    self.screen(segment[1].point, viewport),
+                                ],
+                                Stroke::new(width + 2.0, Color32::WHITE),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -13714,6 +14131,8 @@ pub fn wave_gpu_check_scene() -> Playground {
                 interior: RegionId(2),
             },
         )],
+        material_interfaces: vec![],
+        junctions: vec![],
         internal_boundaries: vec![InternalBoundary {
             id: InternalBoundaryId(1),
             spline: OpenCubicSpline::uniform(vec![
@@ -18575,7 +18994,7 @@ mod tests {
         assert!(
             Playground::compile_far_field(&mesh, &operator, &anisotropic, settings)
                 .unwrap_err()
-                .contains("isotropic background")
+                .contains("isotropic exterior")
         );
 
         let mut inclusion = scene.clone();
@@ -18665,6 +19084,66 @@ mod tests {
                 .any(|point| point.x >= half_extent)
         );
         Playground::validate_far_field_clearance(&scene, 1.0 - half_extent).unwrap();
+    }
+
+    #[test]
+    fn far_field_requires_one_effective_medium_across_the_exterior_shell() {
+        let mut editor = Editor::default();
+        editor.document.model.draft.obstacles.clear();
+        let material = editor.add_material().unwrap();
+        editor
+            .document
+            .model
+            .draft
+            .materials
+            .iter_mut()
+            .find(|candidate| candidate.id == material)
+            .unwrap()
+            .stiffness = ScalarField::constant(1.4);
+        editor
+            .create_material_divider(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)])
+                    .unwrap(),
+                DividerEndpoint::Outer {
+                    side: OuterSide::Bottom,
+                    fraction: 0.5,
+                },
+                DividerEndpoint::Outer {
+                    side: OuterSide::Top,
+                    fraction: 0.5,
+                },
+                vec![BACKGROUND_REGION],
+                material,
+            )
+            .unwrap();
+        let scene = editor.document.model.draft;
+        let mesh = mesh_scene(
+            &scene,
+            4,
+            MeshingOptions {
+                target_edge_length: 0.18,
+                minimum_angle_degrees: 10.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
+            &mesh,
+            &scene,
+            scene.outer_boundaries,
+        )
+        .unwrap();
+        let error = Playground::compile_far_field(
+            &mesh,
+            &operator,
+            &scene,
+            FarFieldSettings {
+                enabled: true,
+                inset: 0.12,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("one effective medium"), "{error}");
     }
 
     #[test]

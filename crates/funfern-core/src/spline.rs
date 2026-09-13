@@ -203,6 +203,31 @@ impl OpenCubicSpline {
             .map(|multiplicity| 3 - multiplicity)
     }
 
+    /// Moves a clamped endpoint or an interpolating C0 breakpoint.
+    pub fn set_breakpoint_point(
+        &mut self,
+        breakpoint: usize,
+        point: Point2,
+    ) -> Result<(), SplineError> {
+        if !point.finite() || breakpoint > self.intervals.len() {
+            return Err(SplineError::Index);
+        }
+        let control = if breakpoint == 0 {
+            0
+        } else if breakpoint == self.intervals.len() {
+            self.controls.len() - 1
+        } else if self.continuity(breakpoint) == Some(0) {
+            3 + self.multiplicities[..breakpoint - 1]
+                .iter()
+                .map(|value| *value as usize)
+                .sum::<usize>()
+        } else {
+            return Err(SplineError::NotRemovable);
+        };
+        self.controls[control] = point;
+        Ok(())
+    }
+
     pub fn knots(&self) -> &[f64] {
         &self.knots
     }

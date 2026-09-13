@@ -20,6 +20,204 @@ fn edge_key(a: usize, b: usize) -> (usize, usize) {
     if a < b { (a, b) } else { (b, a) }
 }
 
+#[test]
+fn open_material_interface_splits_one_region_without_a_duplicate_trace() {
+    let mut scene = Scene::default();
+    scene.regions.push(Region {
+        id: RegionId(2),
+        material: DEFAULT_MATERIAL,
+        frame: MaterialFrame::world(),
+    });
+    scene.junctions = vec![
+        Junction {
+            id: JunctionId(1),
+            location: JunctionLocation::Outer {
+                side: OuterSide::Bottom,
+                fraction: 0.5,
+            },
+        },
+        Junction {
+            id: JunctionId(2),
+            location: JunctionLocation::Outer {
+                side: OuterSide::Top,
+                fraction: 0.5,
+            },
+        },
+    ];
+    scene.material_interfaces.push(MaterialInterface {
+        id: MaterialInterfaceId(1),
+        spline: InterfaceSpline::Open(
+            OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)]).unwrap(),
+        ),
+        nodes: vec![
+            InterfaceNode {
+                id: InterfaceNodeId(1),
+                junction: Some(JunctionId(1)),
+            },
+            InterfaceNode {
+                id: InterfaceNodeId(2),
+                junction: Some(JunctionId(2)),
+            },
+        ],
+        span_sides: vec![InterfaceSpanSides {
+            left: RegionId(2),
+            right: BACKGROUND_REGION,
+        }],
+    });
+
+    let mesh = mesh(&scene);
+    assert!(
+        mesh.triangles
+            .iter()
+            .any(|triangle| triangle.region == RegionId(2))
+    );
+    assert!(
+        mesh.triangles
+            .iter()
+            .any(|triangle| triangle.region == BACKGROUND_REGION)
+    );
+    let interface_edges = mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| edge.label == BoundaryLabel::OpenMaterialInterface(MaterialInterfaceId(1)))
+        .collect::<Vec<_>>();
+    assert!(!interface_edges.is_empty());
+    for edge in interface_edges {
+        let adjacent = mesh
+            .triangles
+            .iter()
+            .filter(|triangle| {
+                edge.vertices
+                    .iter()
+                    .all(|vertex| triangle.vertices.contains(vertex))
+            })
+            .map(|triangle| triangle.region)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(adjacent, BTreeSet::from([BACKGROUND_REGION, RegionId(2)]));
+    }
+}
+
+#[test]
+fn t_junction_partitions_three_material_regions() {
+    fn branch(
+        id: u64,
+        node: &mut u64,
+        points: [Point2; 2],
+        junctions: [JunctionId; 2],
+        sides: InterfaceSpanSides,
+    ) -> MaterialInterface {
+        let nodes = junctions.map(|junction| {
+            let id = InterfaceNodeId(*node);
+            *node += 1;
+            InterfaceNode {
+                id,
+                junction: Some(junction),
+            }
+        });
+        MaterialInterface {
+            id: MaterialInterfaceId(id),
+            spline: InterfaceSpline::Open(OpenCubicSpline::polyline(points.to_vec()).unwrap()),
+            nodes: nodes.to_vec(),
+            span_sides: vec![sides],
+        }
+    }
+
+    let mut scene = Scene::default();
+    for id in [2, 3] {
+        scene.regions.push(Region {
+            id: RegionId(id),
+            material: DEFAULT_MATERIAL,
+            frame: MaterialFrame::world(),
+        });
+    }
+    scene.junctions = vec![
+        Junction {
+            id: JunctionId(1),
+            location: JunctionLocation::Outer {
+                side: OuterSide::Bottom,
+                fraction: 0.5,
+            },
+        },
+        Junction {
+            id: JunctionId(2),
+            location: JunctionLocation::Outer {
+                side: OuterSide::Top,
+                fraction: 0.5,
+            },
+        },
+        Junction {
+            id: JunctionId(3),
+            location: JunctionLocation::Outer {
+                side: OuterSide::Right,
+                fraction: 0.5,
+            },
+        },
+        Junction {
+            id: JunctionId(4),
+            location: JunctionLocation::Interior,
+        },
+    ];
+    let mut node = 1;
+    scene.material_interfaces = vec![
+        branch(
+            1,
+            &mut node,
+            [Point2::new(0.0, -1.0), Point2::default()],
+            [JunctionId(1), JunctionId(4)],
+            InterfaceSpanSides {
+                left: RegionId(2),
+                right: BACKGROUND_REGION,
+            },
+        ),
+        branch(
+            2,
+            &mut node,
+            [Point2::default(), Point2::new(0.0, 1.0)],
+            [JunctionId(4), JunctionId(2)],
+            InterfaceSpanSides {
+                left: RegionId(2),
+                right: RegionId(3),
+            },
+        ),
+        branch(
+            3,
+            &mut node,
+            [Point2::default(), Point2::new(1.0, 0.0)],
+            [JunctionId(4), JunctionId(3)],
+            InterfaceSpanSides {
+                left: RegionId(3),
+                right: BACKGROUND_REGION,
+            },
+        ),
+    ];
+    assert!(validate(&scene).valid());
+
+    let mesh = mesh(&scene);
+    let regions = mesh
+        .triangles
+        .iter()
+        .map(|triangle| triangle.region)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        regions,
+        BTreeSet::from([BACKGROUND_REGION, RegionId(2), RegionId(3)])
+    );
+    let center = mesh
+        .vertices
+        .iter()
+        .position(|vertex| vertex.point.norm() < 1.0e-10)
+        .unwrap();
+    let incident_regions = mesh
+        .triangles
+        .iter()
+        .filter(|triangle| triangle.vertices.contains(&center))
+        .map(|triangle| triangle.region)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(incident_regions, regions);
+    QuadraticWaveOperator::assemble_scene_with_boundaries(&mesh, &scene, scene.outer_boundaries)
+        .unwrap();
+}
+
 fn assert_mesh_invariants(mesh: &TriMesh, holes: usize) {
     let mut adjacency: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     let mut opposites: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
@@ -194,6 +392,7 @@ fn several_holes_keep_labels_and_topology() {
             BoundaryLabel::Obstacle(id) => Some(id.0),
             BoundaryLabel::Outer(_)
             | BoundaryLabel::MaterialInterface(_)
+            | BoundaryLabel::OpenMaterialInterface(_)
             | BoundaryLabel::Wall { .. }
             | BoundaryLabel::InternalBoundary { .. } => None,
         })
@@ -434,6 +633,7 @@ fn empty_domain_and_outer_side_labels_mesh() {
             BoundaryLabel::Outer(side) => Some(side as u8),
             BoundaryLabel::Obstacle(_)
             | BoundaryLabel::MaterialInterface(_)
+            | BoundaryLabel::OpenMaterialInterface(_)
             | BoundaryLabel::Wall { .. }
             | BoundaryLabel::InternalBoundary { .. } => None,
         })
@@ -568,6 +768,8 @@ fn two_region_scene(role: impl FnOnce(RegionId, RegionId) -> LoopRole) -> Scene 
             role(BACKGROUND_REGION, RegionId(2)),
         )],
         internal_boundaries: vec![],
+        material_interfaces: vec![],
+        junctions: vec![],
         materials: vec![
             Material::default_medium(),
             medium(2, "Inclusion", 2.5, [180, 90, 70]),

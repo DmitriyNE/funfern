@@ -543,7 +543,7 @@ fn area_probe_targets_and_far_field_settings_round_trip() {
         .unwrap();
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 20"));
+    assert!(json.contains("\"version\": 21"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
     assert_eq!(decoded.model.far_field.inset, 0.17);
@@ -634,7 +634,7 @@ fn point_source_round_trips_and_version_ten_uses_the_default() {
     };
     let json = save(&document).unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 20);
+    assert_eq!(value["version"], 21);
     assert_eq!(decode(json.as_bytes()).unwrap(), document);
 
     set_file_version(&mut value, 10);
@@ -745,7 +745,7 @@ fn volume_source_round_trips_and_is_one_undoable_region_edit() {
     settle(&mut editor);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 20"));
+    assert!(json.contains("\"version\": 21"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -781,7 +781,7 @@ fn malformed_files_and_invalid_accepted_scene_rejected_without_replacement() {
     for mutation in 0..9 {
         let mut value = base.clone();
         match mutation {
-            0 => value["version"] = 21.into(),
+            0 => value["version"] = 22.into(),
             1 => value["accepted"]["domain"][0] = 1.into(),
             2 => value["draft"]["loops"][0]["intervals"][0] = 0.into(),
             3 => {
@@ -858,7 +858,7 @@ fn open_internal_boundary_round_trip_and_history() {
     let json = save(&editor.document).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&json).unwrap()["version"],
-        20
+        21
     );
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded, editor.document);
@@ -1355,7 +1355,7 @@ fn spatial_materials_parameters_and_frames_round_trip() {
     editor.document.presentation.material_overlay_logarithmic = true;
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 20"));
+    assert!(json.contains("\"version\": 21"));
     assert_eq!(decode(json.as_bytes()).unwrap(), editor.document);
 
     let mut malformed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1888,7 +1888,7 @@ fn boundary_probe_round_trips_and_tracks_periodic_insertion() {
     assert_eq!(target.spans(9), vec![7, 8, 0]);
 
     let json = save(&editor.document).unwrap();
-    assert!(json.contains("\"version\": 20"));
+    assert!(json.contains("\"version\": 21"));
     let decoded = decode(json.as_bytes()).unwrap();
     assert_eq!(decoded.model.probes, editor.document.model.probes);
 
@@ -2014,4 +2014,243 @@ fn material_frame_drag_is_one_history_entry_and_can_be_undone() {
     assert_eq!(editor.history_len(), (1, 0));
     editor.undo();
     assert_eq!(editor.document, original);
+}
+
+#[test]
+fn outer_to_outer_divider_is_one_undoable_region_split() {
+    let mut editor = Editor::default();
+    let before = editor.document.model.clone();
+    let divider = editor
+        .create_material_divider(
+            OpenCubicSpline::polyline(vec![Point2::new(-0.75, -1.0), Point2::new(-0.75, 1.0)])
+                .unwrap(),
+            DividerEndpoint::Outer {
+                side: OuterSide::Bottom,
+                fraction: 0.125,
+            },
+            DividerEndpoint::Outer {
+                side: OuterSide::Top,
+                fraction: 0.875,
+            },
+            vec![BACKGROUND_REGION],
+            DEFAULT_MATERIAL,
+        )
+        .unwrap();
+    assert_eq!(editor.history_len(), (1, 0));
+    assert_eq!(editor.document.model.draft.material_interfaces.len(), 1);
+    assert_eq!(editor.document.model.draft.regions.len(), 2);
+    editor.undo();
+    assert_eq!(editor.document.model, before);
+    editor.redo();
+    editor.delete_material_divider(divider, 0).unwrap();
+    assert!(editor.document.model.draft.material_interfaces.is_empty());
+    assert_eq!(editor.document.model.draft.regions.len(), 1);
+}
+
+#[test]
+fn divider_can_branch_from_a_c0_node_into_a_t_junction() {
+    let mut editor = Editor::default();
+    editor.document.model.draft.obstacles.clear();
+    editor.document.model.accepted.obstacles.clear();
+    let first = editor
+        .create_material_divider(
+            OpenCubicSpline::polyline(vec![
+                Point2::new(0.0, -1.0),
+                Point2::default(),
+                Point2::new(0.0, 1.0),
+            ])
+            .unwrap(),
+            DividerEndpoint::Outer {
+                side: OuterSide::Bottom,
+                fraction: 0.5,
+            },
+            DividerEndpoint::Outer {
+                side: OuterSide::Top,
+                fraction: 0.5,
+            },
+            vec![BACKGROUND_REGION, BACKGROUND_REGION],
+            DEFAULT_MATERIAL,
+        )
+        .unwrap();
+    let node = editor.document.model.draft.material_interfaces[0].nodes[1].id;
+    let branch = editor
+        .create_material_divider(
+            OpenCubicSpline::polyline(vec![Point2::default(), Point2::new(1.0, 0.0)]).unwrap(),
+            DividerEndpoint::InterfaceNode {
+                interface: first,
+                node,
+            },
+            DividerEndpoint::Outer {
+                side: OuterSide::Right,
+                fraction: 0.5,
+            },
+            vec![BACKGROUND_REGION],
+            DEFAULT_MATERIAL,
+        )
+        .unwrap();
+    assert_eq!(editor.document.model.draft.material_interfaces.len(), 2);
+    assert_eq!(editor.document.model.draft.junctions.len(), 4);
+    assert!(validate(&editor.document.model.draft).valid());
+    let vertical = &editor.document.model.draft.material_interfaces[0];
+    assert_ne!(vertical.span_sides[0].right, vertical.span_sides[1].right);
+    editor.delete_material_divider(branch, 0).unwrap();
+    assert!(validate(&editor.document.model.draft).valid());
+    assert_eq!(editor.document.model.draft.material_interfaces.len(), 1);
+    assert_eq!(editor.document.model.draft.junctions.len(), 2);
+}
+
+#[test]
+fn divider_crossing_a_c0_node_relabels_each_entered_sector() {
+    let mut editor = Editor::default();
+    editor.document.model.draft.obstacles.clear();
+    editor.document.model.accepted.obstacles.clear();
+    editor
+        .create_material_divider(
+            OpenCubicSpline::polyline(vec![
+                Point2::new(0.0, -1.0),
+                Point2::default(),
+                Point2::new(0.0, 1.0),
+            ])
+            .unwrap(),
+            DividerEndpoint::Outer {
+                side: OuterSide::Bottom,
+                fraction: 0.5,
+            },
+            DividerEndpoint::Outer {
+                side: OuterSide::Top,
+                fraction: 0.5,
+            },
+            vec![BACKGROUND_REGION, BACKGROUND_REGION],
+            DEFAULT_MATERIAL,
+        )
+        .unwrap();
+    editor
+        .create_material_divider(
+            OpenCubicSpline::polyline(vec![
+                Point2::new(-1.0, 0.0),
+                Point2::default(),
+                Point2::new(1.0, 0.0),
+            ])
+            .unwrap(),
+            DividerEndpoint::Outer {
+                side: OuterSide::Left,
+                fraction: 0.5,
+            },
+            DividerEndpoint::Outer {
+                side: OuterSide::Right,
+                fraction: 0.5,
+            },
+            vec![RegionId(2), BACKGROUND_REGION],
+            DEFAULT_MATERIAL,
+        )
+        .unwrap();
+    assert!(validate(&editor.document.model.draft).valid());
+    assert_eq!(editor.document.model.draft.regions.len(), 3);
+    assert_eq!(editor.document.model.draft.junctions.len(), 4);
+    let mesh = mesh_scene(
+        &editor.document.model.draft,
+        9,
+        MeshingOptions {
+            target_edge_length: 0.25,
+            minimum_angle_degrees: 10.0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        mesh.triangles
+            .iter()
+            .map(|triangle| triangle.region)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+    let encoded = save(&editor.document).unwrap();
+    assert_eq!(parse_document(encoded.as_bytes()).unwrap(), editor.document);
+    editor
+        .delete_material_divider(MaterialInterfaceId(2), 0)
+        .unwrap();
+    assert!(validate(&editor.document.model.draft).valid());
+    assert_eq!(editor.document.model.draft.regions.len(), 2);
+}
+
+#[test]
+fn junction_drag_moves_every_attached_c0_node_as_one_edit() {
+    let mut editor = Editor::default();
+    editor.document.model.draft.obstacles.clear();
+    editor.document.model.accepted.obstacles.clear();
+    let first = editor
+        .create_material_divider(
+            OpenCubicSpline::polyline(vec![
+                Point2::new(0.0, -1.0),
+                Point2::default(),
+                Point2::new(0.0, 1.0),
+            ])
+            .unwrap(),
+            DividerEndpoint::Outer {
+                side: OuterSide::Bottom,
+                fraction: 0.5,
+            },
+            DividerEndpoint::Outer {
+                side: OuterSide::Top,
+                fraction: 0.5,
+            },
+            vec![BACKGROUND_REGION, BACKGROUND_REGION],
+            DEFAULT_MATERIAL,
+        )
+        .unwrap();
+    let node = editor.document.model.draft.material_interfaces[0].nodes[1].id;
+    editor
+        .create_material_divider(
+            OpenCubicSpline::polyline(vec![Point2::default(), Point2::new(1.0, 0.0)]).unwrap(),
+            DividerEndpoint::InterfaceNode {
+                interface: first,
+                node,
+            },
+            DividerEndpoint::Outer {
+                side: OuterSide::Right,
+                fraction: 0.5,
+            },
+            vec![BACKGROUND_REGION],
+            DEFAULT_MATERIAL,
+        )
+        .unwrap();
+    let junction = editor
+        .document
+        .model
+        .draft
+        .junctions
+        .iter()
+        .find(|junction| matches!(junction.location, JunctionLocation::Interior))
+        .unwrap()
+        .id;
+    let history = editor.history_len().0;
+    let target = Point2::new(0.12, 0.08);
+    editor.begin();
+    editor
+        .set_junction_point_during_edit(junction, target)
+        .unwrap();
+    editor.commit();
+    assert_eq!(editor.history_len().0, history + 1);
+    let attached = editor
+        .document
+        .model
+        .draft
+        .material_interfaces
+        .iter()
+        .flat_map(|interface| {
+            interface
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| node.junction == Some(junction))
+                .map(|(index, _)| interface.spline.node_point(index).unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(attached.len(), 2);
+    assert!(
+        attached
+            .iter()
+            .all(|point| (*point - target).norm() < 1.0e-12)
+    );
 }

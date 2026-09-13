@@ -372,7 +372,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   drives bounded refinement and coarsening with wavelength and grading limits.
 - **Interior media:** every triangle carries a stable region ID. The P2e operator
   assembles piecewise mass, stiffness, and damping. Material interfaces use a
-  conforming shared trace. Closed walls and open baffles have separate solution
+  conforming shared trace. Open material dividers may terminate on the outer
+  boundary or meet at explicit C0 junctions; T/crossing edits preserve per-span
+  left/right region sectors. Closed walls and open baffles have separate solution
   DOFs on their two faces; baffle tips reconnect to the surrounding domain.
 - **Mesh changes:** simulation continues on the displayed committed mesh while a
   replacement mesh, operator, timestep, and transfer map are prepared. The GPU
@@ -383,11 +385,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   stable boundary ID and left/right face on the old mesh during transfer.
 
 Scenes allow 32 geometric features, 32 materials, one volume source per region, and
-128 controls per curve. Version 20 JSON stores editable draft and accepted domain
+128 controls per curve. Version 21 JSON stores editable draft and accepted domain
 rectangles together with the complete boundary laws, constant/formula materials
 including directional axis ratios and region frames, and region-owned volume sources in
-both draft and accepted scenes, presentation settings, and a tagged shared time-signal
-representation for point, volume, and boundary drives. Versions 2–19 remain compatible,
+both draft and accepted scenes, open material-divider graphs and junction attachments,
+presentation settings, and a tagged shared time-signal
+representation for point, volume, and boundary drives. Versions 2–20 remain compatible,
 and version 1 files migrate their loops to background holes. Legacy baffles that
 combined a thin-gap spring with face laws load with the thin-gap law taking
 precedence. JSON files are capped at 2 MiB and require finite coordinates. The editor

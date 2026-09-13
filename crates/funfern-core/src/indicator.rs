@@ -525,7 +525,10 @@ impl SolutionIndicatorJob {
             .ok()
             .map(|found| &self.edge_list[found].1)
             .ok_or(SolutionIndicatorError::InvalidMesh)?;
-        if matches!(edge.label, BoundaryLabel::MaterialInterface(_)) {
+        if matches!(
+            edge.label,
+            BoundaryLabel::MaterialInterface(_) | BoundaryLabel::OpenMaterialInterface(_)
+        ) {
             if sides.len() != 2 {
                 return Err(SolutionIndicatorError::InvalidMesh);
             }
@@ -654,7 +657,9 @@ impl SolutionIndicatorJob {
                 };
                 (condition.resolved(self.scene.physics), pair)
             }
-            BoundaryLabel::MaterialInterface(_) => unreachable!(),
+            BoundaryLabel::MaterialInterface(_) | BoundaryLabel::OpenMaterialInterface(_) => {
+                unreachable!()
+            }
         };
         let record_index = self.boundary_records.len();
         self.boundary_records.push(BoundaryRecord {

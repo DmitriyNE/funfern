@@ -1593,6 +1593,8 @@ mod tests {
                 },
             )],
             internal_boundaries: vec![],
+            material_interfaces: vec![],
+            junctions: vec![],
             materials: vec![
                 Material {
                     id: MaterialId(1),

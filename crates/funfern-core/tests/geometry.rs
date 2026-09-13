@@ -465,10 +465,14 @@ fn open_boundary_validation_checks_ends_crossings_and_contacts() {
 
     let mut contact = valid.clone();
     contact.internal_boundaries.push(open_boundary(2, 0.0001));
-    assert!(matches!(
-        validate(&contact).issue,
-        Some(ValidationIssue::BoundaryContact(_))
-    ));
+    assert!(
+        matches!(
+            validate(&contact).issue,
+            Some(ValidationIssue::BoundaryContact(_))
+        ),
+        "{:?}",
+        validate(&contact).issue
+    );
 
     let mut outside = Scene::default();
     let mut boundary = open_boundary(1, 0.0);
@@ -677,4 +681,136 @@ fn maximum_scene_validates_with_bounded_frame_slices() {
         }
     }
     panic!("Representative 32-loop scene exceeded 128 frame slices");
+}
+
+fn junction_branch(
+    id: u64,
+    node: u64,
+    center_junction: JunctionId,
+    outer_junction: JunctionId,
+    end: Point2,
+    left: RegionId,
+    right: RegionId,
+) -> MaterialInterface {
+    MaterialInterface {
+        id: MaterialInterfaceId(id),
+        spline: InterfaceSpline::Open(
+            OpenCubicSpline::polyline(vec![Point2::default(), end]).unwrap(),
+        ),
+        nodes: vec![
+            InterfaceNode {
+                id: InterfaceNodeId(node),
+                junction: Some(center_junction),
+            },
+            InterfaceNode {
+                id: InterfaceNodeId(node + 1),
+                junction: Some(outer_junction),
+            },
+        ],
+        span_sides: vec![InterfaceSpanSides { left, right }],
+    }
+}
+
+#[test]
+fn explicit_three_region_junction_has_consistent_sector_order() {
+    let mut scene = Scene::default();
+    for id in 2..=3 {
+        scene.regions.push(Region {
+            id: RegionId(id),
+            material: DEFAULT_MATERIAL,
+            frame: MaterialFrame::world(),
+        });
+    }
+    let center = JunctionId(1);
+    scene.junctions = vec![
+        Junction {
+            id: center,
+            location: JunctionLocation::Interior,
+        },
+        Junction {
+            id: JunctionId(2),
+            location: JunctionLocation::Outer {
+                side: OuterSide::Right,
+                fraction: 0.5,
+            },
+        },
+        Junction {
+            id: JunctionId(3),
+            location: JunctionLocation::Outer {
+                side: OuterSide::Left,
+                fraction: 0.1,
+            },
+        },
+        Junction {
+            id: JunctionId(4),
+            location: JunctionLocation::Outer {
+                side: OuterSide::Left,
+                fraction: 0.9,
+            },
+        },
+    ];
+    scene.material_interfaces = vec![
+        junction_branch(
+            1,
+            1,
+            center,
+            JunctionId(2),
+            Point2::new(1.0, 0.0),
+            RegionId(2),
+            RegionId(1),
+        ),
+        junction_branch(
+            2,
+            3,
+            center,
+            JunctionId(3),
+            Point2::new(-1.0, 0.8),
+            RegionId(3),
+            RegionId(2),
+        ),
+        junction_branch(
+            3,
+            5,
+            center,
+            JunctionId(4),
+            Point2::new(-1.0, -0.8),
+            RegionId(1),
+            RegionId(3),
+        ),
+    ];
+
+    assert!(validate(&scene).valid(), "{:?}", validate(&scene));
+}
+
+#[test]
+fn free_transmitting_endpoint_is_an_incomplete_draft() {
+    let mut scene = Scene::default();
+    scene.regions.push(Region {
+        id: RegionId(2),
+        material: DEFAULT_MATERIAL,
+        frame: MaterialFrame::world(),
+    });
+    let mut interface = junction_branch(
+        1,
+        1,
+        JunctionId(1),
+        JunctionId(2),
+        Point2::new(1.0, 0.0),
+        RegionId(2),
+        RegionId(1),
+    );
+    interface.nodes[1].junction = None;
+    scene.material_interfaces.push(interface);
+    scene.junctions.push(Junction {
+        id: JunctionId(1),
+        location: JunctionLocation::Outer {
+            side: OuterSide::Left,
+            fraction: 0.5,
+        },
+    });
+
+    assert!(matches!(
+        validate(&scene).issue,
+        Some(ValidationIssue::FreeInterfaceEnd(MaterialInterfaceId(1)))
+    ));
 }

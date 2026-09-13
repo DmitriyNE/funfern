@@ -775,6 +775,11 @@ impl MeshUpdateJob {
                                 self.moved_baffles.insert(id);
                             }
                         }
+                        BoundaryLabel::OpenMaterialInterface(_) => {
+                            return Err(MeshError::Topology(
+                                "local repair of open material interfaces is not supported",
+                            ));
+                        }
                         BoundaryLabel::Outer(_) | BoundaryLabel::Wall { .. } => {}
                     }
                 }
@@ -878,6 +883,11 @@ impl MeshUpdateJob {
                                 "paired baffle trace contains a duplicate face",
                             ));
                         }
+                    }
+                    BoundaryLabel::OpenMaterialInterface(_) => {
+                        return Err(MeshError::Topology(
+                            "local repair of open material interfaces is not supported",
+                        ));
                     }
                     BoundaryLabel::Wall { .. } => {
                         return Err(MeshError::Topology("unsupported source boundary topology"));

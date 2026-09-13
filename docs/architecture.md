@@ -4,8 +4,9 @@ The spline editor, constrained mesher, bounded coordinate-edit repair, enriched
 quadratic GPU wave solver, and geometry-edit simulation transactions are
 implemented. Outer sides, hole spans, and baffle faces support reflecting or
 prescribed Neumann data, prescribed Dirichlet data, and first- or second-order
-radiation. Stable material regions, transmitting interfaces, closed two-sided
-walls, and open baffles with independent face laws or coupled thin-gap spans are
+radiation. Stable material regions, closed and open transmitting interfaces,
+explicit material junctions, closed two-sided walls, and open baffles with
+independent face laws or coupled thin-gap spans are
 implemented. The closed-wall representation is retained for scene compatibility,
 but the current editor does not offer it as a normal role. A first spatial
 edge-size adaptation transaction is implemented; user wavelength and active
@@ -106,8 +107,11 @@ Keep these semantics distinct as they arrive:
 The topology model has stable `RegionId` and `MaterialId`; logical span identities
 arrive with assigned boundary conditions. A closed loop has
 an explicit role; its winding or containment must not silently decide whether it
-is a hole, a transmitting material interface, or a two-sided wall. Regions form a
-validated containment graph. Mesh triangles carry their owning region/material ID,
+is a hole, a transmitting material interface, or a two-sided wall. Closed regions
+form a validated containment graph. Open transmitting dividers form a planar graph
+with stable interface, breakpoint-node, and junction IDs. Each interface span stores
+coherent left/right regions; attached breakpoints are C0, while outer junctions
+retain their side and normalized side coordinate. Mesh triangles carry their owning region/material ID,
 while constrained edges carry their logical boundary/span ID and side information.
 Those labels survive remeshing even though numerical indices do not.
 
@@ -168,10 +172,9 @@ own the same dependency-free `TimeSignal`; the initial harmonic variant keeps of
 amplitude, frequency, and phase together and leaves waveform extension independent
 of each spatial carrier. Compilation is resumable, and temporal-only source edits
 replace the forcing buffer while retaining compiled spatial weights, the mesh,
-operator, solution levels, solver clock, and probe history. The current topology
-permits at most two sourced regions at a shared
-DOF; the compiler rejects higher-order junctions explicitly until point-sharing
-subdomains are supported.
+operator, solution levels, solver clock, and probe history. Conforming material
+junctions share one scalar DOF while incident triangle regions retain their own
+element coefficients.
 
 Boundary conditions attach to logical parameter spans rather than individual mesh
 segments. Sampling copies a span assignment onto every resulting constrained edge.
@@ -183,7 +186,7 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON version 20 remains the single persistence representation. A `Document`
+Scene JSON version 21 remains the single persistence representation. A `Document`
 owns one `DocumentModel` plus `PresentationSettings`. The model contains the draft
 and accepted scenes, probes, point-source configuration, and far-field settings; it
 is also the exact snapshot type stored by Undo/Redo. Presentation contains the View
@@ -192,7 +195,8 @@ through scene files, examples, shared links, and recovery, but stays outside his
 so model edits never rewind the user's current view. Camera, selection, open panels,
 floating-window positions, solver state, and derived render caches remain transient.
 
-Version 20 adds the optional material axis-ratio field and anisotropy presentation
+Version 21 adds open material-interface splines, stable breakpoint nodes, per-span
+left/right regions, and explicit interior/outer junctions. Version 20 adds the optional material axis-ratio field and anisotropy presentation
 overlay; versions 1–19 migrate missing ratios to one. Version 19 moves the editable axis-aligned domain into both draft and accepted
 scenes; older files migrate their historical top-level fixed domain. Version 18
 adds the scene physics model, polarization, explicit electric/magnetic
@@ -408,10 +412,11 @@ Duplication creates new stable geometry IDs, copies knot intervals,
 multiplicities, and span laws, and gives duplicated material-interface or wall
 loops their own interior region with the same material.
 
-Version 20 JSON stores material axis ratios in addition to the independent draft
-and accepted domain rectangles introduced by version 19, alongside
+Version 21 JSON stores material-divider graphs and junctions in addition to the
+version 20 material axis ratios and the independent draft and accepted domain
+rectangles introduced by version 19, alongside
 the loop roles, all assigned boundary laws, materials, regions, controls, intervals,
-knot multiplicities, and both scenes. Versions 2–19 remain compatible; version 1
+knot multiplicities, and both scenes. Versions 2–20 remain compatible; version 1
 loads by assigning its loops the background hole role and
 creating the default background material/region. Older loop records migrate to a
 reflecting condition on every periodic span. Version-6 baffles that combined a

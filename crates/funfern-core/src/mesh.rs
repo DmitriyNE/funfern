@@ -46,6 +46,7 @@ pub enum BoundaryLabel {
     Outer(OuterSide),
     Obstacle(ObstacleId),
     MaterialInterface(ObstacleId),
+    OpenMaterialInterface(crate::MaterialInterfaceId),
     Wall {
         loop_id: ObstacleId,
         side: BoundarySide,
@@ -233,6 +234,8 @@ struct MeshBuilder {
     internal_samples: Vec<Vec<Sample>>,
     internal_chains: Vec<Vec<(usize, f64)>>,
     internal_trace_vertices: BTreeSet<usize>,
+    constraint_kinds: Vec<OpenConstraintKind>,
+    constraint_target_regions: Vec<RegionId>,
     domains: Vec<TriangulationDomain>,
     options: MeshingOptions,
     adjacency: BTreeMap<(usize, usize), Vec<(usize, usize)>>,
@@ -243,6 +246,18 @@ struct MeshBuilder {
     stats: MeshingStats,
     incident: Vec<BTreeSet<usize>>,
     repair_region: Option<Vec<bool>>,
+}
+
+#[derive(Clone, Copy)]
+enum OpenConstraintKind {
+    Material {
+        id: crate::MaterialInterfaceId,
+        sides: crate::InterfaceSpanSides,
+    },
+    Baffle {
+        id: InternalBoundaryId,
+        region: RegionId,
+    },
 }
 
 /// Deterministic counters for profiling without introducing a clock dependency.
@@ -423,6 +438,8 @@ impl MeshBuilder {
             internal_samples: vec![],
             internal_chains: vec![],
             internal_trace_vertices: BTreeSet::new(),
+            constraint_kinds: vec![],
+            constraint_target_regions: vec![],
             domains: vec![],
             options,
             adjacency: BTreeMap::new(),
@@ -825,6 +842,10 @@ impl MeshBuilder {
             BoundaryLabel::MaterialInterface(id) => self
                 .loop_role(id)
                 .is_some_and(|role| role.exterior() == region || role.interior() == Some(region)),
+            BoundaryLabel::OpenMaterialInterface(id) => self
+                .constraint_kinds
+                .iter()
+                .any(|kind| matches!(kind, OpenConstraintKind::Material { id: candidate, sides } if *candidate == id && (sides.left == region || sides.right == region))),
             BoundaryLabel::Wall { loop_id, side } => {
                 self.loop_role(loop_id).is_some_and(|role| match side {
                     BoundarySide::Exterior => role.exterior() == region,
@@ -986,6 +1007,16 @@ impl MeshBuilder {
                 parameter,
             }),
         )?;
+        self.split_boundary_at_vertex(edge_index, vertex, parameter)
+    }
+
+    fn split_boundary_at_vertex(
+        &mut self,
+        edge_index: usize,
+        vertex: usize,
+        parameter: f64,
+    ) -> Result<(), MeshError> {
+        let edge = self.boundary_edges[edge_index];
         self.boundary_keys
             .remove(&edge_key(edge.vertices[0], edge.vertices[1]));
         self.boundary_edges[edge_index] = BoundaryEdge {
@@ -1117,7 +1148,7 @@ impl MeshBuilder {
             .flat_map(|chain| chain.iter().map(|(vertex, _)| *vertex))
             .chain(self.internal_trace_vertices.iter().copied())
             .collect::<BTreeSet<_>>();
-        let target_region = self.internal_boundary_regions[boundary];
+        let target_region = self.constraint_target_regions[boundary];
         let snap_distance = self.options.target_edge_length * 0.3;
         let relocatable = self
             .vertices
@@ -1162,7 +1193,7 @@ impl MeshBuilder {
             MeshError::Topology("internal boundary leaves its material region"),
         )?;
         let triangle = self.triangles[triangle_index];
-        if triangle.region != self.internal_boundary_regions[boundary] {
+        if triangle.region != self.constraint_target_regions[boundary] {
             return Err(MeshError::Topology(
                 "internal boundary has the wrong containing region",
             ));
@@ -1176,9 +1207,30 @@ impl MeshBuilder {
                     "could not locate internal-boundary edge",
                 ))?;
             if self.boundary_keys.contains(&edge_key(edge[0], edge[1])) {
-                return Err(MeshError::Topology(
-                    "internal boundary touches an existing constrained boundary",
-                ));
+                let boundary_index = self
+                    .boundary_edges
+                    .iter()
+                    .position(|boundary| {
+                        edge_key(boundary.vertices[0], boundary.vertices[1])
+                            == edge_key(edge[0], edge[1])
+                    })
+                    .ok_or(MeshError::Topology("constrained edge metadata is missing"))?;
+                let boundary = self.boundary_edges[boundary_index];
+                let delta = self.point(boundary.vertices[1]) - self.point(boundary.vertices[0]);
+                let denominator = delta.dot(delta);
+                if denominator <= 0.0 {
+                    return Err(MeshError::Topology("constrained edge is degenerate"));
+                }
+                let fraction = (point - self.point(boundary.vertices[0])).dot(delta) / denominator;
+                let parameter = boundary.parameters[0]
+                    + fraction.clamp(0.0, 1.0) * (boundary.parameters[1] - boundary.parameters[0]);
+                self.vertices[vertex].boundary = Some(BoundaryPoint {
+                    label: boundary.label,
+                    parameter,
+                });
+                return self
+                    .split_boundary_at_vertex(boundary_index, vertex, parameter)
+                    .map(|_| vertex);
             }
             self.split_edge(edge, vertex)?;
         } else {
@@ -1369,7 +1421,9 @@ impl MeshBuilder {
         if self.vertices.len() + chain.len() - 2 > self.options.max_vertices {
             return Err(self.capacity_error());
         }
-        let id = self.internal_boundary_ids[index];
+        let OpenConstraintKind::Baffle { id, .. } = self.constraint_kinds[index] else {
+            return Err(MeshError::Topology("baffle constraint is missing"));
+        };
         let left_label = BoundaryLabel::InternalBoundary {
             id,
             side: InternalBoundarySide::Left,
@@ -1504,6 +1558,140 @@ impl MeshBuilder {
         }) {
             return Err(MeshError::Topology(
                 "internal-boundary cut created a degenerate element",
+            ));
+        }
+        Ok(())
+    }
+
+    fn install_material_interface(&mut self, index: usize) -> Result<(), MeshError> {
+        let chain = self.internal_chains[index].clone();
+        if chain.len() < 2 {
+            return Err(MeshError::Topology(
+                "material interface needs at least one mesh segment",
+            ));
+        }
+        let OpenConstraintKind::Material { sides, .. } = self.constraint_kinds[index] else {
+            return Err(MeshError::Topology(
+                "material-interface constraint is missing",
+            ));
+        };
+        // Install the complete transmitting graph before assigning any of its
+        // faces. A single branch ending at an interior junction does not divide
+        // the domain by itself; the graph does once all incident branches are
+        // present.
+        if !self
+            .boundary_edges
+            .iter()
+            .any(|edge| matches!(edge.label, BoundaryLabel::OpenMaterialInterface(_)))
+        {
+            let material_constraints = self
+                .constraint_kinds
+                .iter()
+                .enumerate()
+                .filter_map(|(constraint, kind)| match kind {
+                    OpenConstraintKind::Material { id, .. } => Some((constraint, *id)),
+                    OpenConstraintKind::Baffle { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            for (constraint, interface_id) in material_constraints {
+                let constraint_chain = self.internal_chains[constraint].clone();
+                for pair in constraint_chain.windows(2) {
+                    let key = edge_key(pair[0].0, pair[1].0);
+                    if self
+                        .adjacency
+                        .get(&key)
+                        .is_none_or(|adjacent| adjacent.len() != 2)
+                    {
+                        return Err(MeshError::Topology(
+                            "material-interface segment was not recovered",
+                        ));
+                    }
+                    self.add_boundary_edge(BoundaryEdge {
+                        vertices: [pair[0].0, pair[1].0],
+                        label: BoundaryLabel::OpenMaterialInterface(interface_id),
+                        parameters: [pair[0].1, pair[1].1],
+                    });
+                }
+            }
+        }
+
+        let first = chain[0].0;
+        let second = chain[1].0;
+        let adjacent = self
+            .adjacency
+            .get(&edge_key(first, second))
+            .cloned()
+            .ok_or(MeshError::Topology(
+                "material interface has no adjacent elements",
+            ))?;
+        let left_seed = adjacent.iter().find_map(|(triangle, opposite)| {
+            (orient2d(self.point(first), self.point(second), self.point(*opposite))
+                == PredicateSign::Positive)
+                .then_some(*triangle)
+        });
+        let right_seed = adjacent.iter().find_map(|(triangle, opposite)| {
+            (orient2d(self.point(first), self.point(second), self.point(*opposite))
+                == PredicateSign::Negative)
+                .then_some(*triangle)
+        });
+        let left_seed = left_seed.ok_or(MeshError::Topology(
+            "material interface has no element on its left side",
+        ))?;
+        let right_seed = right_seed.ok_or(MeshError::Topology(
+            "material interface has no element on its right side",
+        ))?;
+        let left_region = self.triangles[left_seed].region;
+        let right_region = self.triangles[right_seed].region;
+        if left_region == sides.left && right_region == sides.right {
+            return Ok(());
+        }
+        let (seed, source, replacement) = if left_region == right_region {
+            if left_region == sides.right {
+                (left_seed, left_region, sides.left)
+            } else if left_region == sides.left {
+                (right_seed, right_region, sides.right)
+            } else {
+                return Err(MeshError::Topology(
+                    "material interface is not inside either adjacent region",
+                ));
+            }
+        } else if right_region == sides.right && left_region != sides.left {
+            (left_seed, left_region, sides.left)
+        } else if left_region == sides.left && right_region != sides.right {
+            (right_seed, right_region, sides.right)
+        } else {
+            return Err(MeshError::Topology(
+                "material-interface sides disagree with the existing subdivision",
+            ));
+        };
+        let mut pending = vec![seed];
+        let mut visited = BTreeSet::new();
+        let mut replaced = 0usize;
+        while let Some(triangle_index) = pending.pop() {
+            if !visited.insert(triangle_index) || self.triangles[triangle_index].region != source {
+                continue;
+            }
+            let triangle = self.triangles[triangle_index];
+            self.triangles[triangle_index].region = replacement;
+            replaced += 1;
+            for local in 0..3 {
+                let edge = edge_key(triangle.vertices[local], triangle.vertices[(local + 1) % 3]);
+                if self.boundary_keys.contains(&edge) {
+                    continue;
+                }
+                if let Some(neighbors) = self.adjacency.get(&edge) {
+                    pending.extend(
+                        neighbors
+                            .iter()
+                            .map(|(neighbor, _)| *neighbor)
+                            .filter(|neighbor| *neighbor != triangle_index),
+                    );
+                }
+            }
+        }
+        if replaced == 0 {
+            return Err(MeshError::Topology(
+                "material interface did not create a new region",
             ));
         }
         Ok(())
@@ -1703,6 +1891,10 @@ enum MeshingJobState {
         obstacle: usize,
         sampler: Option<Sampler>,
     },
+    SampleMaterial {
+        interface: usize,
+        sampler: Option<OpenSampler>,
+    },
     SampleInternal {
         boundary: usize,
         sampler: Option<OpenSampler>,
@@ -1786,6 +1978,7 @@ impl MeshingJob {
             MeshingJobState::Validate(_) => "Validating",
             MeshingJobState::Outer
             | MeshingJobState::Sample { .. }
+            | MeshingJobState::SampleMaterial { .. }
             | MeshingJobState::SampleInternal { .. } => "Sampling boundaries",
             MeshingJobState::Bridge(_) => "Connecting holes",
             MeshingJobState::Clip(_) => "Triangulating",
@@ -1864,20 +2057,8 @@ impl MeshingJob {
             }
             MeshingJobState::Sample { obstacle, sampler } => {
                 if obstacle == self.scene.obstacles.len() {
-                    b.internal_boundary_ids = self
-                        .scene
-                        .internal_boundaries
-                        .iter()
-                        .map(|boundary| boundary.id)
-                        .collect();
-                    b.internal_boundary_regions = self
-                        .scene
-                        .internal_boundaries
-                        .iter()
-                        .map(|boundary| boundary.region)
-                        .collect();
-                    MeshingJobState::SampleInternal {
-                        boundary: 0,
+                    MeshingJobState::SampleMaterial {
+                        interface: 0,
                         sampler: None,
                     }
                 } else {
@@ -1911,9 +2092,123 @@ impl MeshingJob {
                     }
                 }
             }
+            MeshingJobState::SampleMaterial { interface, sampler } => {
+                if interface == self.scene.material_interfaces.len() {
+                    b.internal_boundary_ids = self
+                        .scene
+                        .internal_boundaries
+                        .iter()
+                        .map(|boundary| boundary.id)
+                        .collect();
+                    b.internal_boundary_regions = self
+                        .scene
+                        .internal_boundaries
+                        .iter()
+                        .map(|boundary| boundary.region)
+                        .collect();
+                    MeshingJobState::SampleInternal {
+                        boundary: 0,
+                        sampler: None,
+                    }
+                } else {
+                    let material_interface = &self.scene.material_interfaces[interface];
+                    let crate::InterfaceSpline::Open(spline) = &material_interface.spline else {
+                        return Err(MeshError::Topology(
+                            "closed graph material interfaces are not migrated yet",
+                        ));
+                    };
+                    let mut sampler = sampler.unwrap_or_else(|| {
+                        OpenSampler::new(
+                            spline,
+                            SamplingOptions {
+                                tolerance: b.options.curve_tolerance,
+                                max_depth: 18,
+                                max_points: 8192,
+                            },
+                        )
+                    });
+                    if sampler.step() {
+                        let samples = sampler.finish().map_err(|_| {
+                            MeshError::Topology("material-interface sampling failed")
+                        })?;
+                        let mut first_span = 0usize;
+                        while first_span < material_interface.span_sides.len() {
+                            let sides = material_interface.span_sides[first_span];
+                            let mut after_last_span = first_span + 1;
+                            while after_last_span < material_interface.span_sides.len()
+                                && material_interface.span_sides[after_last_span] == sides
+                            {
+                                after_last_span += 1;
+                            }
+                            let start = spline.breakpoint(first_span).unwrap();
+                            let end = spline.breakpoint(after_last_span).unwrap();
+                            let mut run = samples
+                                .iter()
+                                .copied()
+                                .filter(|sample| sample.t >= start && sample.t <= end)
+                                .collect::<Vec<_>>();
+                            if run.first().is_none_or(|sample| sample.t != start) {
+                                run.insert(
+                                    0,
+                                    Sample {
+                                        t: start,
+                                        point: spline.evaluate(start),
+                                    },
+                                );
+                            }
+                            if run.last().is_none_or(|sample| sample.t != end) {
+                                run.push(Sample {
+                                    t: end,
+                                    point: spline.evaluate(end),
+                                });
+                            }
+                            b.internal_samples
+                                .push(resample_internal_boundary(run, b.options)?);
+                            b.constraint_kinds.push(OpenConstraintKind::Material {
+                                id: material_interface.id,
+                                sides,
+                            });
+                            first_span = after_last_span;
+                        }
+                        MeshingJobState::SampleMaterial {
+                            interface: interface + 1,
+                            sampler: None,
+                        }
+                    } else {
+                        MeshingJobState::SampleMaterial {
+                            interface,
+                            sampler: Some(sampler),
+                        }
+                    }
+                }
+            }
             MeshingJobState::SampleInternal { boundary, sampler } => {
                 if boundary == self.scene.internal_boundaries.len() {
                     b.prepare_domains()?;
+                    b.constraint_target_regions = b
+                        .constraint_kinds
+                        .iter()
+                        .enumerate()
+                        .map(|(index, kind)| match *kind {
+                            OpenConstraintKind::Baffle { region, .. } => Ok(region),
+                            OpenConstraintKind::Material { .. } => {
+                                let samples = b.internal_samples.get(index).ok_or(
+                                    MeshError::Topology("material-interface samples are missing"),
+                                )?;
+                                let [first, second] = samples
+                                    .first()
+                                    .zip(samples.get(1))
+                                    .map(|(first, second)| [first.point, second.point])
+                                    .ok_or(MeshError::Topology(
+                                        "material interface needs at least two samples",
+                                    ))?;
+                                b.region_at(first.lerp(second, 0.5))
+                                    .ok_or(MeshError::Topology(
+                                        "material interface lies outside every closed-loop domain",
+                                    ))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     let domain = b
                         .domains
                         .first()
@@ -1949,6 +2244,10 @@ impl MeshingJob {
                         })?;
                         b.internal_samples
                             .push(resample_internal_boundary(samples, b.options)?);
+                        b.constraint_kinds.push(OpenConstraintKind::Baffle {
+                            id: self.scene.internal_boundaries[boundary].id,
+                            region: self.scene.internal_boundaries[boundary].region,
+                        });
                         MeshingJobState::SampleInternal {
                             boundary: boundary + 1,
                             sampler: None,
@@ -2268,7 +2567,15 @@ impl MeshingJob {
                 attempts,
             } => {
                 if segment + 1 == b.internal_chains[boundary].len() {
-                    MeshingJobState::CutInternalBoundary { boundary }
+                    if boundary + 1 == b.internal_samples.len() {
+                        MeshingJobState::CutInternalBoundary { boundary: 0 }
+                    } else {
+                        b.internal_chains.push(Vec::new());
+                        MeshingJobState::InsertInternalPoints {
+                            boundary: boundary + 1,
+                            sample: 0,
+                        }
+                    }
                 } else {
                     let requested = [
                         b.internal_chains[boundary][segment].0,
@@ -2326,15 +2633,18 @@ impl MeshingJob {
                 }
             }
             MeshingJobState::CutInternalBoundary { boundary } => {
-                b.cut_internal_boundary(boundary)?;
+                match b.constraint_kinds[boundary] {
+                    OpenConstraintKind::Material { .. } => {
+                        b.install_material_interface(boundary)?;
+                    }
+                    OpenConstraintKind::Baffle { .. } => b.cut_internal_boundary(boundary)?,
+                }
                 if boundary + 1 == b.internal_samples.len() {
                     self.legalization_work = 0;
                     MeshingJobState::LegalizeInternalCut
                 } else {
-                    b.internal_chains.push(Vec::new());
-                    MeshingJobState::InsertInternalPoints {
+                    MeshingJobState::CutInternalBoundary {
                         boundary: boundary + 1,
-                        sample: 0,
                     }
                 }
             }
@@ -2400,7 +2710,15 @@ impl MeshingJob {
                         .repair_region
                         .as_ref()
                         .is_none_or(|region| triangle.vertices.iter().any(|v| region[*v]));
-                    if changed_region && b.region_at((a + v + c) / 3.0) != Some(triangle.region) {
+                    // Closed loops have an independent point classifier. Open
+                    // interface graphs derive their region labels by flooding
+                    // the recovered planar subdivision, so re-running the
+                    // closed-loop classifier here would incorrectly call every
+                    // newly split element background material.
+                    if changed_region
+                        && self.scene.material_interfaces.is_empty()
+                        && b.region_at((a + v + c) / 3.0) != Some(triangle.region)
+                    {
                         return Err(MeshError::Topology(
                             "triangle has the wrong material-region label",
                         ));
@@ -2421,7 +2739,8 @@ impl MeshingJob {
                                 edge_key(boundary.vertices[0], boundary.vertices[1]) == edge
                             })
                             .map_or(2, |boundary| match boundary.label {
-                                BoundaryLabel::MaterialInterface(_) => 2,
+                                BoundaryLabel::MaterialInterface(_)
+                                | BoundaryLabel::OpenMaterialInterface(_) => 2,
                                 BoundaryLabel::Outer(_)
                                 | BoundaryLabel::Obstacle(_)
                                 | BoundaryLabel::Wall { .. }
@@ -2465,7 +2784,8 @@ impl MeshingJob {
                 }
                 let edge = b.boundary_edges[index].vertices;
                 let expected = match b.boundary_edges[index].label {
-                    BoundaryLabel::MaterialInterface(_) => 2,
+                    BoundaryLabel::MaterialInterface(_)
+                    | BoundaryLabel::OpenMaterialInterface(_) => 2,
                     BoundaryLabel::Outer(_)
                     | BoundaryLabel::Obstacle(_)
                     | BoundaryLabel::Wall { .. }
