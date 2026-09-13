@@ -497,6 +497,12 @@ fixtures assemble and step without leaks or invalid node-membership errors.
 
 #### Stage 3: document model, face assignments, and persistence
 
+In progress. The dependency-free authored `TopologyScene`, explicit active or
+excluded face dispositions, oriented boundary anchors, structured assignment
+errors, same-face separator endpoint check, synchronous convenience compiler, and
+resumable scene compiler are implemented in the core. The application document,
+edit remapping, version-22 persistence, and examples still await the atomic cut.
+
 The application cutover needs a stable authored face reference. `FaceId` is an
 ordinal in one compiled snapshot, so persisting it would make material ownership
 change when an unrelated edit changes face traversal order. A point seed is also
@@ -581,10 +587,15 @@ assignments, probes, sources, and accepted/draft pairs together.
 
 #### Stage 4: cooperative rebuild and atomic runtime contract
 
-The topology mesher is currently synchronous while the live legacy mesher yields
-after a small work slice. Switching it directly would freeze the browser during a
-full rebuild. Refactor the topology full-rebuild path into a deterministic
-`TopologyMeshJob` before changing the document used by the UI.
+In progress. `TopologyMeshingJob` now cooperatively bridges cycles, clips faces,
+legalizes, refines, recovers separated curves, and verifies output, with exact
+slice-size determinism. The application still launches its legacy meshing job and
+does not yet carry the accepted topology bundle.
+
+The topology mesher was originally synchronous while the live legacy mesher
+yielded after a small work slice. Switching it directly would have frozen the
+browser during a full rebuild, so the topology full-rebuild path must remain a
+deterministic cooperative job before the application document changes over.
 
 - Split topology meshing into bounded phases: plan import, one-face triangulation
   and refinement, separated-trace recovery, junction/slit recovery, legalization,

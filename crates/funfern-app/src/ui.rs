@@ -904,6 +904,8 @@ pub struct Playground {
     area_probe_center: Option<Point2>,
     probe_name_edit: Option<(ProbeId, String)>,
     creation_role: CreationRole,
+    closed_creation_role: CreationRole,
+    open_creation_role: CreationRole,
     divider_attachments: Vec<Option<DividerEndpoint>>,
     material_selection: MaterialId,
     material_name_edit: Option<(MaterialId, String)>,
@@ -1093,6 +1095,8 @@ impl Default for Playground {
             area_probe_center: None,
             probe_name_edit: None,
             creation_role: CreationRole::Hole,
+            closed_creation_role: CreationRole::Hole,
+            open_creation_role: CreationRole::InternalBoundary,
             divider_attachments: vec![],
             material_selection: DEFAULT_MATERIAL,
             material_name_edit: None,
@@ -5132,22 +5136,73 @@ impl Playground {
             .fixed_pos(self.add_geometry_anchor)
             .default_width(250.0)
             .show(ctx, |ui| {
+                ui.strong("Closed curve");
                 ui.horizontal_wrapped(|ui| {
-                    for (role, label) in [
-                        (CreationRole::Hole, "Hole"),
-                        (CreationRole::MaterialInterface, "Interface"),
-                        (CreationRole::Divider, "Divider"),
-                        (CreationRole::InternalBoundary, "Baffle"),
+                    ui.label("Initial purpose");
+                    ui.radio_value(
+                        &mut self.closed_creation_role,
+                        CreationRole::MaterialInterface,
+                        "Subdomain",
+                    );
+                    ui.radio_value(&mut self.closed_creation_role, CreationRole::Hole, "Hole");
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for tool in [
+                        DrawTool::Circle,
+                        DrawTool::Rectangle,
+                        DrawTool::Polygon,
+                        DrawTool::Spline,
                     ] {
-                        ui.selectable_value(&mut self.creation_role, role, label);
+                        if ui.button(tool.label()).clicked() {
+                            self.creation_role = self.closed_creation_role;
+                            self.interaction_mode = InteractionMode::Draw {
+                                role: self.closed_creation_role,
+                                tool,
+                            };
+                            self.custom.clear();
+                            self.divider_attachments.clear();
+                            close = true;
+                        }
                     }
                 });
-                if matches!(
-                    self.creation_role,
-                    CreationRole::MaterialInterface | CreationRole::Divider
-                ) {
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.strong("Open curve");
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Initial purpose");
+                    ui.radio_value(
+                        &mut self.open_creation_role,
+                        CreationRole::Divider,
+                        "Subdomain separator",
+                    );
+                    ui.radio_value(
+                        &mut self.open_creation_role,
+                        CreationRole::InternalBoundary,
+                        "BC baffle",
+                    );
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for tool in [DrawTool::Polyline, DrawTool::Spline] {
+                        if ui.button(tool.label()).clicked() {
+                            self.creation_role = self.open_creation_role;
+                            self.interaction_mode = InteractionMode::Draw {
+                                role: self.open_creation_role,
+                                tool,
+                            };
+                            self.custom.clear();
+                            self.divider_attachments.clear();
+                            close = true;
+                        }
+                    }
+                });
+
+                if self.closed_creation_role == CreationRole::MaterialInterface
+                    || self.open_creation_role == CreationRole::Divider
+                {
+                    ui.add_space(6.0);
                     let materials = self.editor.document.model.draft.materials.clone();
-                    egui::ComboBox::from_label("Interior material")
+                    egui::ComboBox::from_label("New subdomain material")
                         .selected_text(
                             self.editor
                                 .document
@@ -5166,34 +5221,6 @@ impl Playground {
                             }
                         });
                 }
-                ui.separator();
-                ui.label("Shape");
-                ui.horizontal_wrapped(|ui| {
-                    let tools: &[DrawTool] = if matches!(
-                        self.creation_role,
-                        CreationRole::InternalBoundary | CreationRole::Divider
-                    ) {
-                        &[DrawTool::Polyline, DrawTool::Spline]
-                    } else {
-                        &[
-                            DrawTool::Circle,
-                            DrawTool::Rectangle,
-                            DrawTool::Polygon,
-                            DrawTool::Spline,
-                        ]
-                    };
-                    for tool in tools {
-                        if ui.button(tool.label()).clicked() {
-                            self.interaction_mode = InteractionMode::Draw {
-                                role: self.creation_role,
-                                tool: *tool,
-                            };
-                            self.custom.clear();
-                            self.divider_attachments.clear();
-                            close = true;
-                        }
-                    }
-                });
             });
         if close {
             open = false;
@@ -11136,6 +11163,14 @@ impl Playground {
                     match self.interaction_mode {
                         InteractionMode::Draw { role, tool } => {
                             self.creation_role = role;
+                            match role {
+                                CreationRole::Hole | CreationRole::MaterialInterface => {
+                                    self.closed_creation_role = role;
+                                }
+                                CreationRole::Divider | CreationRole::InternalBoundary => {
+                                    self.open_creation_role = role;
+                                }
+                            }
                             let attachment = if role == CreationRole::Divider {
                                 self.divider_attachment_at_screen(p, r)
                             } else {
@@ -18220,20 +18255,27 @@ mod tests {
         assert!(h.state.add_geometry_open);
         h.frame(vec![]);
         assert!(h.texts.iter().any(|(text, _)| text == "Draw geometry"));
-        for tool in ["Circle", "Rectangle", "Polygon", "Spline"] {
+        for label in [
+            "Closed curve",
+            "Open curve",
+            "Subdomain",
+            "Hole",
+            "Subdomain separator",
+            "BC baffle",
+        ] {
+            assert!(h.texts.iter().any(|(text, _)| text == label));
+        }
+        for tool in ["Circle", "Rectangle", "Polygon", "Polyline", "Spline"] {
             assert!(h.texts.iter().any(|(text, _)| text == tool));
         }
-        h.click_text("Baffle");
+        h.click_text("BC baffle");
         assert!(matches!(
-            h.state.creation_role,
+            h.state.open_creation_role,
             CreationRole::InternalBoundary
         ));
         assert!(!h.texts.iter().any(|(text, _)| text == "Straight"));
         assert!(h.texts.iter().any(|(text, _)| text == "Polyline"));
-        assert!(h.texts.iter().any(|(text, _)| text == "Spline"));
-        assert!(!h.texts.iter().any(|(text, _)| text == "Circle"));
-        assert!(!h.texts.iter().any(|(text, _)| text == "Rectangle"));
-        assert!(!h.texts.iter().any(|(text, _)| text == "Polygon"));
+        assert!(h.texts.iter().any(|(text, _)| text == "Circle"));
     }
 
     #[test]

@@ -67,6 +67,28 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-14 — Authored topology scenes and cooperative full meshing
+
+- Added dependency-free `TopologyScene`, `FaceAnchor`, and explicit authored face
+  dispositions. Stable outer/curve-side anchors resolve to snapshot-local faces;
+  deliberate exclusion is distinct from a missing invalid-draft assignment.
+- Structural validation covers material/region/source identity, outer corner laws,
+  total face disposition, duplicate ownership, malformed anchors, and plan
+  compatibility. A same-face endpoint query provides the contract needed to filter
+  valid Subdomain separator completion targets.
+- Added `TopologySceneJob` around the resumable arrangement compiler and replaced
+  the synchronous topology triangulator internals with `TopologyMeshingJob`.
+  Bridge search, ear clipping, legalization, refinement, separated-curve recovery,
+  and verification now expose useful phases and publish once.
+- Changed the current Draw popover to geometry-first **Closed curve** and **Open
+  curve** groups. Each remembers its own initial-purpose choice. The live legacy
+  separator already requires attached endpoints; same-face/sector filtering lands
+  with the topology editor because the legacy mesh cannot express that contract
+  reliably.
+- Slice-size determinism is covered directly. All 443 workspace tests, workspace
+  Clippy with warnings denied, native release compilation, and the release Trunk
+  build pass.
+
 ## 2026-09-14 — Planned atomic topology application cutover
 
 - Specified an authored `TopologyScene` with stable oriented face anchors. Compiled

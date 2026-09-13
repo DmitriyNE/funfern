@@ -163,6 +163,13 @@ impl CurveSpline {
         })
     }
 
+    pub fn span_bounds(&self, index: usize) -> Option<[f64; 2]> {
+        match self {
+            Self::Closed(spline) => spline.span_bounds(index),
+            Self::Open(spline) => spline.span_bounds(index),
+        }
+    }
+
     pub fn set_node_point(
         &mut self,
         index: usize,

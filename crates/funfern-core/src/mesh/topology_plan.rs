@@ -8,9 +8,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    BoundaryEdge, BoundaryLabel, BoundaryPoint, MeshBuilder, MeshError, MeshTriangle,
-    OpenConstraintKind, PolygonLocation, SegmentRelation, TriMesh, TriangulationDomain,
-    boundary_adjacency, edge_key, point_in_triangle, segment_relation, valid_options,
+    BoundaryEdge, BoundaryLabel, BoundaryPoint, BridgeSearch, EarSearch, EarStage, MeshBuilder,
+    MeshError, MeshQuality, MeshTriangle, MeshingStats, OpenConstraintKind, PolygonLocation,
+    SegmentRelation, TriMesh, TriangulationDomain, boundary_adjacency, edge_key, point_in_triangle,
+    segment_relation, valid_options,
 };
 use crate::{
     CompiledBoundaryStep, CompiledEdge, CompiledEdgeSource, CurveId, CurveSpanId, FaceId, Point2,
@@ -45,10 +46,372 @@ pub fn mesh_topology_plan(
     mesh_revision: u64,
     options: super::MeshingOptions,
 ) -> Result<TriMesh, MeshError> {
-    if !valid_options(options) {
-        return Err(MeshError::InvalidOptions);
+    let mut job = TopologyMeshingJob::new(plan.clone(), mesh_revision, options);
+    loop {
+        if let Some(result) = job.advance(4096) {
+            return result;
+        }
     }
-    let mut builder = MeshBuilder::new(options, plan.domain);
+}
+
+enum TopologyMeshingState {
+    Initialize,
+    Bridge(BridgeSearch),
+    Clip(EarSearch),
+    Legalize,
+    Refine,
+    CutSlits { index: usize },
+    SplitSlitVertices,
+    ApplySlitLineage,
+    LegalizeFinal,
+    VerifyTriangles { index: usize, quality: MeshQuality },
+    VerifyBoundary { index: usize, quality: MeshQuality },
+    Done,
+}
+
+/// Cooperative full meshing for an immutable topology plan.
+pub struct TopologyMeshingJob {
+    plan: TopologyMeshPlan,
+    mesh_revision: u64,
+    builder: MeshBuilder,
+    trace_vertices: BTreeMap<TraceVertexId, usize>,
+    slit_runs: Vec<(RegionId, Vec<PlannedFaceStep>)>,
+    slit_steps: Vec<PlannedFaceStep>,
+    legalization_work: usize,
+    state: TopologyMeshingState,
+}
+
+impl TopologyMeshingJob {
+    pub fn new(plan: TopologyMeshPlan, mesh_revision: u64, options: super::MeshingOptions) -> Self {
+        let builder = MeshBuilder::new(options, plan.domain);
+        Self {
+            plan,
+            mesh_revision,
+            builder,
+            trace_vertices: BTreeMap::new(),
+            slit_runs: vec![],
+            slit_steps: vec![],
+            legalization_work: 0,
+            state: TopologyMeshingState::Initialize,
+        }
+    }
+
+    pub fn stats(&self) -> MeshingStats {
+        self.builder.stats
+    }
+
+    pub fn phase(&self) -> &'static str {
+        match self.state {
+            TopologyMeshingState::Initialize => "Preparing topology",
+            TopologyMeshingState::Bridge(_) => "Connecting holes",
+            TopologyMeshingState::Clip(_) => "Triangulating",
+            TopologyMeshingState::Legalize | TopologyMeshingState::LegalizeFinal => {
+                "Legalizing edges"
+            }
+            TopologyMeshingState::Refine => "Refining",
+            TopologyMeshingState::CutSlits { .. }
+            | TopologyMeshingState::SplitSlitVertices
+            | TopologyMeshingState::ApplySlitLineage => "Recovering separated curves",
+            TopologyMeshingState::VerifyTriangles { .. }
+            | TopologyMeshingState::VerifyBoundary { .. } => "Checking mesh",
+            TopologyMeshingState::Done => "Finished",
+        }
+    }
+
+    pub fn advance(&mut self, budget: usize) -> Option<Result<TriMesh, MeshError>> {
+        for _ in 0..budget {
+            if matches!(self.state, TopologyMeshingState::Done) {
+                return None;
+            }
+            self.builder.stats.work_units += 1;
+            let result = self.step();
+            match result {
+                Ok(Some(mesh)) => return Some(Ok(mesh)),
+                Ok(None) => {}
+                Err(error) => {
+                    self.state = TopologyMeshingState::Done;
+                    return Some(Err(error));
+                }
+            }
+        }
+        None
+    }
+
+    fn step(&mut self) -> Result<Option<TriMesh>, MeshError> {
+        if !valid_options(self.builder.options) {
+            return Err(MeshError::InvalidOptions);
+        }
+        if self.builder.stats.work_units > 50_000_000 {
+            return Err(MeshError::Topology("topology meshing work limit reached"));
+        }
+        let state = std::mem::replace(&mut self.state, TopologyMeshingState::Done);
+        let b = &mut self.builder;
+        self.state = match state {
+            TopologyMeshingState::Initialize => {
+                let prepared = prepare_topology_builder(&self.plan, b)?;
+                self.trace_vertices = prepared.trace_vertices;
+                self.slit_runs = prepared.slit_runs;
+                let domain = b
+                    .domains
+                    .first()
+                    .cloned()
+                    .ok_or(MeshError::Topology("no topology domain to triangulate"))?;
+                TopologyMeshingState::Bridge(new_bridge_search(domain, 0))
+            }
+            TopologyMeshingState::Bridge(search) => self.step_bridge(search)?,
+            TopologyMeshingState::Clip(search) => self.step_clip(search)?,
+            TopologyMeshingState::Legalize => {
+                if b.dirty_edges.is_empty() {
+                    self.legalization_work = 0;
+                    TopologyMeshingState::Refine
+                } else {
+                    self.legalization_work += 1;
+                    if self.legalization_work > b.options.max_triangles.saturating_mul(128) {
+                        return Err(MeshError::Topology("edge legalization work limit reached"));
+                    }
+                    b.legalize_one()?;
+                    TopologyMeshingState::Legalize
+                }
+            }
+            TopologyMeshingState::Refine => {
+                if !b.bad_triangles.is_empty()
+                    && b.stats.refinement_insertions >= b.options.max_refinement_steps
+                {
+                    return Err(MeshError::RefinementLimit(b.quality()));
+                }
+                if b.refine_once()? {
+                    TopologyMeshingState::CutSlits { index: 0 }
+                } else {
+                    TopologyMeshingState::Legalize
+                }
+            }
+            TopologyMeshingState::CutSlits { index } => {
+                if let Some((region, run)) = self.slit_runs.get(index) {
+                    cut_free_slit(b, *region, run, &mut self.trace_vertices)?;
+                    self.slit_steps.extend(run.iter().copied());
+                    TopologyMeshingState::CutSlits { index: index + 1 }
+                } else {
+                    TopologyMeshingState::SplitSlitVertices
+                }
+            }
+            TopologyMeshingState::SplitSlitVertices => {
+                split_slit_trace_vertices(b, &self.slit_steps, &mut self.trace_vertices)?;
+                TopologyMeshingState::ApplySlitLineage
+            }
+            TopologyMeshingState::ApplySlitLineage => {
+                apply_slit_trace_lineage(b, &self.slit_steps, &mut self.trace_vertices)?;
+                self.legalization_work = 0;
+                TopologyMeshingState::LegalizeFinal
+            }
+            TopologyMeshingState::LegalizeFinal => {
+                if b.dirty_edges.is_empty() {
+                    TopologyMeshingState::VerifyTriangles {
+                        index: 0,
+                        quality: MeshQuality {
+                            minimum_angle_degrees: 180.0,
+                            maximum_edge_length: 0.0,
+                        },
+                    }
+                } else {
+                    self.legalization_work += 1;
+                    if self.legalization_work > b.options.max_triangles.saturating_mul(128) {
+                        return Err(MeshError::Topology("edge legalization work limit reached"));
+                    }
+                    b.legalize_one()?;
+                    TopologyMeshingState::LegalizeFinal
+                }
+            }
+            TopologyMeshingState::VerifyTriangles { index, mut quality } => {
+                if index == b.triangles.len() {
+                    TopologyMeshingState::VerifyBoundary { index: 0, quality }
+                } else {
+                    verify_topology_triangle(b, index, &mut quality)?;
+                    TopologyMeshingState::VerifyTriangles {
+                        index: index + 1,
+                        quality,
+                    }
+                }
+            }
+            TopologyMeshingState::VerifyBoundary { index, quality } => {
+                if index == b.boundary_edges.len() {
+                    return Ok(Some(TriMesh {
+                        geometry_revision: self.plan.geometry_revision,
+                        mesh_revision: self.mesh_revision,
+                        vertices: std::mem::take(&mut b.vertices),
+                        triangles: std::mem::take(&mut b.triangles),
+                        boundary_edges: std::mem::take(&mut b.boundary_edges),
+                        quality,
+                    }));
+                }
+                verify_topology_boundary(b, index)?;
+                TopologyMeshingState::VerifyBoundary {
+                    index: index + 1,
+                    quality,
+                }
+            }
+            TopologyMeshingState::Done => TopologyMeshingState::Done,
+        };
+        Ok(None)
+    }
+
+    fn step_bridge(&mut self, mut search: BridgeSearch) -> Result<TopologyMeshingState, MeshError> {
+        let b = &self.builder;
+        if search.hole == search.holes.len() {
+            return Ok(TopologyMeshingState::Clip(EarSearch {
+                polygon: search.polygon,
+                domain: search.domain,
+                region: search.region,
+                index: 0,
+                degenerate_pass: false,
+                stage: EarStage::Start,
+            }));
+        }
+        let hole_len = search.holes[search.hole].len();
+        if search.seeding {
+            if search.outer_index == search.polygon.len() {
+                let (length, outer_index, hole_index) = search
+                    .best
+                    .take()
+                    .ok_or(MeshError::Topology("no topology bridge candidate"))?;
+                search.outer_index = outer_index;
+                search.hole_index = hole_index;
+                search.visibility = Some((0, 0, length));
+                search.seeding = false;
+                search.testing_seed = true;
+            } else {
+                let length = (b.point(search.polygon[search.outer_index])
+                    - b.point(search.holes[search.hole][search.hole_index]))
+                .norm();
+                if search.best.is_none_or(|best| length < best.0) {
+                    search.best = Some((length, search.outer_index, search.hole_index));
+                }
+                advance_bridge_pair(&mut search, hole_len);
+            }
+        } else if search.outer_index == search.polygon.len() {
+            let (_, outer_index, hole_index) = search
+                .best
+                .ok_or(MeshError::Topology("no visible bridge to topology cycle"))?;
+            let hole = search.holes[search.hole].clone();
+            let mut splice = Vec::with_capacity(hole.len() + 2);
+            for offset in 0..hole.len() {
+                splice.push(hole[(hole_index + offset) % hole.len()]);
+            }
+            splice.push(hole[hole_index]);
+            splice.push(search.polygon[outer_index]);
+            search
+                .polygon
+                .splice(outer_index + 1..outer_index + 1, splice);
+            search.hole += 1;
+            search.outer_index = 0;
+            search.hole_index = 0;
+            search.best = None;
+            search.seeding = true;
+        } else {
+            step_bridge_visibility(b, &mut search)?;
+        }
+        Ok(TopologyMeshingState::Bridge(search))
+    }
+
+    fn step_clip(&mut self, mut search: EarSearch) -> Result<TopologyMeshingState, MeshError> {
+        let b = &mut self.builder;
+        let polygon = &mut search.polygon;
+        if polygon.len() == 3 {
+            b.push_triangle(b.ccw_triangle([polygon[0], polygon[1], polygon[2]], search.region)?)?;
+            let next_domain = search.domain + 1;
+            return Ok(if let Some(domain) = b.domains.get(next_domain).cloned() {
+                TopologyMeshingState::Bridge(new_bridge_search(domain, next_domain))
+            } else {
+                TopologyMeshingState::Legalize
+            });
+        }
+        if search.index == polygon.len() {
+            if search.degenerate_pass {
+                return Err(MeshError::Topology("topology ear clipping stalled"));
+            }
+            search.degenerate_pass = true;
+            search.index = 0;
+            search.stage = EarStage::Start;
+            return Ok(TopologyMeshingState::Clip(search));
+        }
+        let index = search.index;
+        let previous = (index + polygon.len() - 1) % polygon.len();
+        let next = (index + 1) % polygon.len();
+        let [a, v, c] = [polygon[previous], polygon[index], polygon[next]];
+        let mut reject = false;
+        let mut remove = false;
+        match search.stage {
+            EarStage::Start => {
+                let sign = orient2d(b.point(a), b.point(v), b.point(c));
+                let candidate = if search.degenerate_pass {
+                    a == v || v == c || a == c || sign == PredicateSign::Zero
+                } else {
+                    a != v && v != c && a != c && sign == PredicateSign::Positive
+                };
+                if candidate {
+                    search.stage = EarStage::Diagonal(0);
+                } else {
+                    reject = true;
+                }
+            }
+            EarStage::Diagonal(other) => {
+                if other == polygon.len() {
+                    if search.degenerate_pass {
+                        remove = true;
+                    } else {
+                        search.stage = EarStage::Contains(0);
+                    }
+                } else {
+                    let [x, y] = [polygon[other], polygon[(other + 1) % polygon.len()]];
+                    reject = x != a
+                        && x != c
+                        && y != a
+                        && y != c
+                        && segment_relation(b.point(a), b.point(c), b.point(x), b.point(y))
+                            != SegmentRelation::Disjoint;
+                    search.stage = EarStage::Diagonal(other + 1);
+                }
+            }
+            EarStage::Contains(other_index) => {
+                if other_index == polygon.len() {
+                    remove = true;
+                } else {
+                    let other = polygon[other_index];
+                    reject = ![previous, index, next].contains(&other_index)
+                        && ![a, v, c].contains(&other)
+                        && point_in_triangle(b.point(other), [b.point(a), b.point(v), b.point(c)])
+                            != PolygonLocation::Outside;
+                    search.stage = EarStage::Contains(other_index + 1);
+                }
+            }
+        }
+        if remove {
+            if !search.degenerate_pass {
+                b.push_triangle(MeshTriangle {
+                    vertices: [a, v, c],
+                    region: search.region,
+                })?;
+            }
+            polygon.remove(index);
+            search.index = 0;
+            search.degenerate_pass = false;
+            search.stage = EarStage::Start;
+        } else if reject {
+            search.index += 1;
+            search.stage = EarStage::Start;
+        }
+        Ok(TopologyMeshingState::Clip(search))
+    }
+}
+
+struct PreparedTopology {
+    trace_vertices: BTreeMap<TraceVertexId, usize>,
+    slit_runs: Vec<(RegionId, Vec<PlannedFaceStep>)>,
+}
+
+fn prepare_topology_builder(
+    plan: &TopologyMeshPlan,
+    builder: &mut MeshBuilder,
+) -> Result<PreparedTopology, MeshError> {
     let trace_points = plan
         .vertices
         .iter()
@@ -92,7 +455,7 @@ pub fn mesh_topology_plan(
                 let key = (step.edge, side);
                 if let std::collections::btree_map::Entry::Vacant(entry) = chains.entry(key) {
                     let chain =
-                        expand_step_chain(&mut builder, &trace_points, &mut trace_vertices, step)?;
+                        expand_step_chain(builder, &trace_points, &mut trace_vertices, step)?;
                     entry.insert(chain);
                 }
                 let chain = &chains[&key];
@@ -150,29 +513,179 @@ pub fn mesh_topology_plan(
         });
     }
 
-    triangulate_topology_domains(&mut builder)?;
-    let mut slit_steps = vec![];
+    let mut slit_runs = vec![];
     for ((region, _), steps) in free_slits {
-        for run in split_slit_runs(&steps)? {
-            cut_free_slit(&mut builder, region, &run, &mut trace_vertices)?;
-            slit_steps.extend(run);
+        slit_runs.extend(
+            split_slit_runs(&steps)?
+                .into_iter()
+                .map(|run| (region, run)),
+        );
+    }
+    Ok(PreparedTopology {
+        trace_vertices,
+        slit_runs,
+    })
+}
+
+fn new_bridge_search(domain: TriangulationDomain, index: usize) -> BridgeSearch {
+    BridgeSearch {
+        polygon: domain.outer,
+        holes: domain.holes,
+        hole: 0,
+        domain: index,
+        region: domain.region,
+        outer_index: 0,
+        hole_index: 0,
+        best: None,
+        visibility: None,
+        seeding: true,
+        testing_seed: false,
+    }
+}
+
+fn advance_bridge_pair(search: &mut BridgeSearch, hole_len: usize) {
+    search.hole_index += 1;
+    if search.hole_index == hole_len {
+        search.hole_index = 0;
+        search.outer_index += 1;
+    }
+}
+
+fn step_bridge_visibility(
+    builder: &MeshBuilder,
+    search: &mut BridgeSearch,
+) -> Result<(), MeshError> {
+    let a_index = search.polygon[search.outer_index];
+    let hole_len = search.holes[search.hole].len();
+    let v_index = search.holes[search.hole][search.hole_index];
+    let a = builder.point(a_index);
+    let v = builder.point(v_index);
+    let mut next_candidate = false;
+    if let Some((stage, index, length)) = search.visibility {
+        let edge = if stage == 0 {
+            builder.boundary_edges.get(index).map(|edge| {
+                if builder.boundary_relevant_to_region(edge.label, search.region) {
+                    edge.vertices
+                } else {
+                    [a_index, v_index]
+                }
+            })
+        } else if index < search.polygon.len() {
+            Some([
+                search.polygon[index],
+                search.polygon[(index + 1) % search.polygon.len()],
+            ])
+        } else {
+            None
+        };
+        if let Some(edge) = edge {
+            if !edge.contains(&a_index) && !edge.contains(&v_index) {
+                let relation =
+                    segment_relation(a, v, builder.point(edge[0]), builder.point(edge[1]));
+                next_candidate = if stage == 0 {
+                    relation != SegmentRelation::Disjoint
+                } else {
+                    relation == SegmentRelation::ProperIntersection
+                };
+            }
+            search.visibility = Some((stage, index + 1, length));
+        } else if stage == 0 {
+            search.visibility = Some((1, 0, length));
+        } else {
+            if builder.region_at(a.lerp(v, 0.5)) == Some(search.region) {
+                search.best = Some((length, search.outer_index, search.hole_index));
+            }
+            next_candidate = true;
+        }
+    } else {
+        let length = (a - v).norm();
+        if a != v && search.best.is_none_or(|best| length < best.0) {
+            search.visibility = Some((0, 0, length));
+        } else {
+            next_candidate = true;
         }
     }
-    split_slit_trace_vertices(&mut builder, &slit_steps, &mut trace_vertices)?;
-    apply_slit_trace_lineage(&mut builder, &slit_steps, &mut trace_vertices)?;
-    while !builder.dirty_edges.is_empty() {
-        builder.legalize_one()?;
+    if next_candidate {
+        search.visibility = None;
+        if search.testing_seed {
+            search.testing_seed = false;
+            search.outer_index = if search.best.is_some() {
+                search.polygon.len()
+            } else {
+                0
+            };
+            search.hole_index = 0;
+        } else {
+            advance_bridge_pair(search, hole_len);
+        }
     }
-    verify_topology_mesh(&builder)?;
-    let quality = builder.quality();
-    Ok(TriMesh {
-        geometry_revision: plan.geometry_revision,
-        mesh_revision,
-        vertices: builder.vertices,
-        triangles: builder.triangles,
-        boundary_edges: builder.boundary_edges,
-        quality,
-    })
+    Ok(())
+}
+
+fn verify_topology_triangle(
+    builder: &MeshBuilder,
+    index: usize,
+    quality: &mut MeshQuality,
+) -> Result<(), MeshError> {
+    let triangle = builder.triangles[index];
+    let [a, b, c] = builder.triangle_points(triangle);
+    if orient2d(a, b, c) != PredicateSign::Positive {
+        return Err(MeshError::Topology("mesh contains an inverted triangle"));
+    }
+    if builder.region_at((a + b + c) / 3.0) != Some(triangle.region) {
+        return Err(MeshError::Topology(
+            "triangle has the wrong topology face region",
+        ));
+    }
+    for opposite in 0..3 {
+        let edge = edge_key(
+            triangle.vertices[(opposite + 1) % 3],
+            triangle.vertices[(opposite + 2) % 3],
+        );
+        let sides = builder
+            .adjacency
+            .get(&edge)
+            .ok_or(MeshError::Topology("missing adjacency"))?;
+        let expected = builder
+            .boundary_edges
+            .iter()
+            .find(|boundary| edge_key(boundary.vertices[0], boundary.vertices[1]) == edge)
+            .map_or(2, |boundary| boundary_adjacency(boundary.label));
+        if sides.len() != expected || !sides.contains(&(index, triangle.vertices[opposite])) {
+            return Err(MeshError::Topology("mesh has a crack or non-manifold edge"));
+        }
+    }
+    let triangle_quality = builder.triangle_quality(triangle);
+    let twice_area = (b - a).cross(c - a).abs();
+    if twice_area
+        <= triangle_quality.maximum_edge_length * triangle_quality.maximum_edge_length * 1.0e-10
+    {
+        return Err(MeshError::Topology(
+            "mesh contains a scale-degenerate triangle near a constraint",
+        ));
+    }
+    quality.minimum_angle_degrees = quality
+        .minimum_angle_degrees
+        .min(triangle_quality.minimum_angle_degrees);
+    quality.maximum_edge_length = quality
+        .maximum_edge_length
+        .max(triangle_quality.maximum_edge_length);
+    Ok(())
+}
+
+fn verify_topology_boundary(builder: &MeshBuilder, index: usize) -> Result<(), MeshError> {
+    let boundary = builder.boundary_edges[index];
+    let expected = boundary_adjacency(boundary.label);
+    if builder
+        .adjacency
+        .get(&edge_key(boundary.vertices[0], boundary.vertices[1]))
+        .is_none_or(|sides| sides.len() != expected)
+    {
+        return Err(MeshError::Topology(
+            "constrained edge has incorrect adjacency",
+        ));
+    }
+    Ok(())
 }
 
 fn split_slit_runs(steps: &[PlannedFaceStep]) -> Result<Vec<Vec<PlannedFaceStep>>, MeshError> {
@@ -858,224 +1371,6 @@ fn expand_step_chain(
     })
 }
 
-fn triangulate_topology_domains(builder: &mut MeshBuilder) -> Result<(), MeshError> {
-    for domain in builder.domains.clone() {
-        let mut polygon = domain.outer;
-        for hole in domain.holes {
-            bridge_topology_hole(builder, &mut polygon, &hole, domain.region)?;
-        }
-        clip_topology_polygon(builder, polygon, domain.region)?;
-    }
-
-    let mut legalization_work = 0usize;
-    loop {
-        while !builder.dirty_edges.is_empty() {
-            legalization_work += 1;
-            if legalization_work > builder.options.max_triangles.saturating_mul(128) {
-                return Err(MeshError::Topology("edge legalization work limit reached"));
-            }
-            builder.legalize_one()?;
-        }
-        if !builder.bad_triangles.is_empty()
-            && builder.stats.refinement_insertions >= builder.options.max_refinement_steps
-        {
-            return Err(MeshError::RefinementLimit(builder.quality()));
-        }
-        if builder.refine_once()? {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn bridge_topology_hole(
-    builder: &MeshBuilder,
-    polygon: &mut Vec<usize>,
-    hole: &[usize],
-    region: RegionId,
-) -> Result<(), MeshError> {
-    let mut best = None::<(f64, usize, usize)>;
-    for (outer_index, outer) in polygon.iter().copied().enumerate() {
-        for (hole_index, inner) in hole.iter().copied().enumerate() {
-            let a = builder.point(outer);
-            let b = builder.point(inner);
-            if a == b {
-                continue;
-            }
-            let crosses_boundary = builder.boundary_edges.iter().any(|edge| {
-                builder.boundary_relevant_to_region(edge.label, region)
-                    && !edge.vertices.contains(&outer)
-                    && !edge.vertices.contains(&inner)
-                    && segment_relation(
-                        a,
-                        b,
-                        builder.point(edge.vertices[0]),
-                        builder.point(edge.vertices[1]),
-                    ) != SegmentRelation::Disjoint
-            });
-            if crosses_boundary {
-                continue;
-            }
-            let crosses_polygon = polygon
-                .iter()
-                .copied()
-                .zip(polygon.iter().copied().cycle().skip(1))
-                .take(polygon.len())
-                .any(|(x, y)| {
-                    ![x, y].contains(&outer)
-                        && ![x, y].contains(&inner)
-                        && segment_relation(a, b, builder.point(x), builder.point(y))
-                            == SegmentRelation::ProperIntersection
-                });
-            if crosses_polygon || builder.region_at(a.lerp(b, 0.5)) != Some(region) {
-                continue;
-            }
-            let length = (a - b).norm();
-            if best.is_none_or(|candidate| length < candidate.0) {
-                best = Some((length, outer_index, hole_index));
-            }
-        }
-    }
-    let (_, outer_index, hole_index) =
-        best.ok_or(MeshError::Topology("no visible bridge to topology cycle"))?;
-    let mut splice = Vec::with_capacity(hole.len() + 2);
-    for offset in 0..hole.len() {
-        splice.push(hole[(hole_index + offset) % hole.len()]);
-    }
-    splice.push(hole[hole_index]);
-    splice.push(polygon[outer_index]);
-    polygon.splice(outer_index + 1..outer_index + 1, splice);
-    Ok(())
-}
-
-fn clip_topology_polygon(
-    builder: &mut MeshBuilder,
-    mut polygon: Vec<usize>,
-    region: RegionId,
-) -> Result<(), MeshError> {
-    let mut degenerate_pass = false;
-    while polygon.len() > 3 {
-        let mut removed = false;
-        for index in 0..polygon.len() {
-            let previous = (index + polygon.len() - 1) % polygon.len();
-            let next = (index + 1) % polygon.len();
-            let [a, v, c] = [polygon[previous], polygon[index], polygon[next]];
-            let sign = orient2d(builder.point(a), builder.point(v), builder.point(c));
-            if degenerate_pass {
-                if a == v || v == c || a == c || sign == PredicateSign::Zero {
-                    polygon.remove(index);
-                    removed = true;
-                    break;
-                }
-                continue;
-            }
-            if a == v || v == c || a == c || sign != PredicateSign::Positive {
-                continue;
-            }
-            let diagonal_blocked = polygon
-                .iter()
-                .copied()
-                .zip(polygon.iter().copied().cycle().skip(1))
-                .take(polygon.len())
-                .any(|(x, y)| {
-                    x != a
-                        && x != c
-                        && y != a
-                        && y != c
-                        && segment_relation(
-                            builder.point(a),
-                            builder.point(c),
-                            builder.point(x),
-                            builder.point(y),
-                        ) != SegmentRelation::Disjoint
-                });
-            if diagonal_blocked {
-                continue;
-            }
-            let contains_vertex =
-                polygon
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .any(|(other_index, other)| {
-                        ![previous, index, next].contains(&other_index)
-                            && ![a, v, c].contains(&other)
-                            && point_in_triangle(
-                                builder.point(other),
-                                [builder.point(a), builder.point(v), builder.point(c)],
-                            ) != PolygonLocation::Outside
-                    });
-            if contains_vertex {
-                continue;
-            }
-            builder.push_triangle(MeshTriangle {
-                vertices: [a, v, c],
-                region,
-            })?;
-            polygon.remove(index);
-            removed = true;
-            degenerate_pass = false;
-            break;
-        }
-        if !removed {
-            if degenerate_pass {
-                return Err(MeshError::Topology("topology ear clipping stalled"));
-            }
-            degenerate_pass = true;
-        }
-    }
-    if polygon.len() == 3 {
-        builder
-            .push_triangle(builder.ccw_triangle([polygon[0], polygon[1], polygon[2]], region)?)?;
-    }
-    Ok(())
-}
-
-fn verify_topology_mesh(builder: &MeshBuilder) -> Result<(), MeshError> {
-    for (index, triangle) in builder.triangles.iter().copied().enumerate() {
-        let [a, b, c] = builder.triangle_points(triangle);
-        if orient2d(a, b, c) != PredicateSign::Positive {
-            return Err(MeshError::Topology("mesh contains an inverted triangle"));
-        }
-        if builder.region_at((a + b + c) / 3.0) != Some(triangle.region) {
-            return Err(MeshError::Topology(
-                "triangle has the wrong topology face region",
-            ));
-        }
-        for opposite in 0..3 {
-            let edge = edge_key(
-                triangle.vertices[(opposite + 1) % 3],
-                triangle.vertices[(opposite + 2) % 3],
-            );
-            let sides = builder
-                .adjacency
-                .get(&edge)
-                .ok_or(MeshError::Topology("missing adjacency"))?;
-            let expected = builder
-                .boundary_edges
-                .iter()
-                .find(|boundary| edge_key(boundary.vertices[0], boundary.vertices[1]) == edge)
-                .map_or(2, |boundary| boundary_adjacency(boundary.label));
-            if sides.len() != expected || !sides.contains(&(index, triangle.vertices[opposite])) {
-                return Err(MeshError::Topology("mesh has a crack or non-manifold edge"));
-            }
-        }
-    }
-    for boundary in &builder.boundary_edges {
-        let expected = boundary_adjacency(boundary.label);
-        if builder
-            .adjacency
-            .get(&edge_key(boundary.vertices[0], boundary.vertices[1]))
-            .is_none_or(|sides| sides.len() != expected)
-        {
-            return Err(MeshError::Topology(
-                "constrained edge has incorrect adjacency",
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PlannedBoundarySource {
     Outer(crate::OuterSide),
@@ -1649,6 +1944,15 @@ mod tests {
         mesh_topology_plan(&plan, 77, mesh_options()).unwrap()
     }
 
+    fn run_topology_job(plan: TopologyMeshPlan, budget: usize) -> TriMesh {
+        let mut job = TopologyMeshingJob::new(plan, 77, mesh_options());
+        loop {
+            if let Some(result) = job.advance(budget) {
+                return result.unwrap();
+            }
+        }
+    }
+
     fn mesh_area(mesh: &TriMesh) -> f64 {
         mesh.triangles
             .iter()
@@ -1678,6 +1982,22 @@ mod tests {
                 .iter()
                 .all(|edge| matches!(edge.label, BoundaryLabel::Outer(_)))
         );
+    }
+
+    #[test]
+    fn topology_meshing_is_deterministic_across_work_slice_sizes() {
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![square(SpanBehavior::Transmitting)],
+                ..TopologyGeometry::default()
+            },
+            15,
+        )
+        .unwrap();
+        let plan = TopologyMeshPlan::new(&topology, &assign_each_face(&topology)).unwrap();
+        let one_unit = run_topology_job(plan.clone(), 1);
+        let large_slice = run_topology_job(plan, 16_384);
+        assert_eq!(one_unit, large_slice);
     }
 
     #[test]

@@ -119,9 +119,13 @@ The replacement topology kernel removes those stored object roles. It stores one
 open/closed curve type, optional shared topology vertices at spline breakpoints,
 and a behavior on each stable span: transmitting or separated, with coupling
 orthogonal to the two side conditions. A bounded compiler derives directed
-half-edges and planar faces. Active-face assignments carry stable regions;
-unassigned faces represent holes or the exterior. Hole, material-region, divider,
-and baffle choices remain editor creation presets rather than geometry classes.
+half-edges and planar faces. `TopologyScene` keeps materials and stable regions
+beside explicit authored face dispositions. Each disposition uses an oriented
+outer-side or curve-span anchor to recover its snapshot-local `FaceId`; it assigns
+either one `RegionId` or deliberate exclusion. A missing disposition is an invalid
+draft rather than an implicit hole. Compiled face IDs never enter persistence or
+history. Hole, material-region, divider, and baffle choices are initial curve
+configurations rather than geometry classes.
 
 At an arrangement vertex, angular sectors determine finite-element trace identity.
 Crossing a transmitting ray joins the adjacent sectors; crossing a separated ray
@@ -627,7 +631,10 @@ fan pass crosses transmitting edges, stops at separated edges, and duplicates th
 junction vertex once per compiled sector trace. An
 unchanged plan reuses its mesh, and changing only a boundary law does not remesh.
 Coordinate edits use a typed full rebuild until the patch repair receives unified
-curve evaluation and junction-sector rewiring.
+curve evaluation and junction-sector rewiring. `TopologyMeshingJob` runs the full
+baseline cooperatively: bridge search, ear clipping, legalization, refinement,
+separated-curve recovery, and verification are explicit phases, and changing the
+caller work slice does not change the published mesh.
 
 The enriched-quadratic CPU operator has a topology-plan assembly entry point.
 Materials and local frames come from the region library keyed by each triangle's
