@@ -669,8 +669,14 @@ interior edges, evaluates separated left/right laws, and pairs thin-gap traces b
 stable curve/span plus parameter range. Gradient recovery remains keyed by mesh
 vertex and `RegionId`, so a shared multi-region junction cannot average fluxes from
 different material sectors. The resulting size field uses the triangle's explicit
-region for interpolation. Mesh adaptation itself still needs topology-aware curve
-repair before the application can run this path end to end.
+region for interpolation. Fixed-geometry mesh adaptation also consumes an owned
+topology plan. It validates the existing mesh against the plan before changing it,
+pins every sampled endpoint and junction-sector trace, and restricts boundary
+changes to AMR-created vertices inside one sampled plan segment. Transmitting
+constraints remain shared, while two active sides of a separated constraint split
+and collapse atomically by curve/span/parameter identity. Coordinate-edit repair
+still needs topology-aware curve evaluation and junction-sector rewiring before the
+application can use the complete topology path end to end.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a
@@ -992,6 +998,15 @@ interval. Malformed pair topology is an error, while a locally unsafe collapse i
 skipped. Capacity or topology-change exhaustion publishes a valid partial result
 with an explicit limit report; malformed input and total work exhaustion discard
 the candidate.
+
+For a unified topology plan, each sampled `PlannedBoundaryEdge` is the immutable
+geometric atom. Refinement linearly subdivides that atom and coarsening cannot cross
+one of its endpoints. `TraceVertexId` and AMR lineage remain separate: trace identity
+pins a face sector at a sampling point or junction, while lineage controls cooldown
+and preserved-element accounting. Preflight and final publication both verify exact
+plan-interval coverage, active region membership, endpoint trace identity,
+one-versus-two-element adjacency, and matching subdivisions for paired separated
+traces. A one-sided hole boundary has no artificial partner.
 
 Geometry revision identifies the accepted scene, while mesh revision identifies a
 particular discretization of it. Wave operators and linear/quadratic transfer maps

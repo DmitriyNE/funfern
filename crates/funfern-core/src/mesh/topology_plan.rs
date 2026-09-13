@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     BoundaryEdge, BoundaryLabel, BoundaryPoint, MeshBuilder, MeshError, MeshTriangle,
-    OpenConstraintKind, PolygonLocation, SegmentRelation, TriMesh, TriangulationDomain, edge_key,
-    point_in_triangle, segment_relation, valid_options,
+    OpenConstraintKind, PolygonLocation, SegmentRelation, TriMesh, TriangulationDomain,
+    boundary_adjacency, edge_key, point_in_triangle, segment_relation, valid_options,
 };
 use crate::{
     CompiledBoundaryStep, CompiledEdge, CompiledEdgeSource, CurveId, CurveSpanId, FaceId, Point2,
@@ -395,6 +395,15 @@ fn cut_free_slit(
             },
             separated: true,
         };
+        for endpoint in 0..2 {
+            let vertex = edge.vertices[endpoint];
+            if builder.vertices[vertex].trace.is_none() {
+                builder.vertices[vertex].boundary = Some(BoundaryPoint {
+                    label: edge.label,
+                    parameter: edge.parameters[endpoint],
+                });
+            }
+        }
     }
     builder.boundary_regions.retain(|(label, _)| {
         !matches!(label, BoundaryLabel::InternalBoundary { id, .. } if *id == legacy_id)
@@ -757,7 +766,7 @@ fn rewire_attached_slit_endpoint(
     Ok(())
 }
 
-fn topology_label(boundary: PlannedBoundaryEdge) -> BoundaryLabel {
+pub(super) fn topology_label(boundary: PlannedBoundaryEdge) -> BoundaryLabel {
     match boundary.source {
         PlannedBoundarySource::Outer(side) => BoundaryLabel::Outer(side),
         PlannedBoundarySource::Curve { curve, span, side } => {
@@ -1065,22 +1074,6 @@ fn verify_topology_mesh(builder: &MeshBuilder) -> Result<(), MeshError> {
         }
     }
     Ok(())
-}
-
-fn boundary_adjacency(label: BoundaryLabel) -> usize {
-    match label {
-        BoundaryLabel::Curve {
-            separated: false, ..
-        } => 2,
-        BoundaryLabel::Curve {
-            separated: true, ..
-        }
-        | BoundaryLabel::Outer(_)
-        | BoundaryLabel::Obstacle(_)
-        | BoundaryLabel::Wall { .. }
-        | BoundaryLabel::InternalBoundary { .. } => 1,
-        BoundaryLabel::MaterialInterface(_) | BoundaryLabel::OpenMaterialInterface(_) => 2,
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

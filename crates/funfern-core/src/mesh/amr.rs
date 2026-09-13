@@ -165,10 +165,307 @@ struct BoundaryCollapsePlan {
     merged: Option<BoundaryEdge>,
 }
 
+enum AdaptationInput {
+    Scene(Scene),
+    Topology(TopologyAdaptationContract),
+}
+
+#[derive(Clone)]
+struct TopologyBoundaryAtom {
+    boundary: PlannedBoundaryEdge,
+    label: BoundaryLabel,
+    regions: BTreeSet<RegionId>,
+}
+
+struct TopologyAdaptationContract {
+    plan: TopologyMeshPlan,
+    active_regions: BTreeSet<RegionId>,
+    trace_points: BTreeMap<crate::TraceVertexId, Point2>,
+    atoms: Vec<TopologyBoundaryAtom>,
+    seen_traces: BTreeSet<crate::TraceVertexId>,
+    seen_regions: BTreeSet<RegionId>,
+    coverage: Vec<Vec<[f64; 2]>>,
+}
+
+impl TopologyAdaptationContract {
+    fn new(plan: &TopologyMeshPlan) -> Self {
+        let active_regions = plan
+            .domains
+            .iter()
+            .map(|domain| domain.region)
+            .collect::<BTreeSet<_>>();
+        let trace_points = plan
+            .vertices
+            .iter()
+            .map(|vertex| (vertex.id, vertex.point))
+            .collect::<BTreeMap<_, _>>();
+        let mut atoms = vec![];
+        for boundary in plan.boundaries.iter().copied().filter(|boundary| {
+            !matches!(
+                boundary,
+                PlannedBoundaryEdge {
+                    source: PlannedBoundarySource::Curve {
+                        side: CurveTraceSide::Right,
+                        ..
+                    },
+                    behavior: Some(crate::SpanBehavior::Transmitting),
+                    ..
+                }
+            )
+        }) {
+            let label = topology_label(boundary);
+            let mut regions = BTreeSet::from([boundary.region]);
+            if matches!(boundary.behavior, Some(crate::SpanBehavior::Transmitting)) {
+                for candidate in &plan.boundaries {
+                    if same_physical_plan_atom(boundary, *candidate) {
+                        regions.insert(candidate.region);
+                    }
+                }
+            }
+            atoms.push(TopologyBoundaryAtom {
+                boundary,
+                label,
+                regions,
+            });
+        }
+        let coverage = vec![vec![]; atoms.len()];
+        Self {
+            plan: plan.clone(),
+            active_regions,
+            trace_points,
+            atoms,
+            seen_traces: BTreeSet::new(),
+            seen_regions: BTreeSet::new(),
+            coverage,
+        }
+    }
+
+    fn reset_coverage(&mut self) {
+        for intervals in &mut self.coverage {
+            intervals.clear();
+        }
+    }
+}
+
+fn same_physical_plan_atom(a: PlannedBoundaryEdge, b: PlannedBoundaryEdge) -> bool {
+    match (a.source, b.source) {
+        (
+            PlannedBoundarySource::Curve {
+                curve: a_curve,
+                span: a_span,
+                ..
+            },
+            PlannedBoundarySource::Curve {
+                curve: b_curve,
+                span: b_span,
+                ..
+            },
+        ) => {
+            a_curve == b_curve
+                && a_span == b_span
+                && a.parameter[0].min(a.parameter[1]) == b.parameter[0].min(b.parameter[1])
+                && a.parameter[0].max(a.parameter[1]) == b.parameter[0].max(b.parameter[1])
+        }
+        (PlannedBoundarySource::Outer(a_side), PlannedBoundarySource::Outer(b_side)) => {
+            a_side == b_side
+                && a.parameter[0].min(a.parameter[1]) == b.parameter[0].min(b.parameter[1])
+                && a.parameter[0].max(a.parameter[1]) == b.parameter[0].max(b.parameter[1])
+        }
+        _ => false,
+    }
+}
+
+fn topology_point_on_atom(atom: PlannedBoundaryEdge, parameter: f64) -> Option<Point2> {
+    let denominator = atom.parameter[1] - atom.parameter[0];
+    if denominator == 0.0 {
+        return None;
+    }
+    let fraction = (parameter - atom.parameter[0]) / denominator;
+    (-1.0e-12..=1.0 + 1.0e-12)
+        .contains(&fraction)
+        .then(|| atom.points[0].lerp(atom.points[1], fraction.clamp(0.0, 1.0)))
+}
+
+fn parameter_close(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 32.0 * f64::EPSILON * (1.0 + a.abs().max(b.abs()))
+}
+
+fn lower_parameter_vertex(vertices: [usize; 2], parameters: [f64; 2]) -> usize {
+    if parameters[0] <= parameters[1] {
+        vertices[0]
+    } else {
+        vertices[1]
+    }
+}
+
+fn topology_atom_index(contract: &TopologyAdaptationContract, edge: BoundaryEdge) -> Option<usize> {
+    let midpoint = 0.5 * (edge.parameters[0] + edge.parameters[1]);
+    let mut matches = contract
+        .atoms
+        .iter()
+        .enumerate()
+        .filter(|(_, atom)| {
+            let [a, b] = atom.boundary.parameter;
+            atom.label == edge.label
+                && midpoint > a.min(b)
+                && midpoint < a.max(b)
+                && edge.parameters[0] >= a.min(b)
+                && edge.parameters[0] <= a.max(b)
+                && edge.parameters[1] >= a.min(b)
+                && edge.parameters[1] <= a.max(b)
+                && (boundary_adjacency(edge.label) == 2
+                    || (edge.parameters[1] - edge.parameters[0]).signum() == (b - a).signum())
+        })
+        .map(|(index, _)| index);
+    let found = matches.next()?;
+    matches.next().is_none().then_some(found)
+}
+
+fn record_topology_boundary(
+    builder: &MeshBuilder,
+    contract: &mut TopologyAdaptationContract,
+    edge: BoundaryEdge,
+) -> Result<(), MeshAdaptationError> {
+    let Some(atom_index) = topology_atom_index(contract, edge) else {
+        return Err(MeshAdaptationError::InvalidSource(
+            "constrained edge does not belong to one topology interval",
+        ));
+    };
+    let atom = &contract.atoms[atom_index];
+    let adjacency = builder
+        .adjacency
+        .get(&edge_key(edge.vertices[0], edge.vertices[1]))
+        .ok_or(MeshAdaptationError::InvalidSource(
+            "constrained edge has no adjacent triangle",
+        ))?;
+    if adjacency.len() != boundary_adjacency(edge.label) {
+        return Err(MeshAdaptationError::InvalidSource(
+            "constrained edge has incorrect topology adjacency",
+        ));
+    }
+    let regions = adjacency
+        .iter()
+        .map(|(triangle, _)| builder.triangles[*triangle].region)
+        .collect::<BTreeSet<_>>();
+    if regions != atom.regions {
+        return Err(MeshAdaptationError::InvalidSource(
+            "constrained edge has incorrect incident regions",
+        ));
+    }
+    let tolerance = 1.0e-10
+        * contract
+            .plan
+            .domain
+            .width()
+            .max(contract.plan.domain.height());
+    for endpoint in 0..2 {
+        let parameter = edge.parameters[endpoint];
+        let expected = topology_point_on_atom(atom.boundary, parameter).ok_or(
+            MeshAdaptationError::InvalidSource("invalid topology interval geometry"),
+        )?;
+        let vertex = builder.vertices[edge.vertices[endpoint]];
+        if (vertex.point - expected).norm() > tolerance {
+            return Err(MeshAdaptationError::InvalidSource(
+                "constrained edge departed from its topology interval",
+            ));
+        }
+        let planned_endpoint = atom
+            .boundary
+            .parameter
+            .iter()
+            .position(|planned| parameter_close(parameter, *planned));
+        if let Some(planned_endpoint) = planned_endpoint {
+            if vertex.trace != Some(atom.boundary.traces[planned_endpoint]) {
+                return Err(MeshAdaptationError::InvalidSource(
+                    "topology interval endpoint lost its trace identity",
+                ));
+            }
+        } else if vertex.trace.is_some()
+            || vertex.boundary
+                != Some(BoundaryPoint {
+                    label: edge.label,
+                    parameter,
+                })
+        {
+            return Err(MeshAdaptationError::InvalidSource(
+                "adaptive boundary vertex has invalid metadata",
+            ));
+        }
+    }
+    contract.coverage[atom_index].push([
+        edge.parameters[0].min(edge.parameters[1]),
+        edge.parameters[0].max(edge.parameters[1]),
+    ]);
+    Ok(())
+}
+
+fn validate_atom_coverage(
+    atom: &TopologyBoundaryAtom,
+    intervals: &mut [[f64; 2]],
+) -> Result<(), MeshAdaptationError> {
+    intervals.sort_by(|left, right| {
+        left[0]
+            .total_cmp(&right[0])
+            .then(left[1].total_cmp(&right[1]))
+    });
+    let start = atom.boundary.parameter[0].min(atom.boundary.parameter[1]);
+    let end = atom.boundary.parameter[0].max(atom.boundary.parameter[1]);
+    let mut cursor = start;
+    for interval in intervals.iter() {
+        if !parameter_close(interval[0], cursor) || interval[1] <= interval[0] {
+            return Err(MeshAdaptationError::InvalidSource(
+                "topology interval coverage has a gap or overlap",
+            ));
+        }
+        cursor = interval[1];
+    }
+    if intervals.is_empty() || !parameter_close(cursor, end) {
+        return Err(MeshAdaptationError::InvalidSource(
+            "topology interval coverage is incomplete",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_separated_coverage(
+    contract: &TopologyAdaptationContract,
+) -> Result<(), MeshAdaptationError> {
+    for (index, atom) in contract.atoms.iter().enumerate() {
+        let BoundaryLabel::Curve {
+            curve,
+            span,
+            side: CurveTraceSide::Left,
+            separated: true,
+        } = atom.label
+        else {
+            continue;
+        };
+        let opposite = contract.atoms.iter().position(|candidate| {
+            candidate.label
+                == BoundaryLabel::Curve {
+                    curve,
+                    span,
+                    side: CurveTraceSide::Right,
+                    separated: true,
+                }
+                && same_physical_plan_atom(atom.boundary, candidate.boundary)
+        });
+        if let Some(opposite) = opposite
+            && contract.coverage[index] != contract.coverage[opposite]
+        {
+            return Err(MeshAdaptationError::InvalidSource(
+                "separated topology traces have different subdivisions",
+            ));
+        }
+    }
+    Ok(())
+}
+
 enum AdaptationPhase {
     ImportVertices(usize),
     ImportTriangles(usize),
     ImportBoundary(usize),
+    ValidateImportCoverage(usize),
     FindCollapse(usize),
     ApplyCollapse(Option<CollapseCandidate>),
     LegalizeAfterCollapse,
@@ -180,6 +477,7 @@ enum AdaptationPhase {
     LegalizeAfterRefine,
     VerifyTriangles(usize, MeshQuality),
     VerifyBoundary(usize, MeshQuality),
+    VerifyTopologyCoverage(usize, MeshQuality),
     CompactVertices(usize),
     CompactTriangles(usize),
     CompactBoundary(usize),
@@ -188,7 +486,7 @@ enum AdaptationPhase {
 
 pub struct MeshAdaptationJob {
     source: Arc<TriMesh>,
-    scene: Scene,
+    input: AdaptationInput,
     target_mesh_revision: u64,
     field: Arc<dyn MeshSizeField>,
     options: MeshAdaptationOptions,
@@ -218,6 +516,48 @@ impl MeshAdaptationJob {
         options: MeshAdaptationOptions,
     ) -> Self {
         let domain = scene.domain;
+        Self::from_input(
+            source,
+            AdaptationInput::Scene(scene),
+            domain,
+            state,
+            target_mesh_revision,
+            field,
+            options,
+        )
+    }
+
+    /// Starts a fixed-geometry adaptation transaction from a compiled topology
+    /// plan. The plan is cloned so every yielded slice observes one immutable
+    /// boundary and trace contract.
+    pub fn new_topology(
+        source: Arc<TriMesh>,
+        plan: &TopologyMeshPlan,
+        state: MeshAdaptationState,
+        target_mesh_revision: u64,
+        field: Arc<dyn MeshSizeField>,
+        options: MeshAdaptationOptions,
+    ) -> Self {
+        Self::from_input(
+            source,
+            AdaptationInput::Topology(TopologyAdaptationContract::new(plan)),
+            plan.domain,
+            state,
+            target_mesh_revision,
+            field,
+            options,
+        )
+    }
+
+    fn from_input(
+        source: Arc<TriMesh>,
+        input: AdaptationInput,
+        domain: crate::DomainRect,
+        state: MeshAdaptationState,
+        target_mesh_revision: u64,
+        field: Arc<dyn MeshSizeField>,
+        options: MeshAdaptationOptions,
+    ) -> Self {
         let next_generation = state.generation.saturating_add(1);
         let mut report = MeshAdaptationReport {
             generation: next_generation,
@@ -231,7 +571,7 @@ impl MeshAdaptationJob {
         }
         Self {
             source,
-            scene,
+            input,
             target_mesh_revision,
             field,
             options,
@@ -256,7 +596,8 @@ impl MeshAdaptationJob {
         match self.phase {
             AdaptationPhase::ImportVertices(_)
             | AdaptationPhase::ImportTriangles(_)
-            | AdaptationPhase::ImportBoundary(_) => "Importing adaptive mesh",
+            | AdaptationPhase::ImportBoundary(_)
+            | AdaptationPhase::ValidateImportCoverage(_) => "Importing adaptive mesh",
             AdaptationPhase::FindCollapse(_) | AdaptationPhase::ApplyCollapse(_) => {
                 "Coarsening adaptive mesh"
             }
@@ -266,9 +607,9 @@ impl MeshAdaptationJob {
             AdaptationPhase::FindRefine { .. } | AdaptationPhase::ApplyRefine(_) => {
                 "Refining adaptive mesh"
             }
-            AdaptationPhase::VerifyTriangles(_, _) | AdaptationPhase::VerifyBoundary(_, _) => {
-                "Checking adaptive mesh"
-            }
+            AdaptationPhase::VerifyTriangles(_, _)
+            | AdaptationPhase::VerifyBoundary(_, _)
+            | AdaptationPhase::VerifyTopologyCoverage(_, _) => "Checking adaptive mesh",
             AdaptationPhase::CompactVertices(_)
             | AdaptationPhase::CompactTriangles(_)
             | AdaptationPhase::CompactBoundary(_) => "Publishing adaptive mesh",
@@ -314,6 +655,9 @@ impl MeshAdaptationJob {
             AdaptationPhase::ImportVertices(index) => self.import_vertex(index)?,
             AdaptationPhase::ImportTriangles(index) => self.import_triangle(index)?,
             AdaptationPhase::ImportBoundary(index) => self.import_boundary(index)?,
+            AdaptationPhase::ValidateImportCoverage(index) => {
+                self.validate_topology_coverage(index, None)?;
+            }
             AdaptationPhase::FindCollapse(index) => self.find_collapse(index)?,
             AdaptationPhase::ApplyCollapse(candidate) => self.apply_collapse(candidate)?,
             AdaptationPhase::LegalizeAfterCollapse => {
@@ -342,6 +686,9 @@ impl MeshAdaptationJob {
             }
             AdaptationPhase::VerifyBoundary(index, quality) => {
                 self.verify_boundary(index, quality)?;
+            }
+            AdaptationPhase::VerifyTopologyCoverage(index, quality) => {
+                self.validate_topology_coverage(index, Some(quality))?;
             }
             AdaptationPhase::CompactVertices(index) => self.compact_vertex(index),
             AdaptationPhase::CompactTriangles(index) => self.compact_triangle(index),
@@ -376,10 +723,20 @@ impl MeshAdaptationJob {
             if self.source.vertices.is_empty() || self.source.triangles.is_empty() {
                 return Err(MeshAdaptationError::InvalidSource("empty mesh"));
             }
-            if !self.scene.structure_valid() {
-                return Err(MeshAdaptationError::InvalidSource(
-                    "invalid scene structure",
-                ));
+            match &self.input {
+                AdaptationInput::Scene(scene) if !scene.structure_valid() => {
+                    return Err(MeshAdaptationError::InvalidSource(
+                        "invalid scene structure",
+                    ));
+                }
+                AdaptationInput::Topology(contract)
+                    if contract.active_regions.is_empty() || contract.atoms.is_empty() =>
+                {
+                    return Err(MeshAdaptationError::InvalidSource(
+                        "empty topology adaptation contract",
+                    ));
+                }
+                _ => {}
             }
             if self.target_mesh_revision == self.source.mesh_revision {
                 return Err(MeshAdaptationError::InvalidMeshRevision);
@@ -403,25 +760,20 @@ impl MeshAdaptationJob {
             {
                 return Err(MeshAdaptationError::InvalidState);
             }
-            self.builder.loop_ids = self.scene.obstacles.iter().map(|loop_| loop_.id).collect();
-            self.builder.loop_roles = self
-                .scene
-                .obstacles
-                .iter()
-                .map(|loop_| loop_.role)
-                .collect();
-            self.builder.internal_boundary_ids = self
-                .scene
-                .internal_boundaries
-                .iter()
-                .map(|boundary| boundary.id)
-                .collect();
-            self.builder.internal_boundary_regions = self
-                .scene
-                .internal_boundaries
-                .iter()
-                .map(|boundary| boundary.region)
-                .collect();
+            if let AdaptationInput::Scene(scene) = &self.input {
+                self.builder.loop_ids = scene.obstacles.iter().map(|loop_| loop_.id).collect();
+                self.builder.loop_roles = scene.obstacles.iter().map(|loop_| loop_.role).collect();
+                self.builder.internal_boundary_ids = scene
+                    .internal_boundaries
+                    .iter()
+                    .map(|boundary| boundary.id)
+                    .collect();
+                self.builder.internal_boundary_regions = scene
+                    .internal_boundaries
+                    .iter()
+                    .map(|boundary| boundary.region)
+                    .collect();
+            }
         }
         if index == self.source.vertices.len() {
             self.phase = AdaptationPhase::ImportTriangles(0);
@@ -431,7 +783,17 @@ impl MeshAdaptationJob {
         if !vertex.point.finite() {
             return Err(MeshAdaptationError::InvalidSource("non-finite vertex"));
         }
-        self.builder.add_vertex(vertex.point, vertex.boundary)?;
+        let added = self.builder.add_vertex(vertex.point, vertex.boundary)?;
+        self.builder.vertices[added].trace = vertex.trace;
+        if let AdaptationInput::Topology(contract) = &mut self.input
+            && let Some(trace) = vertex.trace
+            && (contract.trace_points.get(&trace).copied() != Some(vertex.point)
+                || !contract.seen_traces.insert(trace))
+        {
+            return Err(MeshAdaptationError::InvalidSource(
+                "invalid topology trace vertex",
+            ));
+        }
         self.source_points_by_lineage
             .insert(self.state.vertex_lineage[index], vertex.point);
         self.phase = AdaptationPhase::ImportVertices(index + 1);
@@ -448,6 +810,14 @@ impl MeshAdaptationJob {
             return Ok(());
         }
         let triangle = self.source.triangles[index];
+        if let AdaptationInput::Topology(contract) = &mut self.input {
+            if !contract.active_regions.contains(&triangle.region) {
+                return Err(MeshAdaptationError::InvalidSource(
+                    "triangle uses an inactive topology region",
+                ));
+            }
+            contract.seen_regions.insert(triangle.region);
+        }
         if triangle
             .vertices
             .iter()
@@ -476,7 +846,11 @@ impl MeshAdaptationJob {
             self.builder.queued_edges.clear();
             self.builder.bad_triangles.clear();
             self.builder.scores.fill(None);
-            self.phase = AdaptationPhase::FindCollapse(0);
+            self.phase = if matches!(self.input, AdaptationInput::Topology(_)) {
+                AdaptationPhase::ValidateImportCoverage(0)
+            } else {
+                AdaptationPhase::FindCollapse(0)
+            };
             return Ok(());
         }
         let edge = self.source.boundary_edges[index];
@@ -492,8 +866,46 @@ impl MeshAdaptationJob {
                 "invalid constrained edge",
             ));
         }
+        if let AdaptationInput::Topology(contract) = &mut self.input {
+            record_topology_boundary(&self.builder, contract, edge)?;
+        }
         self.builder.add_boundary_edge(edge);
         self.phase = AdaptationPhase::ImportBoundary(index + 1);
+        Ok(())
+    }
+
+    fn validate_topology_coverage(
+        &mut self,
+        index: usize,
+        quality: Option<MeshQuality>,
+    ) -> Result<(), MeshAdaptationError> {
+        let AdaptationInput::Topology(contract) = &mut self.input else {
+            return Err(MeshAdaptationError::InvalidSource(
+                "topology coverage requested for a legacy scene",
+            ));
+        };
+        if index == contract.atoms.len() {
+            if contract.seen_traces.len() != contract.trace_points.len()
+                || contract.seen_regions != contract.active_regions
+            {
+                return Err(MeshAdaptationError::InvalidSource(
+                    "topology trace or region coverage is incomplete",
+                ));
+            }
+            validate_separated_coverage(contract)?;
+            contract.reset_coverage();
+            if let Some(quality) = quality {
+                self.begin_publish(quality);
+            } else {
+                self.phase = AdaptationPhase::FindCollapse(0);
+            }
+            return Ok(());
+        }
+        validate_atom_coverage(&contract.atoms[index], &mut contract.coverage[index])?;
+        self.phase = match quality {
+            Some(quality) => AdaptationPhase::VerifyTopologyCoverage(index + 1, quality),
+            None => AdaptationPhase::ValidateImportCoverage(index + 1),
+        };
         Ok(())
     }
 
@@ -553,7 +965,10 @@ impl MeshAdaptationJob {
             self.phase = AdaptationPhase::ApplyCollapse(self.collapse_candidates.pop());
             return Ok(());
         }
-        if self.builder.incident[index].is_empty() || !self.vertex_ready(index) {
+        if self.builder.incident[index].is_empty()
+            || self.builder.vertices[index].trace.is_some()
+            || !self.vertex_ready(index)
+        {
             self.phase = AdaptationPhase::FindCollapse(index + 1);
             return Ok(());
         }
@@ -581,6 +996,7 @@ impl MeshAdaptationJob {
             .filter(|neighbor| {
                 *neighbor != remove
                     && self.builder.vertices[*neighbor].boundary.is_none()
+                    && self.builder.vertices[*neighbor].trace.is_none()
                     && self.state.vertex_lineage[remove] > self.state.vertex_lineage[*neighbor]
             })
             .collect::<BTreeSet<_>>();
@@ -623,7 +1039,13 @@ impl MeshAdaptationJob {
             self.builder.boundary_edges[incoming].vertices[0],
             self.builder.boundary_edges[outgoing].vertices[1],
         ];
-        let keep = self.lower_parameter_vertex(endpoints);
+        let keep = lower_parameter_vertex(
+            endpoints,
+            [
+                self.builder.boundary_edges[incoming].parameters[0],
+                self.builder.boundary_edges[outgoing].parameters[1],
+            ],
+        );
         let length = (self.builder.point(endpoints[0]) - self.builder.point(endpoints[1])).norm();
         let region =
             self.builder.triangles[*self.builder.incident[remove].iter().next().unwrap()].region;
@@ -648,44 +1070,45 @@ impl MeshAdaptationJob {
         }))
     }
 
-    fn lower_parameter_vertex(&self, endpoints: [usize; 2]) -> usize {
-        endpoints
-            .into_iter()
-            .min_by(|left, right| {
-                self.builder.vertices[*left]
-                    .boundary
-                    .unwrap()
-                    .parameter
-                    .total_cmp(&self.builder.vertices[*right].boundary.unwrap().parameter)
-            })
-            .unwrap()
-    }
-
     fn canonical_boundary_face(&self, label: BoundaryLabel) -> bool {
-        !matches!(
-            label,
+        match label {
             BoundaryLabel::InternalBoundary {
                 side: InternalBoundarySide::Right,
                 ..
-            } | BoundaryLabel::Wall {
+            }
+            | BoundaryLabel::Wall {
                 side: BoundarySide::Interior,
                 ..
-            } | BoundaryLabel::Curve {
+            } => false,
+            BoundaryLabel::Curve {
                 side: CurveTraceSide::Right,
                 separated: true,
                 ..
-            }
-        )
+            } => self.paired_label(label).is_none(),
+            _ => true,
+        }
     }
 
     fn is_boundary_anchor(&self, point: BoundaryPoint) -> bool {
         let parameter = point.parameter;
+        if let AdaptationInput::Topology(contract) = &self.input {
+            return contract.atoms.iter().any(|atom| {
+                atom.label == point.label
+                    && atom
+                        .boundary
+                        .parameter
+                        .iter()
+                        .any(|endpoint| parameter_close(parameter, *endpoint))
+            });
+        }
+        let AdaptationInput::Scene(scene) = &self.input else {
+            unreachable!()
+        };
         match point.label {
             BoundaryLabel::Outer(_) => parameter == 0.0 || parameter == 1.0,
             BoundaryLabel::Obstacle(id)
             | BoundaryLabel::MaterialInterface(id)
-            | BoundaryLabel::Wall { loop_id: id, .. } => self
-                .scene
+            | BoundaryLabel::Wall { loop_id: id, .. } => scene
                 .obstacles
                 .iter()
                 .find(|obstacle| obstacle.id == id)
@@ -699,8 +1122,7 @@ impl MeshAdaptationJob {
                         parameter == breakpoint
                     })
                 }),
-            BoundaryLabel::InternalBoundary { id, .. } => self
-                .scene
+            BoundaryLabel::InternalBoundary { id, .. } => scene
                 .internal_boundaries
                 .iter()
                 .find(|boundary| boundary.id == id)
@@ -714,8 +1136,7 @@ impl MeshAdaptationJob {
                         parameter == breakpoint
                     })
                 }),
-            BoundaryLabel::OpenMaterialInterface(id) => self
-                .scene
+            BoundaryLabel::OpenMaterialInterface(id) => scene
                 .material_interfaces
                 .iter()
                 .find(|interface| interface.id == id)
@@ -814,7 +1235,11 @@ impl MeshAdaptationJob {
                     *index != remove
                         && vertex.boundary.is_some_and(|candidate| {
                             candidate.label == pair_label
-                                && vertex.point == self.builder.point(remove)
+                                && if matches!(self.input, AdaptationInput::Topology(_)) {
+                                    parameter_close(candidate.parameter, point.parameter)
+                                } else {
+                                    vertex.point == self.builder.point(remove)
+                                }
                         })
                 })
                 .map(|(index, _)| index)
@@ -837,7 +1262,7 @@ impl MeshAdaptationJob {
     }
 
     fn paired_label(&self, label: BoundaryLabel) -> Option<BoundaryLabel> {
-        match label {
+        let pair = match label {
             BoundaryLabel::InternalBoundary {
                 id,
                 side: InternalBoundarySide::Left,
@@ -852,8 +1277,29 @@ impl MeshAdaptationJob {
                 loop_id,
                 side: BoundarySide::Interior,
             }),
+            BoundaryLabel::Curve {
+                curve,
+                span,
+                side,
+                separated: true,
+            } => Some(BoundaryLabel::Curve {
+                curve,
+                span,
+                side: match side {
+                    CurveTraceSide::Left => CurveTraceSide::Right,
+                    CurveTraceSide::Right => CurveTraceSide::Left,
+                },
+                separated: true,
+            }),
             _ => None,
+        }?;
+        if matches!(label, BoundaryLabel::Curve { .. })
+            && let AdaptationInput::Topology(contract) = &self.input
+            && !contract.atoms.iter().any(|atom| atom.label == pair)
+        {
+            return None;
         }
+        Some(pair)
     }
 
     fn boundary_plan(
@@ -869,7 +1315,7 @@ impl MeshAdaptationJob {
         let before = self.builder.boundary_edges[incoming];
         let after = self.builder.boundary_edges[outgoing];
         let endpoints = [before.vertices[0], after.vertices[1]];
-        let keep = self.lower_parameter_vertex(endpoints);
+        let keep = lower_parameter_vertex(endpoints, [before.parameters[0], after.parameters[1]]);
         let merged = BoundaryEdge {
             vertices: endpoints,
             label,
@@ -901,14 +1347,19 @@ impl MeshAdaptationJob {
         if (d - a).norm() > target {
             return Ok(false);
         }
+        if let AdaptationInput::Topology(contract) = &self.input {
+            return Ok(topology_atom_index(contract, edge).is_some());
+        }
+        let AdaptationInput::Scene(scene) = &self.input else {
+            unreachable!()
+        };
         let [t0, t1] = edge.parameters;
         let hull = match edge.label {
             BoundaryLabel::Outer(_) => return Ok(true),
             BoundaryLabel::Obstacle(id)
             | BoundaryLabel::MaterialInterface(id)
             | BoundaryLabel::Wall { loop_id: id, .. } => {
-                let spline = &self
-                    .scene
+                let spline = &scene
                     .obstacles
                     .iter()
                     .find(|obstacle| obstacle.id == id)
@@ -922,8 +1373,7 @@ impl MeshAdaptationJob {
                 ]
             }
             BoundaryLabel::InternalBoundary { id, .. } => {
-                let spline = &self
-                    .scene
+                let spline = &scene
                     .internal_boundaries
                     .iter()
                     .find(|boundary| boundary.id == id)
@@ -937,8 +1387,7 @@ impl MeshAdaptationJob {
                 ]
             }
             BoundaryLabel::OpenMaterialInterface(id) => {
-                let interface = self
-                    .scene
+                let interface = scene
                     .material_interfaces
                     .iter()
                     .find(|interface| interface.id == id)
@@ -957,11 +1406,7 @@ impl MeshAdaptationJob {
                     spline.evaluate(t1),
                 ]
             }
-            BoundaryLabel::Curve { .. } => {
-                return Err(MeshAdaptationError::InvalidSource(
-                    "unified topology curve geometry is unavailable to legacy AMR",
-                ));
-            }
+            BoundaryLabel::Curve { .. } => unreachable!(),
         };
         Ok(hull.iter().all(|point| {
             crate::point_segment_distance(*point, a, d)
@@ -1019,8 +1464,24 @@ impl MeshAdaptationJob {
                     self.builder.vertices[*vertex]
                         .boundary
                         .map(|point| point.label),
-                    Some(BoundaryLabel::InternalBoundary { .. } | BoundaryLabel::Wall { .. })
-                )
+                    Some(
+                        BoundaryLabel::InternalBoundary { .. }
+                            | BoundaryLabel::Wall { .. }
+                            | BoundaryLabel::Curve {
+                                separated: true,
+                                ..
+                            }
+                    )
+                ) || self.builder.boundary_edges.iter().any(|edge| {
+                    edge.vertices.contains(vertex)
+                        && matches!(
+                            edge.label,
+                            BoundaryLabel::Curve {
+                                separated: true,
+                                ..
+                            }
+                        )
+                })
             });
             if quality.maximum_edge_length > target
                 || (!touches_trace
@@ -1157,6 +1618,9 @@ impl MeshAdaptationJob {
             self.report.remaining_oversized_triangles = self.count_oversized()?;
             self.report.converged =
                 self.report.remaining_oversized_triangles == 0 && self.report.limit.is_none();
+            if let AdaptationInput::Topology(contract) = &mut self.input {
+                contract.seen_regions.clear();
+            }
             self.phase = AdaptationPhase::VerifyTriangles(
                 0,
                 MeshQuality {
@@ -1198,6 +1662,17 @@ impl MeshAdaptationJob {
                     } => BoundaryLabel::Wall {
                         loop_id,
                         side: BoundarySide::Exterior,
+                    },
+                    BoundaryLabel::Curve {
+                        curve,
+                        span,
+                        side: CurveTraceSide::Right,
+                        separated: true,
+                    } => BoundaryLabel::Curve {
+                        curve,
+                        span,
+                        side: CurveTraceSide::Left,
+                        separated: true,
                     },
                     _ => boundary.label,
                 };
@@ -1265,8 +1740,14 @@ impl MeshAdaptationJob {
         label: BoundaryLabel,
     ) -> bool {
         candidate.label == label
-            && self.builder.point(candidate.vertices[0]) == self.builder.point(edge.vertices[1])
-            && self.builder.point(candidate.vertices[1]) == self.builder.point(edge.vertices[0])
+            && if matches!(self.input, AdaptationInput::Topology(_)) {
+                parameter_close(candidate.parameters[0], edge.parameters[1])
+                    && parameter_close(candidate.parameters[1], edge.parameters[0])
+            } else {
+                self.builder.point(candidate.vertices[0]) == self.builder.point(edge.vertices[1])
+                    && self.builder.point(candidate.vertices[1])
+                        == self.builder.point(edge.vertices[0])
+            }
     }
 
     fn split_boundary_face(
@@ -1309,9 +1790,26 @@ impl MeshAdaptationJob {
         label: BoundaryLabel,
         parameter: f64,
     ) -> Result<Point2, MeshAdaptationError> {
+        if let AdaptationInput::Topology(contract) = &self.input {
+            let mut atoms = contract.atoms.iter().filter(|atom| {
+                let [a, b] = atom.boundary.parameter;
+                atom.label == label && parameter > a.min(b) && parameter < a.max(b)
+            });
+            let atom = atoms.next().filter(|_| atoms.next().is_none()).ok_or(
+                MeshAdaptationError::InvalidSource(
+                    "boundary split does not belong to one topology interval",
+                ),
+            )?;
+            return topology_point_on_atom(atom.boundary, parameter).ok_or(
+                MeshAdaptationError::InvalidSource("invalid topology interval geometry"),
+            );
+        }
+        let AdaptationInput::Scene(scene) = &self.input else {
+            unreachable!()
+        };
         match label {
             BoundaryLabel::Outer(side) => {
-                let corners = self.scene.domain.corners();
+                let corners = scene.domain.corners();
                 let [a, b] = match side {
                     OuterSide::Bottom => [corners[0], corners[1]],
                     OuterSide::Right => [corners[1], corners[2]],
@@ -1322,22 +1820,19 @@ impl MeshAdaptationJob {
             }
             BoundaryLabel::Obstacle(id)
             | BoundaryLabel::MaterialInterface(id)
-            | BoundaryLabel::Wall { loop_id: id, .. } => self
-                .scene
+            | BoundaryLabel::Wall { loop_id: id, .. } => scene
                 .obstacles
                 .iter()
                 .find(|obstacle| obstacle.id == id)
                 .map(|obstacle| obstacle.spline.evaluate(parameter))
                 .ok_or(MeshAdaptationError::InvalidSource("unknown loop boundary")),
-            BoundaryLabel::InternalBoundary { id, .. } => self
-                .scene
+            BoundaryLabel::InternalBoundary { id, .. } => scene
                 .internal_boundaries
                 .iter()
                 .find(|boundary| boundary.id == id)
                 .map(|boundary| boundary.spline.evaluate(parameter))
                 .ok_or(MeshAdaptationError::InvalidSource("unknown open boundary")),
-            BoundaryLabel::OpenMaterialInterface(id) => self
-                .scene
+            BoundaryLabel::OpenMaterialInterface(id) => scene
                 .material_interfaces
                 .iter()
                 .find(|interface| interface.id == id)
@@ -1385,6 +1880,14 @@ impl MeshAdaptationJob {
             return Ok(());
         }
         let triangle = self.builder.triangles[index];
+        if let AdaptationInput::Topology(contract) = &mut self.input {
+            if !contract.active_regions.contains(&triangle.region) {
+                return Err(MeshAdaptationError::InvalidSource(
+                    "adaptation produced an inactive topology region",
+                ));
+            }
+            contract.seen_regions.insert(triangle.region);
+        }
         let points = self.builder.triangle_points(triangle);
         if orient2d(points[0], points[1], points[2]) != PredicateSign::Positive {
             return Err(MeshAdaptationError::InvalidSource(
@@ -1406,10 +1909,7 @@ impl MeshAdaptationJob {
                 .boundary_edges
                 .iter()
                 .find(|boundary| edge_key(boundary.vertices[0], boundary.vertices[1]) == edge)
-                .map_or(2, |boundary| match boundary.label {
-                    BoundaryLabel::MaterialInterface(_) => 2,
-                    _ => 1,
-                });
+                .map_or(2, |boundary| boundary_adjacency(boundary.label));
             if sides.len() != expected || !sides.contains(&(index, triangle.vertices[opposite])) {
                 return Err(MeshAdaptationError::InvalidSource(
                     "adaptation produced non-manifold adjacency",
@@ -1444,24 +1944,15 @@ impl MeshAdaptationJob {
         quality: MeshQuality,
     ) -> Result<(), MeshAdaptationError> {
         if index == self.builder.boundary_edges.len() {
-            self.output = Some(TriMesh {
-                geometry_revision: self.source.geometry_revision,
-                mesh_revision: self.target_mesh_revision,
-                vertices: vec![],
-                triangles: self.builder.triangles.clone(),
-                boundary_edges: self.builder.boundary_edges.clone(),
-                quality,
-            });
-            self.remap = Vec::with_capacity(self.builder.vertices.len());
-            self.phase = AdaptationPhase::CompactVertices(0);
+            if matches!(self.input, AdaptationInput::Topology(_)) {
+                self.phase = AdaptationPhase::VerifyTopologyCoverage(0, quality);
+            } else {
+                self.begin_publish(quality);
+            }
             return Ok(());
         }
         let boundary = self.builder.boundary_edges[index];
-        let expected = if matches!(boundary.label, BoundaryLabel::MaterialInterface(_)) {
-            2
-        } else {
-            1
-        };
+        let expected = boundary_adjacency(boundary.label);
         if self
             .builder
             .adjacency
@@ -1472,8 +1963,24 @@ impl MeshAdaptationJob {
                 "adaptation broke a constrained edge",
             ));
         }
+        if let AdaptationInput::Topology(contract) = &mut self.input {
+            record_topology_boundary(&self.builder, contract, boundary)?;
+        }
         self.phase = AdaptationPhase::VerifyBoundary(index + 1, quality);
         Ok(())
+    }
+
+    fn begin_publish(&mut self, quality: MeshQuality) {
+        self.output = Some(TriMesh {
+            geometry_revision: self.source.geometry_revision,
+            mesh_revision: self.target_mesh_revision,
+            vertices: vec![],
+            triangles: self.builder.triangles.clone(),
+            boundary_edges: self.builder.boundary_edges.clone(),
+            quality,
+        });
+        self.remap = Vec::with_capacity(self.builder.vertices.len());
+        self.phase = AdaptationPhase::CompactVertices(0);
     }
 
     fn compact_vertex(&mut self, index: usize) {
@@ -1533,8 +2040,12 @@ impl MeshAdaptationJob {
 mod tests {
     use super::*;
     use crate::{
-        DEFAULT_MATERIAL, InternalBoundary, InternalBoundaryLaw, Material, MaterialId, Obstacle,
-        OpenCubicSpline, PeriodicCubicSpline, QuadraticTransferMap, QuadraticWaveOperator, Region,
+        CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline, DEFAULT_MATERIAL,
+        FaceBoundaryCondition, FaceRegionAssignment, InternalBoundary, InternalBoundaryLaw,
+        Material, MaterialId, Obstacle, OpenCubicSpline, PeriodicCubicSpline, QuadraticTransferMap,
+        QuadraticWaveOperator, Region, SpanBehavior, TopologyCurve, TopologyGeometry,
+        TopologyVertex, TopologyVertexId, TopologyVertexLocation, TopologyWaveModel,
+        compile_topology, mesh_topology_plan,
     };
 
     fn options(maximum: f64, minimum: f64) -> MeshAdaptationOptions {
@@ -1613,6 +2124,213 @@ mod tests {
         }
     }
 
+    fn topology_setup(
+        geometry: TopologyGeometry,
+        revision: u64,
+        maximum: f64,
+        minimum: f64,
+    ) -> (TopologyMeshPlan, Arc<TriMesh>, MeshAdaptationOptions) {
+        let topology = compile_topology(&geometry, revision).unwrap();
+        let assignments = topology
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(index, face)| FaceRegionAssignment {
+                face: face.id,
+                region: Some(RegionId(index as u64 + 1)),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        let configuration = options(maximum, minimum);
+        let mut initial_meshing = configuration.meshing;
+        initial_meshing.target_edge_length = maximum * 1.25;
+        let mesh = Arc::new(mesh_topology_plan(&plan, revision + 100, initial_meshing).unwrap());
+        (plan, mesh, configuration)
+    }
+
+    fn separated_baffle() -> TopologyGeometry {
+        let curve = TopologyCurve::new(
+            CurveId(1),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(-0.55, -0.06), Point2::new(0.55, 0.08)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(1),
+                behavior: SpanBehavior::Separated {
+                    left: FaceBoundaryCondition::Reflecting,
+                    right: FaceBoundaryCondition::Reflecting,
+                    coupling: crate::InternalBoundaryCoupling::Independent,
+                },
+            }],
+        )
+        .unwrap();
+        TopologyGeometry {
+            curves: vec![curve],
+            ..TopologyGeometry::default()
+        }
+    }
+
+    fn transmitting_divider() -> TopologyGeometry {
+        let endpoints = [TopologyVertexId(1), TopologyVertexId(2)];
+        let mut curve = TopologyCurve::new(
+            CurveId(2),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(2),
+                behavior: SpanBehavior::Transmitting,
+            }],
+        )
+        .unwrap();
+        curve.nodes = endpoints
+            .map(|vertex| CurveNode {
+                vertex: Some(vertex),
+            })
+            .to_vec();
+        TopologyGeometry {
+            curves: vec![curve],
+            vertices: vec![
+                TopologyVertex {
+                    id: endpoints[0],
+                    location: TopologyVertexLocation::Outer {
+                        side: OuterSide::Bottom,
+                        fraction: 0.5,
+                    },
+                },
+                TopologyVertex {
+                    id: endpoints[1],
+                    location: TopologyVertexLocation::Outer {
+                        side: OuterSide::Top,
+                        fraction: 0.5,
+                    },
+                },
+            ],
+            ..TopologyGeometry::default()
+        }
+    }
+
+    fn separated_t_junction() -> TopologyGeometry {
+        let center = TopologyVertexId(10);
+        let behavior = SpanBehavior::REFLECTING;
+        let mut horizontal = TopologyCurve::new(
+            CurveId(10),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.7, 0.0),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.7, 0.0),
+                ])
+                .unwrap(),
+            ),
+            vec![
+                CurveSpan {
+                    id: CurveSpanId(100),
+                    behavior,
+                },
+                CurveSpan {
+                    id: CurveSpanId(101),
+                    behavior,
+                },
+            ],
+        )
+        .unwrap();
+        horizontal.nodes[1].vertex = Some(center);
+        let mut branch = TopologyCurve::new(
+            CurveId(11),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, 0.0), Point2::new(0.0, 0.7)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(102),
+                behavior,
+            }],
+        )
+        .unwrap();
+        branch.nodes[0].vertex = Some(center);
+        TopologyGeometry {
+            curves: vec![horizontal, branch],
+            vertices: vec![TopologyVertex {
+                id: center,
+                location: TopologyVertexLocation::Interior(Point2::default()),
+            }],
+            ..TopologyGeometry::default()
+        }
+    }
+
+    fn mixed_junction() -> TopologyGeometry {
+        let [left, right, center] = [
+            TopologyVertexId(20),
+            TopologyVertexId(21),
+            TopologyVertexId(22),
+        ];
+        let mut divider = TopologyCurve::new(
+            CurveId(20),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-1.0, 0.0),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(1.0, 0.0),
+                ])
+                .unwrap(),
+            ),
+            vec![
+                CurveSpan {
+                    id: CurveSpanId(200),
+                    behavior: SpanBehavior::Transmitting,
+                },
+                CurveSpan {
+                    id: CurveSpanId(201),
+                    behavior: SpanBehavior::Transmitting,
+                },
+            ],
+        )
+        .unwrap();
+        divider.nodes[0].vertex = Some(left);
+        divider.nodes[1].vertex = Some(center);
+        divider.nodes[2].vertex = Some(right);
+        let mut branch = TopologyCurve::new(
+            CurveId(21),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, 0.0), Point2::new(0.0, 0.7)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(202),
+                behavior: SpanBehavior::REFLECTING,
+            }],
+        )
+        .unwrap();
+        branch.nodes[0].vertex = Some(center);
+        TopologyGeometry {
+            curves: vec![divider, branch],
+            vertices: vec![
+                TopologyVertex {
+                    id: left,
+                    location: TopologyVertexLocation::Outer {
+                        side: OuterSide::Left,
+                        fraction: 0.5,
+                    },
+                },
+                TopologyVertex {
+                    id: right,
+                    location: TopologyVertexLocation::Outer {
+                        side: OuterSide::Right,
+                        fraction: 0.5,
+                    },
+                },
+                TopologyVertex {
+                    id: center,
+                    location: TopologyVertexLocation::Interior(Point2::default()),
+                },
+            ],
+            ..TopologyGeometry::default()
+        }
+    }
+
     #[test]
     fn uniform_field_is_deterministic_and_mesh_revision_is_distinct() {
         let scene = Scene::initial();
@@ -1652,6 +2370,417 @@ mod tests {
         assert_eq!(one.mesh.mesh_revision, 21);
         assert_eq!(one.report.topology_changes, 0);
         assert!(one.report.converged);
+    }
+
+    #[test]
+    fn topology_rectangle_adapts_deterministically_and_preserves_trace_vertices() {
+        let (plan, source, mut configuration) =
+            topology_setup(TopologyGeometry::default(), 201, 0.28, 0.08);
+        configuration.collapse_ratio = 1.0e-6;
+        let field: Arc<dyn MeshSizeField> =
+            Arc::new(|point: Point2, _| if point.x < -0.45 { 0.08 } else { 0.28 });
+        let one = run(
+            MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                302,
+                field.clone(),
+                configuration,
+            ),
+            1,
+        );
+        let many = run(
+            MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                302,
+                field,
+                configuration,
+            ),
+            10_000,
+        );
+        assert_eq!(one.mesh, many.mesh);
+        assert_eq!(one.state, many.state);
+        assert!(one.report.inserted_vertices > 0, "{:?}", one.report);
+        let traces = one
+            .mesh
+            .vertices
+            .iter()
+            .filter_map(|vertex| vertex.trace.map(|trace| (trace, vertex.point)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            traces,
+            plan.vertices
+                .iter()
+                .map(|vertex| (vertex.id, vertex.point))
+                .collect()
+        );
+    }
+
+    #[test]
+    fn topology_separated_baffle_refines_and_coarsens_both_traces_atomically() {
+        let (plan, source, mut configuration) = topology_setup(separated_baffle(), 211, 0.28, 0.07);
+        configuration.max_topology_changes = 4_000;
+        configuration.max_work_units = 20_000_000;
+        let fine: Arc<dyn MeshSizeField> = Arc::new(
+            |point: Point2, _| {
+                if point.y.abs() < 0.18 { 0.07 } else { 0.28 }
+            },
+        );
+        let refined = run(
+            MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                312,
+                fine,
+                configuration,
+            ),
+            37,
+        );
+        assert!(
+            refined.report.boundary_insertions > 0,
+            "{:?}",
+            refined.report
+        );
+        let refined_segments = refined
+            .mesh
+            .boundary_edges
+            .iter()
+            .filter(|edge| {
+                matches!(
+                    edge.label,
+                    BoundaryLabel::Curve {
+                        separated: true,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let refined_mesh = Arc::new(refined.mesh);
+        let coarse = run(
+            MeshAdaptationJob::new_topology(
+                refined_mesh.clone(),
+                &plan,
+                refined.state,
+                313,
+                Arc::new(|_, _| 0.28),
+                configuration,
+            ),
+            29,
+        );
+        assert!(coarse.report.boundary_collapses > 0, "{:?}", coarse.report);
+        let coarse_segments = coarse
+            .mesh
+            .boundary_edges
+            .iter()
+            .filter(|edge| {
+                matches!(
+                    edge.label,
+                    BoundaryLabel::Curve {
+                        separated: true,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(coarse_segments < refined_segments);
+        let mut pairs = BTreeMap::<(u64, u64), [bool; 2]>::new();
+        for edge in &coarse.mesh.boundary_edges {
+            let BoundaryLabel::Curve {
+                side,
+                separated: true,
+                ..
+            } = edge.label
+            else {
+                continue;
+            };
+            let key = (
+                edge.parameters[0].min(edge.parameters[1]).to_bits(),
+                edge.parameters[0].max(edge.parameters[1]).to_bits(),
+            );
+            pairs.entry(key).or_default()[match side {
+                CurveTraceSide::Left => 0,
+                CurveTraceSide::Right => 1,
+            }] = true;
+        }
+        assert!(pairs.values().all(|sides| *sides == [true, true]));
+
+        let scene = Scene::default();
+        let source_operator = QuadraticWaveOperator::assemble_topology(
+            &source,
+            &plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        let target_operator = QuadraticWaveOperator::assemble_topology(
+            &coarse.mesh,
+            &plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        let transfer =
+            QuadraticTransferMap::build(&source, &source_operator, &coarse.mesh, &target_operator)
+                .unwrap();
+        assert_eq!(transfer.exposed_nodes(), 0);
+        let polynomial = |point: Point2| 0.3 + point.x - 0.4 * point.y + point.x * point.y;
+        let values = source_operator
+            .node_points()
+            .iter()
+            .map(|point| polynomial(*point))
+            .collect::<Vec<_>>();
+        for (actual, point) in transfer
+            .interpolate(&values, 0.0)
+            .unwrap()
+            .iter()
+            .zip(target_operator.node_points())
+        {
+            assert!((actual - polynomial(*point)).abs() < 2.0e-10);
+        }
+    }
+
+    #[test]
+    fn topology_transmitting_divider_remains_shared_between_regions() {
+        let (plan, source, mut configuration) =
+            topology_setup(transmitting_divider(), 221, 0.28, 0.07);
+        configuration.max_topology_changes = 4_000;
+        configuration.max_work_units = 20_000_000;
+        let refined = run(
+            MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                322,
+                Arc::new(|point: Point2, region: RegionId| {
+                    if region == RegionId(1) && point.x.abs() < 0.3 {
+                        0.07
+                    } else {
+                        0.28
+                    }
+                }),
+                configuration,
+            ),
+            31,
+        );
+        assert!(
+            refined.report.boundary_insertions > 0,
+            "{:?}",
+            refined.report
+        );
+        for edge in refined.mesh.boundary_edges.iter().filter(|edge| {
+            matches!(
+                edge.label,
+                BoundaryLabel::Curve {
+                    separated: false,
+                    ..
+                }
+            )
+        }) {
+            let adjacent = refined
+                .mesh
+                .triangles
+                .iter()
+                .filter(|triangle| {
+                    edge.vertices
+                        .iter()
+                        .all(|vertex| triangle.vertices.contains(vertex))
+                })
+                .map(|triangle| triangle.region)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(adjacent, BTreeSet::from([RegionId(1), RegionId(2)]));
+        }
+    }
+
+    #[test]
+    fn topology_preflight_rejects_a_lost_trace_without_mutating_source() {
+        let (plan, source, configuration) =
+            topology_setup(TopologyGeometry::default(), 231, 0.28, 0.08);
+        let mut malformed = source.as_ref().clone();
+        malformed
+            .vertices
+            .iter_mut()
+            .find(|vertex| vertex.trace.is_some())
+            .unwrap()
+            .trace = None;
+        let malformed = Arc::new(malformed);
+        let before = malformed.as_ref().clone();
+        let mut job = MeshAdaptationJob::new_topology(
+            malformed.clone(),
+            &plan,
+            MeshAdaptationState::from_mesh(&malformed),
+            332,
+            Arc::new(|_, _| 0.28),
+            configuration,
+        );
+        let error = loop {
+            if let Some(result) = job.advance(17) {
+                break result.unwrap_err();
+            }
+        };
+        assert!(matches!(error, MeshAdaptationError::InvalidSource(_)));
+        assert_eq!(malformed.as_ref(), &before);
+    }
+
+    #[test]
+    fn topology_hole_boundary_adapts_without_requiring_an_excluded_partner() {
+        let curve = TopologyCurve::new(
+            CurveId(3),
+            CurveSpline::Closed(
+                PeriodicCubicSpline::polygon(vec![
+                    Point2::new(-0.45, -0.45),
+                    Point2::new(0.45, -0.45),
+                    Point2::new(0.45, 0.45),
+                    Point2::new(-0.45, 0.45),
+                ])
+                .unwrap(),
+            ),
+            (0..4)
+                .map(|index| CurveSpan {
+                    id: CurveSpanId(30 + index),
+                    behavior: SpanBehavior::REFLECTING,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![curve],
+                ..TopologyGeometry::default()
+            },
+            241,
+        )
+        .unwrap();
+        let hole = topology.face_at(Point2::default()).unwrap();
+        let assignments = topology
+            .faces
+            .iter()
+            .map(|face| FaceRegionAssignment {
+                face: face.id,
+                region: (face.id != hole).then_some(RegionId(1)),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        let mut configuration = options(0.28, 0.07);
+        configuration.max_topology_changes = 4_000;
+        configuration.max_work_units = 20_000_000;
+        let source = Arc::new(mesh_topology_plan(&plan, 341, configuration.meshing).unwrap());
+        let refined = run(
+            MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                342,
+                Arc::new(|_, _| 0.07),
+                configuration,
+            ),
+            43,
+        );
+        assert!(
+            refined.report.boundary_insertions > 0,
+            "{:?}",
+            refined.report
+        );
+        assert!(refined.mesh.boundary_edges.iter().any(|edge| {
+            matches!(
+                edge.label,
+                BoundaryLabel::Curve {
+                    separated: true,
+                    ..
+                }
+            )
+        }));
+        let refined_mesh = Arc::new(refined.mesh);
+        let coarse = run(
+            MeshAdaptationJob::new_topology(
+                refined_mesh.clone(),
+                &plan,
+                refined.state,
+                343,
+                Arc::new(|_, _| 0.28),
+                configuration,
+            ),
+            37,
+        );
+        assert!(coarse.report.boundary_collapses > 0, "{:?}", coarse.report);
+    }
+
+    #[test]
+    fn topology_separated_t_junction_keeps_three_pinned_sectors() {
+        let (plan, source, mut configuration) =
+            topology_setup(separated_t_junction(), 251, 0.28, 0.07);
+        configuration.max_topology_changes = 4_000;
+        configuration.max_work_units = 20_000_000;
+        let expected = plan
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.point == Point2::default())
+            .map(|vertex| vertex.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected.len(), 3);
+        let result = run(
+            MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                352,
+                Arc::new(
+                    |point: Point2, _| {
+                        if point.norm() < 0.45 { 0.07 } else { 0.28 }
+                    },
+                ),
+                configuration,
+            ),
+            41,
+        );
+        let actual = result
+            .mesh
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.point == Point2::default())
+            .filter_map(|vertex| vertex.trace)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert!(result.report.boundary_insertions > 0, "{:?}", result.report);
+    }
+
+    #[test]
+    fn topology_mixed_junction_preserves_its_conforming_center_trace() {
+        let (plan, source, mut configuration) = topology_setup(mixed_junction(), 261, 0.28, 0.07);
+        configuration.max_topology_changes = 4_000;
+        configuration.max_work_units = 20_000_000;
+        let expected = plan
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.point == Point2::default())
+            .map(|vertex| vertex.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(expected.len(), 1);
+        let result = run(
+            MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                362,
+                Arc::new(
+                    |point: Point2, _| {
+                        if point.norm() < 0.45 { 0.07 } else { 0.28 }
+                    },
+                ),
+                configuration,
+            ),
+            41,
+        );
+        let actual = result
+            .mesh
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.point == Point2::default())
+            .filter_map(|vertex| vertex.trace)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert!(result.report.boundary_insertions > 0, "{:?}", result.report);
     }
 
     #[test]

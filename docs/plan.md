@@ -345,9 +345,9 @@ transmitting curve labels as interior flux jumps, and resolves separated boundar
 laws and thin-gap pairs directly from the plan. Its adaptive size field remains
 keyed by the mesh's explicit `RegionId` labels.
 
-##### Topology-aware fixed-geometry AMR slice
+##### Topology-aware fixed-geometry AMR slice (implemented)
 
-The next slice migrates solution-driven refinement and coarsening on an unchanged
+This slice migrates solution-driven refinement and coarsening on an unchanged
 `TopologyMeshPlan`. It does not migrate coordinate-edit repair. Moving a curve,
 moving a junction, changing span behavior, splitting or merging faces, and changing
 the outer rectangle continue through `TopologyMeshUpdateAction::FullRebuild`.

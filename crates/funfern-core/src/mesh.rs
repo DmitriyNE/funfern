@@ -13,6 +13,23 @@ pub use adaptation::*;
 pub use amr::*;
 pub use topology_plan::*;
 
+pub(super) fn boundary_adjacency(label: BoundaryLabel) -> usize {
+    match label {
+        BoundaryLabel::Curve {
+            separated: false, ..
+        }
+        | BoundaryLabel::MaterialInterface(_)
+        | BoundaryLabel::OpenMaterialInterface(_) => 2,
+        BoundaryLabel::Curve {
+            separated: true, ..
+        }
+        | BoundaryLabel::Outer(_)
+        | BoundaryLabel::Obstacle(_)
+        | BoundaryLabel::Wall { .. }
+        | BoundaryLabel::InternalBoundary { .. } => 1,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum OuterSide {
     Bottom,
