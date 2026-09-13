@@ -127,6 +127,15 @@ profile. Non-rigid control edits leave the frame unchanged. Coefficients are sam
 at volume and boundary quadrature points and at probe positions, so assembly,
 energy, impedance, and timestep limits use the same material definition. Invalid
 runtime values abort the candidate operator and leave the current solver running.
+Material formulas parse through a private expression tree before compiling to the
+bounded postfix evaluator. Ordinary edits retain their original source verbatim and
+do not run algebraic simplification. A Mechanical/EM physics switch transforms the
+tree using `epsilon = 1/k`, `mu = rho`, and `alpha = d/rho`, or the inverse mapping,
+then applies only finite constant folding, neutral-element removal, double-reciprocal
+elimination, and exact structural product/quotient cancellation. This preserves local
+wave speed, characteristic impedance, and normalized damping rate without formula
+growth under repeated switches. The complete material library converts before the
+document transaction begins; a formula-limit failure leaves the document untouched.
 Internal walls require separate traces on their two sides and therefore a
 topology/DOF operation, not merely a coefficient label. Material-value changes
 reuse the current mesh and enter the same transactional operator replacement path

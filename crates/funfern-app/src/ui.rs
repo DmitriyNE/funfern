@@ -7935,6 +7935,41 @@ impl Playground {
         area.accept_after = current_time.max(newest);
     }
 
+    fn has_pending_material_formula_edit(&self) -> bool {
+        self.material_formula_edits
+            .iter()
+            .enumerate()
+            .any(|(slot, edit)| {
+                let Some((material_id, source)) = edit else {
+                    return false;
+                };
+                let Some(material) = self.editor.document.model.draft.material(*material_id) else {
+                    return true;
+                };
+                let field = match slot {
+                    0 => &material.mass_density,
+                    1 => &material.stiffness,
+                    _ => &material.damping,
+                };
+                field.source() != Some(source.as_str())
+            })
+    }
+
+    fn change_physics(&mut self, physics: PhysicsModel) -> Result<(), String> {
+        if self.has_pending_material_formula_edit() {
+            return Err("Finish the pending material formula edit before changing physics".into());
+        }
+        self.editor.set_physics(physics)?;
+        self.material_formula_edits = [None, None, None];
+        self.material_formula_errors = [None, None, None];
+        if physics == PhysicsModel::Mechanical
+            && self.editor.document.presentation.vector_overlay == VectorOverlay::ComplementaryField
+        {
+            self.editor.document.presentation.vector_overlay = VectorOverlay::Off;
+        }
+        Ok(())
+    }
+
     fn simulation_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         self.panel_header(ui, "Simulation");
@@ -7967,17 +8002,18 @@ impl Playground {
                 );
             });
         if selected_physics != current_physics {
-            self.editor.set_physics(selected_physics);
-            if selected_physics == PhysicsModel::Mechanical
-                && self.editor.document.presentation.vector_overlay
-                    == VectorOverlay::ComplementaryField
-            {
-                self.editor.document.presentation.vector_overlay = VectorOverlay::Off;
+            match self.change_physics(selected_physics) {
+                Ok(()) => {
+                    self.message = format!(
+                        "{} selected; field restarted",
+                        physics_label(selected_physics)
+                    );
+                }
+                Err(error) => {
+                    selected_physics = current_physics;
+                    self.message = error;
+                }
             }
-            self.message = format!(
-                "{} selected; the mesh will be reused and the field restarted",
-                physics_label(selected_physics)
-            );
         }
         ui.small(format!(
             "Primary field: {}",
@@ -19286,9 +19322,12 @@ mod tests {
         commit_mesh_without_gpu(&mut h.state);
         let mesh = h.state.mesh.clone().expect("initial accepted mesh");
 
-        h.state.editor.set_physics(PhysicsModel::Electromagnetic {
-            polarization: ElectromagneticPolarization::Tm,
-        });
+        h.state
+            .editor
+            .set_physics(PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            })
+            .unwrap();
         h.settle();
         h.state.refresh_mesh();
 
@@ -19306,6 +19345,29 @@ mod tests {
             PhysicsModel::Electromagnetic {
                 polarization: ElectromagneticPolarization::Tm,
             }
+        );
+    }
+
+    #[test]
+    fn pending_material_formula_text_blocks_physics_conversion() {
+        let mut h = Harness::new();
+        let original = h.state.editor.document.clone();
+        h.state.material_formula_edits[0] = Some((DEFAULT_MATERIAL, "unfinished(".into()));
+
+        let error = h
+            .state
+            .change_physics(PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            })
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Finish the pending material formula edit before changing physics"
+        );
+        assert_eq!(h.state.editor.document, original);
+        assert_eq!(
+            h.state.material_formula_edits[0],
+            Some((DEFAULT_MATERIAL, "unfinished(".into()))
         );
     }
 

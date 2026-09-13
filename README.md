@@ -146,8 +146,13 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   permittivity `ε`, relative permeability `μ`, and a loss rate `α`; both
   polarizations use `c = 1/sqrt(ε μ)` and `Z = sqrt(μ/ε)`. Perfect electric and
   magnetic walls resolve to the appropriate zero-value or zero-flux scalar law for
-  the chosen polarization. Changing the skin is undoable, reuses unchanged mesh
-  geometry, and starts a fresh field so incompatible state is never transferred.
+  the chosen polarization. Changing between Mechanical and EM converts every
+  material with `ε = 1/K`, `μ = ρ`, and `α = d/ρ` (or the inverse mapping),
+  preserving local wave speed, impedance, and normalized damping rate. Formula
+  conversion simplifies exact reciprocal/product cancellations so repeated switches
+  stay bounded. The change is undoable, reuses unchanged mesh geometry, and starts a
+  fresh field so incompatible state is never transferred. TM/TE switches retain the
+  same EM material law.
 - **Geometry role:** choose Hole, Interface, or Baffle from Draw before
   creating. An interface retains its interior and shares its finite-element trace
   with the exterior. A baffle is an open curve with two independent coincident

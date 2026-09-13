@@ -458,12 +458,28 @@ impl Editor {
         self.commit();
     }
 
-    pub fn set_physics(&mut self, physics: PhysicsModel) {
-        if self.document.model.draft.physics == physics {
-            return;
+    pub fn set_physics(&mut self, physics: PhysicsModel) -> Result<(), String> {
+        let previous = self.document.model.draft.physics;
+        if previous == physics {
+            return Ok(());
         }
+        let materials = self
+            .document
+            .model
+            .draft
+            .materials
+            .iter()
+            .map(|material| {
+                previous
+                    .convert_material(physics, material)
+                    .map_err(|error| {
+                        format!("Could not convert material `{}`: {error}", material.name)
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         self.begin();
         self.document.model.draft.physics = physics;
+        self.document.model.draft.materials = materials;
         if physics == PhysicsModel::Mechanical {
             self.document.model.draft.outer_boundaries.sides = self
                 .document
@@ -486,6 +502,7 @@ impl Editor {
         }
         self.changed();
         self.commit();
+        Ok(())
     }
 
     pub fn loop_kind(&self, id: ObstacleId) -> Option<LoopKind> {

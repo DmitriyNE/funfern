@@ -158,6 +158,54 @@ impl ScalarField {
         }
     }
 
+    /// Builds a reciprocal expression and performs the small, structural
+    /// simplifications used when converting between physics material laws.
+    pub(crate) fn reciprocal(&self) -> Result<Self, MaterialError> {
+        Self::from_transformed_expression(Expression::Binary {
+            operator: BinaryOperator::Div,
+            left: Box::new(Expression::Constant(1.0)),
+            right: Box::new(self.expression()?),
+        })
+    }
+
+    /// Builds a product and performs the small, structural simplifications used
+    /// when converting between physics material laws.
+    pub(crate) fn multiply(&self, right: &Self) -> Result<Self, MaterialError> {
+        Self::from_transformed_expression(Expression::Binary {
+            operator: BinaryOperator::Mul,
+            left: Box::new(self.expression()?),
+            right: Box::new(right.expression()?),
+        })
+    }
+
+    /// Builds a quotient and performs the small, structural simplifications used
+    /// when converting between physics material laws.
+    pub(crate) fn divide(&self, right: &Self) -> Result<Self, MaterialError> {
+        Self::from_transformed_expression(Expression::Binary {
+            operator: BinaryOperator::Div,
+            left: Box::new(self.expression()?),
+            right: Box::new(right.expression()?),
+        })
+    }
+
+    fn expression(&self) -> Result<Expression, MaterialError> {
+        match self {
+            Self::Constant(value) => Ok(Expression::Constant(*value)),
+            Self::Formula(formula) => parse_expression(formula.source()),
+        }
+    }
+
+    fn from_transformed_expression(expression: Expression) -> Result<Self, MaterialError> {
+        let expression = expression.simplify();
+        if let Expression::Constant(value) = expression {
+            return value
+                .is_finite()
+                .then_some(Self::Constant(value))
+                .ok_or(MaterialError::InvalidValue);
+        }
+        Ok(Self::Formula(MaterialFormula::from_expression(expression)?))
+    }
+
     fn formula_parameters(&self) -> &[String] {
         match self {
             Self::Constant(_) => &[],
@@ -200,30 +248,35 @@ pub struct MaterialFormula {
 impl MaterialFormula {
     pub fn parse(source: impl Into<String>) -> Result<Self, MaterialError> {
         let source = source.into();
+        let expression = parse_expression(&source)?;
+        Self::from_source_and_expression(source, &expression)
+    }
+
+    fn from_expression(expression: Expression) -> Result<Self, MaterialError> {
+        let source = expression.to_string();
+        Self::parse(source)
+    }
+
+    fn from_source_and_expression(
+        source: String,
+        expression: &Expression,
+    ) -> Result<Self, MaterialError> {
         if source.trim().is_empty() {
             return Err(MaterialError::EmptyFormula);
         }
         if source.len() > MAX_FORMULA_BYTES {
             return Err(MaterialError::FormulaTooLong);
         }
-        let mut parser = Parser::new(&source);
-        parser.parse_expression(0)?;
-        parser.skip_space();
-        if parser.offset != source.len() {
-            return Err(MaterialError::UnexpectedToken(parser.offset));
-        }
-        if parser.program.len() > MAX_FORMULA_OPS {
-            return Err(MaterialError::TooComplex);
-        }
+        let mut program = Vec::new();
+        expression.compile(&mut program)?;
         let mut parameters = Vec::new();
-        for instruction in &parser.program {
+        for instruction in &program {
             if let Instruction::Parameter(name) = instruction
                 && !parameters.contains(name)
             {
                 parameters.push(name.clone());
             }
         }
-        let program = parser.program;
         Ok(Self {
             source,
             program,
@@ -296,6 +349,266 @@ impl MaterialFormula {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum Expression {
+    Constant(f64),
+    X,
+    Y,
+    R,
+    Theta,
+    Parameter(String),
+    Neg(Box<Self>),
+    Binary {
+        operator: BinaryOperator,
+        left: Box<Self>,
+        right: Box<Self>,
+    },
+    Function {
+        function: Function,
+        arguments: Vec<Self>,
+    },
+}
+
+impl Expression {
+    fn compile(&self, program: &mut Vec<Instruction>) -> Result<(), MaterialError> {
+        match self {
+            Self::Constant(value) => push_instruction(program, Instruction::Constant(*value)),
+            Self::X => push_instruction(program, Instruction::X),
+            Self::Y => push_instruction(program, Instruction::Y),
+            Self::R => push_instruction(program, Instruction::R),
+            Self::Theta => push_instruction(program, Instruction::Theta),
+            Self::Parameter(name) => {
+                push_instruction(program, Instruction::Parameter(name.clone()))
+            }
+            Self::Neg(value) => {
+                value.compile(program)?;
+                push_instruction(program, Instruction::Neg)
+            }
+            Self::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                left.compile(program)?;
+                right.compile(program)?;
+                push_instruction(program, operator.instruction())
+            }
+            Self::Function {
+                function,
+                arguments,
+            } => {
+                for argument in arguments {
+                    argument.compile(program)?;
+                }
+                push_instruction(program, Instruction::Function(*function))
+            }
+        }
+    }
+
+    fn simplify(self) -> Self {
+        let expression = match self {
+            Self::Neg(value) => Self::Neg(Box::new(value.simplify())),
+            Self::Binary {
+                operator,
+                left,
+                right,
+            } => Self::Binary {
+                operator,
+                left: Box::new(left.simplify()),
+                right: Box::new(right.simplify()),
+            },
+            Self::Function {
+                function,
+                arguments,
+            } => Self::Function {
+                function,
+                arguments: arguments.into_iter().map(Self::simplify).collect(),
+            },
+            expression => expression,
+        };
+        let mut expression = expression;
+        while let Some(simplified) = expression.simplify_once() {
+            if simplified == expression {
+                break;
+            }
+            expression = simplified;
+        }
+        expression
+    }
+
+    fn simplify_once(&self) -> Option<Self> {
+        match self {
+            Self::Neg(value) => match value.as_ref() {
+                Self::Constant(value) if (-value).is_finite() => Some(Self::Constant(-value)),
+                Self::Neg(inner) => Some((**inner).clone()),
+                _ => None,
+            },
+            Self::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                if let (Self::Constant(left), Self::Constant(right)) =
+                    (left.as_ref(), right.as_ref())
+                {
+                    let value = operator.evaluate(*left, *right);
+                    if value.is_finite() {
+                        return Some(Self::Constant(value));
+                    }
+                }
+                match operator {
+                    BinaryOperator::Add if right.is_zero() => Some((**left).clone()),
+                    BinaryOperator::Add if left.is_zero() => Some((**right).clone()),
+                    BinaryOperator::Sub if right.is_zero() => Some((**left).clone()),
+                    BinaryOperator::Mul if right.is_one() => Some((**left).clone()),
+                    BinaryOperator::Mul if left.is_one() => Some((**right).clone()),
+                    BinaryOperator::Div if right.is_one() => Some((**left).clone()),
+                    BinaryOperator::Div if left.is_one() => {
+                        if let Self::Binary {
+                            operator: BinaryOperator::Div,
+                            left: inner_left,
+                            right: inner_right,
+                        } = right.as_ref()
+                            && inner_left.is_one()
+                        {
+                            return Some((**inner_right).clone());
+                        }
+                        None
+                    }
+                    BinaryOperator::Mul => cancel_product(left, right),
+                    BinaryOperator::Div => cancel_quotient(left, right),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        matches!(self, Self::Constant(value) if *value == 0.0)
+    }
+
+    fn is_one(&self) -> bool {
+        matches!(self, Self::Constant(value) if *value == 1.0)
+    }
+}
+
+fn cancel_product(left: &Expression, right: &Expression) -> Option<Expression> {
+    for (quotient, factor) in [(left, right), (right, left)] {
+        if let Expression::Binary {
+            operator: BinaryOperator::Div,
+            left: numerator,
+            right: denominator,
+        } = quotient
+            && denominator.as_ref() == factor
+        {
+            return Some((**numerator).clone());
+        }
+    }
+    None
+}
+
+fn cancel_quotient(left: &Expression, right: &Expression) -> Option<Expression> {
+    if let Expression::Binary {
+        operator: BinaryOperator::Mul,
+        left: first,
+        right: second,
+    } = left
+    {
+        if first.as_ref() == right {
+            return Some((**second).clone());
+        }
+        if second.as_ref() == right {
+            return Some((**first).clone());
+        }
+    }
+    None
+}
+
+impl std::fmt::Display for Expression {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.fmt_expression(formatter)
+    }
+}
+
+impl Expression {
+    fn fmt_expression(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Constant(value) => write!(formatter, "{value}"),
+            Self::X => formatter.write_str("x"),
+            Self::Y => formatter.write_str("y"),
+            Self::R => formatter.write_str("r"),
+            Self::Theta => formatter.write_str("theta"),
+            Self::Parameter(name) => formatter.write_str(name),
+            Self::Neg(value) => write!(formatter, "-({value})"),
+            Self::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let precedence = operator.precedence();
+                let left_precedence = left.precedence();
+                let right_precedence = right.precedence();
+                let left_parenthesized = left_precedence < precedence
+                    || *operator == BinaryOperator::Pow && left_precedence == precedence;
+                let right_parenthesized = right_precedence < precedence
+                    || right_precedence == precedence && !matches!(operator, BinaryOperator::Pow);
+                left.fmt_operand(formatter, left_parenthesized)?;
+                write!(formatter, " {} ", operator.symbol())?;
+                right.fmt_operand(formatter, right_parenthesized)
+            }
+            Self::Function {
+                function,
+                arguments,
+            } => {
+                write!(formatter, "{}(", function.name())?;
+                for (index, argument) in arguments.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(formatter, "{argument}")?;
+                }
+                formatter.write_str(")")
+            }
+        }
+    }
+
+    fn precedence(&self) -> u8 {
+        match self {
+            Self::Binary { operator, .. } => operator.precedence(),
+            Self::Neg(_) => 3,
+            Self::Constant(value) if value.is_sign_negative() => 3,
+            _ => 4,
+        }
+    }
+
+    fn fmt_operand(
+        &self,
+        formatter: &mut std::fmt::Formatter<'_>,
+        parenthesized: bool,
+    ) -> std::fmt::Result {
+        if parenthesized {
+            formatter.write_str("(")?;
+        }
+        self.fmt_expression(formatter)?;
+        if parenthesized {
+            formatter.write_str(")")?;
+        }
+        Ok(())
+    }
+}
+
+fn push_instruction(
+    program: &mut Vec<Instruction>,
+    instruction: Instruction,
+) -> Result<(), MaterialError> {
+    if program.len() >= MAX_FORMULA_OPS {
+        return Err(MaterialError::TooComplex);
+    }
+    program.push(instruction);
+    Ok(())
+}
+
 fn push_value(
     stack: &mut [f64; MAX_EVAL_STACK],
     len: &mut usize,
@@ -354,6 +667,55 @@ enum Instruction {
     Div,
     Pow,
     Function(Function),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BinaryOperator {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+}
+
+impl BinaryOperator {
+    const fn instruction(self) -> Instruction {
+        match self {
+            Self::Add => Instruction::Add,
+            Self::Sub => Instruction::Sub,
+            Self::Mul => Instruction::Mul,
+            Self::Div => Instruction::Div,
+            Self::Pow => Instruction::Pow,
+        }
+    }
+
+    const fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Pow => "^",
+        }
+    }
+
+    const fn precedence(self) -> u8 {
+        match self {
+            Self::Add | Self::Sub => 1,
+            Self::Mul | Self::Div => 2,
+            Self::Pow => 3,
+        }
+    }
+
+    fn evaluate(self, left: f64, right: f64) -> f64 {
+        match self {
+            Self::Add => left + right,
+            Self::Sub => left - right,
+            Self::Mul => left * right,
+            Self::Div => left / right,
+            Self::Pow => left.powf(right),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -425,13 +787,28 @@ impl Function {
             }
         }
     }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Sqrt => "sqrt",
+            Self::Abs => "abs",
+            Self::Sin => "sin",
+            Self::Cos => "cos",
+            Self::Tan => "tan",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::Min => "min",
+            Self::Max => "max",
+            Self::Clamp => "clamp",
+            Self::Smoothstep => "smoothstep",
+        }
+    }
 }
 
 struct Parser<'a> {
     source: &'a str,
     offset: usize,
     depth: usize,
-    program: Vec<Instruction>,
 }
 
 impl<'a> Parser<'a> {
@@ -440,24 +817,22 @@ impl<'a> Parser<'a> {
             source,
             offset: 0,
             depth: 0,
-            program: Vec::new(),
         }
     }
 
-    fn parse_expression(&mut self, minimum_precedence: u8) -> Result<(), MaterialError> {
+    fn parse_expression(&mut self, minimum_precedence: u8) -> Result<Expression, MaterialError> {
         self.depth += 1;
         if self.depth > MAX_PARSE_DEPTH {
             return Err(MaterialError::TooComplex);
         }
         self.skip_space();
-        if self.consume('-') {
-            self.parse_expression(3)?;
-            self.push(Instruction::Neg)?;
+        let mut expression = if self.consume('-') {
+            Expression::Neg(Box::new(self.parse_expression(3)?))
         } else if self.consume('+') {
-            self.parse_expression(3)?;
+            self.parse_expression(3)?
         } else {
-            self.parse_primary()?;
-        }
+            self.parse_primary()?
+        };
         loop {
             self.skip_space();
             let Some((operator, precedence, right_associative)) = self.peek_operator() else {
@@ -467,26 +842,30 @@ impl<'a> Parser<'a> {
                 break;
             }
             self.offset += 1;
-            self.parse_expression(if right_associative {
+            let right = self.parse_expression(if right_associative {
                 precedence
             } else {
                 precedence + 1
             })?;
-            self.push(operator)?;
+            expression = Expression::Binary {
+                operator,
+                left: Box::new(expression),
+                right: Box::new(right),
+            };
         }
         self.depth -= 1;
-        Ok(())
+        Ok(expression)
     }
 
-    fn parse_primary(&mut self) -> Result<(), MaterialError> {
+    fn parse_primary(&mut self) -> Result<Expression, MaterialError> {
         self.skip_space();
         if self.consume('(') {
-            self.parse_expression(0)?;
+            let expression = self.parse_expression(0)?;
             self.skip_space();
             if !self.consume(')') {
                 return Err(MaterialError::UnexpectedToken(self.offset));
             }
-            return Ok(());
+            return Ok(expression);
         }
         if self
             .peek()
@@ -499,12 +878,11 @@ impl<'a> Parser<'a> {
         self.skip_space();
         if self.consume('(') {
             let (function, expected) = Function::named(name)?;
-            let mut arguments = 0;
+            let mut arguments = Vec::with_capacity(expected);
             self.skip_space();
             if !self.consume(')') {
                 loop {
-                    self.parse_expression(0)?;
-                    arguments += 1;
+                    arguments.push(self.parse_expression(0)?);
                     self.skip_space();
                     if self.consume(')') {
                         break;
@@ -514,25 +892,28 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            if arguments != expected {
+            if arguments.len() != expected {
                 return Err(MaterialError::InvalidArgumentCount(name.into()));
             }
-            return self.push(Instruction::Function(function));
+            return Ok(Expression::Function {
+                function,
+                arguments,
+            });
         }
-        let instruction = match name {
-            "x" => Instruction::X,
-            "y" => Instruction::Y,
-            "r" => Instruction::R,
-            "theta" => Instruction::Theta,
-            "pi" => Instruction::Constant(std::f64::consts::PI),
-            "e" => Instruction::Constant(std::f64::consts::E),
-            _ if valid_identifier(name) => Instruction::Parameter(name.into()),
+        let expression = match name {
+            "x" => Expression::X,
+            "y" => Expression::Y,
+            "r" => Expression::R,
+            "theta" => Expression::Theta,
+            "pi" => Expression::Constant(std::f64::consts::PI),
+            "e" => Expression::Constant(std::f64::consts::E),
+            _ if valid_identifier(name) => Expression::Parameter(name.into()),
             _ => return Err(MaterialError::UnexpectedToken(start)),
         };
-        self.push(instruction)
+        Ok(expression)
     }
 
-    fn parse_number(&mut self) -> Result<(), MaterialError> {
+    fn parse_number(&mut self) -> Result<Expression, MaterialError> {
         let start = self.offset;
         let bytes = self.source.as_bytes();
         while self.offset < bytes.len()
@@ -555,7 +936,7 @@ impl<'a> Parser<'a> {
         if !value.is_finite() {
             return Err(MaterialError::InvalidValue);
         }
-        self.push(Instruction::Constant(value))
+        Ok(Expression::Constant(value))
     }
 
     fn parse_identifier(&mut self) -> Result<&'a str, MaterialError> {
@@ -575,23 +956,15 @@ impl<'a> Parser<'a> {
         Ok(&self.source[start..self.offset])
     }
 
-    fn peek_operator(&self) -> Option<(Instruction, u8, bool)> {
+    fn peek_operator(&self) -> Option<(BinaryOperator, u8, bool)> {
         Some(match self.peek()? {
-            '+' => (Instruction::Add, 1, false),
-            '-' => (Instruction::Sub, 1, false),
-            '*' => (Instruction::Mul, 2, false),
-            '/' => (Instruction::Div, 2, false),
-            '^' => (Instruction::Pow, 3, true),
+            '+' => (BinaryOperator::Add, 1, false),
+            '-' => (BinaryOperator::Sub, 1, false),
+            '*' => (BinaryOperator::Mul, 2, false),
+            '/' => (BinaryOperator::Div, 2, false),
+            '^' => (BinaryOperator::Pow, 3, true),
             _ => return None,
         })
-    }
-
-    fn push(&mut self, instruction: Instruction) -> Result<(), MaterialError> {
-        if self.program.len() >= MAX_FORMULA_OPS {
-            return Err(MaterialError::TooComplex);
-        }
-        self.program.push(instruction);
-        Ok(())
     }
 
     fn skip_space(&mut self) {
@@ -612,6 +985,22 @@ impl<'a> Parser<'a> {
     fn peek(&self) -> Option<char> {
         self.source[self.offset..].chars().next()
     }
+}
+
+fn parse_expression(source: &str) -> Result<Expression, MaterialError> {
+    if source.trim().is_empty() {
+        return Err(MaterialError::EmptyFormula);
+    }
+    if source.len() > MAX_FORMULA_BYTES {
+        return Err(MaterialError::FormulaTooLong);
+    }
+    let mut parser = Parser::new(source);
+    let expression = parser.parse_expression(0)?;
+    parser.skip_space();
+    if parser.offset != source.len() {
+        return Err(MaterialError::UnexpectedToken(parser.offset));
+    }
+    Ok(expression)
 }
 
 pub fn valid_identifier(name: &str) -> bool {
@@ -729,6 +1118,46 @@ mod tests {
         assert!(
             (renamed.evaluate(at(0.0, 0.0), &parameters).unwrap() - (5.0 + 2.0_f64.sin())).abs()
                 < 1e-12
+        );
+    }
+
+    #[test]
+    fn transformed_formulas_simplify_without_rewriting_ordinary_input() {
+        let field = ScalarField::formula(" 2 + 3*x ").unwrap();
+        assert_eq!(field.source(), Some(" 2 + 3*x "));
+
+        let reciprocal = field.reciprocal().unwrap();
+        assert_eq!(reciprocal.source(), Some("1 / (2 + 3 * x)"));
+        let restored = reciprocal.reciprocal().unwrap();
+        assert_eq!(restored.source(), Some("2 + 3 * x"));
+        for x in [-0.4, 0.0, 0.75] {
+            assert_eq!(
+                restored.evaluate(at(x, 0.0), &[]),
+                field.evaluate(at(x, 0.0), &[])
+            );
+        }
+
+        let damping = ScalarField::formula("0.2 + y*y").unwrap();
+        let density = ScalarField::formula("2 + x*x").unwrap();
+        let normalized = damping.divide(&density).unwrap();
+        let round_trip = normalized.multiply(&density).unwrap();
+        assert_eq!(round_trip.source(), Some("0.2 + y * y"));
+        for (x, y) in [(-0.5, 0.2), (0.0, 0.0), (0.8, -0.4)] {
+            assert_eq!(
+                round_trip.evaluate(at(x, y), &[]),
+                damping.evaluate(at(x, y), &[])
+            );
+        }
+
+        let precedence = ScalarField::formula("(-2)^x + 2^-2 + x/(2/y)").unwrap();
+        let precedence_round_trip = precedence.reciprocal().unwrap().reciprocal().unwrap();
+        assert_eq!(
+            precedence_round_trip.source(),
+            Some("(-2) ^ x + 0.25 + x / (2 / y)")
+        );
+        assert_eq!(
+            precedence_round_trip.evaluate(at(2.0, 4.0), &[]),
+            precedence.evaluate(at(2.0, 4.0), &[])
         );
     }
 }

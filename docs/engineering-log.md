@@ -60,6 +60,26 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   vector source terms when a vector field exists, and nonlinear field-dependent
   source/material laws.
 
+## 2026-09-13 — Physics-switch material conversion
+
+- Corrected the Mechanical/EM skin transition. It previously relabeled `(rho, K)`
+  directly as `(epsilon, mu)`, which made mechanical wave speed numerically become
+  EM impedance and mechanical impedance become reciprocal EM wave speed. The switch
+  now uses `epsilon = 1/K`, `mu = rho`, and `alpha = d/rho`, with the inverse mapping
+  on return, preserving local speed, impedance, and normalized damping rate. TM/TE
+  changes leave the shared EM law untouched.
+- Refactored material parsing to build a private expression tree and then emit the
+  existing bounded postfix program. Normal formula entry keeps source text verbatim;
+  only physics conversion invokes structural simplification and canonical printing.
+  Double reciprocals and exact damping product/quotient pairs cancel, so repeated
+  switches do not accumulate wrappers.
+- Material conversion is prepared before the editor transaction and fails atomically
+  if a generated expression exceeds existing limits. One successful switch remains
+  one undo entry. A divergent formula text draft blocks switching rather than being
+  silently discarded.
+- All 347 workspace tests pass, including spatial invariance, 32 repeated conversion
+  cycles, persistence, exact undo/redo, atomic failure, and pending-formula coverage.
+
 ## 2026-09-13 — Scene-only viewport PNG capture
 
 - Added **Viewport PNG** between scene-link copying and SVG export. A request waits
@@ -312,8 +332,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   avoids transferring a scalar state between incompatible physical meanings.
 - Material controls, overlays, point/curve/area readout vocabulary, and source labels
   follow the active skin. Material property frames remain rigid and orthonormal in
-  world units; changing a skin reinterprets the three formulas without introducing
-  coordinate scale.
+  world units. This initial implementation directly reinterpreted formulas; the
+  later physics-switch conversion entry above replaces that behavior.
 - Added derived arrow overlays using the synchronized P2 displacement/velocity
   readback: complementary-field rate for TM/TE and reduced relative energy flow.
   Density and gain are screen-space controls; smoothing is presentation-only and no

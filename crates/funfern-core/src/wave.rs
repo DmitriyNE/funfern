@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{BACKGROUND_REGION, OuterSide, Point2, RegionId, TriMesh};
+use crate::{BACKGROUND_REGION, Material, MaterialError, OuterSide, Point2, RegionId, TriMesh};
 
 /// Constant material coefficients for the scalar wave model
 /// `mass_density * u_tt + damping * u_t - div(stiffness * grad(u)) = f`.
@@ -73,6 +73,34 @@ impl PhysicsModel {
             Self::Mechanical => (properties.mass_density * properties.stiffness).sqrt(),
             Self::Electromagnetic { .. } => (properties.stiffness / properties.mass_density).sqrt(),
         }
+    }
+
+    /// Converts a material law to `target` while preserving its local wave
+    /// speed, characteristic impedance, and normalized damping rate.
+    pub fn convert_material(
+        self,
+        target: Self,
+        material: &Material,
+    ) -> Result<Material, MaterialError> {
+        let crossing_to_em =
+            matches!(self, Self::Mechanical) && matches!(target, Self::Electromagnetic { .. });
+        let crossing_to_mechanical =
+            matches!(self, Self::Electromagnetic { .. }) && matches!(target, Self::Mechanical);
+        if !crossing_to_em && !crossing_to_mechanical {
+            return Ok(material.clone());
+        }
+
+        let mut converted = material.clone();
+        if crossing_to_em {
+            converted.mass_density = material.stiffness.reciprocal()?;
+            converted.stiffness = material.mass_density.clone();
+            converted.damping = material.damping.divide(&material.mass_density)?;
+        } else {
+            converted.mass_density = material.stiffness.clone();
+            converted.stiffness = material.mass_density.reciprocal()?;
+            converted.damping = material.damping.multiply(&material.stiffness)?;
+        }
+        Ok(converted)
     }
 }
 
@@ -790,7 +818,7 @@ impl WaveState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BACKGROUND_REGION, MeshQuality, MeshTriangle, MeshVertex};
+    use crate::{BACKGROUND_REGION, MeshQuality, MeshTriangle, MeshVertex, ScalarField};
 
     #[test]
     fn harmonic_time_signal_evaluates_and_reports_its_bandwidth() {
@@ -1090,6 +1118,72 @@ mod tests {
             assert!((physics.wave_speed(raw) - 1.0 / 6.0).abs() < 1.0e-15);
             assert!((physics.impedance(raw) - 1.5).abs() < 1.0e-15);
         }
+    }
+
+    #[test]
+    fn physics_material_conversion_preserves_characteristics_and_stays_bounded() {
+        let mechanical = PhysicsModel::Mechanical;
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let mut material = Material::default_medium();
+        material.mass_density = ScalarField::formula("2 + 0.2*x*x").unwrap();
+        material.stiffness = ScalarField::formula("5 - 0.3*y").unwrap();
+        material.damping = ScalarField::formula("0.1 + 0.02*r").unwrap();
+
+        let electromagnetic = mechanical.convert_material(tm, &material).unwrap();
+        assert_eq!(
+            tm.convert_material(te, &electromagnetic).unwrap(),
+            electromagnetic
+        );
+        for point in [
+            Point2::new(-0.7, -0.2),
+            Point2::new(0.0, 0.0),
+            Point2::new(0.4, 0.8),
+        ] {
+            let frame = crate::MaterialFrame::world();
+            let old = material.evaluate(frame, point).unwrap();
+            let new = electromagnetic.evaluate(frame, point).unwrap();
+            let old = WaveCoefficients {
+                mass_density: old.mass_density,
+                stiffness: old.stiffness,
+                damping: old.damping,
+            };
+            let new = WaveCoefficients {
+                mass_density: new.mass_density,
+                stiffness: new.stiffness,
+                damping: new.damping,
+            };
+            assert!((mechanical.wave_speed(old) - tm.wave_speed(new)).abs() < 1.0e-14);
+            assert!((mechanical.impedance(old) - tm.impedance(new)).abs() < 1.0e-14);
+            assert!((old.damping / old.mass_density - new.damping).abs() < 1.0e-14);
+        }
+
+        let mut physics = tm;
+        let mut cycled = electromagnetic;
+        let initial_lengths = [
+            cycled.mass_density.source().unwrap().len(),
+            cycled.stiffness.source().unwrap().len(),
+            cycled.damping.source().unwrap().len(),
+        ];
+        for _ in 0..32 {
+            cycled = physics.convert_material(mechanical, &cycled).unwrap();
+            physics = mechanical;
+            cycled = physics.convert_material(tm, &cycled).unwrap();
+            physics = tm;
+        }
+        assert_eq!(
+            [
+                cycled.mass_density.source().unwrap().len(),
+                cycled.stiffness.source().unwrap().len(),
+                cycled.damping.source().unwrap().len(),
+            ],
+            initial_lengths
+        );
+        assert_eq!(cycled, mechanical.convert_material(tm, &material).unwrap());
     }
 
     #[test]

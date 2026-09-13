@@ -344,9 +344,11 @@ fn presentation_round_trips_and_older_scenes_receive_defaults() {
 fn physics_is_undoable_and_version_seventeen_migrates_exactly_to_mechanical() {
     let mut editor = Editor::default();
     let original = editor.document.model.clone();
-    editor.set_physics(PhysicsModel::Electromagnetic {
-        polarization: ElectromagneticPolarization::Tm,
-    });
+    editor
+        .set_physics(PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        })
+        .unwrap();
     settle(&mut editor);
     assert_eq!(editor.history_len(), (1, 0));
     assert!(matches!(
@@ -380,6 +382,83 @@ fn physics_is_undoable_and_version_seventeen_migrates_exactly_to_mechanical() {
     }
     let migrated = decode(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
     assert_eq!(migrated, legacy);
+}
+
+#[test]
+fn physics_switch_converts_spatial_materials_and_undo_restores_the_exact_law() {
+    let mut editor = Editor::default();
+    for scene in [
+        &mut editor.document.model.draft,
+        &mut editor.document.model.accepted,
+    ] {
+        let material = scene.materials.first_mut().unwrap();
+        material.mass_density = ScalarField::formula("2 + 0.2*x*x").unwrap();
+        material.stiffness = ScalarField::formula("5 - 0.3*y").unwrap();
+        material.damping = ScalarField::formula("0.1 + 0.02*r").unwrap();
+    }
+    let original = editor.document.clone();
+    let mechanical = PhysicsModel::Mechanical;
+    let tm = PhysicsModel::Electromagnetic {
+        polarization: ElectromagneticPolarization::Tm,
+    };
+
+    editor.set_physics(tm).unwrap();
+    settle(&mut editor);
+    assert_eq!(editor.history_len(), (1, 0));
+    assert_eq!(editor.document.model.draft, editor.document.model.accepted);
+    for point in [Point2::new(-0.5, 0.25), Point2::new(0.4, -0.7)] {
+        let frame = MaterialFrame::world();
+        let before = original.model.draft.materials[0]
+            .evaluate(frame, point)
+            .unwrap();
+        let after = editor.document.model.draft.materials[0]
+            .evaluate(frame, point)
+            .unwrap();
+        let before = WaveCoefficients {
+            mass_density: before.mass_density,
+            stiffness: before.stiffness,
+            damping: before.damping,
+        };
+        let after = WaveCoefficients {
+            mass_density: after.mass_density,
+            stiffness: after.stiffness,
+            damping: after.damping,
+        };
+        assert!((mechanical.wave_speed(before) - tm.wave_speed(after)).abs() < 1.0e-14);
+        assert!((mechanical.impedance(before) - tm.impedance(after)).abs() < 1.0e-14);
+    }
+
+    let converted = editor.document.clone();
+    let json = save(&converted).unwrap();
+    assert_eq!(decode(json.as_bytes()).unwrap(), converted);
+    editor.undo();
+    assert_eq!(editor.document, original);
+    editor.redo();
+    settle(&mut editor);
+    assert_eq!(editor.document, converted);
+}
+
+#[test]
+fn failed_physics_formula_conversion_is_atomic() {
+    let mut editor = Editor::default();
+    let complex_formula =
+        ScalarField::formula(std::iter::repeat_n("x", 64).collect::<Vec<_>>().join("+")).unwrap();
+    for scene in [
+        &mut editor.document.model.draft,
+        &mut editor.document.model.accepted,
+    ] {
+        scene.materials[0].stiffness = complex_formula.clone();
+    }
+    let original = editor.document.clone();
+
+    let error = editor
+        .set_physics(PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        })
+        .unwrap_err();
+    assert!(error.contains("formula exceeds 256 bytes"), "{error}");
+    assert_eq!(editor.document, original);
+    assert_eq!(editor.history_len(), (0, 0));
 }
 
 #[test]
