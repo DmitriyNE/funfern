@@ -67,6 +67,19 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-14 — Open-curve attachment snapping repair
+
+- Fixed initial attachment hits on inner curves: the cursor's screen-side position
+  now chooses the authored curve's left or right face instead of always choosing
+  left. Once a separator starts, its other endpoint remains filtered to that same
+  active face.
+- Open-curve drawing highlights every eligible outer edge, inner curve segment,
+  and authored junction. A gold ring and **Attach** label show the exact projected
+  point, and the live segment ends at that point before the click commits it.
+- Preview and commit share one 14-pixel attachment query. Direct regression
+  coverage checks an inner hole from its active side at two zoom levels and proves
+  the measured snap distance remains three screen pixels.
+
 ## 2026-09-14 — Atomic topology application cutover
 
 - Replaced the production editor with the unified topology document and removed

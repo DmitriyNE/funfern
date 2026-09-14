@@ -695,7 +695,18 @@ pub fn hit_attachment(
             if distance > radius {
                 return None;
             }
-            let target_face = face.or_else(|| vertex.traces.first().map(|trace| trace.face))?;
+            let target_face = face.or_else(|| {
+                vertex
+                    .traces
+                    .iter()
+                    .find(|trace| {
+                        scene.assignments.iter().any(|assignment| {
+                            assignment.face == trace.face && assignment.region.is_some()
+                        })
+                    })
+                    .or_else(|| vertex.traces.first())
+                    .map(|trace| trace.face)
+            })?;
             vertex
                 .traces
                 .iter()
@@ -744,27 +755,42 @@ pub fn hit_attachment(
                 }
                 CompiledEdgeSource::Curve(span) => {
                     let curve = edge.curve?;
-                    let side = if face == Some(edge.right) {
-                        CurveTraceSide::Right
-                    } else if face.is_none() || face == Some(edge.left) {
-                        CurveTraceSide::Left
+                    let (side, target_face) = if let Some(face) = face {
+                        if face == edge.right {
+                            (CurveTraceSide::Right, face)
+                        } else if face == edge.left {
+                            (CurveTraceSide::Left, face)
+                        } else {
+                            return None;
+                        }
                     } else {
-                        return None;
+                        // World-space left becomes the negative cross-product
+                        // side after the viewport's vertical-axis flip.
+                        let cross =
+                            (b.x - a.x) * (pointer.y - a.y) - (b.y - a.y) * (pointer.x - a.x);
+                        if cross <= 0.0 {
+                            (CurveTraceSide::Left, edge.left)
+                        } else {
+                            (CurveTraceSide::Right, edge.right)
+                        }
                     };
                     let parameter =
                         edge.parameter[0] + (edge.parameter[1] - edge.parameter[0]) * fraction;
-                    Some(AttachmentHit {
-                        attachment: crate::topology_editor::TopologyAttachment::Boundary(
-                            FaceAnchor::Curve {
-                                curve,
-                                span,
-                                side,
-                                parameter,
-                            },
-                        ),
-                        point: edge.points[0].lerp(edge.points[1], fraction),
-                        distance,
-                    })
+                    let attachment = FaceAnchor::Curve {
+                        curve,
+                        span,
+                        side,
+                        parameter,
+                    };
+                    (attachment.resolve(&scene.topology).ok() == Some(target_face)).then_some(
+                        AttachmentHit {
+                            attachment: crate::topology_editor::TopologyAttachment::Boundary(
+                                attachment,
+                            ),
+                            point: edge.points[0].lerp(edge.points[1], fraction),
+                            distance,
+                        },
+                    )
                 }
             }
         })
@@ -1132,5 +1158,33 @@ mod tests {
                 ..
             }) if candidate == curve
         ));
+
+        for scale in [100.0, 420.0] {
+            let transform = ViewportTransform {
+                pixels_per_world: scale,
+                ..view()
+            };
+            let a = transform.world_to_screen(edge.points[0]);
+            let b = transform.world_to_screen(edge.points[1]);
+            let tangent = ScreenPoint::new(b.x - a.x, b.y - a.y);
+            let length = tangent.x.hypot(tangent.y);
+            let normal = if face == edge.left {
+                ScreenPoint::new(tangent.y / length, -tangent.x / length)
+            } else {
+                ScreenPoint::new(-tangent.y / length, tangent.x / length)
+            };
+            let midpoint = transform.world_to_screen(point);
+            let pointer =
+                ScreenPoint::new(midpoint.x + normal.x * 3.0, midpoint.y + normal.y * 3.0);
+            let unspecialized = hit_attachment(compiled, transform, pointer, 5.0, None).unwrap();
+            let resolved = match unspecialized.attachment {
+                crate::topology_editor::TopologyAttachment::Boundary(anchor) => {
+                    anchor.resolve(&compiled.topology).unwrap()
+                }
+                crate::topology_editor::TopologyAttachment::Junction { face, .. } => face,
+            };
+            assert_eq!(resolved, face);
+            assert!((unspecialized.distance - 3.0).abs() < 1.0e-9);
+        }
     }
 }

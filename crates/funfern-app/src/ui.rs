@@ -30,9 +30,9 @@ use funfern_app::topology_runtime::{
     TopologyToken,
 };
 use funfern_app::topology_viewport::{
-    RigidTransform, SampledTopologyGeometry, ScreenPoint, TopologyHandle, TopologyHit,
-    TopologySelection, TopologySpanTarget, ViewportTransform, hit_attachment, plan_handle_drag,
-    plan_rigid_transform, span_context,
+    AttachmentHit, RigidTransform, SampledTopologyGeometry, ScreenPoint, TopologyHandle,
+    TopologyHit, TopologySelection, TopologySpanTarget, ViewportTransform, hit_attachment,
+    plan_handle_drag, plan_rigid_transform, span_context,
 };
 use funfern_core::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -47,6 +47,7 @@ const TEAL: Color32 = Color32::from_rgb(91, 220, 194);
 const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
+const ATTACHMENT_SNAP_RADIUS: f64 = 14.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum InspectorPanel {
@@ -2614,6 +2615,7 @@ impl Playground {
             }
         }
         if let Some(draw) = &self.draw {
+            self.draw_attachment_targets(painter, r, draw);
             let points = draw
                 .points
                 .iter()
@@ -2623,7 +2625,17 @@ impl Playground {
                 painter.circle_filled(*p, 4.0, GOLD);
             }
             if points.len() > 1 {
-                painter.add(egui::Shape::line(points, Stroke::new(1.5, GOLD)));
+                painter.add(egui::Shape::line(points.clone(), Stroke::new(1.5, GOLD)));
+            }
+            if let (Some(last), Some(pointer)) = (points.last(), painter.ctx().pointer_hover_pos())
+            {
+                let target = self
+                    .draw_attachment_hit(ScreenPoint::new(pointer.x as f64, pointer.y as f64), r)
+                    .map_or(pointer, |hit| self.screen(hit.point, r));
+                painter.line_segment(
+                    [*last, target],
+                    Stroke::new(1.2, Color32::from_rgba_unmultiplied(248, 196, 112, 180)),
+                );
             }
         }
         if let Some(pointer) = painter.ctx().pointer_hover_pos() {
@@ -2643,6 +2655,103 @@ impl Playground {
                 }
                 _ => {}
             }
+        }
+    }
+    fn draw_attachment_hit(&self, pointer: ScreenPoint, r: Rect) -> Option<AttachmentHit> {
+        let draw = self.draw.as_ref()?;
+        if !matches!(draw.tool, DrawTool::Polyline | DrawTool::OpenSpline) {
+            return None;
+        }
+        let compiled = self.editor.compiled_draft.as_ref()?;
+        let face = (self.open_purpose == OpenPurpose::Separator)
+            .then_some(draw.face)
+            .flatten();
+        let hit = hit_attachment(
+            compiled,
+            self.transform(r),
+            pointer,
+            ATTACHMENT_SNAP_RADIUS,
+            face,
+        )?;
+        if self.open_purpose == OpenPurpose::Separator
+            && draw.face.is_none()
+            && !compiled.assignments.iter().any(|assignment| {
+                assignment.face == attachment_face(hit.attachment, compiled)
+                    && assignment.region.is_some()
+            })
+        {
+            return None;
+        }
+        Some(hit)
+    }
+    fn draw_attachment_targets(&self, painter: &egui::Painter, r: Rect, draw: &DrawGesture) {
+        if !matches!(draw.tool, DrawTool::Polyline | DrawTool::OpenSpline) {
+            return;
+        }
+        let Some(compiled) = &self.editor.compiled_draft else {
+            return;
+        };
+        let active_faces = compiled
+            .assignments
+            .iter()
+            .filter_map(|assignment| assignment.region.map(|_| assignment.face))
+            .collect::<BTreeSet<_>>();
+        let required_face = (self.open_purpose == OpenPurpose::Separator)
+            .then_some(draw.face)
+            .flatten();
+        let eligible = |faces: &[FaceId]| {
+            required_face.map_or_else(
+                || {
+                    self.open_purpose == OpenPurpose::Baffle
+                        || faces.iter().any(|face| active_faces.contains(face))
+                },
+                |required| faces.contains(&required),
+            )
+        };
+        let stroke = Stroke::new(2.2, Color32::from_rgba_unmultiplied(248, 196, 112, 105));
+        for edge in &compiled.topology.edges {
+            let faces = match edge.source {
+                CompiledEdgeSource::Outer(_) => [edge.left, edge.left],
+                CompiledEdgeSource::Curve(_) => [edge.left, edge.right],
+            };
+            if eligible(&faces) {
+                painter.line_segment(
+                    [
+                        self.screen(edge.points[0], r),
+                        self.screen(edge.points[1], r),
+                    ],
+                    stroke,
+                );
+            }
+        }
+        for vertex in &compiled.topology.vertices {
+            if vertex.authored.is_some()
+                && eligible(
+                    &vertex
+                        .traces
+                        .iter()
+                        .map(|trace| trace.face)
+                        .collect::<Vec<_>>(),
+                )
+            {
+                painter.circle_filled(self.screen(vertex.point, r), 5.0, GOLD);
+            }
+        }
+        if let Some(pointer) = painter.ctx().pointer_hover_pos()
+            && r.contains(pointer)
+            && let Some(hit) =
+                self.draw_attachment_hit(ScreenPoint::new(pointer.x as f64, pointer.y as f64), r)
+        {
+            let point = self.screen(hit.point, r);
+            painter.circle_filled(point, 4.0, GOLD);
+            painter.circle_stroke(point, 9.0, Stroke::new(2.0, GOLD));
+            painter.text(
+                point + egui::vec2(11.0, -11.0),
+                egui::Align2::LEFT_BOTTOM,
+                "Attach",
+                egui::FontId::proportional(11.0),
+                GOLD,
+            );
         }
     }
     fn transform_gizmo(&self, r: Rect) -> Option<(Point2, Pos2)> {
@@ -3153,6 +3262,7 @@ impl Playground {
         }
     }
     fn draw_click(&mut self, mut point: Point2, screen: ScreenPoint, r: Rect) {
+        let snap = self.draw_attachment_hit(screen, r);
         let Some(mut gesture) = self.draw.take() else {
             return;
         };
@@ -3177,18 +3287,13 @@ impl Playground {
         let open = matches!(gesture.tool, DrawTool::Polyline | DrawTool::OpenSpline);
         let mut attachment = None;
         if open {
-            let face = if self.open_purpose == OpenPurpose::Separator {
-                gesture.face
-            } else {
-                None
-            };
-            if let Some(compiled) = &self.editor.compiled_draft {
-                if let Some(hit) = hit_attachment(compiled, self.transform(r), screen, 11.0, face) {
-                    point = hit.point;
-                    attachment = Some(hit.attachment);
-                    if gesture.points.is_empty() {
-                        gesture.face = Some(attachment_face(hit.attachment, compiled));
-                    }
+            if let Some(hit) = snap {
+                point = hit.point;
+                attachment = Some(hit.attachment);
+                if gesture.points.is_empty()
+                    && let Some(compiled) = &self.editor.compiled_draft
+                {
+                    gesture.face = Some(attachment_face(hit.attachment, compiled));
                 }
             }
             if self.open_purpose == OpenPurpose::Separator

@@ -102,6 +102,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   separator must start and finish on valid boundaries of the same active face;
   baffles may have free ends. Attached endpoints share an authoritative junction,
   follow outer-domain resizing, and can be detached from the selected junction.
+  While drawing an open curve, eligible outer edges, inner curves, and existing
+  junctions are highlighted; the hovered attachment uses a fixed screen-space
+  snap radius, independent of zoom.
   Removing a divider asks which adjacent material survives when ownership is
   ambiguous.
 - **Boundaries:** one Boundary inspector applies conditions to every compatible
