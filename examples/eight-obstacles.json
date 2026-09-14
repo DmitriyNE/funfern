@@ -1,765 +1,3450 @@
 {
-  "version": 1,
-  "domain": [
-    -1,
-    1,
-    -1,
-    1
-  ],
-  "draft": [
-    {
-      "id": 1,
-      "controls": [
-        [
-          -0.51,
-          -0.4
-        ],
-        [
-          -0.5539339828220179,
-          -0.2939339828220179
-        ],
-        [
-          -0.66,
-          -0.25
-        ],
-        [
-          -0.7660660171779822,
-          -0.2939339828220179
-        ],
-        [
-          -0.81,
-          -0.4
-        ],
-        [
-          -0.7660660171779822,
-          -0.5060660171779822
-        ],
-        [
-          -0.66,
-          -0.55
-        ],
-        [
-          -0.5539339828220179,
-          -0.5060660171779822
-        ]
-      ],
-      "intervals": [
+  "version": 22,
+  "model": {
+    "draft": {
+      "domain": [
+        -1.0,
         1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
+        -1.0,
         1.0
-      ]
+      ],
+      "physics": {
+        "kind": "mechanical"
+      },
+      "materials": [
+        {
+          "id": 1,
+          "name": "Background",
+          "mass_density": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [],
+          "color": [
+            86,
+            116,
+            138
+          ]
+        }
+      ],
+      "regions": [
+        {
+          "id": 1,
+          "material": 1,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "world"
+          }
+        }
+      ],
+      "face_assignments": [
+        {
+          "anchor": {
+            "kind": "outer",
+            "side": "bottom",
+            "fraction": 0.5
+          },
+          "region": 1
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 1,
+            "span": 1,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 2,
+            "span": 9,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 3,
+            "span": 17,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 4,
+            "span": 25,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 5,
+            "span": 33,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 6,
+            "span": 41,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 7,
+            "span": 49,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 8,
+            "span": 57,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        }
+      ],
+      "volume_sources": [],
+      "outer_boundaries": [
+        {
+          "kind": "first_order_outgoing"
+        },
+        {
+          "kind": "first_order_outgoing"
+        },
+        {
+          "kind": "first_order_outgoing"
+        },
+        {
+          "kind": "first_order_outgoing"
+        }
+      ],
+      "curves": [
+        {
+          "id": 1,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                -0.44500000000000006,
+                -0.48
+              ],
+              [
+                -0.47575378797541257,
+                -0.4057537879754125
+              ],
+              [
+                -0.55,
+                -0.375
+              ],
+              [
+                -0.6242462120245875,
+                -0.4057537879754125
+              ],
+              [
+                -0.655,
+                -0.48
+              ],
+              [
+                -0.6242462120245875,
+                -0.5542462120245875
+              ],
+              [
+                -0.55,
+                -0.585
+              ],
+              [
+                -0.47575378797541257,
+                -0.5542462120245875
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 1,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 2,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 3,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 4,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 5,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 6,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 7,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 8,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                -0.045,
+                -0.55
+              ],
+              [
+                -0.0757537879754125,
+                -0.47575378797541257
+              ],
+              [
+                -0.15,
+                -0.44500000000000006
+              ],
+              [
+                -0.22424621202458747,
+                -0.47575378797541257
+              ],
+              [
+                -0.255,
+                -0.55
+              ],
+              [
+                -0.2242462120245875,
+                -0.6242462120245875
+              ],
+              [
+                -0.15000000000000002,
+                -0.655
+              ],
+              [
+                -0.07575378797541253,
+                -0.6242462120245875
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 9,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 10,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 11,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 12,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 13,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 14,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 15,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 16,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.40499999999999997,
+                -0.45
+              ],
+              [
+                0.37424621202458747,
+                -0.37575378797541253
+              ],
+              [
+                0.3,
+                -0.34500000000000003
+              ],
+              [
+                0.2257537879754125,
+                -0.37575378797541253
+              ],
+              [
+                0.195,
+                -0.45
+              ],
+              [
+                0.22575378797541248,
+                -0.5242462120245874
+              ],
+              [
+                0.3,
+                -0.555
+              ],
+              [
+                0.37424621202458747,
+                -0.5242462120245875
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 17,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 18,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 19,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 20,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 21,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 22,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 23,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 24,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.6849999999999999,
+                -0.1
+              ],
+              [
+                0.6542462120245874,
+                -0.02575378797541253
+              ],
+              [
+                0.58,
+                0.0049999999999999906
+              ],
+              [
+                0.5057537879754125,
+                -0.025753787975412515
+              ],
+              [
+                0.475,
+                -0.09999999999999999
+              ],
+              [
+                0.5057537879754125,
+                -0.17424621202458748
+              ],
+              [
+                0.58,
+                -0.20500000000000002
+              ],
+              [
+                0.6542462120245874,
+                -0.1742462120245875
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 25,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 26,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 27,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 28,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 29,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 30,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 31,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 32,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.355,
+                0.05
+              ],
+              [
+                0.3242462120245875,
+                0.12424621202458748
+              ],
+              [
+                0.25,
+                0.155
+              ],
+              [
+                0.17575378797541252,
+                0.1242462120245875
+              ],
+              [
+                0.14500000000000002,
+                0.05000000000000002
+              ],
+              [
+                0.1757537879754125,
+                -0.024246212024587474
+              ],
+              [
+                0.24999999999999997,
+                -0.05499999999999999
+              ],
+              [
+                0.3242462120245875,
+                -0.024246212024587502
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 33,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 34,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 35,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 36,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 37,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 38,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 39,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 40,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                -0.14500000000000002,
+                -0.02
+              ],
+              [
+                -0.17575378797541252,
+                0.05424621202458747
+              ],
+              [
+                -0.25,
+                0.08499999999999999
+              ],
+              [
+                -0.3242462120245875,
+                0.05424621202458749
+              ],
+              [
+                -0.355,
+                -0.019999999999999987
+              ],
+              [
+                -0.3242462120245875,
+                -0.09424621202458748
+              ],
+              [
+                -0.25,
+                -0.125
+              ],
+              [
+                -0.17575378797541252,
+                -0.09424621202458751
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 41,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 42,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 43,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 44,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 45,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 46,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 47,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 48,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                -0.41500000000000004,
+                0.38
+              ],
+              [
+                -0.44575378797541254,
+                0.4542462120245875
+              ],
+              [
+                -0.52,
+                0.485
+              ],
+              [
+                -0.5942462120245875,
+                0.4542462120245875
+              ],
+              [
+                -0.625,
+                0.38
+              ],
+              [
+                -0.5942462120245875,
+                0.3057537879754125
+              ],
+              [
+                -0.52,
+                0.275
+              ],
+              [
+                -0.44575378797541254,
+                0.3057537879754125
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 49,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 50,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 51,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 52,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 53,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 54,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 55,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 56,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.22499999999999998,
+                0.48
+              ],
+              [
+                0.19424621202458747,
+                0.5542462120245875
+              ],
+              [
+                0.12,
+                0.585
+              ],
+              [
+                0.04575378797541252,
+                0.5542462120245875
+              ],
+              [
+                0.015,
+                0.48
+              ],
+              [
+                0.04575378797541249,
+                0.4057537879754125
+              ],
+              [
+                0.11999999999999998,
+                0.375
+              ],
+              [
+                0.19424621202458747,
+                0.4057537879754125
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 57,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 58,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 59,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 60,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 61,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 62,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 63,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 64,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "vertices": []
     },
-    {
-      "id": 2,
-      "controls": [
-        [
-          -0.07000000000000003,
-          -0.4
-        ],
-        [
-          -0.1139339828220179,
-          -0.2939339828220179
-        ],
-        [
-          -0.22000000000000003,
-          -0.25
-        ],
-        [
-          -0.3260660171779821,
-          -0.2939339828220179
-        ],
-        [
-          -0.37,
-          -0.4
-        ],
-        [
-          -0.32606601717798217,
-          -0.5060660171779822
-        ],
-        [
-          -0.22000000000000006,
-          -0.55
-        ],
-        [
-          -0.11393398282201793,
-          -0.5060660171779822
-        ]
-      ],
-      "intervals": [
+    "accepted": {
+      "domain": [
+        -1.0,
         1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
+        -1.0,
         1.0
-      ]
+      ],
+      "physics": {
+        "kind": "mechanical"
+      },
+      "materials": [
+        {
+          "id": 1,
+          "name": "Background",
+          "mass_density": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "stiffness": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "damping": {
+            "kind": "constant",
+            "value": 0.0
+          },
+          "axis_ratio": {
+            "kind": "constant",
+            "value": 1.0
+          },
+          "parameters": [],
+          "color": [
+            86,
+            116,
+            138
+          ]
+        }
+      ],
+      "regions": [
+        {
+          "id": 1,
+          "material": 1,
+          "frame": {
+            "origin": [
+              0.0,
+              0.0
+            ],
+            "angle_radians": 0.0,
+            "attachment": "world"
+          }
+        }
+      ],
+      "face_assignments": [
+        {
+          "anchor": {
+            "kind": "outer",
+            "side": "bottom",
+            "fraction": 0.5
+          },
+          "region": 1
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 1,
+            "span": 1,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 2,
+            "span": 9,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 3,
+            "span": 17,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 4,
+            "span": 25,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 5,
+            "span": 33,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 6,
+            "span": 41,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 7,
+            "span": 49,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        },
+        {
+          "anchor": {
+            "kind": "curve",
+            "curve": 8,
+            "span": 57,
+            "side": "left",
+            "parameter": 0.5
+          },
+          "region": null
+        }
+      ],
+      "volume_sources": [],
+      "outer_boundaries": [
+        {
+          "kind": "first_order_outgoing"
+        },
+        {
+          "kind": "first_order_outgoing"
+        },
+        {
+          "kind": "first_order_outgoing"
+        },
+        {
+          "kind": "first_order_outgoing"
+        }
+      ],
+      "curves": [
+        {
+          "id": 1,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                -0.44500000000000006,
+                -0.48
+              ],
+              [
+                -0.47575378797541257,
+                -0.4057537879754125
+              ],
+              [
+                -0.55,
+                -0.375
+              ],
+              [
+                -0.6242462120245875,
+                -0.4057537879754125
+              ],
+              [
+                -0.655,
+                -0.48
+              ],
+              [
+                -0.6242462120245875,
+                -0.5542462120245875
+              ],
+              [
+                -0.55,
+                -0.585
+              ],
+              [
+                -0.47575378797541257,
+                -0.5542462120245875
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 1,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 2,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 3,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 4,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 5,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 6,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 7,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 8,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                -0.045,
+                -0.55
+              ],
+              [
+                -0.0757537879754125,
+                -0.47575378797541257
+              ],
+              [
+                -0.15,
+                -0.44500000000000006
+              ],
+              [
+                -0.22424621202458747,
+                -0.47575378797541257
+              ],
+              [
+                -0.255,
+                -0.55
+              ],
+              [
+                -0.2242462120245875,
+                -0.6242462120245875
+              ],
+              [
+                -0.15000000000000002,
+                -0.655
+              ],
+              [
+                -0.07575378797541253,
+                -0.6242462120245875
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 9,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 10,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 11,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 12,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 13,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 14,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 15,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 16,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.40499999999999997,
+                -0.45
+              ],
+              [
+                0.37424621202458747,
+                -0.37575378797541253
+              ],
+              [
+                0.3,
+                -0.34500000000000003
+              ],
+              [
+                0.2257537879754125,
+                -0.37575378797541253
+              ],
+              [
+                0.195,
+                -0.45
+              ],
+              [
+                0.22575378797541248,
+                -0.5242462120245874
+              ],
+              [
+                0.3,
+                -0.555
+              ],
+              [
+                0.37424621202458747,
+                -0.5242462120245875
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 17,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 18,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 19,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 20,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 21,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 22,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 23,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 24,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.6849999999999999,
+                -0.1
+              ],
+              [
+                0.6542462120245874,
+                -0.02575378797541253
+              ],
+              [
+                0.58,
+                0.0049999999999999906
+              ],
+              [
+                0.5057537879754125,
+                -0.025753787975412515
+              ],
+              [
+                0.475,
+                -0.09999999999999999
+              ],
+              [
+                0.5057537879754125,
+                -0.17424621202458748
+              ],
+              [
+                0.58,
+                -0.20500000000000002
+              ],
+              [
+                0.6542462120245874,
+                -0.1742462120245875
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 25,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 26,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 27,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 28,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 29,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 30,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 31,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 32,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.355,
+                0.05
+              ],
+              [
+                0.3242462120245875,
+                0.12424621202458748
+              ],
+              [
+                0.25,
+                0.155
+              ],
+              [
+                0.17575378797541252,
+                0.1242462120245875
+              ],
+              [
+                0.14500000000000002,
+                0.05000000000000002
+              ],
+              [
+                0.1757537879754125,
+                -0.024246212024587474
+              ],
+              [
+                0.24999999999999997,
+                -0.05499999999999999
+              ],
+              [
+                0.3242462120245875,
+                -0.024246212024587502
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 33,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 34,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 35,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 36,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 37,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 38,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 39,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 40,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                -0.14500000000000002,
+                -0.02
+              ],
+              [
+                -0.17575378797541252,
+                0.05424621202458747
+              ],
+              [
+                -0.25,
+                0.08499999999999999
+              ],
+              [
+                -0.3242462120245875,
+                0.05424621202458749
+              ],
+              [
+                -0.355,
+                -0.019999999999999987
+              ],
+              [
+                -0.3242462120245875,
+                -0.09424621202458748
+              ],
+              [
+                -0.25,
+                -0.125
+              ],
+              [
+                -0.17575378797541252,
+                -0.09424621202458751
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 41,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 42,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 43,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 44,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 45,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 46,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 47,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 48,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                -0.41500000000000004,
+                0.38
+              ],
+              [
+                -0.44575378797541254,
+                0.4542462120245875
+              ],
+              [
+                -0.52,
+                0.485
+              ],
+              [
+                -0.5942462120245875,
+                0.4542462120245875
+              ],
+              [
+                -0.625,
+                0.38
+              ],
+              [
+                -0.5942462120245875,
+                0.3057537879754125
+              ],
+              [
+                -0.52,
+                0.275
+              ],
+              [
+                -0.44575378797541254,
+                0.3057537879754125
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 49,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 50,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 51,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 52,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 53,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 54,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 55,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 56,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "spline": {
+            "kind": "closed",
+            "controls": [
+              [
+                0.22499999999999998,
+                0.48
+              ],
+              [
+                0.19424621202458747,
+                0.5542462120245875
+              ],
+              [
+                0.12,
+                0.585
+              ],
+              [
+                0.04575378797541252,
+                0.5542462120245875
+              ],
+              [
+                0.015,
+                0.48
+              ],
+              [
+                0.04575378797541249,
+                0.4057537879754125
+              ],
+              [
+                0.11999999999999998,
+                0.375
+              ],
+              [
+                0.19424621202458747,
+                0.4057537879754125
+              ]
+            ],
+            "intervals": [
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0,
+              1.0
+            ],
+            "multiplicities": [
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1,
+              1
+            ]
+          },
+          "nodes": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ],
+          "spans": [
+            {
+              "id": 57,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 58,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 59,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 60,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 61,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 62,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 63,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            },
+            {
+              "id": 64,
+              "behavior": {
+                "kind": "boundary",
+                "left": {
+                  "kind": "reflecting"
+                },
+                "right": {
+                  "kind": "reflecting"
+                },
+                "coupling": {
+                  "kind": "independent"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "vertices": []
     },
-    {
-      "id": 3,
-      "controls": [
-        [
-          0.37,
-          -0.4
-        ],
-        [
-          0.3260660171779821,
-          -0.2939339828220179
-        ],
-        [
-          0.21999999999999997,
-          -0.25
-        ],
-        [
-          0.11393398282201786,
-          -0.2939339828220179
-        ],
-        [
-          0.06999999999999998,
-          -0.4
-        ],
-        [
-          0.11393398282201782,
-          -0.5060660171779822
-        ],
-        [
-          0.21999999999999995,
-          -0.55
-        ],
-        [
-          0.32606601717798206,
-          -0.5060660171779822
-        ]
+    "probes": [],
+    "source": {
+      "enabled": true,
+      "position": [
+        -0.9,
+        0.0
       ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
+      "width": 0.045,
+      "region": 1,
+      "signal": {
+        "kind": "harmonic",
+        "offset": 0.0,
+        "amplitude": 20.0,
+        "frequency_hz": 3.0,
+        "phase_radians": 0.0
+      }
     },
-    {
-      "id": 4,
-      "controls": [
-        [
-          0.81,
-          -0.4
-        ],
-        [
-          0.7660660171779822,
-          -0.2939339828220179
-        ],
-        [
-          0.66,
-          -0.25
-        ],
-        [
-          0.5539339828220179,
-          -0.2939339828220179
-        ],
-        [
-          0.51,
-          -0.4
-        ],
-        [
-          0.5539339828220179,
-          -0.5060660171779822
-        ],
-        [
-          0.66,
-          -0.55
-        ],
-        [
-          0.7660660171779822,
-          -0.5060660171779822
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "id": 5,
-      "controls": [
-        [
-          -0.51,
-          0.4
-        ],
-        [
-          -0.5539339828220179,
-          0.5060660171779822
-        ],
-        [
-          -0.66,
-          0.55
-        ],
-        [
-          -0.7660660171779822,
-          0.5060660171779822
-        ],
-        [
-          -0.81,
-          0.4
-        ],
-        [
-          -0.7660660171779822,
-          0.2939339828220179
-        ],
-        [
-          -0.66,
-          0.25
-        ],
-        [
-          -0.5539339828220179,
-          0.2939339828220179
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "id": 6,
-      "controls": [
-        [
-          -0.07000000000000003,
-          0.4
-        ],
-        [
-          -0.1139339828220179,
-          0.5060660171779822
-        ],
-        [
-          -0.22000000000000003,
-          0.55
-        ],
-        [
-          -0.3260660171779821,
-          0.5060660171779822
-        ],
-        [
-          -0.37,
-          0.4
-        ],
-        [
-          -0.32606601717798217,
-          0.2939339828220179
-        ],
-        [
-          -0.22000000000000006,
-          0.25
-        ],
-        [
-          -0.11393398282201793,
-          0.2939339828220179
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "id": 7,
-      "controls": [
-        [
-          0.37,
-          0.4
-        ],
-        [
-          0.3260660171779821,
-          0.5060660171779822
-        ],
-        [
-          0.21999999999999997,
-          0.55
-        ],
-        [
-          0.11393398282201786,
-          0.5060660171779822
-        ],
-        [
-          0.06999999999999998,
-          0.4
-        ],
-        [
-          0.11393398282201782,
-          0.2939339828220179
-        ],
-        [
-          0.21999999999999995,
-          0.25
-        ],
-        [
-          0.32606601717798206,
-          0.2939339828220179
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "id": 8,
-      "controls": [
-        [
-          0.81,
-          0.4
-        ],
-        [
-          0.7660660171779822,
-          0.5060660171779822
-        ],
-        [
-          0.66,
-          0.55
-        ],
-        [
-          0.5539339828220179,
-          0.5060660171779822
-        ],
-        [
-          0.51,
-          0.4
-        ],
-        [
-          0.5539339828220179,
-          0.2939339828220179
-        ],
-        [
-          0.66,
-          0.25
-        ],
-        [
-          0.7660660171779822,
-          0.2939339828220179
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
+    "far_field": {
+      "enabled": false,
+      "inset": 0.12
     }
-  ],
-  "accepted": [
-    {
-      "id": 1,
-      "controls": [
-        [
-          -0.51,
-          -0.4
-        ],
-        [
-          -0.5539339828220179,
-          -0.2939339828220179
-        ],
-        [
-          -0.66,
-          -0.25
-        ],
-        [
-          -0.7660660171779822,
-          -0.2939339828220179
-        ],
-        [
-          -0.81,
-          -0.4
-        ],
-        [
-          -0.7660660171779822,
-          -0.5060660171779822
-        ],
-        [
-          -0.66,
-          -0.55
-        ],
-        [
-          -0.5539339828220179,
-          -0.5060660171779822
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
+  },
+  "presentation": {
+    "grid": true,
+    "control_polygons": true,
+    "handles": true,
+    "accepted_reference": true,
+    "boundary_conditions": true,
+    "mesh": false,
+    "mesh_boundaries": true,
+    "adaptation_target": false,
+    "point_probes": true,
+    "line_probes": true,
+    "boundary_probes": true,
+    "area_probes": true,
+    "far_field_contour": true,
+    "probe_labels": true,
+    "field": true,
+    "field_gain": 2.0,
+    "vector_overlay": "off",
+    "vector_overlay_smoothed": true,
+    "vector_overlay_density": 54.0,
+    "vector_overlay_gain": 1.0,
+    "material_overlay": {
+      "kind": "regions"
     },
-    {
-      "id": 2,
-      "controls": [
-        [
-          -0.07000000000000003,
-          -0.4
-        ],
-        [
-          -0.1139339828220179,
-          -0.2939339828220179
-        ],
-        [
-          -0.22000000000000003,
-          -0.25
-        ],
-        [
-          -0.3260660171779821,
-          -0.2939339828220179
-        ],
-        [
-          -0.37,
-          -0.4
-        ],
-        [
-          -0.32606601717798217,
-          -0.5060660171779822
-        ],
-        [
-          -0.22000000000000006,
-          -0.55
-        ],
-        [
-          -0.11393398282201793,
-          -0.5060660171779822
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "id": 3,
-      "controls": [
-        [
-          0.37,
-          -0.4
-        ],
-        [
-          0.3260660171779821,
-          -0.2939339828220179
-        ],
-        [
-          0.21999999999999997,
-          -0.25
-        ],
-        [
-          0.11393398282201786,
-          -0.2939339828220179
-        ],
-        [
-          0.06999999999999998,
-          -0.4
-        ],
-        [
-          0.11393398282201782,
-          -0.5060660171779822
-        ],
-        [
-          0.21999999999999995,
-          -0.55
-        ],
-        [
-          0.32606601717798206,
-          -0.5060660171779822
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "id": 4,
-      "controls": [
-        [
-          0.81,
-          -0.4
-        ],
-        [
-          0.7660660171779822,
-          -0.2939339828220179
-        ],
-        [
-          0.66,
-          -0.25
-        ],
-        [
-          0.5539339828220179,
-          -0.2939339828220179
-        ],
-        [
-          0.51,
-          -0.4
-        ],
-        [
-          0.5539339828220179,
-          -0.5060660171779822
-        ],
-        [
-          0.66,
-          -0.55
-        ],
-        [
-          0.7660660171779822,
-          -0.5060660171779822
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "id": 5,
-      "controls": [
-        [
-          -0.51,
-          0.4
-        ],
-        [
-          -0.5539339828220179,
-          0.5060660171779822
-        ],
-        [
-          -0.66,
-          0.55
-        ],
-        [
-          -0.7660660171779822,
-          0.5060660171779822
-        ],
-        [
-          -0.81,
-          0.4
-        ],
-        [
-          -0.7660660171779822,
-          0.2939339828220179
-        ],
-        [
-          -0.66,
-          0.25
-        ],
-        [
-          -0.5539339828220179,
-          0.2939339828220179
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "id": 6,
-      "controls": [
-        [
-          -0.07000000000000003,
-          0.4
-        ],
-        [
-          -0.1139339828220179,
-          0.5060660171779822
-        ],
-        [
-          -0.22000000000000003,
-          0.55
-        ],
-        [
-          -0.3260660171779821,
-          0.5060660171779822
-        ],
-        [
-          -0.37,
-          0.4
-        ],
-        [
-          -0.32606601717798217,
-          0.2939339828220179
-        ],
-        [
-          -0.22000000000000006,
-          0.25
-        ],
-        [
-          -0.11393398282201793,
-          0.2939339828220179
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "id": 7,
-      "controls": [
-        [
-          0.37,
-          0.4
-        ],
-        [
-          0.3260660171779821,
-          0.5060660171779822
-        ],
-        [
-          0.21999999999999997,
-          0.55
-        ],
-        [
-          0.11393398282201786,
-          0.5060660171779822
-        ],
-        [
-          0.06999999999999998,
-          0.4
-        ],
-        [
-          0.11393398282201782,
-          0.2939339828220179
-        ],
-        [
-          0.21999999999999995,
-          0.25
-        ],
-        [
-          0.32606601717798206,
-          0.2939339828220179
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    },
-    {
-      "id": 8,
-      "controls": [
-        [
-          0.81,
-          0.4
-        ],
-        [
-          0.7660660171779822,
-          0.5060660171779822
-        ],
-        [
-          0.66,
-          0.55
-        ],
-        [
-          0.5539339828220179,
-          0.5060660171779822
-        ],
-        [
-          0.51,
-          0.4
-        ],
-        [
-          0.5539339828220179,
-          0.2939339828220179
-        ],
-        [
-          0.66,
-          0.25
-        ],
-        [
-          0.7660660171779822,
-          0.2939339828220179
-        ]
-      ],
-      "intervals": [
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0
-      ]
-    }
-  ]
+    "material_overlay_opacity": 0.48,
+    "material_overlay_auto_range": true,
+    "material_overlay_logarithmic": false,
+    "material_overlay_manual_min": 0.0,
+    "material_overlay_manual_max": 1.0
+  }
 }

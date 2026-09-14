@@ -32,15 +32,13 @@ Carried over from the cutover follow-up work, not from the review:
   mixed selection lands as two undo steps: the curves that needed no question,
   then the one that did. Gathering every choice before removing anything would
   make it one, and needs a picker that can ask more than once.
+- [ ] Decide what to do with the pre-cutover `editor` module. Nothing in the app
+  uses it: `files.rs` takes one constant from `persistence`, and the module's only
+  other consumer is its own 54-test file. Either delete both, or keep them
+  deliberately as the migration path's regression suite and say so.
 - [ ] Decide what "Flip direction" means for a line probe. The README describes it
   as reversing both the sampling order and the flux sign; segments currently only
   offer Swap ends, and boundary targets carry a separate `reversed` flag.
-- [ ] Refresh the stale example and checklist. `examples/eight-obstacles.json` is
-  still schema version 1 and cannot load after the version-22 break, yet README
-  and `browser-checks.md` both send the reader to it; the checklist also still
-  describes the pre-cutover UI (Draw > Hole/Interface, role changes, baffle
-  merging). Tick the plan's shared-link/recovery item too — `sharing.rs` and
-  `recovery.rs` already use version 22.
 - [ ] Measure representative browser frame timing for the cooperative topology
   job. The cutover recorded that it advances in fixed 256-work-unit slices but
   never measured what that costs in a real browser frame.
@@ -106,6 +104,38 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — The example loads and the checklist describes this app
+
+`examples/eight-obstacles.json` was still schema version 1 and could not load
+after the version-22 break, while the README and the browser checklist both sent
+readers straight to it. It also predated the in-app example gallery, which
+already carries the same scene as Obstacle array, so it had quietly become a
+stale duplicate rather than a separate artefact.
+
+It is now an export of that catalog entry at the current version, and two tests
+keep it honest: one parses every JSON file in `examples/`, the other asserts the
+shipped file still matches the catalog document, so changing one without the
+other fails here rather than in front of a reader.
+
+`browser-checks.md` still described the pre-cutover UI, with a Draw menu split
+into Hole and Interface, a role change on a mixed selection, and baffle endpoint
+merging. Those are rewritten for the tools that exist, and the checklist gained
+items for what this run built: welding by drag, the in-scene survivor picker,
+inactive spans, the Faces and Regions toggle with hole conversion, dragging the
+outer rectangle, hover cursors, and the mesh overlay drawing over the field while
+the categorical overlays no longer imprint it.
+
+One thing the swap turned up: the version-one file was doubling as the fixture
+for a pre-cutover migration test, which is why it had never been regenerated. The
+fixture moved to `crates/funfern-app/tests/fixtures/`, where a deliberately old
+document belongs, leaving `examples/` for scenes a reader can open. That test
+belongs to the `editor` module, which nothing in the app uses any more; whether
+to keep it is now its own item above.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 431 passing, and
+`cargo build --release -p funfern-app --locked`.
 
 ## 2026-09-15 — One gesture, one undo step
 

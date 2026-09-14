@@ -13,14 +13,19 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
 - [ ] Hide every inspector panel and restore each of Edit, View, Simulation, and
   Materials. The viewport expands when the inspector is hidden. At a narrow width,
   File and panel menus replace buttons without obscuring playback controls.
-- [ ] Draw > Hole/Interface offers Circle, Rectangle, Polygon, and Spline. Exercise
-  two-corner Rectangle, vertex-based Polygon with Enter and first-vertex closure,
-  and the four-control Spline preview. Draw > Baffle offers vertex-based Polyline
-  and control-point Spline. Finish the Spline at exactly two controls and verify an
-  exact straight baffle; verify that three controls cannot finish and four or more
-  retain the freeform spline behavior. Check Finish, Enter, Backspace, Escape,
-  previews, one-entry history, invalid drafts, and the 32-feature/128-control limits.
-  The viewport overlay identifies vertices versus control points.
+- [ ] Draw offers Closed curve with Circle, Rectangle, Polygon, and Spline under a
+  Subdomain or Hole purpose, and Open curve with Polyline and Spline under a
+  Separator or Baffle purpose. Exercise two-corner Rectangle, vertex-based Polygon
+  with Enter and first-vertex closure, and the four-control Spline preview. Finish
+  an open Spline at exactly two controls and verify an exact straight baffle;
+  verify that three controls cannot finish and four or more retain the freeform
+  spline behavior. Check Finish, Enter, Backspace, Escape, previews, one-entry
+  history, invalid drafts, and the 128-control limit. The viewport overlay
+  identifies vertices versus control points.
+- [ ] While drawing an open curve, confirm that eligible outer edges, curve
+  interiors, junctions, loose ends, and vertex-less corners all highlight, and that
+  starting or finishing on a loose end welds the new curve into that one. A
+  separator must start and finish on the same active face.
 - [ ] Drag a handle outside the square. The invalid draft persists after release,
   is red, and shows a specific reason and the accepted reference. Drag it back
   to recover. Escape during a drag restores both scenes. Undo restores the prior
@@ -33,8 +38,8 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   marquee, right-to-left crossing marquee, Shift-add, Alt-subtract, filters,
   Select filtered, Invert, and Clear. Press and release Shift or Alt while a marquee
   is already moving and confirm that its operation and result update immediately.
-  Exercise persistent Area select with Replace, Add, and Subtract. Mixed-object span
-  selection must not expose a whole-object delete or role change.
+  Exercise persistent Area select with Replace, Add, and Subtract. Selecting one
+  span must ring only that span's own four controls, not the whole curve.
 - [ ] Press Delete and Backspace with a control, a probe, one complete feature, and
   several complete features selected, including while the pointer is over a panel.
   A multi-feature deletion is one undo entry; partial span and outer-edge selections
@@ -48,14 +53,29 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   verify coherent left/right face selection and that Thin gap replaces the two
   independent face conditions instead of competing with them. Enable View >
   Boundary conditions and compare the canvas colors with the legend.
-- [ ] Use C0 isolation, continuity downgrade/reshape, both straightening actions on
-  a complete baffle and a partial C0-bounded loop piece, splitting, and endpoint
-  merging. **Straighten spans** should isolate and straighten every selected span
-  independently; **Straighten selection** should make each contiguous C0-bounded
-  run one chord. Both preserve the relevant endpoints, conditions, and probe
-  attachments in one undo entry. Endpoint-only actions appear only for a valid
-  endpoint selection; merge is enabled only for two complete baffles within the
-  join distance.
+- [ ] Use C0 isolation, continuity promotion and downgrade, and both straightening
+  actions on a complete baffle and a partial C0-bounded loop piece. **Straighten
+  spans** should isolate and straighten every selected span independently;
+  **Straighten selection** should make each contiguous C0-bounded run one chord.
+  Both preserve the relevant endpoints, conditions, and probe attachments in one
+  undo entry. Promote the seam of a two-span loop to C2 and confirm that the curve
+  gains the spans it needs, does not jump, and comes back in one undo. A junction
+  must keep its C0 buttons disabled.
+- [ ] Weld by dragging. Drop a loose end on another loose end, on its own other
+  end, on a junction, on a curve interior, on a vertex-less corner, and on its own
+  curve. Each is one undo entry, the seam is promotable, and a drop the arrangement
+  rejects leaves only the drag. Dragging a single-span curve onto itself should
+  refine it rather than refuse.
+- [ ] Delete spans that merge two subdomains. The candidates highlight in gold with
+  their material named, a click picks the survivor, and Escape cancels. A span with
+  a hole on both sides reads Inactive in the Edit panel.
+- [ ] In Materials, switch Subdomain assignment between Faces and Regions. Faces
+  lists holes as well; turn a subdomain into a hole and back and confirm that only
+  that face's own boundary changes. A click in the viewport selects a face or a
+  region to match the toggle.
+- [ ] Resize the outer rectangle by dragging a side and a corner grip, with Shift
+  snapping to the grid. Each drag is one undo entry. Confirm the resize cursors
+  appear on hover, before the drag starts, along with the gizmo cursors.
 - [ ] Undo/redo each action through buttons and Ctrl/Cmd shortcuts. One drag or
   completed coordinate edit is one action. Undo/redo restores invalid drafts.
 - [ ] Type coordinates. Delete, Space, and Ctrl/Cmd+Z while typing are captured
@@ -113,8 +133,12 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   or real mesh/solver error should do both.
 - [ ] Disable WebGPU or use an unsupported browser and reload. Readable startup
   guidance must remain visible. Also check an adapter/device initialization failure.
-- [ ] Load `examples/eight-obstacles.json`. Observe idle and dragging frame times,
-  validation latency, smoothness, and browser console errors. Try 32 obstacles.
+- [ ] Load `examples/eight-obstacles.json`, or Obstacle array from the gallery,
+  which is the same scene. Observe idle and dragging frame times, validation
+  latency, smoothness, and browser console errors. Try 32 obstacles.
+- [ ] Enable View > Mesh over a running field and confirm the wireframe is visible
+  on top of it, with and without a material overlay. With Mesh off, neither the
+  Materials nor the Subdomains overlay should print the triangulation.
 
 Keyboard focus, hover help, mode-specific cursors, contrast, and panel traversal
 receive practical accessibility coverage. The numerical canvas remains a custom

@@ -1242,9 +1242,11 @@ fn insertion_and_removal_are_individual_actions() {
     assert_eq!(e.document, before);
 }
 
+/// A version-one document still migrates. The fixture lives here rather than in
+/// `examples/`, which ships a current-version scene for readers to open.
 #[test]
 fn representative_example_loads_and_extreme_finite_draft_remains_editable() {
-    let document = decode(include_bytes!("../../../examples/eight-obstacles.json")).unwrap();
+    let document = decode(include_bytes!("fixtures/eight-obstacles-v1.json")).unwrap();
     assert_eq!(document.model.draft.obstacles.len(), 8);
     let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
     value["draft"]["loops"][0]["controls"][0][0] = serde_json::json!(1e100);

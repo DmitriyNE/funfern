@@ -427,7 +427,8 @@ independent of zoom. The editor
 validator is deliberately conservative; final mesh topology uses adaptive exact
 orientation and incircle signs rather than geometric epsilons.
 Load [examples/eight-obstacles.json](examples/eight-obstacles.json) for a
-representative scene.
+representative scene, or open Obstacle array from the example gallery, which is
+the same scene.
 
 ## Check
 
