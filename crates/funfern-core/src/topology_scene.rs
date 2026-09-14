@@ -393,6 +393,7 @@ impl TopologyScene {
         let plan =
             TopologyMeshPlan::new(&topology, &assignments).map_err(TopologySceneIssue::Plan)?;
         Ok(CompiledTopologyScene {
+            geometry: self.geometry.clone(),
             topology,
             assignments,
             plan,
@@ -402,6 +403,7 @@ impl TopologyScene {
 
 #[derive(Clone, Debug)]
 pub struct CompiledTopologyScene {
+    pub geometry: TopologyGeometry,
     pub topology: TopologySnapshot,
     pub assignments: Vec<FaceRegionAssignment>,
     pub plan: TopologyMeshPlan,
@@ -480,6 +482,7 @@ impl TopologySceneJob {
                             TopologyMeshPlan::new(&topology, &assignments)
                                 .map_err(TopologySceneIssue::Plan)
                                 .map(|plan| CompiledTopologyScene {
+                                    geometry: self.scene.geometry.clone(),
                                     topology,
                                     assignments,
                                     plan,

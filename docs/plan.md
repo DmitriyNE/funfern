@@ -596,8 +596,15 @@ assignments, probes, sources, and accepted/draft pairs together.
 
 In progress. `TopologyMeshingJob` now cooperatively bridges cycles, clips faces,
 legalizes, refines, recovers separated curves, and verifies output, with exact
-slice-size determinism. The application still launches its legacy meshing job and
-does not yet carry the accepted topology bundle.
+slice-size determinism. The application library now carries one immutable accepted
+topology bundle through meshing, assembly, transfer, volume-source compilation,
+ordinary probes, and far-field compilation. A coordinator retains the active state
+until the caller explicitly acknowledges successful GPU upload and rejects stale or
+failed candidates without publication. Source/probe/far-field-only edits reuse the
+exact topology, mesh, and operator; material and boundary-law changes reuse the mesh
+and build an exact transfer; coordinate and graph changes take the typed cooperative
+full rebuild. The visible application still launches its legacy transaction until
+Stage 5 removes its object-specific editor dependencies.
 
 The topology mesher was originally synchronous while the live legacy mesher
 yielded after a small work slice. Switching it directly would have frozen the

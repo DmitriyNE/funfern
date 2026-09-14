@@ -67,6 +67,30 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-14 — Atomic topology runtime preparation
+
+- Added immutable accepted-topology tokens that bind one document revision to its
+  authored scene, compiled arrangement, and mesh plan. CPU preparation now carries
+  that token through cooperative meshing, topology operator assembly, transfer,
+  volume sources, point/line/boundary/area probes, and far-field compilation.
+- Added a publication coordinator with an explicit GPU-acknowledgement boundary.
+  Ready CPU data cannot replace the active runtime on its own; failed, rejected,
+  superseded, and stale candidates leave the committed state untouched.
+- Source, probe, and far-field-only edits reuse the exact topology, mesh, operator,
+  and compiled volume sources. Material or boundary-law changes reuse the mesh and
+  prepare a transfer into the reassembled operator. Coordinate and graph changes
+  report a typed cooperative full rebuild.
+- Restored probe enabled/color semantics in the version-22 topology document and
+  added atomic topology-editor commands for domain, physics, materials, regions,
+  frames, sources, far field, and probes. Load now reseeds material and probe IDs in
+  addition to geometry identities.
+- Direct transaction tests cover publication acknowledgement, exact non-geometric
+  reuse, material-only transfer, coordinate rebuild classification, topology probe
+  compilation, far-field disable status, and active-state retention after failures
+  and supersession.
+- All 470 workspace tests, workspace Clippy with warnings denied, native release
+  compilation, and the release Trunk build pass.
+
 ## 2026-09-14 — Topology version 22 persistence and examples
 
 - Added a strict version-22 topology document codec. It stores independent draft

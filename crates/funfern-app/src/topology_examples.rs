@@ -220,6 +220,8 @@ fn starter_obstacle() -> TopologyDocument {
     document.model.probes.push(TopologyProbeDefinition {
         id: ProbeId(1),
         name: "Receiver".into(),
+        color: [91, 220, 194],
+        enabled: true,
         target: TopologyProbeTarget::Point(Point2::new(0.5, 0.15)),
     });
     document
@@ -316,6 +318,8 @@ fn grin_rod() -> TopologyDocument {
     document.model.probes.push(TopologyProbeDefinition {
         id: ProbeId(1),
         name: "Rod output profile".into(),
+        color: [91, 220, 194],
+        enabled: true,
         target: TopologyProbeTarget::Segment {
             start: Point2::new(0.50, -0.38),
             end: Point2::new(0.50, 0.38),
@@ -396,6 +400,8 @@ fn luneburg_lens() -> TopologyDocument {
     document.model.probes.push(TopologyProbeDefinition {
         id: ProbeId(1),
         name: "Focus energy".into(),
+        color: [91, 220, 194],
+        enabled: true,
         target: TopologyProbeTarget::AreaDisk {
             center: Point2::new(center.x + radius - 0.025, 0.0),
             radius: 0.065,
@@ -404,6 +410,8 @@ fn luneburg_lens() -> TopologyDocument {
     document.model.probes.push(TopologyProbeDefinition {
         id: ProbeId(2),
         name: "Lens energy".into(),
+        color: [248, 196, 112],
+        enabled: true,
         target: TopologyProbeTarget::AreaRegion(region),
     });
     document.presentation.material_overlay = MaterialOverlay::Property(MaterialProperty::WaveSpeed);

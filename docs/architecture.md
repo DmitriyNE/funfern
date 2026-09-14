@@ -671,6 +671,20 @@ baseline cooperatively: bridge search, ear clipping, legalization, refinement,
 separated-curve recovery, and verification are explicit phases, and changing the
 caller work slice does not change the published mesh.
 
+Application preparation binds these objects with a `TopologyToken` containing the
+document and topology revisions. `AcceptedTopology` owns the authored scene,
+compiled arrangement, and mesh plan behind shared immutable pointers.
+`TopologyPreparationJob` carries that bundle through cooperative meshing, quadratic
+assembly, solution-transfer construction, cooperative volume-source compilation,
+ordinary probe stencils, and far-field compilation. A ready candidate does not
+replace the active runtime: the caller first uploads it and then acknowledges the
+same token through `TopologyRuntime::commit_ready`. Upload rejection, preparation
+failure, supersession, or a stale token leaves the previous runtime untouched.
+Document-only changes to point sources, probes, and far-field settings preserve the
+topology token and reuse the exact mesh and operator. Material and boundary-law
+changes retain the mesh but assemble a new operator; coordinate or graph changes
+use the typed cooperative full rebuild until topology-aware local repair arrives.
+
 The enriched-quadratic CPU operator has a topology-plan assembly entry point.
 Materials and local frames come from the region library keyed by each triangle's
 `RegionId`; outer segments and curve traces resolve their owning region and law

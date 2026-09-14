@@ -38,6 +38,8 @@ pub enum TopologyProbeTarget {
 pub struct TopologyProbeDefinition {
     pub id: ProbeId,
     pub name: String,
+    pub color: [u8; 3],
+    pub enabled: bool,
     pub target: TopologyProbeTarget,
 }
 
@@ -135,6 +137,8 @@ pub struct TopologyEditor {
     next_span: u64,
     next_region: u64,
     next_vertex: u64,
+    next_material: u64,
+    next_probe: u64,
 }
 
 impl Default for TopologyEditor {
@@ -155,6 +159,8 @@ impl Default for TopologyEditor {
             next_span: 1,
             next_region: BACKGROUND_REGION.0 + 1,
             next_vertex: 1,
+            next_material: DEFAULT_MATERIAL.0 + 1,
+            next_probe: 1,
         }
     }
 }
@@ -205,6 +211,16 @@ impl TopologyEditor {
                 .chain(&document.model.accepted.geometry.vertices)
                 .map(|vertex| vertex.id.0),
         )?;
+        let next_material = next_id(
+            document
+                .model
+                .draft
+                .materials
+                .iter()
+                .chain(&document.model.accepted.materials)
+                .map(|material| material.id.0),
+        )?;
+        let next_probe = next_id(document.model.probes.iter().map(|probe| probe.id.0))?;
         let mut editor = Self {
             document,
             revision: 0,
@@ -219,6 +235,8 @@ impl TopologyEditor {
             next_span,
             next_region,
             next_vertex,
+            next_material,
+            next_probe,
         };
         editor.changed();
         Ok(editor)
@@ -275,6 +293,355 @@ impl TopologyEditor {
 
     pub fn history_len(&self) -> (usize, usize) {
         (self.undo.len(), self.redo.len())
+    }
+
+    pub fn editing(&self) -> bool {
+        self.before.is_some()
+    }
+
+    pub fn replace_validated(&mut self, document: TopologyDocument) -> Result<(), String> {
+        *self = Self::from_document(document)?;
+        Ok(())
+    }
+
+    pub fn replace_validated_with_history(
+        &mut self,
+        document: TopologyDocument,
+    ) -> Result<(), String> {
+        let mut loaded = Self::from_document(document)?;
+        let previous = self.document.model.clone();
+        let mut undo = std::mem::take(&mut self.undo);
+        undo.push(previous);
+        if undo.len() > HISTORY_LIMIT {
+            undo.remove(0);
+        }
+        loaded.undo = undo;
+        *self = loaded;
+        Ok(())
+    }
+
+    pub fn set_domain_during_edit(&mut self, domain: DomainRect) -> Result<(), String> {
+        if !domain.valid() {
+            return Err("Domain extents are invalid".into());
+        }
+        if self.document.model.draft.geometry.domain != domain {
+            self.document.model.draft.geometry.domain = domain;
+            self.changed();
+        }
+        Ok(())
+    }
+
+    pub fn set_domain(&mut self, domain: DomainRect) -> Result<(), String> {
+        if self.document.model.draft.geometry.domain == domain {
+            return Ok(());
+        }
+        self.begin();
+        if let Err(error) = self.set_domain_during_edit(domain) {
+            self.cancel();
+            return Err(error);
+        }
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_physics(&mut self, physics: PhysicsModel) -> Result<(), String> {
+        let previous = self.document.model.draft.physics;
+        if previous == physics {
+            return Ok(());
+        }
+        let materials = self
+            .document
+            .model
+            .draft
+            .materials
+            .iter()
+            .map(|material| {
+                previous
+                    .convert_material(physics, material)
+                    .map_err(|error| {
+                        format!("Could not convert material `{}`: {error}", material.name)
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.begin();
+        self.document.model.draft.physics = physics;
+        self.document.model.draft.materials = materials;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn add_material(&mut self) -> Result<MaterialId, String> {
+        if self.document.model.draft.materials.len() >= MAX_MATERIALS {
+            return Err(format!("Maximum {MAX_MATERIALS} materials"));
+        }
+        let id = MaterialId(self.next_material);
+        self.next_material = self
+            .next_material
+            .checked_add(1)
+            .ok_or("Material IDs exhausted")?;
+        let mut material = Material::default_medium();
+        material.id = id;
+        material.name = format!("Material {}", id.0);
+        self.begin();
+        self.document.model.draft.materials.push(material);
+        self.changed();
+        self.commit();
+        Ok(id)
+    }
+
+    pub fn update_material(&mut self, material: Material) -> Result<(), String> {
+        if !material.valid() {
+            return Err("Material settings are invalid".into());
+        }
+        let id = material.id;
+        let candidate = self
+            .document
+            .model
+            .draft
+            .materials
+            .iter_mut()
+            .find(|candidate| candidate.id == id)
+            .ok_or("Material no longer exists")?;
+        if *candidate == material {
+            return Ok(());
+        }
+        self.begin();
+        *self
+            .document
+            .model
+            .draft
+            .materials
+            .iter_mut()
+            .find(|candidate| candidate.id == id)
+            .unwrap() = material;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn delete_material(&mut self, id: MaterialId) -> Result<(), String> {
+        if id == DEFAULT_MATERIAL {
+            return Err("The default material cannot be deleted".into());
+        }
+        if self
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .any(|region| region.material == id)
+        {
+            return Err("Material is assigned to a subdomain".into());
+        }
+        let index = self
+            .document
+            .model
+            .draft
+            .materials
+            .iter()
+            .position(|material| material.id == id)
+            .ok_or("Material no longer exists")?;
+        self.begin();
+        self.document.model.draft.materials.remove(index);
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_region_material(
+        &mut self,
+        region: RegionId,
+        material: MaterialId,
+    ) -> Result<(), String> {
+        self.require_material(material)?;
+        let candidate = self
+            .document
+            .model
+            .draft
+            .regions
+            .iter_mut()
+            .find(|candidate| candidate.id == region)
+            .ok_or("Region no longer exists")?;
+        if candidate.material == material {
+            return Ok(());
+        }
+        self.begin();
+        self.document
+            .model
+            .draft
+            .regions
+            .iter_mut()
+            .find(|candidate| candidate.id == region)
+            .unwrap()
+            .material = material;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_region_frame_during_edit(
+        &mut self,
+        region: RegionId,
+        frame: MaterialFrame,
+    ) -> Result<(), String> {
+        if !frame.valid() {
+            return Err("Material frame is invalid".into());
+        }
+        let candidate = self
+            .document
+            .model
+            .draft
+            .regions
+            .iter_mut()
+            .find(|candidate| candidate.id == region)
+            .ok_or("Region no longer exists")?;
+        if candidate.frame != frame {
+            candidate.frame = frame;
+            self.changed();
+        }
+        Ok(())
+    }
+
+    pub fn set_region_frame(
+        &mut self,
+        region: RegionId,
+        frame: MaterialFrame,
+    ) -> Result<(), String> {
+        self.begin();
+        if let Err(error) = self.set_region_frame_during_edit(region, frame) {
+            self.cancel();
+            return Err(error);
+        }
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_volume_source(
+        &mut self,
+        region: RegionId,
+        source: Option<VolumeSource>,
+    ) -> Result<(), String> {
+        if self.document.model.draft.region(region).is_none() {
+            return Err("Region no longer exists".into());
+        }
+        if source
+            .as_ref()
+            .is_some_and(|source| !source.valid() || source.region != region)
+        {
+            return Err("Volume source settings are invalid".into());
+        }
+        let mut sources = self.document.model.draft.volume_sources.clone();
+        sources.retain(|candidate| candidate.region != region);
+        if let Some(source) = source {
+            if sources.len() >= MAX_VOLUME_SOURCES {
+                return Err(format!("Maximum {MAX_VOLUME_SOURCES} volume sources"));
+            }
+            sources.push(source);
+        }
+        if sources == self.document.model.draft.volume_sources {
+            return Ok(());
+        }
+        self.begin();
+        self.document.model.draft.volume_sources = sources;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_point_source(&mut self, source: PointSource) -> Result<(), String> {
+        if !source.valid() || self.document.model.draft.region(source.region).is_none() {
+            return Err("Point source settings are invalid".into());
+        }
+        if self.document.model.source == source {
+            return Ok(());
+        }
+        self.begin();
+        self.document.model.source = source;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_far_field(&mut self, settings: FarFieldSettings) -> Result<(), String> {
+        if !settings.valid() {
+            return Err("Far-field settings are invalid".into());
+        }
+        if self.document.model.far_field == settings {
+            return Ok(());
+        }
+        self.begin();
+        self.document.model.far_field = settings;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn create_probe(
+        &mut self,
+        name: String,
+        color: [u8; 3],
+        target: TopologyProbeTarget,
+    ) -> Result<ProbeId, String> {
+        if self.document.model.probes.len() >= crate::editor::MAX_PROBES {
+            return Err(format!("Maximum {} probes", crate::editor::MAX_PROBES));
+        }
+        let id = ProbeId(self.next_probe);
+        self.next_probe = self
+            .next_probe
+            .checked_add(1)
+            .ok_or("Probe IDs exhausted")?;
+        let probe = TopologyProbeDefinition {
+            id,
+            name,
+            color,
+            enabled: true,
+            target,
+        };
+        if !probe_definition_valid(&probe, &self.document.model.draft) {
+            return Err("Probe settings are invalid".into());
+        }
+        self.begin();
+        self.document.model.probes.push(probe);
+        self.changed();
+        self.commit();
+        Ok(id)
+    }
+
+    pub fn update_probe(&mut self, probe: TopologyProbeDefinition) -> Result<(), String> {
+        if !probe_definition_valid(&probe, &self.document.model.draft) {
+            return Err("Probe settings are invalid".into());
+        }
+        let index = self
+            .document
+            .model
+            .probes
+            .iter()
+            .position(|candidate| candidate.id == probe.id)
+            .ok_or("Probe no longer exists")?;
+        if self.document.model.probes[index] == probe {
+            return Ok(());
+        }
+        self.begin();
+        self.document.model.probes[index] = probe;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn delete_probe(&mut self, id: ProbeId) -> Result<(), String> {
+        let index = self
+            .document
+            .model
+            .probes
+            .iter()
+            .position(|probe| probe.id == id)
+            .ok_or("Probe no longer exists")?;
+        self.begin();
+        self.document.model.probes.remove(index);
+        self.changed();
+        self.commit();
+        Ok(())
     }
 
     pub fn changed(&mut self) {
@@ -1067,6 +1434,44 @@ impl TopologyEditor {
     }
 }
 
+fn probe_definition_valid(probe: &TopologyProbeDefinition, scene: &TopologyScene) -> bool {
+    if probe.id.0 == 0
+        || probe.name.trim().is_empty()
+        || probe.name.len() > 64
+        || scene
+            .regions
+            .iter()
+            .all(|region| region.id != BACKGROUND_REGION)
+    {
+        return false;
+    }
+    match &probe.target {
+        TopologyProbeTarget::Point(point) => point.finite(),
+        TopologyProbeTarget::Segment { start, end, .. } => {
+            start.finite() && end.finite() && (*end - *start).norm() >= 1.0e-6
+        }
+        TopologyProbeTarget::Boundary(target) => scene
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == target.curve)
+            .is_some_and(|curve| {
+                !target.spans.is_empty()
+                    && target
+                        .spans
+                        .iter()
+                        .all(|span| curve.spans.iter().any(|candidate| candidate.id == *span))
+            }),
+        TopologyProbeTarget::AreaDisk { center, radius } => {
+            center.finite()
+                && radius.is_finite()
+                && *radius > 0.0
+                && (std::f64::consts::PI * radius * radius).is_finite()
+        }
+        TopologyProbeTarget::AreaRegion(region) => scene.region(*region).is_some(),
+    }
+}
+
 fn next_id(ids: impl Iterator<Item = u64>) -> Result<u64, String> {
     ids.max()
         .unwrap_or(0)
@@ -1513,6 +1918,54 @@ mod tests {
     }
 
     #[test]
+    fn loaded_material_and_probe_ids_are_reseeded_and_document_edits_are_atomic() {
+        let document = crate::topology_examples::catalog()[3].document.clone();
+        let maximum_material = document
+            .model
+            .draft
+            .materials
+            .iter()
+            .map(|material| material.id.0)
+            .max()
+            .unwrap();
+        let maximum_probe = document
+            .model
+            .probes
+            .iter()
+            .map(|probe| probe.id.0)
+            .max()
+            .unwrap();
+        let mut editor = TopologyEditor::from_document(document).unwrap();
+        settle(&mut editor);
+
+        let material = editor.add_material().unwrap();
+        settle(&mut editor);
+        assert!(material.0 > maximum_material);
+        let probe = editor
+            .create_probe(
+                "new receiver".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::Point(Point2::new(0.8, 0.0)),
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert!(probe.0 > maximum_probe);
+        assert_eq!(editor.history_len(), (2, 0));
+
+        let mut source = editor.document.model.source;
+        source.enabled = false;
+        editor.set_point_source(source).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.history_len(), (3, 0));
+        assert!(editor.undo());
+        settle(&mut editor);
+        assert_ne!(editor.document.model.source, source);
+        assert!(editor.redo());
+        settle(&mut editor);
+        assert_eq!(editor.document.model.source, source);
+    }
+
+    #[test]
     fn invalid_drag_preserves_accepted_scene_and_cancels_exactly() {
         let mut editor = TopologyEditor::default();
         let curve = editor
@@ -1701,6 +2154,8 @@ mod tests {
         editor.document.model.probes.push(TopologyProbeDefinition {
             id: ProbeId(1),
             name: "loop trace".into(),
+            color: [91, 220, 194],
+            enabled: true,
             target: TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
                 curve: loop_id,
                 spans: vec![original],
@@ -1980,6 +2435,8 @@ mod tests {
             TopologyProbeDefinition {
                 id: ProbeId(1),
                 name: "divider".into(),
+                color: [91, 220, 194],
+                enabled: true,
                 target: TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
                     curve: separator.curve,
                     spans: vec![span],
@@ -1991,6 +2448,8 @@ mod tests {
             TopologyProbeDefinition {
                 id: ProbeId(2),
                 name: "new face".into(),
+                color: [248, 196, 112],
+                enabled: true,
                 target: TopologyProbeTarget::AreaRegion(created_region),
             },
         ]);
@@ -2072,11 +2531,15 @@ mod tests {
             TopologyProbeDefinition {
                 id: ProbeId(10),
                 name: "old exterior".into(),
+                color: [91, 220, 194],
+                enabled: true,
                 target: TopologyProbeTarget::AreaRegion(BACKGROUND_REGION),
             },
             TopologyProbeDefinition {
                 id: ProbeId(11),
                 name: "glass side".into(),
+                color: [248, 196, 112],
+                enabled: true,
                 target: TopologyProbeTarget::AreaRegion(glass_region),
             },
         ]);

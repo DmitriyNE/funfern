@@ -46,6 +46,15 @@ impl OwnedTopologyWaveModel {
 }
 
 impl<'a> TopologyWaveModel<'a> {
+    pub fn from_topology_scene(scene: &'a crate::TopologyScene) -> Self {
+        Self {
+            physics: scene.physics,
+            materials: &scene.materials,
+            regions: &scene.regions,
+            outer_boundaries: scene.outer_boundaries,
+        }
+    }
+
     pub fn from_scene(scene: &'a Scene) -> Self {
         Self {
             physics: scene.physics,

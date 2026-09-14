@@ -227,6 +227,8 @@ enum StoredCurveSide {
 struct StoredTopologyProbe {
     id: u64,
     name: String,
+    color: [u8; 3],
+    enabled: bool,
     target: StoredTopologyProbeTarget,
 }
 
@@ -632,6 +634,8 @@ fn encode_probe(probe: &TopologyProbeDefinition) -> StoredTopologyProbe {
     StoredTopologyProbe {
         id: probe.id.0,
         name: probe.name.clone(),
+        color: probe.color,
+        enabled: probe.enabled,
         target: match &probe.target {
             TopologyProbeTarget::Point(position) => StoredTopologyProbeTarget::Point {
                 position: [position.x, position.y],
@@ -667,6 +671,8 @@ fn decode_probe(stored: StoredTopologyProbe) -> Result<TopologyProbeDefinition, 
     Ok(TopologyProbeDefinition {
         id: ProbeId(stored.id),
         name: stored.name,
+        color: stored.color,
+        enabled: stored.enabled,
         target: match stored.target {
             StoredTopologyProbeTarget::Point { position } => {
                 TopologyProbeTarget::Point(Point2::new(position[0], position[1]))
@@ -795,7 +801,8 @@ fn validate_probes(
         if probe.id.0 == 0
             || !ids.insert(probe.id)
             || probe.name.is_empty()
-            || probe.name.len() > 128
+            || probe.name.len() > 64
+            || probe.name.trim().is_empty()
         {
             return Err("Scene contains an invalid probe".into());
         }
@@ -1107,11 +1114,15 @@ mod tests {
             TopologyProbeDefinition {
                 id: ProbeId(1),
                 name: "point".into(),
+                color: [91, 220, 194],
+                enabled: true,
                 target: TopologyProbeTarget::Point(Point2::new(-0.5, 0.0)),
             },
             TopologyProbeDefinition {
                 id: ProbeId(2),
                 name: "line".into(),
+                color: [248, 196, 112],
+                enabled: false,
                 target: TopologyProbeTarget::Segment {
                     start: Point2::new(-0.8, -0.2),
                     end: Point2::new(-0.2, 0.3),
@@ -1121,6 +1132,8 @@ mod tests {
             TopologyProbeDefinition {
                 id: ProbeId(3),
                 name: "divider".into(),
+                color: [72, 166, 255],
+                enabled: true,
                 target: TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
                     curve: curve_id,
                     spans: vec![span],
@@ -1132,6 +1145,8 @@ mod tests {
             TopologyProbeDefinition {
                 id: ProbeId(4),
                 name: "disk".into(),
+                color: [255, 106, 123],
+                enabled: true,
                 target: TopologyProbeTarget::AreaDisk {
                     center: Point2::new(0.4, 0.0),
                     radius: 0.15,
@@ -1140,6 +1155,8 @@ mod tests {
             TopologyProbeDefinition {
                 id: ProbeId(5),
                 name: "region".into(),
+                color: [180, 140, 255],
+                enabled: true,
                 target: TopologyProbeTarget::AreaRegion(BACKGROUND_REGION),
             },
         ];
