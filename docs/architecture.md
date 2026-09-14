@@ -162,12 +162,32 @@ boundary anchor or an authored junction plus its selected incident face. Creatin
 a separator validates both targets against one compiled draft, requires the same
 active face, attaches both endpoints, then assigns the single new daughter face in
 one document command. Span insertion remaps face anchors and expands boundary-probe
-paths before validation. Removing a curve keeps the sole active neighbor
-automatically; when two active regions merge, the command requires an explicit
-survivor and removes probes or sources owned by the dropped region atomically.
-The outer domain retains the stable background region identity; choosing the
-other side's material transfers that side's material and dependents into the
-background identity and removes dependents belonging to the discarded side.
+paths before validation. Removal is planned on a copy: the geometry is cut or
+removed, dangling junctions pruned, curves that lost a junction promoted to
+baffles, and the result compiled; the region merge is then read off that result
+as the regions landing on one face rather than inferred from edge adjacency.
+Several regions landing on one face require an explicit survivor and remove
+probes or sources owned by the dropped regions atomically; regions landing on
+several faces at once is refused. The outer domain retains the stable background
+region identity; choosing the other side's material transfers that side's
+material and dependents into the background identity and removes dependents
+belonging to the discarded side.
+
+Two open-curve ends that meet form one curve, not a junction: an authored
+topology vertex exists only where three or more arms meet or where a curve
+attaches to the outer domain. Welding a loose end onto another concatenates the
+splines — the stationary curve keeps its identity and direction, the other is
+reversed when the ends demand it, which swaps its separated laws and flips the
+side of its face anchors and boundary probes while reversing the probes' paths —
+and leaves a plain multiplicity-3 breakpoint that continuity edits may smooth. A
+loose end dropped on a vertex-less breakpoint makes that breakpoint the junction
+without inserting a span, and a removal that leaves exactly two open-curve ends
+at a junction fuses them in the same command. The arrangement compiler rejects
+coincident endpoints and T-contacts that carry no authored vertex, so an authored
+vertex or a single joined curve is what makes a touch compile, not only what
+keeps it stable under editing. Promotion to a baffle follows the compiler's own
+rule: an open curve is demoted only when a free tip's adjacent span transmits, so
+a curve that keeps a transmitting span between two faces keeps it.
 
 Viewport interaction uses the authored identities directly. Its transient
 selection is either one curve control or authoritative topology vertex, or a set

@@ -37,6 +37,21 @@ ruling — the same detach bug scored 2/2 under one phrasing and 0/2 under anoth
   compile-before-commit check, so a rejected command burns a `RegionId`. Refuted as
   a defect and harmless at u64 width; tidy it if that code is touched again.
 
+Follow-ups from the welding work:
+
+- [ ] Offer the survivor picker for a weld that merges subdomains. Welding a
+  detached separator's end onto a baffle folds its two regions into one face;
+  the weld is refused with the compiler's `DuplicateFace` message rather than
+  asking which region survives.
+- [ ] Self-attachment: a loose end dropped on its own curve's interior is refused
+  ("Attach to another curve"). A curve looping back onto itself is legal
+  geometry and would need the split and attach to run on the same curve.
+- [ ] `detach_endpoint` still leaves a two-arm vertex when the other two arms are
+  open ends, so a seam a manual detach produces stays a locked C0 corner until
+  something touches that junction. Fold it into the deferred unweld/split work.
+- [ ] Multi-curve Delete remains one editor command per curve; see the history
+  item below.
+
 Carried over from the cutover follow-up work, not from the review:
 
 - [ ] Restore capture suppression. The pre-swap `clean_presentation()` had eight
@@ -122,6 +137,76 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-14 — Span soup: welding, and deletion that survives the figure-8
+
+- The figure-8 autosave — a closed loop with a chord welded across it — could
+  not lose any span. Four separate defects, all reproduced against the file
+  before touching anything:
+  - `remove_spans` rebased every face anchor on the cut curve into the piece's
+    parameter domain, then handed `rebuild_face_assignments` the *un-rebased*
+    snapshot. An anchor whose parameter had left its span failed to resolve, was
+    dropped silently, and its face fell into the "no anchor, so take the
+    survivor" branch — two faces claiming region 1, `DuplicateRegion`. It bit
+    only when a surviving, untouched face was anchored on the cut curve: nine of
+    sixteen spans.
+  - A run through a junction node frees the chord and merges all three faces,
+    which the "cap at two" rule refused.
+  - `remove_curve` never called `promote_freed_curves`, so deleting the loop
+    stranded the chord with two free transmitting ends.
+  - The control-point highlight lit every control of a curve when any of its
+    spans was selected.
+- Removal now goes through one `RemovalPlan` for curves and spans: cut or
+  remove on a copy, prune, promote, fuse loose ends left at a two-arm junction,
+  compile, and read the merge off the result — the regions landing on one face.
+  One group asks for a survivor from however many regions it holds; two groups
+  is refused with a reason; a region whose anchor died but whose face persists
+  keeps its region under a fresh anchor. `curve_removal_choices` and
+  `span_removal_choices` are thin wrappers over the plan, so the question the UI
+  asks is exactly the merge the command performs. Deleting a hole now reports no
+  choices rather than the one region it borders; both mean "no question".
+- Welding. Two loose ends meeting are one curve, never a junction: an authored
+  vertex exists only at valence three or more and on the outer domain. New in
+  core: `OpenCubicSpline::close` (the inverse of `open_at` at breakpoint 0 —
+  drop the duplicated corner, seam multiplicity 3, period and span order kept;
+  a single span has too few controls and is refused), `TopologyCurve::reversed`
+  with `SpanBehavior::mirrored` and `CurveTraceSide::opposite`. `join` and
+  `reversed` existed unused since the legacy editor; they now have error-path
+  and involution tests. The editor's `join_curves` keeps the stationary curve's
+  identity and direction, reverses the absorbed one when the ends demand it,
+  pins the absorbed end onto the stationary tip first so `join`'s averaged seam
+  control is exact, and carries every anchor and boundary probe across with
+  `p' = offset + (reversed ? period − p : p)`, flipping sides and toggling the
+  probes' direction. `weld_endpoint` routes a dropped loose end: another loose
+  end joins, the same curve's other end closes, a junction, outer side, curve
+  interior, or vertex-less breakpoint gains an arm. The arrangement must compile
+  or the weld is refused and only the drag remains.
+- A vertex-less breakpoint is a new attachment target, `Breakpoint`, because a
+  `FaceAnchor::Curve` sitting exactly on a node resolves to `AtVertex`.
+  `materialize_attachment` raises the node to a corner and binds a vertex
+  without inserting a span — a seam produced by a weld used to fail or grow a
+  sliver span when a third curve was attached there.
+- Promotion follows the compiler's own rule now: an open curve is demoted only
+  when a free tip's adjacent span transmits. The earlier "any transmitting span
+  plus any free tip" would have walled off the chord after the arc auto-joined
+  it on the figure-8, though it still separates the surviving lobe. A
+  transmitting span that ends up with the same face on both sides is left as it
+  is; the mesh plan drops such edges, so it is inert rather than wrong.
+- UI. Dragging the control of a loose end is a new gesture: gold dots on every
+  eligible target, a ring at the live snap, the weld on release, one history
+  entry with the drag. The snap is recomputed at release rather than taken from
+  the gesture, because a snap captured mid-drag can name a face of a snapshot
+  that validation has since replaced. Drawing an open curve snaps to loose ends
+  and breakpoints too. The survivor picker moved out of the Edit panel, where it
+  only rendered with a span selection open, into the scene: candidates fill
+  gold with their material named at the face centre, a prompt sits over the
+  viewport, a click picks. Controls now ring blue only when they shape a
+  selected span (`selected_span_controls`).
+- Verified: the figure-8 autosave deletes every span, offers three survivors for
+  the run through the junction, and drops the whole loop leaving the chord as a
+  baffle; `cargo fmt`, Clippy with warnings denied, all workspace tests, native
+  release build. Not verified from here: the drag gesture, the picker, and the
+  highlight need a hand on the mouse.
 
 ## 2026-09-14 — Deleting part of a divider
 

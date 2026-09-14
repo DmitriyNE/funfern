@@ -8,7 +8,7 @@ use crate::document::{
 };
 use crate::topology_viewport::TopologyTransformUpdate;
 use funfern_core::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const HISTORY_LIMIT: usize = 100;
 
@@ -102,6 +102,46 @@ pub enum TopologyAttachment {
         vertex: TopologyVertexId,
         face: FaceId,
     },
+    /// A free endpoint of an open curve: `endpoint` is 0 for its start and 1
+    /// for its end. Attaching here welds the two curves into one rather than
+    /// materialising a vertex.
+    LooseEnd {
+        curve: CurveId,
+        endpoint: usize,
+    },
+    /// An interior breakpoint that owns no vertex yet, such as the seam an
+    /// earlier weld left. Attaching here turns the breakpoint into a junction
+    /// without splitting a span; `side` says which face the arm comes from.
+    Breakpoint {
+        curve: CurveId,
+        node: usize,
+        side: CurveTraceSide,
+    },
+}
+
+/// Two open curves fused end to end into one. `survivor` kept its identity and
+/// direction; `absorbed` is gone, reversed first when the ends demanded it. The
+/// seam is node `seam_node` of the survivor and `seam_control` is its on-curve
+/// control, so the UI can select it. `absorbed_far_node` is where the absorbed
+/// curve's other end landed on the survivor. `survivor == absorbed` records a
+/// curve whose two loose ends met and closed into a loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JoinRecord {
+    pub survivor: CurveId,
+    pub absorbed: CurveId,
+    pub seam_node: usize,
+    pub seam_control: usize,
+    pub absorbed_far_node: usize,
+}
+
+/// What welding a loose end did. `curve` is the curve the dragged end now
+/// belongs to; `seam_control` is set when two curves fused or a loop closed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TopologyWeld {
+    pub curve: CurveId,
+    pub seam_control: Option<usize>,
+    pub promoted: bool,
+    pub span_splits: Vec<TopologySpanSplit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,14 +165,20 @@ pub struct TopologyCurveEdit {
 pub struct TopologySpanRemoval {
     pub pieces: Vec<CurveId>,
     pub promoted: Vec<CurveId>,
+    pub joined: Vec<JoinRecord>,
     pub removed_regions: Vec<RegionId>,
     pub region_remaps: Vec<(RegionId, RegionId)>,
     pub removed_probes: Vec<ProbeId>,
 }
 
+/// What removing a whole curve changed. `promoted` names curves demoted to
+/// baffles because the removal freed one of their ends; `joined` records the
+/// pairs of loose ends the removal left at a two-arm junction and fused.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TopologyCurveRemoval {
     pub curve: CurveId,
+    pub promoted: Vec<CurveId>,
+    pub joined: Vec<JoinRecord>,
     pub removed_regions: Vec<RegionId>,
     pub region_remaps: Vec<(RegionId, RegionId)>,
     pub removed_probes: Vec<ProbeId>,
@@ -858,8 +904,34 @@ impl TopologyEditor {
             .map_err(|issue| issue.to_string())?;
         let mut candidate = self.document.model.clone();
         let mut span_splits = vec![];
-        for (node, target) in [(0, start), (curve.nodes.len() - 1, end)] {
+        // Loose ends are welded after the curve exists; everything else pins
+        // the new end onto a materialised vertex.
+        let mut loose = vec![];
+        let last = curve.nodes.len() - 1;
+        for (node, target) in [(0, start), (last, end)] {
             let Some(target) = target else { continue };
+            if let TopologyAttachment::LooseEnd {
+                curve: other,
+                endpoint,
+            } = target
+            {
+                let other_curve = candidate
+                    .draft
+                    .geometry
+                    .curve(other)
+                    .ok_or("Attachment curve no longer exists")?;
+                let other_node = loose_end_node(other_curve, endpoint)?;
+                let tip = other_curve
+                    .spline
+                    .node_point(other_node)
+                    .ok_or("Attachment curve end no longer exists")?;
+                curve
+                    .spline
+                    .set_node_point(node, tip)
+                    .map_err(|error| error.to_string())?;
+                loose.push((node, other, other_node));
+                continue;
+            }
             let (vertex, point) = self.materialize_attachment(
                 &mut candidate.draft,
                 &mut candidate.probes,
@@ -874,12 +946,32 @@ impl TopologyEditor {
         }
         candidate.draft.geometry.curves.push(curve);
 
+        // The start-side existing curve keeps its identity: the drawn curve
+        // dissolves into it, and an end-side curve is then absorbed in turn.
+        let mut surviving = curve_id;
+        let mut far_node = last;
+        let mut joined = vec![];
+        for (node, other, other_node) in loose {
+            if other == surviving {
+                close_curve_geometry(&mut candidate, surviving)?;
+                break;
+            }
+            let record = if node == 0 {
+                join_curves(&mut candidate, (other, other_node), (surviving, 0))?
+            } else {
+                join_curves(&mut candidate, (surviving, far_node), (other, other_node))?
+            };
+            surviving = record.survivor;
+            far_node = record.absorbed_far_node;
+            joined.push(record);
+        }
+
         let topology = compile_topology(&candidate.draft.geometry, self.revision.wrapping_add(1))
             .map_err(|issue| issue.to_string())?;
         self.assign_new_faces(
             &mut candidate.draft,
             &topology,
-            curve_id,
+            surviving,
             source_region,
             new_material,
         )?;
@@ -893,7 +985,7 @@ impl TopologyEditor {
         self.changed();
         self.commit();
         Ok(TopologyCurveEdit {
-            curve: curve_id,
+            curve: surviving,
             span_splits,
         })
     }
@@ -933,19 +1025,54 @@ impl TopologyEditor {
         endpoint: usize,
         target: TopologyAttachment,
     ) -> Result<Vec<TopologySpanSplit>, String> {
+        if matches!(target, TopologyAttachment::LooseEnd { .. }) {
+            return Err("Weld loose ends with weld_endpoint".into());
+        }
         let compiled = self
             .compiled_draft
             .as_ref()
             .unwrap_or(&self.compiled_accepted)
             .clone();
-        let source_face = attachment_face(target, &compiled)?;
+        let mut candidate = self.document.model.clone();
+        let (source_region, span_splits) =
+            self.attach_end_to_vertex(&mut candidate, &compiled, curve, endpoint, target)?;
+        if let Ok(topology) =
+            compile_topology(&candidate.draft.geometry, self.revision.wrapping_add(1))
+        {
+            self.assign_new_faces(&mut candidate.draft, &topology, curve, source_region, None)?;
+        }
+        self.begin();
+        self.document.model = candidate;
+        self.changed();
+        self.commit();
+        Ok(span_splits)
+    }
+
+    /// Materialises `target` as a vertex and pins one free end of `curve` onto
+    /// it. Shared by [`Self::attach_endpoint`] and [`Self::weld_endpoint`].
+    fn attach_end_to_vertex(
+        &mut self,
+        candidate: &mut TopologyDocumentModel,
+        compiled: &CompiledTopologyScene,
+        curve: CurveId,
+        endpoint: usize,
+        target: TopologyAttachment,
+    ) -> Result<(Option<RegionId>, Vec<TopologySpanSplit>), String> {
+        let source_face = attachment_face(target, compiled)?;
         let source_region = compiled
             .assignments
             .iter()
             .find(|assignment| assignment.face == source_face)
             .map(|assignment| assignment.region)
             .ok_or("Attachment face no longer exists")?;
-        let mut candidate = self.document.model.clone();
+        let node = loose_end_node(
+            candidate
+                .draft
+                .geometry
+                .curve(curve)
+                .ok_or("Curve no longer exists")?,
+            endpoint,
+        )?;
         let mut span_splits = vec![];
         let (vertex, point) = self.materialize_attachment(
             &mut candidate.draft,
@@ -960,61 +1087,143 @@ impl TopologyEditor {
             .iter_mut()
             .find(|candidate| candidate.id == curve)
             .ok_or("Curve no longer exists")?;
-        if !attached.spline.is_open() || !matches!(endpoint, 0 | 1) {
-            return Err("Choose the start or end of an open curve".into());
-        }
-        let node = if endpoint == 0 {
-            0
-        } else {
-            attached.nodes.len() - 1
-        };
-        if attached.nodes[node].vertex.is_some() {
-            return Err("Endpoint is already attached".into());
-        }
         attached
             .spline
             .set_node_point(node, point)
             .map_err(|error| error.to_string())?;
         attached.nodes[node].vertex = Some(vertex);
+        Ok((source_region, span_splits))
+    }
 
-        if let Ok(topology) =
-            compile_topology(&candidate.draft.geometry, self.revision.wrapping_add(1))
-        {
-            self.assign_new_faces(&mut candidate.draft, &topology, curve, source_region, None)?;
+    /// Welds a loose end onto whatever the user dropped it on. Two loose ends
+    /// fuse into one curve (or close a loop when they belong to the same
+    /// curve); a junction, an outer side, a curve interior, or a vertex-less
+    /// breakpoint gains an arm. The arrangement must compile afterwards or the
+    /// weld is refused and only the drag remains.
+    pub fn weld_endpoint(
+        &mut self,
+        curve: CurveId,
+        endpoint: usize,
+        target: TopologyAttachment,
+    ) -> Result<TopologyWeld, String> {
+        let compiled = self
+            .compiled_draft
+            .as_ref()
+            .unwrap_or(&self.compiled_accepted)
+            .clone();
+        let mut candidate = self.document.model.clone();
+        let dragged = candidate
+            .draft
+            .geometry
+            .curve(curve)
+            .ok_or("Curve no longer exists")?
+            .clone();
+        let node = loose_end_node(&dragged, endpoint)?;
+        let region_at = |point: Point2| {
+            compiled.topology.face_at(point).and_then(|face| {
+                compiled
+                    .assignments
+                    .iter()
+                    .find(|assignment| assignment.face == face)
+                    .and_then(|assignment| assignment.region)
+            })
+        };
+        let mut span_splits = vec![];
+        let mut seam_control = None;
+        let mut face_curve = curve;
+        let source_region;
+        match target {
+            TopologyAttachment::LooseEnd {
+                curve: other,
+                endpoint: other_end,
+            } if other == curve => {
+                if other_end == endpoint {
+                    return Err("Choose a different end to weld to".into());
+                }
+                let CurveSpline::Open(spline) = &dragged.spline else {
+                    return Err("Curve is already closed".into());
+                };
+                source_region = region_at(open_spline_midpoint(spline));
+                close_curve_geometry(&mut candidate, curve)?;
+                seam_control =
+                    candidate
+                        .draft
+                        .geometry
+                        .curve(curve)
+                        .and_then(|closed| match &closed.spline {
+                            CurveSpline::Closed(spline) => Some(spline.controls().len() - 1),
+                            CurveSpline::Open(_) => None,
+                        });
+            }
+            TopologyAttachment::LooseEnd {
+                curve: other,
+                endpoint: other_end,
+            } => {
+                let other_curve = candidate
+                    .draft
+                    .geometry
+                    .curve(other)
+                    .ok_or("Attachment curve no longer exists")?;
+                let other_node = loose_end_node(other_curve, other_end)?;
+                let tip = other_curve
+                    .spline
+                    .node_point(other_node)
+                    .ok_or("Attachment curve end no longer exists")?;
+                source_region = region_at(tip);
+                let record = join_curves(&mut candidate, (other, other_node), (curve, node))?;
+                face_curve = record.survivor;
+                seam_control = Some(record.seam_control);
+            }
+            TopologyAttachment::Boundary(FaceAnchor::Curve { curve: other, .. })
+                if other == curve =>
+            {
+                return Err("Attach to another curve".into());
+            }
+            _ => {
+                let (region, splits) =
+                    self.attach_end_to_vertex(&mut candidate, &compiled, curve, endpoint, target)?;
+                source_region = region;
+                span_splits = splits;
+            }
         }
+        // A join can hand transmitting spans a free tip; the result is a baffle.
+        let promoted = promote_curve_if_freed(&mut candidate.draft.geometry, face_curve);
+        let topology = compile_topology(&candidate.draft.geometry, self.revision.wrapping_add(1))
+            .map_err(|issue| issue.to_string())?;
+        self.assign_new_faces(
+            &mut candidate.draft,
+            &topology,
+            face_curve,
+            source_region,
+            None,
+        )?;
+        candidate
+            .draft
+            .compile(self.revision.wrapping_add(1))
+            .map_err(|issue| issue.to_string())?;
         self.begin();
         self.document.model = candidate;
         self.changed();
         self.commit();
-        Ok(span_splits)
+        Ok(TopologyWeld {
+            curve: face_curve,
+            seam_control,
+            promoted,
+            span_splits,
+        })
     }
 
-    /// Removes a curve and deterministically resolves any face merge. When two
-    /// active regions meet across the removed curve, `keep_region` is required.
-    /// Active regions adjacent to a curve. More than one means removing the
-    /// curve merges two subdomains and the caller must say which survives.
+    /// Active regions a curve removal would merge into one. More than one means
+    /// removing the curve merges subdomains and the caller must say which
+    /// survives. The answer comes from compiling the removal, so it already
+    /// accounts for curves the removal promotes or welds.
     pub fn curve_removal_choices(&self, curve: CurveId) -> Result<Vec<RegionId>, String> {
-        let compiled = self
-            .compiled_draft
-            .as_ref()
-            .ok_or("Resolve the invalid draft before removing a topology curve")?;
-        let assignment_by_face = compiled
-            .assignments
-            .iter()
-            .map(|assignment| (assignment.face, assignment.region))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        Ok(compiled
-            .topology
-            .edges
-            .iter()
-            .filter(|edge| edge.curve == Some(curve))
-            .flat_map(|edge| [edge.left, edge.right])
-            .filter_map(|face| assignment_by_face.get(&face).copied().flatten())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect())
+        Ok(self
+            .plan_removal(RemovalTarget::Curve(curve))?
+            .merge
+            .map(|merge| merge.regions.into_iter().collect())
+            .unwrap_or_default())
     }
-
     /// The face a closed curve encloses, identified through the authored anchor
     /// that curve owns rather than through snapshot traversal order.
     pub fn enclosed_region(&self, curve: CurveId) -> Option<Option<RegionId>> {
@@ -1182,467 +1391,404 @@ impl TopologyEditor {
         Ok((curve.id, run, false))
     }
 
-    /// Active regions that a span removal would merge. More than one means the
-    /// caller must say which survives, exactly as for whole-curve removal.
+    /// Active regions that a span removal would merge into one. More than one
+    /// means the caller must say which survives, exactly as for whole-curve
+    /// removal. The answer comes from compiling the removal, so it already
+    /// accounts for curves the deletion promotes or welds.
     pub fn span_removal_choices(
         &self,
         selected: &BTreeSet<CurveSpanId>,
     ) -> Result<Vec<RegionId>, String> {
-        let (curve_id, run, whole) = self.span_removal_target(selected)?;
+        let (curve, run, whole) = self.span_removal_target(selected)?;
         if whole {
-            return self.curve_removal_choices(curve_id);
+            return self.curve_removal_choices(curve);
         }
-        let compiled = self
-            .compiled_draft
-            .as_ref()
-            .ok_or("Resolve the invalid draft before deleting spans")?;
-        let curve = self
-            .document
-            .model
-            .draft
-            .geometry
-            .curve(curve_id)
-            .ok_or("Curve no longer exists")?;
-        let plan = CurveCut::plan(curve, &run)?;
-        let mut sources = run
-            .iter()
-            .map(|index| CompiledEdgeSource::Curve(curve.spans[*index].id))
-            .collect::<BTreeSet<_>>();
-        for freed in plan.freed_curves(&self.document.model.draft.geometry, curve_id) {
-            if let Some(curve) = self.document.model.draft.geometry.curve(freed) {
-                sources.extend(
-                    curve
-                        .spans
-                        .iter()
-                        .map(|span| CompiledEdgeSource::Curve(span.id)),
-                );
-            }
-        }
-        let assignment_by_face = compiled
-            .assignments
-            .iter()
-            .map(|assignment| (assignment.face, assignment.region))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        Ok(compiled
-            .topology
-            .edges
-            .iter()
-            .filter(|edge| sources.contains(&edge.source))
-            .flat_map(|edge| [edge.left, edge.right])
-            .filter_map(|face| assignment_by_face.get(&face).copied().flatten())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect())
+        Ok(self
+            .plan_removal(RemovalTarget::Spans { curve, run })?
+            .merge
+            .map(|merge| merge.regions.into_iter().collect())
+            .unwrap_or_default())
     }
 
     /// Deletes one contiguous run of spans, leaving the rest of the curve as open
     /// pieces. Every surviving piece becomes a baffle with the default wall,
     /// because an open curve that kept a transmitting end span with a free tip is
     /// rejected by the arrangement compiler. Any curve the deletion frees from a
-    /// junction is promoted the same way.
+    /// junction is promoted the same way, and two loose ends left at a junction
+    /// fuse into one curve.
     pub fn remove_spans(
         &mut self,
         selected: &BTreeSet<CurveSpanId>,
         keep_region: Option<RegionId>,
     ) -> Result<TopologySpanRemoval, String> {
-        let (curve_id, run, whole) = self.span_removal_target(selected)?;
+        let (curve, run, whole) = self.span_removal_target(selected)?;
         if whole {
-            let removal = self.remove_curve(curve_id, keep_region)?;
+            let removal = self.remove_curve(curve, keep_region)?;
             return Ok(TopologySpanRemoval {
                 pieces: vec![],
-                promoted: vec![],
+                promoted: removal.promoted,
+                joined: removal.joined,
                 removed_regions: removal.removed_regions,
                 region_remaps: removal.region_remaps,
                 removed_probes: removal.removed_probes,
             });
         }
-        let compiled = self
-            .compiled_draft
-            .clone()
-            .ok_or("Resolve the invalid draft before deleting spans".to_owned())?;
-        let choices = self.span_removal_choices(selected)?;
-        if choices.len() > 2 {
-            return Err(
-                "Deleting this run would merge more than two subdomains; remove the attached curves first"
-                    .into(),
-            );
-        }
-        let chosen_survivor = match choices.len() {
-            0 => {
-                if keep_region.is_some() {
-                    return Err("An inactive curve has no material region to keep".into());
-                }
-                None
-            }
-            1 => {
-                let only = choices[0];
-                if keep_region.is_some_and(|selected| selected != only) {
-                    return Err("Selected surviving material is not adjacent to this curve".into());
-                }
-                Some(only)
-            }
-            _ => {
-                let selected =
-                    keep_region.ok_or("Choose which adjacent material survives this deletion")?;
-                if !choices.contains(&selected) {
-                    return Err("Selected surviving material is not adjacent to this curve".into());
-                }
-                Some(selected)
-            }
-        };
-        // Region 1 is the stable exterior identity, so an exterior merge keeps it
-        // and transfers the chosen region's material into it.
-        let survivor = if choices.contains(&BACKGROUND_REGION) {
-            Some(BACKGROUND_REGION)
-        } else {
-            chosen_survivor
-        };
-        let region_remaps = match (chosen_survivor, survivor) {
-            (Some(from), Some(to)) if from != to => vec![(from, to)],
-            _ => vec![],
-        };
-        let dropped_dependencies = choices
-            .iter()
-            .copied()
-            .filter(|region| Some(*region) != chosen_survivor)
-            .collect::<BTreeSet<_>>();
-
-        let curve = self
-            .document
-            .model
-            .draft
-            .geometry
-            .curve(curve_id)
-            .ok_or("Curve no longer exists")?
-            .clone();
-        let plan = CurveCut::plan(&curve, &run)?;
-        let deleted_spans = run
-            .iter()
-            .map(|index| curve.spans[*index].id)
-            .collect::<BTreeSet<_>>();
-        let affected_faces = compiled
-            .topology
-            .edges
-            .iter()
-            .filter(|edge| {
-                matches!(edge.source, CompiledEdgeSource::Curve(span) if deleted_spans.contains(&span))
-            })
-            .flat_map(|edge| [edge.left, edge.right])
-            .filter(|face| {
-                compiled
-                    .assignments
-                    .iter()
-                    .any(|assignment| assignment.face == *face)
-            })
-            .collect::<BTreeSet<_>>();
-        let old_assignments = self
-            .document
-            .model
-            .draft
-            .face_assignments
-            .iter()
-            .copied()
-            .map(|assignment| {
-                assignment
-                    .anchor
-                    .resolve(&compiled.topology)
-                    .map(|face| (face, assignment))
-                    .map_err(|issue| issue.to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut candidate = self.document.model.clone();
-        let mut pieces = Vec::new();
-        let mut rebased = Vec::new();
-        for (index, cut) in plan.pieces.iter().enumerate() {
-            let id = if index == 0 {
-                curve_id
-            } else {
-                self.allocate_curve()?
-            };
-            let spans = cut
-                .spans
-                .iter()
-                .map(|span| CurveSpan {
-                    id: curve.spans[*span].id,
-                    behavior: SpanBehavior::REFLECTING,
-                })
-                .collect::<Vec<_>>();
-            let mut piece = TopologyCurve::new(id, cut.spline.clone(), spans)
-                .map_err(|issue| issue.to_string())?;
-            for (node, original) in cut.nodes.iter().enumerate() {
-                piece.nodes[node] = curve.nodes[*original];
-            }
-            for (position, span) in cut.spans.iter().enumerate() {
-                let old = curve
-                    .spline
-                    .span_bounds(*span)
-                    .ok_or("Missing curve span")?;
-                let new = piece
-                    .spline
-                    .span_bounds(position)
-                    .ok_or("Missing curve span")?;
-                rebased.push((curve.spans[*span].id, id, old, new));
-            }
-            pieces.push(piece);
-        }
-        let position = candidate
-            .draft
-            .geometry
-            .curves
-            .iter()
-            .position(|candidate| candidate.id == curve_id)
-            .ok_or("Curve no longer exists")?;
-        candidate.draft.geometry.curves.remove(position);
-        for (offset, piece) in pieces.iter().enumerate() {
-            candidate
-                .draft
-                .geometry
-                .curves
-                .insert(position + offset, piece.clone());
-        }
-        prune_dangling_junctions(&mut candidate.draft.geometry);
-        let promoted = promote_freed_curves(&mut candidate.draft.geometry);
-
-        for assignment in &mut candidate.draft.face_assignments {
-            let FaceAnchor::Curve {
-                curve: anchor_curve,
-                span,
-                parameter,
-                ..
-            } = &mut assignment.anchor
-            else {
-                continue;
-            };
-            if *anchor_curve != curve_id {
-                continue;
-            }
-            let Some((_, piece, old, new)) = rebased
-                .iter()
-                .find(|(candidate, _, _, _)| candidate == span)
-            else {
-                continue;
-            };
-            let width = old[1] - old[0];
-            let fraction = if width.abs() > f64::MIN_POSITIVE {
-                ((*parameter - old[0]) / width).clamp(0.0, 1.0)
-            } else {
-                0.5
-            };
-            *anchor_curve = *piece;
-            *parameter = new[0] + (new[1] - new[0]) * fraction;
-        }
-
-        let topology = compile_topology(&candidate.draft.geometry, self.revision.wrapping_add(1))
-            .map_err(|issue| issue.to_string())?;
-        candidate.draft.face_assignments = rebuild_face_assignments(
-            &old_assignments,
-            &topology,
-            &affected_faces,
-            survivor,
-            |anchor| {
-                matches!(
-                    anchor,
-                    FaceAnchor::Curve { span, .. } if deleted_spans.contains(span)
-                )
-            },
-        )?;
-
-        if let Some((from, to)) = region_remaps.first().copied() {
-            let replacement = candidate
-                .draft
-                .region(from)
-                .copied()
-                .ok_or("Selected surviving region no longer exists")?;
-            let exterior = candidate
-                .draft
-                .regions
-                .iter_mut()
-                .find(|region| region.id == to)
-                .ok_or("Exterior region no longer exists")?;
-            exterior.material = replacement.material;
-            exterior.frame = MaterialFrame::world();
-        }
-        let removed_regions = choices
-            .iter()
-            .copied()
-            .filter(|region| Some(*region) != survivor)
-            .collect::<Vec<_>>();
-        candidate
-            .draft
-            .regions
-            .retain(|region| !removed_regions.contains(&region.id));
-        candidate.draft.volume_sources.retain_mut(|source| {
-            if region_remaps.iter().any(|(from, _)| source.region == *from) {
-                source.region = survivor.unwrap();
-                true
-            } else {
-                !dropped_dependencies.contains(&source.region)
-            }
-        });
-        retarget_point_source(
-            &mut candidate,
-            &region_remaps,
-            &dropped_dependencies,
-            survivor,
-        );
-        let removed_probes = remap_cut_boundary_probes(
-            &mut candidate.probes,
-            curve_id,
-            &curve,
-            &plan,
-            &pieces,
-            &region_remaps,
-            &dropped_dependencies,
-        );
-
-        candidate
-            .draft
-            .compile(self.revision.wrapping_add(1))
-            .map_err(|issue| issue.to_string())?;
-        self.begin();
-        self.document.model = candidate;
-        self.changed();
-        self.commit();
+        let plan = self.plan_removal(RemovalTarget::Spans { curve, run })?;
+        let outcome = self.apply_removal(plan, keep_region)?;
         Ok(TopologySpanRemoval {
-            pieces: pieces.iter().map(|piece| piece.id).collect(),
-            promoted,
-            removed_regions,
-            region_remaps,
-            removed_probes,
+            pieces: outcome.pieces,
+            promoted: outcome.promoted,
+            joined: outcome.joined,
+            removed_regions: outcome.removed_regions,
+            region_remaps: outcome.region_remaps,
+            removed_probes: outcome.removed_probes,
         })
     }
+
+    /// Removes a curve and deterministically resolves any face merge. When two
+    /// or more active regions meet across the removed curve, `keep_region` is
+    /// required. Curves the removal frees are promoted to baffles; two loose
+    /// ends left at a junction fuse into one curve.
     pub fn remove_curve(
         &mut self,
         curve: CurveId,
         keep_region: Option<RegionId>,
     ) -> Result<TopologyCurveRemoval, String> {
-        let compiled = self
-            .compiled_draft
-            .clone()
-            .ok_or("Resolve the invalid draft before removing a topology curve")?;
-        if !self
-            .document
-            .model
+        let plan = self.plan_removal(RemovalTarget::Curve(curve))?;
+        let outcome = self.apply_removal(plan, keep_region)?;
+        Ok(TopologyCurveRemoval {
+            curve,
+            promoted: outcome.promoted,
+            joined: outcome.joined,
+            removed_regions: outcome.removed_regions,
+            region_remaps: outcome.region_remaps,
+            removed_probes: outcome.removed_probes,
+        })
+    }
+
+    /// Works a removal out on a copy of the document: cuts or removes the
+    /// geometry, prunes and promotes, fuses loose ends the removal leaves at a
+    /// two-arm junction, compiles, and finds where every old face landed. The
+    /// editor is untouched and no id is allocated — a second cut piece takes the
+    /// next curve id provisionally and `apply_removal` claims it.
+    fn plan_removal(&self, target: RemovalTarget) -> Result<RemovalPlan, String> {
+        let compiled = self.compiled_draft.as_ref().ok_or(match target {
+            RemovalTarget::Curve(_) => "Resolve the invalid draft before removing a topology curve",
+            RemovalTarget::Spans { .. } => "Resolve the invalid draft before deleting spans",
+        })?;
+        let mut candidate = self.document.model.clone();
+        let mut removed_probes = vec![];
+        let mut pieces = vec![];
+        let mut provisional_curve = false;
+        let (dead_spans, touched, mut reparameterised) = match &target {
+            RemovalTarget::Curve(curve_id) => {
+                let curve = candidate
+                    .draft
+                    .geometry
+                    .curve(*curve_id)
+                    .ok_or("Curve no longer exists")?
+                    .clone();
+                let touched = curve
+                    .nodes
+                    .iter()
+                    .filter_map(|node| node.vertex)
+                    .collect::<BTreeSet<_>>();
+                let dead = curve
+                    .spans
+                    .iter()
+                    .map(|span| span.id)
+                    .collect::<BTreeSet<_>>();
+                candidate
+                    .draft
+                    .geometry
+                    .curves
+                    .retain(|candidate| candidate.id != *curve_id);
+                candidate.probes.retain(|probe| {
+                    let gone = matches!(
+                        &probe.target,
+                        TopologyProbeTarget::Boundary(target) if target.curve == *curve_id
+                    );
+                    if gone {
+                        removed_probes.push(probe.id);
+                    }
+                    !gone
+                });
+                (dead, touched, BTreeSet::from([*curve_id]))
+            }
+            RemovalTarget::Spans {
+                curve: curve_id,
+                run,
+            } => {
+                let curve = candidate
+                    .draft
+                    .geometry
+                    .curve(*curve_id)
+                    .ok_or("Curve no longer exists")?
+                    .clone();
+                let cut = CurveCut::plan(&curve, run)?;
+                let dead = run
+                    .iter()
+                    .map(|index| curve.spans[*index].id)
+                    .collect::<BTreeSet<_>>();
+                let touched = curve
+                    .nodes
+                    .iter()
+                    .filter_map(|node| node.vertex)
+                    .collect::<BTreeSet<_>>();
+                let mut built = Vec::new();
+                let mut rebased = Vec::new();
+                for (index, piece) in cut.pieces.iter().enumerate() {
+                    let id = if index == 0 {
+                        curve.id
+                    } else {
+                        provisional_curve = true;
+                        CurveId(self.next_curve)
+                    };
+                    let spans = piece
+                        .spans
+                        .iter()
+                        .map(|span| CurveSpan {
+                            id: curve.spans[*span].id,
+                            behavior: SpanBehavior::REFLECTING,
+                        })
+                        .collect::<Vec<_>>();
+                    let mut built_piece = TopologyCurve::new(id, piece.spline.clone(), spans)
+                        .map_err(|issue| issue.to_string())?;
+                    for (node, original) in piece.nodes.iter().enumerate() {
+                        built_piece.nodes[node] = curve.nodes[*original];
+                    }
+                    for (position, span) in piece.spans.iter().enumerate() {
+                        let old = curve
+                            .spline
+                            .span_bounds(*span)
+                            .ok_or("Missing curve span")?;
+                        let new = built_piece
+                            .spline
+                            .span_bounds(position)
+                            .ok_or("Missing curve span")?;
+                        rebased.push((curve.spans[*span].id, id, old, new));
+                    }
+                    built.push(built_piece);
+                }
+                let position = candidate
+                    .draft
+                    .geometry
+                    .curves
+                    .iter()
+                    .position(|candidate| candidate.id == curve.id)
+                    .ok_or("Curve no longer exists")?;
+                candidate.draft.geometry.curves.remove(position);
+                for (offset, piece) in built.iter().enumerate() {
+                    candidate
+                        .draft
+                        .geometry
+                        .curves
+                        .insert(position + offset, piece.clone());
+                }
+                // Anchors on kept spans follow their span onto its piece, with
+                // the parameter rebased into the piece's own domain.
+                for assignment in &mut candidate.draft.face_assignments {
+                    let FaceAnchor::Curve {
+                        curve: anchor_curve,
+                        span,
+                        parameter,
+                        ..
+                    } = &mut assignment.anchor
+                    else {
+                        continue;
+                    };
+                    if *anchor_curve != curve.id {
+                        continue;
+                    }
+                    let Some((_, piece, old, new)) = rebased
+                        .iter()
+                        .find(|(candidate, _, _, _)| candidate == span)
+                    else {
+                        continue;
+                    };
+                    let width = old[1] - old[0];
+                    let fraction = if width.abs() > f64::MIN_POSITIVE {
+                        ((*parameter - old[0]) / width).clamp(0.0, 1.0)
+                    } else {
+                        0.5
+                    };
+                    *anchor_curve = *piece;
+                    *parameter = new[0] + (new[1] - new[0]) * fraction;
+                }
+                removed_probes.extend(remap_cut_boundary_probes(
+                    &mut candidate.probes,
+                    curve.id,
+                    &curve,
+                    &cut,
+                    &built,
+                ));
+                pieces = built.iter().map(|piece| piece.id).collect();
+                (dead, touched, BTreeSet::from([curve.id]))
+            }
+        };
+        prune_dangling_junctions(&mut candidate.draft.geometry);
+        let mut promoted = promote_freed_curves(&mut candidate.draft.geometry);
+        let joined = join_valence_two_ends(&mut candidate, &touched);
+        if !joined.is_empty() {
+            for record in &joined {
+                reparameterised.insert(record.survivor);
+                reparameterised.insert(record.absorbed);
+            }
+            // A fusion can hand transmitting spans a free tip.
+            for curve in promote_freed_curves(&mut candidate.draft.geometry) {
+                if !promoted.contains(&curve) {
+                    promoted.push(curve);
+                }
+            }
+        }
+        let existing = candidate
             .draft
             .geometry
             .curves
             .iter()
-            .any(|candidate| candidate.id == curve)
-        {
-            return Err("Curve no longer exists".into());
-        }
-        let assignment_by_face = compiled
-            .assignments
-            .iter()
-            .map(|assignment| (assignment.face, assignment.region))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let affected_faces = compiled
-            .topology
-            .edges
-            .iter()
-            .filter(|edge| edge.curve == Some(curve))
-            .flat_map(|edge| [edge.left, edge.right])
-            .filter(|face| assignment_by_face.contains_key(face))
+            .map(|curve| curve.id)
             .collect::<BTreeSet<_>>();
-        let active = affected_faces
-            .iter()
-            .filter_map(|face| assignment_by_face[face])
-            .collect::<BTreeSet<_>>();
-        let chosen_survivor = match active.len() {
-            0 => {
-                if keep_region.is_some() {
-                    return Err("An inactive curve has no material region to keep".into());
-                }
-                None
-            }
-            1 => {
-                let only = active.iter().next().copied().unwrap();
-                if keep_region.is_some_and(|selected| selected != only) {
-                    return Err("Selected surviving material is not adjacent to this curve".into());
-                }
-                Some(only)
-            }
-            _ => {
-                let selected =
-                    keep_region.ok_or("Choose which adjacent material survives divider removal")?;
-                if !active.contains(&selected) {
-                    return Err("Selected surviving material is not adjacent to this curve".into());
-                }
-                Some(selected)
-            }
-        };
-        // Region 1 is the stable exterior identity used by document defaults.
-        // Choosing the other material across an exterior merge transfers that
-        // region's semantic state into Region 1 instead of deleting Region 1.
-        let survivor = if active.contains(&BACKGROUND_REGION) {
-            Some(BACKGROUND_REGION)
-        } else {
-            chosen_survivor
-        };
-        let region_remaps = match (chosen_survivor, survivor) {
-            (Some(from), Some(to)) if from != to => vec![(from, to)],
-            _ => vec![],
-        };
-        let dropped_dependencies = active
-            .iter()
-            .copied()
-            .filter(|region| Some(*region) != chosen_survivor)
-            .collect::<BTreeSet<_>>();
+        pieces.retain(|piece| existing.contains(piece));
 
+        // Every old face paired with its anchor as the cut and the fusions left
+        // it: the face comes from the original anchor against the old snapshot,
+        // the anchor from the candidate, which the loops above rewrote in place.
         let old_assignments = self
             .document
             .model
             .draft
             .face_assignments
             .iter()
-            .copied()
-            .map(|assignment| {
-                assignment
+            .zip(&candidate.draft.face_assignments)
+            .map(|(original, rebased)| {
+                original
                     .anchor
                     .resolve(&compiled.topology)
-                    .map(|face| (face, assignment))
+                    .map(|face| (face, *rebased))
                     .map_err(|issue| issue.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut candidate = self.document.model.clone();
-        candidate
-            .draft
-            .geometry
-            .curves
-            .retain(|candidate| candidate.id != curve);
-        let used_vertices = candidate
-            .draft
-            .geometry
-            .curves
-            .iter()
-            .flat_map(|curve| &curve.nodes)
-            .filter_map(|node| node.vertex)
-            .collect::<BTreeSet<_>>();
-        candidate
-            .draft
-            .geometry
-            .vertices
-            .retain(|vertex| used_vertices.contains(&vertex.id));
-        prune_dangling_junctions(&mut candidate.draft.geometry);
         let topology = compile_topology(&candidate.draft.geometry, self.revision.wrapping_add(1))
             .map_err(|issue| issue.to_string())?;
+        let dead = |anchor: &FaceAnchor| matches!(anchor, FaceAnchor::Curve { span, .. } if dead_spans.contains(span));
+        let mut landings = BTreeMap::<FaceId, Landing>::new();
+        let mut live = vec![];
+        let mut vanishing = BTreeSet::new();
+        for (old_face, assignment) in &old_assignments {
+            if dead(&assignment.anchor) {
+                if let Some(region) = assignment.region {
+                    vanishing.insert(region);
+                }
+                let Some(new_face) = attribute_dead_face(
+                    compiled,
+                    &topology,
+                    *old_face,
+                    &dead_spans,
+                    &reparameterised,
+                ) else {
+                    continue;
+                };
+                let landing = landings.entry(new_face).or_default();
+                match assignment.region {
+                    Some(region) => {
+                        landing.dead_regions.insert(region);
+                    }
+                    None => landing.dead_hole = true,
+                }
+            } else {
+                let new_face = assignment.anchor.resolve(&topology).map_err(|issue| {
+                    format!("Face anchor no longer resolves after removal: {issue}")
+                })?;
+                landings.entry(new_face).or_default().live.push(*assignment);
+                live.push((new_face, *assignment));
+            }
+        }
+        let mut merges = landings
+            .iter()
+            .filter_map(|(face, landing)| {
+                let regions = landing.regions();
+                (regions.len() >= 2).then_some(Merge {
+                    face: *face,
+                    regions,
+                })
+            })
+            .collect::<Vec<_>>();
+        if merges.len() > 1 {
+            return Err(
+                "This deletion would merge subdomains in more than one place; delete a smaller part"
+                    .into(),
+            );
+        }
+        Ok(RemovalPlan {
+            candidate,
+            topology,
+            live,
+            landings,
+            merge: merges.pop(),
+            vanishing,
+            pieces,
+            promoted,
+            joined,
+            removed_probes,
+            provisional_curve,
+        })
+    }
 
-        candidate.draft.face_assignments = rebuild_face_assignments(
-            &old_assignments,
-            &topology,
-            &affected_faces,
-            survivor,
-            |anchor| {
-                matches!(
-                    anchor,
-                    FaceAnchor::Curve {
-                        curve: anchor_curve,
-                        ..
-                    } if *anchor_curve == curve
-                )
-            },
-        )?;
+    /// Settles a planned removal with the caller's survivor choice and commits
+    /// it as one history entry.
+    fn apply_removal(
+        &mut self,
+        plan: RemovalPlan,
+        keep_region: Option<RegionId>,
+    ) -> Result<RemovalOutcome, String> {
+        let RemovalPlan {
+            mut candidate,
+            topology,
+            live,
+            landings,
+            merge,
+            vanishing,
+            pieces,
+            promoted,
+            joined,
+            mut removed_probes,
+            provisional_curve,
+        } = plan;
+        let choices = merge
+            .as_ref()
+            .map(|merge| merge.regions.clone())
+            .unwrap_or_default();
+        let (chosen_survivor, survivor) = resolve_survivor(&choices, keep_region)?;
+        let region_remaps = match (chosen_survivor, survivor) {
+            (Some(from), Some(to)) if from != to => vec![(from, to)],
+            _ => vec![],
+        };
+
+        // Faces whose region the removal decides: the merged face takes the
+        // survivor; a face that lost its only anchor but absorbed nothing keeps
+        // what it had under a fresh anchor.
+        let mut forced = BTreeMap::<FaceId, Option<RegionId>>::new();
+        let mut kept = BTreeSet::new();
+        for (face, landing) in &landings {
+            if merge.as_ref().is_some_and(|merge| merge.face == *face) {
+                forced.insert(*face, survivor);
+                continue;
+            }
+            if landing.live.is_empty() {
+                let mut regions = landing.dead_regions.iter().copied();
+                match (regions.next(), regions.next()) {
+                    (Some(region), None) => {
+                        forced.insert(*face, Some(region));
+                        kept.insert(region);
+                    }
+                    (None, None) if landing.dead_hole => {
+                        forced.insert(*face, None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        candidate.draft.face_assignments = rebuild_face_assignments(&live, &topology, &forced)?;
 
         if let Some((from, to)) = region_remaps.first().copied() {
             let replacement = candidate
@@ -1659,60 +1805,60 @@ impl TopologyEditor {
             exterior.material = replacement.material;
             exterior.frame = MaterialFrame::world();
         }
-        let removed_regions = active
+        // Regions leave the document relative to the surviving identity, but
+        // their dependents follow the user's choice: keeping the other material
+        // across an exterior merge moves its sources and probes onto region 1
+        // and drops region 1's own, whose material just got replaced.
+        let removed_regions = choices
+            .iter()
+            .chain(&vanishing)
+            .copied()
+            .filter(|region| Some(*region) != survivor && !kept.contains(region))
+            .collect::<BTreeSet<_>>()
             .into_iter()
-            .filter(|region| Some(*region) != survivor)
             .collect::<Vec<_>>();
+        let dropped = choices
+            .iter()
+            .chain(&vanishing)
+            .copied()
+            .filter(|region| Some(*region) != chosen_survivor && !kept.contains(region))
+            .collect::<BTreeSet<_>>();
         candidate
             .draft
             .regions
             .retain(|region| !removed_regions.contains(&region.id));
         candidate.draft.volume_sources.retain_mut(|source| {
-            if region_remaps.iter().any(|(from, _)| source.region == *from) {
-                source.region = survivor.unwrap();
+            if let Some((_, to)) = region_remaps
+                .iter()
+                .find(|(from, _)| source.region == *from)
+            {
+                source.region = *to;
                 true
             } else {
-                !dropped_dependencies.contains(&source.region)
+                !dropped.contains(&source.region)
             }
         });
-        retarget_point_source(
-            &mut candidate,
+        retarget_point_source(&mut candidate, &region_remaps, &dropped, survivor);
+        removed_probes.extend(settle_region_probes(
+            &mut candidate.probes,
             &region_remaps,
-            &dropped_dependencies,
-            survivor,
-        );
-        let mut removed_probes = vec![];
-        candidate.probes.retain_mut(|probe| {
-            let mut retargeted_region = false;
-            if let TopologyProbeTarget::AreaRegion(region) = &mut probe.target
-                && let Some((_, to)) = region_remaps.iter().find(|(from, _)| *from == *region)
-            {
-                *region = *to;
-                retargeted_region = true;
-            }
-            let remove = matches!(
-                &probe.target,
-                TopologyProbeTarget::Boundary(target) if target.curve == curve
-            ) || !retargeted_region && matches!(
-                probe.target,
-                TopologyProbeTarget::AreaRegion(region) if dropped_dependencies.contains(&region)
-            );
-            if remove {
-                removed_probes.push(probe.id);
-            }
-            !remove
-        });
+            &dropped,
+        ));
         candidate
             .draft
             .compile(self.revision.wrapping_add(1))
             .map_err(|issue| issue.to_string())?;
-
+        if provisional_curve {
+            self.allocate_curve()?;
+        }
         self.begin();
         self.document.model = candidate;
         self.changed();
         self.commit();
-        Ok(TopologyCurveRemoval {
-            curve,
+        Ok(RemovalOutcome {
+            pieces,
+            promoted,
+            joined,
             removed_regions,
             region_remaps,
             removed_probes,
@@ -2565,6 +2711,30 @@ impl TopologyEditor {
                 remap_outer_anchor_dependencies(scene, side, fraction);
                 Ok((vertex, point))
             }
+            TopologyAttachment::LooseEnd { .. } => {
+                Err("Loose ends are welded, not attached to a vertex".into())
+            }
+            TopologyAttachment::Breakpoint { curve, node, .. } => {
+                let curve_index = scene
+                    .geometry
+                    .curves
+                    .iter()
+                    .position(|candidate| candidate.id == curve)
+                    .ok_or("Attachment curve no longer exists")?;
+                let target = &scene.geometry.curves[curve_index];
+                breakpoint_span(target, node)?;
+                if let Some(vertex) = target.nodes[node].vertex {
+                    let point = scene
+                        .geometry
+                        .vertices
+                        .iter()
+                        .find(|candidate| candidate.id == vertex)
+                        .and_then(|vertex| vertex.point(scene.geometry.domain))
+                        .ok_or("Junction no longer exists")?;
+                    return Ok((vertex, point));
+                }
+                self.attach_vertex_to_node(scene, curve_index, node)
+            }
             TopologyAttachment::Boundary(FaceAnchor::Curve {
                 curve, parameter, ..
             }) => {
@@ -2580,6 +2750,18 @@ impl TopologyEditor {
                     parameter,
                 ) {
                     return Ok((vertex, point));
+                }
+                // A breakpoint that owns no vertex yet — an earlier weld's seam,
+                // say — becomes the junction itself: raised to a corner, no span
+                // inserted. A free tip is a loose end and welds instead.
+                if let Some(node) =
+                    vertexless_node_at(&scene.geometry.curves[curve_index], parameter)
+                {
+                    let target = &scene.geometry.curves[curve_index];
+                    if target.spline.is_open() && (node == 0 || node + 1 == target.nodes.len()) {
+                        return Err("That is a loose end; weld to it instead".into());
+                    }
+                    return self.attach_vertex_to_node(scene, curve_index, node);
                 }
                 let point = evaluate_curve(&scene.geometry.curves[curve_index], parameter);
                 let span_index = containing_span(&scene.geometry.curves[curve_index], parameter)
@@ -2607,6 +2789,50 @@ impl TopologyEditor {
                 Ok((vertex, point))
             }
         }
+    }
+
+    /// Makes an interior breakpoint that owns no vertex into a junction: raised
+    /// to a corner without moving the curve, then bound to a fresh vertex.
+    fn attach_vertex_to_node(
+        &mut self,
+        scene: &mut TopologyScene,
+        curve_index: usize,
+        node: usize,
+    ) -> Result<(TopologyVertexId, Point2), String> {
+        let target = &mut scene.geometry.curves[curve_index];
+        let point = target
+            .spline
+            .node_point(node)
+            .ok_or("Attachment breakpoint no longer exists")?;
+        let vertex = self.allocate_vertex()?;
+        match &mut target.spline {
+            CurveSpline::Open(spline) => {
+                while spline
+                    .continuity(node)
+                    .is_some_and(|continuity| continuity > 0)
+                {
+                    spline
+                        .increase_multiplicity(node)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            CurveSpline::Closed(spline) => {
+                while spline
+                    .continuity(node)
+                    .is_some_and(|continuity| continuity > 0)
+                {
+                    spline
+                        .increase_multiplicity(node)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        target.nodes[node].vertex = Some(vertex);
+        scene.geometry.vertices.push(TopologyVertex {
+            id: vertex,
+            location: TopologyVertexLocation::Interior(point),
+        });
+        Ok((vertex, point))
     }
 
     fn assign_new_faces(
@@ -2798,7 +3024,331 @@ fn attachment_face(
                 Err("Selected junction sector no longer exists".into())
             }
         }
+        TopologyAttachment::Breakpoint { curve, node, side } => {
+            let target = compiled
+                .geometry
+                .curve(curve)
+                .ok_or("Attachment curve no longer exists")?;
+            let span = breakpoint_span(target, node)?;
+            let [a, b] = target
+                .spline
+                .span_bounds(span)
+                .ok_or("Attachment breakpoint no longer exists")?;
+            // The node owns no vertex, so the face beside the span starting at
+            // it is the face beside the node.
+            FaceAnchor::Curve {
+                curve,
+                span: target.spans[span].id,
+                side,
+                parameter: (a + b) * 0.5,
+            }
+            .resolve(&compiled.topology)
+            .map_err(|issue| issue.to_string())
+        }
+        TopologyAttachment::LooseEnd { curve, endpoint } => {
+            let target = compiled
+                .geometry
+                .curve(curve)
+                .ok_or("Attachment curve no longer exists")?;
+            let node = loose_end_node(target, endpoint)?;
+            // A free tip is a slit inside one face: the end span sees that face
+            // on both sides, so either side of its compiled edge names it.
+            let span = if node == 0 {
+                target.spans[0].id
+            } else {
+                target.spans[target.spans.len() - 1].id
+            };
+            compiled
+                .topology
+                .edges
+                .iter()
+                .find(|edge| edge.source == CompiledEdgeSource::Curve(span))
+                .map(|edge| edge.left)
+                .or_else(|| {
+                    let point = target.spline.node_point(node)?;
+                    compiled.topology.face_at(point)
+                })
+                .ok_or("Loose end no longer lies in a face".into())
+        }
     }
+}
+
+/// The span that starts at an interior breakpoint, or why the node is not one.
+/// Every node of a closed curve qualifies; an open curve's ends do not.
+fn breakpoint_span(curve: &TopologyCurve, node: usize) -> Result<usize, String> {
+    if node >= curve.nodes.len()
+        || (curve.spline.is_open() && (node == 0 || node + 1 == curve.nodes.len()))
+    {
+        return Err("Choose an interior breakpoint".into());
+    }
+    Ok(node)
+}
+
+/// The node index of a free end of an open curve, or why it is not one.
+fn loose_end_node(curve: &TopologyCurve, endpoint: usize) -> Result<usize, String> {
+    if !curve.spline.is_open() || !matches!(endpoint, 0 | 1) {
+        return Err("Choose the start or end of an open curve".into());
+    }
+    let node = if endpoint == 0 {
+        0
+    } else {
+        curve.nodes.len() - 1
+    };
+    if curve.nodes[node].vertex.is_some() {
+        return Err("Endpoint is already attached".into());
+    }
+    Ok(node)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CurveEnd {
+    Start,
+    End,
+}
+
+fn curve_end(curve: &TopologyCurve, node: usize) -> Result<CurveEnd, String> {
+    if node == 0 {
+        Ok(CurveEnd::Start)
+    } else if node + 1 == curve.nodes.len() {
+        Ok(CurveEnd::End)
+    } else {
+        Err("Weld a curve at one of its ends".into())
+    }
+}
+
+fn open_period(curve: &TopologyCurve) -> Result<f64, String> {
+    match &curve.spline {
+        CurveSpline::Open(spline) => Ok(spline.period()),
+        CurveSpline::Closed(_) => Err("Only open curves can be welded".into()),
+    }
+}
+
+/// Fuses two open curves whose named ends are both free into one curve. The
+/// stationary curve keeps its identity and direction; the absorbed curve is
+/// reversed when the ends demand it and disappears. Span ids survive, every
+/// face anchor and boundary probe on either curve is carried onto the result,
+/// and the seam is an ordinary C0 breakpoint with no vertex. Nothing is
+/// compiled here: callers validate the arrangement afterwards.
+fn join_curves(
+    model: &mut TopologyDocumentModel,
+    stationary: (CurveId, usize),
+    absorbed: (CurveId, usize),
+) -> Result<JoinRecord, String> {
+    let (s_id, s_node) = stationary;
+    let (a_id, a_node) = absorbed;
+    if s_id == a_id {
+        return Err("Choose two different curves to weld".into());
+    }
+    let geometry = &model.draft.geometry;
+    let s = geometry
+        .curve(s_id)
+        .ok_or("Curve no longer exists")?
+        .clone();
+    let mut a = geometry
+        .curve(a_id)
+        .ok_or("Curve no longer exists")?
+        .clone();
+    let s_end = curve_end(&s, s_node)?;
+    let a_end = curve_end(&a, a_node)?;
+    if s.nodes[s_node].vertex.is_some() || a.nodes[a_node].vertex.is_some() {
+        return Err("Both curve ends must be free to weld them".into());
+    }
+    open_period(&s)?;
+    open_period(&a)?;
+    // Pin the absorbed end onto the stationary tip so the seam control `join`
+    // averages is exact.
+    let tip = s
+        .spline
+        .node_point(s_node)
+        .ok_or("Curve end no longer exists")?;
+    a.spline
+        .set_node_point(a_node, tip)
+        .map_err(|error| error.to_string())?;
+    // The joined spline runs head -> tail; the stationary curve is never
+    // reversed, so the absorbed one turns around when the ends demand it.
+    let (head, tail, a_reversed) = match (s_end, a_end) {
+        (CurveEnd::End, CurveEnd::Start) => (s.clone(), a, false),
+        (CurveEnd::End, CurveEnd::End) => (
+            s.clone(),
+            a.reversed().map_err(|issue| issue.to_string())?,
+            true,
+        ),
+        (CurveEnd::Start, CurveEnd::End) => (a, s.clone(), false),
+        (CurveEnd::Start, CurveEnd::Start) => (
+            a.reversed().map_err(|issue| issue.to_string())?,
+            s.clone(),
+            true,
+        ),
+    };
+    let head_is_s = s_end == CurveEnd::End;
+    let (CurveSpline::Open(head_spline), CurveSpline::Open(tail_spline)) =
+        (&head.spline, &tail.spline)
+    else {
+        return Err("Only open curves can be welded".into());
+    };
+    let head_period = head_spline.period();
+    let tail_period = tail_spline.period();
+    // (reversed, offset, period) for every parameter that lived on S or on A.
+    let (s_map, a_map) = if head_is_s {
+        (
+            (false, 0.0, head_period),
+            (a_reversed, head_period, tail_period),
+        )
+    } else {
+        (
+            (false, head_period, tail_period),
+            (a_reversed, 0.0, head_period),
+        )
+    };
+    let spline = head_spline
+        .clone()
+        .join(tail_spline.clone(), 1.0e-9)
+        .map_err(|error| match error {
+            SplineError::ControlCount => {
+                "The welded curve would have too many control points".to_owned()
+            }
+            other => other.to_string(),
+        })?;
+    let seam_node = head.spans.len();
+    let seam_control = spline
+        .span_control_indices(seam_node - 1)
+        .ok_or("Welded curve lost its seam")?[3];
+    let spans = head
+        .spans
+        .iter()
+        .chain(&tail.spans)
+        .copied()
+        .collect::<Vec<_>>();
+    // The two seam nodes collapse into one, which is free by construction.
+    let nodes = head.nodes[..seam_node]
+        .iter()
+        .chain(&tail.nodes)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut joined = TopologyCurve::new(s_id, CurveSpline::Open(spline), spans)
+        .map_err(|issue| issue.to_string())?;
+    if nodes.len() != joined.nodes.len() {
+        return Err("Welded curve has inconsistent nodes".into());
+    }
+    joined.nodes = nodes;
+    let absorbed_far_node = if head_is_s { joined.nodes.len() - 1 } else { 0 };
+
+    let remap = |curve: CurveId, parameter: f64| -> Option<(f64, bool)> {
+        let (reversed, offset, period) = if curve == s_id {
+            s_map
+        } else if curve == a_id {
+            a_map
+        } else {
+            return None;
+        };
+        let local = if reversed {
+            period - parameter
+        } else {
+            parameter
+        };
+        Some((offset + local, reversed))
+    };
+    for assignment in &mut model.draft.face_assignments {
+        let FaceAnchor::Curve {
+            curve,
+            side,
+            parameter,
+            ..
+        } = &mut assignment.anchor
+        else {
+            continue;
+        };
+        let Some((mapped, reversed)) = remap(*curve, *parameter) else {
+            continue;
+        };
+        if reversed {
+            *side = side.opposite();
+        }
+        *parameter = mapped;
+        *curve = s_id;
+    }
+    for probe in &mut model.probes {
+        let TopologyProbeTarget::Boundary(target) = &mut probe.target else {
+            continue;
+        };
+        if target.curve == a_id && a_reversed {
+            target.spans.reverse();
+            target.reversed = !target.reversed;
+            target.side = target.side.opposite();
+        }
+        if target.curve == a_id || target.curve == s_id {
+            target.curve = s_id;
+        }
+    }
+    let curves = &mut model.draft.geometry.curves;
+    let position = curves
+        .iter()
+        .position(|curve| curve.id == s_id)
+        .ok_or("Curve no longer exists")?;
+    curves[position] = joined;
+    curves.retain(|curve| curve.id != a_id);
+    Ok(JoinRecord {
+        survivor: s_id,
+        absorbed: a_id,
+        seam_node,
+        seam_control,
+        absorbed_far_node,
+    })
+}
+
+/// Closes an open curve whose two free ends meet into a loop. Node 0 becomes
+/// the seam, spans and every parameter on the curve are unchanged, so no
+/// dependency moves. Faces are not assigned here: inside a removal no new face
+/// can arise, and `weld_endpoint` runs the face step itself.
+fn close_curve_geometry(
+    model: &mut TopologyDocumentModel,
+    curve_id: CurveId,
+) -> Result<(), String> {
+    let curve = model
+        .draft
+        .geometry
+        .curves
+        .iter_mut()
+        .find(|curve| curve.id == curve_id)
+        .ok_or("Curve no longer exists")?;
+    let CurveSpline::Open(spline) = &curve.spline else {
+        return Err("Curve is already closed".into());
+    };
+    let last = curve.nodes.len() - 1;
+    if curve.nodes[0].vertex.is_some() || curve.nodes[last].vertex.is_some() {
+        return Err("Both curve ends must be free to close the loop".into());
+    }
+    if curve.spans.len() < 2 {
+        return Err("Add a control point before closing a single-span curve".into());
+    }
+    let mut spline = spline.clone();
+    let start = spline.evaluate(0.0);
+    spline
+        .set_breakpoint_point(last, start)
+        .map_err(|error| error.to_string())?;
+    let closed = spline.close(1.0e-9).map_err(|error| error.to_string())?;
+    curve.spline = CurveSpline::Closed(closed);
+    curve.nodes.pop();
+    Ok(())
+}
+
+/// Demotes one open curve to a baffle when it holds a transmitting span and a
+/// free tip, which the arrangement compiler would otherwise reject.
+fn promote_curve_if_freed(geometry: &mut TopologyGeometry, curve_id: CurveId) -> bool {
+    let Some(curve) = geometry
+        .curves
+        .iter_mut()
+        .find(|curve| curve.id == curve_id)
+    else {
+        return false;
+    };
+    if !curve.spline.is_open() || !free_transmitting_end(curve) {
+        return false;
+    }
+    for span in &mut curve.spans {
+        span.behavior = SpanBehavior::REFLECTING;
+    }
+    true
 }
 
 fn open_spline_midpoint(spline: &OpenCubicSpline) -> Point2 {
@@ -2817,6 +3367,20 @@ fn containing_span(curve: &TopologyCurve, parameter: f64) -> Option<usize> {
         let [a, b] = curve.spline.span_bounds(index)?;
         let tolerance = (b - a).abs().max(1.0) * 1.0e-10;
         (parameter > a.min(b) + tolerance && parameter < a.max(b) - tolerance).then_some(index)
+    })
+}
+
+/// The node sitting at `parameter` that owns no vertex yet, if any.
+fn vertexless_node_at(curve: &TopologyCurve, parameter: f64) -> Option<usize> {
+    let tolerance = match &curve.spline {
+        CurveSpline::Closed(spline) => spline.period(),
+        CurveSpline::Open(spline) => spline.period(),
+    }
+    .max(1.0)
+        * 1.0e-10;
+    curve.nodes.iter().enumerate().find_map(|(index, node)| {
+        let node_parameter = curve.spline.node_parameter(index)?;
+        (node.vertex.is_none() && (node_parameter - parameter).abs() <= tolerance).then_some(index)
     })
 }
 
@@ -3323,7 +3887,6 @@ struct CutPiece {
 /// How a contiguous run of spans divides a curve into surviving pieces.
 struct CurveCut {
     pieces: Vec<CutPiece>,
-    vanished_nodes: BTreeSet<usize>,
 }
 
 impl CurveCut {
@@ -3404,96 +3967,33 @@ impl CurveCut {
             }
             piece.nodes = nodes;
         }
-        let surviving = pieces
-            .iter()
-            .flat_map(|piece| piece.nodes.iter().copied())
-            .collect::<BTreeSet<_>>();
-        let vanished_nodes = (0..curve.nodes.len())
-            .filter(|node| !surviving.contains(node))
-            .collect();
-        Ok(Self {
-            pieces,
-            vanished_nodes,
-        })
-    }
-
-    /// Curves that lose their junction because this cut removes the breakpoints
-    /// holding it, and that still carry a transmitting span. An open curve with a
-    /// free transmitting end is rejected by the arrangement compiler, so these
-    /// have to become baffles along with the pieces.
-    fn freed_curves(&self, geometry: &TopologyGeometry, cut: CurveId) -> Vec<CurveId> {
-        let mut releases = std::collections::BTreeMap::<TopologyVertexId, usize>::new();
-        let mut total = std::collections::BTreeMap::<TopologyVertexId, usize>::new();
-        for curve in &geometry.curves {
-            for (index, node) in curve.nodes.iter().enumerate() {
-                let Some(vertex) = node.vertex else {
-                    continue;
-                };
-                *total.entry(vertex).or_default() += 1;
-                if curve.id == cut && self.vanished_nodes.contains(&index) {
-                    *releases.entry(vertex).or_default() += 1;
-                }
-            }
-        }
-        let pruned = geometry
-            .vertices
-            .iter()
-            .filter(|vertex| matches!(vertex.location, TopologyVertexLocation::Interior(_)))
-            .map(|vertex| vertex.id)
-            .filter(|vertex| {
-                total.get(vertex).copied().unwrap_or_default()
-                    - releases.get(vertex).copied().unwrap_or_default()
-                    < 2
-            })
-            .collect::<BTreeSet<_>>();
-        geometry
-            .curves
-            .iter()
-            .filter(|curve| curve.id != cut && curve.spline.is_open())
-            .filter(|curve| {
-                curve
-                    .spans
-                    .iter()
-                    .any(|span| span.behavior == SpanBehavior::Transmitting)
-            })
-            .filter(|curve| {
-                [curve.nodes.first(), curve.nodes.last()]
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|node| node.vertex)
-                    .any(|vertex| pruned.contains(&vertex))
-            })
-            .map(|curve| curve.id)
-            .collect()
+        Ok(Self { pieces })
     }
 }
 
-/// Demotes every open curve that now has a free end while still holding a
-/// transmitting span. Promotion frees no further endpoints, so one pass settles.
+/// Demotes an open curve to a baffle when one of its free tips ends in a
+/// transmitting span, which the arrangement compiler rejects. A mixed curve
+/// whose free tip is already a wall keeps its transmitting spans: they still
+/// separate two faces. Promotion frees no further endpoints, so one pass settles.
 fn promote_freed_curves(geometry: &mut TopologyGeometry) -> Vec<CurveId> {
     let mut promoted = vec![];
     for curve in &mut geometry.curves {
-        if !curve.spline.is_open()
-            || !curve
-                .spans
-                .iter()
-                .any(|span| span.behavior == SpanBehavior::Transmitting)
-        {
-            continue;
+        if curve.spline.is_open() && free_transmitting_end(curve) {
+            for span in &mut curve.spans {
+                span.behavior = SpanBehavior::REFLECTING;
+            }
+            promoted.push(curve.id);
         }
-        let free = [curve.nodes.first(), curve.nodes.last()]
-            .into_iter()
-            .flatten()
-            .any(|node| node.vertex.is_none());
-        if !free {
-            continue;
-        }
-        for span in &mut curve.spans {
-            span.behavior = SpanBehavior::REFLECTING;
-        }
-        promoted.push(curve.id);
     }
     promoted
+}
+
+/// Whether an open curve has a free tip whose adjacent span transmits.
+fn free_transmitting_end(curve: &TopologyCurve) -> bool {
+    let last = curve.nodes.len() - 1;
+    (curve.nodes[0].vertex.is_none() && curve.spans[0].behavior == SpanBehavior::Transmitting)
+        || (curve.nodes[last].vertex.is_none()
+            && curve.spans[curve.spans.len() - 1].behavior == SpanBehavior::Transmitting)
 }
 
 /// Moves boundary probes onto the surviving piece that keeps more of their path,
@@ -3505,8 +4005,6 @@ fn remap_cut_boundary_probes(
     original: &TopologyCurve,
     plan: &CurveCut,
     pieces: &[TopologyCurve],
-    region_remaps: &[(RegionId, RegionId)],
-    dropped: &BTreeSet<RegionId>,
 ) -> Vec<ProbeId> {
     let span_weight = |index: usize| {
         original
@@ -3516,17 +4014,6 @@ fn remap_cut_boundary_probes(
     };
     let mut removed = vec![];
     probes.retain_mut(|probe| {
-        if let TopologyProbeTarget::AreaRegion(region) = &mut probe.target {
-            if let Some((_, to)) = region_remaps.iter().find(|(from, _)| *from == *region) {
-                *region = *to;
-                return true;
-            }
-            if dropped.contains(region) {
-                removed.push(probe.id);
-                return false;
-            }
-            return true;
-        }
         let TopologyProbeTarget::Boundary(target) = &mut probe.target else {
             return true;
         };
@@ -3572,49 +4059,63 @@ fn remap_cut_boundary_probes(
     removed
 }
 
-/// Rebuilds the authored face assignments after geometry was removed and the
-/// scene recompiled. Assignments whose anchor died with the geometry are dropped
-/// by `dead`; every remaining anchor is resolved against the new snapshot, and a
-/// face that absorbed one of `affected_faces` — or a face that inherited no
-/// anchor at all — takes the surviving region.
+/// Follows area probes through a region merge: a probe on a region that folded
+/// into the exterior identity moves with it, a probe on a region that ceased to
+/// exist is dropped and reported.
+fn settle_region_probes(
+    probes: &mut Vec<TopologyProbeDefinition>,
+    remaps: &[(RegionId, RegionId)],
+    dropped: &BTreeSet<RegionId>,
+) -> Vec<ProbeId> {
+    let mut removed = vec![];
+    probes.retain_mut(|probe| {
+        let TopologyProbeTarget::AreaRegion(region) = &mut probe.target else {
+            return true;
+        };
+        if let Some((_, to)) = remaps.iter().find(|(from, _)| *from == *region) {
+            *region = *to;
+            return true;
+        }
+        if dropped.contains(region) {
+            removed.push(probe.id);
+            return false;
+        }
+        true
+    });
+    removed
+}
+
+/// Rebuilds the authored face assignments after a removal compiled. `live`
+/// pairs every surviving anchor with the face it now resolves to; `forced`
+/// names the faces whose region the removal decided — the merged face takes the
+/// survivor, a face that lost its only anchor keeps its region under a fresh
+/// one. Every other face must have inherited exactly one anchor.
 fn rebuild_face_assignments(
-    old_assignments: &[(FaceId, AuthoredFaceAssignment)],
+    live: &[(FaceId, AuthoredFaceAssignment)],
     topology: &TopologySnapshot,
-    affected_faces: &BTreeSet<FaceId>,
-    survivor: Option<RegionId>,
-    dead: impl Fn(&FaceAnchor) -> bool,
+    forced: &BTreeMap<FaceId, Option<RegionId>>,
 ) -> Result<Vec<AuthoredFaceAssignment>, String> {
-    let mut by_new_face =
-        std::collections::BTreeMap::<FaceId, Vec<(FaceId, AuthoredFaceAssignment)>>::new();
-    for (old_face, assignment) in old_assignments {
-        if dead(&assignment.anchor) {
-            continue;
-        }
-        if let Ok(face) = assignment.anchor.resolve(topology) {
-            by_new_face
-                .entry(face)
-                .or_default()
-                .push((*old_face, *assignment));
-        }
-    }
     let mut rebuilt = vec![];
     for face in &topology.faces {
-        let candidates = by_new_face.remove(&face.id).unwrap_or_default();
-        let merged = candidates
+        let candidates = live
             .iter()
-            .any(|(old_face, _)| affected_faces.contains(old_face));
-        if merged || candidates.is_empty() && !affected_faces.is_empty() {
+            .filter(|(candidate, _)| *candidate == face.id)
+            .map(|(_, assignment)| *assignment)
+            .collect::<Vec<_>>();
+        if let Some(region) = forced.get(&face.id) {
             let anchor = candidates
                 .first()
-                .map(|(_, assignment)| assignment.anchor)
+                .map(|assignment| assignment.anchor)
                 .or_else(|| any_face_anchor(topology, face.id))
                 .ok_or("Merged face has no stable boundary anchor")?;
             rebuilt.push(AuthoredFaceAssignment {
                 anchor,
-                region: survivor,
+                region: *region,
             });
         } else if candidates.len() == 1 {
-            rebuilt.push(candidates[0].1);
+            rebuilt.push(candidates[0]);
+        } else if candidates.is_empty() {
+            return Err("Removal left a face without an anchor".into());
         } else {
             return Err("Removal merged unrelated face assignments".into());
         }
@@ -3622,6 +4123,246 @@ fn rebuild_face_assignments(
     Ok(rebuilt)
 }
 
+/// Which old face contributions land on one face of the compiled removal.
+#[derive(Default)]
+struct Landing {
+    live: Vec<AuthoredFaceAssignment>,
+    dead_regions: BTreeSet<RegionId>,
+    dead_hole: bool,
+}
+
+impl Landing {
+    fn regions(&self) -> BTreeSet<RegionId> {
+        self.live
+            .iter()
+            .filter_map(|assignment| assignment.region)
+            .chain(self.dead_regions.iter().copied())
+            .collect()
+    }
+}
+
+/// A face of the compiled removal that absorbed two or more active regions.
+struct Merge {
+    face: FaceId,
+    regions: BTreeSet<RegionId>,
+}
+
+enum RemovalTarget {
+    Curve(CurveId),
+    Spans { curve: CurveId, run: Vec<usize> },
+}
+
+/// A removal worked out to the point where only the survivor choice is missing.
+/// Nothing in it has touched the editor: `candidate` is the geometry after the
+/// cut, pruning, promotion, and welding, compiled into `topology`.
+struct RemovalPlan {
+    candidate: TopologyDocumentModel,
+    topology: TopologySnapshot,
+    live: Vec<(FaceId, AuthoredFaceAssignment)>,
+    landings: BTreeMap<FaceId, Landing>,
+    merge: Option<Merge>,
+    vanishing: BTreeSet<RegionId>,
+    pieces: Vec<CurveId>,
+    promoted: Vec<CurveId>,
+    joined: Vec<JoinRecord>,
+    removed_probes: Vec<ProbeId>,
+    provisional_curve: bool,
+}
+
+struct RemovalOutcome {
+    pieces: Vec<CurveId>,
+    promoted: Vec<CurveId>,
+    joined: Vec<JoinRecord>,
+    removed_regions: Vec<RegionId>,
+    region_remaps: Vec<(RegionId, RegionId)>,
+    removed_probes: Vec<ProbeId>,
+}
+
+/// Resolves the caller's survivor choice against the regions a removal merges.
+/// Region 1 is the stable exterior identity: an exterior merge always keeps it
+/// and transfers the chosen region's material into it instead.
+fn resolve_survivor(
+    choices: &BTreeSet<RegionId>,
+    keep_region: Option<RegionId>,
+) -> Result<(Option<RegionId>, Option<RegionId>), String> {
+    let chosen = match choices.len() {
+        0 => {
+            if keep_region.is_some() {
+                return Err("An inactive curve has no material region to keep".into());
+            }
+            None
+        }
+        1 => {
+            let only = *choices.iter().next().unwrap();
+            if keep_region.is_some_and(|selected| selected != only) {
+                return Err("Selected surviving material is not adjacent to this curve".into());
+            }
+            Some(only)
+        }
+        _ => {
+            let selected =
+                keep_region.ok_or("Choose which adjacent material survives this deletion")?;
+            if !choices.contains(&selected) {
+                return Err("Selected surviving material is not adjacent to this curve".into());
+            }
+            Some(selected)
+        }
+    };
+    let survivor = if choices.contains(&BACKGROUND_REGION) {
+        Some(BACKGROUND_REGION)
+    } else {
+        chosen
+    };
+    Ok((chosen, survivor))
+}
+
+/// The face of the compiled removal that an old face whose anchor died now
+/// belongs to. Prefers an edge of the old face on geometry the removal left
+/// alone, and falls back to the old face's centroid.
+fn attribute_dead_face(
+    compiled: &CompiledTopologyScene,
+    topology: &TopologySnapshot,
+    old_face: FaceId,
+    dead_spans: &BTreeSet<CurveSpanId>,
+    reparameterised: &BTreeSet<CurveId>,
+) -> Option<FaceId> {
+    compiled
+        .topology
+        .edges
+        .iter()
+        .find_map(|edge| {
+            let side = if edge.left == old_face {
+                CurveTraceSide::Left
+            } else if edge.right == old_face {
+                CurveTraceSide::Right
+            } else {
+                return None;
+            };
+            let parameter = (edge.parameter[0] + edge.parameter[1]) * 0.5;
+            let anchor = match edge.source {
+                CompiledEdgeSource::Outer(outer) => {
+                    if side != CurveTraceSide::Left {
+                        return None;
+                    }
+                    FaceAnchor::Outer {
+                        side: outer,
+                        fraction: parameter,
+                    }
+                }
+                CompiledEdgeSource::Curve(span) => {
+                    let curve = edge.curve?;
+                    if dead_spans.contains(&span) || reparameterised.contains(&curve) {
+                        return None;
+                    }
+                    FaceAnchor::Curve {
+                        curve,
+                        span,
+                        side,
+                        parameter,
+                    }
+                }
+            };
+            anchor.resolve(topology).ok()
+        })
+        .or_else(|| {
+            compiled
+                .topology
+                .face(old_face)
+                .and_then(CompiledFace::centroid)
+                .and_then(|centroid| topology.face_at(centroid))
+        })
+}
+
+/// Fuses the two loose ends a removal left at a junction that dropped to
+/// valence two: two open curves become one, or one curve closes into a loop.
+/// Only vertices the removal touched are considered, and a fusion the geometry
+/// refuses (a single-span loop, too many controls) leaves that junction as it
+/// was. A record with `survivor == absorbed` is a curve that closed.
+fn join_valence_two_ends(
+    model: &mut TopologyDocumentModel,
+    touched: &BTreeSet<TopologyVertexId>,
+) -> Vec<JoinRecord> {
+    let mut records = vec![];
+    for vertex_id in touched {
+        let geometry = &model.draft.geometry;
+        if !geometry.vertices.iter().any(|vertex| {
+            vertex.id == *vertex_id
+                && matches!(vertex.location, TopologyVertexLocation::Interior(_))
+        }) {
+            continue;
+        }
+        let references = geometry
+            .curves
+            .iter()
+            .flat_map(|curve| {
+                curve
+                    .nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, node)| node.vertex == Some(*vertex_id))
+                    .map(move |(node, _)| {
+                        let endpoint =
+                            curve.spline.is_open() && (node == 0 || node + 1 == curve.nodes.len());
+                        (curve.id, node, endpoint)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let [
+            (first, first_node, first_end),
+            (second, second_node, second_end),
+        ] = references[..]
+        else {
+            continue;
+        };
+        if !first_end || !second_end {
+            continue;
+        }
+        let before = model.clone();
+        for (curve, node) in [(first, first_node), (second, second_node)] {
+            if let Some(curve) = model
+                .draft
+                .geometry
+                .curves
+                .iter_mut()
+                .find(|candidate| candidate.id == curve)
+            {
+                curve.nodes[node].vertex = None;
+            }
+        }
+        model
+            .draft
+            .geometry
+            .vertices
+            .retain(|vertex| vertex.id != *vertex_id);
+        let fused = if first == second {
+            close_curve_geometry(model, first).map(|()| {
+                let seam_control = model
+                    .draft
+                    .geometry
+                    .curve(first)
+                    .and_then(|curve| match &curve.spline {
+                        CurveSpline::Closed(spline) => Some(spline.controls().len() - 1),
+                        CurveSpline::Open(_) => None,
+                    })
+                    .unwrap_or_default();
+                JoinRecord {
+                    survivor: first,
+                    absorbed: first,
+                    seam_node: 0,
+                    seam_control,
+                    absorbed_far_node: 0,
+                }
+            })
+        } else {
+            join_curves(model, (first, first_node), (second, second_node))
+        };
+        match fused {
+            Ok(record) => records.push(record),
+            Err(_) => *model = before,
+        }
+    }
+    records
+}
 /// Follows the point source through a region merge. A distributed source dies
 /// with its region because it is a profile over that face, but the point source
 /// has a position that is still meshed once the faces merge, so it moves to the
@@ -6031,8 +6772,8 @@ mod tests {
         settle(&mut editor);
         assert_eq!(
             editor.curve_removal_choices(hole).unwrap(),
-            vec![BACKGROUND_REGION],
-            "a hole borders one active region and removes without a question"
+            vec![],
+            "a hole merges no active regions and removes without a question"
         );
         assert!(editor.remove_curve(hole, None).is_ok());
         settle(&mut editor);
@@ -6434,5 +7175,1063 @@ mod tests {
                 assert!((point - start).cross(chord).abs() < 1.0e-12);
             }
         }
+    }
+
+    /// A boundary attachment on the interior (non-background) side of one span
+    /// of a closed subdomain, at that span's midpoint.
+    fn curve_target(
+        editor: &TopologyEditor,
+        loop_id: CurveId,
+        span_index: usize,
+    ) -> (Point2, TopologyAttachment) {
+        let loop_curve = editor.document.model.draft.geometry.curve(loop_id).unwrap();
+        let span = loop_curve.spans[span_index].id;
+        let [a, b] = loop_curve.spline.span_bounds(span_index).unwrap();
+        let parameter = (a + b) * 0.5;
+        let side = [CurveTraceSide::Left, CurveTraceSide::Right]
+            .into_iter()
+            .find(|side| {
+                FaceAnchor::Curve {
+                    curve: loop_id,
+                    span,
+                    side: *side,
+                    parameter,
+                }
+                .resolve(&editor.compiled_accepted.topology)
+                .is_ok_and(|face| {
+                    editor
+                        .compiled_accepted
+                        .assignments
+                        .iter()
+                        .any(|assignment| {
+                            assignment.face == face && assignment.region != Some(BACKGROUND_REGION)
+                        })
+                })
+            })
+            .unwrap();
+        (
+            evaluate_curve(loop_curve, parameter),
+            TopologyAttachment::Boundary(FaceAnchor::Curve {
+                curve: loop_id,
+                span,
+                side,
+                parameter,
+            }),
+        )
+    }
+
+    /// A closed subdomain split by a chord into two lobes. The lobe that
+    /// existed first stays anchored on the loop; the new one is anchored on the
+    /// chord. Returns `(loop, chord)`.
+    fn figure_eight(editor: &mut TopologyEditor) -> (CurveId, CurveId) {
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.55),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(editor);
+        let (start_point, start) = curve_target(editor, loop_id, 0);
+        let (end_point, end) = curve_target(editor, loop_id, 4);
+        let chord = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![start_point, Point2::default(), end_point]).unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: DEFAULT_MATERIAL,
+                },
+                Some(start),
+                Some(end),
+            )
+            .unwrap()
+            .curve;
+        settle(editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        (loop_id, chord)
+    }
+
+    fn region_anchored_on(editor: &TopologyEditor, curve: CurveId) -> Option<RegionId> {
+        editor
+            .document
+            .model
+            .draft
+            .face_assignments
+            .iter()
+            .find(|assignment| {
+                matches!(assignment.anchor, FaceAnchor::Curve { curve: owner, .. } if owner == curve)
+            })
+            .and_then(|assignment| assignment.region)
+    }
+
+    /// Loop spans bordering `region`, in curve order.
+    fn loop_spans_beside(
+        editor: &TopologyEditor,
+        loop_id: CurveId,
+        region: RegionId,
+    ) -> Vec<CurveSpanId> {
+        let compiled = editor.compiled_draft.as_ref().unwrap();
+        let faces = compiled
+            .assignments
+            .iter()
+            .filter(|assignment| assignment.region == Some(region))
+            .map(|assignment| assignment.face)
+            .collect::<BTreeSet<_>>();
+        let beside = compiled
+            .topology
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.curve == Some(loop_id)
+                    && (faces.contains(&edge.left) || faces.contains(&edge.right))
+            })
+            .filter_map(|edge| match edge.source {
+                CompiledEdgeSource::Curve(span) => Some(span),
+                CompiledEdgeSource::Outer(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        span_ids(editor, loop_id)
+            .into_iter()
+            .filter(|span| beside.contains(span))
+            .collect()
+    }
+
+    /// The loop span starting at the first junction node, and the one before.
+    fn junction_run(editor: &TopologyEditor, loop_id: CurveId) -> BTreeSet<CurveSpanId> {
+        let loop_curve = editor.document.model.draft.geometry.curve(loop_id).unwrap();
+        let junction = loop_curve
+            .nodes
+            .iter()
+            .position(|node| node.vertex.is_some())
+            .unwrap();
+        let count = loop_curve.spans.len();
+        [
+            loop_curve.spans[(junction + count - 1) % count].id,
+            loop_curve.spans[junction].id,
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    /// Deleting a span beside the lobe anchored through the chord must leave
+    /// the other lobe — anchored on the loop, whose parameters the cut rebased —
+    /// with its region and material intact.
+    #[test]
+    fn deleting_a_span_beside_a_loop_anchored_lobe_keeps_that_lobe() {
+        let mut editor = TopologyEditor::default();
+        let (loop_id, chord) = figure_eight(&mut editor);
+        let chord_lobe =
+            region_anchored_on(&editor, chord).expect("the new lobe anchors on the chord");
+        let loop_lobe =
+            region_anchored_on(&editor, loop_id).expect("the old lobe anchors on the loop");
+        let glass = editor.add_material().unwrap();
+        settle(&mut editor);
+        editor.set_region_material(loop_lobe, glass).unwrap();
+        settle(&mut editor);
+        let history = editor.history_len().0;
+        let target = loop_spans_beside(&editor, loop_id, chord_lobe)[0];
+        let selected = [target].into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(
+            editor.span_removal_choices(&selected).unwrap(),
+            vec![BACKGROUND_REGION, chord_lobe]
+        );
+        editor
+            .remove_spans(&selected, Some(BACKGROUND_REGION))
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let regions = editor
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .map(|region| region.id)
+            .collect::<Vec<_>>();
+        assert!(regions.contains(&loop_lobe) && !regions.contains(&chord_lobe));
+        assert_eq!(
+            editor
+                .document
+                .model
+                .draft
+                .region(loop_lobe)
+                .unwrap()
+                .material,
+            glass
+        );
+        assert_eq!(editor.history_len().0, history + 1);
+        assert!(editor.undo());
+        settle(&mut editor);
+        assert_eq!(editor.document.model.draft.regions.len(), 3);
+    }
+
+    /// One contiguous run through a junction node frees the chord and merges
+    /// all three faces; every survivor is a legal answer and the chord becomes
+    /// a baffle.
+    #[test]
+    fn deleting_through_a_junction_offers_three_survivors_and_promotes_the_chord() {
+        let mut editor = TopologyEditor::default();
+        let (loop_id, _) = figure_eight(&mut editor);
+        let selected = junction_run(&editor, loop_id);
+        let choices = editor.span_removal_choices(&selected).unwrap();
+        assert_eq!(choices.len(), 3);
+        assert!(editor.remove_spans(&selected, None).is_err());
+        for index in 0..3 {
+            let mut editor = TopologyEditor::default();
+            let (loop_id, chord) = figure_eight(&mut editor);
+            let selected = junction_run(&editor, loop_id);
+            let choices = editor.span_removal_choices(&selected).unwrap();
+            let removal = editor
+                .remove_spans(&selected, Some(choices[index]))
+                .unwrap();
+            settle(&mut editor);
+            assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+            assert_eq!(removal.promoted, vec![chord]);
+            assert!(all_separated(&editor, chord));
+            assert_eq!(editor.document.model.draft.regions.len(), 1);
+            assert_eq!(removal.removed_regions.len(), 2);
+        }
+    }
+
+    /// Removing a baffle merges nothing and asks nothing.
+    #[test]
+    fn baffle_removal_asks_no_question() {
+        let mut editor = TopologyEditor::default();
+        let baffle = three_span_baffle(&mut editor);
+        assert!(editor.curve_removal_choices(baffle).unwrap().is_empty());
+        editor.remove_curve(baffle, None).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+    }
+
+    /// A curve bordering two separate pairs of subdomains cannot be removed in
+    /// one go: the merge would happen in two places with no single survivor.
+    #[test]
+    fn removal_merging_in_two_places_is_refused() {
+        let mut editor = TopologyEditor::default();
+        let glass = editor.add_material().unwrap();
+        settle(&mut editor);
+        let bar = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-1.0, 0.0),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(1.0, 0.0),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator { material: glass },
+                Some(outer(OuterSide::Left, 0.5)),
+                Some(outer(OuterSide::Right, 0.5)),
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        // The bar runs left to right, so its left is up: the new glass region.
+        let up = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, 0.0), Point2::new(0.0, 1.0)])
+                    .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator { material: glass },
+                Some(TopologyAttachment::Breakpoint {
+                    curve: bar,
+                    node: 1,
+                    side: CurveTraceSide::Left,
+                }),
+                Some(outer(OuterSide::Top, 0.5)),
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let vertex = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(bar)
+            .unwrap()
+            .nodes[1]
+            .vertex
+            .expect("the bar's corner became a junction");
+        let compiled = editor.compiled_draft.as_ref().unwrap();
+        let bottom = compiled
+            .topology
+            .vertices
+            .iter()
+            .find(|candidate| candidate.authored == Some(vertex))
+            .unwrap()
+            .traces
+            .iter()
+            .map(|trace| trace.face)
+            .find(|face| {
+                compiled.assignments.iter().any(|assignment| {
+                    assignment.face == *face && assignment.region == Some(BACKGROUND_REGION)
+                })
+            })
+            .unwrap();
+        editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, 0.0), Point2::new(0.0, -1.0)])
+                    .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator { material: glass },
+                Some(TopologyAttachment::Junction {
+                    vertex,
+                    face: bottom,
+                }),
+                Some(outer(OuterSide::Bottom, 0.5)),
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(editor.document.model.draft.regions.len(), 4);
+
+        let before = editor.document.model.clone();
+        let history = editor.history_len();
+        let error = editor.curve_removal_choices(bar).unwrap_err();
+        assert!(error.contains("more than one place"), "{error}");
+        assert!(editor.remove_curve(bar, Some(BACKGROUND_REGION)).is_err());
+        assert_eq!(editor.document.model, before);
+        assert_eq!(editor.history_len(), history);
+        assert_eq!(editor.curve_removal_choices(up).unwrap().len(), 2);
+    }
+
+    /// Removing the loop frees both chord ends: the chord becomes a baffle
+    /// instead of leaving the draft invalid.
+    #[test]
+    fn removing_the_loop_promotes_the_chord_to_a_baffle() {
+        let mut editor = TopologyEditor::default();
+        let (loop_id, chord) = figure_eight(&mut editor);
+        assert_eq!(editor.curve_removal_choices(loop_id).unwrap().len(), 3);
+        let removal = editor
+            .remove_curve(loop_id, Some(BACKGROUND_REGION))
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(removal.promoted, vec![chord]);
+        assert!(all_separated(&editor, chord));
+        assert_eq!(editor.document.model.draft.geometry.curves.len(), 1);
+        assert_eq!(editor.document.model.draft.regions.len(), 1);
+        assert!(editor.undo());
+        settle(&mut editor);
+        assert_eq!(editor.document.model.draft.geometry.curves.len(), 2);
+        assert_eq!(editor.document.model.draft.regions.len(), 3);
+    }
+
+    /// Two two-span baffles with all ends loose: `a` along y = 0 on the left,
+    /// `b` along y = 0.3 on the right.
+    fn two_baffles(editor: &mut TopologyEditor) -> (CurveId, CurveId) {
+        let mut baffle = |points: Vec<Point2>| {
+            let curve = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(points).unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .curve;
+            settle(editor);
+            curve
+        };
+        let a = baffle(vec![
+            Point2::new(-0.5, 0.0),
+            Point2::new(-0.3, 0.0),
+            Point2::new(-0.1, 0.0),
+        ]);
+        let b = baffle(vec![
+            Point2::new(0.1, 0.3),
+            Point2::new(0.3, 0.3),
+            Point2::new(0.5, 0.3),
+        ]);
+        (a, b)
+    }
+
+    /// Every way two loose ends can meet fuses the curves into one: the
+    /// stationary curve keeps its identity and direction, the dragged one turns
+    /// around when it must, and the seam is a plain corner that can be smoothed.
+    #[test]
+    fn welding_loose_ends_fuses_curves_in_every_orientation() {
+        let wall = SpanBehavior::Separated {
+            left: FaceBoundaryCondition::Reflecting,
+            right: FaceBoundaryCondition::Impedance { ratio: 1.0 },
+            coupling: InternalBoundaryCoupling::Independent,
+        };
+        // (dragged end of a, target end of b, span order as (curve, index), a reversed)
+        for (dragged, target, order, reversed) in [
+            (1, 0, [(0, 0), (0, 1), (1, 0), (1, 1)], false),
+            (1, 1, [(1, 0), (1, 1), (0, 1), (0, 0)], true),
+            (0, 1, [(1, 0), (1, 1), (0, 0), (0, 1)], false),
+            (0, 0, [(0, 1), (0, 0), (1, 0), (1, 1)], true),
+        ] {
+            let mut editor = TopologyEditor::default();
+            let (a, b) = two_baffles(&mut editor);
+            for span in &mut editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curves
+                .iter_mut()
+                .find(|curve| curve.id == a)
+                .unwrap()
+                .spans
+            {
+                span.behavior = wall;
+            }
+            let a_spans = span_ids(&editor, a);
+            let b_spans = span_ids(&editor, b);
+            let history = editor.history_len().0;
+            let weld = editor
+                .weld_endpoint(
+                    a,
+                    dragged,
+                    TopologyAttachment::LooseEnd {
+                        curve: b,
+                        endpoint: target,
+                    },
+                )
+                .unwrap();
+            settle(&mut editor);
+            assert_eq!(
+                editor.acceptance,
+                TopologyAcceptance::Valid,
+                "{dragged}->{target}"
+            );
+            assert_eq!(weld.curve, b);
+            assert!(editor.document.model.draft.geometry.curve(a).is_none());
+            let expected = order
+                .iter()
+                .map(|(which, index)| {
+                    if *which == 0 {
+                        a_spans[*index]
+                    } else {
+                        b_spans[*index]
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(span_ids(&editor, b), expected, "{dragged}->{target}");
+            let joined = editor.document.model.draft.geometry.curve(b).unwrap();
+            let CurveSpline::Open(spline) = &joined.spline else {
+                panic!("welding two open curves keeps the result open");
+            };
+            let a_behavior = joined
+                .spans
+                .iter()
+                .find(|span| span.id == a_spans[0])
+                .unwrap()
+                .behavior;
+            assert_eq!(
+                a_behavior,
+                if reversed { wall.mirrored() } else { wall },
+                "{dragged}->{target}"
+            );
+            assert_eq!(spline.continuity(2), Some(0), "the seam is a corner");
+            assert_eq!(
+                weld.seam_control,
+                Some(spline.span_control_indices(1).unwrap()[3])
+            );
+            assert!(joined.nodes[2].vertex.is_none(), "no vertex at valence two");
+            assert_eq!(editor.history_len().0, history + 1);
+            editor.set_curve_continuity(b, 2, 2).unwrap();
+            settle(&mut editor);
+            assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        }
+    }
+
+    /// A curve's two loose ends meeting close it into a loop that owns a face;
+    /// a single span has too few controls for that, and an end cannot meet
+    /// itself.
+    #[test]
+    fn welding_a_curve_onto_itself_closes_a_loop() {
+        let mut editor = TopologyEditor::default();
+        let curve = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.3, -0.3),
+                    Point2::new(0.3, -0.3),
+                    Point2::new(0.3, 0.3),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let spans = span_ids(&editor, curve);
+        let history = editor.history_len().0;
+        let weld = editor
+            .weld_endpoint(
+                curve,
+                1,
+                TopologyAttachment::LooseEnd { curve, endpoint: 0 },
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(weld.curve, curve);
+        assert!(weld.seam_control.is_some());
+        assert!(
+            !editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(curve)
+                .unwrap()
+                .spline
+                .is_open()
+        );
+        assert_eq!(span_ids(&editor, curve), spans);
+        assert_eq!(
+            editor.document.model.draft.regions.len(),
+            2,
+            "the loop encloses a face"
+        );
+        assert_eq!(editor.history_len().0, history + 1);
+
+        let mut editor = TopologyEditor::default();
+        let single = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(-0.3, 0.0), Point2::new(0.3, 0.0)])
+                    .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let before = editor.document.model.clone();
+        let error = editor
+            .weld_endpoint(
+                single,
+                1,
+                TopologyAttachment::LooseEnd {
+                    curve: single,
+                    endpoint: 0,
+                },
+            )
+            .unwrap_err();
+        assert!(error.contains("single-span"), "{error}");
+        assert_eq!(
+            editor
+                .weld_endpoint(
+                    single,
+                    1,
+                    TopologyAttachment::LooseEnd {
+                        curve: single,
+                        endpoint: 1,
+                    },
+                )
+                .unwrap_err(),
+            "Choose a different end to weld to"
+        );
+        assert_eq!(editor.document.model, before);
+    }
+
+    /// A loose end dropped on a junction, a curve interior, or a vertex-less
+    /// seam becomes an arm of that point; a curve cannot attach to itself.
+    #[test]
+    fn welding_a_loose_end_onto_junctions_interiors_and_seams() {
+        let mut editor = TopologyEditor::default();
+        let host = three_span_baffle(&mut editor);
+        let free = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(0.4, 0.0), Point2::new(0.6, 0.0)])
+                    .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let geometry = |editor: &TopologyEditor| editor.document.model.draft.geometry.clone();
+
+        // Onto the outer junction the host hangs from.
+        let vertex = geometry(&editor).curve(host).unwrap().nodes[0]
+            .vertex
+            .unwrap();
+        let face = editor
+            .compiled_draft
+            .as_ref()
+            .unwrap()
+            .topology
+            .vertices
+            .iter()
+            .find(|candidate| candidate.authored == Some(vertex))
+            .unwrap()
+            .traces[0]
+            .face;
+        let weld = editor
+            .weld_endpoint(free, 0, TopologyAttachment::Junction { vertex, face })
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(weld.seam_control.is_none() && weld.span_splits.is_empty());
+        assert_eq!(
+            geometry(&editor).curve(free).unwrap().nodes[0].vertex,
+            Some(vertex)
+        );
+        assert!(editor.undo());
+        settle(&mut editor);
+
+        // Onto the host's interior: a new junction splits the span.
+        let host_curve = geometry(&editor).curve(host).unwrap().clone();
+        let [a, b] = host_curve.spline.span_bounds(1).unwrap();
+        let weld = editor
+            .weld_endpoint(
+                free,
+                0,
+                TopologyAttachment::Boundary(FaceAnchor::Curve {
+                    curve: host,
+                    span: host_curve.spans[1].id,
+                    side: CurveTraceSide::Right,
+                    parameter: (a + b) * 0.5,
+                }),
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(weld.span_splits.len(), 1);
+        assert_eq!(span_ids(&editor, host).len(), 4);
+        let attached = geometry(&editor).curve(free).unwrap().nodes[0].vertex;
+        assert!(attached.is_some());
+        assert!(editor.undo());
+        settle(&mut editor);
+
+        // Onto the seam an earlier weld left: the breakpoint becomes the
+        // junction, no span is split. Both baffles sit clear of the host.
+        let baffle = |editor: &mut TopologyEditor, points: Vec<Point2>| {
+            let curve = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(points).unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .curve;
+            settle(editor);
+            curve
+        };
+        let first = baffle(
+            &mut editor,
+            vec![
+                Point2::new(0.2, 0.6),
+                Point2::new(0.3, 0.6),
+                Point2::new(0.4, 0.6),
+            ],
+        );
+        let second = baffle(
+            &mut editor,
+            vec![
+                Point2::new(0.6, 0.6),
+                Point2::new(0.7, 0.6),
+                Point2::new(0.8, 0.6),
+            ],
+        );
+        editor
+            .weld_endpoint(
+                first,
+                1,
+                TopologyAttachment::LooseEnd {
+                    curve: second,
+                    endpoint: 0,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(
+            geometry(&editor).curve(second).unwrap().nodes[2]
+                .vertex
+                .is_none()
+        );
+        let weld = editor
+            .weld_endpoint(
+                free,
+                0,
+                TopologyAttachment::Breakpoint {
+                    curve: second,
+                    node: 2,
+                    side: CurveTraceSide::Left,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(weld.span_splits.is_empty());
+        assert_eq!(span_ids(&editor, second).len(), 4);
+        let seam_vertex = geometry(&editor).curve(second).unwrap().nodes[2].vertex;
+        assert!(seam_vertex.is_some());
+        assert_eq!(
+            geometry(&editor).curve(free).unwrap().nodes[0].vertex,
+            seam_vertex
+        );
+        let seam = geometry(&editor)
+            .curve(second)
+            .unwrap()
+            .spline
+            .node_point(2)
+            .unwrap();
+        assert!(
+            (geometry(&editor)
+                .curve(free)
+                .unwrap()
+                .spline
+                .node_point(0)
+                .unwrap()
+                - seam)
+                .norm()
+                < 1.0e-9
+        );
+
+        // A curve cannot attach to its own interior.
+        let free_curve = geometry(&editor).curve(free).unwrap().clone();
+        assert_eq!(
+            editor
+                .weld_endpoint(
+                    free,
+                    1,
+                    TopologyAttachment::Boundary(FaceAnchor::Curve {
+                        curve: free,
+                        span: free_curve.spans[0].id,
+                        side: CurveTraceSide::Left,
+                        parameter: 0.5,
+                    }),
+                )
+                .unwrap_err(),
+            "Attach to another curve"
+        );
+    }
+
+    /// Reversing the absorbed curve keeps every dependency on the geometry it
+    /// described: anchors flip side and map their parameter, boundary probes
+    /// reverse their path, flip side, and toggle their direction.
+    #[test]
+    fn join_maps_anchors_and_probes_of_a_reversed_curve() {
+        let mut editor = TopologyEditor::default();
+        let (a, b) = two_baffles(&mut editor);
+        let mut model = editor.document.model.clone();
+        let a_spans = span_ids(&editor, a);
+        let a_period = open_period(model.draft.geometry.curve(a).unwrap()).unwrap();
+        let b_period = open_period(model.draft.geometry.curve(b).unwrap()).unwrap();
+        let probed = 0.25 * a_period;
+        model.draft.face_assignments.push(AuthoredFaceAssignment {
+            anchor: FaceAnchor::Curve {
+                curve: a,
+                span: a_spans[0],
+                side: CurveTraceSide::Left,
+                parameter: probed,
+            },
+            region: Some(BACKGROUND_REGION),
+        });
+        model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(7),
+            name: "wall".into(),
+            color: [1, 2, 3],
+            enabled: true,
+            target: TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                curve: a,
+                spans: a_spans.clone(),
+                side: CurveTraceSide::Left,
+                reversed: false,
+                preset: ProbeSamplingPreset::Medium,
+            }),
+        });
+        let expected_point = evaluate_curve(model.draft.geometry.curve(a).unwrap(), probed);
+        let a_last = model.draft.geometry.curve(a).unwrap().nodes.len() - 1;
+        let b_last = model.draft.geometry.curve(b).unwrap().nodes.len() - 1;
+        // b's end meets a's end: b stays put, a turns around and follows.
+        let record = join_curves(&mut model, (b, b_last), (a, a_last)).unwrap();
+        assert_eq!((record.survivor, record.absorbed), (b, a));
+        let FaceAnchor::Curve {
+            curve,
+            span,
+            side,
+            parameter,
+        } = model.draft.face_assignments.last().unwrap().anchor
+        else {
+            panic!("the anchor stays a curve anchor");
+        };
+        assert_eq!((curve, span, side), (b, a_spans[0], CurveTraceSide::Right));
+        assert!((parameter - (b_period + a_period - probed)).abs() < 1.0e-9);
+        let joined = model.draft.geometry.curve(b).unwrap();
+        assert!((evaluate_curve(joined, parameter) - expected_point).norm() < 1.0e-9);
+        let TopologyProbeTarget::Boundary(target) = &model.probes.last().unwrap().target else {
+            panic!("the probe stays a boundary probe");
+        };
+        assert_eq!(target.curve, b);
+        assert_eq!(
+            target.spans,
+            a_spans.iter().rev().copied().collect::<Vec<_>>()
+        );
+        assert_eq!(target.side, CurveTraceSide::Right);
+        assert!(target.reversed);
+        assert!(probe_definition_valid(
+            model.probes.last().unwrap(),
+            &model.draft
+        ));
+    }
+
+    /// A weld the arrangement rejects leaves the document as the drag left it.
+    #[test]
+    fn weld_that_breaks_the_arrangement_is_refused() {
+        let mut editor = TopologyEditor::default();
+        let mut baffle = |points: Vec<Point2>| {
+            let curve = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(points).unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .curve;
+            settle(&mut editor);
+            curve
+        };
+        let a = baffle(vec![Point2::new(-0.5, 0.0), Point2::new(-0.3, 0.0)]);
+        baffle(vec![Point2::new(0.0, -0.3), Point2::new(0.0, 0.3)]);
+        let b = baffle(vec![Point2::new(0.3, 0.0), Point2::new(0.5, 0.0)]);
+        let before = editor.document.model.clone();
+        let history = editor.history_len();
+        let error = editor
+            .weld_endpoint(
+                a,
+                1,
+                TopologyAttachment::LooseEnd {
+                    curve: b,
+                    endpoint: 0,
+                },
+            )
+            .unwrap_err();
+        assert!(!error.is_empty());
+        assert_eq!(editor.document.model, before);
+        assert_eq!(editor.history_len(), history);
+    }
+
+    /// Cutting the loop right beside a junction leaves the arc's new end and
+    /// the chord's end alone at that point: valence two, so they become one
+    /// curve — and the chord keeps transmitting, because the free tip is on the
+    /// wall side. One undo restores both curves and the junction.
+    #[test]
+    fn cutting_beside_a_junction_welds_the_arc_and_the_chord() {
+        let mut editor = TopologyEditor::default();
+        let (loop_id, chord) = figure_eight(&mut editor);
+        let loop_curve = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(loop_id)
+            .unwrap()
+            .clone();
+        let junction = loop_curve
+            .nodes
+            .iter()
+            .position(|node| node.vertex.is_some())
+            .unwrap();
+        let vertex = loop_curve.nodes[junction].vertex.unwrap();
+        let chord_spans = span_ids(&editor, chord);
+        let selected = [loop_curve.spans[junction].id]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let history = editor.history_len().0;
+        let removal = editor
+            .remove_spans(&selected, Some(BACKGROUND_REGION))
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(removal.joined.len(), 1);
+        let record = removal.joined[0];
+        assert_eq!((record.survivor, record.absorbed), (loop_id, chord));
+        assert!(removal.promoted.is_empty());
+        let geometry = &editor.document.model.draft.geometry;
+        assert!(geometry.curve(chord).is_none());
+        assert!(
+            !geometry
+                .vertices
+                .iter()
+                .any(|candidate| candidate.id == vertex)
+        );
+        let joined = geometry.curve(loop_id).unwrap();
+        assert!(joined.spline.is_open());
+        assert!(
+            joined.spans.iter().any(
+                |span| span.id == chord_spans[0] && span.behavior == SpanBehavior::Transmitting
+            ),
+            "the chord still separates the surviving lobe"
+        );
+        assert!(joined.nodes[record.seam_node].vertex.is_none());
+        assert_eq!(editor.document.model.draft.regions.len(), 2);
+        assert_eq!(editor.history_len().0, history + 1);
+        editor
+            .set_curve_continuity(loop_id, record.seam_node, 1)
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(editor.undo() && editor.undo());
+        settle(&mut editor);
+        let geometry = &editor.document.model.draft.geometry;
+        assert_eq!(geometry.curves.len(), 2);
+        assert!(
+            geometry
+                .vertices
+                .iter()
+                .any(|candidate| candidate.id == vertex)
+        );
+        assert_eq!(editor.document.model.draft.regions.len(), 3);
+    }
+
+    /// A two-arm junction the removal never touched keeps its arms, valence two
+    /// or not: only junctions the command released are fused.
+    #[test]
+    fn auto_join_only_touches_junctions_the_removal_released() {
+        let template = TopologyEditor::default();
+        let mut model = template.document.model.clone();
+        let vertex = TopologyVertexId(50);
+        model.draft.geometry.vertices.push(TopologyVertex {
+            id: vertex,
+            location: TopologyVertexLocation::Interior(Point2::new(0.5, 0.5)),
+        });
+        let mut first = TopologyCurve::new(
+            CurveId(50),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.2, 0.5), Point2::new(0.5, 0.5)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(50),
+                behavior: SpanBehavior::REFLECTING,
+            }],
+        )
+        .unwrap();
+        first.nodes[1].vertex = Some(vertex);
+        let mut second = TopologyCurve::new(
+            CurveId(51),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.5, 0.5), Point2::new(0.5, 0.8)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(51),
+                behavior: SpanBehavior::REFLECTING,
+            }],
+        )
+        .unwrap();
+        second.nodes[0].vertex = Some(vertex);
+        model.draft.geometry.curves.extend([first, second]);
+        model.accepted = model.draft.clone();
+        let mut editor = TopologyEditor::from_document(TopologyDocument {
+            model,
+            ..template.document.clone()
+        })
+        .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(-0.4, -0.4), 0.2),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let removal = editor
+            .remove_curve(loop_id, Some(BACKGROUND_REGION))
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(removal.joined.is_empty());
+        let geometry = &editor.document.model.draft.geometry;
+        assert!(
+            geometry
+                .vertices
+                .iter()
+                .any(|candidate| candidate.id == vertex)
+        );
+        assert_eq!(geometry.curves.len(), 2);
+    }
+
+    /// Drawing from one loose end to another dissolves the new curve into the
+    /// existing ones and the start-side curve keeps its identity; both ends on
+    /// the same curve close it into a loop.
+    #[test]
+    fn drawing_between_loose_ends_welds_the_curves() {
+        let mut editor = TopologyEditor::default();
+        let (a, b) = two_baffles(&mut editor);
+        let a_spans = span_ids(&editor, a);
+        let b_spans = span_ids(&editor, b);
+        let history = editor.history_len().0;
+        let edit = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(-0.1, 0.0), Point2::new(0.1, 0.3)])
+                    .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(TopologyAttachment::LooseEnd {
+                    curve: a,
+                    endpoint: 1,
+                }),
+                Some(TopologyAttachment::LooseEnd {
+                    curve: b,
+                    endpoint: 0,
+                }),
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(edit.curve, a);
+        assert_eq!(editor.document.model.draft.geometry.curves.len(), 1);
+        let spans = span_ids(&editor, a);
+        assert_eq!(spans.len(), 5);
+        assert_eq!(&spans[..2], &a_spans[..]);
+        assert_eq!(&spans[3..], &b_spans[..]);
+        assert_eq!(editor.history_len().0, history + 1);
+
+        let mut editor = TopologyEditor::default();
+        let angle = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.3, -0.3),
+                    Point2::new(0.3, -0.3),
+                    Point2::new(0.3, 0.3),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let edit = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(0.3, 0.3), Point2::new(-0.3, -0.3)])
+                    .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(TopologyAttachment::LooseEnd {
+                    curve: angle,
+                    endpoint: 1,
+                }),
+                Some(TopologyAttachment::LooseEnd {
+                    curve: angle,
+                    endpoint: 0,
+                }),
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(edit.curve, angle);
+        let geometry = &editor.document.model.draft.geometry;
+        assert_eq!(geometry.curves.len(), 1);
+        assert!(!geometry.curve(angle).unwrap().spline.is_open());
+        assert_eq!(span_ids(&editor, angle).len(), 3);
+        assert_eq!(editor.document.model.draft.regions.len(), 2);
     }
 }

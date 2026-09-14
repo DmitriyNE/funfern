@@ -31,6 +31,15 @@ pub enum CurveTraceSide {
     Right,
 }
 
+impl CurveTraceSide {
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ExpandedChain {
     traces: [TraceVertexId; 2],

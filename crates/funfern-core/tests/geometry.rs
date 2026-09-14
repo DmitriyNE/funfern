@@ -963,3 +963,169 @@ fn periodic_open_at_keeps_corners_and_rejects_bad_breakpoints() {
         );
     }
 }
+
+/// Closing an opened loop must give the loop back, rotated to the cut, with a
+/// C0 seam at parameter 0; ends that do not meet and single spans are refused.
+#[test]
+fn open_close_round_trips_the_loop_and_refuses_bad_input() {
+    let polygon = PeriodicCubicSpline::polygon(vec![
+        Point2::new(-0.4, -0.3),
+        Point2::new(0.5, -0.3),
+        Point2::new(0.5, 0.4),
+        Point2::new(-0.4, 0.4),
+    ])
+    .unwrap();
+    for loop_spline in [irregular(), polygon] {
+        let period = loop_spline.period();
+        for breakpoint in 0..loop_spline.intervals().len() {
+            let offset = loop_spline.span_bounds(breakpoint).unwrap()[0];
+            let closed = loop_spline
+                .clone()
+                .open_at(breakpoint)
+                .unwrap()
+                .close(1.0e-12)
+                .unwrap_or_else(|error| panic!("close after open_at({breakpoint}): {error}"));
+            assert_eq!(closed.intervals().len(), loop_spline.intervals().len());
+            assert_eq!(closed.continuity(0), Some(0), "the seam is a corner");
+            assert!((closed.period() - period).abs() < 1.0e-12);
+            for step in 0..=240 {
+                let local = period * step as f64 / 240.0;
+                let expected = loop_spline.evaluate((offset + local) % period);
+                assert!(
+                    (closed.evaluate(local) - expected).norm() < 1.0e-9,
+                    "cut {breakpoint} drifted at t={local:.4}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        open_irregular().close(1.0e-9),
+        Err(SplineError::InvalidInterval)
+    );
+    let single = OpenCubicSpline::new(
+        vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(0.5, 0.5),
+            Point2::new(-0.5, 0.5),
+            Point2::new(0.0, 0.0),
+        ],
+        vec![1.0],
+    )
+    .unwrap();
+    assert_eq!(single.close(1.0e-9), Err(SplineError::ControlCount));
+}
+
+/// Reversal maps `t` to `period - t` exactly and undoes itself.
+#[test]
+fn open_reversed_maps_parameter_exactly_and_is_an_involution() {
+    let spline = open_irregular();
+    let reversed = spline.reversed();
+    let period = spline.period();
+    assert!((reversed.period() - period).abs() < 1.0e-12);
+    for step in 0..=240 {
+        let t = period * step as f64 / 240.0;
+        near(reversed.evaluate(t), spline.evaluate(period - t), 1.0e-12);
+    }
+    assert_eq!(reversed.reversed(), spline);
+}
+
+/// `join` checks the gap before the control budget, and enforces both.
+#[test]
+fn join_refuses_gaps_and_control_overflow() {
+    let apart = OpenCubicSpline::new(
+        vec![
+            Point2::new(2.0, 0.0),
+            Point2::new(2.5, 0.5),
+            Point2::new(3.0, 0.0),
+            Point2::new(3.5, 0.5),
+        ],
+        vec![1.0],
+    )
+    .unwrap();
+    assert_eq!(
+        open_irregular().join(apart, 1.0e-9),
+        Err(SplineError::InvalidInterval)
+    );
+    let line = |start: f64| {
+        OpenCubicSpline::new(
+            (0..65)
+                .map(|index| Point2::new(start + index as f64 * 0.01, 0.0))
+                .collect(),
+            vec![1.0; 62],
+        )
+        .unwrap()
+    };
+    let first = line(0.0);
+    let second = line(first.evaluate(first.period()).x);
+    assert_eq!(first.join(second, 1.0e-9), Err(SplineError::ControlCount));
+}
+
+/// Reversing a topology curve keeps every face's law by swapping the sides,
+/// and reverses spans and nodes with the spline.
+#[test]
+fn topology_curve_reversal_swaps_sides_and_reverses_spans_and_nodes() {
+    let wall = SpanBehavior::Separated {
+        left: FaceBoundaryCondition::Reflecting,
+        right: FaceBoundaryCondition::Impedance { ratio: 1.0 },
+        coupling: InternalBoundaryCoupling::Independent,
+    };
+    let mut curve = TopologyCurve::new(
+        CurveId(7),
+        CurveSpline::Open(open_irregular()),
+        vec![
+            CurveSpan {
+                id: CurveSpanId(1),
+                behavior: SpanBehavior::Transmitting,
+            },
+            CurveSpan {
+                id: CurveSpanId(2),
+                behavior: wall,
+            },
+            CurveSpan {
+                id: CurveSpanId(3),
+                behavior: SpanBehavior::REFLECTING,
+            },
+        ],
+    )
+    .unwrap();
+    curve.nodes[0].vertex = Some(TopologyVertexId(4));
+    let reversed = curve.reversed().unwrap();
+    assert_eq!(reversed.id, curve.id);
+    assert_eq!(
+        reversed
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<Vec<_>>(),
+        vec![CurveSpanId(3), CurveSpanId(2), CurveSpanId(1)]
+    );
+    assert_eq!(
+        reversed.spans[1].behavior,
+        SpanBehavior::Separated {
+            left: FaceBoundaryCondition::Impedance { ratio: 1.0 },
+            right: FaceBoundaryCondition::Reflecting,
+            coupling: InternalBoundaryCoupling::Independent,
+        }
+    );
+    assert_eq!(reversed.spans[2].behavior, SpanBehavior::Transmitting);
+    assert_eq!(reversed.nodes[3].vertex, Some(TopologyVertexId(4)));
+    assert_eq!(reversed.nodes[0].vertex, None);
+    assert_eq!(
+        SpanBehavior::Transmitting.mirrored(),
+        SpanBehavior::Transmitting
+    );
+    assert_eq!(wall.mirrored().mirrored(), wall);
+    assert_eq!(CurveTraceSide::Left.opposite(), CurveTraceSide::Right);
+    let loop_curve = TopologyCurve::new(
+        CurveId(8),
+        CurveSpline::Closed(irregular()),
+        (1..=5)
+            .map(|index| CurveSpan {
+                id: CurveSpanId(index),
+                behavior: SpanBehavior::Transmitting,
+            })
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(loop_curve.reversed(), Err(TopologyIssue::Structure));
+}

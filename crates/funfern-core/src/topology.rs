@@ -115,6 +115,23 @@ impl SpanBehavior {
     fn transmitting(self) -> bool {
         matches!(self, Self::Transmitting)
     }
+
+    /// The same behaviour seen from the opposite curve direction: the two
+    /// separated laws swap sides so each face keeps the law it had.
+    pub fn mirrored(self) -> Self {
+        match self {
+            Self::Transmitting => Self::Transmitting,
+            Self::Separated {
+                left,
+                right,
+                coupling,
+            } => Self::Separated {
+                left: right,
+                right: left,
+                coupling,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -233,6 +250,31 @@ impl TopologyCurve {
             return Err(TopologyIssue::Structure);
         }
         Ok(())
+    }
+
+    /// The same open curve traversed the other way. Spans and nodes reverse
+    /// with the spline and every separated span swaps its laws, so each face
+    /// keeps the law it had. Parameter `p` becomes `period - p`.
+    pub fn reversed(&self) -> Result<Self, TopologyIssue> {
+        let CurveSpline::Open(spline) = &self.spline else {
+            return Err(TopologyIssue::Structure);
+        };
+        let curve = Self {
+            id: self.id,
+            spline: CurveSpline::Open(spline.reversed()),
+            nodes: self.nodes.iter().rev().copied().collect(),
+            spans: self
+                .spans
+                .iter()
+                .rev()
+                .map(|span| CurveSpan {
+                    id: span.id,
+                    behavior: span.behavior.mirrored(),
+                })
+                .collect(),
+        };
+        curve.structure_valid()?;
+        Ok(curve)
     }
 
     /// Inserts or reuses a breakpoint, raises it to C0 without changing the

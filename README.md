@@ -96,17 +96,25 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   uniform scale around the selection centroid; the viewport ring and square grip
   provide direct rotation and scaling. A junction can move only with all
   incident arms; the inspector can expand a partial selection to those arms.
+- **Weld:** dragging a loose end of an open curve shows every target it can join
+  in gold. Dropped on another loose end, the two curves become one — the curve
+  that stayed put keeps its identity and direction, and the seam is an ordinary
+  corner that Continuity can smooth. Dropped on its own other end, the curve
+  closes into a loop. Dropped on a junction, a curve interior, or a corner that
+  owns no junction yet, the end attaches there as a new arm. A drop the
+  arrangement rejects is refused and only the drag remains.
 - **Topology:** drawing is geometry-first. Closed curves offer Circle, Rectangle,
   Polygon, and Spline tools with an initial Subdomain/Hole purpose. Open curves
   offer Polyline and Spline tools with an initial Separator/Baffle purpose. A
   separator must start and finish on valid boundaries of the same active face;
   baffles may have free ends. Attached endpoints share an authoritative junction,
   follow outer-domain resizing, and can be detached from the selected junction.
-  While drawing an open curve, eligible outer edges, inner curves, and existing
-  junctions are highlighted; the hovered attachment uses a fixed screen-space
-  snap radius, independent of zoom.
-  Removing a divider asks which adjacent material survives when ownership is
-  ambiguous.
+  While drawing an open curve, eligible outer edges, inner curves, existing
+  junctions, loose ends, and vertex-less corners are highlighted; the hovered
+  attachment uses a fixed screen-space snap radius, independent of zoom. Starting
+  or finishing on a loose end welds the new curve into that curve.
+  Removing a divider that merges several subdomains highlights the candidates in
+  the scene and takes a click as the survivor.
 - **Boundaries:** one Boundary inspector applies conditions to every compatible
   selected span and reports mixed assignments. Outer edges support reflecting,
   prescribed
@@ -177,9 +185,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Delete also accepts one contiguous run of spans: the run goes and the rest of
   the curve stays as open baffles with the default wall, because an open curve
   cannot keep a transmitting end at a free tip. A curve whose junction sat inside
-  the deleted run is promoted the same way and named in the status line. When the
-  deletion merges two subdomains carrying different materials, the Edit panel
-  asks which survives; it refuses outright when more than two would merge.
+  the deleted run is promoted the same way and named in the status line, and two
+  loose ends the deletion leaves alone at a junction fuse into one curve. When the
+  deletion merges several subdomains into one, the candidates light up in the
+  scene and a click picks the survivor; a deletion that would merge subdomains in
+  two separate places is refused.
 - **Materials:** create and name materials in the Library, edit the three base
   properties named by the active physics skin, and assign them under
   Subdomain assignment. Each coefficient can be a constant or a formula. Formulas

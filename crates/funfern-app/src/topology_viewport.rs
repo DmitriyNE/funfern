@@ -723,7 +723,176 @@ pub fn hit_attachment(
     radius: f64,
     face: Option<FaceId>,
 ) -> Option<AttachmentHit> {
-    let junction = scene
+    hit_junction(scene, transform, pointer, radius, face)
+        .or_else(|| hit_edge(scene, transform, pointer, radius, face, None))
+}
+
+/// Everything a loose end may be welded onto, in precedence order: an authored
+/// junction, another loose end, a vertex-less breakpoint, then a compiled edge.
+/// Point targets come from the authored `geometry`, which is current mid-drag
+/// when the compiled scene is not. `exclude` is the dragged end: it never snaps
+/// to itself, and its whole curve is skipped for breakpoints and edges because
+/// self-attachment is not supported.
+pub fn weld_hit(
+    scene: &CompiledTopologyScene,
+    geometry: &TopologyGeometry,
+    transform: ViewportTransform,
+    pointer: ScreenPoint,
+    radius: f64,
+    exclude: Option<(CurveId, usize)>,
+    face: Option<FaceId>,
+) -> Option<AttachmentHit> {
+    let dragged_curve = exclude.map(|(curve, _)| curve);
+    hit_junction(scene, transform, pointer, radius, face)
+        .or_else(|| hit_loose_end(scene, geometry, transform, pointer, radius, exclude, face))
+        .or_else(|| {
+            hit_breakpoint(
+                scene,
+                geometry,
+                transform,
+                pointer,
+                radius,
+                dragged_curve,
+                face,
+            )
+        })
+        .or_else(|| hit_edge(scene, transform, pointer, radius, face, dragged_curve))
+}
+
+fn hit_loose_end(
+    scene: &CompiledTopologyScene,
+    geometry: &TopologyGeometry,
+    transform: ViewportTransform,
+    pointer: ScreenPoint,
+    radius: f64,
+    exclude: Option<(CurveId, usize)>,
+    face: Option<FaceId>,
+) -> Option<AttachmentHit> {
+    geometry
+        .curves
+        .iter()
+        .filter(|curve| curve.spline.is_open())
+        .flat_map(|curve| {
+            let last = curve.nodes.len() - 1;
+            [(0usize, 0usize), (last, 1usize)]
+                .into_iter()
+                .filter_map(move |(node, endpoint)| {
+                    if curve.nodes[node].vertex.is_some() || exclude == Some((curve.id, node)) {
+                        return None;
+                    }
+                    let point = curve.spline.node_point(node)?;
+                    let distance = transform.world_to_screen(point).distance(pointer);
+                    if distance > radius {
+                        return None;
+                    }
+                    if let Some(face) = face {
+                        // A free tip is a slit inside one face, which its end
+                        // span sees on both sides.
+                        let span = if node == 0 {
+                            curve.spans[0].id
+                        } else {
+                            curve.spans[curve.spans.len() - 1].id
+                        };
+                        let lies_in = scene
+                            .topology
+                            .edges
+                            .iter()
+                            .find(|edge| edge.source == CompiledEdgeSource::Curve(span))
+                            .map(|edge| edge.left);
+                        if lies_in != Some(face) {
+                            return None;
+                        }
+                    }
+                    Some(AttachmentHit {
+                        attachment: crate::topology_editor::TopologyAttachment::LooseEnd {
+                            curve: curve.id,
+                            endpoint,
+                        },
+                        point,
+                        distance,
+                    })
+                })
+        })
+        .min_by(|left, right| left.distance.total_cmp(&right.distance))
+}
+
+fn hit_breakpoint(
+    scene: &CompiledTopologyScene,
+    geometry: &TopologyGeometry,
+    transform: ViewportTransform,
+    pointer: ScreenPoint,
+    radius: f64,
+    exclude: Option<CurveId>,
+    face: Option<FaceId>,
+) -> Option<AttachmentHit> {
+    geometry
+        .curves
+        .iter()
+        .filter(|curve| Some(curve.id) != exclude)
+        .flat_map(|curve| {
+            let open = curve.spline.is_open();
+            let count = curve.nodes.len();
+            (0..count).filter_map(move |node| {
+                if curve.nodes[node].vertex.is_some() || (open && (node == 0 || node + 1 == count))
+                {
+                    return None;
+                }
+                let point = curve.spline.node_point(node)?;
+                let distance = transform.world_to_screen(point).distance(pointer);
+                if distance > radius {
+                    return None;
+                }
+                // The node owns no vertex, so the span starting at it sees the
+                // same faces the node does.
+                let [a, b] = curve.spline.span_bounds(node)?;
+                let midpoint = (a + b) * 0.5;
+                let span = curve.spans[node].id;
+                let side_face = |side| {
+                    FaceAnchor::Curve {
+                        curve: curve.id,
+                        span,
+                        side,
+                        parameter: midpoint,
+                    }
+                    .resolve(&scene.topology)
+                    .ok()
+                };
+                let side = if let Some(face) = face {
+                    [CurveTraceSide::Left, CurveTraceSide::Right]
+                        .into_iter()
+                        .find(|side| side_face(*side) == Some(face))?
+                } else {
+                    // World-space left of increasing parameter.
+                    let tangent = evaluate(&curve.spline, midpoint) - point;
+                    let toward = transform.screen_to_world(pointer) - point;
+                    if tangent.x * toward.y - tangent.y * toward.x >= 0.0 {
+                        CurveTraceSide::Left
+                    } else {
+                        CurveTraceSide::Right
+                    }
+                };
+                Some(AttachmentHit {
+                    attachment: crate::topology_editor::TopologyAttachment::Breakpoint {
+                        curve: curve.id,
+                        node,
+                        side,
+                    },
+                    point,
+                    distance,
+                })
+            })
+        })
+        .min_by(|left, right| left.distance.total_cmp(&right.distance))
+}
+
+fn hit_junction(
+    scene: &CompiledTopologyScene,
+    transform: ViewportTransform,
+    pointer: ScreenPoint,
+    radius: f64,
+    face: Option<FaceId>,
+) -> Option<AttachmentHit> {
+    scene
         .topology
         .vertices
         .iter()
@@ -758,14 +927,22 @@ pub fn hit_attachment(
                     distance,
                 })
         })
-        .min_by(|left, right| left.distance.total_cmp(&right.distance));
-    if junction.is_some() {
-        return junction;
-    }
+        .min_by(|left, right| left.distance.total_cmp(&right.distance))
+}
+
+fn hit_edge(
+    scene: &CompiledTopologyScene,
+    transform: ViewportTransform,
+    pointer: ScreenPoint,
+    radius: f64,
+    face: Option<FaceId>,
+    exclude: Option<CurveId>,
+) -> Option<AttachmentHit> {
     scene
         .topology
         .edges
         .iter()
+        .filter(|edge| edge.curve.is_none() || edge.curve != exclude)
         .filter_map(|edge| {
             let a = transform.world_to_screen(edge.points[0]);
             let b = transform.world_to_screen(edge.points[1]);
@@ -833,6 +1010,39 @@ pub fn hit_attachment(
             }
         })
         .min_by(|left, right| left.distance.total_cmp(&right.distance))
+}
+
+/// The controls that shape the selected curve spans, as `(curve, control)`
+/// pairs: a control belongs to a selection only through a span it supports, so
+/// picking one span of a long curve lights four controls, not the whole curve.
+pub fn selected_span_controls(
+    geometry: &TopologyGeometry,
+    selected: &BTreeSet<TopologySpanTarget>,
+) -> BTreeSet<(CurveId, usize)> {
+    selected
+        .iter()
+        .filter_map(|target| match target {
+            TopologySpanTarget::Curve(span) => Some(*span),
+            TopologySpanTarget::Outer(_) => None,
+        })
+        .filter_map(|span| {
+            geometry.curves.iter().find_map(|curve| {
+                curve
+                    .spans
+                    .iter()
+                    .position(|candidate| candidate.id == span)
+                    .map(|index| (curve, index))
+            })
+        })
+        .filter_map(|(curve, index)| {
+            match &curve.spline {
+                CurveSpline::Closed(spline) => spline.span_control_indices(index),
+                CurveSpline::Open(spline) => spline.span_control_indices(index),
+            }
+            .map(|controls| (curve.id, controls))
+        })
+        .flat_map(|(curve, controls)| controls.into_iter().map(move |control| (curve, control)))
+        .collect()
 }
 
 fn evaluate(spline: &CurveSpline, parameter: f64) -> Point2 {
@@ -1239,9 +1449,48 @@ mod tests {
                     anchor.resolve(&compiled.topology).unwrap()
                 }
                 crate::topology_editor::TopologyAttachment::Junction { face, .. } => face,
+                crate::topology_editor::TopologyAttachment::LooseEnd { .. }
+                | crate::topology_editor::TopologyAttachment::Breakpoint { .. } => {
+                    panic!("edge hits never resolve to loose ends or breakpoints")
+                }
             };
             assert_eq!(resolved, face);
             assert!((unspecialized.distance - 3.0).abs() < 1.0e-9);
         }
+    }
+
+    /// One selected span lights exactly its four supporting controls; two
+    /// adjacent spans share one and light five.
+    #[test]
+    fn selected_span_controls_follow_span_support_not_the_curve() {
+        let spline = PeriodicCubicSpline::rounded(Point2::default(), 0.4);
+        let spans = (1..=8)
+            .map(|index| CurveSpan {
+                id: CurveSpanId(index),
+                behavior: SpanBehavior::Transmitting,
+            })
+            .collect();
+        let curve = TopologyCurve::new(CurveId(1), CurveSpline::Closed(spline), spans).unwrap();
+        let geometry = TopologyGeometry {
+            curves: vec![curve],
+            ..TopologyGeometry::default()
+        };
+        let one = [TopologySpanTarget::Curve(CurveSpanId(3))]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let controls = selected_span_controls(&geometry, &one);
+        assert_eq!(controls.len(), 4);
+        assert!(controls.iter().all(|(curve, _)| *curve == CurveId(1)));
+        let two = [
+            TopologySpanTarget::Curve(CurveSpanId(3)),
+            TopologySpanTarget::Curve(CurveSpanId(4)),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(selected_span_controls(&geometry, &two).len(), 5);
+        let outer = [TopologySpanTarget::Outer(OuterSide::Bottom)]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert!(selected_span_controls(&geometry, &outer).is_empty());
     }
 }

@@ -572,6 +572,27 @@ impl OpenCubicSpline {
         Self::new_with_multiplicities(controls, intervals, multiplicities).unwrap()
     }
 
+    /// Closes a clamped curve whose ends coincide into a loop: the inverse of
+    /// [`PeriodicCubicSpline::open_at`] at breakpoint 0. The seam becomes a
+    /// multiplicity-3 breakpoint at parameter 0, spans keep their order, and
+    /// the period is preserved. A single-span curve has too few controls for a
+    /// loop and is refused with `ControlCount`.
+    pub fn close(self, tolerance: f64) -> Result<PeriodicCubicSpline, SplineError> {
+        let last = self.controls.len() - 1;
+        if !tolerance.is_finite()
+            || tolerance < 0.0
+            || (self.controls[0] - self.controls[last]).norm() > tolerance
+        {
+            return Err(SplineError::InvalidInterval);
+        }
+        // The open form holds the seam corner at both ends; the loop holds it
+        // once, as the control just before breakpoint 0's group.
+        let controls = self.controls[1..].to_vec();
+        let mut multiplicities = vec![3];
+        multiplicities.extend(self.multiplicities);
+        PeriodicCubicSpline::new_with_multiplicities(controls, self.intervals, multiplicities)
+    }
+
     /// Deletes one control and one nonempty knot span. This is an editing
     /// operation and may reshape the curve.
     pub fn remove(&mut self, index: usize) -> Result<(), SplineError> {

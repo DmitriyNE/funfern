@@ -701,19 +701,30 @@ restrict later editing.
 - Preserve the two-point spline-baffle shortcut that inserts equidistant internal
   controls for a straight cubic. Drawing stays active until explicitly dismissed
   where the current tool already has repeat placement.
-- Use one attachment hit-testing path for all open curves: outer sides, authored
-  junctions, and any curve interior. Separators filter it through the same-face
-  completion rule; BC baffles allow free, singly attached, or doubly attached
-  endpoints. A curve-interior drop performs exact C0 breakpoint insertion and
-  creates or reuses a topology vertex in one history action. Render targets above
-  geometry and law strokes. Keyboard-accessible **Attach endpoint** and **Detach
-  endpoint** actions provide a precise fallback.
+- Use one attachment hit-testing path for all open curves: authored junctions,
+  loose ends of other open curves, vertex-less breakpoints, then outer sides and
+  any curve interior, in that precedence. Separators filter it through the
+  same-face completion rule; BC baffles allow free, singly attached, or doubly
+  attached endpoints. A curve-interior drop performs exact C0 breakpoint insertion
+  and creates or reuses a topology vertex in one history action; a breakpoint drop
+  makes that breakpoint the junction without inserting a span. A loose-end drop
+  welds the curves into one — valence two is one curve, never a junction — and a
+  loose end meeting its own curve's other end closes the loop. The same targets
+  serve when a loose end is dragged: the weld happens on release and is one
+  history action together with the drag. Render targets above geometry and law
+  strokes. Keyboard-accessible **Attach endpoint** and **Detach endpoint** actions
+  provide a precise fallback.
 
 **Viewport selection and manipulation**
 
 - Replace object-specific selection with `CurveId`/`CurveSpanId`. One ordinary
   control selects and moves only that control. An attached breakpoint selects its
   authoritative `TopologyVertexId`; dragging it moves all incident curves once.
+  Dragging the control of a loose end is the weld gesture above.
+- Deleting spans or curves that merge several subdomains into one highlights the
+  candidates in the scene and takes a click as the survivor, independent of
+  which panels are open; a deletion that would merge subdomains in more than one
+  place is refused with a reason.
   Multiple selected spans remain a rigid transform selection, including the
   existing translation, scale, rotation gizmos, snapping, and marquee behavior.
 - Keep handle priority over spans, Shift span toggling, command-click whole-curve

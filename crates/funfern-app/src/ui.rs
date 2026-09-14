@@ -22,9 +22,9 @@ use bevy_egui::{
 };
 use funfern_app::document::{ProbeId, ProbeSamplingPreset, VectorOverlay};
 use funfern_app::topology_editor::{
-    ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
-    TopologyBoundaryProbeTarget, TopologyDocument, TopologyEditor, TopologyProbeDefinition,
-    TopologyProbeTarget, TopologySpanRemoval,
+    ClosedCurvePurpose, JoinRecord, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
+    TopologyBoundaryProbeTarget, TopologyCurveRemoval, TopologyDocument, TopologyEditor,
+    TopologyProbeDefinition, TopologyProbeTarget, TopologySpanRemoval,
 };
 use funfern_app::topology_persistence::{self as persistence, TopologyLoadCandidate};
 use funfern_app::topology_runtime::{
@@ -33,8 +33,8 @@ use funfern_app::topology_runtime::{
 };
 use funfern_app::topology_viewport::{
     AttachmentHit, RigidTransform, SampledTopologyGeometry, ScreenPoint, TopologyHandle,
-    TopologyHit, TopologySelection, TopologySpanTarget, ViewportTransform, hit_attachment,
-    plan_axis_scale, plan_handle_drag, plan_rigid_transform, span_context,
+    TopologyHit, TopologySelection, TopologySpanTarget, ViewportTransform, plan_axis_scale,
+    plan_handle_drag, plan_rigid_transform, selected_span_controls, span_context, weld_hit,
 };
 use funfern_core::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -49,7 +49,6 @@ const TEAL: Color32 = Color32::from_rgb(91, 220, 194);
 const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
-const ATTACHMENT_SNAP_RADIUS: f64 = 14.0;
 const FRAME_HISTORY: usize = 120;
 const GIZMO_PADDING: f32 = 18.0;
 
@@ -138,6 +137,13 @@ struct DrawGesture {
 enum DragGesture {
     Handle {
         handle: TopologyHandle,
+    },
+    /// A loose end of an open curve on the move. `snap` is the target it would
+    /// weld onto if released now, for the preview ring only.
+    Endpoint {
+        curve: CurveId,
+        node: usize,
+        snap: Option<AttachmentHit>,
     },
     Spans {
         start: Point2,
@@ -1392,9 +1398,9 @@ impl Playground {
             }
         }
     }
-    /// Presents the survivor choice a divider removal needs, and the closed-curve
-    /// Subdomain/Hole switch. Both act on the complete curve selection.
-    fn topology_actions(&mut self, ui: &mut egui::Ui, curve_spans: &BTreeSet<CurveSpanId>) {
+    /// Drops a staged survivor question when undo, a reload, or another edit
+    /// moved the geometry out from under it, rather than act on something else.
+    fn prune_stale_pending_removal(&mut self) {
         if self.pending_removal.as_ref().is_some_and(|pending| {
             let geometry = &self.editor.document.model.draft.geometry;
             match pending {
@@ -1407,53 +1413,171 @@ impl Playground {
                 }),
             }
         }) {
-            // Undo, a reload, or another edit moved the geometry out from under
-            // the question, so drop it rather than act on something else.
             self.pending_removal = None;
         }
-        if let Some(pending) = self.pending_removal.clone() {
-            ui.separator();
-            ui.label("This deletion merges two subdomains.");
-            ui.horizontal_wrapped(|ui| {
-                for region in pending.choices().to_vec() {
-                    let name = self
-                        .editor
-                        .document
-                        .model
-                        .draft
-                        .region(region)
-                        .and_then(|region| {
-                            self.editor.document.model.draft.material(region.material)
-                        })
-                        .map_or_else(|| format!("Region {}", region.0), |m| m.name.clone());
-                    if ui.button(format!("Keep {name}")).clicked() {
-                        let outcome = match &pending {
-                            PendingRemoval::Curve(curve, _) => {
-                                self.editor.remove_curve(*curve, Some(region)).map(|_| None)
-                            }
-                            PendingRemoval::Spans(spans, _) => {
-                                self.editor.remove_spans(spans, Some(region)).map(Some)
-                            }
-                        };
-                        match outcome {
-                            Ok(removal) => {
-                                self.pending_removal = None;
-                                self.selection = TopologySelection::None;
-                                self.invalidate_samples();
-                                if let Some(removal) = removal {
-                                    self.report_span_removal(&removal);
-                                }
-                            }
-                            Err(error) => self.notify(error),
-                        }
-                    }
+    }
+    /// The region owning the draft face under a world point, from the editor's
+    /// own compile so the answer does not wait on the GPU runtime.
+    fn draft_region_at(&self, point: Point2) -> Option<RegionId> {
+        let compiled = self
+            .editor
+            .compiled_draft
+            .as_ref()
+            .unwrap_or(&self.editor.compiled_accepted);
+        let face = compiled.topology.face_at(point)?;
+        compiled
+            .assignments
+            .iter()
+            .find(|assignment| assignment.face == face)
+            .and_then(|assignment| assignment.region)
+    }
+    fn material_name(&self, region: RegionId) -> String {
+        let draft = &self.editor.document.model.draft;
+        draft
+            .region(region)
+            .and_then(|region| draft.material(region.material))
+            .map_or_else(|| format!("Region {}", region.0), |m| m.name.clone())
+    }
+    /// Highlights every subdomain a staged deletion may keep: the mesh of each
+    /// candidate filled gold, its boundary stroked, and its material named at
+    /// the face centre. The one under the cursor reads stronger.
+    fn draw_removal_candidates(&self, painter: &egui::Painter, r: Rect) {
+        let Some(pending) = &self.pending_removal else {
+            return;
+        };
+        let candidates = pending.choices().iter().copied().collect::<BTreeSet<_>>();
+        let hovered = painter
+            .ctx()
+            .pointer_hover_pos()
+            .filter(|pos| r.contains(*pos))
+            .and_then(|pos| self.draft_region_at(self.world(pos, r)))
+            .filter(|region| candidates.contains(region));
+        let fill = |region: RegionId| {
+            Color32::from_rgba_unmultiplied(
+                248,
+                196,
+                112,
+                if hovered == Some(region) { 150 } else { 85 },
+            )
+        };
+        if let Some(active) = self.runtime.active() {
+            let mesh = &active.mesh;
+            for triangle in &mesh.triangles {
+                if !candidates.contains(&triangle.region) {
+                    continue;
                 }
-                if ui.button("Cancel").clicked() {
-                    self.pending_removal = None;
-                }
-            });
+                let points = triangle
+                    .vertices
+                    .map(|index| self.screen(mesh.vertices[index].point, r));
+                painter.add(egui::Shape::convex_polygon(
+                    points.to_vec(),
+                    fill(triangle.region),
+                    Stroke::NONE,
+                ));
+            }
+        }
+        let compiled = self
+            .editor
+            .compiled_draft
+            .as_ref()
+            .unwrap_or(&self.editor.compiled_accepted);
+        let region_of = |face: FaceId| {
+            compiled
+                .assignments
+                .iter()
+                .find(|assignment| assignment.face == face)
+                .and_then(|assignment| assignment.region)
+                .filter(|region| candidates.contains(region))
+        };
+        for edge in &compiled.topology.edges {
+            if region_of(edge.left).is_some() || region_of(edge.right).is_some() {
+                painter.line_segment(
+                    [
+                        self.screen(edge.points[0], r),
+                        self.screen(edge.points[1], r),
+                    ],
+                    Stroke::new(2.4, GOLD),
+                );
+            }
+        }
+        for face in &compiled.topology.faces {
+            let Some(region) = region_of(face.id) else {
+                continue;
+            };
+            let Some(centroid) = face.centroid() else {
+                continue;
+            };
+            let point = self.screen(centroid, r);
+            let label = format!("Keep {}", self.material_name(region));
+            let galley =
+                painter.layout_no_wrap(label, egui::FontId::proportional(13.0), Color32::WHITE);
+            let rect = egui::Rect::from_center_size(point, galley.size() + egui::vec2(14.0, 8.0));
+            painter.rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(8, 13, 18, 210));
+            painter.rect_stroke(rect, 4.0, Stroke::new(1.0, GOLD), egui::StrokeKind::Outside);
+            painter.galley(rect.min + egui::vec2(7.0, 4.0), galley, Color32::WHITE);
+        }
+    }
+    /// The question a staged deletion asks, anchored over the viewport so it is
+    /// visible whatever panels are open.
+    fn removal_prompt(&mut self, ctx: &egui::Context, viewport: Rect) {
+        if self.pending_removal.is_none() {
             return;
         }
+        let mut cancel = false;
+        egui::Window::new("Merge subdomains")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_TOP)
+            .fixed_pos(Pos2::new(viewport.center().x, viewport.top() + 14.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Click the subdomain that keeps its material").strong(),
+                    );
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel {
+            self.pending_removal = None;
+        }
+    }
+    /// Answers the staged deletion with the candidate under a click; a click
+    /// anywhere else leaves the question open.
+    fn pick_removal_survivor(&mut self, point: Point2) {
+        let Some(pending) = self.pending_removal.clone() else {
+            return;
+        };
+        let Some(region) = self
+            .draft_region_at(point)
+            .filter(|region| pending.choices().contains(region))
+        else {
+            return;
+        };
+        let outcome = match &pending {
+            PendingRemoval::Curve(curve, _) => self
+                .editor
+                .remove_curve(*curve, Some(region))
+                .map(|removal| self.report_curve_removal(&removal)),
+            PendingRemoval::Spans(spans, _) => self
+                .editor
+                .remove_spans(spans, Some(region))
+                .map(|removal| self.report_span_removal(&removal)),
+        };
+        match outcome {
+            Ok(()) => {
+                self.pending_removal = None;
+                self.selection = TopologySelection::None;
+                self.invalidate_samples();
+            }
+            Err(error) => self.message = error,
+        }
+    }
+    /// The closed-curve Subdomain/Hole switch; acts on the complete curve
+    /// selection.
+    fn topology_actions(&mut self, ui: &mut egui::Ui, curve_spans: &BTreeSet<CurveSpanId>) {
         let Some(curve) = self.selected_complete_curves(curve_spans).first().copied() else {
             return;
         };
@@ -2867,9 +2991,14 @@ impl Playground {
             };
             self.draw_sampled(&painter, viewport, sampled, color, 2.0, true);
         }
+        self.draw_weld_targets(&painter, viewport);
         self.draw_markers(&painter, viewport);
         self.draw_material_frame(&painter, viewport);
         self.draw_transform_gizmo(&painter, viewport);
+        self.prune_stale_pending_removal();
+        self.draw_removal_candidates(&painter, viewport);
+        let ctx = ui.ctx().clone();
+        self.removal_prompt(&ctx, viewport);
         if let Some(logo) = &self.logo_texture {
             let size = egui::vec2(140.0, 57.0);
             let logo_rect = Rect::from_min_size(
@@ -3270,18 +3399,21 @@ impl Playground {
             ));
         }
         if interactive && self.editor.document.presentation.handles {
-            let selected_spans = self.selection.spans();
+            // A control belongs to a selection only through a selected span it
+            // shapes; the rest of a long curve stays quiet.
+            let owned_controls = self
+                .selection
+                .spans()
+                .map(|spans| {
+                    selected_span_controls(&self.editor.document.model.draft.geometry, spans)
+                })
+                .unwrap_or_default();
             for handle in &sampled.handles {
                 let active = matches!(self.selection, TopologySelection::Handle(value) if value == handle.handle);
-                let owned = match handle.handle {
-                    TopologyHandle::Control { curve, .. } => selected_spans.is_some_and(|spans| {
-                        sampled
-                            .spans
-                            .iter()
-                            .any(|span| span.curve == Some(curve) && spans.contains(&span.target))
-                    }),
-                    TopologyHandle::Junction(_) => false,
-                };
+                let owned = matches!(
+                    handle.handle,
+                    TopologyHandle::Control { curve, control } if owned_controls.contains(&(curve, control))
+                );
                 let point = self.screen(handle.point, r);
                 let junction = matches!(handle.handle, TopologyHandle::Junction(_));
                 let radius = match (junction, active) {
@@ -3661,11 +3793,13 @@ impl Playground {
         let face = (self.open_purpose == OpenPurpose::Separator)
             .then_some(draw.face)
             .flatten();
-        let hit = hit_attachment(
+        let hit = weld_hit(
             compiled,
+            &self.editor.document.model.draft.geometry,
             self.transform(r),
             pointer,
-            ATTACHMENT_SNAP_RADIUS,
+            self.hit_tolerance(14.0) as f64,
+            None,
             face,
         )?;
         if self.open_purpose == OpenPurpose::Separator
@@ -3732,21 +3866,185 @@ impl Playground {
                 painter.circle_filled(self.screen(vertex.point, r), 5.0, GOLD);
             }
         }
+        self.draw_vertexless_nodes(painter, r, None);
         if let Some(pointer) = painter.ctx().pointer_hover_pos()
             && r.contains(pointer)
             && let Some(hit) =
                 self.draw_attachment_hit(ScreenPoint::new(pointer.x as f64, pointer.y as f64), r)
         {
-            let point = self.screen(hit.point, r);
-            painter.circle_filled(point, 4.0, GOLD);
-            painter.circle_stroke(point, 9.0, Stroke::new(2.0, GOLD));
-            painter.text(
-                point + egui::vec2(11.0, -11.0),
-                egui::Align2::LEFT_BOTTOM,
-                "Attach",
-                egui::FontId::proportional(11.0),
-                GOLD,
-            );
+            self.draw_snap_ring(painter, r, &hit, None);
+        }
+    }
+    /// Gold dots on every loose end and vertex-less breakpoint a curve may be
+    /// welded onto. `dragged` is the end on the move: only its own other end
+    /// stays eligible on that curve.
+    fn draw_vertexless_nodes(
+        &self,
+        painter: &egui::Painter,
+        r: Rect,
+        dragged: Option<(CurveId, usize)>,
+    ) {
+        for candidate in &self.editor.document.model.draft.geometry.curves {
+            let open = candidate.spline.is_open();
+            let count = candidate.nodes.len();
+            for (index, node) in candidate.nodes.iter().enumerate() {
+                let is_end = open && (index == 0 || index + 1 == count);
+                let eligible = match dragged {
+                    Some((curve, dragged_node)) if curve == candidate.id => {
+                        is_end && index != dragged_node
+                    }
+                    _ => true,
+                };
+                if node.vertex.is_some() || !eligible {
+                    continue;
+                }
+                let Some(point) = candidate.spline.node_point(index) else {
+                    continue;
+                };
+                painter.circle_filled(self.screen(point, r), if is_end { 5.0 } else { 3.5 }, GOLD);
+            }
+        }
+    }
+    fn draw_snap_ring(
+        &self,
+        painter: &egui::Painter,
+        r: Rect,
+        hit: &AttachmentHit,
+        dragged: Option<CurveId>,
+    ) {
+        let point = self.screen(hit.point, r);
+        painter.circle_filled(point, 4.0, GOLD);
+        painter.circle_stroke(point, 9.0, Stroke::new(2.0, GOLD));
+        let label = match hit.attachment {
+            TopologyAttachment::LooseEnd { curve, .. } if Some(curve) == dragged => "Close",
+            TopologyAttachment::LooseEnd { .. } => "Weld",
+            _ => "Attach",
+        };
+        painter.text(
+            point + egui::vec2(11.0, -11.0),
+            egui::Align2::LEFT_BOTTOM,
+            label,
+            egui::FontId::proportional(11.0),
+            GOLD,
+        );
+    }
+    /// Targets and the live snap while a loose end is being dragged.
+    fn draw_weld_targets(&self, painter: &egui::Painter, r: Rect) {
+        let Some(DragGesture::Endpoint { curve, node, snap }) = &self.drag else {
+            return;
+        };
+        self.draw_vertexless_nodes(painter, r, Some((*curve, *node)));
+        if let Some(hit) = snap {
+            self.draw_snap_ring(painter, r, hit, Some(*curve));
+        }
+    }
+    /// The node of a loose end when `control` is that end's on-curve control.
+    fn loose_end_of_control(&self, curve: CurveId, control: usize) -> Option<usize> {
+        let curve = self.editor.document.model.draft.geometry.curve(curve)?;
+        let CurveSpline::Open(spline) = &curve.spline else {
+            return None;
+        };
+        let node = if control == 0 {
+            0
+        } else if control + 1 == spline.controls().len() {
+            curve.nodes.len() - 1
+        } else {
+            return None;
+        };
+        curve.nodes[node].vertex.is_none().then_some(node)
+    }
+    fn endpoint_control(&self, curve: CurveId, node: usize) -> Option<usize> {
+        let curve = self.editor.document.model.draft.geometry.curve(curve)?;
+        let CurveSpline::Open(spline) = &curve.spline else {
+            return None;
+        };
+        Some(if node == 0 {
+            0
+        } else {
+            spline.controls().len() - 1
+        })
+    }
+    /// What a dragged loose end would weld onto at `pos`. Point targets come
+    /// from the draft; junctions and edges from the last valid compile, as the
+    /// editor's weld command resolves them.
+    fn weld_hit_for(
+        &self,
+        pos: Pos2,
+        r: Rect,
+        exclude: Option<(CurveId, usize)>,
+    ) -> Option<AttachmentHit> {
+        let compiled = self
+            .editor
+            .compiled_draft
+            .as_ref()
+            .unwrap_or(&self.editor.compiled_accepted);
+        weld_hit(
+            compiled,
+            &self.editor.document.model.draft.geometry,
+            self.transform(r),
+            ScreenPoint::new(pos.x as f64, pos.y as f64),
+            self.hit_tolerance(14.0) as f64,
+            exclude,
+            None,
+        )
+    }
+    /// Welds the released end onto whatever it landed on. The snap is recomputed
+    /// here rather than taken from the gesture: one captured mid-drag may name a
+    /// face of a snapshot that validation has since replaced.
+    fn finish_endpoint_drag(
+        &mut self,
+        curve: CurveId,
+        node: usize,
+        pointer: Option<Pos2>,
+        r: Rect,
+    ) {
+        let Some(pos) = pointer else {
+            return;
+        };
+        let Some(hit) = self.weld_hit_for(pos, r, Some((curve, node))) else {
+            return;
+        };
+        let endpoint = if node == 0 { 0 } else { 1 };
+        match self.editor.weld_endpoint(curve, endpoint, hit.attachment) {
+            Ok(weld) => {
+                self.selection = match weld.seam_control {
+                    Some(control) => TopologySelection::Handle(TopologyHandle::Control {
+                        curve: weld.curve,
+                        control,
+                    }),
+                    None => self.endpoint_control(curve, node).map_or(
+                        TopologySelection::None,
+                        |control| {
+                            TopologySelection::Handle(TopologyHandle::Control { curve, control })
+                        },
+                    ),
+                };
+                self.invalidate_samples();
+                let what = match hit.attachment {
+                    TopologyAttachment::LooseEnd { curve: other, .. } if other == curve => {
+                        "Closed into a loop"
+                    }
+                    TopologyAttachment::LooseEnd { .. } => "Welded into one curve",
+                    TopologyAttachment::Junction { .. } | TopologyAttachment::Breakpoint { .. } => {
+                        "Attached to junction"
+                    }
+                    TopologyAttachment::Boundary(FaceAnchor::Outer { .. }) => {
+                        "Attached to the outer boundary"
+                    }
+                    TopologyAttachment::Boundary(FaceAnchor::Curve { .. }) => {
+                        "Attached to the curve"
+                    }
+                };
+                let mut parts = vec![what.to_owned()];
+                if !weld.span_splits.is_empty() {
+                    parts.push("junction inserted".to_owned());
+                }
+                if weld.promoted {
+                    parts.push("curve promoted to a baffle".to_owned());
+                }
+                self.notify(parts.join(" · "));
+            }
+            Err(error) => self.message = error,
         }
     }
     fn transform_gizmo(&self, r: Rect) -> Option<(Point2, Pos2, f32, f32, f32)> {
@@ -3986,6 +4284,16 @@ impl Playground {
         }
         if !typing && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.cancel_interaction();
+            return;
+        }
+        if self.pending_removal.is_some() {
+            // The survivor question owns the viewport until it is answered or
+            // cancelled: a click picks, everything else waits.
+            if response.clicked_by(egui::PointerButton::Primary)
+                && let Some(pos) = pointer
+            {
+                self.pick_removal_survivor(self.world(pos, r));
+            }
             return;
         }
         if response.double_clicked()
@@ -4240,29 +4548,46 @@ impl Playground {
                         );
                     }
                     self.editor.begin();
-                    self.drag = Some(match hit {
-                        TopologyHit::Handle { handle, .. } => DragGesture::Handle { handle },
-                        TopologyHit::Span { .. } => {
-                            let selected = self.selection.spans().cloned().unwrap_or_default();
-                            let curve_spans = selected
-                                .iter()
-                                .filter_map(|target| match target {
-                                    TopologySpanTarget::Curve(span) => Some(*span),
-                                    TopologySpanTarget::Outer(_) => None,
-                                })
-                                .collect::<BTreeSet<_>>();
-                            let custom_pivot = self
-                                .gizmo_pivot
-                                .as_ref()
-                                .is_some_and(|(selection, _)| selection == &selected);
-                            DragGesture::Spans {
-                                start: self.world(pos, r),
-                                pivot: self
-                                    .gizmo_pivot_for(&selected, &curve_spans)
-                                    .unwrap_or_default(),
-                                custom_pivot,
-                                gizmo_before: self.gizmo_pivot.clone(),
-                                geometry: self.editor.document.model.draft.geometry.clone(),
+                    let loose_end = match hit {
+                        TopologyHit::Handle {
+                            handle: TopologyHandle::Control { curve, control },
+                            ..
+                        } => self
+                            .loose_end_of_control(curve, control)
+                            .map(|node| (curve, node)),
+                        _ => None,
+                    };
+                    self.drag = Some(if let Some((curve, node)) = loose_end {
+                        DragGesture::Endpoint {
+                            curve,
+                            node,
+                            snap: None,
+                        }
+                    } else {
+                        match hit {
+                            TopologyHit::Handle { handle, .. } => DragGesture::Handle { handle },
+                            TopologyHit::Span { .. } => {
+                                let selected = self.selection.spans().cloned().unwrap_or_default();
+                                let curve_spans = selected
+                                    .iter()
+                                    .filter_map(|target| match target {
+                                        TopologySpanTarget::Curve(span) => Some(*span),
+                                        TopologySpanTarget::Outer(_) => None,
+                                    })
+                                    .collect::<BTreeSet<_>>();
+                                let custom_pivot = self
+                                    .gizmo_pivot
+                                    .as_ref()
+                                    .is_some_and(|(selection, _)| selection == &selected);
+                                DragGesture::Spans {
+                                    start: self.world(pos, r),
+                                    pivot: self
+                                        .gizmo_pivot_for(&selected, &curve_spans)
+                                        .unwrap_or_default(),
+                                    custom_pivot,
+                                    gizmo_before: self.gizmo_pivot.clone(),
+                                    geometry: self.editor.document.model.draft.geometry.clone(),
+                                }
                             }
                         }
                     });
@@ -4286,6 +4611,30 @@ impl Playground {
                     DragGesture::Marquee { .. } | DragGesture::Pivot { .. }
                 );
                 let result = match drag {
+                    DragGesture::Endpoint { curve, node, .. } => {
+                        let point = if shift {
+                            Self::snap_point(point)
+                        } else {
+                            point
+                        };
+                        let moved = self
+                            .endpoint_control(curve, node)
+                            .ok_or_else(|| "Curve end no longer exists".to_owned())
+                            .and_then(|control| {
+                                plan_handle_drag(
+                                    &self.editor.document.model.draft.geometry,
+                                    TopologyHandle::Control { curve, control },
+                                    point,
+                                )
+                                .map_err(|e| e.to_string())
+                            })
+                            .and_then(|update| {
+                                self.editor.apply_transform_updates_during_edit(&[update])
+                            });
+                        let snap = self.weld_hit_for(pos, r, Some((curve, node)));
+                        self.drag = Some(DragGesture::Endpoint { curve, node, snap });
+                        moved
+                    }
                     DragGesture::Handle { handle } => {
                         let point = if shift {
                             Self::snap_point(point)
@@ -4538,6 +4887,12 @@ impl Playground {
                         ));
                     }
                     DragGesture::Pivot { .. } => {}
+                    DragGesture::Endpoint { curve, node, .. } => {
+                        self.finish_endpoint_drag(curve, node, pointer, r);
+                        // A no-op after a successful weld, which committed the
+                        // drag and the weld together; the drag alone otherwise.
+                        self.editor.commit();
+                    }
                     _ => self.editor.commit(),
                 }
             }
@@ -4811,9 +5166,12 @@ impl Playground {
                     return;
                 }
             }
-            if let Err(error) = self.editor.remove_curve(curve, None) {
-                self.message = error;
-                return;
+            match self.editor.remove_curve(curve, None) {
+                Ok(removal) => self.report_curve_removal(&removal),
+                Err(error) => {
+                    self.message = error;
+                    return;
+                }
             }
         }
         self.selection = TopologySelection::None;
@@ -4871,26 +5229,68 @@ impl Playground {
     /// Says what the deletion did beyond the selection: a curve promoted to a
     /// baffle or a probe dropped is not something to discover later.
     fn report_span_removal(&mut self, removal: &TopologySpanRemoval) {
-        let mut parts = vec![match removal.pieces.len() {
+        let lead = match removal.pieces.len() {
             0 => "Curve deleted".to_owned(),
             1 => "Deleted spans; the rest is a baffle".to_owned(),
             count => format!("Deleted spans; split into {count} baffles"),
-        }];
-        if !removal.promoted.is_empty() {
+        };
+        self.report_removal(
+            lead,
+            &removal.promoted,
+            &removal.joined,
+            &removal.removed_probes,
+            &removal.removed_regions,
+        );
+    }
+    fn report_curve_removal(&mut self, removal: &TopologyCurveRemoval) {
+        self.report_removal(
+            "Curve deleted".to_owned(),
+            &removal.promoted,
+            &removal.joined,
+            &removal.removed_probes,
+            &removal.removed_regions,
+        );
+    }
+    fn report_removal(
+        &mut self,
+        lead: String,
+        promoted: &[CurveId],
+        joined: &[JoinRecord],
+        removed_probes: &[ProbeId],
+        removed_regions: &[RegionId],
+    ) {
+        let mut parts = vec![lead];
+        if !promoted.is_empty() {
             parts.push(format!(
                 "{} attached curve{} promoted to baffles",
-                removal.promoted.len(),
-                if removal.promoted.len() == 1 { "" } else { "s" }
+                promoted.len(),
+                if promoted.len() == 1 { "" } else { "s" }
             ));
         }
-        if !removal.removed_probes.is_empty() {
-            parts.push(format!("{} probe(s) removed", removal.removed_probes.len()));
-        }
-        if !removal.removed_regions.is_empty() {
+        let closed = joined
+            .iter()
+            .filter(|record| record.survivor == record.absorbed)
+            .count();
+        let fused = joined.len() - closed;
+        if fused > 0 {
             parts.push(format!(
-                "{} subdomain(s) merged",
-                removal.removed_regions.len()
+                "{} pair{} of loose ends welded into one curve",
+                fused,
+                if fused == 1 { "" } else { "s" }
             ));
+        }
+        if closed > 0 {
+            parts.push(format!(
+                "{} curve{} closed into a loop",
+                closed,
+                if closed == 1 { "" } else { "s" }
+            ));
+        }
+        if !removed_probes.is_empty() {
+            parts.push(format!("{} probe(s) removed", removed_probes.len()));
+        }
+        if !removed_regions.is_empty() {
+            parts.push(format!("{} subdomain(s) merged", removed_regions.len()));
         }
         self.notify(parts.join(" · "));
     }
@@ -8177,6 +8577,34 @@ fn attachment_face(attachment: TopologyAttachment, compiled: &CompiledTopologySc
         TopologyAttachment::Boundary(anchor) => {
             anchor.resolve(&compiled.topology).unwrap_or(EXTERIOR_FACE)
         }
+        TopologyAttachment::LooseEnd { curve, endpoint } => compiled
+            .geometry
+            .curve(curve)
+            .and_then(|curve| {
+                let node = if endpoint == 0 {
+                    0
+                } else {
+                    curve.nodes.len() - 1
+                };
+                curve.spline.node_point(node)
+            })
+            .and_then(|point| compiled.topology.face_at(point))
+            .unwrap_or(EXTERIOR_FACE),
+        TopologyAttachment::Breakpoint { curve, node, side } => compiled
+            .geometry
+            .curve(curve)
+            .and_then(|target| {
+                let [a, b] = target.spline.span_bounds(node)?;
+                FaceAnchor::Curve {
+                    curve,
+                    span: target.spans.get(node)?.id,
+                    side,
+                    parameter: (a + b) * 0.5,
+                }
+                .resolve(&compiled.topology)
+                .ok()
+            })
+            .unwrap_or(EXTERIOR_FACE),
     }
 }
 fn field_color(value: f32, gain: f32, under: Color32) -> Color32 {
