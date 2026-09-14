@@ -1481,19 +1481,23 @@ impl Playground {
             )
         };
         if let Some(active) = self.runtime.active() {
+            // One mesh, so the highlight does not print the triangulation on
+            // the subdomain the user is being asked to look at.
             let mesh = &active.mesh;
+            let mut highlight = egui::Mesh::default();
             for triangle in &mesh.triangles {
                 if !candidates.contains(&triangle.region) {
                     continue;
                 }
-                let points = triangle
-                    .vertices
-                    .map(|index| self.screen(mesh.vertices[index].point, r));
-                painter.add(egui::Shape::convex_polygon(
-                    points.to_vec(),
-                    fill(triangle.region),
-                    Stroke::NONE,
-                ));
+                let color = fill(triangle.region);
+                let first = highlight.vertices.len() as u32;
+                for index in triangle.vertices {
+                    highlight.colored_vertex(self.screen(mesh.vertices[index].point, r), color);
+                }
+                highlight.add_triangle(first, first + 1, first + 2);
+            }
+            if !highlight.is_empty() {
+                painter.add(egui::Shape::mesh(highlight));
             }
         }
         let compiled = self
@@ -3280,39 +3284,52 @@ impl Playground {
                 }
             }
         }
-        for triangle in &mesh.triangles {
-            let points = triangle
-                .vertices
-                .map(|index| self.screen(mesh.vertices[index].point, r));
-            let region_color = active
-                .bundle
-                .authored
-                .region(triangle.region)
-                .and_then(|region| active.bundle.authored.material(region.material))
-                .map(|m| {
-                    Color32::from_rgba_unmultiplied(
-                        m.color[0],
-                        m.color[1],
-                        m.color[2],
-                        (presentation.material_overlay_opacity * 210.0) as u8,
-                    )
-                })
-                .unwrap_or(Color32::TRANSPARENT);
-            let base = match presentation.material_overlay {
-                MaterialOverlay::Off | MaterialOverlay::Property(_) => Color32::TRANSPARENT,
-                MaterialOverlay::Regions => region_color,
-                MaterialOverlay::Subdomains => subdomain_color(
-                    &self.editor.document.model.draft,
-                    triangle.region,
-                    presentation.material_overlay_opacity,
-                ),
-            };
-            if base != Color32::TRANSPARENT {
-                painter.add(egui::Shape::convex_polygon(
-                    points.to_vec(),
-                    base,
-                    Stroke::NONE,
-                ));
+        // One mesh rather than one polygon per triangle. A polygon carries its
+        // own antialiased outline, and the outlines of neighbours leave a seam
+        // along every shared edge, which imprints the mesh on a categorical
+        // overlay whether or not the user asked to see it. Vertices are
+        // duplicated per triangle so each keeps its own flat colour and the
+        // boundary between two regions stays a step rather than a gradient.
+        if matches!(
+            presentation.material_overlay,
+            MaterialOverlay::Regions | MaterialOverlay::Subdomains
+        ) {
+            let mut fills = egui::Mesh::default();
+            fills.reserve_vertices(mesh.triangles.len() * 3);
+            fills.reserve_triangles(mesh.triangles.len());
+            for triangle in &mesh.triangles {
+                let base = match presentation.material_overlay {
+                    MaterialOverlay::Regions => active
+                        .bundle
+                        .authored
+                        .region(triangle.region)
+                        .and_then(|region| active.bundle.authored.material(region.material))
+                        .map(|m| {
+                            Color32::from_rgba_unmultiplied(
+                                m.color[0],
+                                m.color[1],
+                                m.color[2],
+                                (presentation.material_overlay_opacity * 210.0) as u8,
+                            )
+                        })
+                        .unwrap_or(Color32::TRANSPARENT),
+                    _ => subdomain_color(
+                        &self.editor.document.model.draft,
+                        triangle.region,
+                        presentation.material_overlay_opacity,
+                    ),
+                };
+                if base == Color32::TRANSPARENT {
+                    continue;
+                }
+                let first = fills.vertices.len() as u32;
+                for index in triangle.vertices {
+                    fills.colored_vertex(self.screen(mesh.vertices[index].point, r), base);
+                }
+                fills.add_triangle(first, first + 1, first + 2);
+            }
+            if !fills.is_empty() {
+                painter.add(egui::Shape::mesh(fills));
             }
         }
         if presentation.field

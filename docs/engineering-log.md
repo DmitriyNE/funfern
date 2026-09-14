@@ -139,6 +139,32 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — Categorical overlays stop printing the triangulation
+
+With the wireframe fixed, the Materials and Subdomains overlays still carried the
+mesh, and the material property overlay did not. The difference was how each is
+painted. The property overlay builds one `egui::Mesh`; the categorical ones added
+one `Shape::convex_polygon` per triangle, and a polygon carries its own
+antialiased outline, so the outlines of neighbours leave a seam along every
+shared edge. The mesh was imprinted on the overlay whether or not the user had
+asked to see it, which is also why the Mesh checkbox looked inert before.
+
+Both categorical overlays now build a single mesh. Vertices are duplicated per
+triangle rather than shared, so each triangle keeps its flat colour and the
+boundary between two regions stays a step instead of becoming a gradient, which
+is the one thing a shared-vertex mesh would have got wrong.
+
+The survivor highlight had the same defect and is fixed with it: it was printing
+the triangulation across the very subdomain it was asking the user to look at.
+
+The adaptation-target overlay keeps its per-triangle polygons. Its colour is a
+per-element quantity, so there the element boundaries are the data rather than an
+artefact of how it is drawn.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 425 passing, and
+`cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-15 — The mesh is drawn over the field, not under it
 
 The View panel's Mesh checkbox reached the document and the wireframe was drawn,
