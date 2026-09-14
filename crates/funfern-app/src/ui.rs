@@ -4998,7 +4998,13 @@ impl Playground {
         commands: &mut Commands,
         delta: f64,
     ) {
-        self.request_runtime();
+        // Starting another preparation mid-upload clears `runtime.ready`, and the
+        // in-flight commit then fails after the GPU has already been finalised.
+        // The edit is picked up on a later frame; `request_runtime` compares the
+        // document revision every frame.
+        if self.uploading.is_none() {
+            self.request_runtime();
+        }
         if let Some(Ok(_)) = self.runtime.advance(256) {
             self.handoff_ready = Some(Instant::now());
         }
@@ -5115,9 +5121,13 @@ impl Playground {
                 && display.current.len() == upload.degrees_of_freedom
             {
                 let upload = self.uploading.take().unwrap();
-                request.finish_transfer(assets);
+                // `finish_transfer` frees the old buffers, so it must not run
+                // until the candidate is actually committed. Finalising first
+                // would leave the GPU on a discretization `runtime.active()`
+                // does not name.
                 match self.runtime.commit_ready(upload.token) {
                     Ok(active) => {
+                        request.finish_transfer(assets);
                         self.sim_time_offset = upload.time_offset;
                         if upload.fresh {
                             self.accumulator = 0.0;
@@ -5139,11 +5149,20 @@ impl Playground {
                         self.record_handoff(&active);
                         self.configure_probes(request, assets, commands, &active);
                     }
-                    Err(error) => self.message = error,
+                    Err(error) => {
+                        if request.transfer_pending() {
+                            let _ = request.rollback_transfer(assets, commands);
+                        }
+                        self.message = error;
+                    }
                 }
             }
         }
-        if self.reset_requested {
+        // Reset rebuilds the GPU buffers against the active topology, which bumps
+        // the generation the pending commit is waiting for. That wedges the
+        // handoff, and because stepping is withheld while one is pending, it
+        // stops the solver for good. It stays queued instead.
+        if self.reset_requested && self.uploading.is_none() {
             if let Some(active) = self.runtime.active() {
                 let dt = active.operator.recommended_time_step();
                 if request
@@ -5164,7 +5183,13 @@ impl Playground {
         }
         if let Some(active) = self.runtime.active() {
             let dt = active.operator.recommended_time_step();
-            if let Some((position, region)) = self.pending_pulse.take()
+            // A pulse written during an upload would land in the new buffers
+            // through the old operator's stencil, so it waits too.
+            if let Some((position, region)) = self
+                .uploading
+                .is_none()
+                .then(|| self.pending_pulse.take())
+                .flatten()
                 && let Err(error) = request.inject_pulse(
                     assets,
                     &active.mesh,

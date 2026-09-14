@@ -11,15 +11,6 @@ Open findings from the 2026-09-14 adversarial review. The bracketed score is how
 many of the two verifier lenses upheld the claim; treat it as a filter, not a
 ruling — the same detach bug scored 2/2 under one phrasing and 0/2 under another.
 
-- [ ] [2/2] Fix the two ways the upload window can hard-stall the solver, together.
-  `refresh_runtime`'s `reset_requested` block runs while an upload is in flight and
-  bumps the GPU generation, so `self.uploading` can never match and the
-  `handoff_pending` gate then withholds stepping forever. Separately,
-  `request_runtime()` is not gated on a pending upload: an edit mid-upload clears
-  `runtime.ready`, the commit path runs `finish_transfer` and then fails
-  `commit_ready`, leaving the GPU on a discretization `runtime.active()` does not
-  name. Re-check the refuted "GPU failure before upload is never observed" claim
-  while here; it overlaps the first case.
 - [ ] [2/2] Shift-snapping a probe drag snaps the cursor rather than the probe.
   `DragGesture::Probe` stores the raw world press point as `grab` and the update
   computes `snap_point(cursor) - grab`, so the probe never lands on the grid and a
@@ -157,6 +148,34 @@ Longer-standing work:
   `split_internal_boundary` used. Nothing had ever trimmed a probe's span list
   before, and `validate_probes` rejects a document naming a missing span, so an
   untrimmed probe would have made the scene unsaveable.
+
+## 2026-09-14 — Nothing else touches the GPU during an upload
+
+- Three writes to the GPU ran inside the upload window and each could wedge the
+  handoff, which the new pacing gate then turns into a permanent stall because
+  stepping is withheld while a handoff is pending.
+  - `reset_requested` rebuilt the buffers against the *active* topology through
+    `replace_with_volume_sources` -> `install`, which bumps the generation the
+    pending commit is waiting for, so `display.generation == upload.generation`
+    could never hold again. Reset now stays queued until the upload finishes.
+  - A queued pulse would land in the new buffers through the old operator's
+    stencil. It waits too.
+  - `request_runtime()` ran unconditionally, so an edit mid-upload started a new
+    preparation, and `TopologyRuntime::request` clears `ready`. It is now skipped
+    while an upload is in flight; the edit is picked up on a later frame because
+    the revision comparison runs every frame. `refresh_amr` already returned
+    early in this window, so AMR could not supersede either.
+- Reordered the commit so `finish_transfer` runs only after `commit_ready`
+  succeeds, and a refusal rolls the transfer back. Finalising first freed the old
+  buffers while `runtime.active()` still named the old topology, leaving the GPU
+  on a discretization nothing in the document described. With the request gate
+  above this should now be unreachable, so it is defence in depth rather than the
+  fix.
+- Not covered by tests: all three live in the Bevy frame loop and need
+  `Assets<ShaderBuffer>` and `Commands`, which the headless suite cannot build.
+  The runtime-side premise — a superseded `commit_ready` leaving the active state
+  untouched — is covered by `failed_or_superseded_candidate_never_replaces_active_state`.
+  The rest wants the browser pass.
 
 ## 2026-09-14 — The stranded point source was in three places, not one
 
