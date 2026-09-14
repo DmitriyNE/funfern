@@ -1525,6 +1525,15 @@ impl Playground {
             TopologySelection::Spans(spans)
         }
     }
+    fn drag_starts_inside_span_selection(selection: &TopologySelection, hit: TopologyHit) -> bool {
+        matches!(
+            hit,
+            TopologyHit::Span { target, .. }
+                if selection
+                    .spans()
+                    .is_some_and(|spans| spans.contains(&target))
+        )
+    }
     fn selected_end_continuity(&self, span: CurveSpanId) -> Option<(CurveId, usize, u8, bool)> {
         let curve = self
             .editor
@@ -3477,13 +3486,7 @@ impl Playground {
                 if let Some(hit) = hit {
                     self.selected_probe = None;
                     let shift = ui.input(|i| i.modifiers.shift);
-                    let dragging_selected_span = matches!(
-                        hit,
-                        TopologyHit::Span { target, .. }
-                            if shift
-                                && self.selection.spans().is_some_and(|spans| spans.contains(&target))
-                    );
-                    if !dragging_selected_span {
+                    if !Self::drag_starts_inside_span_selection(&self.selection, hit) {
                         self.selection.apply_hit(
                             &self.editor.document.model.draft.geometry,
                             hit,
@@ -5936,5 +5939,37 @@ mod tests {
             Playground::marquee_result(&BTreeSet::from([a, b]), hits, MarqueeOperation::Subtract,),
             BTreeSet::from([a])
         );
+    }
+
+    #[test]
+    fn dragging_a_selected_span_preserves_the_complete_selection() {
+        let a = TopologySpanTarget::Curve(CurveSpanId(1));
+        let b = TopologySpanTarget::Curve(CurveSpanId(2));
+        let selection = TopologySelection::Spans(BTreeSet::from([a, b]));
+
+        assert!(Playground::drag_starts_inside_span_selection(
+            &selection,
+            TopologyHit::Span {
+                target: a,
+                distance: 0.0,
+            },
+        ));
+        assert!(!Playground::drag_starts_inside_span_selection(
+            &selection,
+            TopologyHit::Span {
+                target: TopologySpanTarget::Curve(CurveSpanId(3)),
+                distance: 0.0,
+            },
+        ));
+        assert!(!Playground::drag_starts_inside_span_selection(
+            &selection,
+            TopologyHit::Handle {
+                handle: TopologyHandle::Control {
+                    curve: CurveId(1),
+                    control: 0,
+                },
+                distance: 0.0,
+            },
+        ));
     }
 }

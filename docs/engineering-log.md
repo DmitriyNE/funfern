@@ -67,6 +67,15 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-14 — Selection-preserving geometry drag
+
+- Starting a geometry drag on any span already in the current selection now keeps
+  the complete span selection intact. Whole curves and multi-span C0 selections
+  therefore translate as one rigid object; an ordinary click still reduces or
+  modifies selection according to its modifiers.
+- Added a direct regression covering selected spans, unselected spans, and control
+  handles at drag start.
+
 ## 2026-09-14 — Open-curve attachment snapping repair
 
 - Fixed initial attachment hits on inner curves: the cursor's screen-side position
