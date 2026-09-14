@@ -1129,3 +1129,78 @@ fn topology_curve_reversal_swaps_sides_and_reverses_spans_and_nodes() {
     .unwrap();
     assert_eq!(loop_curve.reversed(), Err(TopologyIssue::Structure));
 }
+
+/// Every error a user can read in the status bar is a sentence, not a debug
+/// dump. The structure behind it stays available through `Debug` for the
+/// diagnostics window.
+#[test]
+fn user_facing_errors_read_as_sentences() {
+    let mut messages: Vec<String> = vec![];
+    for issue in [
+        TopologyIssue::Structure,
+        TopologyIssue::WorkLimit,
+        TopologyIssue::Sampling(CurveId(8)),
+        TopologyIssue::MissingVertex {
+            curve: CurveId(1),
+            vertex: TopologyVertexId(2),
+        },
+        TopologyIssue::NonC0Attachment {
+            curve: CurveId(1),
+            node: 3,
+        },
+        TopologyIssue::VertexMismatch {
+            curve: CurveId(1),
+            vertex: TopologyVertexId(2),
+        },
+        TopologyIssue::Outside(CurveId(3)),
+        TopologyIssue::Degenerate(CurveId(3)),
+        TopologyIssue::NearContact {
+            first: CompiledEdgeSource::Curve(CurveSpanId(57)),
+            second: CompiledEdgeSource::Curve(CurveSpanId(65)),
+        },
+        TopologyIssue::Overlap {
+            first: CompiledEdgeSource::Outer(OuterSide::Bottom),
+            second: CompiledEdgeSource::Curve(CurveSpanId(4)),
+        },
+        TopologyIssue::IncompatibleCrossing {
+            first: CompiledEdgeSource::Curve(CurveSpanId(1)),
+            second: CompiledEdgeSource::Curve(CurveSpanId(2)),
+        },
+        TopologyIssue::FreeTransmittingEnd(CurveId(2)),
+        TopologyIssue::TooManySegments,
+        TopologyIssue::TooManyFaces,
+    ] {
+        assert_ne!(
+            issue.to_string(),
+            format!("{issue:?}"),
+            "{issue:?} still prints its debug form"
+        );
+        messages.push(issue.to_string());
+    }
+    for error in [
+        SplineError::ControlCount,
+        SplineError::IntervalCount,
+        SplineError::NonFinite,
+        SplineError::InvalidInterval,
+        SplineError::IllConditionedKnots,
+        SplineError::NotRemovable,
+        SplineError::Index,
+    ] {
+        assert_ne!(
+            error.to_string(),
+            format!("{error:?}"),
+            "{error:?} still prints its debug form"
+        );
+        messages.push(error.to_string());
+    }
+    for message in &messages {
+        assert!(
+            !message.contains(['{', '}', '"', '(']) && !message.contains("::"),
+            "not a sentence: {message}"
+        );
+        assert!(
+            message.split_whitespace().count() >= 4,
+            "too terse to read: {message}"
+        );
+    }
+}

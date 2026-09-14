@@ -62,7 +62,15 @@ pub enum SplineError {
 }
 impl std::fmt::Display for SplineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        f.write_str(match self {
+            Self::ControlCount => "the curve has too few or too many control points",
+            Self::IntervalCount => "the curve's knots and control points do not match",
+            Self::NonFinite => "a control point is not a finite number",
+            Self::InvalidInterval => "a knot interval is not a positive length",
+            Self::IllConditionedKnots => "the knots are too close together to be stable",
+            Self::NotRemovable => "that knot cannot be smoothed any further",
+            Self::Index => "that control point or knot does not exist",
+        })
     }
 }
 impl std::error::Error for SplineError {}

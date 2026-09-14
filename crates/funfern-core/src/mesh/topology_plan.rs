@@ -1556,7 +1556,32 @@ pub fn topology_mesh_update_action(
 
 impl std::fmt::Display for TopologyMeshPlanError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{self:?}")
+        match self {
+            Self::DuplicateFace(_) => {
+                formatter.write_str("two mesh regions claim the same subdomain")
+            }
+            Self::MissingFace(_) => formatter.write_str("a subdomain is missing from the mesh"),
+            Self::UnknownFace(_) => {
+                formatter.write_str("the mesh names a subdomain that does not exist")
+            }
+            Self::InvalidRegion(_) => {
+                formatter.write_str("the mesh names a material that does not exist")
+            }
+            Self::DuplicateRegion(_) => {
+                formatter.write_str("two mesh regions claim the same material")
+            }
+            Self::NoActiveFaces => formatter.write_str("there is nothing left to mesh"),
+            Self::MissingTrace(_) => formatter.write_str("a boundary trace is missing"),
+            Self::BrokenCycle(_) => formatter.write_str("a subdomain boundary does not close"),
+            Self::MissingCurve(span) => {
+                write!(formatter, "span {} is missing from the mesh", span.0)
+            }
+            Self::CoupledExcludedFace(span) => write!(
+                formatter,
+                "span {} couples to a subdomain that is excluded",
+                span.0
+            ),
+        }
     }
 }
 

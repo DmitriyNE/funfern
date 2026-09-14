@@ -7821,8 +7821,10 @@ impl Playground {
                 match self.editor.acceptance {
                     TopologyAcceptance::Valid => ui.label("Draft accepted"),
                     TopologyAcceptance::Pending => ui.label("Draft compiling"),
+                    // The status bar says this in words; the diagnostics window
+                    // is where the structure behind it belongs.
                     TopologyAcceptance::Invalid(issue) => {
-                        ui.colored_label(RED, format!("Draft invalid: {issue}"))
+                        ui.colored_label(RED, format!("Draft invalid: {issue:?}"))
                     }
                 };
                 ui.small(format!(

@@ -408,6 +408,25 @@ pub enum CompiledEdgeSource {
     Curve(CurveSpanId),
 }
 
+/// Names an arrangement edge the way the status bar should say it out loud.
+impl std::fmt::Display for CompiledEdgeSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Outer(side) => write!(
+                formatter,
+                "the {} boundary",
+                match side {
+                    OuterSide::Bottom => "bottom",
+                    OuterSide::Right => "right",
+                    OuterSide::Top => "top",
+                    OuterSide::Left => "left",
+                }
+            ),
+            Self::Curve(span) => write!(formatter, "span {}", span.0),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledEdge {
     pub source: CompiledEdgeSource,
@@ -566,7 +585,52 @@ pub enum TopologyIssue {
 
 impl std::fmt::Display for TopologyIssue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{self:?}")
+        match self {
+            Self::Structure => formatter.write_str("a curve's spans and nodes do not line up"),
+            Self::WorkLimit => formatter.write_str("tracing this geometry ran out of budget"),
+            Self::Sampling(curve) => write!(formatter, "curve {} could not be sampled", curve.0),
+            Self::MissingVertex { curve, .. } => {
+                write!(
+                    formatter,
+                    "curve {} points at a junction that is gone",
+                    curve.0
+                )
+            }
+            Self::NonC0Attachment { curve, .. } => write!(
+                formatter,
+                "a junction on curve {} sits on a knot that is not a corner",
+                curve.0
+            ),
+            Self::VertexMismatch { curve, .. } => {
+                write!(formatter, "curve {} has drifted off its junction", curve.0)
+            }
+            Self::Outside(curve) => write!(formatter, "curve {} leaves the domain", curve.0),
+            Self::Degenerate(curve) => {
+                write!(formatter, "curve {} has a span with no length", curve.0)
+            }
+            Self::NearContact { first, second } => write!(
+                formatter,
+                "{first} and {second} touch with no junction between them"
+            ),
+            Self::Overlap { first, second } => {
+                write!(formatter, "{first} and {second} lie on top of each other")
+            }
+            Self::IncompatibleCrossing { first, second } => write!(
+                formatter,
+                "{first} and {second} cross, which needs both of them to transmit"
+            ),
+            Self::FreeTransmittingEnd(curve) => write!(
+                formatter,
+                "curve {} transmits but ends in open space",
+                curve.0
+            ),
+            Self::TooManySegments => {
+                formatter.write_str("this geometry has too many segments to trace")
+            }
+            Self::TooManyFaces => {
+                formatter.write_str("this geometry has too many subdomains to trace")
+            }
+        }
     }
 }
 

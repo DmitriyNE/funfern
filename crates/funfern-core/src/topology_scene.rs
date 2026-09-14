@@ -144,7 +144,14 @@ pub enum FaceAnchorIssue {
 
 impl std::fmt::Display for FaceAnchorIssue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{self:?}")
+        match self {
+            Self::InvalidParameter => formatter.write_str("that point is off the curve"),
+            Self::UnknownCurve(curve) => write!(formatter, "curve {} is gone", curve.0),
+            Self::UnknownSpan(span) => write!(formatter, "span {} is gone", span.0),
+            Self::AtVertex => formatter.write_str("that point is a junction, not a span"),
+            Self::NotOnBoundary => formatter.write_str("that point is not on a subdomain boundary"),
+            Self::Ambiguous => formatter.write_str("that point sits on more than one boundary"),
+        }
     }
 }
 
@@ -160,7 +167,14 @@ pub enum SeparatorAttachmentIssue {
 
 impl std::fmt::Display for SeparatorAttachmentIssue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{self:?}")
+        match self {
+            Self::Start(issue) => write!(formatter, "at the start, {issue}"),
+            Self::End(issue) => write!(formatter, "at the end, {issue}"),
+            Self::DifferentFaces { .. } => {
+                formatter.write_str("the two ends land on different subdomains")
+            }
+            Self::ExcludedFace(_) => formatter.write_str("that subdomain is excluded"),
+        }
     }
 }
 
@@ -517,7 +531,33 @@ pub enum TopologySceneIssue {
 
 impl std::fmt::Display for TopologySceneIssue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{self:?}")
+        match self {
+            Self::Structure => formatter.write_str("the document's pieces do not line up"),
+            Self::Material => formatter.write_str("a material is missing or invalid"),
+            Self::Region(region) => write!(formatter, "material region {} is invalid", region.0),
+            Self::VolumeSource(region) => write!(
+                formatter,
+                "a source sits in material region {}, which is gone",
+                region.0
+            ),
+            Self::OuterBoundaryCorner => {
+                formatter.write_str("the outer boundary conditions disagree at a corner")
+            }
+            Self::RevisionMismatch => {
+                formatter.write_str("the geometry changed while it was being assigned")
+            }
+            Self::FaceAnchor { source, .. } => write!(formatter, "a subdomain anchor: {source}"),
+            Self::DuplicateFace(_) => formatter.write_str("two anchors claim the same subdomain"),
+            Self::DuplicateRegion(_) => {
+                formatter.write_str("two subdomains claim the same material")
+            }
+            Self::UnassignedFace(_) => formatter.write_str("a subdomain has no material"),
+            Self::UnassignedRegion(_) => {
+                formatter.write_str("a material has no subdomain left to sit in")
+            }
+            Self::Topology(issue) => issue.fmt(formatter),
+            Self::Plan(error) => error.fmt(formatter),
+        }
     }
 }
 

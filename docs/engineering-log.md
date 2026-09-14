@@ -139,6 +139,31 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-14 — Errors that read as sentences
+
+Six error types across the core rendered `Display` as `{self:?}`, so the status
+bar greeted the user with `NearContact { first: Curve(CurveSpanId(57)), second:
+Curve(CurveSpanId(65)) }` and the continuity buttons reported `NotRemovable`.
+Each now writes one sentence, and the same line reads "span 57 and span 65 touch
+with no junction between them".
+
+Deliberately not a help system, as the intent was only to stop leaking `Debug`.
+Each variant gets a single clause, naming the curve or span when that is what
+tells the user where to look, and `CompiledEdgeSource` gained a `Display` so a
+contact can name the outer side or the span on either end of it.
+
+`Debug` keeps every field, and the diagnostics window's Topology section now
+prints the compile issue through it, which is where that detail belongs. The
+types covered are `TopologyIssue`, `SplineError`, `FaceAnchorIssue`,
+`SeparatorAttachmentIssue`, `TopologySceneIssue`, and `TopologyMeshPlanError`.
+`user_facing_errors_read_as_sentences` in the core geometry tests holds the line:
+each message must differ from its debug form, carry no Rust punctuation, and run
+to at least four words.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 418 passing, and
+`cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-14 — A curve may attach to itself, and Delete is a button again
 
 **Self-attachment.** A loose end could not be dropped on its own curve. The hit
