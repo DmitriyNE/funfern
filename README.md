@@ -85,51 +85,25 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   the full frame, mesh, handoff, and solver diagnostics. As the window narrows, file
   actions collapse into File first, followed by the inspector switches collapsing
   into Panels. The essential editing and playback controls stay on one row.
-- **Select:** clicking a handle selects that one control for local reshaping.
-  Clicking a curve selects its knot span; Shift-click toggles spans, and
-  Ctrl/Cmd-click selects the complete curve. Shift-drag adds an unselected span
-  before moving the resulting transformable selection and temporarily enables
-  grid snapping. Double-click inserts a knot without changing the curve and
-  selects its control. Drag a marquee left-to-right to select spans fully enclosed
-  by it; drag right-to-left to select spans that touch or lie inside it. Shift-drag
-  adds and Alt-drag subtracts; pressing or releasing either modifier during the
-  drag updates the operation immediately. The span filter limits marquee selection and
-  Ctrl/Cmd+A to outer edges, loops, baffles, or all geometry. Select filtered,
-  Invert, and Clear provide the same bulk operations in the panel. **Area select**
-  exposes persistent Replace/Add/Subtract controls for touch input. Selection and
-  its filter do not enter document history.
-- **Delete:** Delete or Backspace removes the selected control, probe, or every
-  completely selected loop and baffle as one undoable action. Partial spline-span
-  and outer-boundary selections are retained because they are not standalone
-  geometry objects.
-- **Transform:** complete curves and partial selections bounded by C0 knots can
-  be dragged, translated, rotated, uniformly scaled, snapped, or aligned as one
-  undoable action. **Isolate selection at C0** inserts every missing boundary
-  corner exactly. Each selected subcurve then moves rigidly; connected neighboring
-  spans follow only through their shared corner point. Snapping moves the selected
-  arc-length centroid. Drag the viewport ring to rotate, its square grip to scale,
-  and its center marker to reposition the temporary pivot. Shift snaps rotation to
-  15°, scale to 0.1 increments, and translation to the configured grid even when
-  persistent snapping is off. Seam-wrapped loop selections are supported.
-  A selected span exposes the continuity at its end knot. **C1 tangent** and
-  **C0 corner** refine the cubic exactly; gold diamonds on the curve are
-  repeated knots, separate from circular control handles. **C2 smooth** and
-  **C1 tangent** first try exact knot removal, then use a least-squares reshape
-  when the edited corner cannot be represented at the requested continuity.
-  The status strip reports an upper bound on the curve displacement.
-  Whole loops and baffles can also be duplicated with their span assignments;
-  selected baffles can be straightened between their endpoints.
-- **Baffle topology:** select one baffle span to split at its end knot. Select
-  every span of two baffles to merge their nearest tips. Split preserves the curve
-  exactly; merge snaps sufficiently close tips to their midpoint. Both retain
-  per-span laws, undo history, and start-to-end face orientation; reversing a
-  piece exchanges its left/right assignments. Coincident split tips remain a
-  valid mesh junction.
-- **Loop roles:** a completely selected loop can switch between a hole and material
-  interface. Creating an interior region uses the chosen material. Converting to a
-  hole removes that region and is allowed only when it contains no child loops or
-  baffles. Existing two-sided closed walls remain load-compatible but are omitted
-  from the normal role picker.
+- **Select:** clicking a control or junction selects one handle. Clicking a curve
+  selects its stable span; Shift-click toggles spans, and Ctrl/Cmd-click selects the
+  complete curve. Marquee direction follows CAD convention: left-to-right fully
+  encloses spans, while right-to-left crosses them. Shift at release adds the hits.
+  The outer rectangle participates in the same span selection model.
+- **Delete and transform:** Delete or Backspace removes every completely selected
+  curve. Drag one handle to reshape it, or drag a transformable span selection as a
+  rigid piece. The Edit panel also applies numeric translation, rotation, and
+  uniform scale around the selection centroid; the viewport ring and square grip
+  provide direct rotation and scaling. A junction can move only with all
+  incident arms; the inspector can expand a partial selection to those arms.
+- **Topology:** drawing is geometry-first. Closed curves offer Circle, Rectangle,
+  Polygon, and Spline tools with an initial Subdomain/Hole purpose. Open curves
+  offer Polyline and Spline tools with an initial Separator/Baffle purpose. A
+  separator must start and finish on valid boundaries of the same active face;
+  baffles may have free ends. Attached endpoints share an authoritative junction,
+  follow outer-domain resizing, and can be detached from the selected junction.
+  Removing a divider asks which adjacent material survives when ownership is
+  ambiguous.
 - **Boundaries:** one Boundary inspector applies conditions to every compatible
   selected span and reports mixed assignments. Outer edges support reflecting,
   prescribed
@@ -384,16 +358,14 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   candidate retains the previous simulation. Baffle trace nodes prefer the same
   stable boundary ID and left/right face on the old mesh during transfer.
 
-Scenes allow 32 geometric features, 32 materials, one volume source per region, and
-128 controls per curve. Version 21 JSON stores editable draft and accepted domain
-rectangles together with the complete boundary laws, constant/formula materials
-including directional axis ratios and region frames, and region-owned volume sources in
-both draft and accepted scenes, open material-divider graphs and junction attachments,
-presentation settings, and a tagged shared time-signal
-representation for point, volume, and boundary drives. Versions 2–20 remain compatible,
-and version 1 files migrate their loops to background holes. Legacy baffles that
-combined a thin-gap spring with face laws load with the thin-gap law taking
-precedence. JSON files are capped at 2 MiB and require finite coordinates. The editor
+Scenes allow 64 unified curves, 32 materials, one volume source per region, and
+128 controls per curve. Version 22 JSON stores one open/closed curve model, stable
+span and topology-vertex identities, oriented region anchors, editable draft and
+accepted scenes, boundary laws, constant/formula materials, directional axis ratios,
+orthonormal region frames, sources, probes, far-field settings, and presentation
+settings. Version 22 is a deliberate hard cut and older schemas are rejected; the
+built-in examples are authored directly in the new model. JSON files are capped at
+2 MiB and require finite coordinates. The editor
 uses a world-space validation clearance of `1e-4` times the larger domain extent,
 independent of zoom. The editor
 validator is deliberately conservative; final mesh topology uses adaptive exact

@@ -67,6 +67,43 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-14 — Atomic topology application cutover
+
+- Replaced the production editor with the unified topology document and removed
+  the legacy example/UI module. Version 22 is now the only schema used by file
+  load/save, shared links, recovery, autosave, and all eight bundled examples;
+  older schemas have no production adapter.
+- One immutable topology token now drives rendering, cooperative meshing,
+  quadratic assembly, solution transfer, GPU publication, volume and point
+  sources, AMR, point/line/boundary/area probes, far field, and material overlays.
+  Adapted meshes receive a distinct mesh generation and cannot publish until the
+  matching GPU upload is acknowledged. Source/probe-only edits update in place;
+  material and boundary-law edits reuse the mesh and transfer the field.
+- The visible editor now creates unified open and closed curves, attaches
+  separators only across one active face, edits shared junctions, assigns
+  left/right span laws, removes dividers with explicit region ownership, edits the
+  outer rectangle, and keeps invalid drafts over the accepted reference. Rendering
+  restores the persisted grid, control-polygon, handle, boundary-law, mesh,
+  mesh-boundary, field, material, AMR, vector, probe, and far-field overlays.
+- Restored direct rotation and uniform-scale gizmos, topology-native
+  shape-preserving double-click insertion, guarded reshaping control deletion,
+  probe selection/deletion, material parameters, region profile frames, and
+  region-owned volume-source editing without reintroducing legacy identities.
+- Restored topology-backed capture, sharing, examples, responsive inspectors, and
+  two-finger touch pan/zoom. The first catalog entry is the startup document.
+- A production-source audit finds no legacy geometry IDs or calls to legacy scene
+  meshing in the active UI/runtime path. Legacy editor and codec modules remain
+  compiled only for their existing equivalence/regression suite and shared scalar
+  serialization helpers.
+- Verification passes: formatting; workspace Clippy with warnings denied; all 349
+  workspace tests; native release compilation and startup on Apple M1 Max/Metal;
+  and `NO_COLOR=false trunk build --release` with Trunk 0.21.14. Interactive
+  browser testing was left to the user as requested. The UI advances topology
+  preparation in fixed 256-work-unit slices and AMR/overlay jobs in bounded
+  cooperative slices; representative browser frame timing remains to be measured.
+- Topology coordinate and graph edits deliberately use the cooperative full
+  rebuild. Sector-aware local mesh repair is the next performance follow-up.
+
 ## 2026-09-14 — Topology-native viewport interaction contract
 
 - Added an egui/Bevy-independent viewport model keyed only by stable `CurveId`,

@@ -1,17 +1,18 @@
 //! Version-22 persistence for the unified topology document.
 //!
-//! This is deliberately a hard schema boundary. The live version-21 loader stays
-//! in `persistence` until the atomic application cutover; this module accepts only
-//! version 22 and has no legacy geometry adapter.
+//! This is deliberately a hard schema boundary. Production accepts only version
+//! 22 and has no legacy geometry adapter; the older codec remains solely as an
+//! editor regression fixture while its shared scalar codecs are extracted.
 
-use crate::editor::{MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, ProbeId};
+use crate::document::{MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, ProbeId};
+pub use crate::persistence::MAX_FILE_BYTES;
 use crate::persistence::{
-    MAX_FILE_BYTES, StoredFaceCondition, StoredOuterBoundaryCondition, StoredPhysicsModel,
-    StoredPresentation, StoredProbeSamplingPreset, StoredScalarField, StoredTimeSignal,
-    decode_face_condition, decode_open_spline, decode_outer_condition, decode_physics,
-    decode_presentation, decode_probe_preset, decode_scalar_field, decode_signal, decode_spline,
-    encode_face_condition, encode_outer_condition, encode_physics, encode_presentation,
-    encode_probe_preset, encode_scalar_field, encode_signal,
+    StoredFaceCondition, StoredOuterBoundaryCondition, StoredPhysicsModel, StoredPresentation,
+    StoredProbeSamplingPreset, StoredScalarField, StoredTimeSignal, decode_face_condition,
+    decode_open_spline, decode_outer_condition, decode_physics, decode_presentation,
+    decode_probe_preset, decode_scalar_field, decode_signal, decode_spline, encode_face_condition,
+    encode_outer_condition, encode_physics, encode_presentation, encode_probe_preset,
+    encode_scalar_field, encode_signal,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -303,6 +304,29 @@ pub fn parse_document(bytes: &[u8]) -> Result<TopologyDocument, String> {
     Ok(document)
 }
 
+/// A bounded-load compatible wrapper used by the application event loop. JSON
+/// decoding is already capacity bounded before construction; validation is
+/// performed by `TopologyEditor::from_document` before replacement.
+pub struct TopologyLoadCandidate {
+    document: Option<TopologyDocument>,
+}
+
+impl TopologyLoadCandidate {
+    pub fn advance(&mut self, _budget: usize) -> Option<Result<TopologyDocument, String>> {
+        self.document.take().map(Ok)
+    }
+}
+
+pub fn parse(bytes: &[u8]) -> Result<TopologyLoadCandidate, String> {
+    parse_document(bytes).map(candidate)
+}
+
+pub fn candidate(document: TopologyDocument) -> TopologyLoadCandidate {
+    TopologyLoadCandidate {
+        document: Some(document),
+    }
+}
+
 fn encode_document(document: &TopologyDocument) -> FileV22 {
     FileV22 {
         version: TOPOLOGY_FILE_VERSION,
@@ -347,7 +371,7 @@ fn decode_document(file: FileV22) -> Result<TopologyDocument, String> {
                 region: RegionId(file.model.source.region),
                 signal: decode_signal(file.model.source.signal),
             },
-            far_field: crate::editor::FarFieldSettings {
+            far_field: crate::document::FarFieldSettings {
                 enabled: file.model.far_field.enabled,
                 inset: file.model.far_field.inset,
             },
@@ -1126,7 +1150,7 @@ mod tests {
                 target: TopologyProbeTarget::Segment {
                     start: Point2::new(-0.8, -0.2),
                     end: Point2::new(-0.2, 0.3),
-                    preset: crate::editor::ProbeSamplingPreset::Low,
+                    preset: crate::document::ProbeSamplingPreset::Low,
                 },
             },
             TopologyProbeDefinition {
@@ -1139,7 +1163,7 @@ mod tests {
                     spans: vec![span],
                     side: CurveTraceSide::Left,
                     reversed: true,
-                    preset: crate::editor::ProbeSamplingPreset::Medium,
+                    preset: crate::document::ProbeSamplingPreset::Medium,
                 }),
             },
             TopologyProbeDefinition {

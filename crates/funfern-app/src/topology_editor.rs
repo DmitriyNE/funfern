@@ -3,7 +3,9 @@
 //! The visible editor consumes this layer through stable topology viewport
 //! commands; no legacy object-role adapter belongs here.
 
-use crate::editor::{FarFieldSettings, PresentationSettings, ProbeId, ProbeSamplingPreset};
+use crate::document::{
+    FarFieldSettings, MAX_PROBES, PresentationSettings, ProbeId, ProbeSamplingPreset,
+};
 use crate::topology_viewport::TopologyTransformUpdate;
 use funfern_core::*;
 use std::collections::BTreeSet;
@@ -551,16 +553,24 @@ impl TopologyEditor {
     }
 
     pub fn set_point_source(&mut self, source: PointSource) -> Result<(), String> {
+        self.begin();
+        if let Err(error) = self.set_point_source_during_edit(source) {
+            self.cancel();
+            return Err(error);
+        }
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_point_source_during_edit(&mut self, source: PointSource) -> Result<(), String> {
         if !source.valid() || self.document.model.draft.region(source.region).is_none() {
             return Err("Point source settings are invalid".into());
         }
         if self.document.model.source == source {
             return Ok(());
         }
-        self.begin();
         self.document.model.source = source;
         self.changed();
-        self.commit();
         Ok(())
     }
 
@@ -584,8 +594,8 @@ impl TopologyEditor {
         color: [u8; 3],
         target: TopologyProbeTarget,
     ) -> Result<ProbeId, String> {
-        if self.document.model.probes.len() >= crate::editor::MAX_PROBES {
-            return Err(format!("Maximum {} probes", crate::editor::MAX_PROBES));
+        if self.document.model.probes.len() >= MAX_PROBES {
+            return Err(format!("Maximum {MAX_PROBES} probes"));
         }
         let id = ProbeId(self.next_probe);
         self.next_probe = self
@@ -610,6 +620,19 @@ impl TopologyEditor {
     }
 
     pub fn update_probe(&mut self, probe: TopologyProbeDefinition) -> Result<(), String> {
+        self.begin();
+        if let Err(error) = self.update_probe_during_edit(probe) {
+            self.cancel();
+            return Err(error);
+        }
+        self.commit();
+        Ok(())
+    }
+
+    pub fn update_probe_during_edit(
+        &mut self,
+        probe: TopologyProbeDefinition,
+    ) -> Result<(), String> {
         if !probe_definition_valid(&probe, &self.document.model.draft) {
             return Err("Probe settings are invalid".into());
         }
@@ -623,10 +646,8 @@ impl TopologyEditor {
         if self.document.model.probes[index] == probe {
             return Ok(());
         }
-        self.begin();
         self.document.model.probes[index] = probe;
         self.changed();
-        self.commit();
         Ok(())
     }
 
@@ -1188,6 +1209,159 @@ impl TopologyEditor {
         Ok(())
     }
 
+    /// Inserts a simple knot without changing the curve and splits the stable
+    /// span identity. Boundary probes and face anchors follow both pieces.
+    pub fn insert_control(
+        &mut self,
+        curve_id: CurveId,
+        parameter: f64,
+    ) -> Result<(usize, Option<CurveSpanId>), String> {
+        if !parameter.is_finite() {
+            return Err("Insertion parameter must be finite".into());
+        }
+        let inserted_span = self.allocate_span_id()?;
+        let mut candidate = self.document.model.clone();
+        let curve = candidate
+            .draft
+            .geometry
+            .curves
+            .iter_mut()
+            .find(|curve| curve.id == curve_id)
+            .ok_or("Curve no longer exists")?;
+        let old_span_count = curve.spans.len();
+        let old_span_index = (0..old_span_count)
+            .find(|index| {
+                curve
+                    .spline
+                    .span_bounds(*index)
+                    .is_some_and(|[start, end]| parameter >= start && parameter <= end)
+            })
+            .ok_or("Insertion parameter is outside the curve")?;
+        let original = curve.spans[old_span_index];
+        let insertion = match &mut curve.spline {
+            CurveSpline::Closed(spline) => spline.insert(parameter),
+            CurveSpline::Open(spline) => spline.insert(parameter),
+        }
+        .map_err(|error| error.to_string())?;
+        let control = match insertion {
+            Insertion::Existing(control) => return Ok((control, None)),
+            Insertion::Inserted(control) => control,
+        };
+        let node = match &curve.spline {
+            CurveSpline::Closed(spline) => spline
+                .knots()
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| {
+                    (**left - parameter)
+                        .abs()
+                        .total_cmp(&(**right - parameter).abs())
+                })
+                .map(|(index, _)| index),
+            CurveSpline::Open(spline) => (0..=spline.intervals().len())
+                .filter_map(|index| spline.breakpoint(index).map(|value| (index, value)))
+                .min_by(|(_, left), (_, right)| {
+                    (*left - parameter)
+                        .abs()
+                        .total_cmp(&(*right - parameter).abs())
+                })
+                .map(|(index, _)| index),
+        }
+        .ok_or("Inserted knot could not be located")?;
+        curve.nodes.insert(node, CurveNode::default());
+        curve.spans.insert(
+            node,
+            CurveSpan {
+                id: inserted_span,
+                behavior: original.behavior,
+            },
+        );
+        if curve.spans.len() != old_span_count + 1 || curve.nodes.len() != curve.spline.node_count()
+        {
+            return Err("Inserted curve topology is inconsistent".into());
+        }
+        remap_split_dependencies(
+            &mut candidate.draft,
+            &mut candidate.probes,
+            curve_id,
+            original.id,
+            inserted_span,
+            parameter,
+        );
+        self.begin();
+        self.document.model = candidate;
+        self.changed();
+        self.commit();
+        Ok((control, Some(inserted_span)))
+    }
+
+    /// Removes one control and its associated knot span. This is a reshaping
+    /// edit; attached topology vertices and incompatible adjacent span laws are
+    /// protected from an ambiguous merge.
+    pub fn remove_control(&mut self, curve_id: CurveId, control: usize) -> Result<(), String> {
+        let mut candidate = self.document.model.clone();
+        let curve = candidate
+            .draft
+            .geometry
+            .curves
+            .iter_mut()
+            .find(|curve| curve.id == curve_id)
+            .ok_or("Curve no longer exists")?;
+        let span_count = curve.spans.len();
+        let control_count = match &curve.spline {
+            CurveSpline::Closed(spline) => spline.controls().len(),
+            CurveSpline::Open(spline) => spline.controls().len(),
+        };
+        if control >= control_count {
+            return Err("Control no longer exists".into());
+        }
+        let (removed_span_index, retained_span_index, removed_node) =
+            if matches!(curve.spline, CurveSpline::Closed(_)) {
+                (control, (control + span_count - 1) % span_count, control)
+            } else if control <= 1 {
+                (0, 1, 0)
+            } else if control + 2 >= control_count {
+                (span_count - 1, span_count - 2, span_count)
+            } else {
+                let left = (control - 2).min(span_count - 2);
+                (left + 1, left, left + 1)
+            };
+        if curve
+            .nodes
+            .get(removed_node)
+            .is_some_and(|node| node.vertex.is_some())
+        {
+            return Err("Detach this topology junction before deleting its control".into());
+        }
+        let removed = curve.spans[removed_span_index];
+        let retained = curve.spans[retained_span_index];
+        if removed.behavior != retained.behavior {
+            return Err("Adjacent spans have different boundary settings".into());
+        }
+        match &mut curve.spline {
+            CurveSpline::Closed(spline) => spline.remove(control),
+            CurveSpline::Open(spline) => spline.remove(control),
+        }
+        .map_err(|error| error.to_string())?;
+        curve.spans.remove(removed_span_index);
+        curve.nodes.remove(removed_node);
+        if curve.spans.len() + usize::from(curve.spline.is_open()) != curve.nodes.len() {
+            return Err("Removed curve topology is inconsistent".into());
+        }
+        remap_removed_span_dependencies(
+            &mut candidate.draft,
+            &mut candidate.probes,
+            curve_id,
+            removed.id,
+            retained.id,
+        );
+        self.begin();
+        self.document.model = candidate;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
     /// Applies a topology-native viewport transform without opening or closing
     /// a history transaction. Drag gestures call this repeatedly between
     /// [`Self::begin`] and [`Self::commit`], so one complete drag remains one
@@ -1288,6 +1462,137 @@ impl TopologyEditor {
         if !changed {
             self.before = None;
             return Err("Select existing curve spans".into());
+        }
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_span_face_condition(
+        &mut self,
+        spans: &BTreeSet<CurveSpanId>,
+        side: CurveTraceSide,
+        condition: FaceBoundaryCondition,
+    ) -> Result<(), String> {
+        if !condition.valid() {
+            return Err("Boundary condition is invalid".into());
+        }
+        self.begin();
+        let mut changed = false;
+        for curve in &mut self.document.model.draft.geometry.curves {
+            for span in &mut curve.spans {
+                if !spans.contains(&span.id) {
+                    continue;
+                }
+                let (mut left, mut right, mut coupling) = match span.behavior {
+                    SpanBehavior::Transmitting => (
+                        FaceBoundaryCondition::Reflecting,
+                        FaceBoundaryCondition::Reflecting,
+                        InternalBoundaryCoupling::Independent,
+                    ),
+                    SpanBehavior::Separated {
+                        left,
+                        right,
+                        coupling,
+                    } => (left, right, coupling),
+                };
+                match side {
+                    CurveTraceSide::Left => left = condition,
+                    CurveTraceSide::Right => right = condition,
+                }
+                if condition != FaceBoundaryCondition::Reflecting {
+                    coupling = InternalBoundaryCoupling::Independent;
+                }
+                let behavior = SpanBehavior::Separated {
+                    left,
+                    right,
+                    coupling,
+                };
+                if span.behavior != behavior {
+                    span.behavior = behavior;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            self.before = None;
+            return Err("Select existing curve spans".into());
+        }
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_span_coupling(
+        &mut self,
+        spans: &BTreeSet<CurveSpanId>,
+        coupling: InternalBoundaryCoupling,
+    ) -> Result<(), String> {
+        if !coupling.valid() {
+            return Err("Boundary coupling is invalid".into());
+        }
+        self.begin();
+        let mut changed = false;
+        for curve in &mut self.document.model.draft.geometry.curves {
+            for span in &mut curve.spans {
+                if !spans.contains(&span.id) {
+                    continue;
+                }
+                let (left, right) = match span.behavior {
+                    SpanBehavior::Transmitting => (
+                        FaceBoundaryCondition::Reflecting,
+                        FaceBoundaryCondition::Reflecting,
+                    ),
+                    SpanBehavior::Separated { left, right, .. } => (left, right),
+                };
+                let behavior = SpanBehavior::Separated {
+                    left: if matches!(coupling, InternalBoundaryCoupling::ThinGap { .. }) {
+                        FaceBoundaryCondition::Reflecting
+                    } else {
+                        left
+                    },
+                    right: if matches!(coupling, InternalBoundaryCoupling::ThinGap { .. }) {
+                        FaceBoundaryCondition::Reflecting
+                    } else {
+                        right
+                    },
+                    coupling,
+                };
+                if span.behavior != behavior {
+                    span.behavior = behavior;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            self.before = None;
+            return Err("Select existing curve spans".into());
+        }
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    pub fn set_outer_condition(
+        &mut self,
+        sides: &BTreeSet<OuterSide>,
+        condition: OuterBoundaryCondition,
+    ) -> Result<(), String> {
+        if !condition.valid() || sides.is_empty() {
+            return Err("Outer boundary condition is invalid".into());
+        }
+        self.begin();
+        let mut changed = false;
+        for side in sides {
+            let slot = &mut self.document.model.draft.outer_boundaries.sides[side.index()];
+            if *slot != condition {
+                *slot = condition;
+                changed = true;
+            }
+        }
+        if !changed {
+            self.before = None;
+            return Ok(());
         }
         self.changed();
         self.commit();
@@ -1723,6 +2028,55 @@ fn remap_split_dependencies(
     }
 }
 
+fn remap_removed_span_dependencies(
+    scene: &mut TopologyScene,
+    probes: &mut [TopologyProbeDefinition],
+    curve_id: CurveId,
+    removed: CurveSpanId,
+    retained: CurveSpanId,
+) {
+    let curve = scene
+        .geometry
+        .curves
+        .iter()
+        .find(|curve| curve.id == curve_id);
+    for assignment in &mut scene.face_assignments {
+        let FaceAnchor::Curve {
+            curve: anchor_curve,
+            span,
+            parameter,
+            ..
+        } = &mut assignment.anchor
+        else {
+            continue;
+        };
+        if *anchor_curve != curve_id {
+            continue;
+        }
+        if let Some(curve) = curve
+            && let Some(index) = containing_span(curve, *parameter)
+        {
+            *span = curve.spans[index].id;
+        } else if *span == removed {
+            *span = retained;
+        }
+    }
+    for probe in probes {
+        let TopologyProbeTarget::Boundary(target) = &mut probe.target else {
+            continue;
+        };
+        if target.curve != curve_id || !target.spans.contains(&removed) {
+            continue;
+        }
+        for span in &mut target.spans {
+            if *span == removed {
+                *span = retained;
+            }
+        }
+        target.spans.dedup();
+    }
+}
+
 fn remap_outer_anchor_dependencies(scene: &mut TopologyScene, side: OuterSide, fraction: f64) {
     let mut breakpoints = scene
         .geometry
@@ -2078,6 +2432,60 @@ mod tests {
     }
 
     #[test]
+    fn control_insertion_preserves_shape_and_splits_one_stable_span() {
+        let mut editor = TopologyEditor::default();
+        let curve = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.2),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let before = match &editor.document.model.draft.geometry.curves[0].spline {
+            CurveSpline::Closed(spline) => (0..=128)
+                .map(|index| spline.evaluate(spline.period() * index as f64 / 128.0))
+                .collect::<Vec<_>>(),
+            CurveSpline::Open(_) => unreachable!(),
+        };
+        let old_spans = editor.document.model.draft.geometry.curves[0].spans.len();
+        let old_history = editor.history_len().0;
+        let (control, inserted) = editor.insert_control(curve, 0.5).unwrap();
+        settle(&mut editor);
+        let authored = &editor.document.model.draft.geometry.curves[0];
+        let after = match &authored.spline {
+            CurveSpline::Closed(spline) => (0..=128)
+                .map(|index| spline.evaluate(spline.period() * index as f64 / 128.0))
+                .collect::<Vec<_>>(),
+            CurveSpline::Open(_) => unreachable!(),
+        };
+        assert!(inserted.is_some());
+        assert!(
+            control
+                < match &authored.spline {
+                    CurveSpline::Closed(spline) => spline.controls().len(),
+                    CurveSpline::Open(spline) => spline.controls().len(),
+                }
+        );
+        assert_eq!(authored.spans.len(), old_spans + 1);
+        assert_eq!(editor.history_len().0, old_history + 1);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(
+            before
+                .iter()
+                .zip(after)
+                .all(|(left, right)| (*left - right).norm() <= 1.0e-11)
+        );
+        let history = editor.history_len().0;
+        editor.remove_control(curve, control).unwrap();
+        settle(&mut editor);
+        assert_eq!(
+            editor.document.model.draft.geometry.curves[0].spans.len(),
+            old_spans
+        );
+        assert_eq!(editor.history_len().0, history + 1);
+    }
+
+    #[test]
     fn bulk_span_behavior_is_one_undoable_action() {
         let mut editor = TopologyEditor::default();
         let _curve = editor
@@ -2112,6 +2520,66 @@ mod tests {
                 .spans
                 .iter()
                 .all(|span| span.behavior == SpanBehavior::REFLECTING)
+        );
+    }
+
+    #[test]
+    fn bulk_curve_side_and_outer_conditions_are_atomic() {
+        let mut editor = TopologyEditor::default();
+        editor
+            .create_boundary_baffle(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.5, 0.0),
+                    Point2::new(0.0, 0.2),
+                    Point2::new(0.5, 0.0),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        settle(&mut editor);
+        let spans = editor.document.model.draft.geometry.curves[0]
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<BTreeSet<_>>();
+        let before = editor.history_len().0;
+        editor
+            .set_span_face_condition(
+                &spans,
+                CurveTraceSide::Right,
+                FaceBoundaryCondition::Dirichlet {
+                    signal: TimeSignal::harmonic(0.0, 2.0, 3.0, 0.4),
+                },
+            )
+            .unwrap();
+        assert_eq!(editor.history_len().0, before + 1);
+        assert!(
+            editor.document.model.draft.geometry.curves[0]
+                .spans
+                .iter()
+                .all(|span| matches!(
+                    span.behavior,
+                    SpanBehavior::Separated {
+                        right: FaceBoundaryCondition::Dirichlet { .. },
+                        coupling: InternalBoundaryCoupling::Independent,
+                        ..
+                    }
+                ))
+        );
+
+        let sides = BTreeSet::from([OuterSide::Left, OuterSide::Top]);
+        let before = editor.history_len().0;
+        editor
+            .set_outer_condition(&sides, OuterBoundaryCondition::FirstOrderOutgoing)
+            .unwrap();
+        assert_eq!(editor.history_len().0, before + 1);
+        assert_eq!(
+            editor.document.model.draft.outer_boundaries.sides[OuterSide::Left.index()],
+            OuterBoundaryCondition::FirstOrderOutgoing
+        );
+        assert_eq!(
+            editor.document.model.draft.outer_boundaries.sides[OuterSide::Top.index()],
+            OuterBoundaryCondition::FirstOrderOutgoing
         );
     }
 

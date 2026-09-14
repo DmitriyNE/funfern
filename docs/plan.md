@@ -797,6 +797,10 @@ that will be committed.
 
 #### Stage 6: atomic application switch and legacy removal
 
+**Implemented 2026-09-14.** The production path now uses version 22 and unified
+topology identities end to end. Legacy editor/codecs remain only as compiled test
+fixtures while shared scalar serialization helpers are extracted.
+
 - Land the new document/editor commands, cooperative mesh job, and UI structures
   behind non-production tests first. Switch document loading, validation,
   rendering, hit testing, simulation transactions, AMR, probes, far field, and

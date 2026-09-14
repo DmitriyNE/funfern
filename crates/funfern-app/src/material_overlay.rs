@@ -1,5 +1,5 @@
-pub use funfern_app::editor::{MaterialOverlay, MaterialProperty};
-use funfern_core::{MaterialCoordinates, QuadraticWaveOperator, RegionId, Scene, TriMesh};
+pub use funfern_app::document::{MaterialOverlay, MaterialProperty};
+use funfern_core::{MaterialCoordinates, QuadraticWaveOperator, RegionId, TopologyScene, TriMesh};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ impl OverlayRange {
 #[derive(Clone, Debug, PartialEq)]
 pub struct OverlayKey {
     pub mesh_revision: u64,
-    pub scene: Scene,
+    pub scene: TopologyScene,
 }
 
 #[derive(Clone, Debug)]
@@ -105,7 +105,7 @@ impl MaterialOverlayJob {
     pub fn new(
         mesh: Arc<TriMesh>,
         operator: Arc<QuadraticWaveOperator>,
-        scene: Scene,
+        scene: TopologyScene,
     ) -> Result<Self, String> {
         if mesh.mesh_revision != operator.mesh_revision()
             || mesh.triangles.len() != operator.element_nodes().len()
@@ -207,7 +207,11 @@ impl MaterialOverlayJob {
     }
 }
 
-pub fn sample(scene: &Scene, region_id: RegionId, point: funfern_core::Point2) -> OverlaySample {
+pub fn sample(
+    scene: &TopologyScene,
+    region_id: RegionId,
+    point: funfern_core::Point2,
+) -> OverlaySample {
     let fallback_coordinates = MaterialCoordinates {
         x: point.x,
         y: point.y,
@@ -277,7 +281,11 @@ pub fn sample(scene: &Scene, region_id: RegionId, point: funfern_core::Point2) -
         Ok(_) => errors[5] = Some("must be at least one".into()),
         Err(error) => errors[5] = Some(error.to_string()),
     }
-    if let Some(source) = scene.volume_source(region_id) {
+    if let Some(source) = scene
+        .volume_sources
+        .iter()
+        .find(|source| source.region == region_id)
+    {
         if source.enabled {
             match source.evaluate(region.frame, point) {
                 Ok(profile) => values[6] = Some(profile * source.signal.characteristic_amplitude()),
@@ -367,7 +375,7 @@ mod tests {
     #[test]
     fn derived_properties_and_robust_range_are_well_defined() {
         let sample = sample(
-            &Scene::default(),
+            &TopologyScene::default(),
             funfern_core::BACKGROUND_REGION,
             funfern_core::Point2::new(0.2, 0.3),
         );
@@ -383,7 +391,7 @@ mod tests {
 
     #[test]
     fn anisotropy_overlay_evaluates_the_axis_ratio_formula() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].axis_ratio = funfern_core::ScalarField::formula("1 + abs(x)").unwrap();
         let sample = sample(
             &scene,
@@ -395,7 +403,7 @@ mod tests {
 
     #[test]
     fn electromagnetic_overlay_keeps_raw_properties_and_derives_c_and_z() {
-        let mut scene = Scene {
+        let mut scene = TopologyScene {
             physics: funfern_core::PhysicsModel::Electromagnetic {
                 polarization: funfern_core::ElectromagneticPolarization::Tm,
             },
@@ -418,7 +426,7 @@ mod tests {
 
     #[test]
     fn volume_source_overlay_samples_peak_spatial_acceleration() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.volume_sources.push(funfern_core::VolumeSource {
             region: funfern_core::BACKGROUND_REGION,
             enabled: true,
@@ -505,7 +513,7 @@ mod tests {
         let operator = Arc::new(
             QuadraticWaveOperator::assemble(&operator_mesh, WaveCoefficients::default()).unwrap(),
         );
-        let mut job = MaterialOverlayJob::new(mesh, operator, Scene::default()).unwrap();
+        let mut job = MaterialOverlayJob::new(mesh, operator, TopologyScene::default()).unwrap();
         assert!(job.advance(1).is_none());
         let snapshot = loop {
             if let Some(snapshot) = job.advance(1) {

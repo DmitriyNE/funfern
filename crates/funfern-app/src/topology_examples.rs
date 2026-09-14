@@ -1,6 +1,6 @@
 //! Built-in examples authored directly in the unified topology model.
 
-use crate::editor::{
+use crate::document::{
     FarFieldSettings, MaterialOverlay, MaterialProperty, PresentationSettings, ProbeId,
     ProbeSamplingPreset, VectorOverlay,
 };

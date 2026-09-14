@@ -1,4 +1,6 @@
-use funfern_app::{editor::Document, persistence};
+use funfern_app::{
+    topology_editor::TopologyDocument as Document, topology_persistence as persistence,
+};
 
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "funfern.autosave.v1";
@@ -84,8 +86,7 @@ mod tests {
         let bytes = persistence::save(&document).unwrap();
         write_atomic(&path, bytes.as_bytes()).unwrap();
         let stored = std::fs::read(&path).unwrap();
-        let mut candidate = persistence::parse(&stored).unwrap();
-        assert_eq!(candidate.advance(100_000).unwrap().unwrap(), document);
+        assert_eq!(persistence::parse_document(&stored).unwrap(), document);
         std::fs::remove_file(path).unwrap();
     }
 }

@@ -267,9 +267,10 @@ with empty history. The eight built-in examples are authored directly as topolog
 documents and exercise geometry, sources, probes, spatial materials, EM modes,
 far-field settings, and presentation presets without a legacy conversion layer.
 
-Until the atomic application switch, the visible legacy editor continues to read
-and write version 21. Its compatibility decoder is isolated in the legacy
-`persistence` module and is removed from the production path at cutover.
+The production application reads and writes only version 22. The version 21
+decoder remains compiled temporarily as an editor regression fixture, but the UI,
+file picker, shared links, recovery, examples, and autosave never call it. There is
+no production compatibility adapter.
 
 Version 21 adds open material-interface splines, stable breakpoint nodes, per-span
 left/right regions, and explicit interior/outer junctions. Version 20 adds the optional material axis-ratio field and anisotropy presentation
@@ -488,16 +489,11 @@ Duplication creates new stable geometry IDs, copies knot intervals,
 multiplicities, and span laws, and gives duplicated material-interface or wall
 loops their own interior region with the same material.
 
-Version 21 JSON stores material-divider graphs and junctions in addition to the
-version 20 material axis ratios and the independent draft and accepted domain
-rectangles introduced by version 19, alongside
-the loop roles, all assigned boundary laws, materials, regions, controls, intervals,
-knot multiplicities, and both scenes. Versions 2–20 remain compatible; version 1
-loads by assigning its loops the background hole role and
-creating the default background material/region. Older loop records migrate to a
-reflecting condition on every periodic span. Version-6 baffles that combined a
-thin-gap law with independent face laws migrate with the thin-gap law taking
-precedence.
+Version 22 JSON stores unified open and closed curves, stable spans and shared
+topology vertices, oriented region anchors, all assigned boundary laws, materials,
+regions, controls, intervals, knot multiplicities, and both draft and accepted
+scenes. It also stores sources, probes, far-field configuration, and presentation
+settings. Versions 1–21 are intentionally rejected by this production decoder.
 Serde and rfd live only in the app crate. Round-trip f64 parsing preserves exact
 stored values. Files have a 2 MiB limit, strict fields/version/domain, finite
 values, and scene/control-count checks. A prospective load validates its accepted
@@ -731,8 +727,8 @@ the old two-source junction limit without making every node carry the maximum 33
 source channels. Scene and topology paths use one material-library evaluator,
 including the mechanical/EM coefficient conversion. Core point, line-sample,
 boundary-side, disk, and region probe stencils also accept the topology plan and
-material model directly. Mesh-repair eligibility and application-level probe target
-metadata remain on the legacy model until their consumer slices are complete.
+material model directly. Production probe targets use stable topology span/side
+references and the same transaction token as the displayed mesh.
 
 The residual-based AMR estimator has a topology entry point with the same
 cooperative work phases as the scene path. Its owned plan/model snapshot resolves
@@ -746,9 +742,10 @@ topology plan. It validates the existing mesh against the plan before changing i
 pins every sampled endpoint and junction-sector trace, and restricts boundary
 changes to AMR-created vertices inside one sampled plan segment. Transmitting
 constraints remain shared, while two active sides of a separated constraint split
-and collapse atomically by curve/span/parameter identity. Coordinate-edit repair
-still needs topology-aware curve evaluation and junction-sector rewiring before the
-application can use the complete topology path end to end.
+and collapse atomically by curve/span/parameter identity. Coordinate edits
+currently request the verified cooperative topology full rebuild. Topology-aware
+local curve and junction-sector repair remains a follow-up; the application
+otherwise uses the unified topology path end to end.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a

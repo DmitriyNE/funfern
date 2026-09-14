@@ -5,7 +5,7 @@
 //! transfer, probes, and far field. The visible application may upload a ready
 //! candidate and publish it only after the GPU acknowledges that same token.
 
-use crate::editor::{FarFieldSettings, ProbeId};
+use crate::document::{FarFieldSettings, ProbeId};
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyProbeDefinition, TopologyProbeTarget,
 };
@@ -18,6 +18,8 @@ pub const FAR_FIELD_CONTOUR_POINTS: usize = 256;
 pub struct TopologyToken {
     pub document_revision: u64,
     pub topology_revision: u64,
+    /// Changes for every mesh-bearing transaction, including fixed-topology AMR.
+    pub mesh_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -31,6 +33,7 @@ pub struct AcceptedTopology {
 impl AcceptedTopology {
     pub fn new(
         document_revision: u64,
+        mesh_generation: u64,
         authored: TopologyScene,
         compiled: CompiledTopologyScene,
     ) -> Result<Self, String> {
@@ -57,6 +60,7 @@ impl AcceptedTopology {
             token: TopologyToken {
                 document_revision,
                 topology_revision,
+                mesh_generation,
             },
             authored: Arc::new(authored),
             snapshot: Arc::new(compiled.topology),
@@ -103,6 +107,7 @@ pub struct PreparedTopology {
     pub fresh: bool,
     pub mesh_action: TopologyMeshUpdateAction,
     pub operator_reused: bool,
+    pub adapted: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +164,7 @@ pub struct TopologyPreparationJob {
     source_job: Option<VolumeSourceCompileJob>,
     volume_sources: Option<Arc<CompiledVolumeSources>>,
     operator_reused: bool,
+    adapted: bool,
     done: bool,
 }
 
@@ -181,6 +187,7 @@ impl TopologyPreparationJob {
                 token: TopologyToken {
                     document_revision,
                     topology_revision: previous.bundle.token.topology_revision,
+                    mesh_generation: mesh_revision,
                 },
                 authored: previous.bundle.authored.clone(),
                 snapshot: previous.bundle.snapshot.clone(),
@@ -189,6 +196,7 @@ impl TopologyPreparationJob {
         } else {
             Arc::new(AcceptedTopology::new(
                 document_revision,
+                mesh_revision,
                 document.model.accepted.clone(),
                 compiled,
             )?)
@@ -238,6 +246,50 @@ impl TopologyPreparationJob {
             source_job: None,
             volume_sources,
             operator_reused,
+            adapted: false,
+            done: false,
+        })
+    }
+
+    fn new_adapted(
+        document_revision: u64,
+        document: &TopologyDocument,
+        previous: Arc<PreparedTopology>,
+        mesh: TriMesh,
+    ) -> Result<Self, String> {
+        if document.model.accepted != *previous.bundle.authored
+            || mesh.geometry_revision != previous.bundle.plan.geometry_revision
+            || mesh.mesh_revision == previous.mesh.mesh_revision
+        {
+            return Err("Adapted mesh does not match the active topology".into());
+        }
+        let bundle = Arc::new(AcceptedTopology {
+            token: TopologyToken {
+                document_revision,
+                topology_revision: previous.bundle.token.topology_revision,
+                mesh_generation: mesh.mesh_revision,
+            },
+            authored: previous.bundle.authored.clone(),
+            snapshot: previous.bundle.snapshot.clone(),
+            plan: previous.bundle.plan.clone(),
+        });
+        Ok(Self {
+            bundle,
+            probes: document.model.probes.clone().into(),
+            point_source: document.model.source,
+            far_field: document.model.far_field,
+            previous: Some(previous),
+            mesh_action: TopologyMeshUpdateAction::Reuse,
+            fresh: false,
+            phase: TopologyPreparationPhase::Assembling,
+            mesh_job: None,
+            mesh: Some(Arc::new(mesh)),
+            operator: None,
+            transfer: None,
+            source_job: None,
+            volume_sources: None,
+            operator_reused: false,
+            adapted: true,
             done: false,
         })
     }
@@ -360,6 +412,7 @@ impl TopologyPreparationJob {
             fresh: self.fresh,
             mesh_action: self.mesh_action,
             operator_reused: self.operator_reused,
+            adapted: self.adapted,
         }))
     }
 
@@ -429,6 +482,12 @@ impl Default for TopologyRuntime {
 }
 
 impl TopologyRuntime {
+    pub fn reserve_mesh_revision(&mut self) -> u64 {
+        let revision = self.next_mesh_revision;
+        self.next_mesh_revision = self.next_mesh_revision.wrapping_add(1).max(1);
+        revision
+    }
+
     pub fn request(
         &mut self,
         document_revision: u64,
@@ -437,8 +496,7 @@ impl TopologyRuntime {
         options: MeshingOptions,
         fresh: bool,
     ) -> Result<TopologyToken, String> {
-        let mesh_revision = self.next_mesh_revision;
-        self.next_mesh_revision = self.next_mesh_revision.wrapping_add(1).max(1);
+        let mesh_revision = self.reserve_mesh_revision();
         let job = TopologyPreparationJob::new(
             document_revision,
             document,
@@ -448,6 +506,27 @@ impl TopologyRuntime {
             options,
             fresh,
         )?;
+        let token = job.token();
+        self.preparing = Some(job);
+        self.ready = None;
+        self.requested = Some(token);
+        self.last_error = None;
+        Ok(token)
+    }
+
+    /// Continues the normal preparation and GPU-acknowledged publication path
+    /// from a fixed-topology AMR result.
+    pub fn request_adapted(
+        &mut self,
+        document_revision: u64,
+        document: &TopologyDocument,
+        mesh: TriMesh,
+    ) -> Result<TopologyToken, String> {
+        let previous = self
+            .active
+            .clone()
+            .ok_or_else(|| "Cannot adapt before a topology is active".to_owned())?;
+        let job = TopologyPreparationJob::new_adapted(document_revision, document, previous, mesh)?;
         let token = job.token();
         self.preparing = Some(job);
         self.ready = None;
@@ -785,7 +864,7 @@ mod tests {
         let mut other = TopologyScene::default();
         other.geometry.domain.max_x = 1.5;
         let compiled = other.compile(4).unwrap();
-        assert!(AcceptedTopology::new(7, authored, compiled).is_err());
+        assert!(AcceptedTopology::new(7, 1, authored, compiled).is_err());
     }
 
     #[test]
@@ -818,6 +897,35 @@ mod tests {
         assert!(!candidate.operator_reused);
         assert!(candidate.transfer.is_some());
         runtime.commit_ready(second).unwrap();
+    }
+
+    #[test]
+    fn adapted_mesh_gets_a_distinct_token_and_waits_for_gpu_acknowledgement() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let initial = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        let active = runtime.commit_ready(initial).unwrap();
+        let mut adapted_mesh = active.mesh.as_ref().clone();
+        adapted_mesh.mesh_revision = runtime.reserve_mesh_revision();
+        let adapted = runtime
+            .request_adapted(editor.revision, &editor.document, adapted_mesh)
+            .unwrap();
+        assert_eq!(adapted.document_revision, initial.document_revision);
+        assert_eq!(adapted.topology_revision, initial.topology_revision);
+        assert_ne!(adapted.mesh_generation, initial.mesh_generation);
+        assert_eq!(prepare(&mut runtime).unwrap(), adapted);
+        assert_eq!(runtime.active().unwrap().bundle.token, initial);
+        assert!(runtime.ready().unwrap().adapted);
+        assert_eq!(runtime.commit_ready(adapted).unwrap().bundle.token, adapted);
     }
 
     #[test]
@@ -962,6 +1070,7 @@ mod tests {
                 .commit_ready(TopologyToken {
                     document_revision: 3,
                     topology_revision: 3,
+                    mesh_generation: 3,
                 })
                 .is_err()
         );
@@ -1012,7 +1121,7 @@ mod tests {
                     spans: vec![curve.spans[0].id],
                     side: CurveTraceSide::Left,
                     reversed: false,
-                    preset: crate::editor::ProbeSamplingPreset::Low,
+                    preset: crate::document::ProbeSamplingPreset::Low,
                 }),
             },
         ];
