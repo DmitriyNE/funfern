@@ -1235,27 +1235,41 @@ impl TopologyEditor {
     }
     /// The face a closed curve encloses, identified through the authored anchor
     /// that curve owns rather than through snapshot traversal order.
-    pub fn enclosed_region(&self, curve: CurveId) -> Option<Option<RegionId>> {
+    /// The face assignment anchored on `curve`, by document index. A curve that
+    /// bounds more than one face owns more than one; this returns the first, so
+    /// callers that must be exact should pick the face themselves.
+    pub fn enclosed_assignment(&self, curve: CurveId) -> Option<usize> {
         self.document
             .model
             .draft
             .face_assignments
             .iter()
-            .find(|assignment| {
+            .position(|assignment| {
                 matches!(
                     assignment.anchor,
                     FaceAnchor::Curve { curve: owner, .. } if owner == curve
                 )
             })
-            .map(|assignment| assignment.region)
     }
 
-    /// Turns the face a closed curve encloses into a hole, or back into a
-    /// subdomain carrying `material`. The spans follow: a hole separates with the
-    /// default wall, a subdomain transmits.
-    pub fn set_enclosed_disposition(
+    /// The region an assignment carries, or `None` when that face is a hole.
+    pub fn assignment_region(&self, assignment: usize) -> Option<RegionId> {
+        self.document
+            .model
+            .draft
+            .face_assignments
+            .get(assignment)
+            .and_then(|assignment| assignment.region)
+    }
+
+    /// Turns one assigned face into a hole, or back into a subdomain carrying
+    /// `material`. Only that face's own boundary is re-walled, and only where it
+    /// genuinely divides two faces: such a span transmits exactly when the faces
+    /// on both of its sides are active subdomains. A slit inside the face keeps
+    /// whatever the user gave it, and nothing outside the face is touched.
+    pub fn set_face_disposition(
         &mut self,
-        curve_id: CurveId,
+        assignment: usize,
         material: Option<MaterialId>,
     ) -> Result<(), String> {
         if let Some(material) = material {
@@ -1265,89 +1279,73 @@ impl TopologyEditor {
             .compiled_draft
             .clone()
             .ok_or("Resolve the invalid draft before changing this subdomain".to_owned())?;
-        let anchor = self
+        let current = self
             .document
             .model
             .draft
             .face_assignments
-            .iter()
-            .find(|assignment| {
-                matches!(
-                    assignment.anchor,
-                    FaceAnchor::Curve { curve: owner, .. } if owner == curve_id
-                )
-            })
+            .get(assignment)
             .copied()
-            .ok_or("This curve does not own an enclosed face")?;
-        let current = anchor.region;
-        if current.is_some() == material.is_some() {
-            if let (Some(region), Some(material)) = (current, material) {
+            .ok_or("That subdomain no longer exists")?;
+        if current.region.is_some() == material.is_some() {
+            if let (Some(region), Some(material)) = (current.region, material) {
                 return self.set_region_material(region, material);
             }
             return Ok(());
         }
-        let mut candidate = self.document.model.clone();
-        let curve = candidate
-            .draft
-            .geometry
-            .curves
-            .iter_mut()
-            .find(|candidate| candidate.id == curve_id)
-            .ok_or("Curve no longer exists")?;
-        if curve.spline.is_open() {
-            return Err("Only a closed curve encloses a face".into());
+        let face = current
+            .anchor
+            .resolve(&compiled.topology)
+            .map_err(|issue| issue.to_string())?;
+
+        // Which faces carry a material once this change lands.
+        let mut active = compiled
+            .assignments
+            .iter()
+            .filter(|assignment| assignment.region.is_some())
+            .map(|assignment| assignment.face)
+            .collect::<BTreeSet<_>>();
+        if material.is_some() {
+            active.insert(face);
+        } else {
+            active.remove(&face);
         }
-        // Only refuse when the interior is genuinely divided: more than one face
-        // touching the side this curve's own anchor names means a separator has
-        // split it, and excluding just our anchor would strand the other face as
-        // an active subdomain inside the hole. A junction whose curve attaches
-        // from outside the loop leaves the interior single and is fine.
-        if material.is_none() {
-            let FaceAnchor::Curve { side, .. } = anchor.anchor else {
-                return Err("This curve does not own an enclosed face".into());
+        let mut walls = BTreeSet::new();
+        let mut openings = BTreeSet::new();
+        for edge in &compiled.topology.edges {
+            let CompiledEdgeSource::Curve(span) = edge.source else {
+                continue;
             };
-            let interior = compiled
-                .topology
-                .edges
-                .iter()
-                .filter(|edge| edge.curve == Some(curve_id))
-                .map(|edge| match side {
-                    CurveTraceSide::Left => edge.left,
-                    CurveTraceSide::Right => edge.right,
-                })
-                .collect::<BTreeSet<_>>();
-            if interior.len() > 1 {
-                return Err(
-                    "This subdomain is divided; remove the separators inside it before making it a hole"
-                        .into(),
-                );
+            if edge.left == edge.right || (edge.left != face && edge.right != face) {
+                continue;
+            }
+            if active.contains(&edge.left) && active.contains(&edge.right) {
+                openings.insert(span);
+            } else {
+                walls.insert(span);
             }
         }
-        let behavior = if material.is_some() {
-            SpanBehavior::Transmitting
-        } else {
-            SpanBehavior::REFLECTING
-        };
-        for span in &mut curve.spans {
-            span.behavior = behavior;
+
+        let mut candidate = self.document.model.clone();
+        for curve in &mut candidate.draft.geometry.curves {
+            for span in &mut curve.spans {
+                if walls.contains(&span.id) {
+                    span.behavior = SpanBehavior::REFLECTING;
+                } else if openings.contains(&span.id) {
+                    span.behavior = SpanBehavior::Transmitting;
+                }
+            }
         }
-        let assignment = candidate
+        let slot = candidate
             .draft
             .face_assignments
-            .iter_mut()
-            .find(|assignment| {
-                matches!(
-                    assignment.anchor,
-                    FaceAnchor::Curve { curve: owner, .. } if owner == curve_id
-                )
-            })
-            .ok_or("This curve does not own an enclosed face")?;
-        let anchor = assignment.anchor;
+            .get_mut(assignment)
+            .ok_or("That subdomain no longer exists")?;
         match material {
             Some(material) => {
                 let id = self.allocate_region()?;
-                assignment.region = Some(id);
-                let frame = face_frame(&compiled.topology, anchor.resolve(&compiled.topology).ok());
+                slot.region = Some(id);
+                let frame = face_frame(&compiled.topology, Some(face));
                 candidate.draft.regions.push(Region {
                     id,
                     material,
@@ -1355,8 +1353,8 @@ impl TopologyEditor {
                 });
             }
             None => {
-                assignment.region = None;
-                if let Some(region) = current {
+                slot.region = None;
+                if let Some(region) = current.region {
                     drop_region_dependents(&mut candidate, region);
                 }
             }
@@ -6686,7 +6684,10 @@ mod tests {
                 )
                 .unwrap();
             settle(&mut editor);
-            let region = editor.enclosed_region(curve).unwrap().unwrap();
+            let region = editor
+                .enclosed_assignment(curve)
+                .and_then(|face| editor.assignment_region(face))
+                .unwrap();
             let mut source = editor.document.model.source;
             source.enabled = true;
             source.position = Point2::default();
@@ -6741,7 +6742,8 @@ mod tests {
             )
             .unwrap();
         settle(&mut editor);
-        let region = editor.enclosed_region(curve).unwrap().unwrap();
+        let face = editor.enclosed_assignment(curve).expect("an enclosed face");
+        let region = editor.assignment_region(face).expect("a subdomain");
         let mut source = editor.document.model.source;
         source.enabled = true;
         source.position = Point2::default();
@@ -6749,7 +6751,7 @@ mod tests {
         editor.set_point_source(source).unwrap();
         settle(&mut editor);
 
-        editor.set_enclosed_disposition(curve, None).unwrap();
+        editor.set_face_disposition(face, None).unwrap();
         settle(&mut editor);
         assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
         assert_eq!(editor.document.model.source.region, BACKGROUND_REGION);
@@ -6759,11 +6761,88 @@ mod tests {
         );
     }
 
-    /// A subdomain split by a separator owns only one of the interior faces, so
-    /// turning it into a hole would strand the other as an active region inside
-    /// the excluded one.
+    /// Emptying a face walls only that face's own boundary. A span dividing two
+    /// faces that both stay active is left alone, and a round trip reopens the
+    /// spans whose far side is still a subdomain.
     #[test]
-    fn a_split_subdomain_refuses_to_become_a_hole() {
+    fn a_face_disposition_rewalls_only_that_face() {
+        let mut editor = TopologyEditor::default();
+        let material = editor.document.model.draft.materials[0].id;
+        let left = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(-0.45, 0.0), 0.25),
+                ClosedCurvePurpose::Subdomain { material },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let right = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.45, 0.0), 0.25),
+                ClosedCurvePurpose::Subdomain { material },
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let face = editor.enclosed_assignment(left).expect("an enclosed face");
+        let behavior = |editor: &TopologyEditor, curve: CurveId| {
+            editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(curve)
+                .unwrap()
+                .spans
+                .iter()
+                .map(|span| matches!(span.behavior, SpanBehavior::Transmitting))
+                .collect::<Vec<_>>()
+        };
+        let untouched = behavior(&editor, right);
+        assert!(
+            untouched.iter().all(|open| *open),
+            "both start transmitting"
+        );
+
+        editor.set_face_disposition(face, None).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(editor.assignment_region(face), None);
+        assert!(
+            behavior(&editor, left).iter().all(|open| !*open),
+            "the emptied face is walled all the way round"
+        );
+        assert_eq!(
+            behavior(&editor, right),
+            untouched,
+            "the other subdomain is not touched"
+        );
+
+        editor.set_face_disposition(face, Some(material)).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(
+            behavior(&editor, left).iter().all(|open| *open),
+            "its boundary reopens onto the background, which is active"
+        );
+        assert!(editor.undo(), "one entry per command");
+        settle(&mut editor);
+        assert_eq!(editor.assignment_region(face), None, "back to the hole");
+        assert!(editor.undo());
+        settle(&mut editor);
+        assert!(
+            editor.assignment_region(face).is_some(),
+            "back to the original subdomain"
+        );
+        assert!(
+            behavior(&editor, left).iter().all(|open| *open),
+            "and to its original transmitting boundary"
+        );
+    }
+
+    /// A subdomain split by a separator is two faces, and each is disposed of
+    /// on its own: emptying one leaves the other alive behind a new wall.
+    #[test]
+    fn half_of_a_split_subdomain_becomes_a_hole_on_its_own() {
         let mut editor = TopologyEditor::default();
         let loop_id = editor
             .create_closed_curve(
@@ -6820,9 +6899,58 @@ mod tests {
             )
             .unwrap();
         settle(&mut editor);
-        let before = editor.document.model.clone();
-        assert!(editor.set_enclosed_disposition(loop_id, None).is_err());
-        assert_eq!(editor.document.model, before, "the refusal changes nothing");
+        // Each half is its own face, so one of them becomes a hole on its own
+        // and the separator between them turns into the wall that divides them.
+        let faces = editor.document.model.draft.face_assignments.len();
+        let half = editor
+            .document
+            .model
+            .draft
+            .face_assignments
+            .iter()
+            .position(|assignment| {
+                assignment
+                    .region
+                    .is_some_and(|region| region != BACKGROUND_REGION)
+            })
+            .expect("a split half");
+        editor.set_face_disposition(half, None).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(
+            editor.document.model.draft.face_assignments.len(),
+            faces,
+            "the other half keeps its own assignment"
+        );
+        assert_eq!(editor.assignment_region(half), None, "that half is a hole");
+        assert!(
+            editor
+                .document
+                .model
+                .draft
+                .face_assignments
+                .iter()
+                .filter(|assignment| assignment.region.is_some())
+                .count()
+                >= 2,
+            "the background and the surviving half stay active"
+        );
+        let separator = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id != loop_id)
+            .expect("the separator");
+        assert!(
+            separator
+                .spans
+                .iter()
+                .all(|span| !matches!(span.behavior, SpanBehavior::Transmitting)),
+            "the separator now walls the hole off from its neighbour"
+        );
     }
 
     /// A closed curve must be able to change between enclosing a subdomain and
@@ -6839,7 +6967,8 @@ mod tests {
             )
             .unwrap();
         settle(&mut editor);
-        let region = editor.enclosed_region(curve).unwrap().expect("a subdomain");
+        let face = editor.enclosed_assignment(curve).expect("an enclosed face");
+        let region = editor.assignment_region(face).expect("a subdomain");
         editor
             .set_volume_source(
                 region,
@@ -6854,10 +6983,10 @@ mod tests {
             .unwrap();
         settle(&mut editor);
 
-        editor.set_enclosed_disposition(curve, None).unwrap();
+        editor.set_face_disposition(face, None).unwrap();
         settle(&mut editor);
         assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
-        assert_eq!(editor.enclosed_region(curve), Some(None), "now a hole");
+        assert_eq!(editor.assignment_region(face), None, "now a hole");
         assert!(
             editor.document.model.draft.region(region).is_none(),
             "the region and its dependents go with the interior"
@@ -6881,11 +7010,11 @@ mod tests {
         );
 
         editor
-            .set_enclosed_disposition(curve, Some(DEFAULT_MATERIAL))
+            .set_face_disposition(face, Some(DEFAULT_MATERIAL))
             .unwrap();
         settle(&mut editor);
         assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
-        let restored = editor.enclosed_region(curve).unwrap().expect("a subdomain");
+        let restored = editor.assignment_region(face).expect("a subdomain");
         assert_ne!(
             restored, region,
             "the interior takes a fresh stable identity"

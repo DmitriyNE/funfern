@@ -52,6 +52,14 @@ const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const FRAME_HISTORY: usize = 120;
 const GIZMO_PADDING: f32 = 18.0;
 
+/// What the Materials panel lists, and what a viewport click selects with it.
+/// Faces include holes, which own no region and so cannot appear in the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubdomainListing {
+    Faces,
+    Regions,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum InspectorPanel {
     #[default]
@@ -533,6 +541,11 @@ pub struct Playground {
     pending_removal: Option<PendingRemoval>,
     material_selection: MaterialId,
     region_selection: RegionId,
+    /// Whether the Materials panel lists compiled faces or material regions, and
+    /// which of the two a viewport click picks.
+    subdomain_listing: SubdomainListing,
+    /// Index into `face_assignments` while the panel lists faces.
+    face_selection: usize,
     material_edit: Option<Material>,
     material_formula_edits: BTreeMap<(u64, u8), String>,
     material_formula_errors: BTreeMap<(u64, u8), String>,
@@ -665,6 +678,8 @@ impl Default for Playground {
             pending_removal: None,
             material_selection: DEFAULT_MATERIAL,
             region_selection: BACKGROUND_REGION,
+            subdomain_listing: SubdomainListing::Regions,
+            face_selection: 0,
             material_edit: None,
             material_formula_edits: BTreeMap::new(),
             material_formula_errors: BTreeMap::new(),
@@ -1571,43 +1586,6 @@ impl Playground {
     }
     /// The closed-curve Subdomain/Hole switch; acts on the complete curve
     /// selection.
-    fn topology_actions(&mut self, ui: &mut egui::Ui, curve_spans: &BTreeSet<CurveSpanId>) {
-        let Some(curve) = self.selected_complete_curves(curve_spans).first().copied() else {
-            return;
-        };
-        let Some(current) = self.editor.enclosed_region(curve) else {
-            return;
-        };
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Inside");
-            let hole = ui
-                .add(egui::Button::new("Hole").selected(current.is_none()))
-                .on_hover_text("Remove the interior and give it a wall condition");
-            if hole.clicked()
-                && current.is_some()
-                && let Err(error) = self.editor.set_enclosed_disposition(curve, None)
-            {
-                self.notify(error);
-            }
-            let material = self.material_selection;
-            let name = self
-                .editor
-                .document
-                .model
-                .draft
-                .material(material)
-                .map_or_else(|| "Subdomain".to_owned(), |m| m.name.clone());
-            if ui
-                .add(egui::Button::new(name).selected(current.is_some()))
-                .on_hover_text("Keep the interior and give it the selected material")
-                .clicked()
-                && let Err(error) = self.editor.set_enclosed_disposition(curve, Some(material))
-            {
-                self.notify(error);
-            }
-        });
-    }
     fn span_inspector(&mut self, ui: &mut egui::Ui, spans: BTreeSet<TopologySpanTarget>) {
         ui.label(format!(
             "{} span{}",
@@ -1818,7 +1796,6 @@ impl Playground {
                     }
                 }
             });
-            self.topology_actions(ui, &curve_spans);
             let pivot = self
                 .gizmo_pivot_for(&spans, &curve_spans)
                 .unwrap_or_default();
@@ -2300,9 +2277,116 @@ impl Playground {
     }
     fn materials_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Materials");
-        ui.label("Subdomain assignment");
-        let regions = self.editor.document.model.draft.regions.clone();
+        ui.horizontal(|ui| {
+            ui.label("Subdomain assignment");
+            for (mode, label, hint) in [
+                (
+                    SubdomainListing::Faces,
+                    "Faces",
+                    "Every compiled subdomain, holes included; a click in the scene picks one",
+                ),
+                (
+                    SubdomainListing::Regions,
+                    "Regions",
+                    "Only the material regions; a click in the scene picks one",
+                ),
+            ] {
+                if ui
+                    .selectable_label(self.subdomain_listing == mode, label)
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    self.subdomain_listing = mode;
+                }
+            }
+        });
         let materials = self.editor.document.model.draft.materials.clone();
+        if self.subdomain_listing == SubdomainListing::Faces {
+            self.face_listing(ui, &materials);
+        } else {
+            self.region_listing(ui, &materials);
+        }
+        self.region_detail(ui);
+    }
+
+    /// One row per assigned face, so a hole is editable in the same place a
+    /// subdomain is: it is simply the row whose material is Hole.
+    fn face_listing(&mut self, ui: &mut egui::Ui, materials: &[Material]) {
+        let assignments = self.editor.document.model.draft.face_assignments.clone();
+        if self.face_selection >= assignments.len() {
+            self.face_selection = 0;
+        }
+        for (index, assignment) in assignments.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let (swatch, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    swatch,
+                    2.0,
+                    match assignment.region {
+                        Some(region) => {
+                            subdomain_color(&self.editor.document.model.draft, region, 1.0)
+                        }
+                        None => Color32::from_gray(70),
+                    },
+                );
+                let name = match assignment.region {
+                    Some(region) if region == BACKGROUND_REGION => "Background".to_owned(),
+                    Some(region) => self.material_name(region),
+                    None => "Hole".to_owned(),
+                };
+                if ui
+                    .selectable_label(self.face_selection == index, name)
+                    .on_hover_text("Select this subdomain and outline it in the scene")
+                    .clicked()
+                {
+                    self.face_selection = index;
+                    if let Some(region) = assignment.region {
+                        self.region_selection = region;
+                    }
+                }
+                let mut chosen = assignment.region.and_then(|region| {
+                    self.editor
+                        .document
+                        .model
+                        .draft
+                        .region(region)
+                        .map(|region| region.material)
+                });
+                egui::ComboBox::from_id_salt(("face", index))
+                    .selected_text(match chosen {
+                        Some(material) => materials
+                            .iter()
+                            .find(|item| item.id == material)
+                            .map_or("Missing", |item| item.name.as_str()),
+                        None => "Hole",
+                    })
+                    .show_ui(ui, |ui| {
+                        for item in materials.iter() {
+                            ui.selectable_value(&mut chosen, Some(item.id), &item.name);
+                        }
+                        ui.selectable_value(&mut chosen, None, "Hole")
+                            .on_hover_text("Remove this subdomain and wall its boundary");
+                    });
+                let current = assignment.region.and_then(|region| {
+                    self.editor
+                        .document
+                        .model
+                        .draft
+                        .region(region)
+                        .map(|region| region.material)
+                });
+                if chosen != current
+                    && let Err(error) = self.editor.set_face_disposition(index, chosen)
+                {
+                    self.notify(error);
+                }
+            });
+        }
+    }
+
+    fn region_listing(&mut self, ui: &mut egui::Ui, materials: &[Material]) {
+        let regions = self.editor.document.model.draft.regions.clone();
         for region in regions {
             ui.horizontal(|ui| {
                 let (swatch, _) =
@@ -2335,7 +2419,7 @@ impl Playground {
                             .map_or("Missing", |item| item.name.as_str()),
                     )
                     .show_ui(ui, |ui| {
-                        for item in &materials {
+                        for item in materials {
                             ui.selectable_value(&mut material, item.id, &item.name);
                         }
                     });
@@ -2346,6 +2430,11 @@ impl Playground {
                 }
             });
         }
+    }
+
+    /// The selected region's source and frame, plus the material library.
+    fn region_detail(&mut self, ui: &mut egui::Ui) {
+        let materials = self.editor.document.model.draft.materials.clone();
         if let Some(region) = self
             .editor
             .document
@@ -3614,6 +3703,58 @@ impl Playground {
     }
     /// Whether a compiled span has the given region on either side, used to
     /// outline the face a region probe integrates over.
+    /// The compiled face the Materials panel has selected, with its region, or
+    /// `None` when that assignment no longer resolves.
+    fn selected_face(&self) -> Option<(FaceId, Option<RegionId>)> {
+        let compiled = self
+            .editor
+            .compiled_draft
+            .as_ref()
+            .unwrap_or(&self.editor.compiled_accepted);
+        let assignment = self
+            .editor
+            .document
+            .model
+            .draft
+            .face_assignments
+            .get(self.face_selection)?;
+        let face = assignment.anchor.resolve(&compiled.topology).ok()?;
+        Some((face, assignment.region))
+    }
+
+    /// Which assignment owns the face under a point, by document index, so a
+    /// viewport click can select a hole as readily as a subdomain.
+    fn draft_face_assignment_at(&self, point: Point2) -> Option<usize> {
+        let compiled = self
+            .editor
+            .compiled_draft
+            .as_ref()
+            .unwrap_or(&self.editor.compiled_accepted);
+        let face = compiled.topology.face_at(point)?;
+        self.editor
+            .document
+            .model
+            .draft
+            .face_assignments
+            .iter()
+            .position(|assignment| assignment.anchor.resolve(&compiled.topology) == Ok(face))
+    }
+
+    fn span_bounds_face(&self, target: TopologySpanTarget, face: FaceId) -> bool {
+        let compiled = self
+            .editor
+            .compiled_draft
+            .as_ref()
+            .unwrap_or(&self.editor.compiled_accepted);
+        compiled.topology.edges.iter().any(|edge| {
+            let matches_target = match target {
+                TopologySpanTarget::Outer(side) => edge.source == CompiledEdgeSource::Outer(side),
+                TopologySpanTarget::Curve(span) => edge.source == CompiledEdgeSource::Curve(span),
+            };
+            matches_target && (edge.left == face || edge.right == face)
+        })
+    }
+
     fn span_bounds_region(&self, target: TopologySpanTarget, region: RegionId) -> bool {
         let Some(active) = self.runtime.active() else {
             return false;
@@ -3651,14 +3792,30 @@ impl Playground {
                 p.material_overlay,
                 MaterialOverlay::Regions | MaterialOverlay::Subdomains
             );
+        // While the Materials panel lists faces, outline the selected face
+        // instead of the selected region, so a hole can be picked out too.
+        let selected_face = (self.inspector == Some(InspectorPanel::Materials)
+            && self.subdomain_listing == SubdomainListing::Faces)
+            .then(|| self.selected_face())
+            .flatten();
         if show_region && let Some(sampled) = &self.sampled {
-            let color = subdomain_color(
-                &self.editor.document.model.draft,
-                self.region_selection,
-                1.0,
-            );
+            let color = match selected_face {
+                Some((_, Some(region))) => {
+                    subdomain_color(&self.editor.document.model.draft, region, 1.0)
+                }
+                Some((_, None)) => Color32::from_gray(150),
+                None => subdomain_color(
+                    &self.editor.document.model.draft,
+                    self.region_selection,
+                    1.0,
+                ),
+            };
             for span in &sampled.spans {
-                if !self.span_bounds_region(span.target, self.region_selection) {
+                let bounds = match selected_face {
+                    Some((face, _)) => self.span_bounds_face(span.target, face),
+                    None => self.span_bounds_region(span.target, self.region_selection),
+                };
+                if !bounds {
                     continue;
                 }
                 for pair in span.samples.windows(2) {
@@ -4929,7 +5086,17 @@ impl Playground {
                 } else {
                     self.selection = TopologySelection::None;
                     self.selected_probe = None;
-                    if let Some(region) = self.region_at(self.world(pos, r)) {
+                    let point = self.world(pos, r);
+                    if self.subdomain_listing == SubdomainListing::Faces {
+                        if let Some(index) = self.draft_face_assignment_at(point) {
+                            self.face_selection = index;
+                            if let Some(region) =
+                                self.editor.document.model.draft.face_assignments[index].region
+                            {
+                                self.region_selection = region;
+                            }
+                        }
+                    } else if let Some(region) = self.region_at(point) {
                         self.region_selection = region;
                     }
                 }

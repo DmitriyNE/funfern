@@ -139,6 +139,46 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — Holes belong to faces, not to curves
+
+The Inside and Hole toggle sat in the span inspector, keyed by curve, and on the
+autosave that prompted this it was broken twice over. It appeared for an open
+curve, because its only condition was "does any face anchor belong to this
+curve", with no closedness test. That curve owned two anchors, so the lookup took
+whichever came first. Then Hole failed with "Only a closed curve encloses a face"
+while the material button succeeded by short-circuiting into a plain material
+reassignment, so one button always failed and the other quietly did something
+else.
+
+The operation moved to the face, where it belongs. `set_face_disposition` takes a
+face assignment and re-walls only that face's own boundary, read off
+`CompiledFace::boundaries`. A span dividing two faces transmits exactly when both
+of its sides are active subdomains, and a slit inside the face, where both sides
+are the same, keeps whatever the user gave it. That is well defined in both
+directions and never touches a span outside the face. It also removes the old
+refusal for a divided subdomain: each half is its own face and is emptied on its
+own, leaving the other alive behind the new wall.
+
+Worth recording that the boundary was never in doubt. An earlier note here
+implied a face bounded by parts of an open curve had no span set, which was
+wrong: the compiler gives every face closed cycles and every curve span borders
+exactly two faces. What the old code lacked was not the boundary but any use of
+it, since it walled a whole curve instead.
+
+The Materials panel gained a Faces and Regions toggle. Faces lists one row per
+assignment, holes included, each with a material dropdown that also offers Hole;
+Regions is the old list. The toggle also steers viewport picking and the
+selection outline, so clicking a hole selects its row the way clicking a
+subdomain always has. `set_enclosed_disposition` and `enclosed_region` are gone.
+
+One consequence to know about: a round trip normalises a face's boundary. A
+subdomain whose edge was part wall and part opening comes back all open, because
+nothing records which walls were deliberate.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 419 passing, and
+`cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-14 — Errors that read as sentences
 
 Six error types across the core rendered `Display` as `{self:?}`, so the status

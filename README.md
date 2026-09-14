@@ -202,7 +202,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   two separate places is refused.
 - **Materials:** create and name materials in the Library, edit the three base
   properties named by the active physics skin, and assign them under
-  Subdomain assignment. Each coefficient can be a constant or a formula. Formulas
+  Subdomain assignment, which lists either Faces or Regions. Faces shows one row
+  per compiled subdomain, holes included, and its dropdown offers Hole alongside
+  the materials, so a subdomain becomes a hole and back from the same place.
+  Emptying a face walls its own boundary and nothing else: a span transmits
+  exactly when the faces on both of its sides carry a material. The toggle also
+  steers the viewport, where a click selects a face or a region to match. Each coefficient can be a constant or a formula. Formulas
   use local `x`, `y`, `r`, and `theta`, constants `pi` and `e`, named material
   parameters, arithmetic, powers, and `sqrt`, `abs`, `sin`, `cos`, `tan`, `exp`,
   `log`, `min`, `max`, `clamp`, and `smoothstep`. For example, a radial profile can
