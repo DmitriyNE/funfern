@@ -1,9 +1,10 @@
 //! Headless document and command layer for the unified topology application.
 //!
-//! This module is intentionally not wired into the visible editor until its
-//! semantic commands and persistence contract are complete.
+//! The visible editor consumes this layer through stable topology viewport
+//! commands; no legacy object-role adapter belongs here.
 
 use crate::editor::{FarFieldSettings, PresentationSettings, ProbeId, ProbeSamplingPreset};
+use crate::topology_viewport::TopologyTransformUpdate;
 use funfern_core::*;
 use std::collections::BTreeSet;
 
@@ -1187,6 +1188,85 @@ impl TopologyEditor {
         Ok(())
     }
 
+    /// Applies a topology-native viewport transform without opening or closing
+    /// a history transaction. Drag gestures call this repeatedly between
+    /// [`Self::begin`] and [`Self::commit`], so one complete drag remains one
+    /// undo entry.
+    pub fn apply_transform_updates_during_edit(
+        &mut self,
+        updates: &[TopologyTransformUpdate],
+    ) -> Result<(), String> {
+        if updates.is_empty() {
+            return Err("Transform has no geometry to update".into());
+        }
+        let mut geometry = self.document.model.draft.geometry.clone();
+        for update in updates {
+            match *update {
+                TopologyTransformUpdate::Control {
+                    curve,
+                    control,
+                    point,
+                } => {
+                    let curve = geometry
+                        .curves
+                        .iter_mut()
+                        .find(|candidate| candidate.id == curve)
+                        .ok_or("Curve no longer exists")?;
+                    match &mut curve.spline {
+                        CurveSpline::Closed(spline) => spline.set_control(control, point),
+                        CurveSpline::Open(spline) => spline.set_control(control, point),
+                    }
+                    .map_err(|error| error.to_string())?;
+                }
+                TopologyTransformUpdate::Vertex { vertex, point } => {
+                    if !point.finite() {
+                        return Err("Junction position must be finite".into());
+                    }
+                    let domain = geometry.domain;
+                    let vertex = geometry
+                        .vertices
+                        .iter_mut()
+                        .find(|candidate| candidate.id == vertex)
+                        .ok_or("Junction no longer exists")?;
+                    vertex.location = match vertex.location {
+                        TopologyVertexLocation::Free(_) => TopologyVertexLocation::Free(point),
+                        TopologyVertexLocation::Interior(_) => {
+                            TopologyVertexLocation::Interior(point)
+                        }
+                        TopologyVertexLocation::Outer { side, .. } => {
+                            TopologyVertexLocation::Outer {
+                                side,
+                                fraction: outer_fraction(domain, side, point),
+                            }
+                        }
+                    };
+                }
+            }
+        }
+        geometry
+            .synchronize_vertices()
+            .map_err(|issue| issue.to_string())?;
+        if geometry == self.document.model.draft.geometry {
+            return Ok(());
+        }
+        self.document.model.draft.geometry = geometry;
+        self.changed();
+        Ok(())
+    }
+
+    pub fn apply_transform_updates(
+        &mut self,
+        updates: &[TopologyTransformUpdate],
+    ) -> Result<(), String> {
+        self.begin();
+        if let Err(error) = self.apply_transform_updates_during_edit(updates) {
+            self.cancel();
+            return Err(error);
+        }
+        self.commit();
+        Ok(())
+    }
+
     pub fn set_span_behavior(
         &mut self,
         spans: &BTreeSet<CurveSpanId>,
@@ -1565,6 +1645,16 @@ fn outer_attachment_point(
         OuterSide::Top => Point2::new(domain.max_x - domain.width() * fraction, domain.max_y),
         OuterSide::Left => Point2::new(domain.min_x, domain.max_y - domain.height() * fraction),
     })
+}
+
+fn outer_fraction(domain: DomainRect, side: OuterSide, point: Point2) -> f64 {
+    match side {
+        OuterSide::Bottom => (point.x - domain.min_x) / domain.width(),
+        OuterSide::Right => (point.y - domain.min_y) / domain.height(),
+        OuterSide::Top => (domain.max_x - point.x) / domain.width(),
+        OuterSide::Left => (domain.max_y - point.y) / domain.height(),
+    }
+    .clamp(0.0, 1.0)
 }
 
 fn remap_split_dependencies(
@@ -2563,5 +2653,63 @@ mod tests {
             editor.document.model.probes[0].target,
             TopologyProbeTarget::AreaRegion(BACKGROUND_REGION)
         ));
+    }
+
+    #[test]
+    fn viewport_drag_is_one_history_entry_and_cancel_restores_geometry() {
+        use crate::topology_viewport::{RigidTransform, TopologySpanTarget, plan_rigid_transform};
+
+        let mut editor = TopologyEditor::default();
+        editor
+            .create_boundary_baffle(
+                OpenCubicSpline::polyline(vec![Point2::new(-0.4, -0.2), Point2::new(0.4, -0.2)])
+                    .unwrap(),
+            )
+            .unwrap();
+        settle(&mut editor);
+        let original = editor.document.model.draft.geometry.clone();
+        let span = original.curves[0].spans[0].id;
+        let selected = BTreeSet::from([TopologySpanTarget::Curve(span)]);
+
+        editor.begin();
+        for _ in 0..2 {
+            let updates = plan_rigid_transform(
+                &editor.document.model.draft.geometry,
+                &selected,
+                RigidTransform {
+                    pivot: Point2::default(),
+                    translation: Point2::new(0.05, 0.0),
+                    rotation_radians: 0.0,
+                    scale: 1.0,
+                },
+            )
+            .unwrap();
+            editor
+                .apply_transform_updates_during_edit(&updates)
+                .unwrap();
+        }
+        editor.commit();
+        assert_eq!(editor.history_len(), (2, 0));
+        assert_ne!(editor.document.model.draft.geometry, original);
+        assert!(editor.undo());
+        assert_eq!(editor.document.model.draft.geometry, original);
+
+        let updates = plan_rigid_transform(
+            &editor.document.model.draft.geometry,
+            &selected,
+            RigidTransform {
+                pivot: Point2::default(),
+                translation: Point2::new(0.0, 0.2),
+                rotation_radians: 0.0,
+                scale: 1.0,
+            },
+        )
+        .unwrap();
+        editor.begin();
+        editor
+            .apply_transform_updates_during_edit(&updates)
+            .unwrap();
+        editor.cancel();
+        assert_eq!(editor.document.model.draft.geometry, original);
     }
 }

@@ -67,6 +67,34 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-14 — Topology-native viewport interaction contract
+
+- Added an egui/Bevy-independent viewport model keyed only by stable `CurveId`,
+  `CurveSpanId`, and `TopologyVertexId`. Adaptive rendering samples carry their
+  exact span identity; screen-space hit testing gives authoritative junctions and
+  controls priority over curves.
+- Selection now has one exclusive semantic shape: a single control/junction or a
+  set of spans. Shift toggles spans, whole-curve selection expands by stable IDs,
+  and marquee direction chooses full enclosure or crossing selection.
+- Rigid multi-span planning uses spline support controls and requires partial
+  sections to end at C0 breakpoints. A partially selected shared junction returns
+  `Junction also belongs to unselected spans` plus the missing incident spans;
+  expanding the selection transforms the authoritative vertex exactly once.
+- Added topology-editor transform commands suitable for a live drag transaction.
+  Repeated updates between `begin` and `commit` produce one undo entry, while
+  cancellation restores the exact pre-drag draft. Outer attachments remain on
+  their side and update their stored normalized fraction.
+- Added face-filtered attachment hit testing for outer sides, curve interiors, and
+  authored junction sectors, plus compiled span context for coherent parameter-
+  relative Left/Right laws and active-side display.
+- Direct tests cover hit priority, Shift/whole-curve selection, both marquee
+  directions, partial-junction blocking and recovery, same-face attachment
+  filtering, active trace-side context, one-entry dragging, undo, and cancellation.
+  All 478 workspace tests, workspace Clippy with warnings denied, native release
+  compilation, and the release Trunk build pass. Next: bind this contract to the
+  visible egui viewport and contextual inspector during the production document
+  cutover.
+
 ## 2026-09-14 — Atomic topology runtime preparation
 
 - Added immutable accepted-topology tokens that bind one document revision to its

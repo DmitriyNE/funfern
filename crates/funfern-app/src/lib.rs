@@ -5,3 +5,4 @@ pub mod topology_editor;
 pub mod topology_examples;
 pub mod topology_persistence;
 pub mod topology_runtime;
+pub mod topology_viewport;

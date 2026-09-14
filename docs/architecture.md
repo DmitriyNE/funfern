@@ -162,6 +162,20 @@ The outer domain retains the stable background region identity; choosing the
 other side's material transfers that side's material and dependents into the
 background identity and removes dependents belonging to the discarded side.
 
+Viewport interaction uses the authored identities directly. Its transient
+selection is either one curve control or authoritative topology vertex, or a set
+of stable outer/curve spans. Adaptive display samples retain their originating
+span ID, and screen-space hit testing prefers junctions and controls over curve
+strokes. Shift toggles spans, whole-curve selection expands through the authored
+curve, and marquee direction selects by enclosure or crossing. Rigid span
+transforms operate on spline support controls only when a partial section is
+isolated by C0 breakpoints. If only some arms incident to a shared junction are
+selected, the transform is rejected with the missing incident span set; a complete
+selection moves the authoritative vertex once and synchronizes every attached
+breakpoint. Attachment hit testing may use snapshot-local faces to filter the
+gesture, but the stored command target remains an oriented stable anchor or
+topology-vertex ID.
+
 Material interfaces use a conforming scalar field with three base material
 properties. Mechanical scenes interpret them as density `rho`, stiffness `k`, and
 damping `d`. EM scenes store permittivity `epsilon`, permeability `mu`, and reduced
