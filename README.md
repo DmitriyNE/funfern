@@ -134,12 +134,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   stay bounded. The change is undoable, reuses unchanged mesh geometry, and starts a
   fresh field so incompatible state is never transferred. TM/TE switches retain the
   same EM material law.
-- **Geometry role:** choose Hole, Interface, or Baffle from Draw before
-  creating. An interface retains its interior and shares its finite-element trace
-  with the exterior. A baffle is an open curve with two independent coincident
-  traces; waves reflect from its faces and diffract around its free endpoints.
-  Nested loops and baffles inherit the region under the creation point. Closed
-  two-sided walls remain load-compatible but are no longer a primary creation tool.
+- **Geometry role:** Draw contains closed and open curve tools. Closed curves start
+  as subdomains or holes. Open curves start as transmitting separators or
+  two-sided baffles; separator endpoints must snap to boundaries of the same active
+  face. Gold highlights and a 14-pixel screen-space query show the exact available
+  attachments on the outer domain, inner curves, and junctions.
 - **Circle:** click to place eight controls on a radius `0.15` circle, then
   automatically return to selection. The spline lies inside its control polygon.
 - **Rectangle:** two opposite-corner clicks create an axis-aligned rectangular
@@ -154,12 +153,17 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   baffle; Enter or clicking the first handle closes a loop. Its control polygon
   distinguishes it from the vertex-based tools. Backspace removes the latest staged
   point and Escape cancels construction.
-- **Straighten:** **Straighten spans** makes every selected logical span an exact
-  line between its own endpoints, inserting exact C0 isolation where needed.
-  **Straighten selection** retains the broader chord operation for each contiguous
-  C0-bounded selected run. Both preserve span laws and attached probes and commit as
-  one history action. A complete closed loop is available to the per-span operation
-  but cannot collapse into one selection chord.
+- **Spline editing:** **Straighten spans** makes every selected logical span an
+  exact line between its own endpoints, inserting exact C0 isolation where needed.
+  **Isolate at C0** preserves the curve exactly while freeing a partial span
+  selection for rigid motion. A single selected span exposes C2, C1, and C0 choices
+  for its end knot; smoothing uses a bounded projection and reports its maximum
+  displacement. Junction knots stay C0. Drag selected geometry to translate it.
+  Movable selections show a draggable rotation/scale center, a rotation ring, and
+  separate uniform, horizontal, and vertical scale grips. Hold Shift while dragging
+  to snap world coordinates to `0.05`, angles to 15°, and scale to 0.1 increments.
+  Numeric translation, rotation, and scale use the same topology-aware transform;
+  each geometry gesture or command is one history action.
 - **Remove:** Delete or the panel action removes the selected control and its
   associated knot. This can reshape the curve. At least four controls must remain.
   A removal that would merge different span conditions is rejected until the two

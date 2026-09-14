@@ -32,7 +32,7 @@ use funfern_app::topology_runtime::{
 use funfern_app::topology_viewport::{
     AttachmentHit, RigidTransform, SampledTopologyGeometry, ScreenPoint, TopologyHandle,
     TopologyHit, TopologySelection, TopologySpanTarget, ViewportTransform, hit_attachment,
-    plan_handle_drag, plan_rigid_transform, span_context,
+    plan_axis_scale, plan_handle_drag, plan_rigid_transform, span_context,
 };
 use funfern_core::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -48,6 +48,7 @@ const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const ATTACHMENT_SNAP_RADIUS: f64 = 14.0;
+const GIZMO_PADDING: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum InspectorPanel {
@@ -137,6 +138,9 @@ enum DragGesture {
     },
     Spans {
         start: Point2,
+        pivot: Point2,
+        custom_pivot: bool,
+        gizmo_before: Option<(BTreeSet<TopologySpanTarget>, Point2)>,
         geometry: TopologyGeometry,
     },
     Rotate {
@@ -145,9 +149,14 @@ enum DragGesture {
         geometry: TopologyGeometry,
     },
     Scale {
+        axis: GizmoScaleAxis,
         pivot: Point2,
         start_distance: f64,
         geometry: TopologyGeometry,
+    },
+    Pivot {
+        previous: Option<(BTreeSet<TopologySpanTarget>, Point2)>,
+        offset: Point2,
     },
     Marquee {
         start: Pos2,
@@ -159,8 +168,16 @@ enum DragGesture {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TransformGizmoHit {
+    Pivot,
     Rotate,
-    Scale,
+    Scale(GizmoScaleAxis),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GizmoScaleAxis {
+    Uniform,
+    X,
+    Y,
 }
 
 #[derive(Clone, Debug)]
@@ -246,6 +263,7 @@ pub struct Playground {
     transform_translation: Point2,
     transform_rotation_degrees: f64,
     transform_scale: f64,
+    gizmo_pivot: Option<(BTreeSet<TopologySpanTarget>, Point2)>,
     material_selection: MaterialId,
     region_selection: RegionId,
     material_edit: Option<Material>,
@@ -355,6 +373,7 @@ impl Default for Playground {
             transform_translation: Point2::default(),
             transform_rotation_degrees: 0.0,
             transform_scale: 1.0,
+            gizmo_pivot: None,
             material_selection: DEFAULT_MATERIAL,
             region_selection: BACKGROUND_REGION,
             material_edit: None,
@@ -495,6 +514,15 @@ impl Playground {
         self.selection = TopologySelection::None;
     }
     fn cancel_interaction(&mut self) {
+        match &self.drag {
+            Some(DragGesture::Pivot { previous, .. }) => {
+                self.gizmo_pivot = previous.clone();
+            }
+            Some(DragGesture::Spans { gizmo_before, .. }) => {
+                self.gizmo_pivot = gizmo_before.clone();
+            }
+            _ => {}
+        }
         if self.editor.editing() {
             self.editor.cancel();
         }
@@ -1177,9 +1205,72 @@ impl Playground {
                         }
                     ));
                 }
+                if let Some((curve, breakpoint, continuity, attached)) =
+                    self.selected_end_continuity(span)
+                {
+                    ui.label(format!("End knot · C{continuity}"));
+                    ui.horizontal_wrapped(|ui| {
+                        for (target, label) in
+                            [(2, "C2 smooth"), (1, "C1 tangent"), (0, "C0 corner")]
+                        {
+                            let response = ui.add_enabled(
+                                target == 0 || !attached,
+                                egui::Button::selectable(continuity == target, label),
+                            );
+                            if response.clicked() && continuity != target {
+                                match self.editor.set_curve_continuity(curve, breakpoint, target) {
+                                    Ok(displacement) => {
+                                        self.invalidate_samples();
+                                        if displacement > 0.0 {
+                                            self.notify(format!(
+                                                "Curve smoothed; maximum displacement {displacement:.3e}"
+                                            ));
+                                        }
+                                    }
+                                    Err(error) => self.notify(error),
+                                }
+                            }
+                        }
+                    });
+                }
             }
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button("Straighten spans")
+                    .on_hover_text("Make each selected span straight between its own endpoints")
+                    .clicked()
+                {
+                    match self.editor.straighten_spans(&curve_spans) {
+                        Ok(()) => self.invalidate_samples(),
+                        Err(error) => self.notify(error),
+                    }
+                }
+                if ui
+                    .button("Straighten selection")
+                    .on_hover_text("Make each contiguous C0-bounded selection one chord")
+                    .clicked()
+                {
+                    match self.editor.straighten_span_sections(&curve_spans) {
+                        Ok(()) => self.invalidate_samples(),
+                        Err(error) => self.notify(error),
+                    }
+                }
+                if ui
+                    .button("Isolate at C0")
+                    .on_hover_text("Add exact corners at the selected section boundaries")
+                    .clicked()
+                {
+                    match self.editor.isolate_span_boundaries(&curve_spans) {
+                        Ok(()) => self.invalidate_samples(),
+                        Err(error) => self.notify(error),
+                    }
+                }
+            });
+            let pivot = self
+                .gizmo_pivot_for(&spans, &curve_spans)
+                .unwrap_or_default();
             let transform = RigidTransform {
-                pivot: self.selection_pivot(&curve_spans).unwrap_or_default(),
+                pivot,
                 translation: Point2::default(),
                 rotation_radians: 0.0,
                 scale: 1.0,
@@ -1236,7 +1327,7 @@ impl Playground {
                 });
                 if ui.button("Apply transform").clicked() {
                     let transform = RigidTransform {
-                        pivot: self.selection_pivot(&curve_spans).unwrap_or_default(),
+                        pivot,
                         translation: self.transform_translation,
                         rotation_radians: self.transform_rotation_degrees.to_radians(),
                         scale: self.transform_scale,
@@ -1250,6 +1341,14 @@ impl Playground {
                     .and_then(|updates| self.editor.apply_transform_updates(&updates))
                     {
                         Ok(()) => {
+                            if self
+                                .gizmo_pivot
+                                .as_ref()
+                                .is_some_and(|(selection, _)| selection == &spans)
+                            {
+                                self.gizmo_pivot =
+                                    Some((spans.clone(), pivot + self.transform_translation));
+                            }
                             self.transform_translation = Point2::default();
                             self.transform_rotation_degrees = 0.0;
                             self.transform_scale = 1.0;
@@ -1328,6 +1427,60 @@ impl Playground {
             }
         }
         (count > 0).then(|| sum / count as f64)
+    }
+    fn gizmo_pivot_for(
+        &self,
+        selected: &BTreeSet<TopologySpanTarget>,
+        spans: &BTreeSet<CurveSpanId>,
+    ) -> Option<Point2> {
+        self.gizmo_pivot
+            .as_ref()
+            .filter(|(selection, _)| selection == selected)
+            .map(|(_, point)| *point)
+            .or_else(|| self.selection_pivot(spans))
+    }
+    fn snap_point(point: Point2) -> Point2 {
+        const STEP: f64 = 0.05;
+        Point2::new(
+            (point.x / STEP).round() * STEP,
+            (point.y / STEP).round() * STEP,
+        )
+    }
+    fn scale_drag_distance(axis: GizmoScaleAxis, relative: Point2) -> f64 {
+        match axis {
+            GizmoScaleAxis::Uniform => relative.norm(),
+            GizmoScaleAxis::X => relative.x.abs(),
+            GizmoScaleAxis::Y => relative.y.abs(),
+        }
+    }
+    fn selected_end_continuity(&self, span: CurveSpanId) -> Option<(CurveId, usize, u8, bool)> {
+        let curve = self
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.spans.iter().any(|candidate| candidate.id == span))?;
+        let index = curve
+            .spans
+            .iter()
+            .position(|candidate| candidate.id == span)?;
+        let breakpoint = if curve.spline.is_open() {
+            index + 1
+        } else {
+            (index + 1) % curve.spans.len()
+        };
+        let continuity = match &curve.spline {
+            CurveSpline::Closed(spline) => spline.continuity(breakpoint),
+            CurveSpline::Open(spline) => spline.continuity(breakpoint),
+        }?;
+        let attached = curve
+            .nodes
+            .get(breakpoint)
+            .is_some_and(|node| node.vertex.is_some());
+        Some((curve.id, breakpoint, continuity, attached))
     }
     fn selected_complete_curves(&self, spans: &BTreeSet<CurveSpanId>) -> Vec<CurveId> {
         self.editor
@@ -2754,7 +2907,10 @@ impl Playground {
             );
         }
     }
-    fn transform_gizmo(&self, r: Rect) -> Option<(Point2, Pos2)> {
+    fn transform_gizmo(&self, r: Rect) -> Option<(Point2, Pos2, f32, f32, f32)> {
+        if self.draw.is_some() || self.pulse_mode || self.probe_mode.is_some() {
+            return None;
+        }
         let selected = self.selection.spans()?;
         if selected.is_empty()
             || selected
@@ -2770,38 +2926,167 @@ impl Playground {
                 TopologySpanTarget::Outer(_) => None,
             })
             .collect::<BTreeSet<_>>();
-        let pivot = self.selection_pivot(&spans)?;
-        Some((pivot, self.screen(pivot, r)))
+        let pivot = self.gizmo_pivot_for(selected, &spans)?;
+        let updates = plan_rigid_transform(
+            &self.editor.document.model.draft.geometry,
+            selected,
+            RigidTransform {
+                pivot,
+                translation: Point2::default(),
+                rotation_radians: 0.0,
+                scale: 1.0,
+            },
+        )
+        .ok()?;
+        let center = self.screen(pivot, r);
+        let radius = updates
+            .iter()
+            .map(|update| match update {
+                funfern_app::topology_viewport::TopologyTransformUpdate::Control {
+                    point, ..
+                }
+                | funfern_app::topology_viewport::TopologyTransformUpdate::Vertex {
+                    point, ..
+                } => center.distance(self.screen(*point, r)),
+            })
+            .fold(22.0_f32, f32::max)
+            + GIZMO_PADDING;
+        let x_radius = updates
+            .iter()
+            .map(|update| match update {
+                funfern_app::topology_viewport::TopologyTransformUpdate::Control {
+                    point, ..
+                }
+                | funfern_app::topology_viewport::TopologyTransformUpdate::Vertex {
+                    point, ..
+                } => (self.screen(*point, r).x - center.x).abs(),
+            })
+            .fold(22.0_f32, f32::max)
+            + GIZMO_PADDING;
+        let y_radius = updates
+            .iter()
+            .map(|update| match update {
+                funfern_app::topology_viewport::TopologyTransformUpdate::Control {
+                    point, ..
+                }
+                | funfern_app::topology_viewport::TopologyTransformUpdate::Vertex {
+                    point, ..
+                } => (self.screen(*point, r).y - center.y).abs(),
+            })
+            .fold(22.0_f32, f32::max)
+            + GIZMO_PADDING;
+        Some((pivot, center, radius, x_radius, y_radius))
     }
     fn draw_transform_gizmo(&self, painter: &egui::Painter, r: Rect) {
-        let Some((_, center)) = self.transform_gizmo(r) else {
+        let Some((_, center, radius, x_radius, y_radius)) = self.transform_gizmo(r) else {
             return;
         };
         painter.circle_stroke(
             center,
-            34.0,
+            radius,
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(72, 166, 255, 150)),
         );
-        painter.circle_filled(center, 3.0, SELECT);
-        let grip = center + egui::vec2(24.0, -24.0);
+        painter.line_segment(
+            [center, center + egui::vec2(x_radius, 0.0)],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(72, 166, 255, 110)),
+        );
+        painter.line_segment(
+            [center, center + egui::vec2(0.0, -y_radius)],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(72, 166, 255, 110)),
+        );
+        painter.circle_filled(center, 6.0, Color32::from_rgb(16, 23, 31));
+        painter.circle_stroke(center, 6.0, Stroke::new(2.0, SELECT));
+        painter.line_segment(
+            [
+                center - egui::vec2(11.0, 0.0),
+                center + egui::vec2(11.0, 0.0),
+            ],
+            Stroke::new(1.5, Color32::WHITE),
+        );
+        painter.line_segment(
+            [
+                center - egui::vec2(0.0, 11.0),
+                center + egui::vec2(0.0, 11.0),
+            ],
+            Stroke::new(1.5, Color32::WHITE),
+        );
+        let diagonal = radius * std::f32::consts::FRAC_1_SQRT_2;
         painter.rect_filled(
-            Rect::from_center_size(grip, egui::vec2(8.0, 8.0)),
+            Rect::from_center_size(
+                center + egui::vec2(diagonal, diagonal),
+                egui::vec2(9.0, 9.0),
+            ),
+            1.0,
+            SELECT,
+        );
+        painter.rect_filled(
+            Rect::from_center_size(center + egui::vec2(x_radius, 0.0), egui::vec2(7.0, 11.0)),
+            1.0,
+            SELECT,
+        );
+        painter.rect_filled(
+            Rect::from_center_size(center + egui::vec2(0.0, -y_radius), egui::vec2(11.0, 7.0)),
             1.0,
             SELECT,
         );
     }
     fn hit_transform_gizmo(&self, point: Pos2, r: Rect) -> Option<(TransformGizmoHit, Point2)> {
-        let (pivot, center) = self.transform_gizmo(r)?;
-        let grip = center + egui::vec2(24.0, -24.0);
-        if grip.distance(point) <= 10.0 {
-            return Some((TransformGizmoHit::Scale, pivot));
+        let (pivot, center, radius, x_radius, y_radius) = self.transform_gizmo(r)?;
+        if center.distance(point) <= 12.0 {
+            return Some((TransformGizmoHit::Pivot, pivot));
         }
-        ((center.distance(point) - 34.0).abs() <= 7.0).then_some((TransformGizmoHit::Rotate, pivot))
+        let diagonal = radius * std::f32::consts::FRAC_1_SQRT_2;
+        for (axis, offset) in [
+            (GizmoScaleAxis::Uniform, egui::vec2(diagonal, diagonal)),
+            (GizmoScaleAxis::X, egui::vec2(x_radius, 0.0)),
+            (GizmoScaleAxis::Y, egui::vec2(0.0, -y_radius)),
+        ] {
+            if (center + offset).distance(point) <= 10.0 {
+                return Some((TransformGizmoHit::Scale(axis), pivot));
+            }
+        }
+        ((center.distance(point) - radius).abs() <= 7.0)
+            .then_some((TransformGizmoHit::Rotate, pivot))
     }
     fn handle_viewport_input(&mut self, ui: &egui::Ui, response: &egui::Response, r: Rect) {
         let pointer = response.interact_pointer_pos();
         let touch_active = ui.input(|input| input.any_touches());
         let multi_touch = ui.input(|input| input.multi_touch());
+        if !touch_active {
+            let active_cursor = match self.drag.as_ref() {
+                Some(DragGesture::Pivot { .. }) => Some(egui::CursorIcon::Move),
+                Some(DragGesture::Rotate { .. }) => Some(egui::CursorIcon::Grabbing),
+                Some(DragGesture::Scale {
+                    axis: GizmoScaleAxis::Uniform,
+                    ..
+                }) => Some(egui::CursorIcon::ResizeNwSe),
+                Some(DragGesture::Scale {
+                    axis: GizmoScaleAxis::X,
+                    ..
+                }) => Some(egui::CursorIcon::ResizeHorizontal),
+                Some(DragGesture::Scale {
+                    axis: GizmoScaleAxis::Y,
+                    ..
+                }) => Some(egui::CursorIcon::ResizeVertical),
+                _ => None,
+            };
+            let hover_cursor = pointer
+                .and_then(|pos| self.hit_transform_gizmo(pos, r))
+                .map(|(hit, _)| match hit {
+                    TransformGizmoHit::Pivot => egui::CursorIcon::Move,
+                    TransformGizmoHit::Rotate => egui::CursorIcon::Grab,
+                    TransformGizmoHit::Scale(GizmoScaleAxis::Uniform) => {
+                        egui::CursorIcon::ResizeNwSe
+                    }
+                    TransformGizmoHit::Scale(GizmoScaleAxis::X) => {
+                        egui::CursorIcon::ResizeHorizontal
+                    }
+                    TransformGizmoHit::Scale(GizmoScaleAxis::Y) => egui::CursorIcon::ResizeVertical,
+                });
+            if let Some(cursor) = active_cursor.or(hover_cursor) {
+                ui.ctx().set_cursor_icon(cursor);
+            }
+        }
         if let Some(gesture) = multi_touch
             && (self.touch_navigation || r.contains(gesture.center_pos))
         {
@@ -3010,18 +3295,30 @@ impl Playground {
             if let Some(pos) = pointer {
                 if let Some((hit, pivot)) = self.hit_transform_gizmo(pos, r) {
                     let relative = self.world(pos, r) - pivot;
-                    self.editor.begin();
                     self.drag = Some(match hit {
-                        TransformGizmoHit::Rotate => DragGesture::Rotate {
-                            pivot,
-                            start_angle: relative.y.atan2(relative.x),
-                            geometry: self.editor.document.model.draft.geometry.clone(),
+                        TransformGizmoHit::Pivot => DragGesture::Pivot {
+                            previous: self.gizmo_pivot.clone(),
+                            offset: pivot - self.world(pos, r),
                         },
-                        TransformGizmoHit::Scale => DragGesture::Scale {
-                            pivot,
-                            start_distance: relative.norm().max(1.0e-12),
-                            geometry: self.editor.document.model.draft.geometry.clone(),
-                        },
+                        TransformGizmoHit::Rotate => {
+                            self.editor.begin();
+                            DragGesture::Rotate {
+                                pivot,
+                                start_angle: relative.y.atan2(relative.x),
+                                geometry: self.editor.document.model.draft.geometry.clone(),
+                            }
+                        }
+                        TransformGizmoHit::Scale(axis) => {
+                            self.editor.begin();
+                            DragGesture::Scale {
+                                axis,
+                                pivot,
+                                start_distance: (Self::scale_drag_distance(axis, relative)
+                                    - GIZMO_PADDING as f64 / self.scale)
+                                    .max(1.0e-12),
+                                geometry: self.editor.document.model.draft.geometry.clone(),
+                            }
+                        }
                     });
                     return;
                 }
@@ -3059,19 +3356,47 @@ impl Playground {
                     .and_then(|sampled| sampled.hit_test(self.transform(r), screen, 8.0, 7.0));
                 if let Some(hit) = hit {
                     self.selected_probe = None;
-                    self.selection.apply_hit(
-                        &self.editor.document.model.draft.geometry,
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    let dragging_selected_span = matches!(
                         hit,
-                        ui.input(|i| i.modifiers.shift),
-                        ui.input(|i| i.modifiers.command),
+                        TopologyHit::Span { target, .. }
+                            if shift
+                                && self.selection.spans().is_some_and(|spans| spans.contains(&target))
                     );
+                    if !dragging_selected_span {
+                        self.selection.apply_hit(
+                            &self.editor.document.model.draft.geometry,
+                            hit,
+                            shift,
+                            ui.input(|i| i.modifiers.command),
+                        );
+                    }
                     self.editor.begin();
                     self.drag = Some(match hit {
                         TopologyHit::Handle { handle, .. } => DragGesture::Handle { handle },
-                        TopologyHit::Span { .. } => DragGesture::Spans {
-                            start: self.world(pos, r),
-                            geometry: self.editor.document.model.draft.geometry.clone(),
-                        },
+                        TopologyHit::Span { .. } => {
+                            let selected = self.selection.spans().cloned().unwrap_or_default();
+                            let curve_spans = selected
+                                .iter()
+                                .filter_map(|target| match target {
+                                    TopologySpanTarget::Curve(span) => Some(*span),
+                                    TopologySpanTarget::Outer(_) => None,
+                                })
+                                .collect::<BTreeSet<_>>();
+                            let custom_pivot = self
+                                .gizmo_pivot
+                                .as_ref()
+                                .is_some_and(|(selection, _)| selection == &selected);
+                            DragGesture::Spans {
+                                start: self.world(pos, r),
+                                pivot: self
+                                    .gizmo_pivot_for(&selected, &curve_spans)
+                                    .unwrap_or_default(),
+                                custom_pivot,
+                                gizmo_before: self.gizmo_pivot.clone(),
+                                geometry: self.editor.document.model.draft.geometry.clone(),
+                            }
+                        }
                     });
                 } else {
                     self.drag = Some(DragGesture::Marquee {
@@ -3084,22 +3409,40 @@ impl Playground {
         if response.dragged_by(egui::PointerButton::Primary) {
             if let (Some(pos), Some(drag)) = (pointer, self.drag.clone()) {
                 let point = self.world(pos, r);
+                let shift = ui.input(|input| input.modifiers.shift);
                 let result = match drag {
                     DragGesture::Handle { handle } => {
+                        let point = if shift {
+                            Self::snap_point(point)
+                        } else {
+                            point
+                        };
                         plan_handle_drag(&self.editor.document.model.draft.geometry, handle, point)
                             .map_err(|e| e.to_string())
                             .and_then(|update| {
                                 self.editor.apply_transform_updates_during_edit(&[update])
                             })
                     }
-                    DragGesture::Spans { start, geometry } => {
+                    DragGesture::Spans {
+                        start,
+                        pivot,
+                        custom_pivot,
+                        gizmo_before: _,
+                        geometry,
+                    } => {
                         let selected = self.selection.spans().cloned().unwrap_or_default();
+                        let target = if shift {
+                            Self::snap_point(pivot + point - start)
+                        } else {
+                            pivot + point - start
+                        };
+                        let translation = target - pivot;
                         plan_rigid_transform(
                             &geometry,
                             &selected,
                             RigidTransform {
                                 pivot: Point2::default(),
-                                translation: point - start,
+                                translation,
                                 rotation_radians: 0.0,
                                 scale: 1.0,
                             },
@@ -3107,7 +3450,11 @@ impl Playground {
                         .map_err(|e| e.to_string())
                         .and_then(|updates| {
                             self.editor.document.model.draft.geometry = geometry;
-                            self.editor.apply_transform_updates_during_edit(&updates)
+                            self.editor.apply_transform_updates_during_edit(&updates)?;
+                            if custom_pivot {
+                                self.gizmo_pivot = Some((selected, pivot + translation));
+                            }
+                            Ok(())
                         })
                     }
                     DragGesture::Rotate {
@@ -3117,13 +3464,18 @@ impl Playground {
                     } => {
                         let selected = self.selection.spans().cloned().unwrap_or_default();
                         let relative = point - pivot;
+                        let mut angle = relative.y.atan2(relative.x) - start_angle;
+                        if shift {
+                            let step = 15.0_f64.to_radians();
+                            angle = (angle / step).round() * step;
+                        }
                         plan_rigid_transform(
                             &geometry,
                             &selected,
                             RigidTransform {
                                 pivot,
                                 translation: Point2::default(),
-                                rotation_radians: relative.y.atan2(relative.x) - start_angle,
+                                rotation_radians: angle,
                                 scale: 1.0,
                             },
                         )
@@ -3134,19 +3486,32 @@ impl Playground {
                         })
                     }
                     DragGesture::Scale {
+                        axis,
                         pivot,
                         start_distance,
                         geometry,
                     } => {
                         let selected = self.selection.spans().cloned().unwrap_or_default();
-                        plan_rigid_transform(
+                        let distance = (Self::scale_drag_distance(axis, point - pivot)
+                            - GIZMO_PADDING as f64 / self.scale)
+                            .max(0.0);
+                        let mut factor = (distance / start_distance).max(0.01);
+                        if shift {
+                            factor = ((factor * 10.0).round() / 10.0).max(0.1);
+                        }
+                        plan_axis_scale(
                             &geometry,
                             &selected,
-                            RigidTransform {
-                                pivot,
-                                translation: Point2::default(),
-                                rotation_radians: 0.0,
-                                scale: ((point - pivot).norm() / start_distance).max(0.01),
+                            pivot,
+                            if axis == GizmoScaleAxis::Y {
+                                1.0
+                            } else {
+                                factor
+                            },
+                            if axis == GizmoScaleAxis::X {
+                                1.0
+                            } else {
+                                factor
                             },
                         )
                         .map_err(|e| e.to_string())
@@ -3154,6 +3519,16 @@ impl Playground {
                             self.editor.document.model.draft.geometry = geometry;
                             self.editor.apply_transform_updates_during_edit(&updates)
                         })
+                    }
+                    DragGesture::Pivot { offset, .. } => {
+                        let selected = self.selection.spans().cloned().unwrap_or_default();
+                        let target = if shift {
+                            Self::snap_point(point + offset)
+                        } else {
+                            point + offset
+                        };
+                        self.gizmo_pivot = Some((selected, target));
+                        Ok(())
                     }
                     DragGesture::Marquee { .. } => Ok(()),
                     DragGesture::Source => {
@@ -3229,6 +3604,7 @@ impl Playground {
                             };
                         }
                     }
+                    DragGesture::Pivot { .. } => {}
                     _ => self.editor.commit(),
                 }
             }

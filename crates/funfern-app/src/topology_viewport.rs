@@ -565,6 +565,44 @@ pub fn plan_rigid_transform(
     Ok(updates)
 }
 
+/// Plans independent world-axis scaling around a pivot while retaining the same
+/// topology eligibility rules as rigid/uniform transforms.
+pub fn plan_axis_scale(
+    geometry: &TopologyGeometry,
+    selected: &BTreeSet<TopologySpanTarget>,
+    pivot: Point2,
+    scale_x: f64,
+    scale_y: f64,
+) -> Result<Vec<TopologyTransformUpdate>, TopologyTransformIssue> {
+    if !pivot.finite()
+        || !scale_x.is_finite()
+        || !scale_y.is_finite()
+        || scale_x <= 0.0
+        || scale_y <= 0.0
+    {
+        return Err(TopologyTransformIssue::InvalidTransform);
+    }
+    let mut updates = plan_rigid_transform(
+        geometry,
+        selected,
+        RigidTransform {
+            pivot,
+            translation: Point2::default(),
+            rotation_radians: 0.0,
+            scale: 1.0,
+        },
+    )?;
+    for update in &mut updates {
+        let point = match update {
+            TopologyTransformUpdate::Control { point, .. }
+            | TopologyTransformUpdate::Vertex { point, .. } => point,
+        };
+        let relative = *point - pivot;
+        *point = pivot + Point2::new(relative.x * scale_x, relative.y * scale_y);
+    }
+    Ok(updates)
+}
+
 pub fn incident_spans(
     geometry: &TopologyGeometry,
     vertex: TopologyVertexId,
@@ -1047,6 +1085,25 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn axis_scale_uses_the_rigid_selection_contract() {
+        let geometry = TopologyGeometry {
+            curves: vec![open_curve(1, 10, &[(-0.5, -0.25), (0.5, 0.25)])],
+            ..TopologyGeometry::default()
+        };
+        let selected = BTreeSet::from([TopologySpanTarget::Curve(CurveSpanId(10))]);
+        let updates = plan_axis_scale(&geometry, &selected, Point2::default(), 2.0, 0.5).unwrap();
+        let points = updates
+            .iter()
+            .filter_map(|update| match update {
+                TopologyTransformUpdate::Control { point, .. } => Some(*point),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(points.first().copied(), Some(Point2::new(-1.0, -0.125)));
+        assert_eq!(points.last().copied(), Some(Point2::new(1.0, 0.125)));
     }
 
     #[test]

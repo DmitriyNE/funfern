@@ -80,6 +80,25 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   coverage checks an inner hole from its active side at two zoom levels and proves
   the measured snap distance remains three screen pixels.
 
+## 2026-09-14 — Unified spline authoring tools restored
+
+- Restored topology-native C2/C1/C0 editing at the end knot of a selected span.
+  Sharpening is shape-preserving; smoothing first tries exact knot removal and then
+  uses the spline's bounded least-squares projection. Authored junctions remain C0.
+- Restored **Isolate at C0** for partial span selections and per-span
+  **Straighten spans**. Both preserve stable span IDs and dependent boundary laws,
+  probes, and face anchors, and each completes as one undoable document action.
+- Completed the viewport transform gizmo with a draggable center of rotation and
+  scale, a rotation ring with a grab cursor, and separate uniform, X, and Y scale
+  grips with directional cursors. Geometry itself remains the translation target.
+  Shift snaps coordinates to 0.05 world units, angles to 15 degrees, and scale to
+  0.1 increments without conflicting with Shift span selection. The gizmo appears only when the
+  topology transform planner accepts the current whole-curve or C0-isolated
+  selection.
+- Added direct command regressions for exact isolation across a closed seam, stable
+  identities, undo atomicity, approximate continuity upgrades, junction protection,
+  and independent chord straightening.
+
 ## 2026-09-14 — Atomic topology application cutover
 
 - Replaced the production editor with the unified topology document and removed

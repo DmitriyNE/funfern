@@ -1362,6 +1362,383 @@ impl TopologyEditor {
         Ok(())
     }
 
+    /// Changes the continuity at one authored curve node. Sharpening is exact;
+    /// smoothing uses an exact knot removal when possible and otherwise the
+    /// spline's bounded least-squares projection. Topology junctions remain C0.
+    pub fn set_curve_continuity(
+        &mut self,
+        curve_id: CurveId,
+        breakpoint: usize,
+        target: u8,
+    ) -> Result<f64, String> {
+        if target > 2 {
+            return Err("Cubic continuity must be C0, C1, or C2".into());
+        }
+        let mut candidate = self.document.model.clone();
+        let curve = candidate
+            .draft
+            .geometry
+            .curves
+            .iter_mut()
+            .find(|curve| curve.id == curve_id)
+            .ok_or("Curve no longer exists")?;
+        if target > 0
+            && curve
+                .nodes
+                .get(breakpoint)
+                .is_some_and(|node| node.vertex.is_some())
+        {
+            return Err("A topology junction must remain a C0 corner".into());
+        }
+        let mut displacement = 0.0;
+        match &mut curve.spline {
+            CurveSpline::Closed(spline) => {
+                let current = spline
+                    .continuity(breakpoint)
+                    .ok_or("Choose an existing loop knot")?;
+                if current == target {
+                    return Ok(0.0);
+                }
+                while spline.continuity(breakpoint).unwrap() > target {
+                    spline
+                        .increase_multiplicity(breakpoint)
+                        .map_err(|error| error.to_string())?;
+                }
+                while spline.continuity(breakpoint).unwrap() < target {
+                    match spline.decrease_multiplicity(breakpoint, 1.0e-10) {
+                        Ok(()) => {}
+                        Err(SplineError::NotRemovable) => {
+                            displacement += spline
+                                .decrease_multiplicity_approximate(breakpoint)
+                                .map_err(|error| error.to_string())?;
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    }
+                }
+            }
+            CurveSpline::Open(spline) => {
+                let current = spline
+                    .continuity(breakpoint)
+                    .ok_or("Choose an interior curve knot")?;
+                if current == target {
+                    return Ok(0.0);
+                }
+                while spline.continuity(breakpoint).unwrap() > target {
+                    spline
+                        .increase_multiplicity(breakpoint)
+                        .map_err(|error| error.to_string())?;
+                }
+                while spline.continuity(breakpoint).unwrap() < target {
+                    match spline.decrease_multiplicity(breakpoint, 1.0e-10) {
+                        Ok(()) => {}
+                        Err(SplineError::NotRemovable) => {
+                            displacement += spline
+                                .decrease_multiplicity_approximate(breakpoint)
+                                .map_err(|error| error.to_string())?;
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    }
+                }
+            }
+        }
+        self.begin();
+        self.document.model = candidate;
+        self.changed();
+        self.commit();
+        Ok(displacement)
+    }
+
+    /// Refines every selected/unselected transition to C0 without changing the
+    /// represented curves. Stable span IDs and attached document data survive.
+    pub fn isolate_span_boundaries(
+        &mut self,
+        selected: &BTreeSet<CurveSpanId>,
+    ) -> Result<(), String> {
+        if selected.is_empty() {
+            return Err("Select curve spans to isolate".into());
+        }
+        let mut candidate = self.document.model.clone();
+        let mut found = false;
+        let mut changed = false;
+        for curve in &mut candidate.draft.geometry.curves {
+            let chosen = curve
+                .spans
+                .iter()
+                .map(|span| selected.contains(&span.id))
+                .collect::<Vec<_>>();
+            if !chosen.iter().any(|value| *value) {
+                continue;
+            }
+            found = true;
+            if chosen.iter().all(|value| *value) {
+                continue;
+            }
+            let count = chosen.len();
+            let breakpoints = match &curve.spline {
+                CurveSpline::Closed(_) => (0..count)
+                    .filter(|node| chosen[*node] != chosen[(*node + count - 1) % count])
+                    .collect::<Vec<_>>(),
+                CurveSpline::Open(_) => (1..count)
+                    .filter(|node| chosen[*node - 1] != chosen[*node])
+                    .collect::<Vec<_>>(),
+            };
+            for breakpoint in breakpoints {
+                match &mut curve.spline {
+                    CurveSpline::Closed(spline) => {
+                        while spline.continuity(breakpoint).unwrap() > 0 {
+                            spline
+                                .increase_multiplicity(breakpoint)
+                                .map_err(|error| error.to_string())?;
+                            changed = true;
+                        }
+                    }
+                    CurveSpline::Open(spline) => {
+                        while spline.continuity(breakpoint).unwrap() > 0 {
+                            spline
+                                .increase_multiplicity(breakpoint)
+                                .map_err(|error| error.to_string())?;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !found {
+            return Err("Selected spans no longer exist".into());
+        }
+        if !changed {
+            return Ok(());
+        }
+        self.begin();
+        self.document.model = candidate;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    /// Makes each selected logical span a straight cubic between its own
+    /// endpoints. The span ends are first isolated at C0 and the complete edit
+    /// is recorded as one history action.
+    pub fn straighten_spans(&mut self, selected: &BTreeSet<CurveSpanId>) -> Result<(), String> {
+        if selected.is_empty() {
+            return Err("Select curve spans to straighten".into());
+        }
+        let mut candidate = self.document.model.clone();
+        let mut found = false;
+        for curve in &mut candidate.draft.geometry.curves {
+            let chosen = curve
+                .spans
+                .iter()
+                .enumerate()
+                .filter_map(|(index, span)| selected.contains(&span.id).then_some(index))
+                .collect::<Vec<_>>();
+            if chosen.is_empty() {
+                continue;
+            }
+            found = true;
+            let count = curve.spans.len();
+            let breakpoints = chosen
+                .iter()
+                .flat_map(|span| match &curve.spline {
+                    CurveSpline::Closed(_) => vec![*span, (*span + 1) % count],
+                    CurveSpline::Open(_) => vec![*span, *span + 1],
+                })
+                .filter(|node| match &curve.spline {
+                    CurveSpline::Closed(_) => true,
+                    CurveSpline::Open(_) => *node > 0 && *node < count,
+                })
+                .collect::<BTreeSet<_>>();
+            for breakpoint in breakpoints {
+                match &mut curve.spline {
+                    CurveSpline::Closed(spline) => {
+                        while spline.continuity(breakpoint).unwrap() > 0 {
+                            spline
+                                .increase_multiplicity(breakpoint)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    CurveSpline::Open(spline) => {
+                        while spline.continuity(breakpoint).unwrap() > 0 {
+                            spline
+                                .increase_multiplicity(breakpoint)
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+            }
+            for span in chosen {
+                match &mut curve.spline {
+                    CurveSpline::Closed(spline) => {
+                        let [start_t, end_t] =
+                            spline.span_bounds(span).ok_or("Missing curve span")?;
+                        let start = spline.evaluate(start_t);
+                        let end = spline.evaluate(end_t);
+                        if (end - start).norm() <= f64::EPSILON {
+                            return Err("Cannot straighten a span with coincident endpoints".into());
+                        }
+                        for (offset, control) in spline
+                            .span_control_indices(span)
+                            .ok_or("Missing curve span")?
+                            .into_iter()
+                            .enumerate()
+                        {
+                            spline
+                                .set_control(control, start.lerp(end, offset as f64 / 3.0))
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                    CurveSpline::Open(spline) => {
+                        let [start_t, end_t] =
+                            spline.span_bounds(span).ok_or("Missing curve span")?;
+                        let start = spline.evaluate(start_t);
+                        let end = spline.evaluate(end_t);
+                        if (end - start).norm() <= f64::EPSILON {
+                            return Err("Cannot straighten a span with coincident endpoints".into());
+                        }
+                        for (offset, control) in spline
+                            .span_control_indices(span)
+                            .ok_or("Missing curve span")?
+                            .into_iter()
+                            .enumerate()
+                        {
+                            spline
+                                .set_control(control, start.lerp(end, offset as f64 / 3.0))
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+            }
+        }
+        if !found {
+            return Err("Selected spans no longer exist".into());
+        }
+        self.begin();
+        self.document.model = candidate;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
+    /// Replaces each contiguous, already C0-bounded selected section with one
+    /// endpoint-to-endpoint chord. Junctions divide sections so their authored
+    /// positions and incident curves are never moved implicitly.
+    pub fn straighten_span_sections(
+        &mut self,
+        selected: &BTreeSet<CurveSpanId>,
+    ) -> Result<(), String> {
+        if selected.is_empty() {
+            return Err("Select curve spans to straighten".into());
+        }
+        let mut candidate = self.document.model.clone();
+        let mut found = false;
+        for curve in &mut candidate.draft.geometry.curves {
+            let chosen = curve
+                .spans
+                .iter()
+                .map(|span| selected.contains(&span.id))
+                .collect::<Vec<_>>();
+            if !chosen.iter().any(|value| *value) {
+                continue;
+            }
+            found = true;
+            let count = chosen.len();
+            if matches!(curve.spline, CurveSpline::Closed(_)) && chosen.iter().all(|value| *value) {
+                return Err("A complete closed curve cannot become one chord".into());
+            }
+            for node in 0..curve.nodes.len() {
+                let transition = match &curve.spline {
+                    CurveSpline::Closed(_) => chosen[node] != chosen[(node + count - 1) % count],
+                    CurveSpline::Open(_) => {
+                        node > 0 && node < count && chosen[node - 1] != chosen[node]
+                    }
+                };
+                if transition {
+                    let continuity = match &curve.spline {
+                        CurveSpline::Closed(spline) => spline.continuity(node),
+                        CurveSpline::Open(spline) => spline.continuity(node),
+                    };
+                    if continuity != Some(0) {
+                        return Err("Isolate the selection at C0 before straightening it".into());
+                    }
+                }
+            }
+            let starts = (0..count)
+                .filter(|span| {
+                    if !chosen[*span] {
+                        return false;
+                    }
+                    let previous_unselected = match &curve.spline {
+                        CurveSpline::Closed(_) => !chosen[(*span + count - 1) % count],
+                        CurveSpline::Open(_) => *span == 0 || !chosen[*span - 1],
+                    };
+                    previous_unselected
+                        || curve.nodes[*span].vertex.is_some()
+                        || (chosen.iter().all(|value| *value) && *span == 0)
+                })
+                .collect::<Vec<_>>();
+            for start_span in starts {
+                let mut run = vec![start_span];
+                loop {
+                    let next = match &curve.spline {
+                        CurveSpline::Closed(_) => (run.last().unwrap() + 1) % count,
+                        CurveSpline::Open(_) => run.last().unwrap() + 1,
+                    };
+                    if next >= count
+                        || next == start_span
+                        || !chosen[next]
+                        || curve.nodes[next].vertex.is_some()
+                    {
+                        break;
+                    }
+                    run.push(next);
+                }
+                let mut controls = Vec::new();
+                for span in run {
+                    let active = match &curve.spline {
+                        CurveSpline::Closed(spline) => spline.span_control_indices(span),
+                        CurveSpline::Open(spline) => spline.span_control_indices(span),
+                    }
+                    .ok_or("Missing curve span")?;
+                    if controls.is_empty() {
+                        controls.extend(active);
+                    } else if controls.last() == Some(&active[0]) {
+                        controls.extend_from_slice(&active[1..]);
+                    } else {
+                        return Err("Selected curve section has inconsistent C0 controls".into());
+                    }
+                }
+                let start = match &curve.spline {
+                    CurveSpline::Closed(spline) => spline.controls()[controls[0]],
+                    CurveSpline::Open(spline) => spline.controls()[controls[0]],
+                };
+                let end = match &curve.spline {
+                    CurveSpline::Closed(spline) => spline.controls()[*controls.last().unwrap()],
+                    CurveSpline::Open(spline) => spline.controls()[*controls.last().unwrap()],
+                };
+                if (end - start).norm() <= f64::EPSILON {
+                    return Err("Cannot straighten a section with coincident endpoints".into());
+                }
+                let denominator = (controls.len() - 1) as f64;
+                for (offset, control) in controls.into_iter().enumerate() {
+                    let point = start.lerp(end, offset as f64 / denominator);
+                    match &mut curve.spline {
+                        CurveSpline::Closed(spline) => spline.set_control(control, point),
+                        CurveSpline::Open(spline) => spline.set_control(control, point),
+                    }
+                    .map_err(|error| error.to_string())?;
+                }
+            }
+        }
+        if !found {
+            return Err("Selected spans no longer exist".into());
+        }
+        self.begin();
+        self.document.model = candidate;
+        self.changed();
+        self.commit();
+        Ok(())
+    }
+
     /// Applies a topology-native viewport transform without opening or closing
     /// a history transaction. Drag gestures call this repeatedly between
     /// [`Self::begin`] and [`Self::commit`], so one complete drag remains one
@@ -3179,5 +3556,199 @@ mod tests {
             .unwrap();
         editor.cancel();
         assert_eq!(editor.document.model.draft.geometry, original);
+    }
+
+    #[test]
+    fn span_isolation_is_exact_stable_and_one_history_action() {
+        let mut editor = TopologyEditor::default();
+        let curve_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.3),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let curve = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == curve_id)
+            .unwrap();
+        let span_ids = curve.spans.iter().map(|span| span.id).collect::<Vec<_>>();
+        let before = (0..257)
+            .map(|sample| {
+                let spline = match &curve.spline {
+                    CurveSpline::Closed(spline) => spline,
+                    _ => unreachable!(),
+                };
+                spline.evaluate(spline.period() * sample as f64 / 257.0)
+            })
+            .collect::<Vec<_>>();
+        let history = editor.history_len().0;
+
+        editor
+            .isolate_span_boundaries(&BTreeSet::from([span_ids[1], span_ids[2]]))
+            .unwrap();
+
+        let curve = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == curve_id)
+            .unwrap();
+        let spline = match &curve.spline {
+            CurveSpline::Closed(spline) => spline,
+            _ => unreachable!(),
+        };
+        assert_eq!(spline.continuity(1), Some(0));
+        assert_eq!(spline.continuity(3), Some(0));
+        assert_eq!(
+            curve.spans.iter().map(|span| span.id).collect::<Vec<_>>(),
+            span_ids
+        );
+        for (sample, expected) in before.into_iter().enumerate() {
+            let actual = spline.evaluate(spline.period() * sample as f64 / 257.0);
+            assert!((actual - expected).norm() < 1.0e-11);
+        }
+        assert_eq!(editor.history_len().0, history + 1);
+        assert!(editor.undo());
+        let restored = &editor.document.model.draft.geometry.curves[0];
+        let restored = match &restored.spline {
+            CurveSpline::Closed(spline) => spline,
+            _ => unreachable!(),
+        };
+        assert_eq!(restored.continuity(1), Some(2));
+    }
+
+    #[test]
+    fn continuity_upgrade_reshapes_and_topology_nodes_stay_c0() {
+        let mut editor = TopologyEditor::default();
+        let curve_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::polygon(vec![
+                    Point2::new(-0.3, -0.3),
+                    Point2::new(0.3, -0.3),
+                    Point2::new(0.3, 0.3),
+                    Point2::new(-0.3, 0.3),
+                ])
+                .unwrap(),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert!(editor.set_curve_continuity(curve_id, 1, 2).unwrap() > 0.0);
+        let curve = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == curve_id)
+            .unwrap();
+        assert_eq!(
+            match &curve.spline {
+                CurveSpline::Closed(spline) => spline.continuity(1),
+                _ => unreachable!(),
+            },
+            Some(2)
+        );
+
+        editor.document.model.draft.geometry.curves[0].nodes[2].vertex =
+            Some(TopologyVertexId(999));
+        assert_eq!(
+            editor.set_curve_continuity(curve_id, 2, 1).unwrap_err(),
+            "A topology junction must remain a C0 corner"
+        );
+    }
+
+    #[test]
+    fn straighten_selected_spans_preserves_ids_and_makes_chords() {
+        let mut editor = TopologyEditor::default();
+        let curve_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.3),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let curve = &editor.document.model.draft.geometry.curves[0];
+        let selected = BTreeSet::from([curve.spans[0].id, curve.spans[2].id]);
+        let ids = curve.spans.iter().map(|span| span.id).collect::<Vec<_>>();
+        let history = editor.history_len().0;
+
+        editor.straighten_spans(&selected).unwrap();
+
+        let curve = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == curve_id)
+            .unwrap();
+        assert_eq!(
+            curve.spans.iter().map(|span| span.id).collect::<Vec<_>>(),
+            ids
+        );
+        let spline = match &curve.spline {
+            CurveSpline::Closed(spline) => spline,
+            _ => unreachable!(),
+        };
+        for span in [0, 2] {
+            let [start_t, end_t] = spline.span_bounds(span).unwrap();
+            let start = spline.evaluate(start_t);
+            let end = spline.evaluate(end_t);
+            let middle = spline.evaluate((start_t + end_t) * 0.5);
+            assert!((middle - start.lerp(end, 0.5)).norm() < 1.0e-12);
+        }
+        assert_eq!(editor.history_len().0, history + 1);
+    }
+
+    #[test]
+    fn straighten_selection_replaces_a_c0_run_with_one_chord() {
+        let mut editor = TopologyEditor::default();
+        editor
+            .create_closed_curve(
+                PeriodicCubicSpline::polygon(vec![
+                    Point2::new(-0.3, -0.3),
+                    Point2::new(0.3, -0.3),
+                    Point2::new(0.3, 0.3),
+                    Point2::new(-0.3, 0.3),
+                ])
+                .unwrap(),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let curve = &editor.document.model.draft.geometry.curves[0];
+        let selected = BTreeSet::from([curve.spans[0].id, curve.spans[1].id]);
+        let start = curve.spline.node_point(0).unwrap();
+        let old_corner = curve.spline.node_point(1).unwrap();
+        let end = curve.spline.node_point(2).unwrap();
+
+        editor.straighten_span_sections(&selected).unwrap();
+
+        let curve = &editor.document.model.draft.geometry.curves[0];
+        let new_corner = curve.spline.node_point(1).unwrap();
+        assert!((new_corner - old_corner).norm() > 0.1);
+        let chord = end - start;
+        for span in 0..=1 {
+            let [a, b] = curve.spline.span_bounds(span).unwrap();
+            for step in 0..=8 {
+                let point = match &curve.spline {
+                    CurveSpline::Closed(spline) => spline.evaluate(a + (b - a) * step as f64 / 8.0),
+                    _ => unreachable!(),
+                };
+                assert!((point - start).cross(chord).abs() < 1.0e-12);
+            }
+        }
     }
 }
