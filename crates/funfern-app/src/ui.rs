@@ -3314,21 +3314,6 @@ impl Playground {
                     Stroke::NONE,
                 ));
             }
-            if presentation.mesh {
-                painter.add(egui::Shape::closed_line(
-                    points.to_vec(),
-                    Stroke::new(0.5, Color32::from_gray(75)),
-                ));
-            }
-        }
-        if presentation.mesh_boundaries {
-            for edge in &mesh.boundary_edges {
-                let [a, b] = edge.vertices.map(|index| mesh.vertices[index].point);
-                painter.line_segment(
-                    [self.screen(a, r), self.screen(b, r)],
-                    Stroke::new(1.15, Color32::from_rgba_unmultiplied(184, 201, 211, 180)),
-                );
-            }
         }
         if presentation.field
             && display.generation > 0
@@ -3351,6 +3336,29 @@ impl Playground {
                 }
             }
             painter.add(egui::Shape::mesh(field));
+        }
+        // The field covers the whole domain and is opaque with no material
+        // overlay under it, so the mesh has to be drawn over the field rather
+        // than under it, and brightly enough to read against one.
+        if presentation.mesh {
+            for triangle in &mesh.triangles {
+                let points = triangle
+                    .vertices
+                    .map(|index| self.screen(mesh.vertices[index].point, r));
+                painter.add(egui::Shape::closed_line(
+                    points.to_vec(),
+                    Stroke::new(0.7, Color32::from_rgba_unmultiplied(160, 180, 195, 110)),
+                ));
+            }
+        }
+        if presentation.mesh_boundaries {
+            for edge in &mesh.boundary_edges {
+                let [a, b] = edge.vertices.map(|index| mesh.vertices[index].point);
+                painter.line_segment(
+                    [self.screen(a, r), self.screen(b, r)],
+                    Stroke::new(1.15, Color32::from_rgba_unmultiplied(184, 201, 211, 180)),
+                );
+            }
         }
         let mode = presentation
             .vector_overlay

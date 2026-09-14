@@ -139,6 +139,33 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — The mesh is drawn over the field, not under it
+
+The View panel's Mesh checkbox reached the document and the wireframe was drawn,
+but underneath the field. The field covers the whole domain, and with no material
+overlay beneath it `field_color` returns a fully opaque colour, so the wireframe
+was painted and then completely buried. With an overlay on, the field's alpha
+rises with the wave amplitude to 220, which washed out what remained.
+
+The wireframe was also far too faint to compete even where it showed: half a
+pixel at grey 75, against mesh boundaries drawn at 1.15 pixels in a light blue
+grey. What the Materials and Subdomains overlays "show" is not the wireframe at
+all. It is the antialiasing seams between adjacent flat-filled triangles, which
+is why the mesh looks visible with either overlay, Regions being the default,
+and why toggling the real checkbox seemed to change nothing.
+
+Both the wireframe and the mesh boundaries now draw after the field and before
+the vector overlay, and the wireframe reads at 0.7 pixels in a light grey at
+moderate alpha: visible over a field, still subordinate to the boundary lines.
+Mesh boundaries had the same burial and were fixed with it, though nothing had
+reported them, presumably because they are mostly viewed with an overlay on.
+
+Paint order carries no automated coverage, so this one is for the eye.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 425 passing, and
+`cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-15 — Cursors that appear before the action, not after
 
 The viewport's cursor block read its position from `interact_pointer_pos`, which
