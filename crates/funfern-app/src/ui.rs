@@ -1599,6 +1599,30 @@ impl Playground {
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
+        // A span with an excluded face on both sides, two holes say, bounds
+        // nothing the simulation solves, so its boundary settings do nothing.
+        if let Some(compiled) = self.editor.compiled_draft.as_ref() {
+            let inactive = curve_spans
+                .iter()
+                .filter(|span| {
+                    span_context(compiled, **span)
+                        .is_some_and(|context| !context.left.active && !context.right.active)
+                })
+                .count();
+            if inactive > 0 {
+                ui.colored_label(
+                    GOLD,
+                    if inactive == curve_spans.len() && inactive == 1 {
+                        "Inactive".to_owned()
+                    } else if inactive == curve_spans.len() {
+                        "All inactive".to_owned()
+                    } else {
+                        format!("{inactive} of {} inactive", curve_spans.len())
+                    },
+                )
+                .on_hover_text("Excluded on both sides, so nothing here reaches the simulation");
+            }
+        }
         if !curve_spans.is_empty() {
             // Offer a law only when applying it would change something.
             let already = |behavior: SpanBehavior| {

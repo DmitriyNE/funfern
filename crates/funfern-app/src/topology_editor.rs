@@ -6761,6 +6761,84 @@ mod tests {
         );
     }
 
+    /// A span with an excluded face on either side bounds nothing the simulation
+    /// solves, which is what the Edit panel calls inactive. Reachable now that a
+    /// split subdomain's halves are emptied one at a time.
+    #[test]
+    fn a_span_between_two_holes_reports_itself_inactive() {
+        use crate::topology_viewport::span_context;
+        let mut editor = TopologyEditor::default();
+        let material = editor.document.model.draft.materials[0].id;
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.4),
+                ClosedCurvePurpose::Subdomain { material },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let (start_point, start) = curve_target(&editor, loop_id, 0);
+        let (end_point, end) = curve_target(&editor, loop_id, 4);
+        let separator = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![start_point, Point2::default(), end_point]).unwrap(),
+                OpenCurvePurpose::SubdomainSeparator { material },
+                Some(start),
+                Some(end),
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+
+        let inactive = |editor: &TopologyEditor, curve: CurveId| {
+            let compiled = editor.compiled_draft.as_ref().unwrap();
+            editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(curve)
+                .unwrap()
+                .spans
+                .iter()
+                .map(|span| {
+                    span_context(compiled, span.id)
+                        .is_some_and(|context| !context.left.active && !context.right.active)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            inactive(&editor, separator).iter().all(|dead| !*dead),
+            "the separator divides two live subdomains"
+        );
+
+        // Empty both halves; the separator then sits between two holes.
+        while let Some(index) = editor
+            .document
+            .model
+            .draft
+            .face_assignments
+            .iter()
+            .position(|assignment| {
+                assignment
+                    .region
+                    .is_some_and(|region| region != BACKGROUND_REGION)
+            })
+        {
+            editor.set_face_disposition(index, None).unwrap();
+            settle(&mut editor);
+        }
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(
+            inactive(&editor, separator).iter().all(|dead| *dead),
+            "every separator span is now excluded on both sides"
+        );
+        assert!(
+            inactive(&editor, loop_id).iter().all(|dead| !*dead),
+            "the loop still divides the holes from the live background"
+        );
+    }
+
     /// Emptying a face walls only that face's own boundary. A span dividing two
     /// faces that both stay active is left alone, and a round trip reopens the
     /// spans whose far side is still a subdomain.

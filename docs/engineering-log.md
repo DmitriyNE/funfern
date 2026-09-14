@@ -139,6 +139,23 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — Spans that bound nothing say so
+
+The span inspector now reads "Inactive" when every selected span has an excluded
+face on both sides, and "N of M inactive" for a mixed selection. Such a span
+bounds nothing the simulation solves, so its boundary law, its side conditions
+and its coupling all have no effect, and the panel offered them with no hint that
+they were inert.
+
+`span_context` already resolved both sides' activity for the per-side readout, so
+this reads what was there and needed no new machinery. The state is easy to reach
+now that each half of a split subdomain is emptied on its own: a separator with a
+hole either side of it is the ordinary case.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 420 passing, and
+`cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-15 — Holes belong to faces, not to curves
 
 The Inside and Hole toggle sat in the span inspector, keyed by curve, and on the
