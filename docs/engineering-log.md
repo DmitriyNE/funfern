@@ -21,8 +21,6 @@ Follow-ups from the welding work:
 - [ ] `detach_endpoint` still leaves a two-arm vertex when the other two arms are
   open ends, so a seam a manual detach produces stays a locked C0 corner until
   something touches that junction. Fold it into the deferred unweld/split work.
-- [ ] Multi-curve Delete remains one editor command per curve; see the history
-  item below.
 - [ ] A curve at the 128-control ceiling cannot be sharpened to C0 and cannot
   accept a divider, because both spend controls and refinement only adds more.
   Reachable at about 41 polygon vertices. The message says so; a pre-emptive gate
@@ -30,9 +28,10 @@ Follow-ups from the welding work:
 
 Carried over from the cutover follow-up work, not from the review:
 
-- [ ] Make a multi-feature deletion one history entry. Deleting several curves in
-  one gesture now completes, but issues one editor command per curve, so undo
-  walks back through them individually — `browser-checks.md` expects one entry.
+- [ ] A deletion that needs a survivor closes the entry before asking, so a
+  mixed selection lands as two undo steps: the curves that needed no question,
+  then the one that did. Gathering every choice before removing anything would
+  make it one, and needs a picker that can ask more than once.
 - [ ] Decide what "Flip direction" means for a line probe. The README describes it
   as reversing both the sampling order and the flux sign; segments currently only
   offer Swap ends, and boundary targets carry a separate `reversed` flag.
@@ -107,6 +106,30 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — One gesture, one undo step
+
+Deleting several curves issued one editor command per curve, each closing its own
+history entry, so undo walked back through them one at a time. The log carried
+this as two separate items; they were the same thing.
+
+`begin` was already idempotent, so the fix is a bracket rather than a new
+multi-target planner. `apply_removal` split into a variant that stops after
+`changed` and a wrapper that commits, `remove_curve_during_edit` exposes the
+first, and the viewport's delete brackets the loop and commits once at the end.
+A failure part-way cancels, taking back every removal the gesture had made
+instead of leaving half a selection deleted.
+
+The one case that still lands as two entries is a mixed selection where one curve
+needs a survivor chosen. That commits what is already done before putting the
+question, because answering it is a separate decision the user may cancel.
+Folding it in would need a picker that can ask more than once, which is logged
+rather than built.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 429 passing, and
+`cargo build --release -p funfern-app --locked`. The new test deletes three
+baffles and fails with the per-curve commit restored.
 
 ## 2026-09-15 — Captures show the scene, not the tools
 

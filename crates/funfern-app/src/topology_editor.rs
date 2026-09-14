@@ -1471,8 +1471,21 @@ impl TopologyEditor {
         curve: CurveId,
         keep_region: Option<RegionId>,
     ) -> Result<TopologyCurveRemoval, String> {
+        let removal = self.remove_curve_during_edit(curve, keep_region)?;
+        self.commit();
+        Ok(removal)
+    }
+
+    /// The same removal without closing the history entry, so a gesture that
+    /// deletes several curves lands as one undo step. The caller commits, or
+    /// cancels to take back every removal it has made.
+    pub fn remove_curve_during_edit(
+        &mut self,
+        curve: CurveId,
+        keep_region: Option<RegionId>,
+    ) -> Result<TopologyCurveRemoval, String> {
         let plan = self.plan_removal(RemovalTarget::Curve(curve))?;
-        let outcome = self.apply_removal(plan, keep_region)?;
+        let outcome = self.apply_removal_during_edit(plan, keep_region)?;
         Ok(TopologyCurveRemoval {
             curve,
             promoted: outcome.promoted,
@@ -1758,6 +1771,16 @@ impl TopologyEditor {
         plan: RemovalPlan,
         keep_region: Option<RegionId>,
     ) -> Result<RemovalOutcome, String> {
+        let outcome = self.apply_removal_during_edit(plan, keep_region)?;
+        self.commit();
+        Ok(outcome)
+    }
+
+    fn apply_removal_during_edit(
+        &mut self,
+        plan: RemovalPlan,
+        keep_region: Option<RegionId>,
+    ) -> Result<RemovalOutcome, String> {
         let RemovalPlan {
             mut candidate,
             topology,
@@ -1868,10 +1891,11 @@ impl TopologyEditor {
         if provisional_curve {
             self.allocate_curve()?;
         }
+        // `begin` is idempotent, so several removals inside one bracket stay a
+        // single history entry; the caller decides when to close it.
         self.begin();
         self.document.model = candidate;
         self.changed();
-        self.commit();
         Ok(RemovalOutcome {
             pieces,
             promoted,
