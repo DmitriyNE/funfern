@@ -581,6 +581,12 @@ impl OpenCubicSpline {
         if index >= self.controls.len() {
             return Err(SplineError::Index);
         }
+        // Repeated knots break the one-to-one mapping between raw control
+        // indices and nonempty knot spans. Reject them before indexing the
+        // interval vector.
+        if self.multiplicities.iter().any(|value| *value != 1) {
+            return Err(SplineError::Index);
+        }
         let mut controls = self.controls.clone();
         controls.remove(index);
         let mut intervals = self.intervals.clone();
@@ -592,11 +598,6 @@ impl OpenCubicSpline {
             let left = (index - 2).min(intervals.len() - 2);
             intervals[left] += intervals[left + 1];
             intervals.remove(left + 1);
-        }
-        // Point deletion remains a simple-knot editing operation. Repeated-knot
-        // curves use explicit topology tools instead of this reshaping shortcut.
-        if self.multiplicities.iter().any(|value| *value != 1) {
-            return Err(SplineError::Index);
         }
         *self = Self::new(controls, intervals)?;
         Ok(())

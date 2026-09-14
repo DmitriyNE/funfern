@@ -101,6 +101,31 @@ fn removal_and_malformed_inputs() {
     assert!(PeriodicCubicSpline::new(vec![Point2::default(); 4], vec![f64::INFINITY; 4]).is_err());
 }
 
+#[test]
+fn repeated_knot_control_removal_is_bounded() {
+    let points = vec![
+        Point2::new(-0.5, -0.5),
+        Point2::new(0.5, -0.5),
+        Point2::new(0.5, 0.5),
+        Point2::new(-0.5, 0.5),
+    ];
+    let mut periodic = PeriodicCubicSpline::polygon(points.clone()).unwrap();
+    let periodic_before = periodic.clone();
+    assert_eq!(
+        periodic.remove(periodic.controls().len() - 1),
+        Err(SplineError::Index)
+    );
+    assert_eq!(periodic, periodic_before);
+
+    let mut open = OpenCubicSpline::polyline(points).unwrap();
+    let open_before = open.clone();
+    assert_eq!(
+        open.remove(open.controls().len() - 1),
+        Err(SplineError::Index)
+    );
+    assert_eq!(open, open_before);
+}
+
 fn open_irregular() -> OpenCubicSpline {
     OpenCubicSpline::new(
         vec![

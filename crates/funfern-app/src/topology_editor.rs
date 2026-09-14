@@ -1315,6 +1315,21 @@ impl TopologyEditor {
         if control >= control_count {
             return Err("Control no longer exists".into());
         }
+        let has_repeated_knots = match &curve.spline {
+            CurveSpline::Closed(spline) => spline
+                .multiplicities()
+                .iter()
+                .any(|multiplicity| *multiplicity != 1),
+            CurveSpline::Open(spline) => spline
+                .multiplicities()
+                .iter()
+                .any(|multiplicity| *multiplicity != 1),
+        };
+        if has_repeated_knots {
+            return Err(
+                "Control deletion requires C2 continuity; smooth the curve corners first".into(),
+            );
+        }
         let (removed_span_index, retained_span_index, removed_node) =
             if matches!(curve.spline, CurveSpline::Closed(_)) {
                 (control, (control + span_count - 1) % span_count, control)
@@ -2860,6 +2875,37 @@ mod tests {
             old_spans
         );
         assert_eq!(editor.history_len().0, history + 1);
+    }
+
+    #[test]
+    fn repeated_knot_control_deletion_is_rejected_without_mutation() {
+        let mut editor = TopologyEditor::default();
+        let curve = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::polygon(vec![
+                    Point2::new(-0.3, -0.3),
+                    Point2::new(0.3, -0.3),
+                    Point2::new(0.3, 0.3),
+                    Point2::new(-0.3, 0.3),
+                ])
+                .unwrap(),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let before = editor.document.model.clone();
+        let history = editor.history_len();
+        let last_control = match &editor.document.model.draft.geometry.curves[0].spline {
+            CurveSpline::Closed(spline) => spline.controls().len() - 1,
+            CurveSpline::Open(_) => unreachable!(),
+        };
+
+        assert_eq!(
+            editor.remove_control(curve, last_control).unwrap_err(),
+            "Control deletion requires C2 continuity; smooth the curve corners first"
+        );
+        assert_eq!(editor.document.model, before);
+        assert_eq!(editor.history_len(), history);
     }
 
     #[test]
