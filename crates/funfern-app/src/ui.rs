@@ -552,6 +552,10 @@ pub struct Playground {
     pending_removal: Option<PendingRemoval>,
     material_selection: MaterialId,
     region_selection: RegionId,
+    /// Whether a widget held keyboard focus when the previous frame ended. egui
+    /// clears focus on Escape before any app code runs, so the live predicate is
+    /// already false on the one frame where it matters.
+    keyboard_focus_previous: bool,
     /// Whether the Materials panel lists compiled faces or material regions, and
     /// which of the two a viewport click picks.
     subdomain_listing: SubdomainListing,
@@ -689,6 +693,7 @@ impl Default for Playground {
             pending_removal: None,
             material_selection: DEFAULT_MATERIAL,
             region_selection: BACKGROUND_REGION,
+            keyboard_focus_previous: false,
             subdomain_listing: SubdomainListing::Regions,
             face_selection: 0,
             material_edit: None,
@@ -4596,7 +4601,12 @@ impl Playground {
             self.center = self.center - Point2::new(delta.x as f64, -delta.y as f64) / self.scale;
             self.invalidate_samples();
         }
-        if !typing && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // The first Escape leaves the text field, which egui has already done by
+        // now; only a second one reaches the viewport.
+        if !typing
+            && !self.keyboard_focus_previous
+            && ui.input(|i| i.key_pressed(egui::Key::Escape))
+        {
             self.cancel_interaction();
             return;
         }
@@ -4613,25 +4623,11 @@ impl Playground {
         if response.double_clicked()
             && let Some(pos) = pointer
         {
-            if let Some(probe) = self
-                .editor
-                .document
-                .model
-                .probes
-                .iter()
-                .find(|probe| match probe.target {
-                    TopologyProbeTarget::Point(point)
-                    | TopologyProbeTarget::AreaDisk { center: point, .. } => {
-                        self.screen(point, r).distance(pos) <= 12.0
-                    }
-                    TopologyProbeTarget::Segment { start, end, .. } => {
-                        screen_segment_distance(pos, self.screen(start, r), self.screen(end, r))
-                            <= 8.0
-                    }
-                    _ => false,
-                })
-            {
-                self.probe_windows.insert(probe.id);
+            // The same lookup a single click uses, so a double click honours the
+            // View visibility toggles and opens the probe on top rather than the
+            // one underneath.
+            if let Some(hit) = self.hit_probe(pos, r) {
+                self.probe_windows.insert(hit.id());
                 return;
             }
             if self.editor.document.model.far_field.enabled {
@@ -5193,12 +5189,10 @@ impl Playground {
                         grab,
                         ref original,
                     } => {
-                        let target = if shift {
-                            Self::snap_point(point)
-                        } else {
-                            point
-                        };
-                        self.drag_probe(hit, original, target - grab);
+                        // Snap what the drag moves, not the pointer: the grab
+                        // offset would otherwise leave the probe off the grid by
+                        // however far inside itself it was picked up.
+                        self.drag_probe(hit, original, point - grab, shift);
                         Ok(())
                     }
                 };
@@ -6840,7 +6834,25 @@ impl Playground {
     }
     /// Applies a probe drag to the target captured when the gesture started, so
     /// repeated updates stay exact instead of accumulating rounding.
-    fn drag_probe(&mut self, hit: ProbeHit, original: &TopologyProbeTarget, delta: Point2) {
+    fn snap_scalar(value: f64) -> f64 {
+        const STEP: f64 = 0.05;
+        (value / STEP).round() * STEP
+    }
+
+    fn drag_probe(
+        &mut self,
+        hit: ProbeHit,
+        original: &TopologyProbeTarget,
+        delta: Point2,
+        snap: bool,
+    ) {
+        let place = |point: Point2| {
+            if snap {
+                Self::snap_point(point + delta)
+            } else {
+                point + delta
+            }
+        };
         let Some(mut probe) = self
             .editor
             .document
@@ -6855,24 +6867,32 @@ impl Playground {
         probe.target = original.clone();
         match (hit, &mut probe.target) {
             (ProbeHit::Point(_), TopologyProbeTarget::Point(position)) => {
-                *position = *position + delta;
+                *position = place(*position);
             }
             (
                 ProbeHit::SegmentEndpoint(_, first),
                 TopologyProbeTarget::Segment { start, end, .. },
             ) => {
                 let endpoint = if first { start } else { end };
-                *endpoint = *endpoint + delta;
+                *endpoint = place(*endpoint);
             }
             (ProbeHit::SegmentBody(_), TopologyProbeTarget::Segment { start, end, .. }) => {
-                *start = *start + delta;
-                *end = *end + delta;
+                // Translate rigidly, putting the start on the grid.
+                let shift = place(*start) - *start;
+                *start = *start + shift;
+                *end = *end + shift;
             }
             (ProbeHit::AreaDiskBody(_), TopologyProbeTarget::AreaDisk { center, .. }) => {
-                *center = *center + delta;
+                *center = place(*center);
             }
             (ProbeHit::AreaDiskRadius(_), TopologyProbeTarget::AreaDisk { center, radius }) => {
-                *radius = (*radius + delta.x).max(1.0e-3);
+                let grown = *radius + delta.x;
+                *radius = if snap {
+                    Self::snap_scalar(grown)
+                } else {
+                    grown
+                }
+                .max(1.0e-3);
                 let _ = center;
             }
             _ => return,
@@ -8604,6 +8624,7 @@ impl Playground {
             });
         self.probe_windows(root.ctx());
         self.diagnostics_window(root.ctx());
+        self.keyboard_focus_previous = root.ctx().egui_wants_keyboard_input();
         viewport
     }
 }
@@ -9867,6 +9888,10 @@ mod probe_interaction_tests {
 
     /// The combo label and the drawn colour must name the same thing, and two
     /// subdomains sharing a material must still be told apart.
+    /// Shift snaps what the drag moves, not the pointer, so where inside a probe
+    /// it was picked up cannot leave it off the grid.
+    /// The combo label and the drawn colour must name the same thing, and two
+    /// subdomains sharing a material must still be told apart.
     #[test]
     fn subdomain_overlay_is_categorical_and_named_consistently() {
         assert_eq!(MaterialOverlay::Subdomains.label(), "Subdomains");
@@ -9898,8 +9923,65 @@ mod probe_interaction_tests {
         );
     }
 
-    /// The mechanical skin has no complementary transverse field, so offering it
-    /// would select a mode that draws nothing.
+    #[test]
+    fn shift_snaps_the_probe_rather_than_the_cursor() {
+        let mut state = Playground::default();
+        state
+            .editor
+            .create_probe(
+                "Spot".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::Point(Point2::new(0.0, 0.0)),
+            )
+            .unwrap();
+        let probe = state.editor.document.model.probes.last().unwrap().clone();
+        // Grabbed well off centre, then dragged to an arbitrary place.
+        for grab_offset in [0.0, 0.017, -0.023] {
+            let original = TopologyProbeTarget::Point(Point2::new(0.0, 0.0));
+            let pointer = Point2::new(0.31 + grab_offset, -0.22 + grab_offset);
+            let grab = Point2::new(grab_offset, grab_offset);
+            state.drag_probe(ProbeHit::Point(probe.id), &original, pointer - grab, true);
+            let TopologyProbeTarget::Point(position) =
+                state.editor.document.model.probes.last().unwrap().target
+            else {
+                panic!("a point probe")
+            };
+            for value in [position.x, position.y] {
+                let steps = value / 0.05;
+                assert!(
+                    (steps - steps.round()).abs() < 1.0e-9,
+                    "grabbed at {grab_offset}, landed off the grid at {value}"
+                );
+            }
+        }
+        // A disk radius snaps too, rather than jumping by the grab offset.
+        state
+            .editor
+            .create_probe(
+                "Disk".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::AreaDisk {
+                    center: Point2::new(0.0, 0.0),
+                    radius: 0.2,
+                },
+            )
+            .unwrap();
+        let disk = state.editor.document.model.probes.last().unwrap().clone();
+        state.drag_probe(
+            ProbeHit::AreaDiskRadius(disk.id),
+            &disk.target,
+            Point2::new(0.113, 0.0),
+            true,
+        );
+        let TopologyProbeTarget::AreaDisk { radius, .. } =
+            state.editor.document.model.probes.last().unwrap().target
+        else {
+            panic!("a disk probe")
+        };
+        let steps = radius / 0.05;
+        assert!((steps - steps.round()).abs() < 1.0e-9, "radius {radius}");
+    }
+
     /// A cursor appears for an affordance the drawing does not announce, or one
     /// whose direction matters, and stays away from drawn handles that move
     /// themselves.
@@ -10240,6 +10322,7 @@ mod probe_interaction_tests {
             ProbeHit::SegmentEndpoint(id, true),
             &original,
             Point2::new(0.0, 0.25),
+            false,
         );
         let TopologyProbeTarget::Segment { start, end, .. } =
             state.editor.document.model.probes[index].target.clone()
@@ -10249,7 +10332,12 @@ mod probe_interaction_tests {
         assert!((start - Point2::new(-0.5, 0.25)).norm() < 1.0e-12);
         assert!((end - Point2::new(0.5, 0.0)).norm() < 1.0e-12);
 
-        state.drag_probe(ProbeHit::SegmentBody(id), &original, Point2::new(0.1, -0.1));
+        state.drag_probe(
+            ProbeHit::SegmentBody(id),
+            &original,
+            Point2::new(0.1, -0.1),
+            false,
+        );
         let TopologyProbeTarget::Segment { start, end, .. } =
             state.editor.document.model.probes[index].target.clone()
         else {

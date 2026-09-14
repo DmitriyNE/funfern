@@ -11,25 +11,10 @@ Open findings from the 2026-09-14 adversarial review. The bracketed score is how
 many of the two verifier lenses upheld the claim; treat it as a filter, not a
 ruling — the same detach bug scored 2/2 under one phrasing and 0/2 under another.
 
-- [ ] [2/2] Shift-snapping a probe drag snaps the cursor rather than the probe.
-  `DragGesture::Probe` stores the raw world press point as `grab` and the update
-  computes `snap_point(cursor) - grab`, so the probe never lands on the grid and a
-  disk radius jumps at gesture start. Snap the resulting target, not the pointer.
-- [ ] [2/2] `enclosed_region` accepts any `FaceAnchor::Curve` owned by the curve
-  without requiring the curve to be closed, so an open separator reports an
-  enclosed region and the Edit panel offers an Inside/Hole toggle that can only
-  fail. Require a closed spline.
 - [ ] [2/2, low] `TopologyPreparationTiming.slices` and `longest_slice_ms` are
   written after `advance_slice` has already copied the timing into
   `PreparedTopology`, so every committed handoff omits its final — and usually
   longest — slice. The diagnostics understate exactly the tail they exist to show.
-- [ ] [2/2, low] The double-click probe lookup still uses its own ad-hoc distance
-  test instead of `hit_probe`, so it ignores the View visibility toggles and picks
-  the bottom-most probe where a single click picks the topmost.
-- [ ] [1/2] The viewport `typing` guard may not cover Escape. egui clears keyboard
-  focus in `Focus::begin_pass` before any UI runs, so `egui_wants_keyboard_input()`
-  is already false on the frame Escape is pressed and `cancel_interaction()` still
-  runs while a text field had focus. Verify against egui 0.36 before changing it.
 - [ ] [1/1] `CompiledFace::centroid`'s doc claims the result lies inside the face;
   for an annulus it lies in the hole. The behaviour is right for a radial profile
   in a ring — fix the comment, not the arithmetic.
@@ -138,6 +123,40 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Three input defects from the review
+
+**Shift-snapping a probe snapped the pointer.** The update computed
+`snap_point(cursor) - grab` from the raw press point, so the probe landed off the
+grid by however far inside itself it was picked up, and a disk radius jumped at
+gesture start. What moves is snapped now, per hit kind: a point or an endpoint
+lands on the grid, a segment body translates rigidly with its start on the grid,
+and a radius snaps to the same step.
+
+**Escape cancelled a gesture while a text field had focus.** The review suspected
+this and asked for verification; egui 0.36.2 confirms it. `Focus::begin_pass`
+sets `focused_widget = None` on Escape while processing the frame's input, and
+`egui_wants_keyboard_input` is just `focused().is_some()`, so the guard reads
+false on exactly the frame that matters. The viewport now also consults whether a
+widget held focus when the previous frame ended, which makes the first Escape
+leave the field and only a second one reach the viewport.
+
+**The double-click probe lookup hand-rolled its own distance test**, so it
+ignored the View visibility toggles and picked the bottom-most probe where a
+single click picks the topmost. It calls `hit_probe` now, the same lookup a
+single click uses.
+
+The `enclosed_region` finding is closed as well, though not by this commit: the
+Inside and Hole toggle it described no longer exists, having been replaced by the
+per-face disposition in the Materials panel.
+
+The Escape fix carries no automated coverage, since egui's pass order cannot be
+driven from a unit test; it rests on reading egui's source and needs a look in the
+app. The other two are covered.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 426 passing, and
+`cargo build --release -p funfern-app --locked`.
 
 ## 2026-09-15 — Categorical overlays stop printing the triangulation
 
