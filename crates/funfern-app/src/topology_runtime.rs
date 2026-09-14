@@ -349,9 +349,15 @@ impl TopologyPreparationJob {
             return None;
         }
         let started = Instant::now();
-        let outcome = self.advance_slice(budget);
+        let mut outcome = self.advance_slice(budget);
         self.timing.slices = self.timing.slices.saturating_add(1);
         self.timing.longest_slice_ms = self.timing.longest_slice_ms.max(elapsed_ms(started));
+        // A finished handoff copied the timing before this slice was counted, so
+        // without this it omits its own last and usually longest slice, which is
+        // exactly the tail the diagnostics exist to show.
+        if let Some(Ok(prepared)) = &mut outcome {
+            prepared.timing = self.timing;
+        }
         outcome
     }
 
@@ -916,6 +922,39 @@ mod tests {
             committed.operator.mesh_revision(),
             committed.mesh.mesh_revision
         );
+    }
+
+    /// The timing a handoff carries has to include the slice that finished it,
+    /// which is usually the longest one and the whole point of the measurement.
+    #[test]
+    fn a_finished_preparation_counts_the_slice_that_finished_it() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        let mut slices = 0u32;
+        let finished = loop {
+            slices += 1;
+            if let Some(result) = runtime.advance(1) {
+                break result.unwrap();
+            }
+            assert!(slices < 2_000_000, "preparation did not finish");
+        };
+        assert_eq!(finished, token);
+        let committed = runtime.commit_ready(token).unwrap();
+        assert!(slices > 1, "the preparation took more than one slice");
+        assert_eq!(
+            committed.timing.slices, slices,
+            "the handoff dropped its own last slice"
+        );
+        assert!(committed.timing.longest_slice_ms >= 0.0);
     }
 
     #[test]

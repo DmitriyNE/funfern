@@ -1341,9 +1341,11 @@ impl TopologyEditor {
             .face_assignments
             .get_mut(assignment)
             .ok_or("That subdomain no longer exists")?;
-        match material {
+        // Provisional, like a removal's second curve: the allocator only moves
+        // once the candidate has compiled, so a refused command burns no id.
+        let allocated = match material {
             Some(material) => {
-                let id = self.allocate_region()?;
+                let id = RegionId(self.next_region);
                 slot.region = Some(id);
                 let frame = face_frame(&compiled.topology, Some(face));
                 candidate.draft.regions.push(Region {
@@ -1351,18 +1353,26 @@ impl TopologyEditor {
                     material,
                     frame,
                 });
+                true
             }
             None => {
                 slot.region = None;
                 if let Some(region) = current.region {
                     drop_region_dependents(&mut candidate, region);
                 }
+                false
             }
-        }
+        };
         candidate
             .draft
             .compile(self.revision.wrapping_add(1))
             .map_err(|issue| issue.to_string())?;
+        if allocated {
+            self.next_region = self
+                .next_region
+                .checked_add(1)
+                .ok_or("Region IDs exhausted")?;
+        }
         self.begin();
         self.document.model = candidate;
         self.changed();
@@ -6895,9 +6905,29 @@ mod tests {
             "the other subdomain is not touched"
         );
 
+        // A refused command must not spend a region id, so the allocator only
+        // moves once the candidate has compiled.
+        let before_allocator = editor.next_region;
+        assert!(
+            editor
+                .set_face_disposition(usize::MAX, Some(material))
+                .is_err(),
+            "no such subdomain"
+        );
+        assert_eq!(editor.next_region, before_allocator);
         editor.set_face_disposition(face, Some(material)).unwrap();
         settle(&mut editor);
         assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(
+            editor.next_region,
+            before_allocator + 1,
+            "one subdomain, one id"
+        );
+        assert_eq!(
+            editor.assignment_region(face),
+            Some(RegionId(before_allocator)),
+            "the region kept the id the candidate compiled with"
+        );
         assert!(
             behavior(&editor, left).iter().all(|open| *open),
             "its boundary reopens onto the background, which is active"

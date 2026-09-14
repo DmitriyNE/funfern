@@ -11,16 +11,6 @@ Open findings from the 2026-09-14 adversarial review. The bracketed score is how
 many of the two verifier lenses upheld the claim; treat it as a filter, not a
 ruling — the same detach bug scored 2/2 under one phrasing and 0/2 under another.
 
-- [ ] [2/2, low] `TopologyPreparationTiming.slices` and `longest_slice_ms` are
-  written after `advance_slice` has already copied the timing into
-  `PreparedTopology`, so every committed handoff omits its final — and usually
-  longest — slice. The diagnostics understate exactly the tail they exist to show.
-- [ ] [1/1] `CompiledFace::centroid`'s doc claims the result lies inside the face;
-  for an annulus it lies in the hole. The behaviour is right for a radial profile
-  in a ring — fix the comment, not the arithmetic.
-- [ ] [0/2] `set_enclosed_disposition` advances `next_region` before its
-  compile-before-commit check, so a rejected command burns a `RegionId`. Refuted as
-  a defect and harmless at u64 width; tidy it if that code is touched again.
 
 Follow-ups from the welding work:
 
@@ -123,6 +113,32 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — The measurement now includes its own tail
+
+**A finished preparation dropped its last slice.** `advance` counted the slice
+and updated `longest_slice_ms` only after `advance_slice` had already copied the
+timing into the finished handoff, so every committed `PreparedTopology`
+understated exactly the tail the diagnostics exist to show. The finished result
+is stamped with the updated timing now. On the default scene that is 10821 slices
+reported instead of 10820, and the missing one is the longest. Worth having
+before an optimization sweep reads this instrument. The test drives a preparation
+one slice at a time and compares its own count against the handoff, and it fails
+with the fix reverted.
+
+**`CompiledFace::centroid`'s doc** claimed the point lies inside the face. It does
+for a simply connected face and not in general, since an annulus puts it in the
+hole. That is the right answer for a radial profile in a ring, which is what it is
+for, so the comment changed rather than the arithmetic.
+
+**`set_face_disposition` spent a `RegionId` before its compile check**, which the
+review had found in the command this one replaced and which followed the pattern
+across. The id is provisional now and the allocator only moves once the candidate
+has compiled, the same shape `plan_removal` already used for a cut curve.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 427 passing, and
+`cargo build --release -p funfern-app --locked`.
 
 ## 2026-09-15 — Three input defects from the review
 

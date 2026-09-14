@@ -464,9 +464,11 @@ pub struct CompiledFace {
 }
 
 impl CompiledFace {
-    /// Area-weighted centroid of the face with its holes removed, so anything
-    /// anchored to the face starts somewhere inside it. Falls back to the mean
-    /// of the outer cycle when the cycles carry no usable area.
+    /// Area-weighted centroid of the face with its holes removed. It is a
+    /// representative interior point for a simply connected face, but not in
+    /// general: an annulus puts it in the hole. That is the right answer for a
+    /// radial material profile in a ring, which is what it is for. Falls back to
+    /// the mean of the outer cycle when the cycles carry no usable area.
     pub fn centroid(&self) -> Option<Point2> {
         let mut area = 0.0;
         let mut moment = Point2::default();
