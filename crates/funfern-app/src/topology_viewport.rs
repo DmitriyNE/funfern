@@ -742,21 +742,22 @@ pub fn weld_hit(
     exclude: Option<(CurveId, usize)>,
     face: Option<FaceId>,
 ) -> Option<AttachmentHit> {
-    let dragged_curve = exclude.map(|(curve, _)| curve);
+    // A curve may attach to itself, so only the dragged tip's own neighbourhood
+    // is off limits: its end span always lies under the cursor. Every other
+    // node and span of the same curve is a target like any other.
+    let blocked = exclude.and_then(|(curve, node)| {
+        let curve = geometry.curve(curve)?;
+        let span = if node == 0 {
+            curve.spans.first()?
+        } else {
+            curve.spans.last()?
+        };
+        Some(span.id)
+    });
     hit_junction(scene, transform, pointer, radius, face)
         .or_else(|| hit_loose_end(scene, geometry, transform, pointer, radius, exclude, face))
-        .or_else(|| {
-            hit_breakpoint(
-                scene,
-                geometry,
-                transform,
-                pointer,
-                radius,
-                dragged_curve,
-                face,
-            )
-        })
-        .or_else(|| hit_edge(scene, transform, pointer, radius, face, dragged_curve))
+        .or_else(|| hit_breakpoint(scene, geometry, transform, pointer, radius, face))
+        .or_else(|| hit_edge(scene, transform, pointer, radius, face, blocked))
 }
 
 fn hit_loose_end(
@@ -822,13 +823,13 @@ fn hit_breakpoint(
     transform: ViewportTransform,
     pointer: ScreenPoint,
     radius: f64,
-    exclude: Option<CurveId>,
     face: Option<FaceId>,
 ) -> Option<AttachmentHit> {
+    // Open-curve endpoints are skipped below, so a dragged tip can never pick
+    // itself and its own curve needs no exclusion here.
     geometry
         .curves
         .iter()
-        .filter(|curve| Some(curve.id) != exclude)
         .flat_map(|curve| {
             let open = curve.spline.is_open();
             let count = curve.nodes.len();
@@ -936,13 +937,15 @@ fn hit_edge(
     pointer: ScreenPoint,
     radius: f64,
     face: Option<FaceId>,
-    exclude: Option<CurveId>,
+    exclude: Option<CurveSpanId>,
 ) -> Option<AttachmentHit> {
     scene
         .topology
         .edges
         .iter()
-        .filter(|edge| edge.curve.is_none() || edge.curve != exclude)
+        .filter(
+            |edge| !matches!(edge.source, CompiledEdgeSource::Curve(span) if Some(span) == exclude),
+        )
         .filter_map(|edge| {
             let a = transform.world_to_screen(edge.points[0]);
             let b = transform.world_to_screen(edge.points[1]);

@@ -1896,17 +1896,21 @@ impl Playground {
                     }
                 }
             }
-            let curve_ids = self.selected_complete_curves(&curve_spans);
-            for curve in curve_ids {
-                if ui.button(format!("Delete curve {}", curve.0)).clicked() {
-                    match self.editor.remove_curve(curve, None) {
-                        Ok(_) => {
-                            self.selection = TopologySelection::None;
-                            self.invalidate_samples();
-                        }
-                        Err(error) => self.notify(error),
-                    }
-                }
+            // One button for every selection, running the same path as the
+            // Delete key: whole curves, partial runs, and the survivor picker
+            // when a deletion merges two subdomains.
+            let whole = self.selected_complete_curves(&curve_spans).len();
+            if ui
+                .button("Delete")
+                .on_hover_text(match whole {
+                    0 => "Delete the selected spans and leave the rest as baffles",
+                    1 => "Delete the selected curve",
+                    _ => "Delete the selected curves",
+                })
+                .clicked()
+            {
+                self.delete_selection();
+                self.invalidate_samples();
             }
         }
         let outer = spans

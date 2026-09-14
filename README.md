@@ -108,7 +108,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   that stayed put keeps its identity and direction, and the seam is an ordinary
   corner that Continuity can smooth. Dropped on its own other end, the curve
   closes into a loop. Dropped on a junction, a curve interior, or a corner that
-  owns no junction yet, the end attaches there as a new arm. A drop the
+  owns no junction yet, the end attaches there as a new arm, including on its own
+  curve, where only the span the end itself sits on is out of reach. A drop the
   arrangement rejects is refused and only the drag remains. A curve too small to
   become a loop is refined first by knot insertion, which does not change its
   shape.

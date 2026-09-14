@@ -43,9 +43,6 @@ Follow-ups from the welding work:
   detached separator's end onto a baffle folds its two regions into one face;
   the weld is refused with the compiler's `DuplicateFace` message rather than
   asking which region survives.
-- [ ] Self-attachment: a loose end dropped on its own curve's interior is refused
-  ("Attach to another curve"). A curve looping back onto itself is legal
-  geometry and would need the split and attach to run on the same curve.
 - [ ] `detach_endpoint` still leaves a two-arm vertex when the other two arms are
   open ends, so a seam a manual detach produces stays a locked C0 corner until
   something touches that junction. Fold it into the deferred unweld/split work.
@@ -141,6 +138,35 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-14 — A curve may attach to itself, and Delete is a button again
+
+**Self-attachment.** A loose end could not be dropped on its own curve. The hit
+test excluded the whole dragged curve from breakpoint and edge targets, and the
+command refused a curve anchor on itself with "Attach to another curve". Neither
+was load-bearing: the representation already holds a self-attached curve, and the
+autosave that prompted this is one, a loop and a string that are a single open
+curve sharing one vertex between node 0 and node 3.
+
+The exclusion is now the dragged tip's own end span and nothing else, which is
+the part that genuinely sits under the cursor for the whole gesture. Open-curve
+endpoints were already skipped by the breakpoint test, so the tip cannot pick
+itself. On the saved scene every node and span of the curve is now a target
+except that one span. `attach_end_to_vertex` locates the tip again after
+materialising the attachment, because splitting a span of the same curve inserts
+a node ahead of it and the old index went stale.
+
+**Delete.** The panel's only deletion affordance for spans was a "Delete curve N"
+button, shown when a whole curve was selected, which called the removal with no
+survivor and so failed with "Choose which adjacent material survives this
+deletion" on any deletion that merges two subdomains. Partial span selections had
+no button at all and could only be deleted from the keyboard. One "Delete" button
+now runs the same path the Delete key does, which handles whole curves, partial
+runs, probes, and the in-scene survivor picker.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 417 passing, and
+`cargo build --release -p funfern-app --locked`.
 
 ## 2026-09-14 — Drop the transform refusal messages
 

@@ -1066,7 +1066,7 @@ impl TopologyEditor {
             .find(|assignment| assignment.face == source_face)
             .map(|assignment| assignment.region)
             .ok_or("Attachment face no longer exists")?;
-        let node = loose_end_node(
+        loose_end_node(
             candidate
                 .draft
                 .geometry
@@ -1080,6 +1080,16 @@ impl TopologyEditor {
             &mut candidate.probes,
             target,
             &mut span_splits,
+        )?;
+        // A curve may attach to itself, and the split that made the junction
+        // then inserted a node ahead of the tip, so locate the tip again.
+        let node = loose_end_node(
+            candidate
+                .draft
+                .geometry
+                .curve(curve)
+                .ok_or("Curve no longer exists")?,
+            endpoint,
         )?;
         let attached = candidate
             .draft
@@ -1177,11 +1187,6 @@ impl TopologyEditor {
                 let record = join_curves(&mut candidate, (other, other_node), (curve, node))?;
                 face_curve = record.survivor;
                 seam_control = Some(record.seam_control);
-            }
-            TopologyAttachment::Boundary(FaceAnchor::Curve { curve: other, .. })
-                if other == curve =>
-            {
-                return Err("Attach to another curve".into());
             }
             _ => {
                 let (region, splits) =
@@ -8366,23 +8371,120 @@ mod tests {
                 .norm()
                 < 1.0e-9
         );
+    }
 
-        // A curve cannot attach to its own interior.
-        let free_curve = geometry(&editor).curve(free).unwrap().clone();
-        assert_eq!(
-            editor
-                .weld_endpoint(
-                    free,
-                    1,
-                    TopologyAttachment::Boundary(FaceAnchor::Curve {
-                        curve: free,
-                        span: free_curve.spans[0].id,
-                        side: CurveTraceSide::Left,
-                        parameter: 0.5,
-                    }),
+    /// A curve is as good a target as any other, including for its own loose
+    /// end: the tip may land on one of its own breakpoints or inside one of its
+    /// own spans, and the result is a loop hanging off a stem.
+    #[test]
+    fn a_loose_end_welds_onto_its_own_curve() {
+        let hook = |editor: &mut TopologyEditor| {
+            let id = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![
+                        Point2::new(0.0, -0.4),
+                        Point2::new(0.0, 0.0),
+                        Point2::new(0.0, 0.3),
+                        Point2::new(0.25, 0.15),
+                        Point2::new(0.06, 0.03),
+                    ])
+                    .unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    None,
+                    None,
                 )
-                .unwrap_err(),
-            "Attach to another curve"
+                .unwrap()
+                .curve;
+            settle(editor);
+            id
+        };
+
+        // Onto one of its own vertex-less breakpoints: no span is split.
+        let mut editor = TopologyEditor::default();
+        settle(&mut editor);
+        let id = hook(&mut editor);
+        let spans_before = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(id)
+            .unwrap()
+            .spans
+            .len();
+        let history = editor.history_len().0;
+        editor
+            .weld_endpoint(
+                id,
+                1,
+                TopologyAttachment::Breakpoint {
+                    curve: id,
+                    node: 1,
+                    side: CurveTraceSide::Left,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let curve = editor.document.model.draft.geometry.curve(id).unwrap();
+        assert_eq!(curve.spans.len(), spans_before, "a node needs no split");
+        let vertex = curve.nodes[1]
+            .vertex
+            .expect("the breakpoint became a junction");
+        assert_eq!(
+            curve.nodes.last().unwrap().vertex,
+            Some(vertex),
+            "the tip joined the same junction"
+        );
+        assert_eq!(editor.history_len().0, history + 1);
+        assert!(editor.undo());
+        settle(&mut editor);
+        assert!(
+            editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(id)
+                .unwrap()
+                .nodes
+                .iter()
+                .all(|node| node.vertex.is_none()),
+            "one undo unpicks the whole weld"
+        );
+
+        // Onto the inside of one of its own spans: that span splits, and the
+        // tip is found again on the far side of the inserted node.
+        let mut editor = TopologyEditor::default();
+        settle(&mut editor);
+        let id = hook(&mut editor);
+        let curve = editor.document.model.draft.geometry.curve(id).unwrap();
+        let span = curve.spans[0].id;
+        let [a, b] = curve.spline.span_bounds(0).unwrap();
+        let spans_before = curve.spans.len();
+        editor
+            .weld_endpoint(
+                id,
+                1,
+                TopologyAttachment::Boundary(FaceAnchor::Curve {
+                    curve: id,
+                    span,
+                    side: CurveTraceSide::Left,
+                    parameter: (a + b) * 0.5,
+                }),
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let curve = editor.document.model.draft.geometry.curve(id).unwrap();
+        assert_eq!(curve.spans.len(), spans_before + 1, "the span split");
+        let vertex = curve.nodes[1]
+            .vertex
+            .expect("the split node is the junction");
+        assert_eq!(
+            curve.nodes.last().unwrap().vertex,
+            Some(vertex),
+            "the tip landed on it, not on a stale index"
         );
     }
 
