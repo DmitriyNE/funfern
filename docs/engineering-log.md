@@ -142,6 +142,35 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-14 — Drop the transform refusal messages
+
+The rigid-transform gizmo used to explain itself when a selection could not
+move, with `Junction also belongs to unselected spans` or `Selected span section
+must end at a corner or include the whole curve`, and it offered a **Select
+incident spans** button under the first. Both are gone, along with the second
+**Select incident spans** button on a selected junction handle. A marquee selects
+incident arms trivially, and what is holding a selection is visible in the scene,
+so the gizmo now simply does not appear.
+
+Worth recording what the rule actually is, because the old message stated it
+badly and so did I when asked. Nothing tears: `synchronize_vertices` re-pins
+every vertex-carrying node after any transform. Removing the check by hand and
+translating one arm of a three-arm junction by 0.15 moved the free tip by the
+full 0.15 and the junction end by zero, leaving the arm stretched rather than
+moved. So the single rule behind both refusals is scope: **a transform changes
+nothing outside its selection.** A partial junction breaks it in both directions,
+since moving the vertex reshapes unselected arms and leaving it distorts the
+selected one, and a smooth boundary knot breaks it through shared controls.
+Dragging a junction handle is the legitimate form of the first, which is why that
+has always worked.
+
+`Isolate at C0` remains the remedy for the second and was measured as exact: it
+moved a curve by 1.1e-16 and turned the refusal into a four-control plan.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`.
+
 ## 2026-09-14 — Actions that are offered are actions that work
 
 Manual testing turned up a family of UI actions that stay live while the

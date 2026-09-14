@@ -1343,18 +1343,6 @@ impl Playground {
             }
         }
         if let TopologyHandle::Junction(vertex) = handle {
-            let incident = funfern_app::topology_viewport::incident_spans(
-                &self.editor.document.model.draft.geometry,
-                vertex,
-            );
-            if ui.button("Select incident spans").clicked() {
-                self.selection = TopologySelection::Spans(
-                    incident
-                        .into_iter()
-                        .map(TopologySpanTarget::Curve)
-                        .collect(),
-                );
-            }
             let endpoints = self
                 .editor
                 .document
@@ -1840,29 +1828,14 @@ impl Playground {
                 rotation_radians: 0.0,
                 scale: 1.0,
             };
-            let transform_allowed = match plan_rigid_transform(
+            // A selection that cannot move rigidly simply gets no gizmo. What is
+            // holding it is visible in the scene, and a marquee fixes it.
+            let transform_allowed = plan_rigid_transform(
                 &self.editor.document.model.draft.geometry,
                 &spans,
                 transform,
-            ) {
-                Ok(_) => true,
-                Err(issue) => {
-                    ui.colored_label(GOLD, issue.to_string());
-                    if let funfern_app::topology_viewport::TopologyTransformIssue::PartialJunction {
-                        vertex,
-                        ..
-                    } = issue
-                    {
-                        if ui.button("Select incident spans").clicked() {
-                            self.selection.select_incident_spans(
-                                &self.editor.document.model.draft.geometry,
-                                vertex,
-                            );
-                        }
-                    }
-                    false
-                }
-            };
+            )
+            .is_ok();
             if transform_allowed {
                 ui.separator();
                 ui.horizontal(|ui| {

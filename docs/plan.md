@@ -730,11 +730,11 @@ restrict later editing.
 - Keep handle priority over spans, Shift span toggling, command-click whole-curve
   selection, and right-drag/two-finger viewport navigation. Preserve the
   direction-dependent marquee: left-to-right fully encloses, right-to-left hits.
-- A rigid selection containing only some arms of a shared junction cannot move the
-  vertex without distorting an unselected arm. Keep the transform visible but
-  block that gesture with `Junction also belongs to unselected spans` and actions
-  **Select incident spans** and **Detach endpoint**. If every incident arm is
-  selected, transform the vertex once.
+- A rigid transform changes nothing outside its selection. A selection holding
+  only some arms of a shared junction, or one whose boundary knot is smooth, is
+  therefore not rigidly movable, and the gizmo does not appear for it. If every
+  incident arm is selected, transform the vertex once. Marquee selection and
+  **Isolate at C0** are how the user widens a selection until it moves.
 - Draw a small direction arrow on the focused curve and tint the selected trace
   side. `Left` and `Right` always mean relative to increasing curve parameter;
   bulk edits across curves apply that same coherent rule.

@@ -95,7 +95,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   rigid piece. The Edit panel also applies numeric translation, rotation, and
   uniform scale around the selection centroid; the viewport ring and square grip
   provide direct rotation and scaling. A junction can move only with all
-  incident arms; the inspector can expand a partial selection to those arms.
+  incident arms, and a selection whose boundary knot is smooth shares control
+  points with its neighbour, so neither offers the transform gizmo until the
+  selection is widened or Isolate at C0 walls it off.
 - **Continuity:** a selected end knot reads C0, C1, or C2 and can be set to any
   of them, except at a topology junction, which stays a corner. Smoothing a knot
   on a small loop refines the curve first so there are controls to spend; the
