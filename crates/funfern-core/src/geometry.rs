@@ -194,7 +194,9 @@ impl Material {
             damping: ScalarField::constant(0.0),
             axis_ratio: ScalarField::constant(1.0),
             parameters: vec![],
-            color: [47, 73, 88],
+            // Readable against the dark canvas at the overlay's default opacity
+            // while staying calmer than any assigned material.
+            color: [86, 116, 138],
         }
     }
 

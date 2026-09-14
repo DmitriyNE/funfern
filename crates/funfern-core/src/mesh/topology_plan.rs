@@ -1469,6 +1469,19 @@ pub enum TopologyFullRebuildReason {
     CoordinateRepairDeferred,
 }
 
+impl TopologyFullRebuildReason {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DomainChanged => "outer domain changed",
+            Self::FaceAssignmentsChanged => "face assignments changed",
+            Self::CurveOrSpanTopologyChanged => "curve or span topology changed",
+            Self::SpanBehaviorChanged => "span behavior changed",
+            Self::TraceEquivalenceChanged => "trace equivalence changed",
+            Self::CoordinateRepairDeferred => "curve or junction moved",
+        }
+    }
+}
+
 /// Classifies reuse before starting mesh work. It intentionally admits only
 /// exact reuse today. Every changed plan receives a stable, inspectable full
 /// rebuild reason rather than entering the legacy object-specific repair path.

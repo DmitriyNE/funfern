@@ -303,6 +303,7 @@ fn presentation_round_trips_and_older_scenes_receive_defaults() {
             boundary_probes: false,
             area_probes: false,
             far_field_contour: false,
+            probe_labels: false,
             field: false,
             field_gain: 7.5,
             vector_overlay: VectorOverlay::RelativeEnergyFlow,

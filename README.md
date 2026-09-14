@@ -82,7 +82,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Materials contains the material library; Probes contains receivers and recording
   controls. The lower-right status control shows
   FPS, solver steps per second, DOFs, mesh size, and solver dt; clicking it opens
-  the full frame, mesh, handoff, and solver diagnostics. As the window narrows, file
+  the full frame, topology, mesh, handoff, and solver diagnostics. As the window narrows, file
   actions collapse into File first, followed by the inspector switches collapsing
   into Panels. The essential editing and playback controls stay on one row.
 - **Select:** clicking a control or junction selects one handle. Clicking a curve
@@ -154,7 +154,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   distinguishes it from the vertex-based tools. Backspace removes the latest staged
   point and Escape cancels construction.
 - **Spline editing:** **Straighten spans** makes every selected logical span an
-  exact line between its own endpoints, inserting exact C0 isolation where needed.
+  exact line between its own endpoints, inserting exact C0 isolation where needed,
+  so a multi-span selection becomes a polyline through the existing breakpoints.
+  **Straighten selection** instead lays one contiguous run on a single chord
+  between its outer breakpoints; it is available only while each touched curve
+  contributes one contiguous run, and it refuses a run containing a junction.
+  Both preserve stable span identities and their assigned laws and probes.
   **Isolate at C0** preserves the curve exactly while freeing a partial span
   selection for rigid motion. A single selected span exposes C2, C1, and C0 choices
   for its end knot; smoothing uses a bounded projection and reports its maximum
@@ -169,6 +174,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   A removal that would merge different span conditions is rejected until the two
   assignments agree. Shape-preserving insertion copies the split span assignment.
   A complete selected loop or baffle can be deleted with Delete or Backspace.
+  Delete also accepts one contiguous run of spans: the run goes and the rest of
+  the curve stays as open baffles with the default wall, because an open curve
+  cannot keep a transmitting end at a free tip. A curve whose junction sat inside
+  the deleted run is promoted the same way and named in the status line. When the
+  deletion merges two subdomains carrying different materials, the Edit panel
+  asks which survives; it refuses outright when more than two would merge.
 - **Materials:** create and name materials in the Library, edit the three base
   properties named by the active physics skin, and assign them under
   Subdomain assignment. Each coefficient can be a constant or a formula. Formulas
@@ -178,7 +189,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   define parameter `R = 0.35` and stiffness `2 - clamp(0, 1, r / R)^2`. The `?`
   control beside the material-property note opens a compact syntax reference.
   Coordinates are measured in world units in a rigid orthonormal frame: origin and
-  angle set placement, with no hidden coordinate scaling. A region frame can stay
+  angle set placement, with no hidden coordinate scaling. A new subdomain's frame starts at the
+  centre of the face it owns, so a local profile is usable before touching the
+  gizmo. A region frame can stay
   fixed in the world or follow whole-loop translation, rotation, and uniform scale;
   scaling moves the frame with the object but does not rescale the profile. Unused
   materials are isotropic by default. Directional materials add a constant or
@@ -186,11 +199,14 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   principal axis; the local stiffness/flux tensor is `k diag(a, 1/a)`, preserving
   the base coefficient's geometric mean while giving a principal wave-speed ratio
   `a`. The ratio survives Mechanical/EM and TM/TE switches unchanged. Unused
-  non-default materials can be deleted. Clicking a filled region selects and
-  highlights it. Material changes preserve the live field and reuse the committed
+  non-default materials can be deleted. Selecting a region row highlights its
+  complete derived boundary in the viewport and carries the same categorical
+  swatch the Subdomains overlay uses. Material changes preserve the live field and reuse the committed
   mesh. Profile placement appears for the selected subdomain and can be adjusted
-  numerically or with its viewport origin/rotation gizmo. View can overlay material
-  regions, density, stiffness, damping, wave speed, impedance, anisotropy, or volume-source
+  numerically or with its viewport origin/rotation gizmo. View can overlay Materials (each face in
+  its assigned material's colour), Subdomains (a categorical colour per stable
+  region, so neighbouring faces sharing a material stay distinct), density,
+  stiffness, damping, wave speed, impedance, anisotropy, or volume-source
   amplitude with linear/log and
   automatic/manual range controls plus a local-coordinate hover readout. The
   anisotropy overlay uses a logarithmic ratio scale and sparse fast-axis marks.
@@ -201,7 +217,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   field without retaining stationary startup or source-edit imprints. TM scenes show
   the in-plane magnetic field `H`, TE scenes show the in-plane electric field `E`,
   and either polarization can show the corresponding Poynting vector. Mechanical
-  scenes retain their energy-flow view. Arrow spacing
+  scenes offer energy flow only; the scalar displacement field has no
+  complementary transverse vector, so that mode is not listed there. Arrow spacing
   and gain are screen-space presentation controls, with optional temporal
   smoothing. Each EM mode remains one scalar Maxwell polarization rather than a
   simultaneous six-component field solve.

@@ -53,6 +53,10 @@ const _: () = {
     assert!(TRANSFER_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
     assert!(AREA_PROBE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
 };
+/// Steps encoded per rendered frame. The host paces its own requests with the
+/// same bound so the requested and completed counters cannot diverge without
+/// limit when the solver cannot run faster than wall-clock time.
+pub const MAX_STEPS_PER_FRAME: u64 = 64;
 const STATUS_READY: u8 = 1;
 const STATUS_ERROR: u8 = 2;
 const STATUS_TRANSFERRING: u8 = 3;
@@ -741,6 +745,12 @@ impl WaveGpuRequest {
 
     pub fn failed(&self) -> bool {
         self.stats.status.load(Ordering::Relaxed) == STATUS_ERROR
+    }
+
+    /// Steps asked for so far in this generation. The gap against
+    /// `WaveGpuStats::completed_steps` is the solver's outstanding backlog.
+    pub fn requested_steps(&self) -> u64 {
+        self.desired_steps
     }
 
     pub fn request_steps(&mut self, count: u64) {
@@ -3150,7 +3160,7 @@ fn compute_wave(
     let pending = request
         .desired_steps
         .saturating_sub(group.completed_steps)
-        .min(64);
+        .min(MAX_STEPS_PER_FRAME);
     let inject_now = request.pulse_serial != group.pulse_serial;
     if pending == 0 && !inject_now {
         return;

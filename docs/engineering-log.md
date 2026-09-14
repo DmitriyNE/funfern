@@ -7,6 +7,71 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+Open findings from the 2026-09-14 adversarial review. The bracketed score is how
+many of the two verifier lenses upheld the claim; treat it as a filter, not a
+ruling — the same detach bug scored 2/2 under one phrasing and 0/2 under another.
+
+- [ ] [2/2] Fix the two ways the upload window can hard-stall the solver, together.
+  `refresh_runtime`'s `reset_requested` block runs while an upload is in flight and
+  bumps the GPU generation, so `self.uploading` can never match and the
+  `handoff_pending` gate then withholds stepping forever. Separately,
+  `request_runtime()` is not gated on a pending upload: an edit mid-upload clears
+  `runtime.ready`, the commit path runs `finish_transfer` and then fails
+  `commit_ready`, leaving the GPU on a discretization `runtime.active()` does not
+  name. Re-check the refuted "GPU failure before upload is never observed" claim
+  while here; it overlaps the first case.
+- [ ] [2/2] Shift-snapping a probe drag snaps the cursor rather than the probe.
+  `DragGesture::Probe` stores the raw world press point as `grab` and the update
+  computes `snap_point(cursor) - grab`, so the probe never lands on the grid and a
+  disk radius jumps at gesture start. Snap the resulting target, not the pointer.
+- [ ] [2/2] `enclosed_region` accepts any `FaceAnchor::Curve` owned by the curve
+  without requiring the curve to be closed, so an open separator reports an
+  enclosed region and the Edit panel offers an Inside/Hole toggle that can only
+  fail. Require a closed spline.
+- [ ] [2/2, low] `TopologyPreparationTiming.slices` and `longest_slice_ms` are
+  written after `advance_slice` has already copied the timing into
+  `PreparedTopology`, so every committed handoff omits its final — and usually
+  longest — slice. The diagnostics understate exactly the tail they exist to show.
+- [ ] [2/2, low] The double-click probe lookup still uses its own ad-hoc distance
+  test instead of `hit_probe`, so it ignores the View visibility toggles and picks
+  the bottom-most probe where a single click picks the topmost.
+- [ ] [1/2] The viewport `typing` guard may not cover Escape. egui clears keyboard
+  focus in `Focus::begin_pass` before any UI runs, so `egui_wants_keyboard_input()`
+  is already false on the frame Escape is pressed and `cancel_interaction()` still
+  runs while a text field had focus. Verify against egui 0.36 before changing it.
+- [ ] [1/1] `CompiledFace::centroid`'s doc claims the result lies inside the face;
+  for an annulus it lies in the hole. The behaviour is right for a radial profile
+  in a ring — fix the comment, not the arithmetic.
+- [ ] [0/2] `set_enclosed_disposition` advances `next_region` before its
+  compile-before-commit check, so a rejected command burns a `RegionId`. Refuted as
+  a defect and harmless at u64 width; tidy it if that code is touched again.
+
+Carried over from the cutover follow-up work, not from the review:
+
+- [ ] Restore capture suppression. The pre-swap `clean_presentation()` had eight
+  call sites hiding panels, floating windows, selection emphasis, gizmos,
+  marquees, and tool prompts during PNG export and video recording; it did not
+  survive the cutover, so viewport captures now include whatever is on screen,
+  contrary to `browser-checks.md`. The performance and probe readout windows
+  inherit that exposure.
+- [ ] Make a multi-feature deletion one history entry. Deleting several curves in
+  one gesture now completes, but issues one editor command per curve, so undo
+  walks back through them individually — `browser-checks.md` expects one entry.
+- [ ] Decide what "Flip direction" means for a line probe. The README describes it
+  as reversing both the sampling order and the flux sign; segments currently only
+  offer Swap ends, and boundary targets carry a separate `reversed` flag.
+- [ ] Refresh the stale example and checklist. `examples/eight-obstacles.json` is
+  still schema version 1 and cannot load after the version-22 break, yet README
+  and `browser-checks.md` both send the reader to it; the checklist also still
+  describes the pre-cutover UI (Draw > Hole/Interface, role changes, baffle
+  merging). Tick the plan's shared-link/recovery item too — `sharing.rs` and
+  `recovery.rs` already use version 22.
+- [ ] Measure representative browser frame timing for the cooperative topology
+  job. The cutover recorded that it advances in fixed 256-work-unit slices but
+  never measured what that costs in a real browser frame.
+
+Longer-standing work:
+
 - [ ] After the atomic topology application cutover, add sector-aware local mesh
   repair for unified curve coordinate edits. The first cutover deliberately takes
   a cooperative full rebuild for curve and junction movement while preserving
@@ -66,6 +131,445 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-14 — Deleting part of a divider
+
+- Delete only ever acted on a span selection that covered a complete curve, so a
+  partial selection did nothing at all and said nothing. It now deletes one
+  contiguous run and keeps the rest as open pieces.
+- Added `PeriodicCubicSpline::open_at`, the crate's first periodic-to-open cut:
+  it raises the breakpoint to C0, rotates the controls to start at that corner,
+  and takes one extra control so the corner clamps both ends, the same shared
+  seam control `OpenCubicSpline::split` produces. Everything else composes from
+  `split`. Verified against every breakpoint of a rounded loop, a polygon's
+  existing corners, and a C2 knot.
+- Every surviving piece becomes a baffle with the default wall. That is forced,
+  not cosmetic: `GraphBuilder::finish` rejects an open curve whose end span is
+  transmitting at a free tip. For the same reason any curve the cut frees from a
+  junction is promoted whole and reported, so the gesture cannot leave an invalid
+  draft behind.
+- Face merging reuses the whole-curve survivor rules, including the exterior
+  identity override, and refuses when more than two subdomains would merge.
+  `remove_curve`'s `by_new_face` rebuild is now a shared
+  `rebuild_face_assignments` rather than a second copy.
+- Boundary probes follow the piece holding more of their path and are dropped,
+  and reported, when nothing contiguous survives — the rule the pre-topology
+  `split_internal_boundary` used. Nothing had ever trimmed a probe's span list
+  before, and `validate_probes` rejects a document naming a missing span, so an
+  untrimmed probe would have made the scene unsaveable.
+
+## 2026-09-14 — The stranded point source was in three places, not one
+
+- The review reported the point source being left on a deleted region against
+  `drop_region_dependents`, and the first fix went in there. Checking the finding
+  against the new partial-deletion work found the same defect in both
+  `remove_curve` and `remove_spans`, neither of which touches `model.source` at
+  all. A test proved all three.
+- The merge cases want different behaviour from the hole case, so the shared
+  `retarget_point_source` distinguishes them: a distributed source dies with its
+  region because it is a profile over that face, but the point source has a
+  position that is still meshed once the faces merge, so it follows the surviving
+  identity and keeps driving. Only an exclusion — the subdomain becoming a hole —
+  leaves it with nowhere to be, and there it falls back to the background and
+  switches off.
+- Worth noting for the remaining review items: a finding names one call site, not
+  the defect's extent.
+
+## 2026-09-14 — Review triage, second pass
+
+Harvested the stopped review's journal: 23 findings across six dimensions. Six
+were in work landed today. Fixed:
+
+- `drop_region_dependents` dropped a region without retargeting
+  `model.source.region`, so making a subdomain a hole left the point source
+  naming a region that no longer existed. The scene still compiled `Valid` —
+  nothing in the arrangement checks the point source — but preparation rejected
+  every candidate with "references an inactive region" and the simulation stopped
+  with no visible cause. The source now falls back to the background and is
+  disabled, since its position is inside the new hole.
+- `set_enclosed_disposition(curve, None)` cleared only the anchor the closed curve
+  owns. With a separator already splitting the interior, the other sub-face
+  stayed an active subdomain inside the hole and the command reported success.
+  The guard counts the distinct faces on the side the curve's own anchor names
+  and refuses only when there is more than one, so a junction whose curve
+  attaches from outside the loop still converts.
+- The new material colour button committed on every frame of a drag inside its
+  popup, turning one colour edit into dozens of undo entries and dozens of full
+  scene revalidations. The value is staged and committed when the pointer is
+  released.
+- The staged divider-survivor question outlived its gesture: nothing cleared it
+  when the selection changed or undo ran, so the buttons could act on a curve the
+  user was no longer looking at. It is now dropped as soon as the geometry it
+  names is gone.
+- `subdomain_color` indexed the accepted scene from the viewport and the draft
+  from the panel, so the two disagreed mid-edit. Both take the draft now, and the
+  doc comment says so instead of claiming `RegionId` keying it never did.
+
+Correlating the 42 adversarial verdicts afterwards was worth doing: the two
+verifier lenses reached opposite conclusions on the same detach-orphan bug
+(confirmed on the high-severity phrasing, refuted on the low-severity one), which
+a failing repro settled in favour of confirmed. Treat the verdicts as a filter,
+not an oracle. The split-subdomain claim lost both its verifiers to the kill, so
+it was never judged at all — the first guard written for it was broader than the
+claim and has since been narrowed.
+
+Not acted on, recorded for later: the runtime findings around `reset_requested`
+and `request_runtime` running while an upload is in flight, the Escape key's
+typing guard, probe shift-snapping the cursor rather than the probe, and the
+double-click probe lookup still using its own hit test rather than `hit_probe`.
+
+## 2026-09-14 — Three fixes found by adversarial review
+
+- Detaching an outer-attached endpoint left an orphan vertex. Replacing
+  `prune_unused_vertex` with `prune_dangling_junctions` earlier today narrowed
+  pruning to interior vertices, so a zero-reference outer vertex survived, kept
+  subdividing its domain side, and still drew a junction handle.
+- The opposite error in the same helper: detaching one arm of a shared junction
+  also cleared the other arm's breakpoint, so re-attaching materialised a second
+  vertex instead of restoring the scene. The two policies are now explicit —
+  `prune_unreferenced_vertices` for detach, `prune_dangling_junctions` for
+  removal — over one `prune_vertices` core.
+- Deleting several curves in one gesture removed only the first. Every command
+  clears `compiled_draft`, and both the survivor query and the command need it,
+  so the second iteration failed with `Resolve the invalid draft`. The gesture
+  now revalidates between commands. Multi-curve deletion is still one history
+  entry per curve rather than per gesture; that remains open.
+
+## 2026-09-14 — Subdomain/hole switching and the missing survivor choice
+
+- Nothing in the editor could change a face's disposition. `face_assignments`
+  was only written by curve creation and removal, so turning a subdomain into a
+  hole or back meant deleting the curve and redrawing it.
+  `set_enclosed_disposition` now flips the face the closed curve owns: to a hole
+  it clears the assignment, drops the region with its distributed source and area
+  probes, and separates every span with the default wall; back to a subdomain it
+  allocates a fresh region on the chosen material, seeds its frame at the face
+  centroid, and makes every span transmit. The candidate compiles before it is
+  committed, and the whole switch is one undo entry.
+- `remove_curve` has always required an explicit survivor when a curve borders
+  two assigned subdomains, but the viewport called it with `None` and printed
+  `Choose which adjacent material survives divider removal` with no way to
+  answer. That is also why a closed subdomain appeared undeletable while a hole
+  or a baffle deleted fine: those border one active region, a subdomain borders
+  two. `curve_removal_choices` now reports the candidates, Delete stages the
+  question instead of failing, and the Edit panel offers **Keep &lt;material&gt;**
+  per adjacent region plus Cancel.
+- Still open: removing part of a divider and promoting the leftovers to baffles.
+  That needs curve splitting with stable span identities and dependent remapping,
+  so it is a slice of its own rather than a rider on this one.
+
+## 2026-09-14 — New subdomains start with a frame inside themselves
+
+- A new region took `MaterialFrame::world()`, so a region-local profile or volume
+  source began writing its coordinates around the world origin however far away
+  the region actually was. The first thing anyone had to do was drag the frame
+  gizmo back onto the subdomain.
+- Added `CompiledFace::centroid`: the area-weighted centroid over the face's
+  cycles, so the counter-clockwise outer boundary and clockwise hole cycles
+  subtract correctly and a face with an inclusion still centres on its material.
+  A degenerate or zero-area face falls back to the mean of its outer cycle.
+- `create_closed_curve` seeds a new subdomain's frame at the centroid of the face
+  its anchor resolves to, and a separator's genuinely new daughter centres on the
+  face it owns rather than on the parent it split. A daughter that inherits the
+  old material still inherits the old frame, and the background keeps the frame
+  it was authored with. Angle and attachment are untouched.
+
+## 2026-09-14 — Material frame gizmo restored
+
+- The region frame could only be aligned by typing: the viewport origin/rotation
+  gizmo did not survive the cutover at all. `MaterialFrameDrag`,
+  `MaterialFrameGizmoHit`, `selected_material_frame`, `hit_material_frame_gizmo`,
+  and the drawing block were all dropped, while the README and the Profile
+  placement controls still promised it.
+- Restored with the pre-topology geometry: a 42 px teal ring with its angle bead,
+  a red local x and teal local y axis, and a gold origin grip. Dragging the origin
+  moves the frame, dragging the ring turns it, Shift snaps coordinates to 0.05 and
+  angles to 15°, and the whole gesture is one undo entry through
+  `set_region_frame_during_edit`.
+- The gizmo now follows the same condition as the numeric controls: it appears
+  while Materials is open and either the assigned material or an enabled,
+  spatially varying volume source actually uses local coordinates. The pre-swap
+  version only checked the material, so a constant material driving a varying
+  source had numeric placement with no gizmo.
+- Grip radii use the shared `hit_tolerance`, so they absorb the drag threshold
+  like every other control and widen under touch.
+
+## 2026-09-14 — Volume-source editors follow their checkbox
+
+- The profile and signal editors appeared on the first tick of **Volume source**
+  and then never went away: the block was gated on
+  `existing.is_some() || source.enabled`, and unchecking only writes
+  `enabled: false`, leaving the source in the document forever. The fields stayed
+  on screen greyed out through `add_enabled_ui`.
+- They now render only while the checkbox is ticked. The commit moved outside the
+  block, otherwise unchecking would never be recorded and the box would spring
+  back on the next frame. The profile, parameters, and signal stay in the
+  document while disabled, so re-ticking restores what was there.
+- **Profile placement** follows the same rule: a disabled source no longer keeps
+  the region frame controls open on its own, though a material that uses local
+  coordinates still does.
+
+## 2026-09-14 — Paint every region, one swatch per row
+
+- Reverted skipping the ambient medium: every region paints its assigned
+  material again, background included. Instead of hiding the background, the
+  default medium's colour moved from `[47, 73, 88]` to `[86, 116, 138]`, so it
+  reads against the dark canvas at the overlay's default opacity while staying
+  calmer than an assigned material. Saved scenes keep their stored colour.
+- Dropped the second swatch. A region row showed both its categorical subdomain
+  colour and its assigned material's colour, which read as two colours per
+  material. Subdomain assignment rows now carry only the subdomain colour, and
+  the Library carries only the material colour and its editor.
+
+## 2026-09-14 — Materials overlay contrast and a reachable material colour
+
+- The Materials overlay was drawing, but every pixel of it was the ambient
+  medium. `Material::default_medium` is `[47, 73, 88]`, chosen to sit close to
+  the canvas, and the bundled examples assign materials only a few steps away
+  from it, so the whole domain painted one near-canvas wash at 39% alpha and read
+  as nothing. It only looked broken beside the new Subdomains palette.
+- Regions still carrying `DEFAULT_MATERIAL` are now left unpainted: the ambient
+  medium reads as the canvas and an assigned material stands out against it. A
+  scene that deliberately assigns a non-default material to the background still
+  paints it.
+- A material's colour had no editor anywhere in the UI — probes had one,
+  materials did not — so the only key the overlay uses was invisible and
+  unreachable. The Library rows gained a colour button, and each region row shows
+  both its categorical subdomain swatch and its assigned material's colour, so
+  the panel and either overlay agree.
+
+## 2026-09-14 — Visible material colours and click-to-select subdomains
+
+- The Materials overlay drew nothing visible because every material carried the
+  same colour. `add_material` cloned `Material::default_medium()` wholesale,
+  inheriting its `[47, 73, 88]` slate — deliberately close to the canvas for the
+  ambient background, and therefore invisible once every new material shared it.
+  The pre-swap editor cycled a six-colour palette per material id; restored, so
+  the overlay separates materials again while the background stays subdued.
+- Clicking inside a face now selects that subdomain. The click already cleared
+  the geometry selection; it resolves the committed face under the pointer
+  through `snapshot.face_at` and the plan's domains, and sets the region
+  selection the Materials panel reads.
+- The derived-boundary highlight no longer needs the Materials panel to be open:
+  it also shows while either region overlay is active, so a click has visible
+  feedback wherever region colour is on screen.
+- Added a regression asserting that successive materials take distinct colours
+  and none reuses the background's.
+
+## 2026-09-14 — A subdomain overlay that shows subdomains
+
+- The View combo listed the entry as **Subdomains** while the closed combo and
+  every other caller read **Material regions**, because the item label was a
+  hardcoded string beside `MaterialOverlay::label_for`. Labels now come from the
+  enum in both places.
+- The overlay also did not show subdomains: `MaterialOverlay::Regions` colours
+  each triangle by its region's *material*, so every face using the default
+  medium — including the background — painted the same wash and nothing read as
+  a separate subdomain.
+- Split the two intents the plan already called for. **Materials** keeps the
+  assigned material colour; the new **Subdomains** takes a categorical colour
+  keyed by the region's position in the authored list, so neighbouring faces that
+  share a material stay distinct. The stored codec gained the variant; existing
+  files decode unchanged.
+- The Materials panel now carries the same categorical swatch on each region row,
+  and picking a row outlines that subdomain's complete derived boundary in the
+  viewport, which is what the plan asked for and nothing implemented.
+- Formatting, 372 workspace tests, and workspace Clippy with warnings denied pass.
+
+## 2026-09-14 — One chord per selection, and junctions that let go
+
+- **Straighten selection** did the same thing as **Straighten spans** in practice.
+  It refused any run whose ends were not already C0 (`Isolate the selection at C0
+  before straightening it`), so the only way to reach it was to run the other
+  command first, by which point every internal knot was already a corner and both
+  produced the same polyline. It now isolates the run's ends itself, raises the
+  interior knots to C0 exactly, and lays the whole run on one chord between its
+  outer breakpoints. Measured against the per-span result on three spans of a
+  circle, the two now differ by 2.5e-1 instead of 3.4e-2.
+- Contiguity is now a precondition rather than an accident: `contiguous_run`
+  finds the single run per curve (wrapping through a closed seam), a split
+  selection is refused with a specific reason, and the button is disabled through
+  `selection_is_contiguous`. A junction strictly inside the run is refused
+  because straightening would drag a point another curve shares; the run's own
+  end breakpoints may be junctions and stay put.
+- Removing or detaching a separator left a ghost junction behind.
+  `prune_unused_vertex` only dropped a vertex with no references at all, but the
+  curve the separator had attached to still carried the C0 breakpoint that
+  materialised the junction. That breakpoint kept `vertex: Some(..)` forever, and
+  `set_curve_continuity` refuses any node with a vertex, so an ordinary corner
+  was permanently locked out of a C1/C2 upgrade. `prune_dangling_junctions` now
+  releases interior vertices with fewer than two incident breakpoints and clears
+  the references pointing at them. Outer attachments and free tips are kept: they
+  still constrain their breakpoint.
+- Added regressions for collinearity across a straightened run, span identity
+  survival, split and wrapping and whole-loop contiguity, and a separator removal
+  that leaves its host corner smoothable again.
+
+## 2026-09-14 — Vector overlay lists only drawable modes
+
+- The View combo offered the complementary-field mode in mechanical scenes, where
+  `vector_overlay_samples` has no arm for it and returns no arrows. Selecting it
+  silently emptied the overlay. `VectorOverlay::choices` now drives the combo, so
+  the mechanical skin lists Off and energy flow only.
+- `VectorOverlay::resolved` maps a stored complementary-field mode onto energy
+  flow for the mechanical skin, so a scene authored in EM and switched or
+  reopened as mechanical draws energy flow rather than nothing. Both the combo
+  and the draw path resolve before use, and the smoothing cache keys on the
+  resolved mode so a switch resets its running average.
+
+## 2026-09-14 — Grab from the press point, not the drag point
+
+- Found why grabbing felt worse than before the swap even after the radii were
+  restored: egui only reports `drag_started` once the pointer has travelled past
+  `max_click_dist` (6 px), and the cutover's handler hit-tested at that already
+  displaced position. A 10 px radius therefore left under 4 px of real margin,
+  and none at all on a fast flick. The pre-swap viewport drove its own pointer
+  state machine and tested on press. Every grab test now uses
+  `pointer.press_origin()`, while the motion itself still starts from the live
+  pointer so nothing jumps by the threshold distance.
+- Grab radii also now exceed the drawn control rather than matching it:
+  handles and probe grips 13 px, bodies and spans 9 px, region badges 15 px,
+  the point source 13 px, all still floored at 18 px under touch. A direct test
+  pins the invariant against the drag threshold.
+- Delete, Backspace, Enter, and Escape no longer reach the viewport while a text
+  field has focus, so renaming a probe no longer deletes it. The pre-swap
+  `typing` guard had been dropped entirely.
+- Added the missing **Boundaries** probe toggle to View — `boundary_probes`
+  existed in the document and was the only probe class with no switch — plus a
+  **Probe names** toggle behind a new `probe_labels` presentation field, stored
+  with a serde default so existing version-22 files still load.
+- Boundary-law strokes became a diagnostic layer drawn under the curves instead
+  of over them, and they step outside a selected span's width. A selected span
+  also carries a dark halo, so it stays readable over the law colours and a
+  bright field.
+- Formatting, 367 workspace tests, and workspace Clippy with warnings denied pass.
+
+## 2026-09-14 — Probe manipulation and pre-topology handle sizing
+
+- Restored probe hit testing as one `hit_probe` pass with the pre-swap
+  tolerances (endpoint and radius grips 10 px, bodies 7 px, badges 11–12 px, all
+  floored at 18 px under touch). A click selects the probe under the pointer
+  before geometry sees the event, so a point probe no longer has to be dragged to
+  be selected.
+- Line probes have their endpoint grips back and gained a body drag; disks
+  regained their radius grip. A drag re-applies its delta to the target captured
+  at gesture start rather than accumulating, and Shift snaps as it does for
+  geometry.
+- Every probe kind now resolves an explicit badge point, so all of them carry a
+  name label: point at its marker, line at its midpoint, boundary at the
+  arclength midpoint of its drawn path, disk at its centre, region at its mesh
+  anchor. Boundary probes regained the midpoint badge and region probes the "A"
+  badge with the face outline. Failed probes draw red and non-recording probes
+  grey, matching the pre-swap rule.
+- Handle and marker sizes and strokes come from `2bfa853`: control handles are a
+  4 px fill (6 px active) inside a 1.5 px ring, junctions 5.5/7 px in gold, point
+  probes 4.5/6 px inside a white 7/9 px ring, boundary badges 5.5/7 px, region
+  badges 7/9 px, and the point source is the gold 7 px crosshair again rather
+  than a small filled dot. Geometry hit radii went from a flat 8/7 px to the
+  pre-swap 10/7 px with the same touch floor.
+- Added direct tests for arclength midpoints, label anchors across all probe
+  kinds, hit classification including both endpoints and the radius grip, and
+  endpoint versus body dragging.
+- Formatting, 366 workspace tests, and workspace Clippy with warnings denied
+  pass.
+
+## 2026-09-14 — Probe readouts restored
+
+- The GPU recorders never stopped producing the full payload; the cutover's host
+  code discarded it. `ingest_probes` kept only `displacement` out of the five
+  fields in `PointProbeRecord`, and the readouts drew one un-navigable trace per
+  probe. Point readouts again plot the primary field, velocity or transverse
+  magnitude by physics skin, Poynting magnitude in EM, and local energy density.
+- Line and boundary readouts have their four quantities back (primary field,
+  transverse magnitude, normal flux, energy density), each available versus
+  arclength, as a waterfall, or integrated over the path versus time, behind the
+  compact Plots grid with its waterfall gain. Boundary path length and closure now
+  come from the committed stencil, so the arclength axis and the trapezoidal
+  integral are correct for periodic curves.
+- Area readouts expose mean and RMS primary field, RMS transverse magnitude, mean
+  energy density, and total energy. The far field regained its instantaneous and
+  visible-window time-averaged 40 dB polar patterns beside the waterfall and
+  radiated power, plus its own Plots menu and gain.
+- Every trace in a readout shares one pan/zoom time window with a Live button, and
+  the Probes panel carries a per-probe **Plot** toggle, a rename field, color,
+  sampling preset, boundary trace side and direction, segment end swap, disk
+  radius, and the committed compilation status.
+- Probes are labelled in the scene. Point, disk, and region probes label their
+  marker, line probes label their midpoint, and boundary probes label their first
+  sampled point; region anchors come from the committed mesh and are cached per
+  topology token.
+- Formatting, 362 workspace tests, and workspace Clippy with warnings denied pass.
+  The readouts still need an interactive pass.
+
+## 2026-09-14 — Topology-shaped performance diagnostics
+
+- The performance window did not survive the cutover: the lower-right status
+  summary was a plain label with nothing behind it, and every instrument it used
+  to show belonged to the retired incremental repair path (local attempts, reuse
+  percentage, fallback histograms). Rebuilt around what the unified engine
+  actually has.
+- The status summary is a button again, with a warning marker beside it. A
+  preparation or adaptation error opens the window once; ordinary rebuilding does
+  not. Sections are Frame, Topology, Mesh, Handoff, and Solver.
+- Added `TopologyPreparationTiming` to the runtime. Each candidate accumulates
+  wall-clock milliseconds per phase plus its slice count and longest slice, and
+  carries them into `PreparedTopology`, so the cooperative mesh phase and the
+  synchronous assembly/transfer/probe/far-field tail can be told apart. The live
+  job's breakdown is readable while it runs.
+- Handoff now records the three waits separately: CPU preparation, draining the
+  solver's requested steps, and GPU upload. Each completed transaction also
+  reports what it reused, whether the field was transferred or reset, and the
+  rebuild reason behind a full remesh, using a new
+  `TopologyFullRebuildReason::label`.
+- Solver reports GPU status, dispatches, DOFs and estimated buffer size, dt,
+  throughput in simulated seconds per wall second, and the outstanding step
+  backlog against the per-frame ceiling, which is what the pacing fix above
+  bounds.
+- Formatting, 362 workspace tests, and workspace Clippy with warnings denied
+  pass. The window itself still needs an interactive pass.
+
+## 2026-09-14 — Bounded solver pacing during a handoff
+
+- A prepared candidate could sit in **Ready for GPU upload** indefinitely. The
+  upload waits for `WaveGpuRequest::caught_up`, an exact match between requested
+  and completed steps, but the cutover dropped the host-side pacing that made
+  that reachable: steps were requested every frame at wall-clock rate with a
+  4096-step ceiling, an unclamped frame delta, and an unclamped accumulator,
+  while the render node encodes at most 64 steps per frame. The backlog then
+  grew monotonically whenever `1/dt` exceeded `64 x fps`, and the rebuild's own
+  slow frames built a debt that took seconds to drain even when it did.
+- Restored the withheld schedule: while a candidate is ready or uploading, both
+  continuous and manual stepping pause without touching the user's Run/Pause
+  preference or a pressed Step. Requests are now capped by the render node's own
+  `MAX_STEPS_PER_FRAME`, the frame delta is clamped to 100 ms, and unspent
+  wall-clock time beyond one frame of steps is dropped rather than queued.
+- The commit gate now compares the readback length against the uploading
+  candidate's own degree-of-freedom count. It previously read the runtime's
+  pending slot, which a newer edit clears mid-upload, leaving `uploading` stuck.
+
+## 2026-09-14 — Junction-safe control deletion
+
+- A reshaping control deletion no longer tears an incident junction off its
+  authoritative topology vertex. `remove_control` and the approximate continuity
+  change now re-pin every vertex-bearing breakpoint through
+  `synchronize_vertices`. Deleting a control next to a junction previously moved
+  that C0 breakpoint by up to `5.3e-2` world units and left the document stuck in
+  `VertexMismatch`.
+- Removing the control attributed to a closed curve's first knot interval, or an
+  open curve's leading interval, moves the curve's parameter origin. Face anchors
+  on that curve now shift by the same amount before they are re-attributed to a
+  span, and an anchor left without an interior parameter is recentred on its
+  surviving span. Without that shift an anchor could drift backwards across a
+  junction into a face another assignment already owned, which is the reported
+  `DuplicateFace` after several deletions.
+- The accepted-reference ghost drawn under an invalid draft no longer takes the
+  current span selection. Selection emphasis now belongs to the interactive pass
+  only, matching handles, control polygons, and boundary-law strokes.
+- Added a direct regression over a subdomain split by an inner separator: seam
+  control deletion keeps every junction exactly on its vertex, keeps all three
+  compiled domains, and keeps the region set stable.
+- Formatting, all 362 workspace tests, and workspace Clippy with warnings denied
+  pass.
 
 ## 2026-09-14 — Selection-preserving geometry drag
 

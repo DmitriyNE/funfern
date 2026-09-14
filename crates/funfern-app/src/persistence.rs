@@ -63,6 +63,8 @@ pub(crate) struct StoredPresentation {
     boundary_probes: bool,
     area_probes: bool,
     far_field_contour: bool,
+    #[serde(default = "default_probe_labels")]
+    probe_labels: bool,
     field: bool,
     field_gain: f32,
     #[serde(default)]
@@ -81,6 +83,9 @@ pub(crate) struct StoredPresentation {
     material_overlay_manual_max: f64,
 }
 
+const fn default_probe_labels() -> bool {
+    true
+}
 const fn default_vector_overlay_smoothed() -> bool {
     true
 }
@@ -106,6 +111,7 @@ enum StoredVectorOverlay {
 enum StoredMaterialOverlay {
     Off,
     Regions,
+    Subdomains,
     Property(StoredMaterialProperty),
 }
 
@@ -1449,6 +1455,7 @@ pub(crate) fn encode_presentation(settings: PresentationSettings) -> StoredPrese
         boundary_probes: settings.boundary_probes,
         area_probes: settings.area_probes,
         far_field_contour: settings.far_field_contour,
+        probe_labels: settings.probe_labels,
         field: settings.field,
         field_gain: settings.field_gain,
         vector_overlay: match settings.vector_overlay {
@@ -1462,6 +1469,7 @@ pub(crate) fn encode_presentation(settings: PresentationSettings) -> StoredPrese
         material_overlay: match settings.material_overlay {
             MaterialOverlay::Off => StoredMaterialOverlay::Off,
             MaterialOverlay::Regions => StoredMaterialOverlay::Regions,
+            MaterialOverlay::Subdomains => StoredMaterialOverlay::Subdomains,
             MaterialOverlay::Property(property) => {
                 StoredMaterialOverlay::Property(match property {
                     MaterialProperty::Density => StoredMaterialProperty::Density,
@@ -1499,6 +1507,7 @@ pub(crate) fn decode_presentation(
         boundary_probes: stored.boundary_probes,
         area_probes: stored.area_probes,
         far_field_contour: stored.far_field_contour,
+        probe_labels: stored.probe_labels,
         field: stored.field,
         field_gain: stored.field_gain,
         vector_overlay: match stored.vector_overlay {
@@ -1512,6 +1521,7 @@ pub(crate) fn decode_presentation(
         material_overlay: match stored.material_overlay {
             StoredMaterialOverlay::Off => MaterialOverlay::Off,
             StoredMaterialOverlay::Regions => MaterialOverlay::Regions,
+            StoredMaterialOverlay::Subdomains => MaterialOverlay::Subdomains,
             StoredMaterialOverlay::Property(property) => {
                 MaterialOverlay::Property(match property {
                     StoredMaterialProperty::Density => MaterialProperty::Density,

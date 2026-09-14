@@ -322,6 +322,10 @@ pub struct TopologyGeometry {
 }
 
 impl TopologyGeometry {
+    pub fn curve(&self, id: CurveId) -> Option<&TopologyCurve> {
+        self.curves.iter().find(|curve| curve.id == id)
+    }
+
     /// Applies authoritative topology-vertex positions to every incident C0
     /// breakpoint. Call this after moving a junction or resizing the domain.
     pub fn synchronize_vertices(&mut self) -> Result<(), TopologyIssue> {
@@ -396,6 +400,42 @@ pub struct CompiledFace {
     /// Every step is oriented with this face on its left.
     pub boundaries: Vec<Vec<CompiledBoundaryStep>>,
     pub area: f64,
+}
+
+impl CompiledFace {
+    /// Area-weighted centroid of the face with its holes removed, so anything
+    /// anchored to the face starts somewhere inside it. Falls back to the mean
+    /// of the outer cycle when the cycles carry no usable area.
+    pub fn centroid(&self) -> Option<Point2> {
+        let mut area = 0.0;
+        let mut moment = Point2::default();
+        for cycle in &self.cycles {
+            if cycle.len() < 3 {
+                continue;
+            }
+            for (a, b) in cycle.iter().zip(cycle.iter().cycle().skip(1)) {
+                let cross = a.x * b.y - b.x * a.y;
+                area += cross;
+                moment = moment + (*a + *b) * cross;
+            }
+        }
+        let area = area * 0.5;
+        if area.abs() > 1.0e-12 {
+            let centroid = moment / (6.0 * area);
+            if centroid.finite() {
+                return Some(centroid);
+            }
+        }
+        let outer = self.cycles.first()?;
+        if outer.is_empty() {
+            return None;
+        }
+        let mean = outer
+            .iter()
+            .fold(Point2::default(), |total, point| total + *point)
+            / outer.len() as f64;
+        mean.finite().then_some(mean)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

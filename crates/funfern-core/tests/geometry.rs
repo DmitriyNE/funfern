@@ -839,3 +839,127 @@ fn free_transmitting_endpoint_is_an_incomplete_draft() {
         Some(ValidationIssue::FreeInterfaceEnd(MaterialInterfaceId(1)))
     ));
 }
+
+/// A face centroid must sit inside the face, with its holes removed rather than
+/// averaged in.
+#[test]
+fn compiled_face_centroid_excludes_holes() {
+    let square = CompiledFace {
+        id: FaceId(1),
+        cycles: vec![vec![
+            Point2::new(-1.0, -1.0),
+            Point2::new(1.0, -1.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(-1.0, 1.0),
+        ]],
+        boundaries: vec![],
+        area: 4.0,
+    };
+    let centroid = square.centroid().unwrap();
+    assert!(centroid.norm() < 1.0e-12, "{centroid:?}");
+
+    let mut with_hole = square.clone();
+    // A clockwise hole in the right half pulls the centroid left.
+    with_hole.cycles.push(vec![
+        Point2::new(0.2, -0.6),
+        Point2::new(0.2, 0.6),
+        Point2::new(0.9, 0.6),
+        Point2::new(0.9, -0.6),
+    ]);
+    let shifted = with_hole.centroid().unwrap();
+    assert!(
+        shifted.x < -0.05,
+        "hole did not shift the centroid: {shifted:?}"
+    );
+    assert!(shifted.y.abs() < 1.0e-9);
+
+    let degenerate = CompiledFace {
+        id: FaceId(2),
+        cycles: vec![vec![Point2::new(3.0, 4.0), Point2::new(3.0, 4.0)]],
+        boundaries: vec![],
+        area: 0.0,
+    };
+    assert_eq!(degenerate.centroid(), Some(Point2::new(3.0, 4.0)));
+}
+
+/// Cutting a loop open must reproduce the same curve, sampled from the cut.
+#[test]
+fn periodic_open_at_reproduces_the_loop_from_its_cut() {
+    let loop_spline = PeriodicCubicSpline::rounded(Point2::new(0.2, -0.1), 0.4);
+    for breakpoint in 0..loop_spline.intervals().len() {
+        let opened = loop_spline
+            .clone()
+            .open_at(breakpoint)
+            .unwrap_or_else(|error| panic!("open_at({breakpoint}) failed: {error}"));
+        assert_eq!(opened.intervals().len(), loop_spline.intervals().len());
+        assert_eq!(
+            opened.multiplicities().len() + 1,
+            opened.intervals().len(),
+            "open splines carry one multiplicity per interior breakpoint"
+        );
+        let offset = loop_spline.span_bounds(breakpoint).unwrap()[0];
+        let period = loop_spline.period();
+        assert!((opened.period() - period).abs() < 1.0e-12);
+        for step in 0..=240 {
+            let local = period * step as f64 / 240.0;
+            let expected = loop_spline.evaluate((offset + local) % period);
+            let actual = opened.evaluate(local);
+            assert!(
+                (actual - expected).norm() < 1.0e-9,
+                "cut at {breakpoint} drifted by {:.3e} at t={local:.4}",
+                (actual - expected).norm()
+            );
+        }
+        // Both clamped ends land on the breakpoint they were cut at.
+        let corner = loop_spline.evaluate(offset);
+        assert!((opened.evaluate(0.0) - corner).norm() < 1.0e-9);
+        assert!((opened.evaluate(opened.period()) - corner).norm() < 1.0e-9);
+    }
+}
+
+/// A pre-existing corner must survive the cut, and an out-of-range breakpoint
+/// must be refused rather than wrapped.
+#[test]
+fn periodic_open_at_keeps_corners_and_rejects_bad_breakpoints() {
+    let polygon = PeriodicCubicSpline::polygon(vec![
+        Point2::new(-0.4, -0.3),
+        Point2::new(0.5, -0.3),
+        Point2::new(0.5, 0.4),
+        Point2::new(-0.4, 0.4),
+    ])
+    .unwrap();
+    let period = polygon.period();
+    let opened = polygon.clone().open_at(2).unwrap();
+    let offset = polygon.span_bounds(2).unwrap()[0];
+    for step in 0..=200 {
+        let local = period * step as f64 / 200.0;
+        let expected = polygon.evaluate((offset + local) % period);
+        assert!((opened.evaluate(local) - expected).norm() < 1.0e-9);
+    }
+    assert_eq!(
+        polygon.clone().open_at(polygon.intervals().len()),
+        Err(SplineError::Index)
+    );
+
+    // Cutting at a C2 knot inserts the corner without moving the curve.
+    let smooth = PeriodicCubicSpline::uniform(vec![
+        Point2::new(-0.3, 0.0),
+        Point2::new(0.0, -0.35),
+        Point2::new(0.35, 0.0),
+        Point2::new(0.0, 0.3),
+        Point2::new(-0.15, 0.2),
+    ])
+    .unwrap();
+    assert_eq!(smooth.continuity(1), Some(2));
+    let opened = smooth.clone().open_at(1).unwrap();
+    let offset = smooth.span_bounds(1).unwrap()[0];
+    let period = smooth.period();
+    for step in 0..=200 {
+        let local = period * step as f64 / 200.0;
+        let expected = smooth.evaluate((offset + local) % period);
+        assert!(
+            (opened.evaluate(local) - expected).norm() < 1.0e-9,
+            "C2 cut drifted at t={local:.4}"
+        );
+    }
+}

@@ -961,6 +961,44 @@ impl PeriodicCubicSpline {
         Ok(())
     }
 
+    /// Cuts the loop open at one breakpoint. The result's first span is the
+    /// breakpoint's, and both of its clamped ends sit on that breakpoint's
+    /// corner. The breakpoint is raised to C0 first, so the open curve
+    /// reproduces the loop exactly.
+    pub fn open_at(mut self, breakpoint: usize) -> Result<OpenCubicSpline, SplineError> {
+        if breakpoint >= self.intervals.len() {
+            return Err(SplineError::Index);
+        }
+        while self.multiplicities[breakpoint] < 3 {
+            self.increase_multiplicity(breakpoint)?;
+        }
+        let count = self.controls.len();
+        // The corner of a multiplicity-3 breakpoint is the control just before
+        // its own group, which is where the open form's clamped end belongs.
+        let group = self.multiplicities[..breakpoint]
+            .iter()
+            .map(|value| *value as usize)
+            .sum::<usize>();
+        let first = (group + count - 1) % count;
+        // One more control than the loop holds: the corner appears at both ends,
+        // exactly as `OpenCubicSpline::split` shares its seam control.
+        let controls = (0..=count)
+            .map(|offset| self.controls[(first + offset) % count])
+            .collect::<Vec<_>>();
+        let rotate = |values: &[f64]| {
+            (0..values.len())
+                .map(|index| values[(breakpoint + index) % values.len()])
+                .collect::<Vec<_>>()
+        };
+        let intervals = rotate(&self.intervals);
+        // The cut breakpoint becomes the clamped ends, so only the remaining
+        // breakpoints stay interior.
+        let multiplicities = (1..self.multiplicities.len())
+            .map(|index| self.multiplicities[(breakpoint + index) % self.multiplicities.len()])
+            .collect::<Vec<_>>();
+        OpenCubicSpline::new_with_multiplicities(controls, intervals, multiplicities)
+    }
+
     /// Removes one periodic knot copy only when doing so reproduces the current
     /// controls within `tolerance`.
     pub fn decrease_multiplicity(

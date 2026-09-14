@@ -11,7 +11,11 @@ pub const MAX_SEGMENT_PROBE_POINTS: usize = 512;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterialOverlay {
     Off,
+    /// Every face takes the colour of the material assigned to it.
     Regions,
+    /// Every face takes a categorical colour keyed by its stable `RegionId`, so
+    /// neighbouring subdomains that happen to share a material stay distinct.
+    Subdomains,
     Property(MaterialProperty),
 }
 
@@ -19,7 +23,8 @@ impl MaterialOverlay {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Off => "Off",
-            Self::Regions => "Material regions",
+            Self::Regions => "Materials",
+            Self::Subdomains => "Subdomains",
             Self::Property(property) => property.label(),
         }
     }
@@ -27,7 +32,8 @@ impl MaterialOverlay {
     pub const fn label_for(self, physics: PhysicsModel) -> &'static str {
         match self {
             Self::Off => "Off",
-            Self::Regions => "Material regions",
+            Self::Regions => "Materials",
+            Self::Subdomains => "Subdomains",
             Self::Property(property) => property.label_for(physics),
         }
     }
@@ -104,8 +110,31 @@ pub enum VectorOverlay {
 }
 
 impl VectorOverlay {
-    pub const fn label(self, physics: PhysicsModel) -> &'static str {
+    /// Modes that actually produce arrows for this physics skin. The mechanical
+    /// scalar field has no complementary transverse vector to reconstruct, so
+    /// only energy flow is offered there.
+    pub const fn choices(physics: PhysicsModel) -> &'static [Self] {
+        match physics {
+            PhysicsModel::Mechanical => &[Self::Off, Self::RelativeEnergyFlow],
+            PhysicsModel::Electromagnetic { .. } => &[
+                Self::Off,
+                Self::ComplementaryField,
+                Self::RelativeEnergyFlow,
+            ],
+        }
+    }
+
+    /// Maps a stored mode onto one this skin can draw. A scene saved in EM and
+    /// reopened as mechanical therefore shows energy flow instead of nothing.
+    pub const fn resolved(self, physics: PhysicsModel) -> Self {
         match (self, physics) {
+            (Self::ComplementaryField, PhysicsModel::Mechanical) => Self::RelativeEnergyFlow,
+            _ => self,
+        }
+    }
+
+    pub const fn label(self, physics: PhysicsModel) -> &'static str {
+        match (self.resolved(physics), physics) {
             (Self::Off, _) => "Off",
             (
                 Self::ComplementaryField,
@@ -119,7 +148,8 @@ impl VectorOverlay {
                     polarization: ElectromagneticPolarization::Te,
                 },
             ) => "Electric field E",
-            (Self::ComplementaryField, PhysicsModel::Mechanical) => "Vector field",
+            // Unreachable: `resolved` turns this into energy flow first.
+            (Self::ComplementaryField, PhysicsModel::Mechanical) => "Energy flow",
             (Self::RelativeEnergyFlow, PhysicsModel::Electromagnetic { .. }) => "Poynting flow",
             (Self::RelativeEnergyFlow, PhysicsModel::Mechanical) => "Energy flow",
         }
@@ -141,6 +171,7 @@ pub struct PresentationSettings {
     pub boundary_probes: bool,
     pub area_probes: bool,
     pub far_field_contour: bool,
+    pub probe_labels: bool,
     pub field: bool,
     pub field_gain: f32,
     pub vector_overlay: VectorOverlay,
@@ -186,6 +217,7 @@ impl Default for PresentationSettings {
             boundary_probes: true,
             area_probes: true,
             far_field_contour: true,
+            probe_labels: true,
             field: true,
             field_gain: 2.0,
             vector_overlay: VectorOverlay::Off,

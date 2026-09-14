@@ -51,9 +51,16 @@ The point source is manipulated directly through its viewport marker.
 
 The lower-right status control carries a compact performance summary (FPS, solver
 steps per second, DOFs, mesh size, and timestep). Detailed performance measurements
-are UI-only diagnostics in one draggable, scrollable window with Frame, Mesh,
-Handoff, and Solver sections. It includes a rolling frame-time plot and aggregate
-frame statistics. Mesh/solver errors open diagnostics and light the warning marker;
+are UI-only diagnostics in one draggable, scrollable window with Frame, Topology,
+Mesh, Handoff, and Solver sections. It includes a rolling frame-time plot and
+aggregate frame statistics. The sections follow one transaction end to end: the
+accepted token and the live preparation breakdown, the committed mesh and its
+adaptation, the three handoff waits (CPU preparation, draining the solver's
+requested steps, GPU upload) with what each transaction reused, and the running
+solver's throughput and outstanding step backlog. Preparation carries its own
+wall-clock buckets so the cooperative mesh phase and the synchronous assembly,
+transfer, probe, and far-field tail are distinguishable. Preparation and
+adaptation errors open diagnostics and light the warning marker;
 ordinary rebuilding does neither. Validation, mesh, and handoff stages share the
 middle of the status strip, while successful document and handoff actions appear as
 short-lived notices.

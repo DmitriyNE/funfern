@@ -9,6 +9,7 @@ use crate::document::{FarFieldSettings, ProbeId};
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyProbeDefinition, TopologyProbeTarget,
 };
+use bevy::platform::time::Instant;
 use funfern_core::*;
 use std::sync::Arc;
 
@@ -94,6 +95,30 @@ pub struct CompiledTopologyProbe {
     pub result: TopologyProbeCompilation,
 }
 
+/// Wall-clock breakdown of one candidate's CPU preparation. Meshing and volume
+/// sources are cooperative; assembly, transfer, probes, and far field currently
+/// run to completion inside the slice that reaches them, so their buckets show
+/// the synchronous tail directly.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TopologyPreparationTiming {
+    pub meshing_ms: f64,
+    pub assembly_ms: f64,
+    pub sources_ms: f64,
+    pub measurements_ms: f64,
+    pub slices: u32,
+    pub longest_slice_ms: f64,
+}
+
+impl TopologyPreparationTiming {
+    pub fn total_ms(self) -> f64 {
+        self.meshing_ms + self.assembly_ms + self.sources_ms + self.measurements_ms
+    }
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
+}
+
 #[derive(Clone, Debug)]
 pub struct PreparedTopology {
     pub bundle: Arc<AcceptedTopology>,
@@ -108,6 +133,7 @@ pub struct PreparedTopology {
     pub mesh_action: TopologyMeshUpdateAction,
     pub operator_reused: bool,
     pub adapted: bool,
+    pub timing: TopologyPreparationTiming,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,6 +192,7 @@ pub struct TopologyPreparationJob {
     operator_reused: bool,
     adapted: bool,
     done: bool,
+    timing: TopologyPreparationTiming,
 }
 
 impl TopologyPreparationJob {
@@ -248,6 +275,7 @@ impl TopologyPreparationJob {
             operator_reused,
             adapted: false,
             done: false,
+            timing: TopologyPreparationTiming::default(),
         })
     }
 
@@ -291,6 +319,7 @@ impl TopologyPreparationJob {
             operator_reused: false,
             adapted: true,
             done: false,
+            timing: TopologyPreparationTiming::default(),
         })
     }
 
@@ -308,6 +337,10 @@ impl TopologyPreparationJob {
             .map_or_else(|| self.phase.label(), TopologyMeshingJob::phase)
     }
 
+    pub fn timing(&self) -> TopologyPreparationTiming {
+        self.timing
+    }
+
     pub fn advance(
         &mut self,
         budget: usize,
@@ -315,8 +348,22 @@ impl TopologyPreparationJob {
         if self.done || budget == 0 {
             return None;
         }
+        let started = Instant::now();
+        let outcome = self.advance_slice(budget);
+        self.timing.slices = self.timing.slices.saturating_add(1);
+        self.timing.longest_slice_ms = self.timing.longest_slice_ms.max(elapsed_ms(started));
+        outcome
+    }
+
+    fn advance_slice(
+        &mut self,
+        budget: usize,
+    ) -> Option<Result<PreparedTopology, TopologyPreparationError>> {
         if let Some(job) = &mut self.mesh_job {
-            let result = job.advance(budget)?;
+            let started = Instant::now();
+            let result = job.advance(budget);
+            self.timing.meshing_ms += elapsed_ms(started);
+            let result = result?;
             self.mesh_job = None;
             match result {
                 Ok(mesh) => {
@@ -326,6 +373,7 @@ impl TopologyPreparationJob {
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             }
         }
+        let assembly_started = Instant::now();
         if self.operator.is_none() {
             let mesh = self.mesh.as_ref().unwrap().clone();
             let operator = match QuadraticWaveOperator::assemble_topology(
@@ -370,8 +418,12 @@ impl TopologyPreparationJob {
         {
             return Some(Err(self.fail(error)));
         }
+        self.timing.assembly_ms += elapsed_ms(assembly_started);
         if let Some(job) = &mut self.source_job {
-            let result = job.advance(budget)?;
+            let started = Instant::now();
+            let result = job.advance(budget);
+            self.timing.sources_ms += elapsed_ms(started);
+            let result = result?;
             self.source_job = None;
             match result {
                 Ok(sources) => self.volume_sources = Some(Arc::new(sources)),
@@ -379,6 +431,7 @@ impl TopologyPreparationJob {
             }
         }
         self.phase = TopologyPreparationPhase::CompilingMeasurements;
+        let measurements_started = Instant::now();
         let mesh = self.mesh.as_ref().unwrap().clone();
         let operator = self.operator.as_ref().unwrap().clone();
         let probes = compile_probes(&self.probes, &mesh, &operator, &self.bundle);
@@ -398,6 +451,7 @@ impl TopologyPreparationJob {
             .map(Arc::new)
             .map_err(|error| error.to_string())
         });
+        self.timing.measurements_ms += elapsed_ms(measurements_started);
         self.done = true;
         self.phase = TopologyPreparationPhase::Ready;
         Some(Ok(PreparedTopology {
@@ -413,6 +467,7 @@ impl TopologyPreparationJob {
             mesh_action: self.mesh_action,
             operator_reused: self.operator_reused,
             adapted: self.adapted,
+            timing: self.timing,
         }))
     }
 
@@ -544,6 +599,11 @@ impl TopologyRuntime {
 
     pub fn detail(&self) -> Option<&'static str> {
         self.preparing.as_ref().map(TopologyPreparationJob::detail)
+    }
+
+    /// Live breakdown of the candidate still being prepared.
+    pub fn preparing_timing(&self) -> Option<TopologyPreparationTiming> {
+        self.preparing.as_ref().map(TopologyPreparationJob::timing)
     }
 
     pub fn active(&self) -> Option<&Arc<PreparedTopology>> {

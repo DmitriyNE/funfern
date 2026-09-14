@@ -8,8 +8,9 @@ use crate::material_overlay::{
 use crate::recording::{self, DestinationRequest, RecordingEvent, RecordingSpec, VideoRecorder};
 use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, AreaProbeRecord, CurveProbeDisplay, CurveProbeInput,
-    CurveProbeRecord, FarFieldDisplay, FarFieldInput, FarFieldRecord, ProbeDisplay, PulseSettings,
-    WaveDisplay, WaveGpuRequest, WaveTransfer,
+    CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldDisplay, FarFieldInput, FarFieldRecord,
+    MAX_STEPS_PER_FRAME, PointProbeRecord, ProbeDisplay, PulseSettings, WaveDisplay,
+    WaveGpuRequest, WaveTransfer,
 };
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -22,12 +23,13 @@ use bevy_egui::{
 use funfern_app::document::{ProbeId, ProbeSamplingPreset, VectorOverlay};
 use funfern_app::topology_editor::{
     ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
-    TopologyBoundaryProbeTarget, TopologyDocument, TopologyEditor, TopologyProbeTarget,
+    TopologyBoundaryProbeTarget, TopologyDocument, TopologyEditor, TopologyProbeDefinition,
+    TopologyProbeTarget, TopologySpanRemoval,
 };
 use funfern_app::topology_persistence::{self as persistence, TopologyLoadCandidate};
 use funfern_app::topology_runtime::{
-    PreparedTopology, TopologyProbeCompilation, TopologyProbeStencil, TopologyRuntime,
-    TopologyToken,
+    PreparedTopology, TopologyPreparationTiming, TopologyProbeCompilation, TopologyProbeStencil,
+    TopologyRuntime, TopologyToken,
 };
 use funfern_app::topology_viewport::{
     AttachmentHit, RigidTransform, SampledTopologyGeometry, ScreenPoint, TopologyHandle,
@@ -48,6 +50,7 @@ const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const ATTACHMENT_SNAP_RADIUS: f64 = 14.0;
+const FRAME_HISTORY: usize = 120;
 const GIZMO_PADDING: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -165,7 +168,74 @@ enum DragGesture {
         operation: MarqueeOperation,
     },
     Source,
-    Probe(ProbeId),
+    MaterialFrame {
+        region: RegionId,
+        start: MaterialFrame,
+        hit: MaterialFrameGizmoHit,
+        grab: f64,
+    },
+    Probe {
+        hit: ProbeHit,
+        grab: Point2,
+        original: TopologyProbeTarget,
+    },
+}
+
+/// A deletion waiting on the survivor choice, because it merges two subdomains
+/// carrying different materials.
+#[derive(Clone, Debug)]
+enum PendingRemoval {
+    Curve(CurveId, Vec<RegionId>),
+    Spans(BTreeSet<CurveSpanId>, Vec<RegionId>),
+}
+
+impl PendingRemoval {
+    fn choices(&self) -> &[RegionId] {
+        match self {
+            Self::Curve(_, choices) | Self::Spans(_, choices) => choices,
+        }
+    }
+}
+
+/// The two grips of a region's material/source frame: its origin and the ring
+/// that turns its local axes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaterialFrameGizmoHit {
+    Origin,
+    Rotate,
+}
+
+const MATERIAL_FRAME_RADIUS: f32 = 42.0;
+
+/// What a pointer landed on within a probe. Endpoint and radius grips take
+/// priority over the body so a small probe stays reshapeable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeHit {
+    Point(ProbeId),
+    SegmentEndpoint(ProbeId, bool),
+    SegmentBody(ProbeId),
+    Boundary(ProbeId),
+    AreaDiskBody(ProbeId),
+    AreaDiskRadius(ProbeId),
+    AreaRegion(ProbeId),
+}
+
+impl ProbeHit {
+    const fn id(self) -> ProbeId {
+        match self {
+            Self::Point(id)
+            | Self::SegmentEndpoint(id, _)
+            | Self::SegmentBody(id)
+            | Self::Boundary(id)
+            | Self::AreaDiskBody(id)
+            | Self::AreaDiskRadius(id)
+            | Self::AreaRegion(id) => id,
+        }
+    }
+
+    const fn draggable(self) -> bool {
+        !matches!(self, Self::Boundary(_) | Self::AreaRegion(_))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,8 +294,136 @@ impl MarqueeContainment {
 
 #[derive(Clone, Debug)]
 struct ProbeTrace {
-    samples: VecDeque<(f64, f64)>,
+    samples: VecDeque<PointProbeRecord>,
     last_time: f64,
+}
+
+/// A quantity a line or boundary probe samples along its path. The GPU records
+/// all four every frame; the readout chooses which to draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineProbeQuantity {
+    Field,
+    Transverse,
+    Flux,
+    Energy,
+}
+
+impl LineProbeQuantity {
+    const ALL: [Self; 4] = [Self::Field, Self::Transverse, Self::Flux, Self::Energy];
+
+    const fn label_for(self, physics: PhysicsModel) -> &'static str {
+        match self {
+            Self::Field => primary_field_label(physics),
+            Self::Transverse => transverse_field_magnitude_label(physics),
+            Self::Flux => match physics {
+                PhysicsModel::Mechanical => "Normal energy flux",
+                PhysicsModel::Electromagnetic { .. } => "Normal Poynting flux",
+            },
+            Self::Energy => "Energy density",
+        }
+    }
+
+    const fn color(self) -> Color32 {
+        match self {
+            Self::Field => SELECT,
+            Self::Transverse => Color32::from_rgb(188, 139, 255),
+            Self::Flux => TEAL,
+            Self::Energy => GOLD,
+        }
+    }
+
+    const fn offset(self) -> usize {
+        match self {
+            Self::Field => 0,
+            Self::Transverse => 3,
+            Self::Flux => 6,
+            Self::Energy => 9,
+        }
+    }
+
+    const fn applies(self, physics: PhysicsModel) -> bool {
+        !matches!(self, Self::Transverse) || matches!(physics, PhysicsModel::Electromagnetic { .. })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineProbeRepresentation {
+    Arclength,
+    Waterfall,
+    Integral,
+}
+
+impl LineProbeRepresentation {
+    const ALL: [Self; 3] = [Self::Arclength, Self::Waterfall, Self::Integral];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Arclength => "vs s",
+            Self::Waterfall => "Waterfall",
+            Self::Integral => "∫ vs t",
+        }
+    }
+
+    const fn offset(self) -> usize {
+        match self {
+            Self::Arclength => 0,
+            Self::Waterfall => 1,
+            Self::Integral => 2,
+        }
+    }
+}
+
+/// Per-readout presentation: which traces are drawn and the shared time window
+/// every trace in that window pans and zooms together.
+#[derive(Clone, Debug)]
+struct ProbeViewState {
+    live: bool,
+    end_time: f64,
+    span: f64,
+    field: bool,
+    secondary_field: bool,
+    poynting: bool,
+    energy: bool,
+    area_mean_field: bool,
+    area_rms_field: bool,
+    area_rms_transverse: bool,
+    area_mean_energy: bool,
+    area_total_energy: bool,
+    line_plots: [bool; 12],
+    far_waterfall: bool,
+    far_polar: bool,
+    far_power: bool,
+    waterfall_gain: f32,
+}
+
+impl ProbeViewState {
+    fn new(span: f64) -> Self {
+        Self {
+            live: true,
+            end_time: 0.0,
+            span: span.min(2.0),
+            field: true,
+            secondary_field: false,
+            poynting: false,
+            energy: true,
+            area_mean_field: false,
+            area_rms_field: true,
+            area_rms_transverse: false,
+            area_mean_energy: false,
+            area_total_energy: true,
+            // Field versus arclength and its waterfall, plus the two integrals.
+            line_plots: [
+                true, true, false, // primary component
+                false, false, false, // transverse magnitude
+                false, false, true, // normal flux
+                false, false, true, // energy density
+            ],
+            far_waterfall: true,
+            far_polar: true,
+            far_power: true,
+            waterfall_gain: 1.0,
+        }
+    }
 }
 
 struct CurveTrace {
@@ -275,11 +473,30 @@ impl Default for ProbeTrace {
     }
 }
 
+/// One completed geometry-to-GPU transaction, split into the three waits the
+/// user can actually act on: CPU preparation, draining the solver's requested
+/// steps, and the GPU upload itself.
+#[derive(Clone, Copy, Debug)]
+struct HandoffRecord {
+    prepare_ms: f64,
+    drain_ms: f64,
+    upload_ms: f64,
+    timing: TopologyPreparationTiming,
+    action: TopologyMeshUpdateAction,
+    operator_reused: bool,
+    adapted: bool,
+    transferred: bool,
+    fresh: bool,
+    degrees_of_freedom: usize,
+    triangles: usize,
+}
+
 struct Uploading {
     token: TopologyToken,
     generation: u64,
     fresh: bool,
     time_offset: f64,
+    degrees_of_freedom: usize,
 }
 
 #[derive(Resource)]
@@ -294,6 +511,7 @@ pub struct Playground {
     draw: Option<DrawGesture>,
     drag: Option<DragGesture>,
     touch_navigation: bool,
+    touch_active: bool,
     suppress_touch_click: bool,
     center: Point2,
     scale: f64,
@@ -306,11 +524,13 @@ pub struct Playground {
     transform_rotation_degrees: f64,
     transform_scale: f64,
     gizmo_pivot: Option<(BTreeSet<TopologySpanTarget>, Point2)>,
+    pending_removal: Option<PendingRemoval>,
     material_selection: MaterialId,
     region_selection: RegionId,
     material_edit: Option<Material>,
     material_formula_edits: BTreeMap<(u64, u8), String>,
     material_formula_errors: BTreeMap<(u64, u8), String>,
+    material_color_edit: Option<(MaterialId, [u8; 3])>,
     new_separator_material: MaterialId,
     mesh_edge: f64,
     requested_edge: f64,
@@ -334,6 +554,14 @@ pub struct Playground {
     probe_windows: BTreeSet<ProbeId>,
     far_field_window: bool,
     probe_traces: BTreeMap<ProbeId, ProbeTrace>,
+    probe_views: BTreeMap<ProbeId, ProbeViewState>,
+    probe_status: BTreeMap<ProbeId, String>,
+    probe_metrics: BTreeMap<ProbeId, (f64, bool)>,
+    probe_anchors: BTreeMap<ProbeId, Point2>,
+    probe_metadata_token: Option<(TopologyToken, u64)>,
+    probe_name_edit: Option<(ProbeId, String)>,
+    probe_history_seconds: f64,
+    far_field_view: ProbeViewState,
     probe_readback: u64,
     curve_probe_readback: u64,
     area_probe_readback: u64,
@@ -383,6 +611,17 @@ pub struct Playground {
     amr_adaptation_job: Option<MeshAdaptationJob>,
     amr_adaptation_state: Option<MeshAdaptationState>,
     amr_pending_state: Option<MeshAdaptationState>,
+    amr_report: Option<MeshAdaptationReport>,
+    gpu_status: &'static str,
+    gpu_dispatches: u64,
+    step_backlog: u64,
+    diagnostics_open: bool,
+    diagnostics_warned: bool,
+    frame_history: VecDeque<f32>,
+    handoff_requested: Option<Instant>,
+    handoff_ready: Option<Instant>,
+    handoff_upload: Option<Instant>,
+    last_handoff: Option<HandoffRecord>,
     ready: bool,
 }
 
@@ -404,6 +643,7 @@ impl Default for Playground {
             draw: None,
             drag: None,
             touch_navigation: false,
+            touch_active: false,
             suppress_touch_click: false,
             center: Point2::default(),
             scale: 300.0,
@@ -416,11 +656,13 @@ impl Default for Playground {
             transform_rotation_degrees: 0.0,
             transform_scale: 1.0,
             gizmo_pivot: None,
+            pending_removal: None,
             material_selection: DEFAULT_MATERIAL,
             region_selection: BACKGROUND_REGION,
             material_edit: None,
             material_formula_edits: BTreeMap::new(),
             material_formula_errors: BTreeMap::new(),
+            material_color_edit: None,
             new_separator_material: DEFAULT_MATERIAL,
             mesh_edge: 0.08,
             requested_edge: f64::NAN,
@@ -444,6 +686,14 @@ impl Default for Playground {
             probe_windows: BTreeSet::new(),
             far_field_window: false,
             probe_traces: BTreeMap::new(),
+            probe_views: BTreeMap::new(),
+            probe_status: BTreeMap::new(),
+            probe_metrics: BTreeMap::new(),
+            probe_anchors: BTreeMap::new(),
+            probe_metadata_token: None,
+            probe_name_edit: None,
+            probe_history_seconds: 10.0,
+            far_field_view: ProbeViewState::new(10.0),
             probe_readback: 0,
             curve_probe_readback: 0,
             area_probe_readback: 0,
@@ -493,6 +743,17 @@ impl Default for Playground {
             amr_adaptation_job: None,
             amr_adaptation_state: None,
             amr_pending_state: None,
+            amr_report: None,
+            gpu_status: "loading",
+            gpu_dispatches: 0,
+            step_backlog: 0,
+            diagnostics_open: false,
+            diagnostics_warned: false,
+            frame_history: VecDeque::with_capacity(FRAME_HISTORY),
+            handoff_requested: None,
+            handoff_ready: None,
+            handoff_upload: None,
+            last_handoff: None,
             ready: false,
         }
     }
@@ -573,6 +834,7 @@ impl Playground {
         }
         self.drag = None;
         self.draw = None;
+        self.pending_removal = None;
         self.pulse_mode = false;
         self.probe_mode = None;
         self.invalidate_samples();
@@ -591,6 +853,7 @@ impl Playground {
         self.selection = TopologySelection::None;
         self.selected_probe = None;
         self.draw = None;
+        self.pending_removal = None;
         self.requested_revision = None;
         self.reset_requested = fresh;
         self.invalidate_samples();
@@ -1129,6 +1392,104 @@ impl Playground {
             }
         }
     }
+    /// Presents the survivor choice a divider removal needs, and the closed-curve
+    /// Subdomain/Hole switch. Both act on the complete curve selection.
+    fn topology_actions(&mut self, ui: &mut egui::Ui, curve_spans: &BTreeSet<CurveSpanId>) {
+        if self.pending_removal.as_ref().is_some_and(|pending| {
+            let geometry = &self.editor.document.model.draft.geometry;
+            match pending {
+                PendingRemoval::Curve(curve, _) => geometry.curve(*curve).is_none(),
+                PendingRemoval::Spans(spans, _) => !spans.iter().all(|span| {
+                    geometry
+                        .curves
+                        .iter()
+                        .any(|curve| curve.spans.iter().any(|candidate| candidate.id == *span))
+                }),
+            }
+        }) {
+            // Undo, a reload, or another edit moved the geometry out from under
+            // the question, so drop it rather than act on something else.
+            self.pending_removal = None;
+        }
+        if let Some(pending) = self.pending_removal.clone() {
+            ui.separator();
+            ui.label("This deletion merges two subdomains.");
+            ui.horizontal_wrapped(|ui| {
+                for region in pending.choices().to_vec() {
+                    let name = self
+                        .editor
+                        .document
+                        .model
+                        .draft
+                        .region(region)
+                        .and_then(|region| {
+                            self.editor.document.model.draft.material(region.material)
+                        })
+                        .map_or_else(|| format!("Region {}", region.0), |m| m.name.clone());
+                    if ui.button(format!("Keep {name}")).clicked() {
+                        let outcome = match &pending {
+                            PendingRemoval::Curve(curve, _) => {
+                                self.editor.remove_curve(*curve, Some(region)).map(|_| None)
+                            }
+                            PendingRemoval::Spans(spans, _) => {
+                                self.editor.remove_spans(spans, Some(region)).map(Some)
+                            }
+                        };
+                        match outcome {
+                            Ok(removal) => {
+                                self.pending_removal = None;
+                                self.selection = TopologySelection::None;
+                                self.invalidate_samples();
+                                if let Some(removal) = removal {
+                                    self.report_span_removal(&removal);
+                                }
+                            }
+                            Err(error) => self.notify(error),
+                        }
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    self.pending_removal = None;
+                }
+            });
+            return;
+        }
+        let Some(curve) = self.selected_complete_curves(curve_spans).first().copied() else {
+            return;
+        };
+        let Some(current) = self.editor.enclosed_region(curve) else {
+            return;
+        };
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Inside");
+            let hole = ui
+                .add(egui::Button::new("Hole").selected(current.is_none()))
+                .on_hover_text("Remove the interior and give it a wall condition");
+            if hole.clicked()
+                && current.is_some()
+                && let Err(error) = self.editor.set_enclosed_disposition(curve, None)
+            {
+                self.notify(error);
+            }
+            let material = self.material_selection;
+            let name = self
+                .editor
+                .document
+                .model
+                .draft
+                .material(material)
+                .map_or_else(|| "Subdomain".to_owned(), |m| m.name.clone());
+            if ui
+                .add(egui::Button::new(name).selected(current.is_some()))
+                .on_hover_text("Keep the interior and give it the selected material")
+                .clicked()
+                && let Err(error) = self.editor.set_enclosed_disposition(curve, Some(material))
+            {
+                self.notify(error);
+            }
+        });
+    }
     fn span_inspector(&mut self, ui: &mut egui::Ui, spans: BTreeSet<TopologySpanTarget>) {
         ui.label(format!(
             "{} span{}",
@@ -1290,9 +1651,14 @@ impl Playground {
                         Err(error) => self.notify(error),
                     }
                 }
+                let contiguous = self.editor.selection_is_contiguous(&curve_spans);
                 if ui
-                    .button("Straighten selection")
-                    .on_hover_text("Make each contiguous C0-bounded selection one chord")
+                    .add_enabled(contiguous, egui::Button::new("Straighten selection"))
+                    .on_hover_text(if contiguous {
+                        "Lay the whole selected run on one straight chord"
+                    } else {
+                        "Select one contiguous run of spans on each curve"
+                    })
                     .clicked()
                 {
                     match self.editor.straighten_span_sections(&curve_spans) {
@@ -1311,6 +1677,7 @@ impl Playground {
                     }
                 }
             });
+            self.topology_actions(ui, &curve_spans);
             let pivot = self
                 .gizmo_pivot_for(&spans, &curve_spans)
                 .unwrap_or_default();
@@ -1596,22 +1963,13 @@ impl Playground {
         ui.checkbox(&mut p.adaptation_target, "Adaptation target");
         ui.checkbox(&mut p.field, "Field");
         ui.add(egui::Slider::new(&mut p.field_gain, 0.25..=12.0).text("Field intensity"));
+        let physics = self.editor.document.model.draft.physics;
+        p.vector_overlay = p.vector_overlay.resolved(physics);
         egui::ComboBox::from_id_salt("vector-overlay")
-            .selected_text(
-                p.vector_overlay
-                    .label(self.editor.document.model.draft.physics),
-            )
+            .selected_text(p.vector_overlay.label(physics))
             .show_ui(ui, |ui| {
-                for mode in [
-                    VectorOverlay::Off,
-                    VectorOverlay::ComplementaryField,
-                    VectorOverlay::RelativeEnergyFlow,
-                ] {
-                    ui.selectable_value(
-                        &mut p.vector_overlay,
-                        mode,
-                        mode.label(self.editor.document.model.draft.physics),
-                    );
+                for mode in VectorOverlay::choices(physics) {
+                    ui.selectable_value(&mut p.vector_overlay, *mode, mode.label(physics));
                 }
             });
         if p.vector_overlay != VectorOverlay::Off {
@@ -1631,11 +1989,9 @@ impl Playground {
             )
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut p.material_overlay, MaterialOverlay::Off, "Off");
-                ui.selectable_value(
-                    &mut p.material_overlay,
-                    MaterialOverlay::Regions,
-                    "Subdomains",
-                );
+                for overlay in [MaterialOverlay::Regions, MaterialOverlay::Subdomains] {
+                    ui.selectable_value(&mut p.material_overlay, overlay, overlay.label());
+                }
                 for property in [
                     MaterialProperty::Density,
                     MaterialProperty::Stiffness,
@@ -1676,9 +2032,11 @@ impl Playground {
         ui.separator();
         ui.label("Probes");
         ui.checkbox(&mut p.point_probes, "Points");
-        ui.checkbox(&mut p.line_probes, "Curves");
+        ui.checkbox(&mut p.line_probes, "Lines");
+        ui.checkbox(&mut p.boundary_probes, "Boundaries");
         ui.checkbox(&mut p.area_probes, "Areas");
         ui.checkbox(&mut p.far_field_contour, "Far field");
+        ui.checkbox(&mut p.probe_labels, "Probe names");
     }
     fn simulation_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Simulation");
@@ -1817,6 +2175,14 @@ impl Playground {
         let materials = self.editor.document.model.draft.materials.clone();
         for region in regions {
             ui.horizontal(|ui| {
+                let (swatch, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    swatch,
+                    2.0,
+                    subdomain_color(&self.editor.document.model.draft, region.id, 1.0),
+                );
+
                 if ui
                     .selectable_label(
                         self.region_selection == region.id,
@@ -1876,30 +2242,33 @@ impl Playground {
                 signal: TimeSignal::harmonic(0.0, 12.0, 3.0, 0.0),
             });
             let mut source_changed = ui.checkbox(&mut source.enabled, "Volume source").changed();
-            if existing.is_some() || source.enabled {
-                ui.add_enabled_ui(source.enabled, |ui| {
-                    let before = source.profile.clone();
-                    material_scalar_editor(
-                        ui,
-                        (u64::MAX - region.id.0, 4),
-                        "Profile",
-                        &mut source.profile,
-                        &source.parameters,
-                        0.0,
-                        &mut self.material_formula_edits,
-                        &mut self.material_formula_errors,
-                    );
-                    source_changed |= source.profile != before;
-                    ui.label("Signal");
-                    let before = source.signal;
-                    edit_time_signal(ui, &mut source.signal);
-                    source_changed |= source.signal != before;
-                });
-                if source_changed
-                    && let Err(error) = self.editor.set_volume_source(region.id, Some(source))
-                {
-                    self.notify(error);
-                }
+            // The editors follow the checkbox exactly. Turning the source off
+            // keeps its profile and signal in the document, so turning it back
+            // on restores what was there.
+            if source.enabled {
+                let before = source.profile.clone();
+                material_scalar_editor(
+                    ui,
+                    (u64::MAX - region.id.0, 4),
+                    "Profile",
+                    &mut source.profile,
+                    &source.parameters,
+                    0.0,
+                    &mut self.material_formula_edits,
+                    &mut self.material_formula_errors,
+                );
+                source_changed |= source.profile != before;
+                ui.label("Signal");
+                let before = source.signal;
+                edit_time_signal(ui, &mut source.signal);
+                source_changed |= source.signal != before;
+            }
+            // Committed outside the block so unchecking is recorded rather than
+            // springing back on the next frame.
+            if source_changed
+                && let Err(error) = self.editor.set_volume_source(region.id, Some(source))
+            {
+                self.notify(error);
             }
 
             let uses_frame = self
@@ -1909,7 +2278,9 @@ impl Playground {
                 .draft
                 .material(region.material)
                 .is_some_and(Material::uses_frame)
-                || existing.as_ref().is_some_and(VolumeSource::varying);
+                || existing
+                    .as_ref()
+                    .is_some_and(|source| source.enabled && source.varying());
             if uses_frame {
                 ui.separator();
                 ui.label("Profile placement");
@@ -1983,15 +2354,46 @@ impl Playground {
             }
         });
         for material in &materials {
-            if ui
-                .selectable_label(self.material_selection == material.id, &material.name)
-                .clicked()
-            {
-                self.material_selection = material.id;
-                self.material_edit = None;
-                self.material_formula_edits.clear();
-                self.material_formula_errors.clear();
-            }
+            ui.horizontal(|ui| {
+                // `color_edit_button_srgb` reports a change on every frame of a
+                // drag inside its popup, so stage the value and commit it once
+                // the pointer is released.
+                let mut color = self
+                    .material_color_edit
+                    .filter(|(id, _)| *id == material.id)
+                    .map_or(material.color, |(_, color)| color);
+                let response = ui
+                    .color_edit_button_srgb(&mut color)
+                    .on_hover_text("Colour used by the Materials overlay");
+                if response.changed() {
+                    self.material_color_edit = Some((material.id, color));
+                }
+                if let Some((id, staged)) = self.material_color_edit
+                    && id == material.id
+                    && !ui.ctx().egui_is_using_pointer()
+                {
+                    self.material_color_edit = None;
+                    if staged != material.color {
+                        let mut updated = material.clone();
+                        updated.color = staged;
+                        if let Err(error) = self.editor.update_material(updated) {
+                            self.notify(error);
+                        }
+                    }
+                }
+                if ui
+                    .selectable_label(self.material_selection == material.id, &material.name)
+                    .clicked()
+                {
+                    self.material_selection = material.id;
+                    self.material_edit = None;
+                    self.material_formula_edits.clear();
+                    self.material_formula_errors.clear();
+                }
+                if material.id == DEFAULT_MATERIAL {
+                    ui.small("ambient");
+                }
+            });
         }
         if self
             .material_edit
@@ -2201,6 +2603,7 @@ impl Playground {
                 boundary_target.is_some(),
                 egui::Button::new("+ Selected boundary"),
             )
+            .on_hover_text("Create a boundary probe from one span selection on one curve")
             .clicked()
             && let Some(target) = boundary_target
         {
@@ -2210,30 +2613,51 @@ impl Playground {
                 TopologyProbeTarget::Boundary(target),
             ) {
                 Ok(id) => {
+                    self.selected_probe = Some(id);
                     self.probe_windows.insert(id);
                     self.notify("Boundary probe added");
                 }
                 Err(error) => self.notify(error),
             }
         }
+        ui.add(
+            egui::Slider::new(&mut self.probe_history_seconds, 2.0..=60.0)
+                .logarithmic(true)
+                .text("History (sim s)"),
+        )
+        .on_hover_text("Longest time window a readout can show");
+        ui.separator();
         let probes = self.editor.document.model.probes.clone();
         for mut probe in probes {
             ui.horizontal(|ui| {
-                let response =
-                    ui.selectable_label(self.selected_probe == Some(probe.id), &probe.name);
-                if response.clicked() {
+                let open = self.probe_windows.contains(&probe.id);
+                if ui
+                    .selectable_label(self.selected_probe == Some(probe.id), &probe.name)
+                    .clicked()
+                {
                     self.selected_probe = Some(probe.id);
                     self.selection = TopologySelection::None;
                 }
-                if response.double_clicked() {
-                    self.probe_windows.insert(probe.id);
-                }
-                if ui.checkbox(&mut probe.enabled, "Live").changed() {
-                    if let Err(error) = self.editor.update_probe(probe.clone()) {
-                        self.notify(error)
+                if ui
+                    .add(egui::Button::new("Plot").selected(open))
+                    .on_hover_text("Show or hide this probe's readout window")
+                    .clicked()
+                {
+                    if open {
+                        self.probe_windows.remove(&probe.id);
+                    } else {
+                        self.probe_windows.insert(probe.id);
                     }
                 }
-                if ui.small_button("×").clicked() {
+                if ui
+                    .checkbox(&mut probe.enabled, "Live")
+                    .on_hover_text("Record samples from the solver")
+                    .changed()
+                    && let Err(error) = self.editor.update_probe(probe.clone())
+                {
+                    self.notify(error);
+                }
+                if ui.small_button("×").on_hover_text("Delete").clicked() {
                     if let Err(error) = self.editor.delete_probe(probe.id) {
                         self.notify(error)
                     } else {
@@ -2244,6 +2668,12 @@ impl Playground {
                     }
                 }
             });
+            if let Some(status) = self.probe_status.get(&probe.id) {
+                ui.small(egui::RichText::new(status).color(GOLD));
+            }
+        }
+        if let Some(id) = self.selected_probe {
+            self.selected_probe_editor(ui, id);
         }
         ui.separator();
         let mut far = self.editor.document.model.far_field;
@@ -2270,6 +2700,132 @@ impl Playground {
             if let Err(error) = self.editor.set_far_field(far) {
                 self.notify(error)
             }
+        }
+    }
+    /// Name, color, and target settings for the selected probe. The name is
+    /// committed when the field loses focus so every keystroke is not a
+    /// separate document revision.
+    fn selected_probe_editor(&mut self, ui: &mut egui::Ui, id: ProbeId) {
+        let Some(mut probe) = self
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .find(|probe| probe.id == id)
+            .cloned()
+        else {
+            self.selected_probe = None;
+            self.probe_name_edit = None;
+            return;
+        };
+        ui.separator();
+        ui.label(match probe.target {
+            TopologyProbeTarget::Point(_) => "Selected point probe",
+            TopologyProbeTarget::Segment { .. } => "Selected line probe",
+            TopologyProbeTarget::Boundary(_) => "Selected boundary probe",
+            TopologyProbeTarget::AreaDisk { .. } => "Selected disk probe",
+            TopologyProbeTarget::AreaRegion(_) => "Selected region probe",
+        });
+        if !matches!(self.probe_name_edit.as_ref(), Some((candidate, _)) if *candidate == id) {
+            self.probe_name_edit = Some((id, probe.name.clone()));
+        }
+        let mut commit_name = None;
+        if let Some((_, name)) = self.probe_name_edit.as_mut() {
+            let response = ui.add(egui::TextEdit::singleline(name).hint_text("Probe name"));
+            if (response.lost_focus()
+                || response
+                    .ctx
+                    .input(|input| input.key_pressed(egui::Key::Enter)))
+                && !name.trim().is_empty()
+                && name.len() <= 64
+            {
+                commit_name = Some(name.trim().to_owned());
+            }
+        }
+        if let Some(name) = commit_name
+            && name != probe.name
+        {
+            probe.name = name;
+            if let Err(error) = self.editor.update_probe(probe.clone()) {
+                self.notify(error);
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("Color");
+            if ui.color_edit_button_srgb(&mut probe.color).changed()
+                && let Err(error) = self.editor.update_probe(probe.clone())
+            {
+                self.notify(error);
+            }
+        });
+        let mut changed = false;
+        match &mut probe.target {
+            TopologyProbeTarget::Segment { start, end, preset } => {
+                changed |= sampling_preset_picker(ui, id, preset);
+                if ui
+                    .button("Swap ends")
+                    .on_hover_text("Reverse the arclength axis and the normal flux sign")
+                    .clicked()
+                {
+                    std::mem::swap(start, end);
+                    changed = true;
+                }
+            }
+            TopologyProbeTarget::Boundary(target) => {
+                changed |= sampling_preset_picker(ui, id, &mut target.preset);
+                let mut side = target.side;
+                ui.horizontal(|ui| {
+                    ui.label("Trace side");
+                    for (value, label) in [
+                        (CurveTraceSide::Left, "Left"),
+                        (CurveTraceSide::Right, "Right"),
+                    ] {
+                        if ui.selectable_label(side == value, label).clicked() {
+                            side = value;
+                        }
+                    }
+                });
+                if side != target.side {
+                    target.side = side;
+                    changed = true;
+                }
+                let mut reversed = target.reversed;
+                if ui
+                    .checkbox(&mut reversed, "Reverse direction")
+                    .on_hover_text("Sample the path against increasing curve parameter")
+                    .changed()
+                {
+                    target.reversed = reversed;
+                    changed = true;
+                }
+                ui.small(format!("{} spans", target.spans.len()));
+            }
+            TopologyProbeTarget::AreaDisk { radius, .. } => {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(radius)
+                            .speed(0.005)
+                            .range(0.001..=10.0)
+                            .prefix("Radius "),
+                    )
+                    .changed();
+            }
+            TopologyProbeTarget::Point(_) | TopologyProbeTarget::AreaRegion(_) => {}
+        }
+        if changed && let Err(error) = self.editor.update_probe(probe) {
+            self.notify(error);
+        }
+        if let Some((length, closed)) = self.probe_metrics.get(&id).copied()
+            && length > 0.0
+        {
+            ui.small(format!(
+                "Path length {length:.4}{}",
+                if closed { " · closed" } else { "" }
+            ));
+        }
+        if ui.button("Clear recorded samples").clicked() {
+            self.clear_probe_trace(id);
         }
     }
     fn viewport(&mut self, ui: &mut egui::Ui, display: &WaveDisplay) -> Rect {
@@ -2312,6 +2868,7 @@ impl Playground {
             self.draw_sampled(&painter, viewport, sampled, color, 2.0, true);
         }
         self.draw_markers(&painter, viewport);
+        self.draw_material_frame(&painter, viewport);
         self.draw_transform_gizmo(&painter, viewport);
         if let Some(logo) = &self.logo_texture {
             let size = egui::vec2(140.0, 57.0);
@@ -2482,9 +3039,13 @@ impl Playground {
                 })
                 .unwrap_or(Color32::TRANSPARENT);
             let base = match presentation.material_overlay {
-                MaterialOverlay::Off => Color32::TRANSPARENT,
+                MaterialOverlay::Off | MaterialOverlay::Property(_) => Color32::TRANSPARENT,
                 MaterialOverlay::Regions => region_color,
-                MaterialOverlay::Property(_) => Color32::TRANSPARENT,
+                MaterialOverlay::Subdomains => subdomain_color(
+                    &self.editor.document.model.draft,
+                    triangle.region,
+                    presentation.material_overlay_opacity,
+                ),
             };
             if base != Color32::TRANSPARENT {
                 painter.add(egui::Shape::convex_polygon(
@@ -2531,7 +3092,9 @@ impl Playground {
             }
             painter.add(egui::Shape::mesh(field));
         }
-        let mode = presentation.vector_overlay;
+        let mode = presentation
+            .vector_overlay
+            .resolved(active.bundle.authored.physics);
         if mode != VectorOverlay::Off {
             let samples = vector_overlay_samples(
                 &active.bundle.authored,
@@ -2556,11 +3119,14 @@ impl Playground {
         completed_steps: u64,
     ) {
         let settings = self.editor.document.presentation;
-        if self.vector_overlay_mode != settings.vector_overlay {
+        let mode = settings
+            .vector_overlay
+            .resolved(self.editor.document.model.draft.physics);
+        if self.vector_overlay_mode != mode {
             self.vector_overlay_average.clear();
             self.vector_overlay_step = u64::MAX;
             self.vector_overlay_peak_reference = 0.0;
-            self.vector_overlay_mode = settings.vector_overlay;
+            self.vector_overlay_mode = mode;
         }
         if settings.vector_overlay_smoothed {
             if self.vector_overlay_step != completed_steps {
@@ -2652,25 +3218,18 @@ impl Playground {
                 }
             }
         }
-        for span in &sampled.spans {
-            let selected = matches!(&self.selection,TopologySelection::Spans(spans) if spans.contains(&span.target));
-            let stroke = Stroke::new(
-                if selected { width + 2.0 } else { width },
-                if selected { SELECT } else { color },
-            );
-            for segment in span.samples.windows(2) {
-                painter.line_segment(
-                    [
-                        self.screen(segment[0].point, r),
-                        self.screen(segment[1].point, r),
-                    ],
-                    stroke,
-                );
-            }
-            if interactive
-                && self.editor.document.presentation.boundary_conditions
-                && let Some((left, right)) = self.span_condition_colors(span.target)
-            {
+        // The boundary-law strokes are a diagnostic layer: draw them first and
+        // push them clear of a selected span so the selection always reads above.
+        if interactive && self.editor.document.presentation.boundary_conditions {
+            for span in &sampled.spans {
+                let Some((left, right)) = self.span_condition_colors(span.target) else {
+                    continue;
+                };
+                let offset = if self.span_selected(span.target) {
+                    width * 0.5 + 4.0
+                } else {
+                    2.5
+                };
                 for segment in span.samples.windows(2) {
                     let a = self.screen(segment[0].point, r);
                     let b = self.screen(segment[1].point, r);
@@ -2678,30 +3237,78 @@ impl Playground {
                     if tangent.length_sq() <= f32::EPSILON {
                         continue;
                     }
-                    let normal = egui::vec2(-tangent.y, tangent.x).normalized() * 2.5;
+                    let normal = egui::vec2(-tangent.y, tangent.x).normalized() * offset;
                     painter.line_segment([a + normal, b + normal], Stroke::new(1.4, left));
                     painter.line_segment([a - normal, b - normal], Stroke::new(1.4, right));
                 }
             }
         }
+        for span in &sampled.spans {
+            let selected = interactive && self.span_selected(span.target);
+            let points = span
+                .samples
+                .iter()
+                .map(|sample| self.screen(sample.point, r))
+                .collect::<Vec<_>>();
+            if points.len() < 2 {
+                continue;
+            }
+            if selected {
+                // A dark halo keeps the blue readable over the law strokes and
+                // over a bright field.
+                painter.add(egui::Shape::line(
+                    points.clone(),
+                    Stroke::new(width + 4.5, Color32::from_rgba_unmultiplied(8, 13, 18, 190)),
+                ));
+            }
+            painter.add(egui::Shape::line(
+                points,
+                Stroke::new(
+                    if selected { width + 2.5 } else { width },
+                    if selected { SELECT } else { color },
+                ),
+            ));
+        }
         if interactive && self.editor.document.presentation.handles {
+            let selected_spans = self.selection.spans();
             for handle in &sampled.handles {
-                let selected = matches!(self.selection,TopologySelection::Handle(value) if value==handle.handle);
-                let p = self.screen(handle.point, r);
-                let (radius, fill) = match handle.handle {
-                    TopologyHandle::Junction(_) => (5.0, GOLD),
-                    _ => (
-                        3.5,
-                        if selected {
-                            SELECT
-                        } else {
-                            Color32::from_gray(205)
-                        },
-                    ),
+                let active = matches!(self.selection, TopologySelection::Handle(value) if value == handle.handle);
+                let owned = match handle.handle {
+                    TopologyHandle::Control { curve, .. } => selected_spans.is_some_and(|spans| {
+                        sampled
+                            .spans
+                            .iter()
+                            .any(|span| span.curve == Some(curve) && spans.contains(&span.target))
+                    }),
+                    TopologyHandle::Junction(_) => false,
                 };
-                painter.circle_filled(p, radius, fill);
+                let point = self.screen(handle.point, r);
+                let junction = matches!(handle.handle, TopologyHandle::Junction(_));
+                let radius = match (junction, active) {
+                    (true, true) => 7.0,
+                    (true, false) => 5.5,
+                    (false, true) => 6.0,
+                    (false, false) => 4.0,
+                };
+                let fill = if active || junction {
+                    GOLD
+                } else {
+                    Color32::from_rgb(23, 34, 44)
+                };
+                let ring = if active || owned {
+                    SELECT
+                } else if junction {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgb(106, 133, 150)
+                };
+                painter.circle_filled(point, radius, fill);
+                painter.circle_stroke(point, radius, Stroke::new(1.5, ring));
             }
         }
+    }
+    fn span_selected(&self, target: TopologySpanTarget) -> bool {
+        matches!(&self.selection, TopologySelection::Spans(spans) if spans.contains(&target))
     }
     fn span_condition_colors(&self, target: TopologySpanTarget) -> Option<(Color32, Color32)> {
         match target {
@@ -2729,96 +3336,202 @@ impl Playground {
                 }),
         }
     }
-    fn draw_markers(&self, painter: &egui::Painter, r: Rect) {
-        let p = self.editor.document.presentation;
-        let source = self.editor.document.model.source;
-        if source.enabled {
-            let s = self.screen(source.position, r);
-            painter.circle(
-                s,
-                6.0,
-                Color32::from_rgb(246, 154, 70),
-                Stroke::new(1.5, Color32::WHITE),
-            );
-        }
+    /// Probe markers and their names. Sizes and strokes follow the pre-topology
+    /// viewport so every probe keeps a grabbable badge and a readable label.
+    fn draw_probes(&self, painter: &egui::Painter, r: Rect) {
         for probe in &self.editor.document.model.probes {
-            let point = match probe.target {
-                TopologyProbeTarget::Point(point) => Some(point),
-                TopologyProbeTarget::AreaDisk { center, radius } => {
-                    if p.area_probes {
-                        painter.circle_stroke(
-                            self.screen(center, r),
-                            (radius * self.scale) as f32,
-                            Stroke::new(
-                                1.2,
-                                Color32::from_rgb(probe.color[0], probe.color[1], probe.color[2]),
-                            ),
-                        );
-                    }
-                    Some(center)
+            if !self.probe_visible(&probe.target) {
+                continue;
+            }
+            let selected = self.selected_probe == Some(probe.id);
+            let color = self.probe_color(probe);
+            match &probe.target {
+                TopologyProbeTarget::Point(position) => {
+                    let center = self.screen(*position, r);
+                    painter.circle_filled(center, if selected { 6.0 } else { 4.5 }, color);
+                    painter.circle_stroke(
+                        center,
+                        if selected { 9.0 } else { 7.0 },
+                        Stroke::new(if selected { 2.0 } else { 1.3 }, Color32::WHITE),
+                    );
                 }
                 TopologyProbeTarget::Segment { start, end, .. } => {
-                    if p.line_probes {
-                        painter.line_segment(
-                            [self.screen(start, r), self.screen(end, r)],
-                            Stroke::new(
-                                2.0,
-                                Color32::from_rgb(probe.color[0], probe.color[1], probe.color[2]),
-                            ),
+                    let a = self.screen(*start, r);
+                    let b = self.screen(*end, r);
+                    painter
+                        .line_segment([a, b], Stroke::new(if selected { 3.0 } else { 2.0 }, color));
+                    let midpoint = a + (b - a) * 0.5;
+                    let direction = b - a;
+                    let length = direction.length().max(1.0);
+                    let normal = egui::vec2(direction.y, -direction.x) / length;
+                    painter.arrow(midpoint, normal * 18.0, Stroke::new(1.5, color));
+                    for endpoint in [a, b] {
+                        painter.circle_filled(endpoint, if selected { 5.0 } else { 4.0 }, color);
+                        painter.circle_stroke(
+                            endpoint,
+                            if selected { 7.0 } else { 6.0 },
+                            Stroke::new(1.5, Color32::WHITE),
                         );
                     }
-                    None
                 }
-                TopologyProbeTarget::Boundary(ref target) => {
-                    if p.boundary_probes
-                        && let Some(sampled) = &self.sampled
-                    {
-                        for span in sampled.spans.iter().filter(|span| {
-                            matches!(span.target, TopologySpanTarget::Curve(id) if target.spans.contains(&id))
-                        }) {
-                            for segment in span.samples.windows(2) {
+                TopologyProbeTarget::Boundary(target) => {
+                    let path = self.boundary_probe_polyline(target);
+                    for pair in path.windows(2) {
+                        painter.line_segment(
+                            [self.screen(pair[0], r), self.screen(pair[1], r)],
+                            Stroke::new(if selected { 4.0 } else { 2.5 }, color),
+                        );
+                    }
+                    if let Some(badge) = Self::polyline_midpoint(&path) {
+                        let badge = self.screen(badge, r);
+                        painter.circle_filled(badge, if selected { 7.0 } else { 5.5 }, color);
+                        painter.circle_stroke(
+                            badge,
+                            if selected { 9.0 } else { 7.5 },
+                            Stroke::new(1.5, Color32::WHITE),
+                        );
+                    }
+                }
+                TopologyProbeTarget::AreaDisk { center, radius } => {
+                    let center = self.screen(*center, r);
+                    let radius = (radius * self.scale) as f32;
+                    painter.circle_filled(
+                        center,
+                        radius,
+                        Color32::from_rgba_unmultiplied(
+                            color.r(),
+                            color.g(),
+                            color.b(),
+                            if selected { 32 } else { 18 },
+                        ),
+                    );
+                    painter.circle_stroke(
+                        center,
+                        radius,
+                        Stroke::new(if selected { 2.5 } else { 1.5 }, color),
+                    );
+                    painter.circle_filled(center, if selected { 5.0 } else { 3.5 }, color);
+                    let handle = center + egui::vec2(radius, 0.0);
+                    painter.circle_filled(handle, if selected { 5.0 } else { 4.0 }, color);
+                    painter.circle_stroke(
+                        handle,
+                        if selected { 7.0 } else { 6.0 },
+                        Stroke::new(1.5, Color32::WHITE),
+                    );
+                }
+                TopologyProbeTarget::AreaRegion(region) => {
+                    if let Some(sampled) = &self.sampled {
+                        for span in &sampled.spans {
+                            if !self.span_bounds_region(span.target, *region) {
+                                continue;
+                            }
+                            for pair in span.samples.windows(2) {
                                 painter.line_segment(
-                                    [
-                                        self.screen(segment[0].point, r),
-                                        self.screen(segment[1].point, r),
-                                    ],
-                                    Stroke::new(
-                                        3.5,
-                                        Color32::from_rgb(
-                                            probe.color[0],
-                                            probe.color[1],
-                                            probe.color[2],
-                                        ),
-                                    ),
+                                    [self.screen(pair[0].point, r), self.screen(pair[1].point, r)],
+                                    Stroke::new(if selected { 4.0 } else { 2.5 }, color),
                                 );
                             }
                         }
                     }
-                    None
+                    if let Some(anchor) = self.probe_anchors.get(&probe.id).copied() {
+                        let center = self.screen(anchor, r);
+                        painter.circle_filled(center, if selected { 9.0 } else { 7.0 }, color);
+                        painter.circle_stroke(
+                            center,
+                            if selected { 11.0 } else { 9.0 },
+                            Stroke::new(1.5, Color32::WHITE),
+                        );
+                        painter.text(
+                            center,
+                            egui::Align2::CENTER_CENTER,
+                            "A",
+                            egui::FontId::monospace(9.0),
+                            Color32::WHITE,
+                        );
+                    }
                 }
-                TopologyProbeTarget::AreaRegion(_) => None,
+            }
+            if !self.editor.document.presentation.probe_labels {
+                continue;
+            }
+            if let Some(badge) = self.probe_badge(probe) {
+                let origin = self.screen(badge, r) + egui::vec2(10.0, -10.0);
+                let label = painter.layout_no_wrap(
+                    probe.name.clone(),
+                    egui::FontId::monospace(10.0),
+                    color,
+                );
+                let rect = Rect::from_min_size(
+                    Pos2::new(origin.x, origin.y - label.size().y),
+                    label.size(),
+                );
+                painter.rect_filled(
+                    rect.expand(2.0),
+                    2.0,
+                    Color32::from_rgba_unmultiplied(8, 13, 18, 170),
+                );
+                painter.galley(rect.min, label, color);
+            }
+        }
+    }
+    /// Whether a compiled span has the given region on either side, used to
+    /// outline the face a region probe integrates over.
+    fn span_bounds_region(&self, target: TopologySpanTarget, region: RegionId) -> bool {
+        let Some(active) = self.runtime.active() else {
+            return false;
+        };
+        let Some(face) = active
+            .bundle
+            .plan
+            .domains
+            .iter()
+            .find(|domain| domain.region == region)
+            .map(|domain| domain.face)
+        else {
+            return false;
+        };
+        active.bundle.snapshot.edges.iter().any(|edge| {
+            let matches_target = match target {
+                TopologySpanTarget::Outer(side) => edge.source == CompiledEdgeSource::Outer(side),
+                TopologySpanTarget::Curve(span) => edge.source == CompiledEdgeSource::Curve(span),
             };
-            if let Some(point) = point {
-                let visible = match probe.target {
-                    TopologyProbeTarget::Point(_) => p.point_probes,
-                    TopologyProbeTarget::AreaDisk { .. } | TopologyProbeTarget::AreaRegion(_) => {
-                        p.area_probes
-                    }
-                    _ => true,
-                };
-                if visible {
-                    let pos = self.screen(point, r);
-                    if self.selected_probe == Some(probe.id) {
-                        painter.circle_stroke(pos, 8.0, Stroke::new(1.5, SELECT));
-                    }
-                    painter.circle_filled(
-                        pos,
-                        4.5,
-                        Color32::from_rgb(probe.color[0], probe.color[1], probe.color[2]),
+            matches_target && (edge.left == face || edge.right == face)
+        })
+    }
+    fn draw_markers(&self, painter: &egui::Painter, r: Rect) {
+        let p = self.editor.document.presentation;
+        let source = self.editor.document.model.source;
+        if source.enabled {
+            let center = self.screen(source.position, r);
+            painter.circle_stroke(center, 7.0, Stroke::new(2.0, GOLD));
+            for offset in [egui::vec2(10.0, 0.0), egui::vec2(0.0, 10.0)] {
+                painter.line_segment([center - offset, center + offset], Stroke::new(1.0, GOLD));
+            }
+        }
+        let show_region = self.inspector == Some(InspectorPanel::Materials)
+            || matches!(
+                p.material_overlay,
+                MaterialOverlay::Regions | MaterialOverlay::Subdomains
+            );
+        if show_region && let Some(sampled) = &self.sampled {
+            let color = subdomain_color(
+                &self.editor.document.model.draft,
+                self.region_selection,
+                1.0,
+            );
+            for span in &sampled.spans {
+                if !self.span_bounds_region(span.target, self.region_selection) {
+                    continue;
+                }
+                for pair in span.samples.windows(2) {
+                    painter.line_segment(
+                        [self.screen(pair[0].point, r), self.screen(pair[1].point, r)],
+                        Stroke::new(4.0, color),
                     );
                 }
             }
         }
+        self.draw_probes(painter, r);
         if p.far_field_contour && self.editor.document.model.far_field.enabled {
             let d = self.editor.document.model.draft.geometry.domain;
             let inset = self.editor.document.model.far_field.inset;
@@ -3179,7 +3892,13 @@ impl Playground {
     }
     fn handle_viewport_input(&mut self, ui: &egui::Ui, response: &egui::Response, r: Rect) {
         let pointer = response.interact_pointer_pos();
+        // egui reports `drag_started` only once the pointer has travelled past
+        // `max_click_dist`, so by then the live position has already left
+        // whatever the user aimed at. Every grab test uses the press origin.
+        let press = ui.input(|input| input.pointer.press_origin()).or(pointer);
+        let typing = ui.ctx().egui_wants_keyboard_input();
         let touch_active = ui.input(|input| input.any_touches());
+        self.touch_active = touch_active;
         let multi_touch = ui.input(|input| input.multi_touch());
         if !touch_active {
             let active_cursor = match self.drag.as_ref() {
@@ -3265,7 +3984,7 @@ impl Playground {
             self.center = self.center - Point2::new(delta.x as f64, -delta.y as f64) / self.scale;
             self.invalidate_samples();
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if !typing && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.cancel_interaction();
             return;
         }
@@ -3339,13 +4058,13 @@ impl Playground {
                     );
                 }
             }
-            if ui.input(|i| i.key_pressed(egui::Key::Backspace)) {
+            if !typing && ui.input(|i| i.key_pressed(egui::Key::Backspace)) {
                 if let Some(draw) = &mut self.draw {
                     draw.points.pop();
                     draw.attachments.pop();
                 }
             }
-            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if !typing && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.finish_draw();
             }
             let _ = draw;
@@ -3421,8 +4140,27 @@ impl Playground {
             return;
         }
         if response.drag_started_by(egui::PointerButton::Primary) {
-            if let Some(pos) = pointer {
-                if let Some((hit, pivot)) = self.hit_transform_gizmo(pos, r) {
+            if let (Some(pos), Some(grab)) = (pointer, press) {
+                if let Some(hit) = self.hit_material_frame_gizmo(grab, r)
+                    && let Some((region, start)) = self.selected_material_frame()
+                {
+                    let world = self.world(grab, r);
+                    self.editor.begin();
+                    self.drag = Some(DragGesture::MaterialFrame {
+                        region,
+                        start,
+                        hit,
+                        grab: match hit {
+                            MaterialFrameGizmoHit::Origin => 0.0,
+                            MaterialFrameGizmoHit::Rotate => {
+                                let relative = world - start.origin;
+                                relative.y.atan2(relative.x)
+                            }
+                        },
+                    });
+                    return;
+                }
+                if let Some((hit, pivot)) = self.hit_transform_gizmo(grab, r) {
                     let relative = self.world(pos, r) - pivot;
                     self.drag = Some(match hit {
                         TransformGizmoHit::Pivot => DragGesture::Pivot {
@@ -3451,38 +4189,45 @@ impl Playground {
                     });
                     return;
                 }
-                let screen = ScreenPoint::new(pos.x as f64, pos.y as f64);
+                let screen = ScreenPoint::new(grab.x as f64, grab.y as f64);
                 let source = self.editor.document.model.source;
-                if source.enabled && self.screen(source.position, r).distance(pos) <= 11.0 {
+                if source.enabled
+                    && self.screen(source.position, r).distance(grab) <= self.hit_tolerance(13.0)
+                {
                     self.editor.begin();
                     self.drag = Some(DragGesture::Source);
                     return;
                 }
-                if let Some(probe) = self
-                    .editor
-                    .document
-                    .model
-                    .probes
-                    .iter()
-                    .find(|probe| match probe.target {
-                        TopologyProbeTarget::Point(point)
-                        | TopologyProbeTarget::AreaDisk { center: point, .. } => {
-                            self.screen(point, r).distance(pos) <= 11.0
-                        }
-                        _ => false,
-                    })
-                    .map(|probe| probe.id)
-                {
-                    self.selected_probe = Some(probe);
+                if let Some(hit) = self.hit_probe(grab, r) {
+                    self.selected_probe = Some(hit.id());
                     self.selection = TopologySelection::None;
-                    self.editor.begin();
-                    self.drag = Some(DragGesture::Probe(probe));
+                    if hit.draggable()
+                        && let Some(original) = self
+                            .editor
+                            .document
+                            .model
+                            .probes
+                            .iter()
+                            .find(|probe| probe.id == hit.id())
+                            .map(|probe| probe.target.clone())
+                    {
+                        self.editor.begin();
+                        self.drag = Some(DragGesture::Probe {
+                            hit,
+                            grab: self.world(pos, r),
+                            original,
+                        });
+                    }
                     return;
                 }
-                let hit = self
-                    .sampled
-                    .as_ref()
-                    .and_then(|sampled| sampled.hit_test(self.transform(r), screen, 8.0, 7.0));
+                let hit = self.sampled.as_ref().and_then(|sampled| {
+                    sampled.hit_test(
+                        self.transform(r),
+                        screen,
+                        self.hit_tolerance(13.0) as f64,
+                        self.hit_tolerance(9.0) as f64,
+                    )
+                });
                 if let Some(hit) = hit {
                     self.selected_probe = None;
                     let shift = ui.input(|i| i.modifiers.shift);
@@ -3684,6 +4429,34 @@ impl Playground {
                         });
                         Ok(())
                     }
+                    DragGesture::MaterialFrame {
+                        region,
+                        start,
+                        hit,
+                        grab,
+                    } => {
+                        let mut frame = start;
+                        match hit {
+                            MaterialFrameGizmoHit::Origin => {
+                                frame.origin = if shift {
+                                    Self::snap_point(point)
+                                } else {
+                                    point
+                                };
+                            }
+                            MaterialFrameGizmoHit::Rotate => {
+                                let relative = point - start.origin;
+                                let mut angle =
+                                    start.angle_radians + relative.y.atan2(relative.x) - grab;
+                                if shift {
+                                    let step = 15.0_f64.to_radians();
+                                    angle = (angle / step).round() * step;
+                                }
+                                frame.angle_radians = angle;
+                            }
+                        }
+                        self.editor.set_region_frame_during_edit(region, frame)
+                    }
                     DragGesture::Source => {
                         let mut source = self.editor.document.model.source;
                         source.position = point;
@@ -3700,25 +4473,18 @@ impl Playground {
                         }
                         self.editor.set_point_source_during_edit(source)
                     }
-                    DragGesture::Probe(id) => {
-                        let probe = self
-                            .editor
-                            .document
-                            .model
-                            .probes
-                            .iter()
-                            .find(|probe| probe.id == id)
-                            .cloned();
-                        if let Some(mut probe) = probe {
-                            match &mut probe.target {
-                                TopologyProbeTarget::Point(position) => *position = point,
-                                TopologyProbeTarget::AreaDisk { center, .. } => *center = point,
-                                _ => return,
-                            }
-                            self.editor.update_probe_during_edit(probe)
+                    DragGesture::Probe {
+                        hit,
+                        grab,
+                        ref original,
+                    } => {
+                        let target = if shift {
+                            Self::snap_point(point)
                         } else {
-                            Err("Probe no longer exists".into())
-                        }
+                            point
+                        };
+                        self.drag_probe(hit, original, target - grab);
+                        Ok(())
                     }
                 };
                 if let Err(error) = result {
@@ -3778,12 +4544,17 @@ impl Playground {
         }
         if response.clicked() && self.drag.is_none() {
             if let Some(pos) = pointer {
+                if let Some(hit) = self.hit_probe(pos, r) {
+                    self.selected_probe = Some(hit.id());
+                    self.selection = TopologySelection::None;
+                    return;
+                }
                 let hit = self.sampled.as_ref().and_then(|sampled| {
                     sampled.hit_test(
                         self.transform(r),
                         ScreenPoint::new(pos.x as f64, pos.y as f64),
-                        8.0,
-                        7.0,
+                        self.hit_tolerance(13.0) as f64,
+                        self.hit_tolerance(9.0) as f64,
                     )
                 });
                 if let Some(hit) = hit {
@@ -3797,10 +4568,15 @@ impl Playground {
                 } else {
                     self.selection = TopologySelection::None;
                     self.selected_probe = None;
+                    if let Some(region) = self.region_at(self.world(pos, r)) {
+                        self.region_selection = region;
+                    }
                 }
             }
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+        if !typing
+            && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+        {
             self.delete_selection();
         }
     }
@@ -4014,9 +4790,27 @@ impl Playground {
             _ => vec![],
         };
         if curves.is_empty() {
+            self.delete_span_selection();
             return;
         }
         for curve in curves {
+            // Every removal invalidates the compiled draft, and both the choice
+            // query and the command need it, so the next curve in a multi-curve
+            // selection has to wait for revalidation rather than fail.
+            self.settle_editor();
+            // Merging two assigned subdomains needs an explicit survivor, so
+            // hand the choice to the Edit panel instead of failing the gesture.
+            match self.editor.curve_removal_choices(curve) {
+                Ok(choices) if choices.len() > 1 => {
+                    self.pending_removal = Some(PendingRemoval::Curve(curve, choices));
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.message = error;
+                    return;
+                }
+            }
             if let Err(error) = self.editor.remove_curve(curve, None) {
                 self.message = error;
                 return;
@@ -4027,6 +4821,90 @@ impl Playground {
         self.material_formula_edits.clear();
         self.material_formula_errors.clear();
         self.invalidate_samples();
+    }
+    /// Drives the editor's cooperative validation to a decision. Only a gesture
+    /// that must issue several dependent commands in one frame needs this; the
+    /// ordinary path validates across frames in `frame`.
+    fn settle_editor(&mut self) {
+        for _ in 0..4096 {
+            if self.editor.acceptance != TopologyAcceptance::Pending {
+                return;
+            }
+            self.editor.validate_frame(4096);
+        }
+    }
+    /// Deletes a partial span selection, splitting the curve and leaving baffles.
+    fn delete_span_selection(&mut self) {
+        let TopologySelection::Spans(targets) = &self.selection else {
+            return;
+        };
+        let spans = targets
+            .iter()
+            .filter_map(|target| match target {
+                TopologySpanTarget::Curve(span) => Some(*span),
+                TopologySpanTarget::Outer(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if spans.is_empty() {
+            return;
+        }
+        let choices = match self.editor.span_removal_choices(&spans) {
+            Ok(choices) => choices,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        if choices.len() > 1 {
+            self.pending_removal = Some(PendingRemoval::Spans(spans, choices));
+            return;
+        }
+        match self.editor.remove_spans(&spans, choices.first().copied()) {
+            Ok(removal) => {
+                self.selection = TopologySelection::None;
+                self.invalidate_samples();
+                self.report_span_removal(&removal);
+            }
+            Err(error) => self.message = error,
+        }
+    }
+    /// Says what the deletion did beyond the selection: a curve promoted to a
+    /// baffle or a probe dropped is not something to discover later.
+    fn report_span_removal(&mut self, removal: &TopologySpanRemoval) {
+        let mut parts = vec![match removal.pieces.len() {
+            0 => "Curve deleted".to_owned(),
+            1 => "Deleted spans; the rest is a baffle".to_owned(),
+            count => format!("Deleted spans; split into {count} baffles"),
+        }];
+        if !removal.promoted.is_empty() {
+            parts.push(format!(
+                "{} attached curve{} promoted to baffles",
+                removal.promoted.len(),
+                if removal.promoted.len() == 1 { "" } else { "s" }
+            ));
+        }
+        if !removal.removed_probes.is_empty() {
+            parts.push(format!("{} probe(s) removed", removal.removed_probes.len()));
+        }
+        if !removal.removed_regions.is_empty() {
+            parts.push(format!(
+                "{} subdomain(s) merged",
+                removal.removed_regions.len()
+            ));
+        }
+        self.notify(parts.join(" · "));
+    }
+    /// Stable region owning the committed face under a world point.
+    fn region_at(&self, point: Point2) -> Option<RegionId> {
+        let active = self.runtime.active()?;
+        let face = active.bundle.snapshot.face_at(point)?;
+        active
+            .bundle
+            .plan
+            .domains
+            .iter()
+            .find(|domain| domain.face == face)
+            .map(|domain| domain.region)
     }
     fn place_pulse(&mut self, point: Point2) {
         let Some(active) = self.runtime.active() else {
@@ -4078,9 +4956,39 @@ impl Playground {
                 self.requested_revision = Some(self.editor.revision);
                 self.requested_edge = self.mesh_edge;
                 self.reset_requested = false;
+                self.begin_handoff_timeline();
             }
             Err(error) => self.message = error,
         }
+    }
+    fn begin_handoff_timeline(&mut self) {
+        self.handoff_requested = Some(Instant::now());
+        self.handoff_ready = None;
+        self.handoff_upload = None;
+    }
+    fn record_handoff(&mut self, active: &Arc<PreparedTopology>) {
+        let now = Instant::now();
+        let millis = |from: Option<Instant>, to: Instant| {
+            from.map_or(0.0, |from| (to - from).as_secs_f64() * 1000.0)
+        };
+        let ready = self.handoff_ready.unwrap_or(now);
+        let upload = self.handoff_upload.unwrap_or(ready);
+        self.last_handoff = Some(HandoffRecord {
+            prepare_ms: millis(self.handoff_requested, ready),
+            drain_ms: millis(Some(ready), upload),
+            upload_ms: millis(Some(upload), now),
+            timing: active.timing,
+            action: active.mesh_action,
+            operator_reused: active.operator_reused,
+            adapted: active.adapted,
+            transferred: active.transfer.is_some(),
+            fresh: active.fresh,
+            degrees_of_freedom: active.operator.degrees_of_freedom(),
+            triangles: active.mesh.triangles.len(),
+        });
+        self.handoff_requested = None;
+        self.handoff_ready = None;
+        self.handoff_upload = None;
     }
     fn refresh_runtime(
         &mut self,
@@ -4091,7 +4999,9 @@ impl Playground {
         delta: f64,
     ) {
         self.request_runtime();
-        let _ = self.runtime.advance(256);
+        if let Some(Ok(_)) = self.runtime.advance(256) {
+            self.handoff_ready = Some(Instant::now());
+        }
         if self.uploading.is_none() && self.runtime.ready().is_some() && request.caught_up() {
             let candidate = self.runtime.ready().unwrap().clone();
             let in_place = candidate.operator_reused
@@ -4102,6 +5012,7 @@ impl Playground {
                 });
             if in_place {
                 let token = candidate.bundle.token;
+                self.handoff_upload = Some(Instant::now());
                 match request.update_source(
                     assets,
                     &candidate.mesh,
@@ -4111,6 +5022,7 @@ impl Playground {
                     Ok(()) => match self.runtime.commit_ready(token) {
                         Ok(active) => {
                             self.message = "Simulation settings committed".into();
+                            self.record_handoff(&active);
                             self.configure_probes(request, assets, commands, &active);
                         }
                         Err(error) => self.message = error,
@@ -4173,11 +5085,13 @@ impl Playground {
                                             * active.operator.recommended_time_step()
                                 })
                         };
+                        self.handoff_upload = Some(Instant::now());
                         self.uploading = Some(Uploading {
                             token: candidate.bundle.token,
                             generation: request.generation(),
                             fresh: candidate.fresh,
                             time_offset,
+                            degrees_of_freedom: candidate.operator.degrees_of_freedom(),
                         })
                     }
                     Err(error) => {
@@ -4198,11 +5112,7 @@ impl Playground {
                 self.uploading = None;
             } else if request.ready()
                 && display.generation == upload.generation
-                && display.current.len()
-                    == self
-                        .runtime
-                        .ready()
-                        .map_or(0, |candidate| candidate.operator.degrees_of_freedom())
+                && display.current.len() == upload.degrees_of_freedom
             {
                 let upload = self.uploading.take().unwrap();
                 request.finish_transfer(assets);
@@ -4226,6 +5136,7 @@ impl Playground {
                         self.amr_last_analyzed_step = None;
                         self.probe_gpu_token = None;
                         self.message = "Simulation topology committed".into();
+                        self.record_handoff(&active);
                         self.configure_probes(request, assets, commands, &active);
                     }
                     Err(error) => self.message = error,
@@ -4268,19 +5179,37 @@ impl Playground {
             {
                 self.message = error;
             }
-            if self.wave_running {
-                self.accumulator += delta;
-                let steps = (self.accumulator / dt).floor().min(4096.0) as u64;
-                if steps > 0 {
-                    request.request_steps(steps);
-                    self.accumulator -= steps as f64 * dt;
+            // A pending handoff can only replace the GPU buffers once the render
+            // world has encoded every step already requested. Withhold both
+            // continuous and manual scheduling until then, leaving the user's
+            // Run/Pause preference and a pressed Step untouched.
+            let handoff_pending = self.runtime.ready().is_some() || self.uploading.is_some();
+            if !handoff_pending {
+                if self.wave_running {
+                    self.accumulator += delta.clamp(0.0, 0.1);
+                    let steps = (self.accumulator / dt)
+                        .floor()
+                        .min(MAX_STEPS_PER_FRAME as f64) as u64;
+                    if steps > 0 {
+                        request.request_steps(steps);
+                        self.accumulator -= steps as f64 * dt;
+                    }
+                    // The solver cannot encode more than one frame's worth of
+                    // steps, so unspent wall-clock time is dropped instead of
+                    // queued into a backlog that never drains.
+                    self.accumulator = self.accumulator.min(MAX_STEPS_PER_FRAME as f64 * dt);
+                } else if self.wave_step {
+                    request.request_steps(1);
+                    self.wave_step = false;
                 }
-            } else if self.wave_step {
-                request.request_steps(1);
-                self.wave_step = false;
             }
         }
         self.completed_steps = request.stats().completed_steps();
+        self.gpu_status = request.stats().status();
+        self.gpu_dispatches = request.stats().dispatches();
+        self.step_backlog = request
+            .requested_steps()
+            .saturating_sub(self.completed_steps);
         if let Some(active) = self.runtime.active()
             && display.generation == request.generation()
             && display.current.len() == active.operator.degrees_of_freedom()
@@ -4450,6 +5379,7 @@ impl Playground {
             match result {
                 Ok(result) => {
                     self.amr_pending_state = Some(result.state);
+                    self.amr_report = Some(result.report);
                     match self.runtime.request_adapted(
                         self.editor.revision,
                         &self.editor.document,
@@ -4458,6 +5388,7 @@ impl Playground {
                         Ok(_) => {
                             self.amr_status = "preparing adaptive handoff".into();
                             self.amr_error = None;
+                            self.begin_handoff_timeline();
                         }
                         Err(error) => {
                             self.amr_pending_state = None;
@@ -4659,10 +5590,11 @@ impl Playground {
                 .probe_traces
                 .entry(ProbeId(record.probe_id))
                 .or_default();
-            let time = self.sim_time_offset + record.time;
-            if time > trace.last_time {
-                trace.last_time = time;
-                trace.samples.push_back((time, record.displacement));
+            let mut record = *record;
+            record.time += self.sim_time_offset;
+            if record.time > trace.last_time {
+                trace.last_time = record.time;
+                trace.samples.push_back(record);
                 while trace.samples.len() > 4096 {
                     trace.samples.pop_front();
                 }
@@ -4800,7 +5732,980 @@ impl Playground {
             None
         }
     }
+    /// The frame a region-local material profile or volume source is written in,
+    /// shown only while Materials is open and something actually uses it.
+    fn selected_material_frame(&self) -> Option<(RegionId, MaterialFrame)> {
+        if self.inspector != Some(InspectorPanel::Materials) {
+            return None;
+        }
+        let scene = &self.editor.document.model.draft;
+        let region = scene.region(self.region_selection)?;
+        let material_uses = scene
+            .material(region.material)
+            .is_some_and(Material::uses_frame);
+        let source_uses = scene
+            .volume_sources
+            .iter()
+            .any(|source| source.region == region.id && source.enabled && source.varying());
+        (material_uses || source_uses).then_some((region.id, region.frame))
+    }
+    fn hit_material_frame_gizmo(&self, point: Pos2, r: Rect) -> Option<MaterialFrameGizmoHit> {
+        let (_, frame) = self.selected_material_frame()?;
+        let distance = self.screen(frame.origin, r).distance(point);
+        if distance <= self.hit_tolerance(11.0) {
+            Some(MaterialFrameGizmoHit::Origin)
+        } else if (distance - MATERIAL_FRAME_RADIUS).abs() <= self.hit_tolerance(9.0) {
+            Some(MaterialFrameGizmoHit::Rotate)
+        } else {
+            None
+        }
+    }
+    fn draw_material_frame(&self, painter: &egui::Painter, r: Rect) {
+        let Some((_, frame)) = self.selected_material_frame() else {
+            return;
+        };
+        let center = self.screen(frame.origin, r);
+        let (sin, cos) = frame.angle_radians.sin_cos();
+        let x_end = center + egui::vec2((cos * 33.0) as f32, (-sin * 33.0) as f32);
+        let y_end = center + egui::vec2((-sin * 27.0) as f32, (-cos * 27.0) as f32);
+        painter.circle_stroke(center, MATERIAL_FRAME_RADIUS, Stroke::new(1.5, TEAL));
+        painter.circle_filled(
+            center
+                + egui::vec2(
+                    cos as f32 * MATERIAL_FRAME_RADIUS,
+                    -sin as f32 * MATERIAL_FRAME_RADIUS,
+                ),
+            4.5,
+            TEAL,
+        );
+        painter.line_segment([center, x_end], Stroke::new(2.0, RED));
+        painter.line_segment([center, y_end], Stroke::new(2.0, TEAL));
+        painter.circle_filled(center, 6.0, Color32::from_rgb(16, 23, 31));
+        painter.circle_stroke(center, 6.0, Stroke::new(2.0, GOLD));
+        for (end, label, color) in [(x_end, "x", RED), (y_end, "y", TEAL)] {
+            painter.text(
+                end,
+                egui::Align2::LEFT_CENTER,
+                label,
+                egui::FontId::monospace(11.0),
+                color,
+            );
+        }
+    }
+    /// Screen-space hit radius. Touch input keeps the drawn controls small but
+    /// widens what counts as a hit.
+    fn hit_tolerance(&self, mouse: f32) -> f32 {
+        if self.touch_active {
+            mouse.max(18.0)
+        } else {
+            mouse
+        }
+    }
+    fn probe_visible(&self, target: &TopologyProbeTarget) -> bool {
+        let presentation = self.editor.document.presentation;
+        match target {
+            TopologyProbeTarget::Point(_) => presentation.point_probes,
+            TopologyProbeTarget::Segment { .. } => presentation.line_probes,
+            TopologyProbeTarget::Boundary(_) => presentation.boundary_probes,
+            TopologyProbeTarget::AreaDisk { .. } | TopologyProbeTarget::AreaRegion(_) => {
+                presentation.area_probes
+            }
+        }
+    }
+    /// Colour rule shared by markers and labels: a probe that failed to compile
+    /// reads red, one that is not recording reads grey.
+    fn probe_color(&self, probe: &TopologyProbeDefinition) -> Color32 {
+        if self.probe_status.contains_key(&probe.id) {
+            RED
+        } else if !probe.enabled {
+            Color32::from_rgb(112, 130, 143)
+        } else {
+            Color32::from_rgb(probe.color[0], probe.color[1], probe.color[2])
+        }
+    }
+    /// The drawn path of a boundary probe, in the target's own span order.
+    fn boundary_probe_polyline(&self, target: &TopologyBoundaryProbeTarget) -> Vec<Point2> {
+        let Some(sampled) = &self.sampled else {
+            return vec![];
+        };
+        let mut path = Vec::new();
+        for span in &target.spans {
+            let Some(samples) = sampled
+                .spans
+                .iter()
+                .find(|candidate| candidate.target == TopologySpanTarget::Curve(*span))
+            else {
+                continue;
+            };
+            for sample in &samples.samples {
+                if path.last() != Some(&sample.point) {
+                    path.push(sample.point);
+                }
+            }
+        }
+        path
+    }
+    /// Point half way along a polyline by arclength, used to badge and hit the
+    /// probe where the eye expects it rather than at an arbitrary end.
+    fn polyline_midpoint(path: &[Point2]) -> Option<Point2> {
+        let total: f64 = path.windows(2).map(|pair| (pair[1] - pair[0]).norm()).sum();
+        let mut remaining = total * 0.5;
+        for pair in path.windows(2) {
+            let length = (pair[1] - pair[0]).norm();
+            if remaining <= length {
+                let fraction = if length > 0.0 {
+                    remaining / length
+                } else {
+                    0.0
+                };
+                return Some(pair[0].lerp(pair[1], fraction));
+            }
+            remaining -= length;
+        }
+        path.first().copied()
+    }
+    fn probe_badge(&self, probe: &TopologyProbeDefinition) -> Option<Point2> {
+        match &probe.target {
+            TopologyProbeTarget::Point(point) => Some(*point),
+            TopologyProbeTarget::Segment { start, end, .. } => Some(start.lerp(*end, 0.5)),
+            TopologyProbeTarget::Boundary(target) => {
+                Self::polyline_midpoint(&self.boundary_probe_polyline(target))
+            }
+            TopologyProbeTarget::AreaDisk { center, .. } => Some(*center),
+            TopologyProbeTarget::AreaRegion(_) => self.probe_anchors.get(&probe.id).copied(),
+        }
+    }
+    /// Topmost probe under the pointer. Later probes win, matching the draw order.
+    fn hit_probe(&self, point: Pos2, viewport: Rect) -> Option<ProbeHit> {
+        self.editor
+            .document
+            .model
+            .probes
+            .iter()
+            .rev()
+            .filter(|probe| self.probe_visible(&probe.target))
+            .find_map(|probe| match &probe.target {
+                TopologyProbeTarget::Point(position) => {
+                    (self.screen(*position, viewport).distance(point) <= self.hit_tolerance(13.0))
+                        .then_some(ProbeHit::Point(probe.id))
+                }
+                TopologyProbeTarget::Segment { start, end, .. } => {
+                    let a = self.screen(*start, viewport);
+                    let b = self.screen(*end, viewport);
+                    if a.distance(point) <= self.hit_tolerance(13.0) {
+                        Some(ProbeHit::SegmentEndpoint(probe.id, true))
+                    } else if b.distance(point) <= self.hit_tolerance(13.0) {
+                        Some(ProbeHit::SegmentEndpoint(probe.id, false))
+                    } else if screen_segment_distance(point, a, b) <= self.hit_tolerance(9.0) {
+                        Some(ProbeHit::SegmentBody(probe.id))
+                    } else {
+                        None
+                    }
+                }
+                TopologyProbeTarget::Boundary(target) => {
+                    let badge = Self::polyline_midpoint(&self.boundary_probe_polyline(target))?;
+                    (self.screen(badge, viewport).distance(point) <= self.hit_tolerance(13.0))
+                        .then_some(ProbeHit::Boundary(probe.id))
+                }
+                TopologyProbeTarget::AreaDisk { center, radius } => {
+                    let center = self.screen(*center, viewport);
+                    let radius = (radius * self.scale) as f32;
+                    let handle = center + egui::vec2(radius, 0.0);
+                    if handle.distance(point) <= self.hit_tolerance(13.0) {
+                        Some(ProbeHit::AreaDiskRadius(probe.id))
+                    } else if center.distance(point) <= radius + self.hit_tolerance(9.0) {
+                        Some(ProbeHit::AreaDiskBody(probe.id))
+                    } else {
+                        None
+                    }
+                }
+                TopologyProbeTarget::AreaRegion(_) => {
+                    let anchor = self.probe_anchors.get(&probe.id).copied()?;
+                    (self.screen(anchor, viewport).distance(point) <= self.hit_tolerance(15.0))
+                        .then_some(ProbeHit::AreaRegion(probe.id))
+                }
+            })
+    }
+    /// Applies a probe drag to the target captured when the gesture started, so
+    /// repeated updates stay exact instead of accumulating rounding.
+    fn drag_probe(&mut self, hit: ProbeHit, original: &TopologyProbeTarget, delta: Point2) {
+        let Some(mut probe) = self
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .find(|probe| probe.id == hit.id())
+            .cloned()
+        else {
+            return;
+        };
+        probe.target = original.clone();
+        match (hit, &mut probe.target) {
+            (ProbeHit::Point(_), TopologyProbeTarget::Point(position)) => {
+                *position = *position + delta;
+            }
+            (
+                ProbeHit::SegmentEndpoint(_, first),
+                TopologyProbeTarget::Segment { start, end, .. },
+            ) => {
+                let endpoint = if first { start } else { end };
+                *endpoint = *endpoint + delta;
+            }
+            (ProbeHit::SegmentBody(_), TopologyProbeTarget::Segment { start, end, .. }) => {
+                *start = *start + delta;
+                *end = *end + delta;
+            }
+            (ProbeHit::AreaDiskBody(_), TopologyProbeTarget::AreaDisk { center, .. }) => {
+                *center = *center + delta;
+            }
+            (ProbeHit::AreaDiskRadius(_), TopologyProbeTarget::AreaDisk { center, radius }) => {
+                *radius = (*radius + delta.x).max(1.0e-3);
+                let _ = center;
+            }
+            _ => return,
+        }
+        if let Err(error) = self.editor.update_probe_during_edit(probe) {
+            self.message = error;
+        }
+    }
+    /// Mirrors the committed compilation status and path metrics of every probe
+    /// so the readouts can report a precise reason and a real arclength axis.
+    fn refresh_probe_metadata(&mut self) {
+        let ids = self
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .map(|probe| probe.id)
+            .collect::<BTreeSet<_>>();
+        self.probe_status.retain(|id, _| ids.contains(id));
+        self.probe_metrics.retain(|id, _| ids.contains(id));
+        self.probe_traces.retain(|id, _| ids.contains(id));
+        self.curve_probe_traces.retain(|id, _| ids.contains(id));
+        self.area_probe_traces.retain(|id, _| ids.contains(id));
+        self.probe_views.retain(|id, _| ids.contains(id));
+        self.probe_windows.retain(|id| ids.contains(id));
+        self.probe_anchors.retain(|id, _| ids.contains(id));
+        let Some(active) = self.runtime.active().cloned() else {
+            return;
+        };
+        // Path metrics and region anchors are derived from the committed mesh,
+        // so they only change when a new candidate or probe set is published.
+        let token = (active.bundle.token, self.editor.revision);
+        if self.probe_metadata_token == Some(token) {
+            return;
+        }
+        self.probe_metadata_token = Some(token);
+        self.probe_anchors.clear();
+        for compiled in active.probes.iter() {
+            match &compiled.result {
+                TopologyProbeCompilation::Ready(stencil) => {
+                    self.probe_status.remove(&compiled.id);
+                    if let TopologyProbeStencil::Boundary(samples) = stencil.as_ref() {
+                        let closed = self.boundary_probe_is_closed(compiled.id);
+                        let mut length = 0.0;
+                        for pair in samples.windows(2) {
+                            length += (pair[1].point - pair[0].point).norm();
+                        }
+                        if closed
+                            && let (Some(first), Some(last)) = (samples.first(), samples.last())
+                        {
+                            length += (first.point - last.point).norm();
+                        }
+                        self.probe_metrics.insert(compiled.id, (length, closed));
+                    }
+                }
+                TopologyProbeCompilation::Failed(reason) => {
+                    self.probe_status.insert(compiled.id, reason.clone());
+                }
+                TopologyProbeCompilation::Disabled => {
+                    self.probe_status
+                        .insert(compiled.id, "Recording is off".into());
+                }
+            }
+        }
+        for probe in &self.editor.document.model.probes {
+            match probe.target {
+                TopologyProbeTarget::Segment { start, end, .. } => {
+                    self.probe_metrics
+                        .insert(probe.id, ((end - start).norm(), false));
+                }
+                TopologyProbeTarget::AreaRegion(region) => {
+                    if let Some(point) = region_anchor(&active.mesh, region) {
+                        self.probe_anchors.insert(probe.id, point);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    /// A boundary probe covering every span of a periodic curve samples a closed
+    /// loop, so its last sample joins its first when integrating.
+    fn boundary_probe_is_closed(&self, id: ProbeId) -> bool {
+        let Some(TopologyProbeTarget::Boundary(target)) = self
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .find(|probe| probe.id == id)
+            .map(|probe| &probe.target)
+        else {
+            return false;
+        };
+        self.editor
+            .document
+            .model
+            .accepted
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == target.curve)
+            .is_some_and(|curve| {
+                !curve.spline.is_open()
+                    && curve
+                        .spans
+                        .iter()
+                        .all(|span| target.spans.contains(&span.id))
+            })
+    }
+    fn clear_probe_trace(&mut self, id: ProbeId) {
+        self.probe_traces.remove(&id);
+        self.curve_probe_traces.remove(&id);
+        self.area_probe_traces.remove(&id);
+    }
+    fn probe_time_window(
+        samples: &[PointProbeRecord],
+        view: &mut ProbeViewState,
+    ) -> Option<(f64, f64)> {
+        let first = samples.first()?.time;
+        let last = samples.last()?.time;
+        let available = last - first;
+        if !available.is_finite() || available <= f64::EPSILON {
+            return None;
+        }
+        let span = view.span.min(available);
+        if view.live {
+            view.end_time = last;
+        }
+        view.end_time = view.end_time.clamp(first + span, last);
+        Some((view.end_time - span, view.end_time))
+    }
+    /// One pannable, zoomable time trace. Every trace in a readout shares the
+    /// window held by `view`, so they stay aligned while the user navigates.
+    fn probe_plot(
+        ui: &mut egui::Ui,
+        label: &str,
+        samples: &[PointProbeRecord],
+        value: impl Fn(&PointProbeRecord) -> f64,
+        color: Color32,
+        view: &mut ProbeViewState,
+        maximum_span: f64,
+    ) {
+        ui.small(label);
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(120.0), 92.0),
+            egui::Sense::drag(),
+        );
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        ui.painter().rect_stroke(
+            rect,
+            2.0,
+            Stroke::new(1.0, Color32::from_rgb(55, 69, 80)),
+            egui::StrokeKind::Inside,
+        );
+        let waiting = |painter: &egui::Painter| {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Waiting for samples",
+                egui::FontId::monospace(11.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+        };
+        let Some((mut minimum_time, mut maximum_time)) = Self::probe_time_window(samples, view)
+        else {
+            waiting(ui.painter());
+            return;
+        };
+        let visible_span = maximum_time - minimum_time;
+        if response.drag_started() {
+            view.live = false;
+        }
+        if response.dragged() {
+            let delta = response.drag_delta().x as f64;
+            view.end_time -= delta / rect.width() as f64 * visible_span;
+        }
+        if response.hovered() {
+            let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                let fraction = response.hover_pos().map_or(0.5, |position| {
+                    ((position.x - rect.left()) / rect.width()).clamp(0.0, 1.0)
+                }) as f64;
+                let anchored_time = minimum_time + fraction * visible_span;
+                view.live = false;
+                view.span = (visible_span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+                let first = samples.first().unwrap().time;
+                let last = samples.last().unwrap().time;
+                let zoomed_span = view.span.min(last - first);
+                let fullest_span = maximum_span.min(last - first);
+                if view.span >= fullest_span * (1.0 - 1.0e-9) {
+                    view.live = true;
+                    view.end_time = last;
+                } else {
+                    view.end_time = anchored_time + (1.0 - fraction) * zoomed_span;
+                }
+            }
+        }
+        (minimum_time, maximum_time) = Self::probe_time_window(samples, view).unwrap();
+        let visible = samples
+            .iter()
+            .filter(|sample| sample.time >= minimum_time && sample.time <= maximum_time)
+            .collect::<Vec<_>>();
+        if visible.len() < 2 {
+            waiting(ui.painter());
+            return;
+        }
+        let mut minimum = f64::INFINITY;
+        let mut maximum = f64::NEG_INFINITY;
+        for sample in &visible {
+            let sample = value(sample);
+            minimum = minimum.min(sample);
+            maximum = maximum.max(sample);
+        }
+        if !minimum.is_finite() || !maximum.is_finite() {
+            return;
+        }
+        if (maximum - minimum).abs() < 1.0e-15 {
+            let padding = maximum.abs().max(1.0) * 0.05;
+            minimum -= padding;
+            maximum += padding;
+        }
+        let time_span = (maximum_time - minimum_time).max(f64::MIN_POSITIVE);
+        let value_span = maximum - minimum;
+        let points = visible
+            .iter()
+            .map(|sample| {
+                egui::pos2(
+                    egui::lerp(
+                        rect.left()..=rect.right(),
+                        ((sample.time - minimum_time) / time_span) as f32,
+                    ),
+                    egui::lerp(
+                        rect.bottom()..=rect.top(),
+                        ((value(sample) - minimum) / value_span) as f32,
+                    ),
+                )
+            })
+            .collect();
+        ui.painter()
+            .add(egui::Shape::line(points, Stroke::new(1.4, color)));
+        ui.painter().text(
+            rect.left_top() + egui::vec2(4.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            format!("{maximum:+.3e}"),
+            egui::FontId::monospace(9.0),
+            Color32::from_rgb(142, 161, 175),
+        );
+        ui.painter().text(
+            rect.left_bottom() + egui::vec2(4.0, -3.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{minimum:+.3e}"),
+            egui::FontId::monospace(9.0),
+            Color32::from_rgb(142, 161, 175),
+        );
+        response.on_hover_text(format!(
+            "Simulation time {minimum_time:.4}–{maximum_time:.4}"
+        ));
+    }
+    fn curve_probe_values(frame: &CurveProbeRecord, quantity: LineProbeQuantity) -> &[f32] {
+        match quantity {
+            LineProbeQuantity::Field => &frame.displacement,
+            LineProbeQuantity::Transverse => &frame.transverse_magnitude,
+            LineProbeQuantity::Flux => &frame.normal_flux,
+            LineProbeQuantity::Energy => &frame.energy_density,
+        }
+    }
+    /// Trapezoidal integral along the sampled path, plus the fraction of the
+    /// intervals that carried finite values.
+    fn curve_probe_integral(
+        frame: &CurveProbeRecord,
+        length: f64,
+        quantity: LineProbeQuantity,
+        closed: bool,
+    ) -> (f64, f64) {
+        let samples = Self::curve_probe_values(frame, quantity);
+        let intervals = if closed {
+            samples.len()
+        } else {
+            samples.len().saturating_sub(1)
+        };
+        if intervals == 0 || !length.is_finite() {
+            return (f64::NAN, 0.0);
+        }
+        let mut integral = 0.0;
+        let mut valid = 0usize;
+        for index in 0..intervals {
+            let a = samples[index] as f64;
+            let b = samples[(index + 1) % samples.len()] as f64;
+            if a.is_finite() && b.is_finite() {
+                integral += 0.5 * (a + b);
+                valid += 1;
+            }
+        }
+        if valid == 0 {
+            return (f64::NAN, 0.0);
+        }
+        (
+            integral * length / intervals as f64,
+            valid as f64 / intervals as f64,
+        )
+    }
+    fn curve_probe_profile(
+        ui: &mut egui::Ui,
+        frames: &[CurveProbeRecord],
+        view: &ProbeViewState,
+        quantity: LineProbeQuantity,
+        length: f64,
+        physics: PhysicsModel,
+    ) {
+        ui.small(format!("{} vs arclength", quantity.label_for(physics)));
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(120.0), 110.0),
+            egui::Sense::hover(),
+        );
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        let Some(frame) = frames.iter().min_by(|a, b| {
+            (a.time - view.end_time)
+                .abs()
+                .total_cmp(&(b.time - view.end_time).abs())
+        }) else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Waiting for samples",
+                egui::FontId::monospace(11.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+            return;
+        };
+        let samples = Self::curve_probe_values(frame, quantity);
+        let mut minimum = samples
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(f32::INFINITY, f32::min);
+        let mut maximum = samples
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !minimum.is_finite() || !maximum.is_finite() {
+            return;
+        }
+        if (maximum - minimum).abs() < 1.0e-12 {
+            let padding = maximum.abs().max(1.0) * 0.05;
+            minimum -= padding;
+            maximum += padding;
+        }
+        if minimum <= 0.0 && maximum >= 0.0 {
+            let zero = egui::lerp(
+                rect.bottom()..=rect.top(),
+                (0.0 - minimum) / (maximum - minimum),
+            );
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.left(), zero),
+                    egui::pos2(rect.right(), zero),
+                ],
+                Stroke::new(1.0, Color32::from_rgb(45, 57, 67)),
+            );
+        }
+        let count = samples.len().max(2);
+        let mut run = Vec::new();
+        for (index, value) in samples.iter().copied().enumerate() {
+            if value.is_finite() {
+                run.push(egui::pos2(
+                    egui::lerp(
+                        rect.left()..=rect.right(),
+                        index as f32 / (count - 1) as f32,
+                    ),
+                    egui::lerp(
+                        rect.bottom()..=rect.top(),
+                        (value - minimum) / (maximum - minimum),
+                    ),
+                ));
+            } else if run.len() >= 2 {
+                ui.painter().add(egui::Shape::line(
+                    std::mem::take(&mut run),
+                    Stroke::new(1.5, quantity.color()),
+                ));
+            } else {
+                run.clear();
+            }
+        }
+        if run.len() >= 2 {
+            ui.painter()
+                .add(egui::Shape::line(run, Stroke::new(1.5, quantity.color())));
+        }
+        ui.painter().text(
+            rect.left_top() + egui::vec2(4.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            format!("{maximum:+.3e}"),
+            egui::FontId::monospace(9.0),
+            Color32::from_rgb(142, 161, 175),
+        );
+        ui.painter().text(
+            rect.left_bottom() + egui::vec2(4.0, -3.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{minimum:+.3e} · s=0"),
+            egui::FontId::monospace(9.0),
+            Color32::from_rgb(142, 161, 175),
+        );
+        ui.painter().text(
+            rect.right_bottom() + egui::vec2(-4.0, -3.0),
+            egui::Align2::RIGHT_BOTTOM,
+            format!("s={length:.3}"),
+            egui::FontId::monospace(9.0),
+            Color32::from_rgb(142, 161, 175),
+        );
+    }
+    fn curve_probe_waterfall(
+        ui: &mut egui::Ui,
+        frames: &[CurveProbeRecord],
+        times: &[PointProbeRecord],
+        view: &mut ProbeViewState,
+        maximum_span: f64,
+        quantity: LineProbeQuantity,
+        physics: PhysicsModel,
+    ) {
+        ui.small(format!("{} waterfall", quantity.label_for(physics)));
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(120.0), 170.0),
+            egui::Sense::drag(),
+        );
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, view) else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Waiting for samples",
+                egui::FontId::monospace(11.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+            return;
+        };
+        let span = maximum_time - minimum_time;
+        if response.drag_started() {
+            view.live = false;
+        }
+        if response.dragged() {
+            view.end_time += response.drag_delta().y as f64 / rect.height() as f64 * span;
+        }
+        if response.hovered() {
+            let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                view.live = false;
+                view.span = (span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+            }
+        }
+        let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, view) else {
+            return;
+        };
+        let visible = frames
+            .iter()
+            .filter(|frame| frame.time >= minimum_time && frame.time <= maximum_time)
+            .collect::<Vec<_>>();
+        let maximum = visible
+            .iter()
+            .flat_map(|frame| Self::curve_probe_values(frame, quantity).iter())
+            .copied()
+            .filter(|value| value.is_finite())
+            .map(f32::abs)
+            .fold(0.0, f32::max)
+            .max(1.0e-12)
+            / view.waterfall_gain;
+        for (row, frame) in visible.iter().enumerate() {
+            let samples = Self::curve_probe_values(frame, quantity);
+            let count = samples.len();
+            if count == 0 {
+                continue;
+            }
+            let top = egui::lerp(
+                rect.bottom()..=rect.top(),
+                (row + 1) as f32 / visible.len() as f32,
+            );
+            let bottom = egui::lerp(
+                rect.bottom()..=rect.top(),
+                row as f32 / visible.len() as f32,
+            );
+            for (column, value) in samples.iter().copied().enumerate() {
+                if !value.is_finite() {
+                    continue;
+                }
+                let normalized = (value / maximum).clamp(-1.0, 1.0);
+                let color = waterfall_color(normalized, quantity == LineProbeQuantity::Energy);
+                let left = egui::lerp(rect.left()..=rect.right(), column as f32 / count as f32);
+                let right = egui::lerp(
+                    rect.left()..=rect.right(),
+                    (column + 1) as f32 / count as f32,
+                );
+                ui.painter().rect_filled(
+                    Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom)),
+                    0.0,
+                    color,
+                );
+            }
+        }
+        ui.painter().text(
+            rect.left_top() + egui::vec2(4.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            format!("t={maximum_time:.3}"),
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
+        ui.painter().text(
+            rect.left_bottom() + egui::vec2(4.0, -3.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("t={minimum_time:.3} · s=0"),
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
+        ui.painter().text(
+            rect.right_bottom() + egui::vec2(-4.0, -3.0),
+            egui::Align2::RIGHT_BOTTOM,
+            "s=L",
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
+    }
+    fn far_field_waterfall(
+        ui: &mut egui::Ui,
+        frames: &[FarFieldRecord],
+        times: &[PointProbeRecord],
+        view: &mut ProbeViewState,
+        maximum_span: f64,
+    ) {
+        ui.small("Direction × time");
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(120.0), 170.0),
+            egui::Sense::drag(),
+        );
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, view) else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Warming up the propagation delay",
+                egui::FontId::monospace(11.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+            return;
+        };
+        let span = maximum_time - minimum_time;
+        if response.drag_started() {
+            view.live = false;
+        }
+        if response.dragged() {
+            view.end_time += response.drag_delta().y as f64 / rect.height() as f64 * span;
+        }
+        if response.hovered() {
+            let wheel = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+            if wheel != 0.0 {
+                view.live = false;
+                view.span = (span * (-wheel as f64 * 0.01).exp()).clamp(0.02, maximum_span);
+                if view.span >= maximum_span * (1.0 - 1.0e-9) {
+                    view.live = true;
+                }
+            }
+        }
+        let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, view) else {
+            return;
+        };
+        let visible = frames
+            .iter()
+            .filter(|frame| frame.time >= minimum_time && frame.time <= maximum_time)
+            .collect::<Vec<_>>();
+        let maximum = visible
+            .iter()
+            .flat_map(|frame| frame.amplitude.iter())
+            .copied()
+            .filter(|value| value.is_finite())
+            .map(f32::abs)
+            .fold(0.0, f32::max)
+            .max(1.0e-12)
+            / view.waterfall_gain;
+        for (row, frame) in visible.iter().enumerate() {
+            let count = frame.amplitude.len();
+            if count == 0 {
+                continue;
+            }
+            let top = egui::lerp(
+                rect.bottom()..=rect.top(),
+                (row + 1) as f32 / visible.len() as f32,
+            );
+            let bottom = egui::lerp(
+                rect.bottom()..=rect.top(),
+                row as f32 / visible.len() as f32,
+            );
+            for (column, value) in frame.amplitude.iter().copied().enumerate() {
+                if !value.is_finite() {
+                    continue;
+                }
+                let color = waterfall_color((value / maximum).clamp(-1.0, 1.0), false);
+                let left = egui::lerp(rect.left()..=rect.right(), column as f32 / count as f32);
+                let right = egui::lerp(
+                    rect.left()..=rect.right(),
+                    (column + 1) as f32 / count as f32,
+                );
+                ui.painter().rect_filled(
+                    Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom)),
+                    0.0,
+                    color,
+                );
+            }
+        }
+        ui.painter().text(
+            rect.left_top() + egui::vec2(4.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            format!("t={maximum_time:.3}"),
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
+        ui.painter().text(
+            rect.left_bottom() + egui::vec2(4.0, -3.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("t={minimum_time:.3} · 0°"),
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
+        ui.painter().text(
+            rect.right_bottom() + egui::vec2(-4.0, -3.0),
+            egui::Align2::RIGHT_BOTTOM,
+            "360°",
+            egui::FontId::monospace(9.0),
+            Color32::WHITE,
+        );
+    }
+    /// Mean intensity over exactly the window the other far-field traces show.
+    fn far_field_average(
+        frames: &[FarFieldRecord],
+        times: &[PointProbeRecord],
+        view: &ProbeViewState,
+    ) -> Vec<f32> {
+        let mut window = view.clone();
+        let Some((minimum_time, maximum_time)) = Self::probe_time_window(times, &mut window) else {
+            return vec![];
+        };
+        let mut average = vec![0.0_f32; FAR_FIELD_DIRECTIONS];
+        let mut count = 0_u32;
+        for frame in frames
+            .iter()
+            .filter(|frame| frame.time >= minimum_time && frame.time <= maximum_time)
+        {
+            if frame.intensity.len() != FAR_FIELD_DIRECTIONS {
+                continue;
+            }
+            for (sum, value) in average.iter_mut().zip(&frame.intensity) {
+                *sum += *value;
+            }
+            count += 1;
+        }
+        if count > 0 {
+            for value in &mut average {
+                *value /= count as f32;
+            }
+            average
+        } else {
+            vec![]
+        }
+    }
+    fn far_field_polar(ui: &mut egui::Ui, label: &str, intensity: &[f32]) {
+        ui.small(label);
+        let size = ui.available_width().max(100.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+        let center = rect.center();
+        let radius = 0.44 * size;
+        ui.painter()
+            .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        for fraction in [0.25, 0.5, 0.75, 1.0] {
+            ui.painter().circle_stroke(
+                center,
+                radius * fraction,
+                Stroke::new(0.7, Color32::from_rgb(55, 69, 80)),
+            );
+        }
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x - radius, center.y),
+                egui::pos2(center.x + radius, center.y),
+            ],
+            Stroke::new(0.7, Color32::from_rgb(55, 69, 80)),
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(center.x, center.y - radius),
+                egui::pos2(center.x, center.y + radius),
+            ],
+            Stroke::new(0.7, Color32::from_rgb(55, 69, 80)),
+        );
+        let maximum = intensity
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(0.0_f32, f32::max);
+        if maximum <= 1.0e-30 {
+            ui.painter().text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                "Waiting for signal",
+                egui::FontId::monospace(10.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+            return;
+        }
+        let mut points = intensity
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, value)| {
+                let db = 10.0 * (value.max(1.0e-30) / maximum).log10();
+                let radial = (1.0 + db / 40.0).clamp(0.0, 1.0);
+                let angle = std::f32::consts::TAU * index as f32 / FAR_FIELD_DIRECTIONS as f32;
+                center + egui::vec2(angle.cos(), -angle.sin()) * radius * radial
+            })
+            .collect::<Vec<_>>();
+        if let Some(first) = points.first().copied() {
+            points.push(first);
+        }
+        if points.len() > 2 {
+            ui.painter()
+                .add(egui::Shape::line(points, Stroke::new(2.0, TEAL)));
+        }
+        for (offset, align, label) in [
+            (egui::vec2(radius, 0.0), egui::Align2::RIGHT_BOTTOM, "0°"),
+            (egui::vec2(0.0, -radius), egui::Align2::LEFT_TOP, "90°"),
+            (egui::vec2(-radius, 0.0), egui::Align2::LEFT_BOTTOM, "180°"),
+            (egui::vec2(0.0, radius), egui::Align2::LEFT_BOTTOM, "270°"),
+        ] {
+            ui.painter().text(
+                center + offset,
+                align,
+                label,
+                egui::FontId::monospace(9.0),
+                Color32::from_rgb(142, 161, 175),
+            );
+        }
+    }
     fn probe_windows(&mut self, ctx: &egui::Context) {
+        let physics = self.editor.document.model.accepted.physics;
+        let history = self.probe_history_seconds;
         let ids = self.probe_windows.iter().copied().collect::<Vec<_>>();
         for id in ids {
             let Some(probe) = self
@@ -4815,117 +6720,884 @@ impl Playground {
                 self.probe_windows.remove(&id);
                 continue;
             };
+            let point_samples = self
+                .probe_traces
+                .get(&id)
+                .map(|trace| trace.samples.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let curve_frames = self
+                .curve_probe_traces
+                .get(&id)
+                .map(|trace| trace.records.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let area_samples = self
+                .area_probe_traces
+                .get(&id)
+                .map(|trace| trace.records.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let is_curve = matches!(
+                probe.target,
+                TopologyProbeTarget::Segment { .. } | TopologyProbeTarget::Boundary(_)
+            );
+            let is_area = matches!(
+                probe.target,
+                TopologyProbeTarget::AreaDisk { .. } | TopologyProbeTarget::AreaRegion(_)
+            );
+            let (length, closed) = self.probe_metrics.get(&id).copied().unwrap_or((0.0, false));
+            let curve_times = curve_frames
+                .iter()
+                .map(|frame| PointProbeRecord {
+                    probe_id: frame.probe_id,
+                    time: frame.time,
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>();
+            let status = self.probe_status.get(&id).cloned();
+            let mut view = self
+                .probe_views
+                .remove(&id)
+                .unwrap_or_else(|| ProbeViewState::new(history));
+            let newest_time = point_samples
+                .last()
+                .map(|sample| sample.time)
+                .or_else(|| curve_frames.last().map(|frame| frame.time))
+                .or_else(|| area_samples.last().map(|sample| sample.time));
+            if view.live
+                && let Some(time) = newest_time
+            {
+                view.end_time = time;
+            }
+            view.span = view.span.clamp(0.02, history);
+            let kind = match probe.target {
+                TopologyProbeTarget::Point(_) => "point probe",
+                TopologyProbeTarget::Segment { .. } => "line probe",
+                TopologyProbeTarget::Boundary(_) => "boundary probe",
+                TopologyProbeTarget::AreaDisk { .. } | TopologyProbeTarget::AreaRegion(_) => {
+                    "area probe"
+                }
+            };
             let mut open = true;
-            egui::Window::new(probe.name)
-                .id(egui::Id::new(("probe", id.0)))
+            let mut clear = false;
+            egui::Window::new(format!("{} · {kind}", probe.name))
+                .id(egui::Id::new(("probe_readout", id.0)))
                 .open(&mut open)
-                .default_size([420.0, 220.0])
+                .default_width(430.0)
+                .resizable(true)
                 .show(ctx, |ui| {
-                    if ui.button("Clear").clicked() {
-                        self.probe_traces.remove(&id);
-                        self.curve_probe_traces.remove(&id);
-                        self.area_probe_traces.remove(&id);
-                    }
-                    match probe.target {
-                        TopologyProbeTarget::Point(_) => {
-                            ui.label("Field × time");
-                            let values = self
-                                .probe_traces
-                                .get(&id)
-                                .map(|trace| trace.samples.iter().copied().collect::<Vec<_>>())
-                                .unwrap_or_default();
-                            draw_time_series(ui, &values, TEAL, 180.0);
-                        }
-                        TopologyProbeTarget::Segment { .. } | TopologyProbeTarget::Boundary(_) => {
-                            let latest = self
-                                .curve_probe_traces
-                                .get(&id)
-                                .and_then(|trace| trace.records.back());
-                            for (label, values, color) in latest.map_or_else(Vec::new, |record| {
-                                vec![
-                                    ("Field × arclength", record.displacement.as_slice(), TEAL),
-                                    ("Flux × arclength", record.normal_flux.as_slice(), GOLD),
-                                    (
-                                        "Energy × arclength",
-                                        record.energy_density.as_slice(),
-                                        Color32::from_rgb(174, 126, 241),
-                                    ),
-                                ]
-                            }) {
-                                ui.label(label);
-                                draw_profile(ui, values, color, 105.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new("Live").selected(view.live))
+                            .on_hover_text("Follow the newest sample")
+                            .clicked()
+                        {
+                            view.live = true;
+                            if let Some(time) = newest_time {
+                                view.end_time = time;
                             }
                         }
-                        TopologyProbeTarget::AreaDisk { .. }
-                        | TopologyProbeTarget::AreaRegion(_) => {
-                            ui.label("Integrated energy × time");
-                            let values = self
-                                .area_probe_traces
-                                .get(&id)
-                                .map(|trace| {
-                                    trace
-                                        .records
-                                        .iter()
-                                        .map(|record| (record.time, record.total_energy))
-                                        .collect::<Vec<_>>()
+                        if is_curve {
+                            let active = LineProbeQuantity::ALL
+                                .into_iter()
+                                .filter(|quantity| quantity.applies(physics))
+                                .flat_map(|quantity| {
+                                    LineProbeRepresentation::ALL.into_iter().map(
+                                        move |representation| {
+                                            quantity.offset() + representation.offset()
+                                        },
+                                    )
                                 })
-                                .unwrap_or_default();
-                            draw_time_series(ui, &values, GOLD, 180.0);
-                            if let Some(record) = self
-                                .area_probe_traces
-                                .get(&id)
-                                .and_then(|trace| trace.records.back())
-                            {
-                                ui.small(format!(
-                                    "mean field {:.3e} · area {:.3} · coverage {:.0}%",
-                                    record.mean_displacement,
-                                    record.covered_area,
-                                    record.coverage * 100.0
-                                ));
+                                .filter(|index| view.line_plots[*index])
+                                .count();
+                            egui::containers::menu::MenuButton::new(format!("Plots ({active})"))
+                                .config(
+                                    egui::containers::menu::MenuConfig::new().close_behavior(
+                                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                                    ),
+                                )
+                                .ui(ui, |ui| {
+                                    egui::Grid::new(("line_probe_plots", id.0))
+                                        .num_columns(4)
+                                        .spacing(egui::vec2(12.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.label("");
+                                            for representation in LineProbeRepresentation::ALL {
+                                                ui.small(representation.label());
+                                            }
+                                            ui.end_row();
+                                            for quantity in LineProbeQuantity::ALL {
+                                                if !quantity.applies(physics) {
+                                                    continue;
+                                                }
+                                                ui.label(quantity.label_for(physics));
+                                                for representation in LineProbeRepresentation::ALL {
+                                                    let index =
+                                                        quantity.offset() + representation.offset();
+                                                    ui.checkbox(&mut view.line_plots[index], "")
+                                                        .on_hover_text(format!(
+                                                            "{} {}",
+                                                            quantity.label_for(physics),
+                                                            representation.label()
+                                                        ));
+                                                }
+                                                ui.end_row();
+                                            }
+                                        });
+                                    ui.separator();
+                                    ui.add(
+                                        egui::Slider::new(&mut view.waterfall_gain, 0.1..=10.0)
+                                            .logarithmic(true)
+                                            .text("Waterfall gain"),
+                                    );
+                                });
+                        } else if is_area {
+                            let electromagnetic =
+                                matches!(physics, PhysicsModel::Electromagnetic { .. });
+                            let active = [
+                                view.area_mean_field,
+                                view.area_rms_field,
+                                view.area_rms_transverse && electromagnetic,
+                                view.area_mean_energy,
+                                view.area_total_energy,
+                            ]
+                            .into_iter()
+                            .filter(|enabled| *enabled)
+                            .count();
+                            egui::containers::menu::MenuButton::new(format!("Plots ({active})"))
+                                .config(
+                                    egui::containers::menu::MenuConfig::new().close_behavior(
+                                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                                    ),
+                                )
+                                .ui(ui, |ui| {
+                                    ui.checkbox(
+                                        &mut view.area_mean_field,
+                                        format!("Mean {}", primary_field_label(physics)),
+                                    );
+                                    ui.checkbox(
+                                        &mut view.area_rms_field,
+                                        format!("RMS {}", primary_field_label(physics)),
+                                    );
+                                    if electromagnetic {
+                                        ui.checkbox(
+                                            &mut view.area_rms_transverse,
+                                            format!(
+                                                "RMS {}",
+                                                transverse_field_magnitude_label(physics)
+                                            ),
+                                        );
+                                    }
+                                    ui.checkbox(&mut view.area_mean_energy, "Mean energy density");
+                                    ui.checkbox(
+                                        &mut view.area_total_energy,
+                                        total_energy_label(physics),
+                                    );
+                                });
+                        } else {
+                            let electromagnetic =
+                                matches!(physics, PhysicsModel::Electromagnetic { .. });
+                            let active = [
+                                view.field,
+                                view.secondary_field,
+                                view.poynting && electromagnetic,
+                                view.energy,
+                            ]
+                            .into_iter()
+                            .filter(|enabled| *enabled)
+                            .count();
+                            egui::containers::menu::MenuButton::new(format!("Plots ({active})"))
+                                .config(
+                                    egui::containers::menu::MenuConfig::new().close_behavior(
+                                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                                    ),
+                                )
+                                .ui(ui, |ui| {
+                                    ui.checkbox(&mut view.field, primary_field_label(physics));
+                                    ui.checkbox(
+                                        &mut view.secondary_field,
+                                        match physics {
+                                            PhysicsModel::Mechanical => {
+                                                primary_field_rate_label(physics)
+                                            }
+                                            PhysicsModel::Electromagnetic { .. } => {
+                                                transverse_field_magnitude_label(physics)
+                                            }
+                                        },
+                                    );
+                                    if electromagnetic {
+                                        ui.checkbox(&mut view.poynting, "Poynting magnitude |S|");
+                                    }
+                                    ui.checkbox(&mut view.energy, "Energy density");
+                                });
+                        }
+                        if ui.small_button("Clear").clicked() {
+                            clear = true;
+                        }
+                    });
+                    if let Some(status) = &status {
+                        ui.colored_label(GOLD, status);
+                    }
+                    if is_curve {
+                        if let Some(frame) = curve_frames.last() {
+                            let (_, coverage) = Self::curve_probe_integral(
+                                frame,
+                                length,
+                                LineProbeQuantity::Field,
+                                closed,
+                            );
+                            if coverage < 0.999 {
+                                ui.small(format!("Valid coverage {:.0}%", coverage * 100.0));
                             }
                         }
+                        for quantity in LineProbeQuantity::ALL {
+                            if !quantity.applies(physics) {
+                                continue;
+                            }
+                            if view.line_plots
+                                [quantity.offset() + LineProbeRepresentation::Arclength.offset()]
+                            {
+                                Self::curve_probe_profile(
+                                    ui,
+                                    &curve_frames,
+                                    &view,
+                                    quantity,
+                                    length,
+                                    physics,
+                                );
+                            }
+                            if view.line_plots
+                                [quantity.offset() + LineProbeRepresentation::Waterfall.offset()]
+                            {
+                                Self::curve_probe_waterfall(
+                                    ui,
+                                    &curve_frames,
+                                    &curve_times,
+                                    &mut view,
+                                    history,
+                                    quantity,
+                                    physics,
+                                );
+                            }
+                            if view.line_plots
+                                [quantity.offset() + LineProbeRepresentation::Integral.offset()]
+                            {
+                                let integral = curve_frames
+                                    .iter()
+                                    .map(|frame| PointProbeRecord {
+                                        probe_id: frame.probe_id,
+                                        time: frame.time,
+                                        displacement: Self::curve_probe_integral(
+                                            frame, length, quantity, closed,
+                                        )
+                                        .0,
+                                        ..Default::default()
+                                    })
+                                    .collect::<Vec<_>>();
+                                Self::probe_plot(
+                                    ui,
+                                    &format!("{} ∫ ds", quantity.label_for(physics)),
+                                    &integral,
+                                    |sample| sample.displacement,
+                                    quantity.color(),
+                                    &mut view,
+                                    history,
+                                );
+                            }
+                        }
+                    } else if is_area {
+                        if let Some(sample) = area_samples.last() {
+                            ui.small(format!(
+                                "area {:.4} · covered {:.0}%",
+                                sample.covered_area,
+                                sample.coverage * 100.0
+                            ));
+                        }
+                        let history_of = |value: fn(&AreaProbeRecord) -> f64| {
+                            area_samples
+                                .iter()
+                                .map(|sample| PointProbeRecord {
+                                    probe_id: sample.probe_id,
+                                    time: sample.time,
+                                    displacement: value(sample),
+                                    ..Default::default()
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        for (enabled, label, values, color) in [
+                            (
+                                view.area_mean_field,
+                                format!("Mean {}", primary_field_label(physics)),
+                                history_of(|s| s.mean_displacement),
+                                SELECT,
+                            ),
+                            (
+                                view.area_rms_field,
+                                format!("RMS {}", primary_field_label(physics)),
+                                history_of(|s| s.rms_displacement),
+                                TEAL,
+                            ),
+                            (
+                                view.area_rms_transverse
+                                    && matches!(physics, PhysicsModel::Electromagnetic { .. }),
+                                format!("RMS {}", transverse_field_magnitude_label(physics)),
+                                history_of(|s| s.rms_transverse_magnitude),
+                                Color32::from_rgb(188, 139, 255),
+                            ),
+                            (
+                                view.area_mean_energy,
+                                "Mean energy density".to_owned(),
+                                history_of(|s| s.mean_energy_density),
+                                GOLD,
+                            ),
+                            (
+                                view.area_total_energy,
+                                total_energy_label(physics).to_owned(),
+                                history_of(|s| s.total_energy),
+                                RED,
+                            ),
+                        ] {
+                            if enabled {
+                                Self::probe_plot(
+                                    ui,
+                                    &label,
+                                    &values,
+                                    |sample| sample.displacement,
+                                    color,
+                                    &mut view,
+                                    history,
+                                );
+                            }
+                        }
+                    } else {
+                        let electromagnetic =
+                            matches!(physics, PhysicsModel::Electromagnetic { .. });
+                        if view.field {
+                            Self::probe_plot(
+                                ui,
+                                primary_field_label(physics),
+                                &point_samples,
+                                |sample| sample.displacement,
+                                SELECT,
+                                &mut view,
+                                history,
+                            );
+                        }
+                        if view.secondary_field {
+                            Self::probe_plot(
+                                ui,
+                                match physics {
+                                    PhysicsModel::Mechanical => primary_field_rate_label(physics),
+                                    PhysicsModel::Electromagnetic { .. } => {
+                                        transverse_field_magnitude_label(physics)
+                                    }
+                                },
+                                &point_samples,
+                                |sample| match physics {
+                                    PhysicsModel::Mechanical => sample.velocity,
+                                    PhysicsModel::Electromagnetic { .. } => {
+                                        sample.transverse_magnitude
+                                    }
+                                },
+                                TEAL,
+                                &mut view,
+                                history,
+                            );
+                        }
+                        if view.poynting && electromagnetic {
+                            Self::probe_plot(
+                                ui,
+                                "Poynting magnitude |S|",
+                                &point_samples,
+                                |sample| sample.poynting_magnitude,
+                                RED,
+                                &mut view,
+                                history,
+                            );
+                        }
+                        if view.energy {
+                            Self::probe_plot(
+                                ui,
+                                "Local energy density",
+                                &point_samples,
+                                |sample| sample.energy_density,
+                                GOLD,
+                                &mut view,
+                                history,
+                            );
+                        }
                     }
+                    ui.small(if is_curve {
+                        "Drag traces horizontally or waterfalls vertically · wheel to zoom"
+                    } else {
+                        "Drag right for earlier time · wheel to zoom"
+                    });
                 });
+            if clear {
+                self.clear_probe_trace(id);
+            }
             if !open {
                 self.probe_windows.remove(&id);
             }
+            self.probe_views.insert(id, view);
         }
-        if self.far_field_window {
-            let mut open = true;
-            egui::Window::new("Far field")
-                .id(egui::Id::new("far-field-readout"))
-                .open(&mut open)
-                .default_size([560.0, 620.0])
-                .show(ctx, |ui| {
-                    if ui.button("Clear").clicked() {
-                        self.far_field_trace = FarFieldTrace::default();
+        self.far_field_readout_window(ctx);
+    }
+    fn far_field_readout_window(&mut self, ctx: &egui::Context) {
+        if !self.far_field_window {
+            return;
+        }
+        let history = self.probe_history_seconds;
+        let frames = self
+            .far_field_trace
+            .records
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let times = frames
+            .iter()
+            .map(|frame| PointProbeRecord {
+                time: frame.time,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let power = frames
+            .iter()
+            .map(|frame| PointProbeRecord {
+                time: frame.time,
+                displacement: frame
+                    .intensity
+                    .iter()
+                    .map(|value| *value as f64)
+                    .sum::<f64>()
+                    * std::f64::consts::TAU
+                    / FAR_FIELD_DIRECTIONS as f64,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let newest_time = frames.last().map(|frame| frame.time);
+        if self.far_field_view.live
+            && let Some(time) = newest_time
+        {
+            self.far_field_view.end_time = time;
+        }
+        self.far_field_view.span = self.far_field_view.span.clamp(0.02, history);
+        let status = self
+            .runtime
+            .active()
+            .and_then(|active| active.far_field.as_ref())
+            .and_then(|result| result.as_ref().err().cloned());
+        let mut open = true;
+        let mut clear = false;
+        egui::Window::new("Outer-domain far field")
+            .id(egui::Id::new("far_field_readout"))
+            .open(&mut open)
+            .default_width(470.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new("Live").selected(self.far_field_view.live))
+                        .clicked()
+                    {
+                        self.far_field_view.live = true;
+                        if let Some(time) = newest_time {
+                            self.far_field_view.end_time = time;
+                        }
                     }
-                    if let Some(record) = self.far_field_trace.records.back() {
-                        ui.label("Direction × time");
-                        draw_far_waterfall(ui, &self.far_field_trace.records, 190.0);
-                        ui.label("Relative radiation pattern");
-                        draw_polar(ui, &record.intensity, 250.0);
+                    let active = [
+                        self.far_field_view.far_waterfall,
+                        self.far_field_view.far_polar,
+                        self.far_field_view.far_power,
+                    ]
+                    .into_iter()
+                    .filter(|enabled| *enabled)
+                    .count();
+                    egui::containers::menu::MenuButton::new(format!("Plots ({active})"))
+                        .config(
+                            egui::containers::menu::MenuConfig::new()
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+                        )
+                        .ui(ui, |ui| {
+                            ui.checkbox(&mut self.far_field_view.far_waterfall, "Waterfall");
+                            ui.checkbox(&mut self.far_field_view.far_polar, "Polar patterns");
+                            ui.checkbox(&mut self.far_field_view.far_power, "Radiated power")
+                                .on_hover_text(
+                                    "Directional intensity integrated over observation angle",
+                                );
+                        });
+                    if self.far_field_view.far_waterfall {
+                        ui.add(
+                            egui::Slider::new(&mut self.far_field_view.waterfall_gain, 0.2..=5.0)
+                                .logarithmic(true)
+                                .text("gain"),
+                        );
                     }
-                    ui.label("Radiated power × time");
-                    let values = self
-                        .far_field_trace
-                        .records
+                    if ui.small_button("Clear").clicked() {
+                        clear = true;
+                    }
+                });
+                if let Some(status) = &status {
+                    ui.colored_label(RED, status);
+                    return;
+                }
+                if self.far_field_view.far_waterfall {
+                    Self::far_field_waterfall(
+                        ui,
+                        &frames,
+                        &times,
+                        &mut self.far_field_view,
+                        history,
+                    );
+                }
+                if self.far_field_view.far_polar {
+                    let instantaneous = frames
                         .iter()
-                        .map(|record| {
-                            (
-                                record.time,
-                                record
-                                    .intensity
-                                    .iter()
-                                    .map(|value| *value as f64)
-                                    .sum::<f64>(),
+                        .min_by(|a, b| {
+                            (a.time - self.far_field_view.end_time)
+                                .abs()
+                                .total_cmp(&(b.time - self.far_field_view.end_time).abs())
+                        })
+                        .map(|frame| frame.intensity.clone())
+                        .unwrap_or_default();
+                    let averaged = Self::far_field_average(&frames, &times, &self.far_field_view);
+                    ui.small("Relative radiation pattern · 40 dB");
+                    ui.columns(2, |columns| {
+                        Self::far_field_polar(&mut columns[0], "Instantaneous", &instantaneous);
+                        Self::far_field_polar(&mut columns[1], "Time-averaged", &averaged);
+                    });
+                }
+                if self.far_field_view.far_power {
+                    Self::probe_plot(
+                        ui,
+                        "Radiated power",
+                        &power,
+                        |sample| sample.displacement,
+                        GOLD,
+                        &mut self.far_field_view,
+                        history,
+                    );
+                }
+                ui.small(
+                    "Drag through time · wheel to zoom · the average follows the visible window",
+                );
+            });
+        if clear {
+            self.far_field_trace = FarFieldTrace::default();
+        }
+        self.far_field_window = open;
+    }
+    fn diagnostics_warning(&self) -> bool {
+        self.runtime.last_error().is_some() || self.amr_error.is_some()
+    }
+    fn summary_line(&self) -> String {
+        let active = self.runtime.active();
+        format!(
+            "{:.0} fps · {:.0} steps/s · {} dofs · {} elements · dt {}",
+            1000.0 / self.frame_ms.max(0.01),
+            self.steps_per_second,
+            active.map_or(0, |v| v.operator.degrees_of_freedom()),
+            active.map_or(0, |v| v.mesh.triangles.len()),
+            active.map_or("—".into(), |v| format!(
+                "{:.2e}",
+                v.operator.recommended_time_step()
+            ))
+        )
+    }
+    /// One draggable window over the whole transaction: the frame it costs, the
+    /// topology and mesh it produced, the handoff waits, and the running solver.
+    /// A preparation or adaptation error opens it once and lights the status
+    /// marker; an ordinary rebuild does neither.
+    fn diagnostics_window(&mut self, ctx: &egui::Context) {
+        let warning = self.diagnostics_warning();
+        if warning && !self.diagnostics_warned {
+            self.diagnostics_open = true;
+        }
+        self.diagnostics_warned = warning;
+        if self.frame_ms.is_finite() && self.frame_ms > 0.0 {
+            if self.frame_history.len() == FRAME_HISTORY {
+                self.frame_history.pop_front();
+            }
+            self.frame_history.push_back(self.frame_ms);
+        }
+        if !self.diagnostics_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Performance diagnostics")
+            .open(&mut open)
+            .default_width(420.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.monospace(self.summary_line());
+                    ui.separator();
+                    self.frame_section(ui);
+                    self.topology_section(ui);
+                    self.mesh_section(ui);
+                    self.handoff_section(ui);
+                    self.solver_section(ui);
+                });
+            });
+        self.diagnostics_open = open;
+    }
+    fn frame_section(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Frame")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(format!(
+                    "{:.2} ms · {:.0} px/unit",
+                    self.frame_ms, self.scale
+                ));
+                let samples = self.frame_history.len();
+                let peak = self.frame_history.iter().copied().fold(0.0_f32, f32::max);
+                let average =
+                    self.frame_history.iter().sum::<f32>() / self.frame_history.len().max(1) as f32;
+                let mut ordered = self.frame_history.iter().copied().collect::<Vec<_>>();
+                ordered.sort_by(f32::total_cmp);
+                let p95 = ordered
+                    .get(((samples as f32 * 0.95).ceil() as usize).saturating_sub(1))
+                    .copied()
+                    .unwrap_or(0.0);
+                ui.small(format!(
+                    "Average {average:.2} ms · p95 {p95:.2} ms · peak {peak:.2} ms · {samples} samples"
+                ));
+                let (response, painter) =
+                    ui.allocate_painter(egui::vec2(ui.available_width(), 46.0), Sense::hover());
+                let rect = response.rect;
+                painter.rect_filled(rect, 3.0, Color32::from_rgb(10, 16, 22));
+                if samples > 1 && peak > 0.0 {
+                    let points = self
+                        .frame_history
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            Pos2::new(
+                                egui::lerp(
+                                    rect.left()..=rect.right(),
+                                    index as f32 / (samples - 1) as f32,
+                                ),
+                                rect.bottom() - rect.height() * (value / peak),
                             )
                         })
-                        .collect::<Vec<_>>();
-                    draw_time_series(ui, &values, GOLD, 120.0);
-                });
-            self.far_field_window = open;
-        }
+                        .collect();
+                    painter.add(egui::Shape::line(points, Stroke::new(1.5, TEAL)));
+                }
+            });
+    }
+    fn topology_section(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Topology")
+            .default_open(true)
+            .show(ui, |ui| {
+                match self.editor.acceptance {
+                    TopologyAcceptance::Valid => ui.label("Draft accepted"),
+                    TopologyAcceptance::Pending => ui.label("Draft compiling"),
+                    TopologyAcceptance::Invalid(issue) => {
+                        ui.colored_label(RED, format!("Draft invalid: {issue}"))
+                    }
+                };
+                ui.small(format!(
+                    "Document revision {} · {} curves · {} authored regions",
+                    self.editor.revision,
+                    self.editor.document.model.draft.geometry.curves.len(),
+                    self.editor.document.model.draft.regions.len(),
+                ));
+                match self.runtime.active() {
+                    Some(active) => ui.small(format!(
+                        "Committed token: document {} · topology {} · mesh generation {}",
+                        active.bundle.token.document_revision,
+                        active.bundle.token.topology_revision,
+                        active.bundle.token.mesh_generation,
+                    )),
+                    None => ui.small("No committed topology"),
+                };
+                match (self.runtime.phase(), self.runtime.preparing_timing()) {
+                    (Some(phase), Some(timing)) => {
+                        ui.small(format!(
+                            "Preparing: {}",
+                            self.runtime.detail().unwrap_or(phase.label())
+                        ));
+                        ui.small(timing_line(timing));
+                    }
+                    (Some(phase), None) => {
+                        ui.small(format!("Candidate: {}", phase.label()));
+                    }
+                    _ => {
+                        ui.small("No candidate in preparation");
+                    }
+                }
+                if let Some(error) = self.runtime.last_error() {
+                    ui.colored_label(RED, format!("{error}"));
+                }
+            });
+    }
+    fn mesh_section(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Mesh")
+            .default_open(true)
+            .show(ui, |ui| {
+                match self.runtime.active() {
+                    Some(active) => {
+                        ui.label(format!(
+                            "{} vertices · {} triangles · {} active regions",
+                            active.mesh.vertices.len(),
+                            active.mesh.triangles.len(),
+                            active.bundle.plan.domains.len(),
+                        ));
+                        ui.small(format!(
+                            "Minimum angle {:.1}° · maximum edge {:.3} · target {:.3}",
+                            active.mesh.quality.minimum_angle_degrees,
+                            active.mesh.quality.maximum_edge_length,
+                            self.mesh_edge,
+                        ));
+                    }
+                    None => {
+                        ui.label("No committed mesh");
+                    }
+                }
+                ui.small(format!("Adaptation: {}", self.amr_status));
+                if let Some(result) = &self.amr_indicator_result {
+                    let report = &result.report;
+                    ui.small(format!(
+                        "Indicator {:.2e}–{:.2e} · target {:.3}–{:.3}",
+                        report.minimum_indicator,
+                        report.maximum_indicator,
+                        report.minimum_target,
+                        report.maximum_target,
+                    ));
+                    ui.small(format!(
+                        "Refine candidates {} · coarsen candidates {} · {} work units",
+                        report.refine_candidates, report.coarsen_candidates, report.work_units,
+                    ));
+                }
+                if let Some(report) = &self.amr_report {
+                    ui.small(format!(
+                        "Last adaptation: {} refinements · {} coarsenings · {} rejected collapses",
+                        report
+                            .topology_changes
+                            .saturating_sub(report.coarsening_changes),
+                        report.coarsening_changes,
+                        report.skipped_collapses,
+                    ));
+                    ui.small(format!(
+                        "{:.0}% of the source triangles survived · {} still oversized",
+                        100.0 * report.preserved_triangles as f64
+                            / report.original_triangles.max(1) as f64,
+                        report.remaining_oversized_triangles,
+                    ));
+                }
+                if let Some(error) = &self.amr_error {
+                    ui.colored_label(RED, error);
+                }
+            });
+    }
+    fn handoff_section(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Handoff")
+            .default_open(true)
+            .show(ui, |ui| {
+                if self.uploading.is_some() {
+                    ui.label("Uploading the candidate to the GPU");
+                } else if self.runtime.ready().is_some() {
+                    ui.label(format!(
+                        "Candidate ready · draining {} requested steps",
+                        self.step_backlog
+                    ));
+                } else if self.runtime.phase().is_some() {
+                    ui.label("Preparing a candidate on the CPU");
+                } else {
+                    ui.label("Idle");
+                }
+                ui.small("The committed field keeps running until a candidate is acknowledged.");
+                match &self.last_handoff {
+                    Some(record) => {
+                        ui.small(format!(
+                            "Last handoff: prepare {:.1} ms · drain {:.1} ms · upload {:.1} ms",
+                            record.prepare_ms, record.drain_ms, record.upload_ms,
+                        ));
+                        ui.small(timing_line(record.timing));
+                        ui.small(match record.action {
+                            TopologyMeshUpdateAction::Reuse => {
+                                if record.adapted {
+                                    "Adapted mesh · operator reassembled".to_owned()
+                                } else {
+                                    format!(
+                                        "Reused the committed mesh · operator {}",
+                                        if record.operator_reused {
+                                            "reused"
+                                        } else {
+                                            "reassembled"
+                                        }
+                                    )
+                                }
+                            }
+                            TopologyMeshUpdateAction::FullRebuild(reason) => {
+                                format!("Full rebuild: {}", reason.label())
+                            }
+                        });
+                        ui.small(format!(
+                            "{} · {} dofs · {} triangles",
+                            if record.fresh {
+                                "Fresh field"
+                            } else if record.transferred {
+                                "Field transferred"
+                            } else {
+                                "Field preserved in place"
+                            },
+                            record.degrees_of_freedom,
+                            record.triangles,
+                        ));
+                    }
+                    None => {
+                        ui.small("No handoff has completed yet.");
+                    }
+                }
+            });
+    }
+    fn solver_section(&self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Solver")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(format!(
+                    "GPU {} · {} dispatches",
+                    self.gpu_status, self.gpu_dispatches
+                ));
+                match self.runtime.active() {
+                    Some(active) => {
+                        let dt = active.operator.recommended_time_step();
+                        ui.small(format!(
+                            "{} dofs · {:.2} MiB",
+                            active.operator.degrees_of_freedom(),
+                            active.operator.estimated_gpu_bytes() as f64 / (1024.0 * 1024.0),
+                        ));
+                        ui.small(format!(
+                            "dt {dt:.3e} · {:.0} steps/s · {:.2} simulated s per wall s",
+                            self.steps_per_second,
+                            self.steps_per_second * dt,
+                        ));
+                        ui.small(format!(
+                            "Simulated time {:.4} s · {} completed steps",
+                            self.sim_time_offset + self.completed_steps as f64 * dt,
+                            self.completed_steps,
+                        ));
+                    }
+                    None => {
+                        ui.small("Waiting for an accepted mesh and wave operator.");
+                    }
+                }
+                let withheld = self.runtime.ready().is_some() || self.uploading.is_some();
+                ui.small(format!(
+                    "Backlog {} steps · {} per frame ceiling · scheduling {}",
+                    self.step_backlog,
+                    MAX_STEPS_PER_FRAME,
+                    if withheld {
+                        "withheld for a pending handoff"
+                    } else if self.wave_running {
+                        "running"
+                    } else {
+                        "paused"
+                    },
+                ));
+                if let Some(energy) = self.wave_energy {
+                    ui.small(format!("Discrete energy {energy:.6e}"));
+                }
+            });
     }
     fn status_bar(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("status")
@@ -4974,20 +7646,24 @@ impl Playground {
                         ui.separator();
                         ui.label(&self.message);
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let active = self.runtime.active();
-                        ui.label(format!(
-                            "{:.0} fps · {:.0} steps/s · {} dofs · {} elements · dt {}",
-                            1000.0 / self.frame_ms.max(0.01),
-                            self.steps_per_second,
-                            active.map_or(0, |v| v.operator.degrees_of_freedom()),
-                            active.map_or(0, |v| v.mesh.triangles.len()),
-                            active.map_or("—".into(), |v| format!(
-                                "{:.2e}",
-                                v.operator.recommended_time_step()
-                            ))
-                        ));
-                    });
+                    let warning = self.diagnostics_warning();
+                    let summary = self.summary_line();
+                    let toggled = ui
+                        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let clicked = ui
+                                .add(egui::Button::new(summary).frame(false))
+                                .on_hover_text("Open performance diagnostics")
+                                .clicked();
+                            if warning {
+                                ui.colored_label(GOLD, "⚠")
+                                    .on_hover_text("Preparation or adaptation reported an error");
+                            }
+                            clicked
+                        })
+                        .inner;
+                    if toggled {
+                        self.diagnostics_open = !self.diagnostics_open;
+                    }
                 });
             });
     }
@@ -5013,8 +7689,21 @@ impl Playground {
                 viewport = self.viewport(ui, display);
             });
         self.probe_windows(root.ctx());
+        self.diagnostics_window(root.ctx());
         viewport
     }
+}
+
+fn timing_line(timing: TopologyPreparationTiming) -> String {
+    format!(
+        "mesh {:.1} · assembly {:.1} · sources {:.1} · probes {:.1} ms · {} slices · longest {:.1} ms",
+        timing.meshing_ms,
+        timing.assembly_ms,
+        timing.sources_ms,
+        timing.measurements_ms,
+        timing.slices,
+        timing.longest_slice_ms,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5294,135 +7983,118 @@ fn edit_time_signal(ui: &mut egui::Ui, signal: &mut TimeSignal) {
     });
 }
 
-fn draw_time_series(ui: &mut egui::Ui, values: &[(f64, f64)], color: Color32, height: f32) {
-    let (response, painter) =
-        ui.allocate_painter(egui::vec2(ui.available_width(), height), Sense::hover());
-    let rect = response.rect;
-    painter.rect_filled(rect, 4.0, Color32::from_rgb(10, 16, 22));
-    if values.len() < 2 {
-        return;
-    }
-    let t1 = values.last().unwrap().0;
-    let t0 = (t1 - 10.0).max(values.first().unwrap().0);
-    let visible = values.iter().filter(|(time, _)| *time >= t0);
-    let max = visible
-        .clone()
-        .map(|(_, value)| value.abs())
-        .fold(1.0e-12, f64::max);
-    let points = visible
-        .map(|(time, value)| {
-            Pos2::new(
-                egui::remap_clamp(
-                    *time as f32,
-                    t0 as f32..=t1.max(t0 + 1.0e-9) as f32,
-                    rect.left()..=rect.right(),
-                ),
-                egui::remap_clamp(
-                    *value as f32,
-                    -max as f32..=max as f32,
-                    rect.bottom()..=rect.top(),
-                ),
-            )
-        })
-        .collect();
-    painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
-}
-
-fn draw_profile(ui: &mut egui::Ui, values: &[f32], color: Color32, height: f32) {
-    let (response, painter) =
-        ui.allocate_painter(egui::vec2(ui.available_width(), height), Sense::hover());
-    let rect = response.rect;
-    painter.rect_filled(rect, 4.0, Color32::from_rgb(10, 16, 22));
-    if values.len() < 2 {
-        return;
-    }
-    let max = values
-        .iter()
-        .map(|value| value.abs())
-        .fold(1.0e-9, f32::max);
-    let points = values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            Pos2::new(
-                egui::lerp(
-                    rect.left()..=rect.right(),
-                    index as f32 / (values.len() - 1) as f32,
-                ),
-                egui::remap_clamp(*value, -max..=max, rect.bottom()..=rect.top()),
-            )
-        })
-        .collect();
-    painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
-}
-
-fn draw_polar(ui: &mut egui::Ui, values: &[f32], size: f32) {
-    let width = ui.available_width();
-    let side = size.min(width);
-    let left = ui.cursor().left() + (width - side) * 0.5;
-    let rect = Rect::from_min_size(Pos2::new(left, ui.cursor().top()), egui::vec2(side, side));
-    ui.allocate_rect(rect, Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 4.0, Color32::from_rgb(10, 16, 22));
-    let center = rect.center();
-    let radius = side * 0.43;
-    for fraction in [0.25, 0.5, 0.75, 1.0] {
-        painter.circle_stroke(
-            center,
-            radius * fraction,
-            Stroke::new(0.7, Color32::from_gray(60)),
-        );
-    }
-    if values.len() < 3 {
-        return;
-    }
-    let maximum = values.iter().copied().fold(1.0e-12, f32::max);
-    let mut points = values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let angle = std::f32::consts::TAU * index as f32 / values.len() as f32;
-            let magnitude = (value.max(0.0) / maximum).sqrt();
-            center + egui::vec2(angle.cos(), -angle.sin()) * radius * magnitude
-        })
-        .collect::<Vec<_>>();
-    points.push(points[0]);
-    painter.add(egui::Shape::line(points, Stroke::new(1.6, TEAL)));
-}
-
-fn draw_far_waterfall(ui: &mut egui::Ui, records: &VecDeque<FarFieldRecord>, height: f32) {
-    let (response, painter) =
-        ui.allocate_painter(egui::vec2(ui.available_width(), height), Sense::hover());
-    let rect = response.rect;
-    painter.rect_filled(rect, 4.0, Color32::from_rgb(10, 16, 22));
-    let shown = records.len().min(96);
-    if shown == 0 {
-        return;
-    }
-    for (row, record) in records.iter().rev().take(shown).rev().enumerate() {
-        let count = record.amplitude.len();
-        if count == 0 {
+/// Average of the triangle centroids carrying one region, used to anchor a
+/// region probe's viewport label where the region actually is.
+fn region_anchor(mesh: &TriMesh, region: RegionId) -> Option<Point2> {
+    let mut sum = Point2::default();
+    let mut count = 0.0;
+    for triangle in &mesh.triangles {
+        if triangle.region != region {
             continue;
         }
-        let top = egui::lerp(rect.top()..=rect.bottom(), row as f32 / shown as f32);
-        let bottom = egui::lerp(rect.top()..=rect.bottom(), (row + 1) as f32 / shown as f32);
-        let scale = record
-            .amplitude
+        let centroid = triangle
+            .vertices
             .iter()
-            .map(|value| value.abs())
-            .fold(1.0e-9, f32::max);
-        for (index, value) in record.amplitude.iter().enumerate() {
-            let left = egui::lerp(rect.left()..=rect.right(), index as f32 / count as f32);
-            let right = egui::lerp(
-                rect.left()..=rect.right(),
-                (index + 1) as f32 / count as f32,
-            );
-            painter.rect_filled(
-                Rect::from_min_max(Pos2::new(left, top), Pos2::new(right, bottom)),
-                0.0,
-                field_color(*value / scale, 1.0, Color32::from_rgb(10, 16, 22)),
-            );
-        }
+            .fold(Point2::default(), |total, index| {
+                total + mesh.vertices[*index].point
+            })
+            / 3.0;
+        sum = sum + centroid;
+        count += 1.0;
+    }
+    (count > 0.0).then(|| sum / count)
+}
+
+fn sampling_preset_picker(
+    ui: &mut egui::Ui,
+    id: ProbeId,
+    preset: &mut ProbeSamplingPreset,
+) -> bool {
+    let mut chosen = *preset;
+    egui::ComboBox::from_id_salt(("probe_sampling", id.0))
+        .selected_text(match chosen {
+            ProbeSamplingPreset::Low => "Low · 32 pts / 30 Hz",
+            ProbeSamplingPreset::Medium => "Medium · 64 pts / 60 Hz",
+            ProbeSamplingPreset::High => "High · 128 pts / 120 Hz",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut chosen, ProbeSamplingPreset::Low, "Low");
+            ui.selectable_value(&mut chosen, ProbeSamplingPreset::Medium, "Medium");
+            ui.selectable_value(&mut chosen, ProbeSamplingPreset::High, "High");
+        });
+    if chosen != *preset {
+        *preset = chosen;
+        return true;
+    }
+    false
+}
+
+const fn primary_field_label(physics: PhysicsModel) -> &'static str {
+    match physics {
+        PhysicsModel::Mechanical => "Displacement u",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        } => "Electric field E_z",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => "Magnetic field H_z",
+    }
+}
+
+const fn primary_field_rate_label(physics: PhysicsModel) -> &'static str {
+    match physics {
+        PhysicsModel::Mechanical => "Velocity ∂u/∂t",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        } => "Electric-field rate ∂E_z/∂t",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => "Magnetic-field rate ∂H_z/∂t",
+    }
+}
+
+const fn total_energy_label(physics: PhysicsModel) -> &'static str {
+    match physics {
+        PhysicsModel::Mechanical => "Mechanical energy",
+        PhysicsModel::Electromagnetic { .. } => "Electromagnetic energy",
+    }
+}
+
+const fn transverse_field_magnitude_label(physics: PhysicsModel) -> &'static str {
+    match physics {
+        PhysicsModel::Mechanical => "In-plane magnitude",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        } => "Magnetic magnitude |H|",
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => "Electric magnitude |E|",
+    }
+}
+
+/// Diverging blue/red ramp for a signed waterfall cell, or a single-sided ramp
+/// for a non-negative quantity such as energy density.
+fn waterfall_color(normalized: f32, single_sided: bool) -> Color32 {
+    if single_sided {
+        let amount = normalized.max(0.0);
+        Color32::from_rgb(
+            (22.0 + amount * 233.0) as u8,
+            (35.0 + amount * 155.0) as u8,
+            (55.0 + amount * 55.0) as u8,
+        )
+    } else if normalized >= 0.0 {
+        Color32::from_rgb(
+            (30.0 + normalized * 225.0) as u8,
+            (45.0 + normalized * 90.0) as u8,
+            (60.0 + normalized * 45.0) as u8,
+        )
+    } else {
+        let amount = -normalized;
+        Color32::from_rgb(
+            (30.0 + amount * 35.0) as u8,
+            (45.0 + amount * 65.0) as u8,
+            (60.0 + amount * 195.0) as u8,
+        )
     }
 }
 
@@ -5519,6 +8191,34 @@ fn field_color_over_overlay(value: f32, gain: f32) -> Color32 {
         target[2],
         (value.abs() * 220.0).round() as u8,
     )
+}
+
+/// Categorical colour for one subdomain, taken by the region's position in the
+/// authored draft list so neighbouring faces sharing a material still read
+/// apart. Every caller must pass the same scene — the draft — or the panel and
+/// the viewport disagree about which colour belongs to which region.
+fn subdomain_color(scene: &TopologyScene, region: RegionId, opacity: f32) -> Color32 {
+    const PALETTE: [[u8; 3]; 10] = [
+        [91, 220, 194],
+        [248, 196, 112],
+        [174, 126, 241],
+        [255, 106, 123],
+        [72, 166, 255],
+        [126, 217, 87],
+        [255, 154, 70],
+        [236, 130, 200],
+        [110, 198, 233],
+        [204, 194, 108],
+    ];
+    let Some(index) = scene
+        .regions
+        .iter()
+        .position(|candidate| candidate.id == region)
+    else {
+        return Color32::TRANSPARENT;
+    };
+    let [red, green, blue] = PALETTE[index % PALETTE.len()];
+    Color32::from_rgba_unmultiplied(red, green, blue, (opacity * 210.0) as u8)
 }
 
 fn material_property_color(fraction: f32, alpha: u8) -> Color32 {
@@ -5797,6 +8497,7 @@ pub fn frame(
     state.refresh_amr(&request, &display);
     state.ingest_probes(&probe_display);
     state.ingest_spatial_probes(&curve_display, &area_display, &far_display);
+    state.refresh_probe_metadata();
     state.refresh_material_overlay();
     let mut root = egui::Ui::new(
         ctx.clone(),
@@ -5971,5 +8672,412 @@ mod tests {
                 distance: 0.0,
             },
         ));
+    }
+}
+
+#[cfg(test)]
+mod probe_interaction_tests {
+    use super::*;
+
+    fn viewport() -> Rect {
+        Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))
+    }
+
+    #[test]
+    fn polyline_midpoint_splits_the_path_by_arclength() {
+        let path = [
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0),
+        ];
+        let midpoint = Playground::polyline_midpoint(&path).unwrap();
+        assert!((midpoint - Point2::new(2.0, 0.0)).norm() < 1.0e-12);
+        assert_eq!(
+            Playground::polyline_midpoint(&[Point2::new(1.0, 3.0)]),
+            Some(Point2::new(1.0, 3.0))
+        );
+        assert_eq!(Playground::polyline_midpoint(&[]), None);
+    }
+
+    /// Every probe kind must resolve a badge point, otherwise it draws no label.
+    #[test]
+    fn every_probe_kind_resolves_a_label_anchor() {
+        let mut state = Playground::default();
+        let curve = state
+            .editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.4),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        for _ in 0..100_000 {
+            state.editor.validate_frame(256);
+            if state.editor.acceptance != TopologyAcceptance::Pending {
+                break;
+            }
+        }
+        assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
+        let spans = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|candidate| candidate.id == curve)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<Vec<_>>();
+        state
+            .editor
+            .create_probe(
+                "Edge".into(),
+                [248, 196, 112],
+                TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                    curve,
+                    spans,
+                    side: CurveTraceSide::Left,
+                    reversed: false,
+                    preset: ProbeSamplingPreset::Medium,
+                }),
+            )
+            .unwrap();
+        state
+            .editor
+            .create_probe(
+                "Line".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::Segment {
+                    start: Point2::new(-0.8, -0.2),
+                    end: Point2::new(0.8, 0.2),
+                    preset: ProbeSamplingPreset::Medium,
+                },
+            )
+            .unwrap();
+        state
+            .editor
+            .create_probe(
+                "Spot".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::Point(Point2::new(0.6, 0.6)),
+            )
+            .unwrap();
+        state.refresh_samples(viewport());
+        assert!(state.sampled.is_some());
+
+        for probe in state.editor.document.model.probes.clone() {
+            let badge = state
+                .probe_badge(&probe)
+                .unwrap_or_else(|| panic!("{} has no label anchor", probe.name));
+            assert!(
+                badge.finite(),
+                "{} anchored at a non-finite point",
+                probe.name
+            );
+            if matches!(probe.target, TopologyProbeTarget::Boundary(_)) {
+                assert!(
+                    (badge.norm() - 0.4).abs() < 0.05,
+                    "boundary badge left its curve: {badge:?}"
+                );
+            }
+        }
+    }
+
+    /// A click on a probe must select it without starting a drag, and the badge
+    /// of a boundary probe must be grabbable at its drawn position.
+    #[test]
+    fn probe_hit_testing_covers_every_kind() {
+        let mut state = Playground::default();
+        state
+            .editor
+            .create_probe(
+                "Spot".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::Point(Point2::new(0.2, 0.1)),
+            )
+            .unwrap();
+        state
+            .editor
+            .create_probe(
+                "Line".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::Segment {
+                    start: Point2::new(-0.6, -0.3),
+                    end: Point2::new(0.6, -0.3),
+                    preset: ProbeSamplingPreset::Medium,
+                },
+            )
+            .unwrap();
+        state
+            .editor
+            .create_probe(
+                "Disk".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::AreaDisk {
+                    center: Point2::new(-0.5, 0.5),
+                    radius: 0.2,
+                },
+            )
+            .unwrap();
+        state.refresh_samples(viewport());
+        let id_of = |state: &Playground, name: &str| {
+            state
+                .editor
+                .document
+                .model
+                .probes
+                .iter()
+                .find(|probe| probe.name == name)
+                .unwrap()
+                .id
+        };
+        let point = id_of(&state, "Spot");
+        let line = id_of(&state, "Line");
+        let disk = id_of(&state, "Disk");
+
+        let at = |state: &Playground, world: Point2| state.screen(world, viewport());
+        assert_eq!(
+            state.hit_probe(at(&state, Point2::new(0.2, 0.1)), viewport()),
+            Some(ProbeHit::Point(point))
+        );
+        assert_eq!(
+            state.hit_probe(at(&state, Point2::new(-0.6, -0.3)), viewport()),
+            Some(ProbeHit::SegmentEndpoint(line, true))
+        );
+        assert_eq!(
+            state.hit_probe(at(&state, Point2::new(0.6, -0.3)), viewport()),
+            Some(ProbeHit::SegmentEndpoint(line, false))
+        );
+        assert_eq!(
+            state.hit_probe(at(&state, Point2::new(0.0, -0.3)), viewport()),
+            Some(ProbeHit::SegmentBody(line))
+        );
+        assert_eq!(
+            state.hit_probe(at(&state, Point2::new(-0.3, 0.5)), viewport()),
+            Some(ProbeHit::AreaDiskRadius(disk))
+        );
+        assert_eq!(
+            state.hit_probe(at(&state, Point2::new(-0.5, 0.5)), viewport()),
+            Some(ProbeHit::AreaDiskBody(disk))
+        );
+        assert_eq!(
+            state.hit_probe(at(&state, Point2::new(0.9, 0.9)), viewport()),
+            None
+        );
+    }
+
+    /// The frame gizmo must be reachable wherever the numeric placement controls
+    /// are, otherwise a region-local profile can only be aligned by typing.
+    #[test]
+    fn material_frame_gizmo_appears_with_its_numeric_controls() {
+        let mut state = Playground::default();
+        assert_eq!(state.selected_material_frame(), None, "hidden by default");
+
+        let material = state.editor.add_material().unwrap();
+        let mut updated = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(material)
+            .unwrap()
+            .clone();
+        updated.stiffness = ScalarField::formula("1 + 0.2 * x").unwrap();
+        state.editor.update_material(updated).unwrap();
+        state
+            .editor
+            .set_region_material(BACKGROUND_REGION, material)
+            .unwrap();
+
+        state.inspector = Some(InspectorPanel::Edit);
+        assert_eq!(
+            state.selected_material_frame(),
+            None,
+            "the gizmo belongs to the Materials panel"
+        );
+        state.inspector = Some(InspectorPanel::Materials);
+        state.region_selection = BACKGROUND_REGION;
+        let (region, frame) = state
+            .selected_material_frame()
+            .expect("a frame-using material must expose its gizmo");
+        assert_eq!(region, BACKGROUND_REGION);
+
+        let centre = state.screen(frame.origin, viewport());
+        assert_eq!(
+            state.hit_material_frame_gizmo(centre, viewport()),
+            Some(MaterialFrameGizmoHit::Origin)
+        );
+        assert_eq!(
+            state.hit_material_frame_gizmo(
+                centre + egui::vec2(MATERIAL_FRAME_RADIUS, 0.0),
+                viewport()
+            ),
+            Some(MaterialFrameGizmoHit::Rotate)
+        );
+        assert_eq!(
+            state.hit_material_frame_gizmo(centre + egui::vec2(25.0, 0.0), viewport()),
+            None
+        );
+    }
+
+    /// The combo label and the drawn colour must name the same thing, and two
+    /// subdomains sharing a material must still be told apart.
+    #[test]
+    fn subdomain_overlay_is_categorical_and_named_consistently() {
+        assert_eq!(MaterialOverlay::Subdomains.label(), "Subdomains");
+        assert_eq!(
+            MaterialOverlay::Subdomains.label_for(PhysicsModel::Mechanical),
+            MaterialOverlay::Subdomains.label()
+        );
+        assert_eq!(MaterialOverlay::Regions.label(), "Materials");
+
+        let mut scene = TopologyScene::default();
+        scene.regions.push(Region {
+            id: RegionId(7),
+            material: DEFAULT_MATERIAL,
+            frame: MaterialFrame::world(),
+        });
+        scene.regions.push(Region {
+            id: RegionId(8),
+            material: DEFAULT_MATERIAL,
+            frame: MaterialFrame::world(),
+        });
+        let background = subdomain_color(&scene, BACKGROUND_REGION, 1.0);
+        let first = subdomain_color(&scene, RegionId(7), 1.0);
+        let second = subdomain_color(&scene, RegionId(8), 1.0);
+        assert_ne!(first, second, "equal materials must still read apart");
+        assert_ne!(background, first);
+        assert_eq!(
+            subdomain_color(&scene, RegionId(99), 1.0),
+            Color32::TRANSPARENT
+        );
+    }
+
+    /// The mechanical skin has no complementary transverse field, so offering it
+    /// would select a mode that draws nothing.
+    #[test]
+    fn vector_overlay_offers_only_modes_that_draw() {
+        assert_eq!(
+            VectorOverlay::choices(PhysicsModel::Mechanical),
+            &[VectorOverlay::Off, VectorOverlay::RelativeEnergyFlow]
+        );
+        assert_eq!(
+            VectorOverlay::choices(PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            })
+            .len(),
+            3
+        );
+        assert_eq!(
+            VectorOverlay::ComplementaryField.resolved(PhysicsModel::Mechanical),
+            VectorOverlay::RelativeEnergyFlow
+        );
+        assert_eq!(
+            VectorOverlay::ComplementaryField.resolved(PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            }),
+            VectorOverlay::ComplementaryField
+        );
+        assert_eq!(
+            VectorOverlay::ComplementaryField.label(PhysicsModel::Mechanical),
+            VectorOverlay::RelativeEnergyFlow.label(PhysicsModel::Mechanical)
+        );
+    }
+
+    /// egui only reports a drag once the pointer has passed `max_click_dist`,
+    /// so a grab radius must still cover the control from that far away.
+    #[test]
+    fn grab_radii_absorb_the_drag_threshold() {
+        let mut state = Playground::default();
+        state
+            .editor
+            .create_probe(
+                "Spot".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::Point(Point2::new(0.0, 0.0)),
+            )
+            .unwrap();
+        let id = state
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .find(|probe| probe.name == "Spot")
+            .unwrap()
+            .id;
+        let centre = state.screen(Point2::new(0.0, 0.0), viewport());
+        let threshold = egui::InputOptions::default().max_click_dist;
+        // The drawn marker reaches 9 px with its selected ring.
+        let visual = 9.0;
+        assert!(
+            state.hit_tolerance(13.0) >= visual + threshold * 0.5,
+            "grab radius must exceed the drawn control plus half the drag threshold"
+        );
+        for offset in [0.0, 6.0, 12.0] {
+            assert_eq!(
+                state.hit_probe(centre + egui::vec2(offset, 0.0), viewport()),
+                Some(ProbeHit::Point(id)),
+                "probe lost {offset} px from its centre"
+            );
+        }
+        assert_eq!(
+            state.hit_probe(centre + egui::vec2(20.0, 0.0), viewport()),
+            None
+        );
+    }
+
+    /// Dragging an endpoint must move only that endpoint, and a body drag must
+    /// translate the whole probe.
+    #[test]
+    fn probe_drags_reshape_and_translate() {
+        let mut state = Playground::default();
+        state
+            .editor
+            .create_probe(
+                "Line".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::Segment {
+                    start: Point2::new(-0.5, 0.0),
+                    end: Point2::new(0.5, 0.0),
+                    preset: ProbeSamplingPreset::Medium,
+                },
+            )
+            .unwrap();
+        let index = state
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .position(|probe| probe.name == "Line")
+            .unwrap();
+        let id = state.editor.document.model.probes[index].id;
+        let original = state.editor.document.model.probes[index].target.clone();
+
+        state.drag_probe(
+            ProbeHit::SegmentEndpoint(id, true),
+            &original,
+            Point2::new(0.0, 0.25),
+        );
+        let TopologyProbeTarget::Segment { start, end, .. } =
+            state.editor.document.model.probes[index].target.clone()
+        else {
+            panic!("expected a segment")
+        };
+        assert!((start - Point2::new(-0.5, 0.25)).norm() < 1.0e-12);
+        assert!((end - Point2::new(0.5, 0.0)).norm() < 1.0e-12);
+
+        state.drag_probe(ProbeHit::SegmentBody(id), &original, Point2::new(0.1, -0.1));
+        let TopologyProbeTarget::Segment { start, end, .. } =
+            state.editor.document.model.probes[index].target.clone()
+        else {
+            panic!("expected a segment")
+        };
+        assert!((start - Point2::new(-0.4, -0.1)).norm() < 1.0e-12);
+        assert!((end - Point2::new(0.6, -0.1)).norm() < 1.0e-12);
     }
 }
