@@ -75,11 +75,11 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   modifies selection according to its modifiers.
 - Added a direct regression covering selected spans, unselected spans, and control
   handles at drag start.
-- Fixed a control-deletion panic on C0/C1 curves. Repeated knots break the
-  one-to-one mapping between raw B-spline controls and logical curve spans, so the
-  existing C2-only reshaping deletion is now rejected before span attribution.
-  Core and editor regressions verify that high control indices return an error and
-  leave the spline, document, and history untouched.
+- Fixed control attribution during deletion on C0/C1 curves. A raw B-spline
+  control is now mapped through knot multiplicities to its logical corner and
+  span. That corner is smoothed automatically before the reshaping deletion;
+  unrelated corners retain their continuity, and the complete operation remains
+  one history action. Core bounds checks still prevent direct ambiguous indexing.
 
 ## 2026-09-14 — Open-curve attachment snapping repair
 

@@ -126,6 +126,14 @@ pub struct TopologyCurveRemoval {
     pub removed_probes: Vec<ProbeId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlRemovalTarget {
+    Closed { node: usize },
+    OpenStart { control: usize },
+    OpenInterior { node: usize },
+    OpenEnd { from_end: usize },
+}
+
 pub struct TopologyEditor {
     pub document: TopologyDocument,
     pub revision: u64,
@@ -1307,40 +1315,9 @@ impl TopologyEditor {
             .iter_mut()
             .find(|curve| curve.id == curve_id)
             .ok_or("Curve no longer exists")?;
-        let span_count = curve.spans.len();
-        let control_count = match &curve.spline {
-            CurveSpline::Closed(spline) => spline.controls().len(),
-            CurveSpline::Open(spline) => spline.controls().len(),
-        };
-        if control >= control_count {
-            return Err("Control no longer exists".into());
-        }
-        let has_repeated_knots = match &curve.spline {
-            CurveSpline::Closed(spline) => spline
-                .multiplicities()
-                .iter()
-                .any(|multiplicity| *multiplicity != 1),
-            CurveSpline::Open(spline) => spline
-                .multiplicities()
-                .iter()
-                .any(|multiplicity| *multiplicity != 1),
-        };
-        if has_repeated_knots {
-            return Err(
-                "Control deletion requires C2 continuity; smooth the curve corners first".into(),
-            );
-        }
+        let target = control_removal_target(&curve.spline, control)?;
         let (removed_span_index, retained_span_index, removed_node) =
-            if matches!(curve.spline, CurveSpline::Closed(_)) {
-                (control, (control + span_count - 1) % span_count, control)
-            } else if control <= 1 {
-                (0, 1, 0)
-            } else if control + 2 >= control_count {
-                (span_count - 1, span_count - 2, span_count)
-            } else {
-                let left = (control - 2).min(span_count - 2);
-                (left + 1, left, left + 1)
-            };
+            control_removal_indices(target, curve.spans.len())?;
         if curve
             .nodes
             .get(removed_node)
@@ -1353,11 +1330,7 @@ impl TopologyEditor {
         if removed.behavior != retained.behavior {
             return Err("Adjacent spans have different boundary settings".into());
         }
-        match &mut curve.spline {
-            CurveSpline::Closed(spline) => spline.remove(control),
-            CurveSpline::Open(spline) => spline.remove(control),
-        }
-        .map_err(|error| error.to_string())?;
+        remove_attributed_control(&mut curve.spline, target)?;
         curve.spans.remove(removed_span_index);
         curve.nodes.remove(removed_node);
         if curve.spans.len() + usize::from(curve.spline.is_open()) != curve.nodes.len() {
@@ -2354,6 +2327,180 @@ fn outer_fraction(domain: DomainRect, side: OuterSide, point: Point2) -> f64 {
     .clamp(0.0, 1.0)
 }
 
+fn control_removal_target(
+    spline: &CurveSpline,
+    control: usize,
+) -> Result<ControlRemovalTarget, String> {
+    match spline {
+        CurveSpline::Closed(spline) => {
+            if control >= spline.controls().len() {
+                return Err("Control no longer exists".into());
+            }
+            let mut end = 0usize;
+            let node = spline
+                .multiplicities()
+                .iter()
+                .position(|multiplicity| {
+                    end += *multiplicity as usize;
+                    control < end
+                })
+                .ok_or("Control has no associated curve span")?;
+            Ok(ControlRemovalTarget::Closed { node })
+        }
+        CurveSpline::Open(spline) => {
+            let count = spline.controls().len();
+            if control >= count {
+                return Err("Control no longer exists".into());
+            }
+            if control <= 1 {
+                return Ok(ControlRemovalTarget::OpenStart { control });
+            }
+            if control + 2 >= count {
+                return Ok(ControlRemovalTarget::OpenEnd {
+                    from_end: count - 1 - control,
+                });
+            }
+            let mut end = 2usize;
+            let slot = spline
+                .multiplicities()
+                .iter()
+                .position(|multiplicity| {
+                    end += *multiplicity as usize;
+                    control < end
+                })
+                .ok_or("Control has no associated curve span")?;
+            Ok(ControlRemovalTarget::OpenInterior { node: slot + 1 })
+        }
+    }
+}
+
+fn control_removal_indices(
+    target: ControlRemovalTarget,
+    span_count: usize,
+) -> Result<(usize, usize, usize), String> {
+    if span_count < 2 {
+        return Err("At least four spline controls must remain".into());
+    }
+    match target {
+        ControlRemovalTarget::Closed { node } if node < span_count => {
+            Ok((node, (node + span_count - 1) % span_count, node))
+        }
+        ControlRemovalTarget::OpenStart { .. } => Ok((0, 1, 0)),
+        ControlRemovalTarget::OpenInterior { node } if node < span_count => {
+            Ok((node, node - 1, node))
+        }
+        ControlRemovalTarget::OpenEnd { .. } => Ok((span_count - 1, span_count - 2, span_count)),
+        _ => Err("Control has no associated curve span".into()),
+    }
+}
+
+fn smooth_periodic_breakpoint(
+    spline: &mut PeriodicCubicSpline,
+    breakpoint: usize,
+) -> Result<(), String> {
+    while spline.continuity(breakpoint).unwrap_or(2) < 2 {
+        match spline.decrease_multiplicity(breakpoint, 1.0e-10) {
+            Ok(()) => {}
+            Err(SplineError::NotRemovable) => {
+                spline
+                    .decrease_multiplicity_approximate(breakpoint)
+                    .map_err(|error| error.to_string())?;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn smooth_open_breakpoint(spline: &mut OpenCubicSpline, breakpoint: usize) -> Result<(), String> {
+    while spline.continuity(breakpoint).unwrap_or(2) < 2 {
+        match spline.decrease_multiplicity(breakpoint, 1.0e-10) {
+            Ok(()) => {}
+            Err(SplineError::NotRemovable) => {
+                spline
+                    .decrease_multiplicity_approximate(breakpoint)
+                    .map_err(|error| error.to_string())?;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn remove_attributed_control(
+    spline: &mut CurveSpline,
+    target: ControlRemovalTarget,
+) -> Result<(), String> {
+    match (spline, target) {
+        (CurveSpline::Closed(spline), ControlRemovalTarget::Closed { node }) => {
+            smooth_periodic_breakpoint(spline, node)?;
+            let control = spline.multiplicities()[..node]
+                .iter()
+                .map(|value| *value as usize)
+                .sum::<usize>();
+            let mut controls = spline.controls().to_vec();
+            controls.remove(control);
+            let mut intervals = spline.intervals().to_vec();
+            let previous = (node + intervals.len() - 1) % intervals.len();
+            intervals[previous] += intervals[node];
+            intervals.remove(node);
+            let mut multiplicities = spline.multiplicities().to_vec();
+            multiplicities.remove(node);
+            *spline =
+                PeriodicCubicSpline::new_with_multiplicities(controls, intervals, multiplicities)
+                    .map_err(|error| error.to_string())?;
+        }
+        (CurveSpline::Open(spline), ControlRemovalTarget::OpenStart { control }) => {
+            if spline.intervals().len() > 1 {
+                smooth_open_breakpoint(spline, 1)?;
+            }
+            let mut controls = spline.controls().to_vec();
+            controls.remove(control);
+            let mut intervals = spline.intervals().to_vec();
+            intervals.remove(0);
+            let mut multiplicities = spline.multiplicities().to_vec();
+            if !multiplicities.is_empty() {
+                multiplicities.remove(0);
+            }
+            *spline = OpenCubicSpline::new_with_multiplicities(controls, intervals, multiplicities)
+                .map_err(|error| error.to_string())?;
+        }
+        (CurveSpline::Open(spline), ControlRemovalTarget::OpenInterior { node }) => {
+            smooth_open_breakpoint(spline, node)?;
+            let control = 2 + spline.multiplicities()[..node - 1]
+                .iter()
+                .map(|value| *value as usize)
+                .sum::<usize>();
+            let mut controls = spline.controls().to_vec();
+            controls.remove(control);
+            let mut intervals = spline.intervals().to_vec();
+            intervals[node - 1] += intervals[node];
+            intervals.remove(node);
+            let mut multiplicities = spline.multiplicities().to_vec();
+            multiplicities.remove(node - 1);
+            *spline = OpenCubicSpline::new_with_multiplicities(controls, intervals, multiplicities)
+                .map_err(|error| error.to_string())?;
+        }
+        (CurveSpline::Open(spline), ControlRemovalTarget::OpenEnd { from_end }) => {
+            let spans = spline.intervals().len();
+            if spans > 1 {
+                smooth_open_breakpoint(spline, spans - 1)?;
+            }
+            let mut controls = spline.controls().to_vec();
+            let control = controls.len() - 1 - from_end;
+            controls.remove(control);
+            let mut intervals = spline.intervals().to_vec();
+            intervals.pop();
+            let mut multiplicities = spline.multiplicities().to_vec();
+            multiplicities.pop();
+            *spline = OpenCubicSpline::new_with_multiplicities(controls, intervals, multiplicities)
+                .map_err(|error| error.to_string())?;
+        }
+        _ => return Err("Control attribution does not match the curve".into()),
+    }
+    Ok(())
+}
+
 fn remap_split_dependencies(
     scene: &mut TopologyScene,
     probes: &mut [TopologyProbeDefinition],
@@ -2878,7 +3025,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_knot_control_deletion_is_rejected_without_mutation() {
+    fn repeated_knot_control_deletion_smooths_only_its_attributed_corner() {
         let mut editor = TopologyEditor::default();
         let curve = editor
             .create_closed_curve(
@@ -2893,19 +3040,82 @@ mod tests {
             )
             .unwrap();
         settle(&mut editor);
-        let before = editor.document.model.clone();
-        let history = editor.history_len();
+        let history = editor.history_len().0;
         let last_control = match &editor.document.model.draft.geometry.curves[0].spline {
             CurveSpline::Closed(spline) => spline.controls().len() - 1,
             CurveSpline::Open(_) => unreachable!(),
         };
 
-        assert_eq!(
-            editor.remove_control(curve, last_control).unwrap_err(),
-            "Control deletion requires C2 continuity; smooth the curve corners first"
-        );
-        assert_eq!(editor.document.model, before);
-        assert_eq!(editor.history_len(), history);
+        editor.remove_control(curve, last_control).unwrap();
+        let curve = &editor.document.model.draft.geometry.curves[0];
+        assert_eq!(curve.spans.len(), 3);
+        assert_eq!(curve.nodes.len(), 3);
+        let CurveSpline::Closed(spline) = &curve.spline else {
+            unreachable!()
+        };
+        assert_eq!(spline.controls().len(), 9);
+        assert_eq!(spline.multiplicities(), &[3, 3, 3]);
+        assert_eq!(editor.history_len().0, history + 1);
+    }
+
+    #[test]
+    fn control_deletion_retains_unrelated_repeated_knots() {
+        let mut editor = TopologyEditor::default();
+        let curve_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.3),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        editor.set_curve_continuity(curve_id, 1, 0).unwrap();
+        let control_for_node_four = match &editor.document.model.draft.geometry.curves[0].spline {
+            CurveSpline::Closed(spline) => spline.multiplicities()[..4]
+                .iter()
+                .map(|value| *value as usize)
+                .sum(),
+            CurveSpline::Open(_) => unreachable!(),
+        };
+
+        editor
+            .remove_control(curve_id, control_for_node_four)
+            .unwrap();
+        let CurveSpline::Closed(spline) = &editor.document.model.draft.geometry.curves[0].spline
+        else {
+            unreachable!()
+        };
+        assert_eq!(spline.multiplicities()[1], 3);
+        assert_eq!(spline.intervals().len(), 7);
+    }
+
+    #[test]
+    fn open_curve_end_control_deletion_smooths_the_adjacent_corner() {
+        let mut editor = TopologyEditor::default();
+        let curve_id = editor
+            .create_boundary_baffle(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.6, -0.2),
+                    Point2::new(-0.2, 0.2),
+                    Point2::new(0.2, -0.2),
+                    Point2::new(0.6, 0.2),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        settle(&mut editor);
+        let last_control = match &editor.document.model.draft.geometry.curves[0].spline {
+            CurveSpline::Open(spline) => spline.controls().len() - 1,
+            CurveSpline::Closed(_) => unreachable!(),
+        };
+
+        editor.remove_control(curve_id, last_control).unwrap();
+        let curve = &editor.document.model.draft.geometry.curves[0];
+        assert_eq!(curve.spans.len(), 2);
+        assert_eq!(curve.nodes.len(), 3);
+        let CurveSpline::Open(spline) = &curve.spline else {
+            unreachable!()
+        };
+        assert_eq!(spline.multiplicities(), &[3]);
     }
 
     #[test]
