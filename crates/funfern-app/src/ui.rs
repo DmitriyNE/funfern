@@ -1205,7 +1205,7 @@ impl Playground {
                 });
             });
         });
-        if self.draw_open {
+        if self.draw_open && !self.capturing() {
             let ctx = root.ctx().clone();
             egui::Window::new("Draw")
                 .collapsible(false)
@@ -1256,6 +1256,11 @@ impl Playground {
     }
     fn side_panel(&mut self, root: &mut egui::Ui) {
         let Some(panel) = self.inspector else { return };
+        // On a narrow layout the inspector floats over the viewport instead of
+        // docking beside it, which would put a panel inside the capture crop.
+        if self.capturing() && root.available_width() < 700.0 {
+            return;
+        }
         if root.available_width() < 700.0 {
             let mut open = true;
             egui::Window::new(match panel {
@@ -1467,6 +1472,9 @@ impl Playground {
     /// candidate filled gold, its boundary stroked, and its material named at
     /// the face centre. The one under the cursor reads stronger.
     fn draw_removal_candidates(&self, painter: &egui::Painter, r: Rect) {
+        if self.capturing() {
+            return;
+        }
         let Some(pending) = &self.pending_removal else {
             return;
         };
@@ -1549,7 +1557,7 @@ impl Playground {
     /// The question a staged deletion asks, anchored over the viewport so it is
     /// visible whatever panels are open.
     fn removal_prompt(&mut self, ctx: &egui::Context, viewport: Rect) {
-        if self.pending_removal.is_none() {
+        if self.pending_removal.is_none() || self.capturing() {
             return;
         }
         let mut cancel = false;
@@ -3565,12 +3573,14 @@ impl Playground {
             let owned_controls = self
                 .selection
                 .spans()
+                .filter(|_| !self.capturing())
                 .map(|spans| {
                     selected_span_controls(&self.editor.document.model.draft.geometry, spans)
                 })
                 .unwrap_or_default();
             for handle in &sampled.handles {
-                let active = matches!(self.selection, TopologySelection::Handle(value) if value == handle.handle);
+                let active = !self.capturing()
+                    && matches!(self.selection, TopologySelection::Handle(value) if value == handle.handle);
                 let owned = matches!(
                     handle.handle,
                     TopologyHandle::Control { curve, control } if owned_controls.contains(&(curve, control))
@@ -3600,8 +3610,25 @@ impl Playground {
             }
         }
     }
+    /// True while a PNG snapshot or a video frame is being taken. The capture
+    /// crops to the viewport, so panels and the status bar are outside it by
+    /// construction; what has to go is the chrome drawn inside the crop and the
+    /// windows that float over it. `browser-checks.md` sets the rule: the field,
+    /// the active View overlays, probes and the logo stay, while readouts,
+    /// selection emphasis, gizmos, marquees and tool prompts do not.
+    fn capturing(&self) -> bool {
+        matches!(
+            self.snapshot_state,
+            SnapshotState::Armed | SnapshotState::Capturing
+        ) || matches!(
+            self.recording_state,
+            RecordingState::Preparing | RecordingState::Starting | RecordingState::Recording
+        )
+    }
+
     fn span_selected(&self, target: TopologySpanTarget) -> bool {
-        matches!(&self.selection, TopologySelection::Spans(spans) if spans.contains(&target))
+        !self.capturing()
+            && matches!(&self.selection, TopologySelection::Spans(spans) if spans.contains(&target))
     }
     fn span_condition_colors(&self, target: TopologySpanTarget) -> Option<(Color32, Color32)> {
         match target {
@@ -3636,7 +3663,7 @@ impl Playground {
             if !self.probe_visible(&probe.target) {
                 continue;
             }
-            let selected = self.selected_probe == Some(probe.id);
+            let selected = !self.capturing() && self.selected_probe == Some(probe.id);
             let color = self.probe_color(probe);
             match &probe.target {
                 TopologyProbeTarget::Point(position) => {
@@ -3853,11 +3880,12 @@ impl Playground {
                 painter.line_segment([center - offset, center + offset], Stroke::new(1.0, GOLD));
             }
         }
-        let show_region = self.inspector == Some(InspectorPanel::Materials)
-            || matches!(
-                p.material_overlay,
-                MaterialOverlay::Regions | MaterialOverlay::Subdomains
-            );
+        let show_region = !self.capturing()
+            && (self.inspector == Some(InspectorPanel::Materials)
+                || matches!(
+                    p.material_overlay,
+                    MaterialOverlay::Regions | MaterialOverlay::Subdomains
+                ));
         // While the Materials panel lists faces, outline the selected face
         // instead of the selected region, so a hole can be picked out too.
         let selected_face = (self.inspector == Some(InspectorPanel::Materials)
@@ -3912,12 +3940,13 @@ impl Playground {
                 GOLD,
             );
         }
-        if let Some(DragGesture::Marquee {
-            start,
-            current,
-            operation,
-            ..
-        }) = &self.drag
+        if !self.capturing()
+            && let Some(DragGesture::Marquee {
+                start,
+                current,
+                operation,
+                ..
+            }) = &self.drag
         {
             let marquee = Rect::from_two_pos(*start, *current).intersect(r);
             let operation_color = match operation {
@@ -3970,7 +3999,7 @@ impl Playground {
                 border_color,
             );
         }
-        if let Some(draw) = &self.draw {
+        if let Some(draw) = &self.draw.as_ref().filter(|_| !self.capturing()) {
             self.draw_attachment_targets(painter, r, draw);
             let points = draw
                 .points
@@ -4159,6 +4188,9 @@ impl Playground {
     }
     /// Targets and the live snap while a loose end is being dragged.
     fn draw_weld_targets(&self, painter: &egui::Painter, r: Rect) {
+        if self.capturing() {
+            return;
+        }
         let Some(DragGesture::Endpoint { curve, node, snap }) = &self.drag else {
             return;
         };
@@ -4347,6 +4379,9 @@ impl Playground {
         Some((pivot, center, radius, x_radius, y_radius))
     }
     fn draw_transform_gizmo(&self, painter: &egui::Painter, r: Rect) {
+        if self.capturing() {
+            return;
+        }
         let Some((_, center, radius, x_radius, y_radius)) = self.transform_gizmo(r) else {
             return;
         };
@@ -6556,6 +6591,9 @@ impl Playground {
         }
     }
     fn draw_material_frame(&self, painter: &egui::Painter, r: Rect) {
+        if self.capturing() {
+            return;
+        }
         let Some((_, frame)) = self.selected_material_frame() else {
             return;
         };
@@ -6593,7 +6631,8 @@ impl Playground {
     /// the user can see rather than have to know about. Hidden while a gesture
     /// that has nothing to do with the domain is running.
     fn draw_domain_handles(&self, painter: &egui::Painter, r: Rect) {
-        if self.draw.is_some()
+        if self.capturing()
+            || self.draw.is_some()
             || self.pending_removal.is_some()
             || matches!(
                 self.drag,
@@ -8622,8 +8661,10 @@ impl Playground {
             .show(root, |ui| {
                 viewport = self.viewport(ui, display);
             });
-        self.probe_windows(root.ctx());
-        self.diagnostics_window(root.ctx());
+        if !self.capturing() {
+            self.probe_windows(root.ctx());
+            self.diagnostics_window(root.ctx());
+        }
         self.keyboard_focus_previous = root.ctx().egui_wants_keyboard_input();
         viewport
     }
@@ -9834,6 +9875,52 @@ mod probe_interaction_tests {
 
     /// The frame gizmo must be reachable wherever the numeric placement controls
     /// are, otherwise a region-local profile can only be aligned by typing.
+    /// A capture crops to the viewport, so what has to be suppressed is the
+    /// chrome inside the crop, not the panels outside it.
+    #[test]
+    fn a_capture_hides_the_chrome_inside_its_crop() {
+        let mut state = Playground::default();
+        assert!(!state.capturing(), "idle is not a capture");
+        for snapshot in [SnapshotState::Armed, SnapshotState::Capturing] {
+            state.snapshot_state = snapshot;
+            assert!(state.capturing(), "{snapshot:?}");
+        }
+        state.snapshot_state = SnapshotState::Saving;
+        assert!(
+            !state.capturing(),
+            "saving happens after the pixels are taken"
+        );
+        state.snapshot_state = SnapshotState::Idle;
+        for recording in [
+            RecordingState::Preparing,
+            RecordingState::Starting,
+            RecordingState::Recording,
+        ] {
+            state.recording_state = recording;
+            assert!(state.capturing(), "{recording:?}");
+        }
+        state.recording_state = RecordingState::SelectingDestination;
+        assert!(
+            !state.capturing(),
+            "choosing a destination is not yet a capture"
+        );
+
+        // Selection emphasis is the one thing that has to read through the
+        // predicate rather than be gated at a call site.
+        state.recording_state = RecordingState::Recording;
+        state.selection = TopologySelection::Spans(
+            [TopologySpanTarget::Outer(OuterSide::Bottom)]
+                .into_iter()
+                .collect(),
+        );
+        assert!(
+            !state.span_selected(TopologySpanTarget::Outer(OuterSide::Bottom)),
+            "a selected span must not read as selected in a capture"
+        );
+        state.recording_state = RecordingState::Idle;
+        assert!(state.span_selected(TopologySpanTarget::Outer(OuterSide::Bottom)));
+    }
+
     #[test]
     fn material_frame_gizmo_appears_with_its_numeric_controls() {
         let mut state = Playground::default();

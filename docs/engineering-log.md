@@ -30,12 +30,6 @@ Follow-ups from the welding work:
 
 Carried over from the cutover follow-up work, not from the review:
 
-- [ ] Restore capture suppression. The pre-swap `clean_presentation()` had eight
-  call sites hiding panels, floating windows, selection emphasis, gizmos,
-  marquees, and tool prompts during PNG export and video recording; it did not
-  survive the cutover, so viewport captures now include whatever is on screen,
-  contrary to `browser-checks.md`. The performance and probe readout windows
-  inherit that exposure.
 - [ ] Make a multi-feature deletion one history entry. Deleting several curves in
   one gesture now completes, but issues one editor command per curve, so undo
   walks back through them individually — `browser-checks.md` expects one entry.
@@ -113,6 +107,37 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Captures show the scene, not the tools
+
+Capture suppression did not survive the cutover, so PNG exports and video frames
+carried whatever was on screen. Restoring it turned out smaller than the log
+feared, because the capture already crops to the central viewport: side panels
+and the status bar are outside it by construction and needed nothing. What leaks
+in is the chrome drawn inside the crop and the windows that float over it.
+
+A `capturing()` predicate over the snapshot and recording states now gates the
+weld targets, the domain grips, the transform and material frame gizmos, the
+survivor highlight and its prompt, the marquee, the draw preview, the diagnostics
+and probe readout windows, the Draw window, and the inspector on a narrow layout
+where it floats rather than docks. Selection emphasis reads through the predicate
+instead, since `span_selected`, the owned-control ring, the active handle and the
+selected probe are consulted from several places; making the predicate answer
+false is one change rather than a dozen.
+
+What stays is what `browser-checks.md` asks for: the field, the active View
+overlays including control polygons, handles and boundary badges, the geometry,
+the probes, the source marker, and the logo.
+
+The old implementation threaded a `clean_capture` bool through eighteen call
+sites. Each draw consults the predicate itself now, which is why this is a
+smaller diff than the one it replaces.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 428 passing, and
+`cargo build --release -p funfern-app --locked`. What a capture actually contains
+needs the browser checklist; the test covers the predicate and the selection
+emphasis that reads through it.
 
 ## 2026-09-15 — The measurement now includes its own tail
 
