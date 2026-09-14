@@ -97,7 +97,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   provide direct rotation and scaling. A junction can move only with all
   incident arms, and a selection whose boundary knot is smooth shares control
   points with its neighbour, so neither offers the transform gizmo until the
-  selection is widened or Isolate at C0 walls it off.
+  selection is widened or Isolate at C0 walls it off. The outer rectangle resizes
+  by dragging a side or one of its corner grips, with Shift snapping to the grid;
+  the Edit panel also carries its extents as numbers.
 - **Continuity:** a selected end knot reads C0, C1, or C2 and can be set to any
   of them, except at a topology junction, which stays a corner. Smoothing a knot
   on a small loop refines the curve first so there are controls to spend; the

@@ -141,10 +141,21 @@ struct DrawGesture {
     face: Option<FaceId>,
 }
 
+/// Which part of the outer rectangle a domain resize has hold of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DomainDrag {
+    Side { side: OuterSide, start: DomainRect },
+    Corner { index: usize, start: DomainRect },
+}
+
 #[derive(Clone, Debug)]
 enum DragGesture {
     Handle {
         handle: TopologyHandle,
+    },
+    /// The outer rectangle being resized by one of its sides or corners.
+    Domain {
+        drag: DomainDrag,
     },
     /// A loose end of an open curve on the move. `snap` is the target it would
     /// weld onto if released now, for the preview ring only.
@@ -3111,6 +3122,7 @@ impl Playground {
             self.draw_sampled(&painter, viewport, sampled, color, 2.0, true);
         }
         self.draw_weld_targets(&painter, viewport);
+        self.draw_domain_handles(&painter, viewport);
         self.draw_markers(&painter, viewport);
         self.draw_material_frame(&painter, viewport);
         self.draw_transform_gizmo(&painter, viewport);
@@ -4401,8 +4413,20 @@ impl Playground {
                     axis: GizmoScaleAxis::Y,
                     ..
                 }) => Some(egui::CursorIcon::ResizeVertical),
+                Some(DragGesture::Domain {
+                    drag: DomainDrag::Corner { index, .. },
+                }) => Some(Self::domain_corner_cursor(*index)),
+                Some(DragGesture::Domain {
+                    drag: DomainDrag::Side { side, .. },
+                }) => Some(match side {
+                    OuterSide::Left | OuterSide::Right => egui::CursorIcon::ResizeHorizontal,
+                    OuterSide::Bottom | OuterSide::Top => egui::CursorIcon::ResizeVertical,
+                }),
                 _ => None,
             };
+            let corner_cursor = pointer
+                .and_then(|pos| self.hit_domain_corner(pos, r))
+                .map(Self::domain_corner_cursor);
             let hover_cursor = pointer
                 .and_then(|pos| self.hit_transform_gizmo(pos, r))
                 .map(|(hit, _)| match hit {
@@ -4416,7 +4440,7 @@ impl Playground {
                     }
                     TransformGizmoHit::Scale(GizmoScaleAxis::Y) => egui::CursorIcon::ResizeVertical,
                 });
-            if let Some(cursor) = active_cursor.or(hover_cursor) {
+            if let Some(cursor) = active_cursor.or(hover_cursor).or(corner_cursor) {
                 ui.ctx().set_cursor_icon(cursor);
             }
         }
@@ -4715,6 +4739,30 @@ impl Playground {
                     }
                     return;
                 }
+                // A corner of the outer rectangle outranks the two sides that
+                // meet there, so both a corner and a side drag stay reachable.
+                if let Some(index) = self.hit_domain_corner(grab, r) {
+                    self.selected_probe = None;
+                    self.selection = TopologySelection::Spans(
+                        [
+                            TopologySpanTarget::Outer(OuterSide::ALL[index]),
+                            TopologySpanTarget::Outer(
+                                OuterSide::ALL
+                                    [(index + OuterSide::ALL.len() - 1) % OuterSide::ALL.len()],
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    );
+                    self.editor.begin();
+                    self.drag = Some(DragGesture::Domain {
+                        drag: DomainDrag::Corner {
+                            index,
+                            start: self.editor.document.model.draft.geometry.domain,
+                        },
+                    });
+                    return;
+                }
                 let hit = self.sampled.as_ref().and_then(|sampled| {
                     sampled.hit_test(
                         self.transform(r),
@@ -4744,7 +4792,21 @@ impl Playground {
                             .map(|node| (curve, node)),
                         _ => None,
                     };
-                    self.drag = Some(if let Some((curve, node)) = loose_end {
+                    let outer_side = match hit {
+                        TopologyHit::Span {
+                            target: TopologySpanTarget::Outer(side),
+                            ..
+                        } if !shift && !ui.input(|i| i.modifiers.command) => Some(side),
+                        _ => None,
+                    };
+                    self.drag = Some(if let Some(side) = outer_side {
+                        DragGesture::Domain {
+                            drag: DomainDrag::Side {
+                                side,
+                                start: self.editor.document.model.draft.geometry.domain,
+                            },
+                        }
+                    } else if let Some((curve, node)) = loose_end {
                         DragGesture::Endpoint {
                             curve,
                             node,
@@ -4821,6 +4883,20 @@ impl Playground {
                         let snap = self.weld_hit_for(pos, r, Some((curve, node)));
                         self.drag = Some(DragGesture::Endpoint { curve, node, snap });
                         moved
+                    }
+                    DragGesture::Domain { drag } => {
+                        let point = if shift {
+                            Self::snap_point(point)
+                        } else {
+                            point
+                        };
+                        let start = match drag {
+                            DomainDrag::Side { start, .. } | DomainDrag::Corner { start, .. } => {
+                                start
+                            }
+                        };
+                        self.editor
+                            .set_domain_during_edit(Self::resize_domain(start, drag, point))
                     }
                     DragGesture::Handle { handle } => {
                         let point = if shift {
@@ -6416,6 +6492,117 @@ impl Playground {
     }
     /// Screen-space hit radius. Touch input keeps the drawn controls small but
     /// widens what counts as a hit.
+    /// Small grips on the outer rectangle's corners, so the resize is something
+    /// the user can see rather than have to know about. Hidden while a gesture
+    /// that has nothing to do with the domain is running.
+    fn draw_domain_handles(&self, painter: &egui::Painter, r: Rect) {
+        if self.draw.is_some()
+            || self.pending_removal.is_some()
+            || matches!(
+                self.drag,
+                Some(
+                    DragGesture::Marquee { .. }
+                        | DragGesture::Spans { .. }
+                        | DragGesture::Rotate { .. }
+                        | DragGesture::Scale { .. }
+                )
+            )
+        {
+            return;
+        }
+        let dragging = matches!(self.drag, Some(DragGesture::Domain { .. }));
+        for (index, corner) in self
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .domain
+            .corners()
+            .into_iter()
+            .enumerate()
+        {
+            let center = self.screen(corner, r);
+            if !r.contains(center) {
+                continue;
+            }
+            let held = dragging
+                && matches!(
+                    self.drag,
+                    Some(DragGesture::Domain {
+                        drag: DomainDrag::Corner { index: held, .. },
+                    }) if held == index
+                );
+            let half = if held { 5.0 } else { 4.0 };
+            let rect = egui::Rect::from_center_size(center, egui::vec2(half * 2.0, half * 2.0));
+            painter.rect_filled(rect, 1.0, Color32::from_rgba_unmultiplied(8, 13, 18, 220));
+            painter.rect_stroke(
+                rect,
+                1.0,
+                Stroke::new(1.0, if held { GOLD } else { TEAL }),
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
+
+    /// The outer rectangle's corner under the pointer, if any. Corners win over
+    /// the sides they meet, so a corner drag is always reachable.
+    fn hit_domain_corner(&self, point: Pos2, viewport: Rect) -> Option<usize> {
+        self.editor
+            .document
+            .model
+            .draft
+            .geometry
+            .domain
+            .corners()
+            .into_iter()
+            .enumerate()
+            .map(|(index, corner)| (index, self.screen(corner, viewport).distance(point)))
+            .filter(|(_, distance)| *distance <= self.hit_tolerance(10.0))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(index, _)| index)
+    }
+
+    fn domain_corner_cursor(index: usize) -> egui::CursorIcon {
+        match index {
+            0 | 2 => egui::CursorIcon::ResizeNeSw,
+            _ => egui::CursorIcon::ResizeNwSe,
+        }
+    }
+
+    /// Where the dragged side or corner lands, leaving the rest of the rectangle
+    /// where it was.
+    fn resize_domain(start: DomainRect, drag: DomainDrag, point: Point2) -> DomainRect {
+        let mut domain = start;
+        match drag {
+            DomainDrag::Side { side, .. } => match side {
+                OuterSide::Bottom => domain.min_y = point.y,
+                OuterSide::Right => domain.max_x = point.x,
+                OuterSide::Top => domain.max_y = point.y,
+                OuterSide::Left => domain.min_x = point.x,
+            },
+            DomainDrag::Corner { index, .. } => match index {
+                0 => {
+                    domain.min_x = point.x;
+                    domain.min_y = point.y;
+                }
+                1 => {
+                    domain.max_x = point.x;
+                    domain.min_y = point.y;
+                }
+                2 => {
+                    domain.max_x = point.x;
+                    domain.max_y = point.y;
+                }
+                _ => {
+                    domain.min_x = point.x;
+                    domain.max_y = point.y;
+                }
+            },
+        }
+        domain
+    }
+
     fn hit_tolerance(&self, mouse: f32) -> f32 {
         if self.touch_active {
             mouse.max(18.0)
@@ -9641,6 +9828,74 @@ mod probe_interaction_tests {
 
     /// egui only reports a drag once the pointer has passed `max_click_dist`,
     /// so a grab radius must still cover the control from that far away.
+    /// Dragging the outer rectangle resizes it: a side moves only its own edge,
+    /// a corner moves the two that meet there, and the rest stays put.
+    #[test]
+    fn domain_drags_move_one_side_or_one_corner() {
+        let start = DomainRect::new(-1.0, 1.0, -1.0, 1.0);
+        for (side, expected) in [
+            (OuterSide::Left, DomainRect::new(-0.5, 1.0, -1.0, 1.0)),
+            (OuterSide::Right, DomainRect::new(-1.0, -0.5, -1.0, 1.0)),
+            (OuterSide::Bottom, DomainRect::new(-1.0, 1.0, -0.5, 1.0)),
+            (OuterSide::Top, DomainRect::new(-1.0, 1.0, -1.0, -0.5)),
+        ] {
+            assert_eq!(
+                Playground::resize_domain(
+                    start,
+                    DomainDrag::Side { side, start },
+                    Point2::new(-0.5, -0.5),
+                ),
+                expected,
+                "{side:?} moved the wrong edge"
+            );
+        }
+        for (index, expected) in [
+            (0usize, DomainRect::new(0.5, 1.0, 0.25, 1.0)),
+            (1, DomainRect::new(-1.0, 0.5, 0.25, 1.0)),
+            (2, DomainRect::new(-1.0, 0.5, -1.0, 0.25)),
+            (3, DomainRect::new(0.5, 1.0, -1.0, 0.25)),
+        ] {
+            assert_eq!(
+                Playground::resize_domain(
+                    start,
+                    DomainDrag::Corner { index, start },
+                    Point2::new(0.5, 0.25),
+                ),
+                expected,
+                "corner {index} moved the wrong pair"
+            );
+        }
+    }
+
+    /// The corners are grabbable at the same radius as any other handle, and
+    /// each offers the diagonal cursor that matches it.
+    #[test]
+    fn domain_corners_are_grabbable_and_cursored() {
+        let state = Playground::default();
+        let domain = state.editor.document.model.draft.geometry.domain;
+        for (index, corner) in domain.corners().into_iter().enumerate() {
+            let centre = state.screen(corner, viewport());
+            assert_eq!(
+                state.hit_domain_corner(centre, viewport()),
+                Some(index),
+                "corner {index} is not grabbable at its own centre"
+            );
+            assert_eq!(
+                state.hit_domain_corner(centre + egui::vec2(60.0, 60.0), viewport()),
+                None,
+                "corner {index} grabs far too wide"
+            );
+        }
+        assert_eq!(
+            Playground::domain_corner_cursor(0),
+            egui::CursorIcon::ResizeNeSw
+        );
+        assert_eq!(
+            Playground::domain_corner_cursor(1),
+            egui::CursorIcon::ResizeNwSe
+        );
+    }
+
     #[test]
     fn grab_radii_absorb_the_drag_threshold() {
         let mut state = Playground::default();

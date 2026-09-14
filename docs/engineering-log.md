@@ -139,6 +139,32 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — The outer rectangle is draggable again
+
+Dragging the domain's sides and corners did not survive the cutover in
+`eddad77`. The old viewport carried a `DomainDrag` with Side and Corner
+variants, a corner hit test, and a live resize; none of it came across, and the
+replacement was the four numeric extents in the Edit panel, which appear only
+once an outer side is selected. Nothing reported the loss: pressing an outer side
+started an ordinary span transform whose curve-span set was empty, so the drag
+moved nothing and said nothing. The rigid-transform refusal for outer selections
+even points at the numeric fields by name.
+
+Restored to what it was. A corner grab outranks the two sides that meet there, so
+both gestures stay reachable; a side drag needs no modifier, leaving Shift and
+Command for selection as before. Shift snaps to the grid, the corners carry their
+diagonal cursors, and the whole drag is one history entry, since press begins the
+transaction and release commits it. `set_domain_during_edit` was already on the
+topology editor and unused, so nothing new was needed underneath.
+
+The corners are now drawn as small grips, which the old viewport did not do. They
+hide during drawing, a staged removal, and any gesture that is not about the
+domain.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 422 passing, and
+`cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-15 — Spans that bound nothing say so
 
 The span inspector now reads "Inactive" when every selected span has an excluded
