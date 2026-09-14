@@ -99,6 +99,17 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   identities, undo atomicity, approximate continuity upgrades, junction protection,
   and independent chord straightening.
 
+## 2026-09-14 — Marquee intent feedback restored
+
+- Restored the live marquee label, operation-colored fill, solid blue enclosure
+  border, and dashed teal crossing border. Left-to-right requires full enclosure;
+  right-to-left accepts any crossed span.
+- Replace, Shift-add, and Alt-subtract now update both the label and selection while
+  the pointer remains down. Modifier changes are read again at release, and Escape
+  restores the selection captured at drag start.
+- Added direct tests for direction classification and baseline-relative replace,
+  addition, and subtraction.
+
 ## 2026-09-14 — Atomic topology application cutover
 
 - Replaced the production editor with the unified topology document and removed

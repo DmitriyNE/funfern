@@ -266,7 +266,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **Navigate:** right-drag or Space + left-drag pans with a mouse. On touch screens,
   drag an object to manipulate it, drag empty canvas with one finger to marquee
   spans, and use two fingers to pan and pinch around their shared center. Touch hit
-  targets expand without making the drawn controls larger. Fit View frames the
+  targets expand without making the drawn controls larger. Marquee feedback shows
+  the live Replace/Add/Subtract operation and Enclosed/Crossing hit mode. Shift adds,
+  Alt subtracts, and either modifier can change while dragging; left-to-right fully
+  encloses spans while right-to-left selects crossings. Fit View frames the
   current domain. Panel scrolling and text editing do not manipulate the viewport.
 - **Drafts:** green curves are accepted, amber curves are being checked, red
   curves are invalid. The last accepted scene stays as a subdued reference.

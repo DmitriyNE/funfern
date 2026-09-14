@@ -160,7 +160,9 @@ enum DragGesture {
     },
     Marquee {
         start: Pos2,
-        base: TopologySelection,
+        current: Pos2,
+        base: BTreeSet<TopologySpanTarget>,
+        operation: MarqueeOperation,
     },
     Source,
     Probe(ProbeId),
@@ -178,6 +180,46 @@ enum GizmoScaleAxis {
     Uniform,
     X,
     Y,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarqueeOperation {
+    Replace,
+    Add,
+    Subtract,
+}
+
+impl MarqueeOperation {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Replace => "Replace",
+            Self::Add => "Add",
+            Self::Subtract => "Subtract",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarqueeContainment {
+    Enclosed,
+    Crossing,
+}
+
+impl MarqueeContainment {
+    const fn from_drag(start: Pos2, current: Pos2) -> Self {
+        if current.x >= start.x {
+            Self::Enclosed
+        } else {
+            Self::Crossing
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Enclosed => "Enclosed",
+            Self::Crossing => "Crossing",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -520,6 +562,9 @@ impl Playground {
             }
             Some(DragGesture::Spans { gizmo_before, .. }) => {
                 self.gizmo_pivot = gizmo_before.clone();
+            }
+            Some(DragGesture::Marquee { base, .. }) => {
+                self.selection = Self::selection_from_spans(base.clone());
             }
             _ => {}
         }
@@ -1451,6 +1496,33 @@ impl Playground {
             GizmoScaleAxis::Uniform => relative.norm(),
             GizmoScaleAxis::X => relative.x.abs(),
             GizmoScaleAxis::Y => relative.y.abs(),
+        }
+    }
+    fn marquee_operation(modifiers: egui::Modifiers) -> MarqueeOperation {
+        if modifiers.alt {
+            MarqueeOperation::Subtract
+        } else if modifiers.shift {
+            MarqueeOperation::Add
+        } else {
+            MarqueeOperation::Replace
+        }
+    }
+    fn marquee_result(
+        base: &BTreeSet<TopologySpanTarget>,
+        hits: BTreeSet<TopologySpanTarget>,
+        operation: MarqueeOperation,
+    ) -> BTreeSet<TopologySpanTarget> {
+        match operation {
+            MarqueeOperation::Replace => hits,
+            MarqueeOperation::Add => base.union(&hits).copied().collect(),
+            MarqueeOperation::Subtract => base.difference(&hits).copied().collect(),
+        }
+    }
+    fn selection_from_spans(spans: BTreeSet<TopologySpanTarget>) -> TopologySelection {
+        if spans.is_empty() {
+            TopologySelection::None
+        } else {
+            TopologySelection::Spans(spans)
         }
     }
     fn selected_end_continuity(&self, span: CurveSpanId) -> Option<(CurveId, usize, u8, bool)> {
@@ -2757,15 +2829,63 @@ impl Playground {
                 GOLD,
             );
         }
-        if let Some(DragGesture::Marquee { start, .. }) = &self.drag {
-            if let Some(current) = painter.ctx().pointer_interact_pos() {
+        if let Some(DragGesture::Marquee {
+            start,
+            current,
+            operation,
+            ..
+        }) = &self.drag
+        {
+            let marquee = Rect::from_two_pos(*start, *current).intersect(r);
+            let operation_color = match operation {
+                MarqueeOperation::Replace => SELECT,
+                MarqueeOperation::Add => GOLD,
+                MarqueeOperation::Subtract => RED,
+            };
+            let containment = MarqueeContainment::from_drag(*start, *current);
+            let border_color = match containment {
+                MarqueeContainment::Enclosed => SELECT,
+                MarqueeContainment::Crossing => TEAL,
+            };
+            painter.rect_filled(
+                marquee,
+                0.0,
+                Color32::from_rgba_unmultiplied(
+                    operation_color.r(),
+                    operation_color.g(),
+                    operation_color.b(),
+                    24,
+                ),
+            );
+            if containment == MarqueeContainment::Enclosed {
                 painter.rect_stroke(
-                    Rect::from_two_pos(*start, current),
+                    marquee,
                     0.0,
-                    Stroke::new(1.0, SELECT),
-                    egui::StrokeKind::Middle,
+                    Stroke::new(1.0, border_color),
+                    egui::StrokeKind::Inside,
                 );
+            } else {
+                let corners = [
+                    marquee.left_top(),
+                    marquee.right_top(),
+                    marquee.right_bottom(),
+                    marquee.left_bottom(),
+                    marquee.left_top(),
+                ];
+                painter.extend(egui::Shape::dashed_line(
+                    &corners,
+                    Stroke::new(1.0, border_color),
+                    5.0,
+                    3.0,
+                ));
             }
+            painter.text(
+                marquee.left_top() + egui::vec2(4.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                format!("{} · {}", operation.label(), containment.label()),
+                egui::FontId::monospace(9.0),
+                border_color,
+            );
         }
         if let Some(draw) = &self.draw {
             self.draw_attachment_targets(painter, r, draw);
@@ -3399,9 +3519,12 @@ impl Playground {
                         }
                     });
                 } else {
+                    let base = self.selection.spans().cloned().unwrap_or_default();
                     self.drag = Some(DragGesture::Marquee {
                         start: pos,
-                        base: self.selection.clone(),
+                        current: pos,
+                        base,
+                        operation: Self::marquee_operation(ui.input(|input| input.modifiers)),
                     });
                 }
             }
@@ -3410,6 +3533,10 @@ impl Playground {
             if let (Some(pos), Some(drag)) = (pointer, self.drag.clone()) {
                 let point = self.world(pos, r);
                 let shift = ui.input(|input| input.modifiers.shift);
+                let invalidates_geometry = !matches!(
+                    &drag,
+                    DragGesture::Marquee { .. } | DragGesture::Pivot { .. }
+                );
                 let result = match drag {
                     DragGesture::Handle { handle } => {
                         let point = if shift {
@@ -3530,7 +3657,30 @@ impl Playground {
                         self.gizmo_pivot = Some((selected, target));
                         Ok(())
                     }
-                    DragGesture::Marquee { .. } => Ok(()),
+                    DragGesture::Marquee { start, base, .. } => {
+                        let operation = Self::marquee_operation(ui.input(|input| input.modifiers));
+                        let hits = self
+                            .sampled
+                            .as_ref()
+                            .map(|sampled| {
+                                sampled.marquee_hits(
+                                    self.transform(r),
+                                    ScreenPoint::new(start.x as f64, start.y as f64),
+                                    ScreenPoint::new(pos.x as f64, pos.y as f64),
+                                )
+                            })
+                            .unwrap_or_default();
+                        self.selection = Self::selection_from_spans(Self::marquee_result(
+                            &base, hits, operation,
+                        ));
+                        self.drag = Some(DragGesture::Marquee {
+                            start,
+                            current: pos,
+                            base,
+                            operation,
+                        });
+                        Ok(())
+                    }
                     DragGesture::Source => {
                         let mut source = self.editor.document.model.source;
                         source.position = point;
@@ -3571,38 +3721,52 @@ impl Playground {
                 if let Err(error) = result {
                     self.message = error;
                 }
-                self.invalidate_samples();
+                if invalidates_geometry {
+                    self.invalidate_samples();
+                }
             }
         }
         if response.drag_stopped_by(egui::PointerButton::Primary) {
             if let Some(drag) = self.drag.take() {
                 match drag {
-                    DragGesture::Marquee { start, base } => {
-                        if let Some(end) = pointer {
-                            let hits = self
-                                .sampled
-                                .as_ref()
-                                .map(|sampled| {
-                                    sampled.marquee_hits(
-                                        self.transform(r),
-                                        ScreenPoint::new(start.x as f64, start.y as f64),
-                                        ScreenPoint::new(end.x as f64, end.y as f64),
-                                    )
+                    DragGesture::Marquee {
+                        start,
+                        current,
+                        base,
+                        ..
+                    } => {
+                        let release_modifiers = ui.input(|input| {
+                            input
+                                .raw
+                                .events
+                                .iter()
+                                .find_map(|event| match event {
+                                    egui::Event::PointerButton {
+                                        button: egui::PointerButton::Primary,
+                                        pressed: false,
+                                        modifiers,
+                                        ..
+                                    } => Some(*modifiers),
+                                    _ => None,
                                 })
-                                .unwrap_or_default();
-                            let add = ui.input(|i| i.modifiers.shift);
-                            let mut selection = if add {
-                                base.spans().cloned().unwrap_or_default()
-                            } else {
-                                BTreeSet::new()
-                            };
-                            selection.extend(hits);
-                            self.selection = if selection.is_empty() {
-                                TopologySelection::None
-                            } else {
-                                TopologySelection::Spans(selection)
-                            };
-                        }
+                                .unwrap_or(input.modifiers)
+                        });
+                        let operation = Self::marquee_operation(release_modifiers);
+                        let end = pointer.unwrap_or(current);
+                        let hits = self
+                            .sampled
+                            .as_ref()
+                            .map(|sampled| {
+                                sampled.marquee_hits(
+                                    self.transform(r),
+                                    ScreenPoint::new(start.x as f64, start.y as f64),
+                                    ScreenPoint::new(end.x as f64, end.y as f64),
+                                )
+                            })
+                            .unwrap_or_default();
+                        self.selection = Self::selection_from_spans(Self::marquee_result(
+                            &base, hits, operation,
+                        ));
                     }
                     DragGesture::Pivot { .. } => {}
                     _ => self.editor.commit(),
@@ -5724,4 +5888,53 @@ pub fn frame(
     }
     state.autosave();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marquee_operation_and_direction_are_live_conventions() {
+        assert_eq!(
+            Playground::marquee_operation(egui::Modifiers::NONE),
+            MarqueeOperation::Replace
+        );
+        assert_eq!(
+            Playground::marquee_operation(egui::Modifiers::SHIFT),
+            MarqueeOperation::Add
+        );
+        assert_eq!(
+            Playground::marquee_operation(egui::Modifiers::ALT),
+            MarqueeOperation::Subtract
+        );
+        assert_eq!(
+            MarqueeContainment::from_drag(Pos2::ZERO, Pos2::new(10.0, 4.0)),
+            MarqueeContainment::Enclosed
+        );
+        assert_eq!(
+            MarqueeContainment::from_drag(Pos2::ZERO, Pos2::new(-10.0, 4.0)),
+            MarqueeContainment::Crossing
+        );
+    }
+
+    #[test]
+    fn marquee_add_and_subtract_apply_against_the_drag_baseline() {
+        let a = TopologySpanTarget::Curve(CurveSpanId(1));
+        let b = TopologySpanTarget::Curve(CurveSpanId(2));
+        let base = BTreeSet::from([a]);
+        let hits = BTreeSet::from([b]);
+        assert_eq!(
+            Playground::marquee_result(&base, hits.clone(), MarqueeOperation::Replace),
+            BTreeSet::from([b])
+        );
+        assert_eq!(
+            Playground::marquee_result(&base, hits.clone(), MarqueeOperation::Add),
+            BTreeSet::from([a, b])
+        );
+        assert_eq!(
+            Playground::marquee_result(&BTreeSet::from([a, b]), hits, MarqueeOperation::Subtract,),
+            BTreeSet::from([a])
+        );
+    }
 }
