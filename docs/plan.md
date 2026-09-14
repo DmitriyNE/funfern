@@ -503,8 +503,11 @@ errors, same-face separator endpoint check, synchronous convenience compiler, an
 resumable scene compiler are implemented in the core. The headless application
 document now creates closed curves, free or attached baffles, and attached
 separators; it remaps split-span anchors and boundary probes and resolves curve
-removal ownership atomically. Remaining spline topology edits, version-22
-persistence, and examples still await the atomic cut.
+removal ownership atomically. The strict version-22 codec and all eight built-in
+examples now use this document directly, including sources, probes, materials,
+frames, boundary laws, far-field settings, and presentation state. Loading reseeds
+stable IDs and begins with empty history. Remaining spline topology edits and the
+live atomic UI/runtime switch still await the cut.
 
 The application cutover needs a stable authored face reference. `FaceId` is an
 ordinal in one compiled snapshot, so persisting it would make material ownership
@@ -569,12 +572,13 @@ exterior is never assignable.
   list of `CurveSpanId`s, `CurveTraceSide`, direction, and sampling preset. Knot
   insertion expands the path, reversal reverses it and swaps orientation, and
   removal is rejected if the remaining path is no longer contiguous.
-- Add scene-file version 22 as a deliberate compatibility break and remove the
-  versions 1 through 21 decoders. Rewrite the built-in examples and URL-scene
-  fixtures in version 22. Loading obsolete local storage is ignored with one clear
-  notice; loading an obsolete or malformed file leaves the current document
-  untouched.
-- Keep one complete topology edit as one `DocumentModel` history entry. Loading
+- [x] Add scene-file version 22 as a deliberate compatibility break with no
+  versions 1 through 21 decoder. Rewrite the built-in examples directly in the
+  version-22 model.
+- [ ] Switch shared-link and recovery payloads to version 22 during the atomic live
+  cut. Ignore obsolete local storage with one clear notice; loading an obsolete or
+  malformed file must leave the current document untouched.
+- [x] Keep one complete topology edit as one `DocumentModel` history entry. Loading
   clears history as it does now. Invalid drafts, including unresolved anchors and
   incomplete transmitting dividers, remain serializable and undoable.
 

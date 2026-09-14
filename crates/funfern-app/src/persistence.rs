@@ -49,7 +49,7 @@ struct FileV2 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredPresentation {
+pub(crate) struct StoredPresentation {
     grid: bool,
     control_polygons: bool,
     handles: bool,
@@ -216,7 +216,7 @@ enum StoredBoundaryProbeSide {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum StoredProbeSamplingPreset {
+pub(crate) enum StoredProbeSamplingPreset {
     Low,
     Medium,
     High,
@@ -277,14 +277,14 @@ struct StoredMaterial {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StoredPhysicsModel {
+pub(crate) enum StoredPhysicsModel {
     Mechanical,
     Electromagnetic { polarization: StoredPolarization },
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum StoredPolarization {
+pub(crate) enum StoredPolarization {
     Tm,
     Te,
 }
@@ -306,14 +306,14 @@ enum StoredMaterialLaw {
 
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
-enum StoredScalarField {
+pub(crate) enum StoredScalarField {
     Legacy(f64),
     Field(StoredScalarFieldV14),
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StoredScalarFieldV14 {
+pub(crate) enum StoredScalarFieldV14 {
     Constant { value: f64 },
     Formula { source: String },
 }
@@ -447,7 +447,7 @@ struct StoredSpanLaw {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StoredFaceCondition {
+pub(crate) enum StoredFaceCondition {
     Reflecting,
     Impedance { ratio: f64 },
     SecondOrderOutgoing,
@@ -459,7 +459,7 @@ enum StoredFaceCondition {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StoredOuterBoundaryCondition {
+pub(crate) enum StoredOuterBoundaryCondition {
     Reflecting,
     FirstOrderOutgoing,
     SecondOrderOutgoing,
@@ -472,14 +472,14 @@ enum StoredOuterBoundaryCondition {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(untagged)]
-enum StoredTimeSignal {
+pub(crate) enum StoredTimeSignal {
     Current(StoredTimeSignalV17),
     Legacy(StoredHarmonicSignalV16),
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum StoredTimeSignalV17 {
+pub(crate) enum StoredTimeSignalV17 {
     Harmonic {
         offset: f64,
         amplitude: f64,
@@ -490,7 +490,7 @@ enum StoredTimeSignalV17 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredHarmonicSignalV16 {
+pub(crate) struct StoredHarmonicSignalV16 {
     offset: f64,
     amplitude: f64,
     frequency_hz: f64,
@@ -726,7 +726,7 @@ fn encode_scene(scene: &Scene) -> StoredScene {
     }
 }
 
-fn encode_physics(physics: PhysicsModel) -> StoredPhysicsModel {
+pub(crate) fn encode_physics(physics: PhysicsModel) -> StoredPhysicsModel {
     match physics {
         PhysicsModel::Mechanical => StoredPhysicsModel::Mechanical,
         PhysicsModel::Electromagnetic { polarization } => StoredPhysicsModel::Electromagnetic {
@@ -738,7 +738,7 @@ fn encode_physics(physics: PhysicsModel) -> StoredPhysicsModel {
     }
 }
 
-fn decode_physics(physics: StoredPhysicsModel) -> PhysicsModel {
+pub(crate) fn decode_physics(physics: StoredPhysicsModel) -> PhysicsModel {
     match physics {
         StoredPhysicsModel::Mechanical => PhysicsModel::Mechanical,
         StoredPhysicsModel::Electromagnetic { polarization } => PhysicsModel::Electromagnetic {
@@ -750,7 +750,7 @@ fn decode_physics(physics: StoredPhysicsModel) -> PhysicsModel {
     }
 }
 
-fn encode_scalar_field(field: &ScalarField) -> StoredScalarField {
+pub(crate) fn encode_scalar_field(field: &ScalarField) -> StoredScalarField {
     StoredScalarField::Field(match field {
         ScalarField::Constant(value) => StoredScalarFieldV14::Constant { value: *value },
         ScalarField::Formula(formula) => StoredScalarFieldV14::Formula {
@@ -759,7 +759,7 @@ fn encode_scalar_field(field: &ScalarField) -> StoredScalarField {
     })
 }
 
-fn decode_scalar_field(
+pub(crate) fn decode_scalar_field(
     field: StoredScalarField,
     require_tagged: bool,
 ) -> Result<ScalarField, String> {
@@ -777,7 +777,7 @@ fn decode_scalar_field(
     }
 }
 
-fn encode_signal(signal: TimeSignal) -> StoredTimeSignal {
+pub(crate) fn encode_signal(signal: TimeSignal) -> StoredTimeSignal {
     let [offset, amplitude, frequency_hz, phase_radians] = signal.harmonic_parameters();
     StoredTimeSignal::Current(StoredTimeSignalV17::Harmonic {
         offset,
@@ -787,7 +787,7 @@ fn encode_signal(signal: TimeSignal) -> StoredTimeSignal {
     })
 }
 
-fn decode_signal(signal: StoredTimeSignal) -> TimeSignal {
+pub(crate) fn decode_signal(signal: StoredTimeSignal) -> TimeSignal {
     let (offset, amplitude, frequency_hz, phase_radians) = match signal {
         StoredTimeSignal::Current(StoredTimeSignalV17::Harmonic {
             offset,
@@ -810,7 +810,9 @@ fn decode_signal(signal: StoredTimeSignal) -> TimeSignal {
     }
 }
 
-fn encode_outer_condition(condition: OuterBoundaryCondition) -> StoredOuterBoundaryCondition {
+pub(crate) fn encode_outer_condition(
+    condition: OuterBoundaryCondition,
+) -> StoredOuterBoundaryCondition {
     match condition {
         OuterBoundaryCondition::Reflecting => StoredOuterBoundaryCondition::Reflecting,
         OuterBoundaryCondition::FirstOrderOutgoing => {
@@ -830,7 +832,9 @@ fn encode_outer_condition(condition: OuterBoundaryCondition) -> StoredOuterBound
     }
 }
 
-fn decode_outer_condition(condition: StoredOuterBoundaryCondition) -> OuterBoundaryCondition {
+pub(crate) fn decode_outer_condition(
+    condition: StoredOuterBoundaryCondition,
+) -> OuterBoundaryCondition {
     match condition {
         StoredOuterBoundaryCondition::Reflecting => OuterBoundaryCondition::Reflecting,
         StoredOuterBoundaryCondition::FirstOrderOutgoing => {
@@ -850,7 +854,7 @@ fn decode_outer_condition(condition: StoredOuterBoundaryCondition) -> OuterBound
     }
 }
 
-fn encode_face_condition(condition: FaceBoundaryCondition) -> StoredFaceCondition {
+pub(crate) fn encode_face_condition(condition: FaceBoundaryCondition) -> StoredFaceCondition {
     match condition {
         FaceBoundaryCondition::Reflecting => StoredFaceCondition::Reflecting,
         FaceBoundaryCondition::Impedance { ratio } => StoredFaceCondition::Impedance { ratio },
@@ -866,7 +870,7 @@ fn encode_face_condition(condition: FaceBoundaryCondition) -> StoredFaceConditio
     }
 }
 
-fn decode_face_condition(condition: StoredFaceCondition) -> FaceBoundaryCondition {
+pub(crate) fn decode_face_condition(condition: StoredFaceCondition) -> FaceBoundaryCondition {
     match condition {
         StoredFaceCondition::Reflecting => FaceBoundaryCondition::Reflecting,
         StoredFaceCondition::Impedance { ratio } => FaceBoundaryCondition::Impedance { ratio },
@@ -882,7 +886,7 @@ fn decode_face_condition(condition: StoredFaceCondition) -> FaceBoundaryConditio
     }
 }
 
-fn decode_spline(
+pub(crate) fn decode_spline(
     controls: Vec<[f64; 2]>,
     intervals: Vec<f64>,
     multiplicities: Vec<u8>,
@@ -902,7 +906,7 @@ fn decode_spline(
     .map_err(|error| error.to_string())
 }
 
-fn decode_open_spline(
+pub(crate) fn decode_open_spline(
     controls: Vec<[f64; 2]>,
     intervals: Vec<f64>,
     multiplicities: Vec<u8>,
@@ -1430,7 +1434,7 @@ fn encode_document(document: &Document) -> FileV2 {
     }
 }
 
-fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
+pub(crate) fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
     StoredPresentation {
         grid: settings.grid,
         control_polygons: settings.control_polygons,
@@ -1478,7 +1482,9 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
     }
 }
 
-fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSettings, String> {
+pub(crate) fn decode_presentation(
+    stored: StoredPresentation,
+) -> Result<PresentationSettings, String> {
     let settings = PresentationSettings {
         grid: stored.grid,
         control_polygons: stored.control_polygons,
@@ -1531,7 +1537,7 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
     }
 }
 
-fn encode_probe_preset(preset: ProbeSamplingPreset) -> StoredProbeSamplingPreset {
+pub(crate) fn encode_probe_preset(preset: ProbeSamplingPreset) -> StoredProbeSamplingPreset {
     match preset {
         ProbeSamplingPreset::Low => StoredProbeSamplingPreset::Low,
         ProbeSamplingPreset::Medium => StoredProbeSamplingPreset::Medium,
@@ -1539,7 +1545,7 @@ fn encode_probe_preset(preset: ProbeSamplingPreset) -> StoredProbeSamplingPreset
     }
 }
 
-fn decode_probe_preset(preset: StoredProbeSamplingPreset) -> ProbeSamplingPreset {
+pub(crate) fn decode_probe_preset(preset: StoredProbeSamplingPreset) -> ProbeSamplingPreset {
     match preset {
         StoredProbeSamplingPreset::Low => ProbeSamplingPreset::Low,
         StoredProbeSamplingPreset::Medium => ProbeSamplingPreset::Medium,

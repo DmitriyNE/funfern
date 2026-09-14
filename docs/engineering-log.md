@@ -67,6 +67,26 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-14 — Topology version 22 persistence and examples
+
+- Added a strict version-22 topology document codec. It stores independent draft
+  and accepted authored scenes, stable face anchors, spline topology, span laws,
+  regions and material frames, formulas and sources, topology probe targets,
+  far-field settings, and presentation state. Compiled topology, mesh/cache state,
+  selection, camera, transient readouts, and history stay out of the file.
+- Version 22 is a hard schema break. Versions 1–21, unknown fields, malformed IDs,
+  dangling references, excessive documents, and invalid accepted scenes fail before
+  document replacement. Structurally valid invalid drafts remain loadable and
+  editable beside their independently validated accepted scene.
+- Re-authored all eight built-in examples directly in the unified topology model.
+  Their full source, probe, material, field-overlay, EM polarization, and far-field
+  semantics survive exact compact-JSON round trips; no legacy scene adapter is used.
+- Added the topology editor load constructor. It compiles accepted state, clears
+  undo/redo, starts revisioned draft validation, and reseeds curve, span, region,
+  and topology-vertex allocators across both stored snapshots.
+- All 462 workspace tests, workspace Clippy with warnings denied, native release
+  compilation, and the release Trunk build pass.
+
 ## 2026-09-14 — Headless topology document editing
 
 - Added the application-side topology document model with draft/accepted snapshots,

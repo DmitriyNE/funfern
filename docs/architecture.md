@@ -233,14 +233,29 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-Scene JSON version 21 remains the single persistence representation. A `Document`
-owns one `DocumentModel` plus `PresentationSettings`. The model contains the draft
-and accepted scenes, probes, point-source configuration, and far-field settings; it
-is also the exact snapshot type stored by Undo/Redo. Presentation contains the View
-inspector's visibility, field-intensity, and material-overlay controls. It travels
-through scene files, examples, shared links, and recovery, but stays outside history,
-so model edits never rewind the user's current view. Camera, selection, open panels,
-floating-window positions, solver state, and derived render caches remain transient.
+The replacement topology document has a strict scene JSON version 22. It is a
+deliberate compatibility break: its decoder accepts only version 22, rejects unknown
+fields and malformed or excessive data before replacement, and has no versions 1–21
+adapter. Both draft and accepted authored topology are stored, so an invalid but
+structurally sound draft survives a round trip while the accepted scene must compile.
+Stable curve, span, topology-vertex, region, material, probe, and source references
+are checked during decoding. Compiled faces, mesh plans, caches, history, camera,
+selection, panel state, floating-window positions, and solver state are omitted.
+
+A topology `Document` owns one undoable model plus `PresentationSettings`. The model
+contains draft and accepted scenes, probes, point-source configuration, and far-field
+settings; it is the exact snapshot type stored by Undo/Redo. Presentation contains
+the View inspector's visibility, field-intensity, and material-overlay controls. It
+travels through scene files, examples, shared links, and recovery, but stays outside
+history, so model edits never rewind the user's current view. Loading validates the
+accepted scene, reseeds every stable-ID allocator from both snapshots, and starts
+with empty history. The eight built-in examples are authored directly as topology
+documents and exercise geometry, sources, probes, spatial materials, EM modes,
+far-field settings, and presentation presets without a legacy conversion layer.
+
+Until the atomic application switch, the visible legacy editor continues to read
+and write version 21. Its compatibility decoder is isolated in the legacy
+`persistence` module and is removed from the production path at cutover.
 
 Version 21 adds open material-interface splines, stable breakpoint nodes, per-span
 left/right regions, and explicit interior/outer junctions. Version 20 adds the optional material axis-ratio field and anisotropy presentation

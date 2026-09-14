@@ -160,6 +160,70 @@ impl Default for TopologyEditor {
 }
 
 impl TopologyEditor {
+    pub fn from_document(document: TopologyDocument) -> Result<Self, String> {
+        let compiled_accepted = document
+            .model
+            .accepted
+            .compile(0)
+            .map_err(|issue| format!("Accepted topology is invalid: {issue}"))?;
+        let next_curve = next_id(
+            document
+                .model
+                .draft
+                .geometry
+                .curves
+                .iter()
+                .chain(&document.model.accepted.geometry.curves)
+                .map(|curve| curve.id.0),
+        )?;
+        let next_span = next_id(
+            document
+                .model
+                .draft
+                .geometry
+                .curves
+                .iter()
+                .chain(&document.model.accepted.geometry.curves)
+                .flat_map(|curve| curve.spans.iter().map(|span| span.id.0)),
+        )?;
+        let next_region = next_id(
+            document
+                .model
+                .draft
+                .regions
+                .iter()
+                .chain(&document.model.accepted.regions)
+                .map(|region| region.id.0),
+        )?;
+        let next_vertex = next_id(
+            document
+                .model
+                .draft
+                .geometry
+                .vertices
+                .iter()
+                .chain(&document.model.accepted.geometry.vertices)
+                .map(|vertex| vertex.id.0),
+        )?;
+        let mut editor = Self {
+            document,
+            revision: 0,
+            acceptance: TopologyAcceptance::Pending,
+            compiled_draft: None,
+            compiled_accepted,
+            undo: vec![],
+            redo: vec![],
+            before: None,
+            job: None,
+            next_curve,
+            next_span,
+            next_region,
+            next_vertex,
+        };
+        editor.changed();
+        Ok(editor)
+    }
+
     pub fn begin(&mut self) {
         if self.before.is_none() {
             self.before = Some(self.document.model.clone());
@@ -1003,6 +1067,13 @@ impl TopologyEditor {
     }
 }
 
+fn next_id(ids: impl Iterator<Item = u64>) -> Result<u64, String> {
+    ids.max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or("Document IDs exhausted".into())
+}
+
 fn attachment_face(
     target: TopologyAttachment,
     compiled: &CompiledTopologyScene,
@@ -1315,6 +1386,130 @@ mod tests {
         assert!(editor.undo());
         settle(&mut editor);
         assert_eq!(editor.document.model, original);
+    }
+
+    #[test]
+    fn loaded_document_clears_history_and_reseeds_stable_ids() {
+        let mut original = TopologyEditor::default();
+        let first_curve = original
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(-0.35, 0.0), 0.15),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut original);
+        original
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(-0.6, -1.0), Point2::new(-0.45, -0.65)])
+                    .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(outer(OuterSide::Bottom, 0.2)),
+                None,
+            )
+            .unwrap();
+        settle(&mut original);
+        assert_eq!(original.history_len(), (2, 0));
+
+        let old_curve_ids = original
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .map(|curve| curve.id)
+            .collect::<BTreeSet<_>>();
+        let old_span_ids = original
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .flat_map(|curve| curve.spans.iter().map(|span| span.id))
+            .collect::<BTreeSet<_>>();
+        let old_vertex_ids = original
+            .document
+            .model
+            .draft
+            .geometry
+            .vertices
+            .iter()
+            .map(|vertex| vertex.id)
+            .collect::<BTreeSet<_>>();
+        let old_region_ids = original
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .map(|region| region.id)
+            .collect::<BTreeSet<_>>();
+
+        let mut loaded = TopologyEditor::from_document(original.document.clone()).unwrap();
+        settle(&mut loaded);
+        assert_eq!(loaded.history_len(), (0, 0));
+        assert_eq!(loaded.acceptance, TopologyAcceptance::Valid);
+
+        let second_curve = loaded
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.35, 0.0), 0.15),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut loaded);
+        assert_ne!(second_curve, first_curve);
+        assert!(!old_curve_ids.contains(&second_curve));
+        let second = loaded
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == second_curve)
+            .unwrap();
+        assert!(
+            second
+                .spans
+                .iter()
+                .all(|span| !old_span_ids.contains(&span.id))
+        );
+        assert!(
+            loaded
+                .document
+                .model
+                .draft
+                .regions
+                .iter()
+                .any(|region| !old_region_ids.contains(&region.id))
+        );
+
+        loaded
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(0.6, -1.0), Point2::new(0.45, -0.65)])
+                    .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(outer(OuterSide::Bottom, 0.8)),
+                None,
+            )
+            .unwrap();
+        settle(&mut loaded);
+        assert!(
+            loaded
+                .document
+                .model
+                .draft
+                .geometry
+                .vertices
+                .iter()
+                .any(|vertex| !old_vertex_ids.contains(&vertex.id))
+        );
+        assert_eq!(loaded.history_len(), (2, 0));
     }
 
     #[test]
