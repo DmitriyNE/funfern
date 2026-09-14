@@ -1607,19 +1607,27 @@ fn domain_segments(domain: DomainRect) -> Vec<RawSegment> {
 }
 
 fn node_vertex_at(curve: &TopologyCurve, parameter: f64) -> Option<TopologyVertexId> {
-    let scale = match &curve.spline {
-        CurveSpline::Closed(spline) => spline.period(),
-        CurveSpline::Open(spline) => spline.period(),
+    let (scale, closed) = match &curve.spline {
+        CurveSpline::Closed(spline) => (spline.period(), true),
+        CurveSpline::Open(spline) => (spline.period(), false),
     };
+    let tolerance = scale * 1.0e-10;
     curve
         .nodes
         .iter()
         .enumerate()
         .find(|(index, _)| {
-            curve
-                .spline
-                .node_parameter(*index)
-                .is_some_and(|node| (node - parameter).abs() <= scale * 1.0e-10)
+            curve.spline.node_parameter(*index).is_some_and(|node| {
+                // A closed curve's seam is node 0, which the sampler reaches
+                // again at the period. Without the wrap the span that ends
+                // there loses its junction and the contact reads as accidental.
+                let distance = if closed {
+                    periodic_distance(node, parameter, scale)
+                } else {
+                    (node - parameter).abs()
+                };
+                distance <= tolerance
+            })
         })
         .and_then(|(_, node)| node.vertex)
 }
@@ -1771,6 +1779,48 @@ mod tests {
             let edges = snapshot.span_edges(CurveSpanId(span)).collect::<Vec<_>>();
             assert!(!edges.is_empty());
             assert!(edges.iter().all(|edge| edge.left != edge.right));
+        }
+    }
+
+    /// A closed curve's seam is node zero, and the span that ends there arrives
+    /// at the period rather than at zero. A baffle attached to the seam is a
+    /// genuine junction, not an accidental touch, in both directions.
+    #[test]
+    fn a_junction_on_a_closed_curve_seam_is_authorised_from_both_spans() {
+        let corner = TopologyVertexId(1);
+        for seam in [0usize, 1] {
+            let mut ring = closed(
+                1,
+                1,
+                &[[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
+                SpanBehavior::REFLECTING,
+            );
+            attach(&mut ring, seam, corner);
+            let seam_point = ring.spline.node_point(seam).unwrap();
+            let mut arm = open(
+                2,
+                10,
+                &[
+                    [seam_point.x, seam_point.y],
+                    [seam_point.x * 1.6, seam_point.y * 1.6],
+                ],
+                SpanBehavior::REFLECTING,
+            );
+            attach(&mut arm, 0, corner);
+            let geometry = TopologyGeometry {
+                domain: DomainRect::UNIT,
+                curves: vec![ring, arm],
+                vertices: vec![TopologyVertex {
+                    id: corner,
+                    location: TopologyVertexLocation::Interior(seam_point),
+                }],
+            };
+            let snapshot = compile_topology(&geometry, 0)
+                .unwrap_or_else(|issue| panic!("seam node {seam} rejected: {issue}"));
+            assert!(
+                snapshot.span_edges(CurveSpanId(10)).next().is_some(),
+                "the attached arm survives at seam node {seam}"
+            );
         }
     }
 

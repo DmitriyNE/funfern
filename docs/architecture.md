@@ -187,7 +187,20 @@ coincident endpoints and T-contacts that carry no authored vertex, so an authore
 vertex or a single joined curve is what makes a touch compile, not only what
 keeps it stable under editing. Promotion to a baffle follows the compiler's own
 rule: an open curve is demoted only when a free tip's adjacent span transmits, so
-a curve that keeps a transmitting span between two faces keeps it.
+a curve that keeps a transmitting span between two faces keeps it. A closed
+curve's seam is node zero, which the span that ends there reaches at the period
+rather than at zero, so every parameter comparison against a closed curve's nodes
+wraps; without that the seam's junction is invisible from one side and a contact
+there reads as accidental.
+
+A periodic cubic needs at least four control points, and a closed curve's control
+count is the sum of its breakpoint multiplicities, so smoothing a knot on a small
+loop can run out of room. That floor is bought past rather than enforced: an
+operation that needs controls refines the curve by exact knot insertion first,
+inside its own command, so the curve does not move and the gesture stays one
+history entry. What refinement cannot buy is the opposite wall — sharpening to a
+corner and attaching a junction both spend controls against a 128-control ceiling
+— or a topological rule: a node carrying a junction is always a C0 corner.
 
 Viewport interaction uses the authored identities directly. Its transient
 selection is either one curve control or authoritative topology vertex, or a set

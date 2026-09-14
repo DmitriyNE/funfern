@@ -1325,15 +1325,21 @@ impl Playground {
                 Err(error) => self.notify(error),
             }
         }
-        if let TopologyHandle::Control { curve, control } = handle
-            && ui.button("Delete control").clicked()
-        {
-            match self.editor.remove_control(curve, control) {
-                Ok(()) => {
-                    self.selection = TopologySelection::None;
-                    self.invalidate_samples();
+        if let TopologyHandle::Control { curve, control } = handle {
+            // Ask the command itself whether it would succeed, so the button is
+            // live exactly when the deletion is.
+            let refusal = self.editor.control_removal_error(curve, control);
+            let response = ui
+                .add_enabled(refusal.is_none(), egui::Button::new("Delete control"))
+                .on_disabled_hover_text(refusal.unwrap_or_default());
+            if response.clicked() {
+                match self.editor.remove_control(curve, control) {
+                    Ok(()) => {
+                        self.selection = TopologySelection::None;
+                        self.invalidate_samples();
+                    }
+                    Err(error) => self.notify(error),
                 }
-                Err(error) => self.notify(error),
             }
         }
         if let TopologyHandle::Junction(vertex) = handle {
@@ -1628,8 +1634,27 @@ impl Playground {
             })
             .collect::<BTreeSet<_>>();
         if !curve_spans.is_empty() {
+            // Offer a law only when applying it would change something.
+            let already = |behavior: SpanBehavior| {
+                self.editor
+                    .document
+                    .model
+                    .draft
+                    .geometry
+                    .curves
+                    .iter()
+                    .flat_map(|curve| curve.spans.iter())
+                    .filter(|span| curve_spans.contains(&span.id))
+                    .all(|span| span.behavior == behavior)
+            };
+            let transmitting = already(SpanBehavior::Transmitting);
+            let reflecting = already(SpanBehavior::REFLECTING);
             ui.horizontal(|ui| {
-                if ui.button("Transmit").clicked() {
+                if ui
+                    .add_enabled(!transmitting, egui::Button::new("Transmit"))
+                    .on_disabled_hover_text("These spans already transmit")
+                    .clicked()
+                {
                     if let Err(error) = self
                         .editor
                         .set_span_behavior(&curve_spans, SpanBehavior::Transmitting)
@@ -1637,7 +1662,11 @@ impl Playground {
                         self.notify(error);
                     }
                 }
-                if ui.button("Boundary").clicked() {
+                if ui
+                    .add_enabled(!reflecting, egui::Button::new("Boundary"))
+                    .on_disabled_hover_text("These spans are already reflecting boundaries")
+                    .clicked()
+                {
                     if let Err(error) = self
                         .editor
                         .set_span_behavior(&curve_spans, SpanBehavior::REFLECTING)

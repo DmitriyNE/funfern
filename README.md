@@ -96,13 +96,20 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   uniform scale around the selection centroid; the viewport ring and square grip
   provide direct rotation and scaling. A junction can move only with all
   incident arms; the inspector can expand a partial selection to those arms.
+- **Continuity:** a selected end knot reads C0, C1, or C2 and can be set to any
+  of them, except at a topology junction, which stays a corner. Smoothing a knot
+  on a small loop refines the curve first so there are controls to spend; the
+  refinement is exact, so nothing moves and one undo steps back over the whole
+  change. Actions that cannot succeed are shown disabled with the reason.
 - **Weld:** dragging a loose end of an open curve shows every target it can join
   in gold. Dropped on another loose end, the two curves become one — the curve
   that stayed put keeps its identity and direction, and the seam is an ordinary
   corner that Continuity can smooth. Dropped on its own other end, the curve
   closes into a loop. Dropped on a junction, a curve interior, or a corner that
   owns no junction yet, the end attaches there as a new arm. A drop the
-  arrangement rejects is refused and only the drag remains.
+  arrangement rejects is refused and only the drag remains. A curve too small to
+  become a loop is refined first by knot insertion, which does not change its
+  shape.
 - **Topology:** drawing is geometry-first. Closed curves offer Circle, Rectangle,
   Polygon, and Spline tools with an initial Subdomain/Hole purpose. Open curves
   offer Polyline and Spline tools with an initial Separator/Baffle purpose. A

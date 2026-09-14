@@ -51,6 +51,10 @@ Follow-ups from the welding work:
   something touches that junction. Fold it into the deferred unweld/split work.
 - [ ] Multi-curve Delete remains one editor command per curve; see the history
   item below.
+- [ ] A curve at the 128-control ceiling cannot be sharpened to C0 and cannot
+  accept a divider, because both spend controls and refinement only adds more.
+  Reachable at about 41 polygon vertices. The message says so; a pre-emptive gate
+  would need the cost of the whole attachment, not just of one knot.
 
 Carried over from the cutover follow-up work, not from the review:
 
@@ -137,6 +141,54 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-14 — Actions that are offered are actions that work
+
+Manual testing turned up a family of UI actions that stay live while the
+operation behind them cannot succeed. Reproduced each against the native
+autosave before changing anything.
+
+**A closed curve's four-control floor.** A periodic cubic needs at least four
+control points, and a closed curve's control count is the sum of its breakpoint
+multiplicities. The saved scene held a two-span loop at `[3, 1]`, exactly on the
+floor, so its C0 seam could not be promoted in either direction — and the buttons
+offered it anyway, reporting the raw `NotRemovable` enum name. This is a direct
+consequence of the weld: closing prepends a multiplicity-3 seam, so welding a
+two-span baffle into a loop always lands on the floor.
+
+The fix is refinement rather than a gate. Knot insertion is exact, so promotion
+now buys the controls it needs first and the curve does not move; measured on the
+saved curve, two insertions moved it by 4e-16. `promotion_control_deficit`
+computes the shortfall, `refine_curve_to_spans` splits the widest span, and both
+run on the command's candidate so the whole gesture stays one history entry. The
+breakpoint is re-found by parameter afterwards, since inserting a knot shifts
+node indices. Welding a single-span curve into a loop refines the same way
+instead of refusing.
+
+The one gate that stays is topological: a node carrying a junction remains a C0
+corner, and no refinement changes that. The one case refinement cannot buy is the
+opposite wall — the 128-control ceiling, where sharpening to C0 costs two
+controls and insertion only makes it worse. That now says so in words.
+
+**A closed curve's seam lost its junction.** `node_vertex_at` matched node
+parameters without wrapping, so the span that ends at a closed curve's seam
+arrives at the period and never matched node zero. Anything attached there — a
+divider drawn onto the seam, a loose end welded to it — compiled as an accidental
+`NearContact` instead of a junction. One periodic comparison fixes it, and the
+editor's own node lookups wrap the same way. This is what made dividers fail "in
+some cases" without an obvious pattern: the pattern was the seam.
+
+**Two more offered-but-impossible actions.** Delete control now asks the command
+itself whether it would succeed, through `control_removal_error`, which runs the
+real removal on a copy so the prediction cannot drift. Transmit and Boundary are
+offered only when applying them would change something; before, a selection that
+already carried that law reported "Select existing curve spans".
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 416 passing, and
+`cargo build --release -p funfern-app --locked`. Both seam tests were verified to
+fail with the wrap reverted. Interactive verification of the buttons and the
+refinement gesture is left to the browser and the native app.
 
 ## 2026-09-14 — Span soup: welding, and deletion that survives the figure-8
 

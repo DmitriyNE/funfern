@@ -953,6 +953,7 @@ impl TopologyEditor {
         let mut joined = vec![];
         for (node, other, other_node) in loose {
             if other == surviving {
+                refine_curve_to_spans(&mut candidate, &mut self.next_span, surviving, 2)?;
                 close_curve_geometry(&mut candidate, surviving)?;
                 break;
             }
@@ -1144,6 +1145,9 @@ impl TopologyEditor {
                     return Err("Curve is already closed".into());
                 };
                 source_region = region_at(open_spline_midpoint(spline));
+                // A single span cannot become a loop: a periodic cubic needs
+                // four controls. Refine first, exactly, so the weld still lands.
+                refine_curve_to_spans(&mut candidate, &mut self.next_span, curve, 2)?;
                 close_curve_geometry(&mut candidate, curve)?;
                 seam_control =
                     candidate
@@ -1901,78 +1905,12 @@ impl TopologyEditor {
         }
         let inserted_span = self.allocate_span_id()?;
         let mut candidate = self.document.model.clone();
-        let curve = candidate
-            .draft
-            .geometry
-            .curves
-            .iter_mut()
-            .find(|curve| curve.id == curve_id)
-            .ok_or("Curve no longer exists")?;
-        let old_span_count = curve.spans.len();
-        let old_span_index = (0..old_span_count)
-            .find(|index| {
-                curve
-                    .spline
-                    .span_bounds(*index)
-                    .is_some_and(|[start, end]| parameter >= start && parameter <= end)
-            })
-            .ok_or("Insertion parameter is outside the curve")?;
-        let original = curve.spans[old_span_index];
-        let insertion = match &mut curve.spline {
-            CurveSpline::Closed(spline) => spline.insert(parameter),
-            CurveSpline::Open(spline) => spline.insert(parameter),
-        }
-        .map_err(|error| error.to_string())?;
-        let control = match insertion {
-            Insertion::Existing(control) => return Ok((control, None)),
-            Insertion::Inserted(control) => control,
-        };
-        let node = match &curve.spline {
-            CurveSpline::Closed(spline) => spline
-                .knots()
-                .iter()
-                .enumerate()
-                .min_by(|(_, left), (_, right)| {
-                    (**left - parameter)
-                        .abs()
-                        .total_cmp(&(**right - parameter).abs())
-                })
-                .map(|(index, _)| index),
-            CurveSpline::Open(spline) => (0..=spline.intervals().len())
-                .filter_map(|index| spline.breakpoint(index).map(|value| (index, value)))
-                .min_by(|(_, left), (_, right)| {
-                    (*left - parameter)
-                        .abs()
-                        .total_cmp(&(*right - parameter).abs())
-                })
-                .map(|(index, _)| index),
-        }
-        .ok_or("Inserted knot could not be located")?;
-        curve.nodes.insert(node, CurveNode::default());
-        curve.spans.insert(
-            node,
-            CurveSpan {
-                id: inserted_span,
-                behavior: original.behavior,
-            },
-        );
-        if curve.spans.len() != old_span_count + 1 || curve.nodes.len() != curve.spline.node_count()
-        {
-            return Err("Inserted curve topology is inconsistent".into());
-        }
-        remap_split_dependencies(
-            &mut candidate.draft,
-            &mut candidate.probes,
-            curve_id,
-            original.id,
-            inserted_span,
-            parameter,
-        );
+        let outcome = insert_curve_control(&mut candidate, curve_id, parameter, inserted_span)?;
         self.begin();
         self.document.model = candidate;
         self.changed();
         self.commit();
-        Ok((control, Some(inserted_span)))
+        Ok(outcome)
     }
 
     /// Removes one control and its associated knot span. This is a reshaping
@@ -1980,53 +1918,21 @@ impl TopologyEditor {
     /// protected from an ambiguous merge.
     pub fn remove_control(&mut self, curve_id: CurveId, control: usize) -> Result<(), String> {
         let mut candidate = self.document.model.clone();
-        let curve = candidate
-            .draft
-            .geometry
-            .curves
-            .iter_mut()
-            .find(|curve| curve.id == curve_id)
-            .ok_or("Curve no longer exists")?;
-        let target = control_removal_target(&curve.spline, control)?;
-        let (removed_span_index, retained_span_index, removed_node) =
-            control_removal_indices(target, curve.spans.len())?;
-        if curve
-            .nodes
-            .get(removed_node)
-            .is_some_and(|node| node.vertex.is_some())
-        {
-            return Err("Detach this topology junction before deleting its control".into());
-        }
-        let removed = curve.spans[removed_span_index];
-        let retained = curve.spans[retained_span_index];
-        if removed.behavior != retained.behavior {
-            return Err("Adjacent spans have different boundary settings".into());
-        }
-        let parameter_shift = leading_interval_shift(&curve.spline, target);
-        remove_attributed_control(&mut curve.spline, target)?;
-        curve.spans.remove(removed_span_index);
-        curve.nodes.remove(removed_node);
-        if curve.spans.len() + usize::from(curve.spline.is_open()) != curve.nodes.len() {
-            return Err("Removed curve topology is inconsistent".into());
-        }
-        candidate
-            .draft
-            .geometry
-            .synchronize_vertices()
-            .map_err(|issue| issue.to_string())?;
-        remap_removed_span_dependencies(
-            &mut candidate.draft,
-            &mut candidate.probes,
-            curve_id,
-            removed.id,
-            retained.id,
-            parameter_shift,
-        );
+        remove_curve_control(&mut candidate, curve_id, control)?;
         self.begin();
         self.document.model = candidate;
         self.changed();
         self.commit();
         Ok(())
+    }
+
+    /// Why deleting this control would be refused, or `None` when it would
+    /// succeed. The answer runs the real removal on a copy, so it cannot drift
+    /// from the command, and it lets the UI disable an action rather than let
+    /// the user discover the refusal by clicking.
+    pub fn control_removal_error(&self, curve_id: CurveId, control: usize) -> Option<String> {
+        let mut candidate = self.document.model.clone();
+        remove_curve_control(&mut candidate, curve_id, control).err()
     }
 
     /// Changes the continuity at one authored curve node. Sharpening is exact;
@@ -2045,9 +1951,7 @@ impl TopologyEditor {
         let curve = candidate
             .draft
             .geometry
-            .curves
-            .iter_mut()
-            .find(|curve| curve.id == curve_id)
+            .curve(curve_id)
             .ok_or("Curve no longer exists")?;
         if target > 0
             && curve
@@ -2057,6 +1961,34 @@ impl TopologyEditor {
         {
             return Err("A topology junction must remain a C0 corner".into());
         }
+        // A closed curve's control count is the sum of its multiplicities and
+        // may not fall below four, so promoting a knot on a small loop has to
+        // buy room first. Knot insertion is exact, so nothing moves, and the
+        // refinement rides inside this command's single history entry.
+        let deficit = promotion_control_deficit(curve, breakpoint, target);
+        let breakpoint = if deficit == 0 {
+            breakpoint
+        } else {
+            let parameter = curve
+                .spline
+                .node_parameter(breakpoint)
+                .ok_or("Choose an existing curve knot")?;
+            let spans = curve.spans.len() + deficit;
+            refine_curve_to_spans(&mut candidate, &mut self.next_span, curve_id, spans)?;
+            let refined = candidate
+                .draft
+                .geometry
+                .curve(curve_id)
+                .ok_or("Curve no longer exists")?;
+            node_index_at_parameter(refined, parameter).ok_or("Refined curve lost its knot")?
+        };
+        let curve = candidate
+            .draft
+            .geometry
+            .curves
+            .iter_mut()
+            .find(|curve| curve.id == curve_id)
+            .ok_or("Curve no longer exists")?;
         let mut displacement = 0.0;
         match &mut curve.spline {
             CurveSpline::Closed(spline) => {
@@ -3300,6 +3232,218 @@ fn join_curves(
 /// the seam, spans and every parameter on the curve are unchanged, so no
 /// dependency moves. Faces are not assigned here: inside a removal no new face
 /// can arise, and `weld_endpoint` runs the face step itself.
+/// Deletes one control and its knot span, merging the spans on either side.
+/// Attached junctions and mismatched span laws block the merge, and the spline
+/// keeps its four-control floor.
+fn remove_curve_control(
+    model: &mut TopologyDocumentModel,
+    curve_id: CurveId,
+    control: usize,
+) -> Result<(), String> {
+    let curve = model
+        .draft
+        .geometry
+        .curves
+        .iter_mut()
+        .find(|curve| curve.id == curve_id)
+        .ok_or("Curve no longer exists")?;
+    let target = control_removal_target(&curve.spline, control)?;
+    let (removed_span_index, retained_span_index, removed_node) =
+        control_removal_indices(target, curve.spans.len())?;
+    if curve
+        .nodes
+        .get(removed_node)
+        .is_some_and(|node| node.vertex.is_some())
+    {
+        return Err("Detach this topology junction before deleting its control".into());
+    }
+    let removed = curve.spans[removed_span_index];
+    let retained = curve.spans[retained_span_index];
+    if removed.behavior != retained.behavior {
+        return Err("Adjacent spans have different boundary settings".into());
+    }
+    let parameter_shift = leading_interval_shift(&curve.spline, target);
+    remove_attributed_control(&mut curve.spline, target)?;
+    curve.spans.remove(removed_span_index);
+    curve.nodes.remove(removed_node);
+    if curve.spans.len() + usize::from(curve.spline.is_open()) != curve.nodes.len() {
+        return Err("Removed curve topology is inconsistent".into());
+    }
+    model
+        .draft
+        .geometry
+        .synchronize_vertices()
+        .map_err(|issue| issue.to_string())?;
+    remap_removed_span_dependencies(
+        &mut model.draft,
+        &mut model.probes,
+        curve_id,
+        removed.id,
+        retained.id,
+        parameter_shift,
+    );
+    Ok(())
+}
+
+/// Splits one span by exact knot insertion. The curve keeps its shape exactly;
+/// only its control and span structure is refined. Anchors and probes follow
+/// the split, so this is safe to run inside another command's candidate.
+fn insert_curve_control(
+    model: &mut TopologyDocumentModel,
+    curve_id: CurveId,
+    parameter: f64,
+    inserted_span: CurveSpanId,
+) -> Result<(usize, Option<CurveSpanId>), String> {
+    let curve = model
+        .draft
+        .geometry
+        .curves
+        .iter_mut()
+        .find(|curve| curve.id == curve_id)
+        .ok_or("Curve no longer exists")?;
+    let old_span_count = curve.spans.len();
+    let old_span_index = (0..old_span_count)
+        .find(|index| {
+            curve
+                .spline
+                .span_bounds(*index)
+                .is_some_and(|[start, end]| parameter >= start && parameter <= end)
+        })
+        .ok_or("Insertion parameter is outside the curve")?;
+    let original = curve.spans[old_span_index];
+    let insertion = match &mut curve.spline {
+        CurveSpline::Closed(spline) => spline.insert(parameter),
+        CurveSpline::Open(spline) => spline.insert(parameter),
+    }
+    .map_err(control_count_message)?;
+    let control = match insertion {
+        Insertion::Existing(control) => return Ok((control, None)),
+        Insertion::Inserted(control) => control,
+    };
+    let node = match &curve.spline {
+        CurveSpline::Closed(spline) => spline
+            .knots()
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                (**left - parameter)
+                    .abs()
+                    .total_cmp(&(**right - parameter).abs())
+            })
+            .map(|(index, _)| index),
+        CurveSpline::Open(spline) => (0..=spline.intervals().len())
+            .filter_map(|index| spline.breakpoint(index).map(|value| (index, value)))
+            .min_by(|(_, left), (_, right)| {
+                (*left - parameter)
+                    .abs()
+                    .total_cmp(&(*right - parameter).abs())
+            })
+            .map(|(index, _)| index),
+    }
+    .ok_or("Inserted knot could not be located")?;
+    curve.nodes.insert(node, CurveNode::default());
+    curve.spans.insert(
+        node,
+        CurveSpan {
+            id: inserted_span,
+            behavior: original.behavior,
+        },
+    );
+    if curve.spans.len() != old_span_count + 1 || curve.nodes.len() != curve.spline.node_count() {
+        return Err("Inserted curve topology is inconsistent".into());
+    }
+    remap_split_dependencies(
+        &mut model.draft,
+        &mut model.probes,
+        curve_id,
+        original.id,
+        inserted_span,
+        parameter,
+    );
+    Ok((control, Some(inserted_span)))
+}
+
+/// A spline carries a hard ceiling on its control points, which no amount of
+/// refinement can buy past. Say so instead of leaking the error name.
+fn control_count_message(error: SplineError) -> String {
+    match error {
+        SplineError::ControlCount => {
+            "This curve already carries as many control points as a spline allows".to_owned()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Refines a curve by exact knot insertion until it carries at least `spans`
+/// spans, splitting the widest span each time. Knot insertion does not move the
+/// curve, so the refinement is invisible; it only buys the control points that
+/// an operation needs to stay inside the spline's four-control floor.
+fn refine_curve_to_spans(
+    model: &mut TopologyDocumentModel,
+    next_span: &mut u64,
+    curve_id: CurveId,
+    spans: usize,
+) -> Result<(), String> {
+    loop {
+        let curve = model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == curve_id)
+            .ok_or("Curve no longer exists")?;
+        if curve.spans.len() >= spans {
+            return Ok(());
+        }
+        let parameter = widest_span_midpoint(curve).ok_or("Curve has no span to refine")?;
+        let id = CurveSpanId(*next_span);
+        *next_span = next_span.checked_add(1).ok_or("Span IDs exhausted")?;
+        let (_, inserted) = insert_curve_control(model, curve_id, parameter, id)?;
+        if inserted.is_none() {
+            return Err("Curve could not be refined".into());
+        }
+    }
+}
+
+fn widest_span_midpoint(curve: &TopologyCurve) -> Option<f64> {
+    (0..curve.spans.len())
+        .filter_map(|index| {
+            let [start, end] = curve.spline.span_bounds(index)?;
+            Some((end - start, (start + end) * 0.5))
+        })
+        .max_by(|(left, _), (right, _)| left.total_cmp(right))
+        .map(|(_, middle)| middle)
+}
+
+/// How many extra control points a promotion needs before the periodic spline's
+/// four-control floor allows it. An open spline has no floor, and sharpening a
+/// knot only ever adds controls.
+fn promotion_control_deficit(curve: &TopologyCurve, breakpoint: usize, target: u8) -> usize {
+    let CurveSpline::Closed(spline) = &curve.spline else {
+        return 0;
+    };
+    let Some(current) = spline.continuity(breakpoint) else {
+        return 0;
+    };
+    if current >= target {
+        return 0;
+    }
+    let spent = usize::from(current.abs_diff(target));
+    let remaining = spline.controls().len().saturating_sub(spent);
+    4usize.saturating_sub(remaining)
+}
+
+/// Locates a node by its parameter. Refinement preserves every existing knot,
+/// so a breakpoint index taken before a refinement is recovered through this.
+fn node_index_at_parameter(curve: &TopologyCurve, parameter: f64) -> Option<usize> {
+    (0..curve.nodes.len()).find(|index| {
+        curve
+            .spline
+            .node_parameter(*index)
+            .is_some_and(|node| (node - parameter).abs() <= 1.0e-9)
+    })
+}
+
 fn close_curve_geometry(
     model: &mut TopologyDocumentModel,
     curve_id: CurveId,
@@ -3372,16 +3516,25 @@ fn containing_span(curve: &TopologyCurve, parameter: f64) -> Option<usize> {
 
 /// The node sitting at `parameter` that owns no vertex yet, if any.
 fn vertexless_node_at(curve: &TopologyCurve, parameter: f64) -> Option<usize> {
-    let tolerance = match &curve.spline {
-        CurveSpline::Closed(spline) => spline.period(),
-        CurveSpline::Open(spline) => spline.period(),
-    }
-    .max(1.0)
-        * 1.0e-10;
+    let tolerance = curve_period(&curve.spline).max(1.0) * 1.0e-10;
     curve.nodes.iter().enumerate().find_map(|(index, node)| {
         let node_parameter = curve.spline.node_parameter(index)?;
-        (node.vertex.is_none() && (node_parameter - parameter).abs() <= tolerance).then_some(index)
+        (node.vertex.is_none() && parameter_distance(curve, node_parameter, parameter) <= tolerance)
+            .then_some(index)
     })
+}
+
+/// Distance between two parameters on one curve. A closed curve's seam is node
+/// zero, which the last span reaches again at the period, so the comparison has
+/// to wrap or every lookup at the seam misses.
+fn parameter_distance(curve: &TopologyCurve, left: f64, right: f64) -> f64 {
+    let period = curve_period(&curve.spline);
+    let distance = (left - right).abs();
+    if curve.spline.is_open() {
+        distance
+    } else {
+        distance.min(period - distance)
+    }
 }
 
 fn existing_curve_vertex(
@@ -3389,15 +3542,10 @@ fn existing_curve_vertex(
     geometry: &TopologyGeometry,
     parameter: f64,
 ) -> Option<(TopologyVertexId, Point2)> {
-    let tolerance = match &curve.spline {
-        CurveSpline::Closed(spline) => spline.period(),
-        CurveSpline::Open(spline) => spline.period(),
-    }
-    .max(1.0)
-        * 1.0e-10;
+    let tolerance = curve_period(&curve.spline).max(1.0) * 1.0e-10;
     curve.nodes.iter().enumerate().find_map(|(index, node)| {
         let node_parameter = curve.spline.node_parameter(index)?;
-        if (node_parameter - parameter).abs() > tolerance {
+        if parameter_distance(curve, node_parameter, parameter) > tolerance {
             return None;
         }
         let vertex = node.vertex?;
@@ -7179,6 +7327,25 @@ mod tests {
 
     /// A boundary attachment on the interior (non-background) side of one span
     /// of a closed subdomain, at that span's midpoint.
+    /// Samples a curve evenly over its whole parameter range, for asserting
+    /// that a structural edit left the geometry where it was.
+    fn sample_curve(editor: &TopologyEditor, curve: CurveId, count: usize) -> Vec<Point2> {
+        let curve = editor.document.model.draft.geometry.curve(curve).unwrap();
+        let period = match &curve.spline {
+            CurveSpline::Closed(spline) => spline.period(),
+            CurveSpline::Open(spline) => spline.period(),
+        };
+        (0..count)
+            .map(|index| {
+                let parameter = period * index as f64 / (count - 1) as f64;
+                match &curve.spline {
+                    CurveSpline::Closed(spline) => spline.evaluate(parameter),
+                    CurveSpline::Open(spline) => spline.evaluate(parameter),
+                }
+            })
+            .collect()
+    }
+
     fn curve_target(
         editor: &TopologyEditor,
         loop_id: CurveId,
@@ -7642,6 +7809,295 @@ mod tests {
     /// A curve's two loose ends meeting close it into a loop that owns a face;
     /// a single span has too few controls for that, and an end cannot meet
     /// itself.
+    /// A loop small enough to sit on the periodic spline's four-control floor
+    /// cannot spend a control on smoothing. Promotion refines it first by exact
+    /// knot insertion, inside the one history entry the gesture earns.
+    #[test]
+    fn promoting_a_floor_bound_seam_refines_the_loop_first() {
+        for (target, expected_spans) in [(1u8, 3usize), (2, 4)] {
+            let mut editor = TopologyEditor::default();
+            let curve = editor
+                .create_open_curve(
+                    OpenCubicSpline::new(
+                        vec![
+                            Point2::new(-0.2, 0.0),
+                            Point2::new(-0.45, 0.55),
+                            Point2::new(0.45, 0.55),
+                            Point2::new(0.3, 0.1),
+                            Point2::new(0.2, 0.0),
+                        ],
+                        vec![1.0, 1.0],
+                    )
+                    .unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .curve;
+            settle(&mut editor);
+            editor
+                .weld_endpoint(
+                    curve,
+                    1,
+                    TopologyAttachment::LooseEnd { curve, endpoint: 0 },
+                )
+                .unwrap();
+            settle(&mut editor);
+            let loop_curve = editor.document.model.draft.geometry.curve(curve).unwrap();
+            let CurveSpline::Closed(spline) = &loop_curve.spline else {
+                panic!("the weld closed the curve")
+            };
+            assert_eq!(spline.controls().len(), 4, "the loop sits on the floor");
+            assert_eq!(spline.continuity(0), Some(0), "the seam is a corner");
+
+            let before = editor.document.model.clone();
+            let history = editor.history_len().0;
+            let sampled = sample_curve(&editor, curve, 401);
+            let bound = editor.set_curve_continuity(curve, 0, target).unwrap();
+            settle(&mut editor);
+            assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+            assert_eq!(
+                editor.history_len().0,
+                history + 1,
+                "the refinement rides inside the promotion"
+            );
+            let promoted = editor.document.model.draft.geometry.curve(curve).unwrap();
+            assert_eq!(promoted.spans.len(), expected_spans);
+            let CurveSpline::Closed(spline) = &promoted.spline else {
+                panic!("still closed")
+            };
+            assert_eq!(
+                spline.continuity(0),
+                Some(target),
+                "the seam reached C{target}"
+            );
+            assert!(
+                spline.controls().len() >= 4,
+                "the refined loop stays above the floor"
+            );
+            let moved = sampled
+                .iter()
+                .zip(sample_curve(&editor, curve, 401))
+                .map(|(before, after)| (*before - after).norm())
+                .fold(0.0, f64::max);
+            assert!(
+                moved <= bound + 1.0e-9,
+                "the curve moves no further than the reported bound: {moved} > {bound}"
+            );
+            assert!(editor.undo());
+            settle(&mut editor);
+            assert_eq!(
+                editor.document.model, before,
+                "one undo restores the unrefined loop"
+            );
+        }
+    }
+
+    /// Refinement buys control points; it can never buy a junction the right to
+    /// stop being a corner.
+    #[test]
+    fn a_junction_still_refuses_promotion_after_refinement_is_available() {
+        let mut editor = TopologyEditor::default();
+        let ring = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::polygon(vec![
+                    Point2::new(-0.4, -0.4),
+                    Point2::new(0.4, -0.4),
+                    Point2::new(0.0, 0.4),
+                ])
+                .unwrap(),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        // Hang a baffle off the ring so one of its nodes becomes a junction.
+        let (point, attachment) = curve_target(&editor, ring, 0);
+        editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![point, Point2::new(point.x, point.y - 0.35)])
+                    .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(attachment),
+                None,
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let junction = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(ring)
+            .unwrap()
+            .nodes
+            .iter()
+            .position(|node| node.vertex.is_some())
+            .expect("the baffle planted a junction on the ring");
+        let before = editor.document.model.clone();
+        for target in [1u8, 2] {
+            assert_eq!(
+                editor.set_curve_continuity(ring, junction, target),
+                Err("A topology junction must remain a C0 corner".to_owned())
+            );
+        }
+        assert_eq!(
+            editor.document.model, before,
+            "a refused promotion refines nothing"
+        );
+    }
+
+    /// A welded loop's seam is node zero, which the last span reaches at the
+    /// period rather than at zero. Attaching there is a junction like any other.
+    #[test]
+    fn a_curve_attaches_to_a_closed_curves_seam() {
+        let mut editor = TopologyEditor::default();
+        let ring = editor
+            .create_open_curve(
+                OpenCubicSpline::new(
+                    vec![
+                        Point2::new(-0.2, 0.0),
+                        Point2::new(-0.5, 0.6),
+                        Point2::new(0.5, 0.6),
+                        Point2::new(0.3, 0.1),
+                        Point2::new(0.2, 0.0),
+                    ],
+                    vec![1.0, 1.0],
+                )
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        editor
+            .weld_endpoint(
+                ring,
+                1,
+                TopologyAttachment::LooseEnd {
+                    curve: ring,
+                    endpoint: 0,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let closed = editor.document.model.draft.geometry.curve(ring).unwrap();
+        assert!(!closed.spline.is_open());
+        assert!(
+            closed.nodes[0].vertex.is_none(),
+            "the seam carries no junction yet"
+        );
+        let seam = closed.spline.node_point(0).unwrap();
+        let span = closed.spans[0].id;
+
+        // Reach the seam from the span that ends there, at the period.
+        let period = match &closed.spline {
+            CurveSpline::Closed(spline) => spline.period(),
+            CurveSpline::Open(spline) => spline.period(),
+        };
+        let last = closed.spans[closed.spans.len() - 1].id;
+        for (name, target_span, parameter) in [
+            ("from the first span", span, 0.0),
+            ("from the last span", last, period),
+        ] {
+            let mut trial = TopologyEditor::from_document(editor.document.clone()).unwrap();
+            settle(&mut trial);
+            let side = [CurveTraceSide::Left, CurveTraceSide::Right]
+                .into_iter()
+                .find(|side| {
+                    FaceAnchor::Curve {
+                        curve: ring,
+                        span: target_span,
+                        side: *side,
+                        parameter,
+                    }
+                    .resolve(&trial.compiled_accepted.topology)
+                    .is_ok()
+                })
+                .unwrap_or_else(|| panic!("{name}: neither side resolves"));
+            trial
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![seam, Point2::new(seam.x, seam.y - 0.4)])
+                        .unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    Some(TopologyAttachment::Boundary(FaceAnchor::Curve {
+                        curve: ring,
+                        span: target_span,
+                        side,
+                        parameter,
+                    })),
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            settle(&mut trial);
+            assert_eq!(trial.acceptance, TopologyAcceptance::Valid, "{name}");
+            let ringed = trial.document.model.draft.geometry.curve(ring).unwrap();
+            assert!(
+                ringed.nodes[0].vertex.is_some(),
+                "{name}: the seam became the junction"
+            );
+            assert_eq!(
+                ringed.spans.len(),
+                closed.spans.len(),
+                "{name}: attaching at a node splits nothing"
+            );
+        }
+    }
+
+    /// The delete action reports its own refusal ahead of the click, so the UI
+    /// can disable it rather than let the user discover the wall.
+    #[test]
+    fn control_deletion_reports_its_refusal_before_the_click() {
+        let mut editor = TopologyEditor::default();
+        let minimal = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(-0.3, 0.2), Point2::new(0.3, 0.2)])
+                    .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        for control in 0..4 {
+            let refusal = editor
+                .control_removal_error(minimal, control)
+                .unwrap_or_else(|| panic!("control {control} of a minimal curve is not deletable"));
+            assert!(refusal.contains("four"), "{refusal}");
+        }
+
+        let roomy = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.3, -0.2),
+                    Point2::new(0.0, -0.3),
+                    Point2::new(0.3, -0.2),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        assert_eq!(
+            editor.control_removal_error(roomy, 2),
+            None,
+            "an interior control of a two-span curve deletes"
+        );
+        assert!(
+            editor.control_removal_error(roomy, 99).is_some(),
+            "a control that does not exist is refused"
+        );
+        // The prediction is the command: what it allows, the command performs.
+        assert!(editor.remove_control(roomy, 2).is_ok());
+    }
+
     #[test]
     fn welding_a_curve_onto_itself_closes_a_loop() {
         let mut editor = TopologyEditor::default();
@@ -7695,8 +8151,16 @@ mod tests {
         let mut editor = TopologyEditor::default();
         let single = editor
             .create_open_curve(
-                OpenCubicSpline::polyline(vec![Point2::new(-0.3, 0.0), Point2::new(0.3, 0.0)])
-                    .unwrap(),
+                OpenCubicSpline::new(
+                    vec![
+                        Point2::new(-0.2, 0.0),
+                        Point2::new(-0.45, 0.55),
+                        Point2::new(0.45, 0.55),
+                        Point2::new(0.2, 0.0),
+                    ],
+                    vec![1.0],
+                )
+                .unwrap(),
                 OpenCurvePurpose::BoundaryBaffle,
                 None,
                 None,
@@ -7705,17 +8169,6 @@ mod tests {
             .curve;
         settle(&mut editor);
         let before = editor.document.model.clone();
-        let error = editor
-            .weld_endpoint(
-                single,
-                1,
-                TopologyAttachment::LooseEnd {
-                    curve: single,
-                    endpoint: 0,
-                },
-            )
-            .unwrap_err();
-        assert!(error.contains("single-span"), "{error}");
         assert_eq!(
             editor
                 .weld_endpoint(
@@ -7730,6 +8183,30 @@ mod tests {
             "Choose a different end to weld to"
         );
         assert_eq!(editor.document.model, before);
+
+        // One span cannot span a loop, so the weld refines the curve first.
+        // Knot insertion is exact, so the closed curve runs where the open one
+        // did, and the whole thing is still a single history entry.
+        let history = editor.history_len().0;
+        editor
+            .weld_endpoint(
+                single,
+                1,
+                TopologyAttachment::LooseEnd {
+                    curve: single,
+                    endpoint: 0,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let closed = editor.document.model.draft.geometry.curve(single).unwrap();
+        assert!(!closed.spline.is_open(), "the single span closed");
+        assert_eq!(closed.spans.len(), 2, "refined to the smallest legal loop");
+        assert_eq!(editor.history_len().0, history + 1);
+        assert!(editor.undo());
+        settle(&mut editor);
+        assert_eq!(editor.document.model, before, "one undo restores one span");
     }
 
     /// A loose end dropped on a junction, a curve interior, or a vertex-less
