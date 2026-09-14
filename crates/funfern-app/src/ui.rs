@@ -4369,6 +4369,118 @@ impl Playground {
             SELECT,
         );
     }
+    fn scale_axis_cursor(axis: GizmoScaleAxis) -> egui::CursorIcon {
+        match axis {
+            GizmoScaleAxis::Uniform => egui::CursorIcon::ResizeNwSe,
+            GizmoScaleAxis::X => egui::CursorIcon::ResizeHorizontal,
+            GizmoScaleAxis::Y => egui::CursorIcon::ResizeVertical,
+        }
+    }
+
+    fn outer_side_cursor(side: OuterSide) -> egui::CursorIcon {
+        match side {
+            OuterSide::Left | OuterSide::Right => egui::CursorIcon::ResizeHorizontal,
+            OuterSide::Bottom | OuterSide::Top => egui::CursorIcon::ResizeVertical,
+        }
+    }
+
+    /// A mode that owns the whole viewport says so with the cursor, since there
+    /// is no handle anywhere to carry the meaning.
+    fn modal_cursor(&self, pos: Pos2, r: Rect) -> Option<egui::CursorIcon> {
+        if let Some(pending) = &self.pending_removal {
+            // Only the candidates are clickable; everywhere else the click does
+            // nothing and the cursor should not promise otherwise.
+            return self
+                .draft_region_at(self.world(pos, r))
+                .filter(|region| pending.choices().contains(region))
+                .map(|_| egui::CursorIcon::PointingHand);
+        }
+        (self.draw.is_some() || self.pulse_mode || self.probe_mode.is_some())
+            .then_some(egui::CursorIcon::Crosshair)
+    }
+
+    /// The cursor a live gesture holds on to, so what appeared under the pointer
+    /// does not vanish the moment the drag begins.
+    fn drag_cursor(&self) -> Option<egui::CursorIcon> {
+        Some(match self.drag.as_ref()? {
+            DragGesture::Pivot { .. } | DragGesture::Spans { .. } => egui::CursorIcon::Move,
+            DragGesture::Rotate { .. } => egui::CursorIcon::Grabbing,
+            DragGesture::Scale { axis, .. } => Self::scale_axis_cursor(*axis),
+            DragGesture::Domain {
+                drag: DomainDrag::Corner { index, .. },
+            } => Self::domain_corner_cursor(*index),
+            DragGesture::Domain {
+                drag: DomainDrag::Side { side, .. },
+            } => Self::outer_side_cursor(*side),
+            DragGesture::MaterialFrame { hit, .. } => match hit {
+                MaterialFrameGizmoHit::Origin => egui::CursorIcon::Move,
+                MaterialFrameGizmoHit::Rotate => egui::CursorIcon::Grabbing,
+            },
+            DragGesture::Probe { hit, .. } => match hit {
+                ProbeHit::AreaDiskRadius(_) => egui::CursorIcon::ResizeHorizontal,
+                ProbeHit::AreaDiskBody(_) | ProbeHit::SegmentBody(_) => egui::CursorIcon::Move,
+                _ => return None,
+            },
+            _ => return None,
+        })
+    }
+
+    /// What the pointer is over while editing. Only an affordance the drawing
+    /// does not already announce, or one whose direction matters, earns a
+    /// cursor: a drawn handle that moves itself is its own announcement. The
+    /// order matches the one the press handler resolves grabs in.
+    fn hover_cursor(&self, pos: Pos2, r: Rect) -> Option<egui::CursorIcon> {
+        if self.selected_material_frame().is_some()
+            && let Some(hit) = self.hit_material_frame_gizmo(pos, r)
+        {
+            return Some(match hit {
+                MaterialFrameGizmoHit::Origin => egui::CursorIcon::Move,
+                MaterialFrameGizmoHit::Rotate => egui::CursorIcon::Grab,
+            });
+        }
+        if let Some((hit, _)) = self.hit_transform_gizmo(pos, r) {
+            return Some(match hit {
+                TransformGizmoHit::Pivot => egui::CursorIcon::Move,
+                TransformGizmoHit::Rotate => egui::CursorIcon::Grab,
+                TransformGizmoHit::Scale(axis) => Self::scale_axis_cursor(axis),
+            });
+        }
+        if let Some(hit) = self.hit_probe(pos, r) {
+            return match hit {
+                ProbeHit::AreaDiskRadius(_) => Some(egui::CursorIcon::ResizeHorizontal),
+                ProbeHit::AreaDiskBody(_) | ProbeHit::SegmentBody(_) => {
+                    Some(egui::CursorIcon::Move)
+                }
+                _ => None,
+            };
+        }
+        if let Some(index) = self.hit_domain_corner(pos, r) {
+            return Some(Self::domain_corner_cursor(index));
+        }
+        let hit = self.sampled.as_ref().and_then(|sampled| {
+            sampled.hit_test(
+                self.transform(r),
+                ScreenPoint::new(pos.x as f64, pos.y as f64),
+                self.hit_tolerance(13.0) as f64,
+                self.hit_tolerance(9.0) as f64,
+            )
+        })?;
+        let TopologyHit::Span { target, .. } = hit else {
+            return None;
+        };
+        if let TopologySpanTarget::Outer(side) = target {
+            return Some(Self::outer_side_cursor(side));
+        }
+        // Pressing a span of the selection drags the whole of it, but only when
+        // that selection can move rigidly. The gizmo answers exactly that, so
+        // its absence is what tells the user to widen the selection.
+        let selected = self
+            .selection
+            .spans()
+            .is_some_and(|spans| spans.contains(&target));
+        (selected && self.transform_gizmo(r).is_some()).then_some(egui::CursorIcon::Move)
+    }
+
     fn hit_transform_gizmo(&self, point: Pos2, r: Rect) -> Option<(TransformGizmoHit, Point2)> {
         let (pivot, center, radius, x_radius, y_radius) = self.transform_gizmo(r)?;
         if center.distance(point) <= 12.0 {
@@ -4398,49 +4510,15 @@ impl Playground {
         self.touch_active = touch_active;
         let multi_touch = ui.input(|input| input.multi_touch());
         if !touch_active {
-            let active_cursor = match self.drag.as_ref() {
-                Some(DragGesture::Pivot { .. }) => Some(egui::CursorIcon::Move),
-                Some(DragGesture::Rotate { .. }) => Some(egui::CursorIcon::Grabbing),
-                Some(DragGesture::Scale {
-                    axis: GizmoScaleAxis::Uniform,
-                    ..
-                }) => Some(egui::CursorIcon::ResizeNwSe),
-                Some(DragGesture::Scale {
-                    axis: GizmoScaleAxis::X,
-                    ..
-                }) => Some(egui::CursorIcon::ResizeHorizontal),
-                Some(DragGesture::Scale {
-                    axis: GizmoScaleAxis::Y,
-                    ..
-                }) => Some(egui::CursorIcon::ResizeVertical),
-                Some(DragGesture::Domain {
-                    drag: DomainDrag::Corner { index, .. },
-                }) => Some(Self::domain_corner_cursor(*index)),
-                Some(DragGesture::Domain {
-                    drag: DomainDrag::Side { side, .. },
-                }) => Some(match side {
-                    OuterSide::Left | OuterSide::Right => egui::CursorIcon::ResizeHorizontal,
-                    OuterSide::Bottom | OuterSide::Top => egui::CursorIcon::ResizeVertical,
-                }),
-                _ => None,
-            };
-            let corner_cursor = pointer
-                .and_then(|pos| self.hit_domain_corner(pos, r))
-                .map(Self::domain_corner_cursor);
-            let hover_cursor = pointer
-                .and_then(|pos| self.hit_transform_gizmo(pos, r))
-                .map(|(hit, _)| match hit {
-                    TransformGizmoHit::Pivot => egui::CursorIcon::Move,
-                    TransformGizmoHit::Rotate => egui::CursorIcon::Grab,
-                    TransformGizmoHit::Scale(GizmoScaleAxis::Uniform) => {
-                        egui::CursorIcon::ResizeNwSe
-                    }
-                    TransformGizmoHit::Scale(GizmoScaleAxis::X) => {
-                        egui::CursorIcon::ResizeHorizontal
-                    }
-                    TransformGizmoHit::Scale(GizmoScaleAxis::Y) => egui::CursorIcon::ResizeVertical,
-                });
-            if let Some(cursor) = active_cursor.or(hover_cursor).or(corner_cursor) {
+            // Hover, not interaction: `interact_pointer_pos` is `None` until a
+            // gesture is already under way, which is precisely when a cursor has
+            // nothing left to announce.
+            let hovering = response.hover_pos();
+            let cursor = hovering
+                .and_then(|pos| self.modal_cursor(pos, r))
+                .or_else(|| self.drag_cursor())
+                .or_else(|| hovering.and_then(|pos| self.hover_cursor(pos, r)));
+            if let Some(cursor) = cursor {
                 ui.ctx().set_cursor_icon(cursor);
             }
         }
@@ -9797,6 +9875,174 @@ mod probe_interaction_tests {
 
     /// The mechanical skin has no complementary transverse field, so offering it
     /// would select a mode that draws nothing.
+    /// A cursor appears for an affordance the drawing does not announce, or one
+    /// whose direction matters, and stays away from drawn handles that move
+    /// themselves.
+    #[test]
+    fn cursors_mark_the_affordances_the_drawing_does_not() {
+        let mut state = Playground::default();
+        let r = viewport();
+        state.refresh_samples(r);
+        let domain = state.editor.document.model.draft.geometry.domain;
+
+        // Direction matters: the outer rectangle's corners and sides.
+        let corner = state.screen(domain.corners()[0], r);
+        assert_eq!(
+            state.hover_cursor(corner, r),
+            Some(egui::CursorIcon::ResizeNeSw)
+        );
+        let left_middle = state.screen(
+            Point2::new(domain.min_x, (domain.min_y + domain.max_y) * 0.5),
+            r,
+        );
+        assert_eq!(
+            state.hover_cursor(left_middle, r),
+            Some(egui::CursorIcon::ResizeHorizontal),
+            "a bare outer side announces nothing on its own"
+        );
+        let bottom_middle = state.screen(
+            Point2::new((domain.min_x + domain.max_x) * 0.5, domain.min_y),
+            r,
+        );
+        assert_eq!(
+            state.hover_cursor(bottom_middle, r),
+            Some(egui::CursorIcon::ResizeVertical)
+        );
+
+        // Open space keeps the plain arrow.
+        assert_eq!(
+            state.hover_cursor(state.screen(Point2::default(), r), r),
+            None
+        );
+
+        // A drawn handle that moves itself says enough by itself.
+        let settle = |state: &mut Playground| {
+            for _ in 0..100000 {
+                state.editor.validate_frame(1000);
+                if state.editor.acceptance != TopologyAcceptance::Pending {
+                    return;
+                }
+            }
+            panic!("validation did not terminate")
+        };
+        settle(&mut state);
+        let curve = state
+            .editor
+            .create_boundary_baffle(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.3, 0.25),
+                    Point2::new(0.0, 0.45),
+                    Point2::new(0.3, 0.25),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        settle(&mut state);
+        state.invalidate_samples();
+        state.refresh_samples(r);
+        let control = match &state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(curve)
+            .unwrap()
+            .spline
+        {
+            CurveSpline::Open(spline) => spline.controls()[0],
+            CurveSpline::Closed(spline) => spline.controls()[0],
+        };
+        assert_eq!(
+            state.hover_cursor(state.screen(control, r), r),
+            None,
+            "a control point is its own announcement"
+        );
+
+        // A selected span moves the whole selection, which nothing draws.
+        let spans = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(curve)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| TopologySpanTarget::Curve(span.id))
+            .collect::<BTreeSet<_>>();
+        let midpoint = Point2::new(0.0, 0.3833);
+        assert_eq!(
+            state.hover_cursor(state.screen(midpoint, r), r),
+            None,
+            "an unselected span offers no move"
+        );
+        state.selection = TopologySelection::Spans(spans.clone());
+        assert_eq!(
+            state.hover_cursor(state.screen(midpoint, r), r),
+            Some(egui::CursorIcon::Move)
+        );
+        // Widen the selection to include an outer side, which cannot move.
+        let mut blocked = spans;
+        blocked.insert(TopologySpanTarget::Outer(OuterSide::Bottom));
+        state.selection = TopologySelection::Spans(blocked);
+        assert_eq!(
+            state.hover_cursor(state.screen(midpoint, r), r),
+            None,
+            "the cursor is absent exactly when the drag would do nothing"
+        );
+    }
+
+    /// A mode that owns the viewport says so, since no handle can.
+    #[test]
+    fn modal_cursors_say_what_a_click_would_do() {
+        let mut state = Playground::default();
+        let r = viewport();
+        let centre = state.screen(Point2::default(), r);
+        assert_eq!(state.modal_cursor(centre, r), None);
+        state.pulse_mode = true;
+        assert_eq!(
+            state.modal_cursor(centre, r),
+            Some(egui::CursorIcon::Crosshair)
+        );
+        state.pulse_mode = false;
+        state.pending_removal = Some(PendingRemoval::Curve(CurveId(99), vec![]));
+        assert_eq!(
+            state.modal_cursor(centre, r),
+            None,
+            "nowhere is clickable while no candidate is offered"
+        );
+    }
+
+    /// Whatever appeared under the pointer stays for the gesture it started.
+    #[test]
+    fn a_gesture_keeps_the_cursor_it_began_with() {
+        let mut state = Playground::default();
+        assert_eq!(state.drag_cursor(), None);
+        state.drag = Some(DragGesture::Domain {
+            drag: DomainDrag::Side {
+                side: OuterSide::Left,
+                start: state.editor.document.model.draft.geometry.domain,
+            },
+        });
+        assert_eq!(
+            state.drag_cursor(),
+            Some(egui::CursorIcon::ResizeHorizontal)
+        );
+        state.drag = Some(DragGesture::Marquee {
+            start: Pos2::ZERO,
+            current: Pos2::ZERO,
+            base: BTreeSet::new(),
+            operation: MarqueeOperation::Replace,
+        });
+        assert_eq!(
+            state.drag_cursor(),
+            None,
+            "a marquee needs no cursor of its own"
+        );
+    }
+
     #[test]
     fn vector_overlay_offers_only_modes_that_draw() {
         assert_eq!(

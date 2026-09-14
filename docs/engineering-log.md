@@ -139,6 +139,39 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — Cursors that appear before the action, not after
+
+The viewport's cursor block read its position from `interact_pointer_pos`, which
+egui documents as `None` unless the widget is already being interacted with. So
+every hover branch was dead and only the branch keyed off a running drag ever
+fired, which is the opposite of what a cursor is for: it announced what you were
+already doing. `hover_pos` fixes it in one call, and that alone revives the
+transform gizmo and domain corner cursors that were already written.
+
+The rule for what earns one, since most affordances had no mapping at all: a
+cursor appears only where the drawing does not already announce the affordance,
+or where direction matters. A drawn handle that moves itself is its own
+announcement, so control points, junctions, loose ends, probe points and segment
+endpoints, and the source marker stay bare, as does open space.
+
+What is mapped now, in the order the press handler resolves grabs: the material
+frame's origin and rotate, the transform gizmo's pivot, ring and three scale
+axes, a probe's disk radius and its disk and segment bodies, the domain's
+corners and sides, and a selected span. The last one is conditional on the
+selection being able to move rigidly, which the gizmo already answers, so its
+absence is what tells the user to widen the selection. That quietly restores the
+feedback lost when the transform refusal messages were dropped.
+
+Modal states carry a cursor because no handle can: crosshair while drawing,
+placing a pulse, or placing a probe, and a pointing hand over a survivor
+candidate, with nothing elsewhere since a click there does nothing. Resolution is
+modal first, then the running gesture, then hover, so a gesture keeps whatever
+appeared under the pointer when it started.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings` clean, `cargo test --workspace --locked` 425 passing, and
+`cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-15 — The outer rectangle is draggable again
 
 Dragging the domain's sides and corners did not survive the cutover in
