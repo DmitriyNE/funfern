@@ -1028,6 +1028,7 @@ mod tests {
             vertices,
             triangles,
             boundary_edges: Vec::new(),
+            requested_sizes: vec![],
             quality: MeshQuality {
                 minimum_angle_degrees: 45.0,
                 maximum_edge_length: 2.0_f64.sqrt() * 2.0 / n as f64,

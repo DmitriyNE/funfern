@@ -189,7 +189,6 @@ struct TriangleGrid {
     triangles: Vec<[Point2; 3]>,
     /// Per triangle, whether the edge after each corner is a boundary edge.
     constrained: Vec<[bool; 3]>,
-    sizes: Vec<f64>,
 }
 
 impl TriangleGrid {
@@ -216,7 +215,6 @@ impl TriangleGrid {
             cell,
             dimension,
             cells: vec![vec![]; dimension * dimension],
-            sizes: Vec::with_capacity(triangles.len()),
             triangles: vec![],
             constrained,
         };
@@ -228,11 +226,6 @@ impl TriangleGrid {
                     grid.cells[y * dimension + x].push(index as u32);
                 }
             }
-            grid.sizes.push(
-                (0..3)
-                    .map(|corner| (triangle[(corner + 1) % 3] - triangle[corner]).norm())
-                    .fold(0.0, f64::max),
-            );
         }
         grid.triangles = triangles;
         grid
@@ -319,14 +312,32 @@ fn bounds(points: impl Iterator<Item = Point2>) -> (Point2, Point2) {
     )
 }
 
-/// Edge-length targets read from the triangles a carve removed, so the band
-/// is refilled at the density it had, including density that adaptation
-/// added.
-pub(super) struct LocalSizeField(TriangleGrid);
+/// Edge-length targets for refilling a carved band: the sizes adaptation
+/// requested for the triangles the carve removed, looked up by point. The
+/// sizes those triangles actually had are deliberately not consulted. A
+/// refill has to meet frozen rim vertices and the boundary's own chords with
+/// elements smaller than the target, and repairing the same band again would
+/// read that smallness back as a target: over repeated drags of one curve the
+/// mesh only ever got finer. A request is copied, never re-measured, so it is
+/// bounded by what adaptation asked for and carries nothing the refill made.
+pub(super) struct LocalSizeField {
+    grid: TriangleGrid,
+    requests: Vec<f64>,
+}
 
 impl LocalSizeField {
+    fn new(triangles: Vec<[Point2; 3]>, requests: Vec<f64>) -> Self {
+        let constrained = vec![[false; 3]; triangles.len()];
+        Self {
+            grid: TriangleGrid::new(triangles, constrained),
+            requests,
+        }
+    }
+
     pub(super) fn size_at(&self, point: Point2) -> Option<f64> {
-        self.0.containing(point).map(|index| self.0.sizes[index])
+        self.grid
+            .containing(point)
+            .map(|index| self.requests[index])
     }
 }
 
@@ -352,6 +363,10 @@ pub struct TopologyCarveJob {
     topology: Arc<TopologySnapshot>,
     mesh_revision: u64,
     options: MeshingOptions,
+    /// Whether the refill honours the sizes adaptation requested for the
+    /// removed triangles; otherwise the band comes back at the meshing target.
+    preserve_adaptation: bool,
+    size_field: Option<Arc<LocalSizeField>>,
     kept_keys: BTreeSet<AtomKey>,
     rebuilt_curves: BTreeSet<CurveId>,
     /// Junction points whose sector structure changed; every atom ending at
@@ -382,7 +397,9 @@ pub struct TopologyCarveJob {
 impl TopologyCarveJob {
     /// Prepares a repair of `previous`, a mesh of `previous_plan`, for `plan`.
     /// `topology` is the compiled arrangement the new plan was built from; it
-    /// decides which face a kept triangle now lies in.
+    /// decides which face a kept triangle now lies in. With
+    /// `preserve_adaptation` the refill follows the sizes adaptation requested
+    /// for the removed triangles, so an adapted band stays adapted.
     pub fn new(
         previous: Arc<TriMesh>,
         previous_plan: &TopologyMeshPlan,
@@ -390,6 +407,7 @@ impl TopologyCarveJob {
         topology: Arc<TopologySnapshot>,
         mesh_revision: u64,
         options: MeshingOptions,
+        preserve_adaptation: bool,
     ) -> Self {
         let old_keys = previous_plan
             .boundaries
@@ -419,6 +437,8 @@ impl TopologyCarveJob {
             topology,
             mesh_revision,
             options,
+            preserve_adaptation,
+            size_field: None,
             kept_keys,
             rebuilt_curves,
             rebuilt_points: BTreeSet::new(),
@@ -576,19 +596,25 @@ impl TopologyCarveJob {
                 self.report.cavities = domains.len();
                 let mut builder = self.builder.take().unwrap();
                 builder.domains = domains;
-                let removed = self
-                    .deleted
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, deleted)| **deleted)
-                    .map(|(index, _)| {
-                        self.previous.triangles[index]
-                            .vertices
-                            .map(|vertex| self.previous.vertices[vertex].point)
-                    })
-                    .collect::<Vec<_>>();
-                let constrained = vec![[false; 3]; removed.len()];
-                builder.size_field = Some(LocalSizeField(TriangleGrid::new(removed, constrained)));
+                if self.preserve_adaptation {
+                    let (removed, requests): (Vec<_>, Vec<_>) = self
+                        .deleted
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, deleted)| **deleted)
+                        .filter_map(|(index, _)| {
+                            let request = self.previous.requested_size(index)?;
+                            let points = self.previous.triangles[index]
+                                .vertices
+                                .map(|vertex| self.previous.vertices[vertex].point);
+                            Some((points, request))
+                        })
+                        .unzip();
+                    if !removed.is_empty() {
+                        self.size_field = Some(Arc::new(LocalSizeField::new(removed, requests)));
+                    }
+                }
+                builder.size_field = self.size_field.clone();
                 let frozen = builder.frozen_triangles;
                 CarvePhase::Mesh(Box::new(TopologyMeshingJob::resume(
                     self.plan.clone(),
@@ -1277,6 +1303,30 @@ impl TopologyCarveJob {
 
     /// Drops vertices the removed band left behind and renumbers the rest.
     fn compact(&self, mut mesh: TriMesh) -> Result<TriMesh, MeshError> {
+        // Kept triangles keep the size adaptation requested for them; the
+        // refill's triangles take the request of the removed triangle under
+        // their centroid, so the next repair preserves the band again.
+        let kept = self.kept_order.len();
+        let requested = mesh
+            .triangles
+            .iter()
+            .enumerate()
+            .map(|(index, triangle)| {
+                if index < kept {
+                    self.previous.requested_size(self.kept_order[index])
+                } else {
+                    let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+                    self.size_field
+                        .as_ref()
+                        .and_then(|field| field.size_at((a + b + c) / 3.0))
+                }
+            })
+            .collect::<Vec<_>>();
+        mesh.requested_sizes = if requested.iter().any(Option::is_some) {
+            requested
+        } else {
+            vec![]
+        };
         let mut used = vec![false; mesh.vertices.len()];
         for triangle in &mesh.triangles {
             for vertex in triangle.vertices {
@@ -1317,6 +1367,7 @@ pub fn carve_topology_mesh(
     topology: Arc<TopologySnapshot>,
     mesh_revision: u64,
     options: MeshingOptions,
+    preserve_adaptation: bool,
 ) -> Result<(TriMesh, CarveReport), MeshError> {
     let mut job = TopologyCarveJob::new(
         previous,
@@ -1325,6 +1376,7 @@ pub fn carve_topology_mesh(
         topology,
         mesh_revision,
         options,
+        preserve_adaptation,
     );
     loop {
         if let Some(result) = job.advance(4096) {
@@ -1338,9 +1390,9 @@ mod tests {
     use super::*;
     use crate::{
         CurveSpan, CurveSpline, FaceRegionAssignment, MeshAdaptationJob, MeshAdaptationOptions,
-        MeshAdaptationState, OpenCubicSpline, OuterSide, PeriodicCubicSpline, TopologyCurve,
-        TopologyGeometry, TopologyVertex, TopologyVertexId, TopologyVertexLocation,
-        compile_topology, mesh_topology_plan,
+        MeshAdaptationResult, MeshAdaptationState, MeshSizeField, OpenCubicSpline, OuterSide,
+        PeriodicCubicSpline, TopologyCurve, TopologyGeometry, TopologyVertex, TopologyVertexId,
+        TopologyVertexLocation, compile_topology, mesh_topology_plan,
     };
 
     fn spans(start: u64, count: usize, behavior: SpanBehavior) -> Vec<CurveSpan> {
@@ -1439,6 +1491,7 @@ mod tests {
             Arc::new(topology.clone()),
             previous.mesh_revision + 1,
             options,
+            true,
         )
         .unwrap()
     }
@@ -1653,38 +1706,7 @@ mod tests {
         let before_plan = plan_for(&before_topology, from, None, options);
         let base = mesh_topology_plan(&before_plan, 10, options).unwrap();
         let fine = 0.07;
-        let field = move |point: Point2, _: RegionId| {
-            let distance = (point - from).norm();
-            if distance <= 0.5 {
-                fine
-            } else if distance >= 0.7 {
-                0.28
-            } else {
-                fine + (distance - 0.5) / 0.2 * (0.28 - fine)
-            }
-        };
-        let mut job = MeshAdaptationJob::new_topology(
-            Arc::new(base.clone()),
-            &before_plan,
-            MeshAdaptationState::from_mesh(&base),
-            11,
-            Arc::new(field),
-            MeshAdaptationOptions {
-                meshing: options,
-                minimum_target_edge_length: fine,
-                maximum_target_edge_length: 0.28,
-                max_topology_changes: 8_000,
-                max_work_units: 50_000_000,
-                ..MeshAdaptationOptions::default()
-            },
-        );
-        let adapted = loop {
-            if let Some(result) = job.advance(4096) {
-                break result.unwrap();
-            }
-        };
-        assert!(adapted.report.converged, "{:?}", adapted.report);
-        let adapted = adapted.mesh;
+        let adapted = adapt_around(&base, &before_plan, from, fine, options);
         assert!(adapted.triangles.len() > 3 * base.triangles.len());
 
         let after_topology = compile_topology(&hole_geometry(to), 2).unwrap();
@@ -1905,6 +1927,7 @@ mod tests {
                 Arc::new(scene.after_topology.clone()),
                 scene.before.mesh_revision + 1,
                 scene.options,
+                true,
             );
             loop {
                 if let Some(result) = job.advance(slice) {
@@ -2262,5 +2285,355 @@ mod tests {
         assert_eq!(far_left(&carved), far_left(&before));
         let fresh = mesh_topology_plan(&after_plan, 11, options).unwrap();
         assert_same_areas(&carved, &fresh);
+    }
+
+    /// Runs one adaptation of `base`, a mesh of `plan`, against `field`.
+    fn adapt_from(
+        base: &TriMesh,
+        plan: &TopologyMeshPlan,
+        state: MeshAdaptationState,
+        field: Arc<dyn MeshSizeField>,
+        minimum: f64,
+        options: MeshingOptions,
+    ) -> MeshAdaptationResult {
+        let mut job = MeshAdaptationJob::new_topology(
+            Arc::new(base.clone()),
+            plan,
+            state,
+            base.mesh_revision + 1,
+            field,
+            MeshAdaptationOptions {
+                meshing: options,
+                minimum_target_edge_length: minimum,
+                maximum_target_edge_length: options.target_edge_length,
+                max_topology_changes: 8_000,
+                max_work_units: 50_000_000,
+                ..MeshAdaptationOptions::default()
+            },
+        );
+        loop {
+            if let Some(result) = job.advance(4096) {
+                break result.unwrap();
+            }
+        }
+    }
+
+    /// Refines `base` around `center`: `fine` within 0.5 of it, the meshing
+    /// target beyond 0.7, graded between.
+    fn adapt_around(
+        base: &TriMesh,
+        plan: &TopologyMeshPlan,
+        center: Point2,
+        fine: f64,
+        options: MeshingOptions,
+    ) -> TriMesh {
+        let coarse = options.target_edge_length;
+        let field = move |point: Point2, _: RegionId| {
+            let distance = (point - center).norm();
+            if distance <= 0.5 {
+                fine
+            } else if distance >= 0.7 {
+                coarse
+            } else {
+                fine + (distance - 0.5) / 0.2 * (coarse - fine)
+            }
+        };
+        let result = adapt_from(
+            base,
+            plan,
+            MeshAdaptationState::from_mesh(base),
+            Arc::new(field),
+            fine,
+            options,
+        );
+        assert!(result.report.converged, "{:?}", result.report);
+        result.mesh
+    }
+
+    fn shortest_edge(mesh: &TriMesh) -> f64 {
+        mesh.triangles
+            .iter()
+            .flat_map(|triangle| {
+                let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+                (0..3).map(move |corner| (points[(corner + 1) % 3] - points[corner]).norm())
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Repairs `mesh`, a mesh of `plan` with the hole at `from`, back and
+    /// forth between `to` and `from` for an even number of passes, returning
+    /// the mesh back at `from`, its plan, and the triangle count after every
+    /// pass.
+    fn drag_back_and_forth(
+        mesh: TriMesh,
+        plan: TopologyMeshPlan,
+        from: Point2,
+        to: Point2,
+        passes: usize,
+        options: MeshingOptions,
+    ) -> (TriMesh, TopologyMeshPlan, Vec<usize>) {
+        assert_eq!(passes % 2, 0);
+        let mut mesh = mesh;
+        let mut plan = plan;
+        let mut counts = vec![];
+        for pass in 0..passes {
+            let center = if pass % 2 == 0 { to } else { from };
+            let topology = compile_topology(&hole_geometry(center), pass as u64 + 2).unwrap();
+            let next = plan_for(&topology, center, None, options);
+            let (carved, _) = carve(&mesh, &plan, &next, &topology, options);
+            counts.push(carved.triangles.len());
+            mesh = carved;
+            plan = next;
+        }
+        (mesh, plan, counts)
+    }
+
+    /// Dragging one curve back and forth over the same ground used to refine
+    /// the mesh without bound. The refill read the sizes of the triangles it
+    /// removed, the boundary's own chords and the slivers beside frozen rim
+    /// vertices among them, and every repair took the minimum again: fourteen
+    /// repairs of this nudge doubled the mesh and cut its shortest edge
+    /// twentyfold. The refill follows requested sizes only now, and a mesh no
+    /// adaptation has touched has none, so it comes back at the target.
+    #[test]
+    fn repeated_repairs_of_one_curve_do_not_refine_the_mesh() {
+        let options = options(0.06);
+        let from = Point2::new(0.0, 0.0);
+        let to = Point2::new(0.05, 0.02);
+        let topology = compile_topology(&hole_geometry(from), 1).unwrap();
+        let plan = plan_for(&topology, from, None, options);
+        let fresh = mesh_topology_plan(&plan, 10, options).unwrap();
+        let (mesh, plan, counts) = drag_back_and_forth(fresh.clone(), plan, from, to, 14, options);
+        assert_contract(&mesh, &plan, options);
+        assert!(mesh.requested_sizes.is_empty());
+        assert!(
+            mesh.triangles.len() <= fresh.triangles.len() * 105 / 100,
+            "{} triangles after {counts:?}, fresh {}",
+            mesh.triangles.len(),
+            fresh.triangles.len()
+        );
+        assert!(
+            shortest_edge(&mesh) >= shortest_edge(&fresh) * 0.95,
+            "shortest edge {} after {counts:?}, fresh {}",
+            shortest_edge(&mesh),
+            shortest_edge(&fresh)
+        );
+    }
+
+    /// An adapted mesh repaired back and forth stays where adaptation put it:
+    /// the requested sizes the refill copies are bounded by what the field
+    /// asked for and carry nothing the refill itself produced.
+    #[test]
+    fn repeated_repairs_of_an_adapted_mesh_stay_at_the_requested_sizes() {
+        let options = options(0.12);
+        let from = Point2::new(0.0, 0.0);
+        let to = Point2::new(0.05, 0.02);
+        let topology = compile_topology(&hole_geometry(from), 1).unwrap();
+        let plan = plan_for(&topology, from, None, options);
+        let base = mesh_topology_plan(&plan, 10, options).unwrap();
+        let adapted = adapt_around(&base, &plan, from, 0.04, options);
+        assert!(adapted.triangles.len() > 2 * base.triangles.len());
+        let (mesh, plan, counts) =
+            drag_back_and_forth(adapted.clone(), plan, from, to, 12, options);
+        assert_contract(&mesh, &plan, options);
+        for count in &counts {
+            assert!(
+                count * 10 <= adapted.triangles.len() * 11
+                    && count * 10 >= adapted.triangles.len() * 9,
+                "{counts:?} against {}",
+                adapted.triangles.len()
+            );
+        }
+        assert!(shortest_edge(&mesh) >= shortest_edge(&adapted) * 0.95);
+        assert_eq!(mesh.requested_sizes.len(), mesh.triangles.len());
+        let requested = mesh.requested_sizes.iter().flatten().count();
+        assert!(
+            requested * 20 >= mesh.triangles.len() * 19,
+            "{requested} of {} triangles carry a request",
+            mesh.triangles.len()
+        );
+    }
+
+    /// Kept triangles keep their requested size and the refill's triangles
+    /// take the request of the removed triangle beneath them, so the next
+    /// repair finds the band still asked for.
+    #[test]
+    fn a_repair_carries_requested_sizes_into_the_refilled_band() {
+        let options = options(0.12);
+        let from = Point2::new(0.0, 0.0);
+        let to = Point2::new(0.05, 0.02);
+        let fine = 0.04;
+        let before_topology = compile_topology(&hole_geometry(from), 1).unwrap();
+        let before_plan = plan_for(&before_topology, from, None, options);
+        let base = mesh_topology_plan(&before_plan, 10, options).unwrap();
+        let adapted = adapt_around(&base, &before_plan, from, fine, options);
+        let after_topology = compile_topology(&hole_geometry(to), 2).unwrap();
+        let after_plan = plan_for(&after_topology, to, None, options);
+        let (carved, report) = carve(
+            &adapted,
+            &before_plan,
+            &after_plan,
+            &after_topology,
+            options,
+        );
+        assert_eq!(carved.requested_sizes.len(), carved.triangles.len());
+        let previous = adapted
+            .triangles
+            .iter()
+            .enumerate()
+            .map(|(index, triangle)| {
+                (
+                    triangle_keys_one(&adapted, triangle),
+                    adapted.requested_size(index),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        // The ground the hole uncovered had no triangles before, so nothing
+        // there has an opinion: those refill triangles carry no request and
+        // come back at the target until adaptation looks at them.
+        let (mut kept, mut inherited, mut uncovered) = (0, 0, 0);
+        for (index, triangle) in carved.triangles.iter().enumerate() {
+            match previous.get(&triangle_keys_one(&carved, triangle)) {
+                Some(request) => {
+                    kept += 1;
+                    assert_eq!(carved.requested_size(index), *request);
+                }
+                None => {
+                    let distance = (centroid(&carved, triangle) - from).norm();
+                    let request = carved.requested_size(index);
+                    if distance < 0.24 {
+                        uncovered += 1;
+                        assert_eq!(request, None, "{distance}");
+                    } else if distance > 0.32 {
+                        inherited += 1;
+                        let request = request.expect("a refill triangle over removed ground");
+                        assert!(
+                            request >= fine && request <= options.target_edge_length,
+                            "{request}"
+                        );
+                        if distance < 0.45 {
+                            assert!(request <= fine * 1.0001, "{request}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(kept >= report.kept_triangles, "{kept} {report:?}");
+        assert!(inherited > 0 && uncovered > 0, "{inherited} {uncovered}");
+    }
+
+    /// Without preserving adaptation the refill returns to the meshing target
+    /// and carries no request, while kept triangles keep theirs.
+    #[test]
+    fn a_repair_without_preserving_adaptation_refills_at_the_target() {
+        let options = options(0.12);
+        let from = Point2::new(0.0, 0.0);
+        let to = Point2::new(0.05, 0.02);
+        let fine = 0.04;
+        let before_topology = compile_topology(&hole_geometry(from), 1).unwrap();
+        let before_plan = plan_for(&before_topology, from, None, options);
+        let base = mesh_topology_plan(&before_plan, 10, options).unwrap();
+        let adapted = adapt_around(&base, &before_plan, from, fine, options);
+        let after_topology = compile_topology(&hole_geometry(to), 2).unwrap();
+        let after_plan = plan_for(&after_topology, to, None, options);
+        let (preserving, _) = carve(
+            &adapted,
+            &before_plan,
+            &after_plan,
+            &after_topology,
+            options,
+        );
+        let (carved, report) = carve_topology_mesh(
+            Arc::new(adapted.clone()),
+            &before_plan,
+            after_plan.clone(),
+            Arc::new(after_topology),
+            12,
+            options,
+            false,
+        )
+        .unwrap();
+        assert_contract(&carved, &after_plan, options);
+        let kept = triangle_keys(&adapted);
+        let band = |mesh: &TriMesh| {
+            mesh.triangles
+                .iter()
+                .enumerate()
+                .filter(|(_, triangle)| !kept.contains(&triangle_keys_one(mesh, triangle)))
+                .map(|(index, triangle)| (index, max_edge(mesh, triangle)))
+                .collect::<Vec<_>>()
+        };
+        let coarse = band(&carved);
+        let dense = band(&preserving);
+        assert!(!coarse.is_empty() && !dense.is_empty());
+        assert!(
+            coarse
+                .iter()
+                .all(|(index, _)| carved.requested_size(*index).is_none())
+        );
+        let longest =
+            |band: &[(usize, f64)]| band.iter().map(|(_, edge)| *edge).fold(0.0, f64::max);
+        assert!(
+            longest(&coarse) > longest(&dense) * 1.3,
+            "longest refill edge {} against {} when preserving",
+            longest(&coarse),
+            longest(&dense)
+        );
+        assert!(
+            coarse.len() * 2 < dense.len(),
+            "{} against {}",
+            coarse.len(),
+            dense.len()
+        );
+        assert_eq!(carved.requested_sizes.len(), carved.triangles.len());
+        assert!(
+            carved.requested_sizes[..report.kept_triangles]
+                .iter()
+                .all(Option::is_some)
+        );
+    }
+
+    /// A refilled band is ordinary mesh to adaptation: once the field no
+    /// longer wants it fine, its vertices collapse like any other, so a
+    /// repair can never leave density behind that adaptation cannot remove.
+    #[test]
+    fn adaptation_coarsens_a_repaired_band_it_no_longer_wants_fine() {
+        let options = options(0.12);
+        let from = Point2::new(0.0, 0.0);
+        let to = Point2::new(0.05, 0.02);
+        let fine = 0.04;
+        let before_topology = compile_topology(&hole_geometry(from), 1).unwrap();
+        let before_plan = plan_for(&before_topology, from, None, options);
+        let base = mesh_topology_plan(&before_plan, 10, options).unwrap();
+        let adapted = adapt_around(&base, &before_plan, from, fine, options);
+        let after_topology = compile_topology(&hole_geometry(to), 2).unwrap();
+        let after_plan = plan_for(&after_topology, to, None, options);
+        let (carved, _) = carve(
+            &adapted,
+            &before_plan,
+            &after_plan,
+            &after_topology,
+            options,
+        );
+        let coarse: Arc<dyn MeshSizeField> =
+            Arc::new(move |_: Point2, _: RegionId| options.target_edge_length);
+        let mut mesh = carved.clone();
+        let mut state = MeshAdaptationState::from_mesh(&mesh);
+        for _ in 0..3 {
+            let result = adapt_from(&mesh, &after_plan, state, coarse.clone(), fine, options);
+            state = result.state;
+            mesh = result.mesh;
+        }
+        assert!(
+            mesh.triangles.len() * 10 <= carved.triangles.len() * 6,
+            "{} triangles after coarsening {}",
+            mesh.triangles.len(),
+            carved.triangles.len()
+        );
+        assert!(
+            mesh.requested_sizes
+                .iter()
+                .all(|request| *request == Some(options.target_edge_length))
+        );
     }
 }

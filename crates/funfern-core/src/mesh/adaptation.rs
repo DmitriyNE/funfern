@@ -1768,6 +1768,7 @@ mod tests {
             vertices: b.vertices.clone(),
             triangles: b.triangles.clone(),
             boundary_edges: b.boundary_edges.clone(),
+            requested_sizes: vec![],
             quality,
         });
         let mut next = scene.clone();

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use crate::{
     BACKGROUND_REGION, InternalBoundaryId, LoopRole, ObstacleId, OpenSampler, Point2,
@@ -146,9 +147,19 @@ pub struct TriMesh {
     pub triangles: Vec<MeshTriangle>,
     pub boundary_edges: Vec<BoundaryEdge>,
     pub quality: MeshQuality,
+    /// Per triangle, the edge length adaptation last asked for where it lies;
+    /// empty until an adaptation has run. A repair refills the band it removes
+    /// at these requested sizes rather than at the sizes it measures, so a
+    /// sliver the refill itself produced never becomes a target.
+    pub requested_sizes: Vec<Option<f64>>,
 }
 
 impl TriMesh {
+    /// The edge length adaptation last requested for a triangle, if any.
+    pub fn requested_size(&self, index: usize) -> Option<f64> {
+        self.requested_sizes.get(index).copied().flatten()
+    }
+
     pub fn triangle_quality(&self, index: usize) -> Option<MeshQuality> {
         let triangle = self.triangles.get(index)?;
         let points = triangle.vertices.map(|vertex| self.vertices[vertex].point);
@@ -290,7 +301,7 @@ struct MeshBuilder {
     frozen_vertices: usize,
     /// Local edge-length targets sampled from triangles that a repair removed,
     /// so a rebuilt band keeps the density it had.
-    size_field: Option<carve::LocalSizeField>,
+    size_field: Option<Arc<carve::LocalSizeField>>,
 }
 
 #[derive(Clone, Copy)]
@@ -3018,6 +3029,7 @@ impl MeshingJob {
                         triangles: std::mem::take(&mut b.triangles),
                         boundary_edges: std::mem::take(&mut b.boundary_edges),
                         quality,
+                        requested_sizes: vec![],
                     }));
                 }
                 let edge = b.boundary_edges[index].vertices;

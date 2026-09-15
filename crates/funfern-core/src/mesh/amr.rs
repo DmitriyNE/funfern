@@ -698,7 +698,7 @@ impl MeshAdaptationJob {
                 self.validate_topology_coverage(index, Some(quality))?;
             }
             AdaptationPhase::CompactVertices(index) => self.compact_vertex(index),
-            AdaptationPhase::CompactTriangles(index) => self.compact_triangle(index),
+            AdaptationPhase::CompactTriangles(index) => self.compact_triangle(index)?,
             AdaptationPhase::CompactBoundary(index) => {
                 return self.compact_boundary(index);
             }
@@ -2038,6 +2038,7 @@ impl MeshAdaptationJob {
             triangles: self.builder.triangles.clone(),
             boundary_edges: self.builder.boundary_edges.clone(),
             quality,
+            requested_sizes: vec![None; self.builder.triangles.len()],
         });
         self.remap = Vec::with_capacity(self.builder.vertices.len());
         self.phase = AdaptationPhase::CompactVertices(0);
@@ -2059,16 +2060,22 @@ impl MeshAdaptationJob {
         self.phase = AdaptationPhase::CompactVertices(index + 1);
     }
 
-    fn compact_triangle(&mut self, index: usize) {
-        let output = self.output.as_mut().unwrap();
-        if index == output.triangles.len() {
+    fn compact_triangle(&mut self, index: usize) -> Result<(), MeshAdaptationError> {
+        if index == self.builder.triangles.len() {
             self.phase = AdaptationPhase::CompactBoundary(0);
-            return;
+            return Ok(());
         }
+        // Every triangle records the size the field asks for where it lies,
+        // read from the finished mesh: a repair then refills a band at what
+        // adaptation wants there now, not at what it once produced.
+        let request = self.triangle_target(self.builder.triangles[index])?;
+        let output = self.output.as_mut().unwrap();
         output.triangles[index].vertices = output.triangles[index]
             .vertices
             .map(|vertex| self.remap[vertex]);
+        output.requested_sizes[index] = Some(request);
         self.phase = AdaptationPhase::CompactTriangles(index + 1);
+        Ok(())
     }
 
     fn compact_boundary(
@@ -2974,6 +2981,48 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);
         assert!(result.report.boundary_insertions > 0, "{:?}", result.report);
+    }
+
+    /// Every triangle of an adapted mesh records the size the field asks for
+    /// where it lies, read from the finished mesh, so a repair can refill a
+    /// band at what adaptation wants there rather than at what it measures.
+    #[test]
+    fn adaptation_records_the_requested_size_on_every_triangle() {
+        let scene = Scene::initial();
+        let configuration = options(0.24, 0.08);
+        let source = Arc::new(mesh_scene(&scene, 3, configuration.meshing).unwrap());
+        assert!(source.requested_sizes.is_empty());
+        let field = radial(Point2::new(-0.55, 0.45), 0.08, 0.24);
+        let result = run(
+            MeshAdaptationJob::new(
+                source.clone(),
+                scene,
+                MeshAdaptationState::from_mesh(&source),
+                31,
+                field.clone(),
+                configuration,
+            ),
+            37,
+        );
+        let mesh = &result.mesh;
+        assert_eq!(mesh.requested_sizes.len(), mesh.triangles.len());
+        for (index, triangle) in mesh.triangles.iter().enumerate() {
+            let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+            let region = triangle.region;
+            let mut expected =
+                field.target_edge_length((points[0] + points[1] + points[2]) / 3.0, region);
+            for point in points {
+                expected = expected.min(field.target_edge_length(point, region));
+            }
+            for [a, b] in [[0, 1], [1, 2], [2, 0]] {
+                expected =
+                    expected.min(field.target_edge_length(points[a].lerp(points[b], 0.5), region));
+            }
+            assert_eq!(mesh.requested_size(index), Some(expected));
+        }
+        let requests = mesh.requested_sizes.iter().flatten();
+        assert!(requests.clone().any(|size| *size < 0.09));
+        assert!(requests.clone().any(|size| *size > 0.23));
     }
 
     #[test]

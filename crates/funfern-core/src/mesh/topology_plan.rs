@@ -289,6 +289,7 @@ impl TopologyMeshingJob {
                         triangles: std::mem::take(&mut b.triangles),
                         boundary_edges: std::mem::take(&mut b.boundary_edges),
                         quality,
+                        requested_sizes: vec![],
                     }));
                 }
                 verify_topology_boundary(b, index)?;

@@ -137,6 +137,9 @@ impl TopologyPreparationTiming {
 pub struct PreparationIntent {
     pub fresh: bool,
     pub force_rebuild: bool,
+    /// Whether a repair refills its band at the sizes adaptation requested
+    /// there rather than at the meshing target.
+    pub preserve_adaptation: bool,
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
@@ -249,6 +252,7 @@ impl TopologyPreparationJob {
         let PreparationIntent {
             fresh,
             force_rebuild,
+            preserve_adaptation,
         } = intent;
         let same_authored_scene = previous
             .as_ref()
@@ -327,6 +331,7 @@ impl TopologyPreparationJob {
                         bundle.snapshot.clone(),
                         mesh_revision,
                         options,
+                        preserve_adaptation,
                     )),
                     None,
                     None,
@@ -747,6 +752,9 @@ pub struct TopologyRuntime {
     /// Consumed by the next `request`: rebuild the mesh even for an unchanged
     /// plan with unchanged options.
     force_rebuild: bool,
+    /// Whether repairs refill a carved band at the sizes adaptation requested
+    /// there; see `set_preserve_adaptation`.
+    preserve_adaptation: bool,
 }
 
 impl Default for TopologyRuntime {
@@ -759,6 +767,7 @@ impl Default for TopologyRuntime {
             next_mesh_revision: 1,
             last_error: None,
             force_rebuild: false,
+            preserve_adaptation: true,
         }
     }
 }
@@ -768,6 +777,15 @@ impl TopologyRuntime {
     /// meshing options are unchanged, for instance to leave an adapted mesh.
     pub fn request_full_rebuild(&mut self) {
         self.force_rebuild = true;
+    }
+
+    /// Whether repairs refill a carved band at the sizes adaptation requested
+    /// there. Off, the band comes back at the meshing target, so once
+    /// adaptation is disabled an adapted mesh coarsens wherever it is
+    /// repaired. A mesh no adaptation has touched refills at the target
+    /// either way.
+    pub fn set_preserve_adaptation(&mut self, preserve: bool) {
+        self.preserve_adaptation = preserve;
     }
 
     pub fn reserve_mesh_revision(&mut self) -> u64 {
@@ -795,6 +813,7 @@ impl TopologyRuntime {
             PreparationIntent {
                 fresh,
                 force_rebuild: std::mem::take(&mut self.force_rebuild),
+                preserve_adaptation: self.preserve_adaptation,
             },
         )?;
         let token = job.token();
@@ -1764,6 +1783,87 @@ mod tests {
         };
         assert_eq!(refined_far(&repaired.mesh), refined_far(&adapted));
         assert!(repaired.mesh.triangles.len() > base.mesh.triangles.len() * 3 / 2);
+    }
+
+    /// The runtime hands the adaptation switch to the carve. On, the refill
+    /// follows the sizes adaptation requested for the removed band; off, it
+    /// returns to the meshing target and carries no request.
+    #[test]
+    fn a_repair_follows_the_adaptation_switch() {
+        let (mut editor, curve, mut runtime) = hole_runtime();
+        let base = runtime.active().unwrap().clone();
+        let fine = options().target_edge_length * 0.4;
+        let mut adaptation = MeshAdaptationJob::new_topology(
+            base.mesh.clone(),
+            &base.bundle.plan,
+            MeshAdaptationState::from_mesh(&base.mesh),
+            runtime.reserve_mesh_revision(),
+            Arc::new(move |point: Point2, _| {
+                if point.x > 0.0 {
+                    fine
+                } else {
+                    options().target_edge_length
+                }
+            }),
+            MeshAdaptationOptions {
+                meshing: options(),
+                minimum_target_edge_length: fine,
+                maximum_target_edge_length: options().target_edge_length,
+                max_topology_changes: 8_000,
+                max_work_units: 50_000_000,
+                ..MeshAdaptationOptions::default()
+            },
+        );
+        let adapted = loop {
+            if let Some(result) = adaptation.advance(4096) {
+                break result.unwrap().mesh;
+            }
+        };
+        let token = runtime
+            .request_adapted(editor.revision, &editor.document, adapted)
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        runtime.commit_ready(token).unwrap();
+
+        let repair = |editor: &mut TopologyEditor, runtime: &mut TopologyRuntime, x: f64| {
+            editor.set_control(curve, 0, Point2::new(x, 0.0)).unwrap();
+            settle(editor);
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(prepare(runtime).unwrap(), token);
+            let repaired = runtime.commit_ready(token).unwrap();
+            let carve = repaired.carve.expect("a repair reports its carve");
+            assert_eq!(
+                repaired.mesh.requested_sizes.len(),
+                repaired.mesh.triangles.len()
+            );
+            let band = repaired.mesh.requested_sizes[carve.kept_triangles..].to_vec();
+            assert!(!band.is_empty());
+            band
+        };
+
+        let band = repair(&mut editor, &mut runtime, 0.24);
+        let fine_requests = band
+            .iter()
+            .flatten()
+            .filter(|size| (**size - fine).abs() < 1.0e-9)
+            .count();
+        assert!(
+            fine_requests * 2 > band.len(),
+            "{fine_requests} of {}",
+            band.len()
+        );
+
+        runtime.set_preserve_adaptation(false);
+        let band = repair(&mut editor, &mut runtime, 0.22);
+        assert!(band.iter().all(Option::is_none));
     }
 
     /// A topology change is a repair too: a new baffle carves the band it

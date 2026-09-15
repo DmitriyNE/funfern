@@ -1095,6 +1095,7 @@ mod tests {
             Arc::new(after_topology),
             11,
             options,
+            true,
         )
         .unwrap();
 
@@ -1175,6 +1176,7 @@ mod tests {
                 })
                 .collect(),
             boundary_edges: vec![],
+            requested_sizes: vec![],
             quality: MeshQuality {
                 minimum_angle_degrees: 45.0,
                 maximum_edge_length: 1.0,

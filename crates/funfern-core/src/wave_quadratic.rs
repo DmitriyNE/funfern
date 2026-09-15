@@ -2591,6 +2591,7 @@ mod tests {
                 },
             ],
             boundary_edges: vec![],
+            requested_sizes: vec![],
             quality: MeshQuality {
                 minimum_angle_degrees: 45.0,
                 maximum_edge_length: 2.0_f64.sqrt(),
@@ -3996,6 +3997,7 @@ mod tests {
                 region: BACKGROUND_REGION,
             }],
             boundary_edges: vec![],
+            requested_sizes: vec![],
             quality: MeshQuality {
                 minimum_angle_degrees: 0.0,
                 maximum_edge_length: 1.0,

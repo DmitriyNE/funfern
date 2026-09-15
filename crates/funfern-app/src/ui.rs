@@ -5831,6 +5831,7 @@ impl Playground {
         if std::mem::take(&mut self.remesh_requested) {
             self.runtime.request_full_rebuild();
         }
+        self.runtime.set_preserve_adaptation(self.amr_enabled);
         match self.runtime.request(
             self.editor.revision,
             &self.editor.document,
