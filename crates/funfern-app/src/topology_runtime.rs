@@ -157,6 +157,10 @@ pub struct PreparedTopology {
     pub mesh_action: TopologyMeshUpdateAction,
     pub operator_reused: bool,
     pub adapted: bool,
+    /// What a repair kept, removed and inserted, when the mesh was carved.
+    pub carve: Option<CarveReport>,
+    /// Why a repair was abandoned for a full rebuild, when it was.
+    pub repair_fallback: Option<String>,
     pub timing: TopologyPreparationTiming,
     /// Options the mesh was built with. A request with different options is
     /// a full rebuild even when the plan is unchanged.
@@ -165,6 +169,7 @@ pub struct PreparedTopology {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TopologyPreparationPhase {
+    Repairing,
     Meshing,
     Assembling,
     Transferring,
@@ -177,6 +182,7 @@ pub enum TopologyPreparationPhase {
 impl TopologyPreparationPhase {
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Repairing => "Repairing the mesh",
             Self::Meshing => "Mesh rebuilding",
             Self::Assembling => "Assembling wave operator",
             Self::Transferring => "Carrying the field across",
@@ -212,6 +218,9 @@ pub struct TopologyPreparationJob {
     mesh_action: TopologyMeshUpdateAction,
     fresh: bool,
     phase: TopologyPreparationPhase,
+    carve_job: Option<TopologyCarveJob>,
+    carve: Option<CarveReport>,
+    repair_fallback: Option<String>,
     mesh_job: Option<TopologyMeshingJob>,
     mesh: Option<Arc<TriMesh>>,
     assembly_job: Option<QuadraticAssemblyJob>,
@@ -297,7 +306,7 @@ impl TopologyPreparationJob {
                 }
             }
         };
-        let (mesh_job, mesh, phase) = match mesh_action {
+        let (carve_job, mesh_job, mesh, phase) = match mesh_action {
             TopologyMeshUpdateAction::Reuse => {
                 let mesh = if same_authored_scene {
                     previous.as_ref().unwrap().mesh.clone()
@@ -306,9 +315,26 @@ impl TopologyPreparationJob {
                     mesh.geometry_revision = bundle.plan.geometry_revision;
                     Arc::new(mesh)
                 };
-                (None, Some(mesh), TopologyPreparationPhase::Assembling)
+                (None, None, Some(mesh), TopologyPreparationPhase::Assembling)
+            }
+            TopologyMeshUpdateAction::Repair(_) => {
+                let previous = previous.as_ref().unwrap();
+                (
+                    Some(TopologyCarveJob::new(
+                        previous.mesh.clone(),
+                        &previous.bundle.plan,
+                        bundle.plan.as_ref().clone(),
+                        bundle.snapshot.clone(),
+                        mesh_revision,
+                        options,
+                    )),
+                    None,
+                    None,
+                    TopologyPreparationPhase::Repairing,
+                )
             }
             TopologyMeshUpdateAction::FullRebuild(_) => (
+                None,
                 Some(TopologyMeshingJob::new(
                     bundle.plan.as_ref().clone(),
                     mesh_revision,
@@ -333,6 +359,9 @@ impl TopologyPreparationJob {
             mesh_action,
             fresh,
             phase,
+            carve_job,
+            carve: None,
+            repair_fallback: None,
             mesh_job,
             mesh,
             operator,
@@ -381,6 +410,9 @@ impl TopologyPreparationJob {
             mesh_action: TopologyMeshUpdateAction::Reuse,
             fresh: false,
             phase: TopologyPreparationPhase::Assembling,
+            carve_job: None,
+            carve: None,
+            repair_fallback: None,
             mesh_job: None,
             mesh: Some(Arc::new(mesh)),
             operator: None,
@@ -405,7 +437,9 @@ impl TopologyPreparationJob {
     }
 
     pub fn detail(&self) -> &'static str {
-        if let Some(job) = &self.mesh_job {
+        if let Some(job) = &self.carve_job {
+            job.phase()
+        } else if let Some(job) = &self.mesh_job {
             job.phase()
         } else if let Some(job) = &self.assembly_job {
             job.phase()
@@ -476,6 +510,36 @@ impl TopologyPreparationJob {
         &mut self,
         budget: usize,
     ) -> Option<Result<PreparedTopology, TopologyPreparationError>> {
+        if let Some(job) = &mut self.carve_job {
+            let started = Instant::now();
+            let result = job.advance(budget);
+            self.timing.meshing_ms += elapsed_ms(started);
+            let result = result?;
+            let report = job.report();
+            self.carve_job = None;
+            match result {
+                Ok(mesh) => {
+                    self.carve = Some(report);
+                    self.mesh = Some(Arc::new(mesh));
+                    self.phase = TopologyPreparationPhase::Assembling;
+                }
+                // A carve that cannot finish is not an error of the request:
+                // the plan is sound, so the full rebuild takes over and the
+                // reason travels with the candidate for the diagnostics.
+                Err(error) => {
+                    self.repair_fallback = Some(error.to_string());
+                    self.mesh_action = TopologyMeshUpdateAction::FullRebuild(
+                        TopologyFullRebuildReason::RepairFailed,
+                    );
+                    self.mesh_job = Some(TopologyMeshingJob::new(
+                        self.bundle.plan.as_ref().clone(),
+                        self.bundle.token.mesh_generation,
+                        self.meshing,
+                    ));
+                    self.phase = TopologyPreparationPhase::Meshing;
+                }
+            }
+        }
         if let Some(job) = &mut self.mesh_job {
             let started = Instant::now();
             let result = job.advance(budget);
@@ -603,6 +667,8 @@ impl TopologyPreparationJob {
             mesh_action: self.mesh_action,
             operator_reused: self.operator_reused,
             adapted: self.adapted,
+            carve: self.carve,
+            repair_fallback: self.repair_fallback.take(),
             timing: self.timing,
             meshing: self.meshing,
         }))
@@ -1504,8 +1570,8 @@ mod tests {
         assert!(candidate.transfer.is_none());
     }
 
-    #[test]
-    fn coordinate_edit_is_a_typed_full_rebuild() {
+    /// A hole with the running field's runtime around it, ready for edits.
+    fn hole_runtime() -> (TopologyEditor, CurveId, TopologyRuntime) {
         let mut editor = TopologyEditor::default();
         let curve = editor
             .create_closed_curve(
@@ -1526,12 +1592,26 @@ mod tests {
             .unwrap();
         prepare(&mut runtime).unwrap();
         runtime.commit_ready(first).unwrap();
+        (editor, curve, runtime)
+    }
 
+    fn nudge(editor: &mut TopologyEditor, curve: CurveId) {
         editor
             .set_control(curve, 0, Point2::new(0.24, 0.0))
             .unwrap();
-        settle(&mut editor);
-        runtime
+        settle(editor);
+    }
+
+    /// Moving a control is a repair: the band around the hole is carved and
+    /// refilled, the rest of the mesh and its nodes survive, the operator is
+    /// rebuilt on the new mesh and the field crosses through a transfer that
+    /// copies the untouched nodes exactly.
+    #[test]
+    fn a_coordinate_edit_repairs_the_mesh_by_carving() {
+        let (mut editor, curve, mut runtime) = hole_runtime();
+        let before = runtime.active().unwrap().clone();
+        nudge(&mut editor, curve);
+        let token = runtime
             .request(
                 editor.revision,
                 &editor.document,
@@ -1540,12 +1620,150 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert!(matches!(
+        assert_eq!(
             runtime.preparing.as_ref().unwrap().mesh_action,
-            TopologyMeshUpdateAction::FullRebuild(
-                TopologyFullRebuildReason::CoordinateRepairDeferred
+            TopologyMeshUpdateAction::Repair(TopologyRepairReason::CurveOrJunctionMoved)
+        );
+        assert_eq!(runtime.phase(), Some(TopologyPreparationPhase::Repairing));
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let repaired = runtime.commit_ready(token).unwrap();
+        assert_eq!(
+            repaired.mesh_action,
+            TopologyMeshUpdateAction::Repair(TopologyRepairReason::CurveOrJunctionMoved)
+        );
+        let report = repaired.carve.expect("a repair reports its carve");
+        assert!(report.kept_triangles > 0, "{report:?}");
+        assert!(
+            report.removed_triangles * 2 < before.mesh.triangles.len(),
+            "{report:?}"
+        );
+        assert_eq!(
+            repaired.mesh.triangles.len(),
+            report.kept_triangles + report.inserted_triangles
+        );
+        assert!(repaired.repair_fallback.is_none());
+        assert!(!repaired.operator_reused);
+        assert!(!repaired.adapted);
+        assert_ne!(
+            repaired.bundle.token.mesh_generation,
+            before.bundle.token.mesh_generation
+        );
+        let transfer = repaired.transfer.as_ref().expect("the field crosses over");
+        assert!(transfer.exact_nodes() * 2 > repaired.operator.degrees_of_freedom());
+        assert!(repaired.timing.meshing_ms >= 0.0);
+    }
+
+    /// A carve that cannot finish is not the request's failure: the candidate
+    /// falls back to the full rebuild and says why.
+    #[test]
+    fn a_failed_repair_falls_back_to_a_full_rebuild() {
+        let (mut editor, curve, mut runtime) = hole_runtime();
+        {
+            // A mesh the carve cannot read: one boundary edge with a legacy label.
+            let active = Arc::make_mut(runtime.active.as_mut().unwrap());
+            let mesh = Arc::make_mut(&mut active.mesh);
+            mesh.boundary_edges[0].label = BoundaryLabel::Obstacle(ObstacleId(7));
+        }
+        nudge(&mut editor, curve);
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                false,
             )
-        ));
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let rebuilt = runtime.commit_ready(token).unwrap();
+        assert_eq!(
+            rebuilt.mesh_action,
+            TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::RepairFailed)
+        );
+        assert!(rebuilt.carve.is_none());
+        assert!(
+            rebuilt
+                .repair_fallback
+                .as_deref()
+                .is_some_and(|message| message.contains("topology plan")),
+            "{:?}",
+            rebuilt.repair_fallback
+        );
+        assert!(rebuilt.transfer.is_some());
+        assert_eq!(rebuilt.mesh.mesh_revision, token.mesh_generation);
+    }
+
+    /// Refinement an adaptation added survives an edit elsewhere: only the
+    /// band around the moved curve is refilled, at the density it had.
+    #[test]
+    fn a_repair_keeps_an_adapted_mesh_outside_the_band() {
+        let (mut editor, curve, mut runtime) = hole_runtime();
+        let base = runtime.active().unwrap().clone();
+        let fine = options().target_edge_length * 0.4;
+        let mut adaptation = MeshAdaptationJob::new_topology(
+            base.mesh.clone(),
+            &base.bundle.plan,
+            MeshAdaptationState::from_mesh(&base.mesh),
+            runtime.reserve_mesh_revision(),
+            Arc::new(move |point: Point2, _| {
+                if point.x > 0.3 {
+                    fine
+                } else {
+                    options().target_edge_length
+                }
+            }),
+            MeshAdaptationOptions {
+                meshing: options(),
+                minimum_target_edge_length: fine,
+                maximum_target_edge_length: options().target_edge_length,
+                max_topology_changes: 8_000,
+                max_work_units: 50_000_000,
+                ..MeshAdaptationOptions::default()
+            },
+        );
+        let adapted = loop {
+            if let Some(result) = adaptation.advance(4096) {
+                break result.unwrap().mesh;
+            }
+        };
+        assert!(adapted.triangles.len() > base.mesh.triangles.len() * 3 / 2);
+        let token = runtime
+            .request_adapted(editor.revision, &editor.document, adapted.clone())
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        runtime.commit_ready(token).unwrap();
+
+        nudge(&mut editor, curve);
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let repaired = runtime.commit_ready(token).unwrap();
+        let report = repaired.carve.expect("a repair reports its carve");
+        assert!(
+            report.kept_triangles * 2 > adapted.triangles.len(),
+            "{report:?}"
+        );
+        // The refined half is far from the hole and comes through untouched.
+        let refined_far = |mesh: &TriMesh| {
+            mesh.triangles
+                .iter()
+                .filter(|triangle| {
+                    triangle
+                        .vertices
+                        .iter()
+                        .all(|vertex| mesh.vertices[*vertex].point.x > 0.6)
+                })
+                .count()
+        };
+        assert_eq!(refined_far(&repaired.mesh), refined_far(&adapted));
+        assert!(repaired.mesh.triangles.len() > base.mesh.triangles.len() * 3 / 2);
     }
 
     #[test]

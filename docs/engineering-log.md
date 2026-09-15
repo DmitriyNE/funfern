@@ -46,16 +46,15 @@ Carried over from the cutover follow-up work, not from the review:
 Longer-standing work:
 
 - [ ] Incremental mesh repair by carving, agreed 2026-09-15 to replace the
-  deferred coordinate repair and its caps. Stage 1, the core carving job, landed
-  2026-09-15 (`mesh/carve.rs`). Remaining stages: an exact identity path in the
-  transfer map for nodes outside the band; runtime plumbing with a Repairing
-  phase, a repair update action, and the full rebuild as the fallback on a carve
-  error, with the reason and the kept and removed counts in the Performance
-  panel; widening the classifier so every plan difference except the outer
-  domain, a resolution change and a requested rebuild is a repair; docs and
-  browser checks. Backlog once those land: deformation-first repair for small
-  motions with carving as the fallback; live repair during drags once the carve
-  time is measured in the app; outer-domain resize through carving.
+  deferred coordinate repair and its caps. Landed 2026-09-15: the core carving
+  job (`mesh/carve.rs`), the exact identity path in the transfer map, and the
+  runtime's Repairing phase for coordinate edits with the full rebuild as the
+  fallback and the counts in the Performance panel. Remaining: widening the
+  classifier so every plan difference except the outer domain, a resolution
+  change and a requested rebuild is a repair; docs and browser checks. Backlog
+  once those land: deformation-first repair for small motions with carving as
+  the fallback; live repair during drags now that the carve time shows in the
+  panel; outer-domain resize through carving.
 - [ ] Raise viewport video capture from the initial 30 FPS implementation to 60 FPS.
   Measure browser encoding and native GPU-readback pressure first, retain bounded
   native queues and wall-clock pacing, and report dropped frames rather than slowing
@@ -122,6 +121,40 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Coordinate edits repair the active mesh by carving
+
+The classifier's `CoordinateRepairDeferred` full rebuild is gone. A plan whose
+only difference from the active one is moved geometry now classifies as
+`TopologyMeshUpdateAction::Repair(CurveOrJunctionMoved)`, and the preparation
+job runs a `TopologyCarveJob` in a new Repairing phase in place of the mesher,
+against whatever mesh is active, adapted or not. Assembly, the transfer and
+the sources follow as for a rebuild; the operator is never reused across a
+repair. A carve that fails is not the request's failure: the candidate falls
+back to the full mesher under a new `RepairFailed` reason and carries the
+message, and the prepared topology carries the carve report. The Performance
+panel's handoff line shows the repair with its kept, removed and inserted
+counts, a fallback with its message, and how many of the transferred nodes
+were copied exactly.
+
+Three runtime tests: a control nudge on a hole is a repair whose transfer
+copies more than half the nodes exactly; a mesh the carve cannot read, one
+boundary edge relabelled with a legacy label, falls back to the full rebuild
+with the reason attached; and refinement an adaptation added far from the
+hole comes through a repair unchanged, triangle for triangle.
+
+Release timing on the Obstacle array example, a control moved by 0.02, Apple
+M1 Max, taken from the preparation's own buckets:
+
+| preset | triangles | mesh rebuild | mesh repair | kept | nodes copied exactly |
+| --- | --- | --- | --- | --- | --- |
+| Medium, 0.08 | 2,962 | 63 ms | 6.5 ms | 96.9% | 9,056 of 9,333 |
+| Fine, 0.04 | 10,804 | 326 ms | 20.8 ms | 98.8% | 32,600 of 33,047 |
+
+Assembly and the transfer are unchanged by the repair, 29 ms and 13 ms at the
+Fine preset, so they are now the larger part of a handover. The obstacle is a
+reflecting curve and is rebuilt whole, 66 atoms for one moved control; that
+is the whole-curve rule for separated spans doing what it should.
 
 ## 2026-09-15 — The transfer copies untouched nodes exactly
 

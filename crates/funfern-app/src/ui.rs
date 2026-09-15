@@ -501,7 +501,7 @@ impl Default for ProbeTrace {
 /// One completed geometry-to-GPU transaction, split into the three waits the
 /// user can actually act on: CPU preparation, draining the solver's requested
 /// steps, and the GPU upload itself.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct HandoffRecord {
     prepare_ms: f64,
     drain_ms: f64,
@@ -511,9 +511,13 @@ struct HandoffRecord {
     operator_reused: bool,
     adapted: bool,
     transferred: bool,
+    /// Target nodes the transfer copied exactly, when the field crossed over.
+    exact_nodes: usize,
     fresh: bool,
     degrees_of_freedom: usize,
     triangles: usize,
+    carve: Option<CarveReport>,
+    repair_fallback: Option<String>,
 }
 
 struct Uploading {
@@ -5864,9 +5868,15 @@ impl Playground {
             operator_reused: active.operator_reused,
             adapted: active.adapted,
             transferred: active.transfer.is_some(),
+            exact_nodes: active
+                .transfer
+                .as_ref()
+                .map_or(0, |transfer| transfer.exact_nodes()),
             fresh: active.fresh,
             degrees_of_freedom: active.operator.degrees_of_freedom(),
             triangles: active.mesh.triangles.len(),
+            carve: active.carve,
+            repair_fallback: active.repair_fallback.clone(),
         });
         self.handoff_requested = None;
         self.handoff_ready = None;
@@ -8603,18 +8613,36 @@ impl Playground {
                                     )
                                 }
                             }
+                            TopologyMeshUpdateAction::Repair(reason) => match record.carve {
+                                Some(carve) => format!(
+                                    "Mesh repaired: {} · kept {} · removed {} · inserted {}",
+                                    reason.label(),
+                                    carve.kept_triangles,
+                                    carve.removed_triangles,
+                                    carve.inserted_triangles,
+                                ),
+                                None => format!("Mesh repaired: {}", reason.label()),
+                            },
                             TopologyMeshUpdateAction::FullRebuild(reason) => {
-                                format!("Full rebuild: {}", reason.label())
+                                match &record.repair_fallback {
+                                    Some(message) => {
+                                        format!("Full rebuild: {} ({message})", reason.label())
+                                    }
+                                    None => format!("Full rebuild: {}", reason.label()),
+                                }
                             }
                         });
                         ui.small(format!(
                             "{} · {} dofs · {} triangles",
                             if record.fresh {
-                                "Fresh field"
+                                "Fresh field".to_owned()
                             } else if record.transferred {
-                                "Field transferred"
+                                format!(
+                                    "Field transferred · {} of {} nodes copied exactly",
+                                    record.exact_nodes, record.degrees_of_freedom
+                                )
                             } else {
-                                "Field preserved in place"
+                                "Field preserved in place".to_owned()
                             },
                             record.degrees_of_freedom,
                             record.triangles,

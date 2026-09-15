@@ -1506,7 +1506,23 @@ pub enum TopologyMeshPlanError {
 pub enum TopologyMeshUpdateAction {
     /// Geometry and topology are identical; the current discretization remains valid.
     Reuse,
+    /// The plan differs only where carving can follow: the changed atoms are
+    /// carved out of the active mesh and refilled, the rest is kept.
+    Repair(TopologyRepairReason),
     FullRebuild(TopologyFullRebuildReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopologyRepairReason {
+    CurveOrJunctionMoved,
+}
+
+impl TopologyRepairReason {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CurveOrJunctionMoved => "curve or junction moved",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1516,16 +1532,15 @@ pub enum TopologyFullRebuildReason {
     CurveOrSpanTopologyChanged,
     SpanBehaviorChanged,
     TraceEquivalenceChanged,
-    /// The existing patch repair needs spline evaluation and endpoint-sector
-    /// rewiring from the new topology model. That migration is deliberately
-    /// deferred until all numerical consumers use `TopologyMeshPlan`.
-    CoordinateRepairDeferred,
     /// The plan is unchanged but the meshing options, such as the target edge
     /// length, are not those the active mesh was built with.
     MeshingOptionsChanged,
     /// The user asked for a rebuild of an unchanged plan, for instance to
     /// return from an adapted mesh to the base resolution.
     Requested,
+    /// A repair was attempted and the carve failed; the runtime keeps the
+    /// message alongside.
+    RepairFailed,
 }
 
 impl TopologyFullRebuildReason {
@@ -1536,16 +1551,17 @@ impl TopologyFullRebuildReason {
             Self::CurveOrSpanTopologyChanged => "curve or span topology changed",
             Self::SpanBehaviorChanged => "span behavior changed",
             Self::TraceEquivalenceChanged => "trace equivalence changed",
-            Self::CoordinateRepairDeferred => "curve or junction moved",
             Self::MeshingOptionsChanged => "mesh resolution changed",
             Self::Requested => "rebuild requested",
+            Self::RepairFailed => "mesh repair failed",
         }
     }
 }
 
-/// Classifies reuse before starting mesh work. It intentionally admits only
-/// exact reuse today. Every changed plan receives a stable, inspectable full
-/// rebuild reason rather than entering the legacy object-specific repair path.
+/// Classifies reuse before starting mesh work. Identical plans reuse the
+/// mesh, a plan whose only difference is moved geometry is repaired by
+/// carving, and every other difference receives a stable, inspectable full
+/// rebuild reason.
 pub fn topology_mesh_update_action(
     previous: &TopologyMeshPlan,
     next: &TopologyMeshPlan,
@@ -1603,7 +1619,7 @@ pub fn topology_mesh_update_action(
     if same_geometry {
         TopologyMeshUpdateAction::Reuse
     } else {
-        TopologyMeshUpdateAction::FullRebuild(Reason::CoordinateRepairDeferred)
+        TopologyMeshUpdateAction::Repair(TopologyRepairReason::CurveOrJunctionMoved)
     }
 }
 
@@ -3112,9 +3128,7 @@ mod tests {
             TopologyMeshPlan::new(&moved_snapshot, &assign_each_face(&moved_snapshot)).unwrap();
         assert_eq!(
             topology_mesh_update_action(&first, &moved),
-            TopologyMeshUpdateAction::FullRebuild(
-                TopologyFullRebuildReason::CoordinateRepairDeferred
-            )
+            TopologyMeshUpdateAction::Repair(TopologyRepairReason::CurveOrJunctionMoved)
         );
 
         let mut reassigned = identical.clone();
