@@ -150,6 +150,62 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — A click names a boundary, not a side of one
+
+Connecting two closed curves with a baffle was refused with "Open-curve
+endpoints must attach to the same face". The editor was not at fault: on the
+reported file, 9 of the 64 straight paths between the two curves draw fine
+through `create_open_curve`, and that message never appears. The side the click
+reported was.
+
+An attachment carries a `CurveTraceSide`, and the face it resolves to is the
+face on that side. The side comes from which pixel the pointer landed on.
+Hovering all the way round both curves of the file at fixed offsets:
+
+| pointer offset | curve 1 | curve 2 |
+| --- | --- | --- |
+| 6 px outside | 0/160 wrong | 0/160 wrong |
+| 2 px outside | 24/160 report the interior | 40/160 |
+| on the line | 57/160 | more |
+
+Neither curve owns a vertex, so 88 and 136 of those 160 positions are
+*breakpoint* hits rather than edge hits, and `hit_breakpoint` takes its side
+from the chord between the node and the span's midpoint. On a rounded span that
+chord cuts the corner, so a point genuinely outside the curve lies inside the
+chord. With two closed curves, one wrong-side click names an interior and the
+two ends disagree.
+
+A better side test would only narrow the window. The side is not the user's
+choice: they clicked a boundary, and which side of it the new curve lies on is
+visible in the curve they drew. So:
+
+- `open_curve_face` replaces the pairwise face comparison. Each attachment
+  offers every face it could name - both sides of a curve anchor or breakpoint,
+  every assigned sector of a junction - and the face is taken from the drawn
+  path, sampled at half, a quarter and three quarters of its length. If the path
+  cannot say, the sides the clicks reported are tried, and then the only face
+  the two ends share. The error survives only for ends that genuinely touch no
+  common subdomain.
+- `attach_end_to_vertex` does the same for a weld, with the curve already in the
+  document standing in for the drawn one. A two-sided target there picked the
+  source region for `assign_new_faces`, so the wrong side handed a new face the
+  wrong material and frame.
+- The viewport no longer restricts a separator's snapping to the face its first
+  click reported, and a separator's first point is accepted when *either* side
+  of the boundary has an active subdomain. `DrawGesture::face` and the UI's own
+  `attachment_face` are gone with it.
+- `materialize_attachment` already ignored the side entirely, which is what made
+  this contained: the side existed only to answer the face question.
+
+Two regression tests, both verified to fail beforehand. A baffle bridging two
+loops is drawn for all four combinations of reported sides. A baffle chord drawn
+through a subdomain splits it whichever side the clicks named, and the daughter
+region inherits the subdomain's material - on the old code, a pair of
+outside-reported clicks handed it the background's instead, silently.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked` (499 tests), and the release build.
+
 ## 2026-09-16 — A slit that joins two loops breaks the face it cuts
 
 Two reports, one defect. A file whose geometry could not be meshed, and a

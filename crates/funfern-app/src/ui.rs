@@ -24,7 +24,7 @@ use funfern_app::document::{ProbeId, ProbeSamplingPreset, VectorOverlay};
 use funfern_app::topology_editor::{
     ClosedCurvePurpose, JoinRecord, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
     TopologyBoundaryProbeTarget, TopologyCurveRemoval, TopologyDocument, TopologyEditor,
-    TopologyProbeDefinition, TopologyProbeTarget, TopologySpanRemoval,
+    TopologyProbeDefinition, TopologyProbeTarget, TopologySpanRemoval, attachment_faces,
 };
 use funfern_app::topology_persistence::{self as persistence, TopologyLoadCandidate};
 use funfern_app::topology_runtime::{
@@ -142,7 +142,6 @@ struct DrawGesture {
     tool: DrawTool,
     points: Vec<Point2>,
     attachments: Vec<Option<TopologyAttachment>>,
-    face: Option<FaceId>,
 }
 
 /// Which part of the outer rectangle a domain resize has hold of.
@@ -931,7 +930,6 @@ impl Playground {
             tool,
             points: vec![],
             attachments: vec![],
-            face: None,
         });
         self.draw_open = false;
         self.selection = TopologySelection::None;
@@ -4335,9 +4333,9 @@ impl Playground {
             return None;
         }
         let compiled = self.editor.compiled_draft.as_ref()?;
-        let face = (self.open_purpose == OpenPurpose::Separator)
-            .then_some(draw.face)
-            .flatten();
+        // No face restriction, for either purpose. Which side of a boundary the
+        // pointer is on is not what the user is choosing by clicking it, and
+        // the editor settles the face from the drawn path instead.
         let hit = weld_hit(
             compiled,
             &self.editor.document.model.draft.geometry,
@@ -4345,14 +4343,20 @@ impl Playground {
             pointer,
             self.hit_tolerance(14.0) as f64,
             None,
-            face,
+            None,
         )?;
+        // A separator has to start somewhere it can divide, so its first point
+        // needs a boundary with an active subdomain on one side or the other.
         if self.open_purpose == OpenPurpose::Separator
-            && draw.face.is_none()
-            && !compiled.assignments.iter().any(|assignment| {
-                assignment.face == attachment_face(hit.attachment, compiled)
-                    && assignment.region.is_some()
-            })
+            && draw.points.is_empty()
+            && !attachment_faces(hit.attachment, compiled)
+                .into_iter()
+                .any(|face| {
+                    compiled
+                        .assignments
+                        .iter()
+                        .any(|assignment| assignment.face == face && assignment.region.is_some())
+                })
         {
             return None;
         }
@@ -4370,17 +4374,12 @@ impl Playground {
             .iter()
             .filter_map(|assignment| assignment.region.map(|_| assignment.face))
             .collect::<BTreeSet<_>>();
-        let required_face = (self.open_purpose == OpenPurpose::Separator)
-            .then_some(draw.face)
-            .flatten();
+        // Either side of a boundary makes it a target: the side a click lands
+        // on is not a choice the user is making, and the editor reads the face
+        // from where the curve is drawn.
         let eligible = |faces: &[FaceId]| {
-            required_face.map_or_else(
-                || {
-                    self.open_purpose == OpenPurpose::Baffle
-                        || faces.iter().any(|face| active_faces.contains(face))
-                },
-                |required| faces.contains(&required),
-            )
+            self.open_purpose == OpenPurpose::Baffle
+                || faces.iter().any(|face| active_faces.contains(face))
         };
         let stroke = Stroke::new(2.2, Color32::from_rgba_unmultiplied(248, 196, 112, 105));
         for edge in &compiled.topology.edges {
@@ -5656,11 +5655,6 @@ impl Playground {
             if let Some(hit) = snap {
                 point = hit.point;
                 attachment = Some(hit.attachment);
-                if gesture.points.is_empty()
-                    && let Some(compiled) = &self.editor.compiled_draft
-                {
-                    gesture.face = Some(attachment_face(hit.attachment, compiled));
-                }
             }
             if self.open_purpose == OpenPurpose::Separator
                 && gesture.points.is_empty()
@@ -9900,42 +9894,6 @@ fn closest_curve_parameter(
         }
     }
     best.map(|(_, curve, parameter)| (curve, parameter))
-}
-fn attachment_face(attachment: TopologyAttachment, compiled: &CompiledTopologyScene) -> FaceId {
-    match attachment {
-        TopologyAttachment::Junction { face, .. } => face,
-        TopologyAttachment::Boundary(anchor) => {
-            anchor.resolve(&compiled.topology).unwrap_or(EXTERIOR_FACE)
-        }
-        TopologyAttachment::LooseEnd { curve, endpoint } => compiled
-            .geometry
-            .curve(curve)
-            .and_then(|curve| {
-                let node = if endpoint == 0 {
-                    0
-                } else {
-                    curve.nodes.len() - 1
-                };
-                curve.spline.node_point(node)
-            })
-            .and_then(|point| compiled.topology.face_at(point))
-            .unwrap_or(EXTERIOR_FACE),
-        TopologyAttachment::Breakpoint { curve, node, side } => compiled
-            .geometry
-            .curve(curve)
-            .and_then(|target| {
-                let [a, b] = target.spline.span_bounds(node)?;
-                FaceAnchor::Curve {
-                    curve,
-                    span: target.spans.get(node)?.id,
-                    side,
-                    parameter: (a + b) * 0.5,
-                }
-                .resolve(&compiled.topology)
-                .ok()
-            })
-            .unwrap_or(EXTERIOR_FACE),
-    }
 }
 fn field_color(value: f32, gain: f32, under: Color32) -> Color32 {
     let value = (value * gain).tanh();

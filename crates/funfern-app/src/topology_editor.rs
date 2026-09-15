@@ -858,22 +858,7 @@ impl TopologyEditor {
             .compiled_draft
             .clone()
             .ok_or("Finish the current invalid topology edit before drawing a new open curve")?;
-        let start_face = start
-            .map(|target| attachment_face(target, &compiled))
-            .transpose()?;
-        let end_face = end
-            .map(|target| attachment_face(target, &compiled))
-            .transpose()?;
-        if let (Some(start_face), Some(end_face)) = (start_face, end_face)
-            && start_face != end_face
-        {
-            return Err("Open-curve endpoints must attach to the same face".into());
-        }
-
-        let source_face = start_face
-            .or(end_face)
-            .or_else(|| compiled.topology.face_at(open_spline_midpoint(&spline)))
-            .ok_or("Open curve must lie in a bounded face")?;
+        let source_face = open_curve_face(&compiled, &spline, start, end)?;
         let source_region = compiled
             .assignments
             .iter()
@@ -1059,7 +1044,12 @@ impl TopologyEditor {
         endpoint: usize,
         target: TopologyAttachment,
     ) -> Result<(Option<RegionId>, Vec<TopologySpanSplit>), String> {
-        let source_face = attachment_face(target, compiled)?;
+        let dragged = candidate
+            .draft
+            .geometry
+            .curve(curve)
+            .ok_or("Curve no longer exists")?;
+        let source_face = attached_end_face(compiled, dragged, target)?;
         let source_region = compiled
             .assignments
             .iter()
@@ -2967,6 +2957,159 @@ fn next_id(ids: impl Iterator<Item = u64>) -> Result<u64, String> {
         .unwrap_or(0)
         .checked_add(1)
         .ok_or("Document IDs exhausted".into())
+}
+
+/// Every face an attachment can name.
+///
+/// A click names a boundary, not a side of one. Which side it reports is
+/// decided by the pixel the pointer landed on, and near a breakpoint that can
+/// be the far side even when the pointer is clearly outside the curve - the
+/// user chose a boundary, and the side was never theirs to choose. So an
+/// attachment offers the faces it could belong to and something else settles
+/// which one it does.
+pub fn attachment_faces(
+    target: TopologyAttachment,
+    compiled: &CompiledTopologyScene,
+) -> Vec<FaceId> {
+    let both_sides = |curve, span, parameter| {
+        [CurveTraceSide::Left, CurveTraceSide::Right]
+            .into_iter()
+            .filter_map(|side| {
+                FaceAnchor::Curve {
+                    curve,
+                    span,
+                    side,
+                    parameter,
+                }
+                .resolve(&compiled.topology)
+                .ok()
+            })
+            .collect::<Vec<_>>()
+    };
+    let faces = match target {
+        TopologyAttachment::Boundary(FaceAnchor::Curve {
+            curve,
+            span,
+            parameter,
+            ..
+        }) => both_sides(curve, span, parameter),
+        TopologyAttachment::Breakpoint { curve, node, .. } => compiled
+            .geometry
+            .curve(curve)
+            .and_then(|target| {
+                let span = breakpoint_span(target, node).ok()?;
+                let [a, b] = target.spline.span_bounds(span)?;
+                Some(both_sides(curve, target.spans[span].id, (a + b) * 0.5))
+            })
+            .unwrap_or_default(),
+        TopologyAttachment::Junction { vertex, .. } => compiled
+            .topology
+            .vertices
+            .iter()
+            .filter(|candidate| candidate.authored == Some(vertex))
+            .flat_map(|candidate| candidate.traces.iter().map(|trace| trace.face))
+            .filter(|face| {
+                compiled
+                    .assignments
+                    .iter()
+                    .any(|assignment| assignment.face == *face)
+            })
+            .collect(),
+        _ => attachment_face(target, compiled).into_iter().collect(),
+    };
+    let mut unique = Vec::with_capacity(faces.len());
+    for face in faces {
+        if !unique.contains(&face) {
+            unique.push(face);
+        }
+    }
+    unique
+}
+
+/// The face an open curve drawn between these attachments belongs to.
+///
+/// The drawn path decides it, because that is the thing the user placed: a
+/// curve is on one side of the boundary it starts from or the other, and which
+/// one is visible on screen. The attachments only have to be able to reach it.
+/// When the path cannot say - every sample sits on a boundary - the sides the
+/// clicks happened to report are tried, and then the only face the two ends
+/// share.
+fn open_curve_face(
+    compiled: &CompiledTopologyScene,
+    spline: &OpenCubicSpline,
+    start: Option<TopologyAttachment>,
+    end: Option<TopologyAttachment>,
+) -> Result<FaceId, String> {
+    let reachable = |target: Option<TopologyAttachment>| {
+        target.map(|target| attachment_faces(target, compiled))
+    };
+    let start_faces = reachable(start);
+    let end_faces = reachable(end);
+    let shared = match (&start_faces, &end_faces) {
+        (Some(start), Some(end)) => start
+            .iter()
+            .copied()
+            .filter(|face| end.contains(face))
+            .collect::<Vec<_>>(),
+        (Some(faces), None) | (None, Some(faces)) => faces.clone(),
+        (None, None) => vec![],
+    };
+    if start_faces.is_some() && end_faces.is_some() && shared.is_empty() {
+        return Err("The two ends of an open curve must touch the same subdomain".into());
+    }
+    // Away from the ends, where the curve is unambiguously on one side.
+    for fraction in [0.5, 0.25, 0.75] {
+        let Some(face) = compiled
+            .topology
+            .face_at(spline.evaluate(spline.period() * fraction))
+        else {
+            continue;
+        };
+        if shared.is_empty() || shared.contains(&face) {
+            return Ok(face);
+        }
+    }
+    for stated in [start, end].into_iter().flatten() {
+        if let Ok(face) = attachment_face(stated, compiled)
+            && shared.contains(&face)
+        {
+            return Ok(face);
+        }
+    }
+    match shared.as_slice() {
+        [face] => Ok(*face),
+        [] => Err("Open curve must lie in a bounded face".into()),
+        _ => Err("Draw this curve inside the subdomain it belongs to".into()),
+    }
+}
+
+/// The face a curve being welded belongs to. The same reasoning as
+/// `open_curve_face`, with the curve already in the document standing in for
+/// the one being drawn: its own path answers which side of the boundary it is
+/// on, and the end being attached only has to reach that face. A target that
+/// names one face on its own is left to settle it.
+fn attached_end_face(
+    compiled: &CompiledTopologyScene,
+    curve: &TopologyCurve,
+    target: TopologyAttachment,
+) -> Result<FaceId, String> {
+    let faces = attachment_faces(target, compiled);
+    if faces.len() < 2 {
+        return attachment_face(target, compiled);
+    }
+    let Ok(period) = open_period(curve) else {
+        return attachment_face(target, compiled);
+    };
+    for fraction in [0.5, 0.25, 0.75] {
+        if let Some(face) = compiled
+            .topology
+            .face_at(evaluate_curve(curve, period * fraction))
+            && faces.contains(&face)
+        {
+            return Ok(face);
+        }
+    }
+    attachment_face(target, compiled)
 }
 
 fn attachment_face(
@@ -5505,6 +5648,174 @@ mod tests {
         assert_eq!(edit.span_splits.len(), 2);
         assert_eq!(editor.document.model.draft.regions.len(), 3);
         assert_eq!(editor.compiled_accepted.plan.domains.len(), 3);
+    }
+
+    /// An anchor on the middle of a span, naming the side whose face is - or is
+    /// not - the background. Naming the wrong one is what a click a pixel off
+    /// the outline reports, and nothing downstream should depend on it.
+    fn span_anchor(
+        editor: &TopologyEditor,
+        curve: CurveId,
+        span_index: usize,
+        background: bool,
+    ) -> (Point2, TopologyAttachment) {
+        let compiled = &editor.compiled_accepted;
+        let outside = compiled
+            .topology
+            .face_at(Point2::new(0.0, 0.95))
+            .expect("a background face");
+        let owner = compiled.geometry.curve(curve).expect("curve");
+        let span = owner.spans[span_index].id;
+        let [a, b] = owner.spline.span_bounds(span_index).expect("span bounds");
+        let parameter = (a + b) * 0.5;
+        let side = [CurveTraceSide::Left, CurveTraceSide::Right]
+            .into_iter()
+            .find(|side| {
+                FaceAnchor::Curve {
+                    curve,
+                    span,
+                    side: *side,
+                    parameter,
+                }
+                .resolve(&compiled.topology)
+                .is_ok_and(|face| (face == outside) == background)
+            })
+            .expect("a side on the requested face");
+        (
+            evaluate_curve(owner, parameter),
+            TopologyAttachment::Boundary(FaceAnchor::Curve {
+                curve,
+                span,
+                side,
+                parameter,
+            }),
+        )
+    }
+
+    fn subdomain_ring(editor: &mut TopologyEditor, centre: Point2, radius: f64) -> CurveId {
+        let id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(centre, radius),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(editor);
+        id
+    }
+
+    /// Which face an open curve belongs to is read from the curve, not from the
+    /// side of a boundary a click happened to land on. A baffle bridging two
+    /// loops is drawn in the background however the two clicks were reported.
+    #[test]
+    fn a_bridge_between_two_loops_ignores_the_side_the_clicks_reported() {
+        for (first_inside, second_inside) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut editor = TopologyEditor::default();
+            let left = subdomain_ring(&mut editor, Point2::new(-0.5, 0.0), 0.25);
+            let right = subdomain_ring(&mut editor, Point2::new(0.5, 0.0), 0.25);
+            // Span 0 of the left ring and span 4 of the right one face each
+            // other across the gap, so the straight path between them stays in
+            // the background whatever the anchors say.
+            let facing = |editor: &TopologyEditor, curve: CurveId, background: bool| {
+                (0..8)
+                    .map(|index| span_anchor(editor, curve, index, background))
+                    .max_by(|a, b| {
+                        let toward = |point: Point2| {
+                            if curve == left { point.x } else { -point.x }
+                        };
+                        toward(a.0).total_cmp(&toward(b.0))
+                    })
+                    .unwrap()
+            };
+            let (start_point, start) = facing(&editor, left, !first_inside);
+            let (end_point, end) = facing(&editor, right, !second_inside);
+            let edit = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![start_point, end_point]).unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    Some(start),
+                    Some(end),
+                )
+                .unwrap_or_else(|error| panic!("inside {first_inside}/{second_inside}: {error}"));
+            settle(&mut editor);
+            assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+            let bridge = editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(edit.curve)
+                .expect("the bridge");
+            assert!(
+                bridge.nodes.first().unwrap().vertex.is_some()
+                    && bridge.nodes.last().unwrap().vertex.is_some(),
+                "both ends are attached"
+            );
+            // The bridge joins the two loops without enclosing anything.
+            assert_eq!(editor.document.model.draft.regions.len(), 3);
+        }
+    }
+
+    /// The other direction: a chord drawn through a loop's interior belongs to
+    /// the interior even when both clicks reported the outside. A baffle there
+    /// cuts the subdomain in two, and the daughter face inherits the material
+    /// of the subdomain the curve was drawn in - not of the background the
+    /// clicks happened to name.
+    #[test]
+    fn a_chord_drawn_inside_splits_the_inside_whatever_the_clicks_reported() {
+        for stated_background in [false, true] {
+            let mut editor = TopologyEditor::default();
+            let ring = subdomain_ring(&mut editor, Point2::new(0.03, 0.05), 0.45);
+            let inner_material = editor.add_material().unwrap();
+            let inner_region = editor
+                .document
+                .model
+                .draft
+                .regions
+                .iter()
+                .map(|region| region.id)
+                .find(|region| *region != BACKGROUND_REGION)
+                .expect("the ring's own region");
+            editor
+                .set_region_material(inner_region, inner_material)
+                .unwrap();
+            settle(&mut editor);
+
+            let (start_point, start) = span_anchor(&editor, ring, 0, stated_background);
+            let (end_point, end) = span_anchor(&editor, ring, 4, stated_background);
+            editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![
+                        start_point,
+                        Point2::new(0.03, 0.05),
+                        end_point,
+                    ])
+                    .unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    Some(start),
+                    Some(end),
+                )
+                .unwrap_or_else(|error| panic!("stated background {stated_background}: {error}"));
+            settle(&mut editor);
+            assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+
+            let daughter = editor
+                .document
+                .model
+                .draft
+                .regions
+                .iter()
+                .find(|region| region.id != BACKGROUND_REGION && region.id != inner_region)
+                .unwrap_or_else(|| panic!("stated background {stated_background}: no new region"));
+            assert_eq!(
+                daughter.material, inner_material,
+                "stated background {stated_background}: the daughter belongs to the subdomain \
+                 the chord was drawn in"
+            );
+        }
     }
 
     /// A reshaping control deletion must not tear an incident junction off its

@@ -705,6 +705,14 @@ Creation, deletion, knot edits, resolution changes, excessive motion and failed
 repair use the full resumable mesher. Resolution remains an application preference,
 excluded from geometry files and undo history.
 
+An open curve belongs to one face, and the editor reads which one from the
+curve itself: the faces sampled along the drawn path, falling back to the sides
+the attachments named and then to the only face the two ends share. A click on a
+boundary names the boundary, not a side of it - which side it reports follows
+from the pixel the pointer landed on, and near a breakpoint that is the far side
+often enough to refuse ordinary work. Attachments therefore offer every face
+they could belong to, and the path settles which one they do.
+
 The unified topology path has its own full-rebuild baseline. `TopologyMeshPlan`
 supplies directed face cycles, stable curve/span labels, and snapshot-local sector
 trace IDs; the triangulator no longer infers region ownership from object classes.
