@@ -105,6 +105,24 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — A stale adaptation is dropped, not reported
+
+"Adapted mesh does not match the active topology" was a race dressed as an
+error. An adaptation job runs across many frames; while it runs, the user edits
+geometry, `refresh_amr` waits for the new topology to be prepared, and then the
+job finishes against a mesh that is no longer active. The runtime correctly
+rejected the handoff, and the UI showed the rejection in red and raised the
+warning flag, although nothing was wrong with either the mesh or the topology.
+
+The job now records the revision of the mesh it started from, and every frame
+drops it as soon as the active mesh differs, with a plain status line and no
+error. The check keys on the mesh revision rather than the whole topology token
+so that a document-only change, such as moving a probe, which re-prepares the
+runtime but reuses the mesh, does not throw away a valid adaptation. The
+handoff's own mismatch check stays as a hard error, which it now should never
+reach. A `Playground` test starts an adaptation, replaces the active mesh
+through a domain edit, and asserts the job is gone with no error.
+
 ## 2026-09-15 — Adaptation applies a pass at a time
 
 "Mesh adaptation work limit reached" was structural. The refinement scan walked

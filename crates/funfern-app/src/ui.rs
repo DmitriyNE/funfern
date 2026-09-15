@@ -643,6 +643,9 @@ pub struct Playground {
     amr_indicator_source: Option<(TopologyToken, u64, u64, u64)>,
     amr_indicator_result: Option<SolutionIndicatorResult>,
     amr_adaptation_job: Option<MeshAdaptationJob>,
+    /// Revision of the active mesh the running adaptation started from. The
+    /// job is dropped as soon as that mesh is no longer the active one.
+    amr_adaptation_source: Option<u64>,
     amr_adaptation_state: Option<MeshAdaptationState>,
     amr_pending_state: Option<MeshAdaptationState>,
     amr_report: Option<MeshAdaptationReport>,
@@ -778,6 +781,7 @@ impl Default for Playground {
             amr_indicator_source: None,
             amr_indicator_result: None,
             amr_adaptation_job: None,
+            amr_adaptation_source: None,
             amr_adaptation_state: None,
             amr_pending_state: None,
             amr_report: None,
@@ -6196,6 +6200,23 @@ impl Playground {
             self.amr_status = "off".into();
             return;
         }
+        // An adaptation spans many frames while the user may remesh underneath
+        // it. Its result is only meaningful against the mesh it started from,
+        // so once another mesh is active the job is dropped here instead of
+        // finishing and being rejected at the handoff as an error.
+        if self.amr_adaptation_job.is_some()
+            && self.amr_adaptation_source.is_some_and(|source| {
+                self.runtime
+                    .active()
+                    .is_none_or(|active| active.mesh.mesh_revision != source)
+            })
+        {
+            self.amr_adaptation_job = None;
+            self.amr_adaptation_source = None;
+            self.amr_pending_state = None;
+            self.amr_status = "adaptation discarded: the mesh changed underneath it".into();
+            return;
+        }
         if self.uploading.is_some() || self.runtime.phase().is_some() || self.editor.editing() {
             self.amr_status = if self.amr_adaptation_job.is_some() {
                 "adapting mesh"
@@ -6215,6 +6236,7 @@ impl Playground {
             }
             let Some(result) = result else { return };
             self.amr_adaptation_job = None;
+            self.amr_adaptation_source = None;
             match result {
                 Ok(result) => {
                     self.amr_pending_state = Some(result.state);
@@ -6330,6 +6352,7 @@ impl Playground {
                 field,
                 options,
             ));
+            self.amr_adaptation_source = Some(active.mesh.mesh_revision);
             self.amr_status = "adapting mesh".into();
             return;
         }
@@ -10520,5 +10543,85 @@ mod probe_interaction_tests {
         };
         assert!((start - Point2::new(-0.4, -0.1)).norm() < 1.0e-12);
         assert!((end - Point2::new(0.6, -0.1)).norm() < 1.0e-12);
+    }
+
+    fn settle(editor: &mut TopologyEditor) {
+        for _ in 0..100_000 {
+            editor.validate_frame(64);
+            if editor.acceptance != TopologyAcceptance::Pending {
+                return;
+            }
+        }
+        panic!("topology validation did not finish");
+    }
+
+    /// Prepares the editor's accepted scene and makes it the active topology,
+    /// the way a frame does once the GPU has acknowledged the upload.
+    fn activate(state: &mut Playground) -> Arc<PreparedTopology> {
+        let options = MeshingOptions {
+            target_edge_length: 0.18,
+            ..MeshingOptions::default()
+        };
+        let token = state
+            .runtime
+            .request(
+                state.editor.revision,
+                &state.editor.document,
+                state.editor.compiled_accepted.clone(),
+                options,
+                true,
+            )
+            .unwrap();
+        for _ in 0..1_000_000 {
+            if let Some(result) = state.runtime.advance(4096) {
+                result.unwrap();
+                return state.runtime.commit_ready(token).unwrap();
+            }
+        }
+        panic!("topology preparation did not finish");
+    }
+
+    /// An adaptation spans many frames while the user may remesh underneath
+    /// it. Once the active mesh is no longer the one the job started from, the
+    /// job is dropped quietly instead of finishing and being rejected at the
+    /// handoff as "Adapted mesh does not match the active topology".
+    #[test]
+    fn an_adaptation_of_a_replaced_mesh_is_discarded_without_an_error() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let first = activate(&mut state);
+        state.amr_enabled = true;
+        state.amr_adaptation_job = Some(MeshAdaptationJob::new_topology(
+            first.mesh.clone(),
+            &first.bundle.plan,
+            MeshAdaptationState::from_mesh(&first.mesh),
+            state.runtime.reserve_mesh_revision(),
+            Arc::new(|_, _| 0.09),
+            MeshAdaptationOptions::default(),
+        ));
+        state.amr_adaptation_source = Some(first.mesh.mesh_revision);
+
+        state
+            .editor
+            .set_domain(DomainRect {
+                max_x: 1.4,
+                ..DomainRect::UNIT
+            })
+            .unwrap();
+        settle(&mut state.editor);
+        let second = activate(&mut state);
+        assert_ne!(second.mesh.mesh_revision, first.mesh.mesh_revision);
+
+        state.refresh_amr(&WaveGpuRequest::default(), &WaveDisplay::default());
+        assert!(state.amr_adaptation_job.is_none());
+        assert!(state.amr_adaptation_source.is_none());
+        assert_eq!(state.amr_error, None);
+        assert!(
+            state.amr_status.contains("discarded"),
+            "status was {:?}",
+            state.amr_status
+        );
     }
 }
