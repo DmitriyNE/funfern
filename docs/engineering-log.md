@@ -48,7 +48,18 @@ Longer-standing work:
 - [ ] After the atomic topology application cutover, add sector-aware local mesh
   repair for unified curve coordinate edits. The first cutover deliberately takes
   a cooperative full rebuild for curve and junction movement while preserving
-  exact mesh reuse for material, source, and boundary-law edits.
+  exact mesh reuse for material, source, and boundary-law edits. Design outline
+  agreed for discussion on 2026-09-15, to be planned before any code: pair atoms
+  between the previous and next coarsened plans by span, side and parameter
+  range when the topology signatures match; move each boundary mesh vertex to
+  its parameter on the new atom; route the legacy `MeshUpdateJob`'s scene
+  lookups through a small geometry trait with a plan-backed implementation so
+  its motion radius, ring expansion, smoothing, inversion check, retry and
+  full-rebuild fallback are reused; take junction sectors from the AMR
+  contract's pinned sectors; give the transfer map an identity fast path for
+  untouched nodes. Open questions for the user: repair per drag frame or on
+  release as edits run today, and whether a span whose atom count changes is
+  repaired with boundary splits and collapses or rebuilt for that face.
 - [ ] Raise viewport video capture from the initial 30 FPS implementation to 60 FPS.
   Measure browser encoding and native GPU-readback pressure first, retain bounded
   native queues and wall-clock pacing, and report dropped frames rather than slowing
