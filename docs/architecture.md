@@ -708,13 +708,16 @@ excluded from geometry files and undo history.
 A transmitting curve may end in open space. Such an end divides nothing: the
 same face lies on both sides of the span, which carries no boundary condition
 and changes no material, so the curve is inert until an end is attached. It is
-how a wall is switched off without being deleted, and how a divider is drawn
-before it is attached. The mesher carries the resulting dangling chain as an
-internal constraint; carving cannot follow one being introduced - the cavity rim
-it walks runs into the chain's dead end - so that one edit falls back to a full
-rebuild, and edits elsewhere still carve. A separator only receives the material
-chosen while drawing it if it encloses a face there and then; a face enclosed
-later inherits the region it was cut out of.
+how a wall is switched off without being deleted, how a divider is drawn before
+it is attached, and how a probe is carried on a curve that changes nothing. Such
+a chain is topologically a baffle whose two sides are not separated: the face
+walks out along it and back, so the plan carries an atom for each direction even
+though both name the same face, which is what lets carving follow the rim round
+the free tip and lets a probe read either side. Every reader of that list asks
+whether some atom matches rather than summing over it, so the pair costs nothing
+elsewhere. A separator only receives the material chosen while drawing it if it
+encloses a face there and then; a face enclosed later inherits the region it was
+cut out of.
 
 An open curve belongs to one face, and the editor reads which one from the
 curve itself: the faces sampled along the drawn path, falling back to the sides

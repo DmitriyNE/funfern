@@ -150,6 +150,42 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — One atom per direction, and both debts are paid
+
+Two consequences were left behind by free separators: adding one forced a full
+rebuild instead of a repair, and a boundary probe worked on only one of its two
+sides. Both were the same line.
+
+`append_boundary_sides` emitted the right-hand atom of a transmitting edge only
+when the two sides named *different* faces, and `coarsened` repeated the rule.
+For a chain interior to one face - a divider bridging two loops, or one that
+ends in open space - that left a single atom where the face's boundary walks the
+chain twice, once in each direction.
+
+- Carving expands the face's steps whose atom is in the changed set. The return
+  traversal was not in it, so nothing came back along the chain and the cavity
+  rim ran into a dead end at the free tip, which is the error it reported.
+- A boundary probe asks `contains_boundary_target` whether the plan holds an
+  atom for the span *and side* it wants. The second side had none, hence
+  "Boundary probe span has no active trace".
+
+Both sides are emitted now, whatever faces they name. The pair carries the same
+two trace vertices in the opposite order, so it introduces nothing new, and
+every reader of that list asks whether some atom matches rather than summing
+over it - the far field, the probes and carving's own change detection all go
+through `any` or a set.
+
+Adding a free separator now repairs: the carve keeps most of the mesh and the
+field crosses over with the usual exactness. A probe compiles on both sides, 64
+sample points each, with exactly opposite outward normals - which is what makes
+the flux sign mean anything, and carrying a probe is the reason to draw a curve
+that changes nothing in the first place.
+
+Two tests, both verified to fail with the guards put back: the repair, and the
+pair of probes. Checked: `cargo fmt --all`, `cargo clippy --workspace
+--all-targets --locked -D warnings`, `cargo test --workspace --locked` (503
+tests), and the release build.
+
 ## 2026-09-16 — A curve that divides nothing is a state worth holding
 
 Four separate rules refused a separator that does not divide: the compiler's
@@ -187,20 +223,14 @@ back into one.
 **Checked past a fresh mesh**, since a dangling transmitting chain is a shape
 several paths had never seen:
 
-- Carving cannot follow one being introduced: the cavity rim walks into the
-  chain's dead end and the repair falls back to a full rebuild. The mesh is
-  correct and the field still transfers; only the incremental path is given up,
-  and only for that edit - an edit elsewhere in the same scene still carves. A
-  test pins both halves.
+- Carving could not follow one being introduced: the cavity rim walked into the
+  chain's dead end and the repair fell back to a full rebuild. Fixed the same
+  day, below.
 - Adaptation over a free separator refines cleanly: 541 triangles to 2116, area
   exactly 4.000000, no orphans.
-- A boundary probe compiles on one side of a free separator and reports
-  "Boundary probe span has no active trace" on the other, because the plan
-  carries one trace where both sides name the same face. Honest, and it starts
-  working on both sides once the curve divides something.
-
-- [ ] Teach carving to follow a dangling transmitting chain, so introducing a
-  free separator repairs instead of rebuilding.
+- A boundary probe compiled on one side of a free separator and reported
+  "Boundary probe span has no active trace" on the other. Fixed the same day,
+  below.
 
 Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
 warnings`, `cargo test --workspace --locked` (502 tests), and the release build.

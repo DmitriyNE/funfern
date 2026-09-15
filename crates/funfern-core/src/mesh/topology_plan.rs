@@ -2136,10 +2136,9 @@ impl TopologyMeshPlan {
                             parameter,
                         });
                     }
-                    if let Some(region) = side(first.right)
-                        && (behavior != Some(SpanBehavior::Transmitting)
-                            || first.right != first.left)
-                    {
+                    // Both sides, even when they name the same face: see
+                    // `append_boundary_sides`.
+                    if let Some(region) = side(first.right) {
                         boundaries.push(PlannedBoundaryEdge {
                             source: PlannedBoundarySource::Curve {
                                 curve,
@@ -2410,9 +2409,15 @@ fn append_boundary_sides(
                     parameter: edge.parameter,
                 });
             }
-            if let Some(region) = side(edge.right)
-                && (behavior != Some(SpanBehavior::Transmitting) || edge.right != edge.left)
-            {
+            // Both sides, even when they name the same face. A transmitting
+            // edge interior to one face - a divider bridging two loops, or one
+            // that ends in open space - is walked twice by that face, and each
+            // direction needs its own atom: carving follows the second one back
+            // around the free tip, and a probe on the second side has a trace
+            // to sample. The two carry the same trace vertices in the opposite
+            // order, so nothing new is introduced by the pair; every reader of
+            // this list asks whether some atom matches rather than summing it.
+            if let Some(region) = side(edge.right) {
                 output.push(PlannedBoundaryEdge {
                     source: PlannedBoundarySource::Curve {
                         curve,

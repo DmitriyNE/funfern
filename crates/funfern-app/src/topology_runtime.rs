@@ -1909,14 +1909,13 @@ mod tests {
     }
 
     /// A separator with free ends divides nothing, so it is a transmitting
-    /// chain dangling inside one face - a shape carving has never seen. Adding
-    /// one falls back to a full rebuild, because the cavity rim a carve walks
-    /// runs into the dead end of the chain. The mesh is still correct and the
-    /// field still crosses over; only the incremental path is given up, and
-    /// only for the edit that introduces the chain.
+    /// chain dangling inside one face. Topologically that is a baffle without
+    /// the two sides being separated, and it carves like one: the face's
+    /// boundary walks out along the chain and back, and the plan carries an
+    /// atom for each direction so the cavity rim can follow it round the tip.
     #[test]
-    fn adding_a_free_separator_rebuilds_and_leaves_carving_alone_elsewhere() {
-        let (mut editor, hole, mut runtime) = hole_runtime();
+    fn adding_a_free_separator_repairs_the_active_mesh() {
+        let (mut editor, _, mut runtime) = hole_runtime();
         let before = runtime.active().unwrap().clone();
         let separator = editor
             .create_open_curve(
@@ -1960,24 +1959,28 @@ mod tests {
                 false,
             )
             .unwrap();
+        assert_eq!(
+            runtime.preparing.as_ref().unwrap().mesh_action,
+            TopologyMeshUpdateAction::Repair(TopologyRepairReason::CurveOrSpanTopologyChanged)
+        );
         assert_eq!(prepare(&mut runtime).unwrap(), token);
-        let rebuilt = runtime.commit_ready(token).unwrap();
+        let repaired = runtime.commit_ready(token).unwrap();
+        let report = repaired.carve.unwrap_or_else(|| {
+            panic!(
+                "the carve should follow the chain: {:?}",
+                repaired.repair_fallback
+            )
+        });
         assert!(
-            rebuilt.carve.is_none() && rebuilt.repair_fallback.is_some(),
-            "the carve gives up and says so: {:?}",
-            rebuilt.repair_fallback
+            report.kept_triangles * 2 > before.mesh.triangles.len(),
+            "{report:?}"
         );
-        assert!(
-            rebuilt
-                .transfer
-                .as_ref()
-                .is_some_and(|transfer| transfer.exact_nodes() > 0),
-            "the field still crosses over"
-        );
+        let transfer = repaired.transfer.as_ref().expect("the field crosses over");
+        assert!(transfer.exact_nodes() * 2 > repaired.operator.degrees_of_freedom());
         // The chain is in the mesh, and both of its sides name the one face it
         // lies in, so nothing along it bounds anything.
         assert!(
-            rebuilt.mesh.boundary_edges.iter().any(|edge| matches!(
+            repaired.mesh.boundary_edges.iter().any(|edge| matches!(
                 edge.label,
                 BoundaryLabel::Curve {
                     curve: candidate,
@@ -1987,25 +1990,94 @@ mod tests {
             )),
             "the separator is traced into the mesh"
         );
+    }
 
-        // An edit away from the chain still carves, so one free separator does
-        // not cost the whole scene its incremental path.
-        nudge(&mut editor, hole);
+    /// Carrying a probe is the point of a dangling separator, and a probe reads
+    /// one side of a boundary. Both sides of this one name the same face, so
+    /// both have to compile - they sample the same field with opposite normals,
+    /// which is what makes the flux sign meaningful.
+    #[test]
+    fn a_probe_reads_both_sides_of_a_free_separator() {
+        let mut editor = TopologyEditor::default();
+        let separator = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.41, 0.13),
+                    Point2::new(0.02, -0.07),
+                    Point2::new(0.37, -0.19),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: DEFAULT_MATERIAL,
+                },
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let spans = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(separator)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<Vec<_>>();
+        let probes = [CurveTraceSide::Left, CurveTraceSide::Right].map(|side| {
+            editor
+                .create_probe(
+                    format!("{side:?}"),
+                    [200, 160, 90],
+                    TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                        curve: separator,
+                        spans: spans.clone(),
+                        side,
+                        reversed: false,
+                        preset: crate::document::ProbeSamplingPreset::default(),
+                    }),
+                )
+                .unwrap()
+        });
+        settle(&mut editor);
+
+        let mut runtime = TopologyRuntime::default();
         let token = runtime
             .request(
                 editor.revision,
                 &editor.document,
                 editor.compiled_accepted.clone(),
                 options(),
-                false,
+                true,
             )
             .unwrap();
         assert_eq!(prepare(&mut runtime).unwrap(), token);
-        let repaired = runtime.commit_ready(token).unwrap();
+        let active = runtime.commit_ready(token).unwrap();
+
+        let normals = probes.map(|id| {
+            let compiled = active
+                .probes
+                .iter()
+                .find(|compiled| compiled.id == id)
+                .unwrap_or_else(|| panic!("probe {id:?} was compiled"));
+            match &compiled.result {
+                TopologyProbeCompilation::Ready(stencil) => match stencil.as_ref() {
+                    TopologyProbeStencil::Boundary(points) => {
+                        assert!(!points.is_empty(), "{id:?} sampled nothing");
+                        points[0].outward_normal
+                    }
+                    other => panic!("{id:?} compiled to {other:?}"),
+                },
+                other => panic!("{id:?} did not compile: {other:?}"),
+            }
+        });
+        let [left, right] = normals;
         assert!(
-            repaired.carve.is_some(),
-            "a distant edit still repairs: {:?}",
-            repaired.repair_fallback
+            (left.x + right.x).abs() < 1.0e-9 && (left.y + right.y).abs() < 1.0e-9,
+            "the two sides face opposite ways: {left:?} {right:?}"
         );
     }
 
