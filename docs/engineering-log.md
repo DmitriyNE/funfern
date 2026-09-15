@@ -52,6 +52,12 @@ Longer-standing work:
   panel, and the classifier treating every plan difference except the outer
   domain, a resolution change and a requested rebuild as a repair. Browser
   checks for it are listed in `docs/browser-checks.md` and not yet run.
+- [ ] Let a repair's refill legalize or split into the first ring of kept
+  triangles. Beside the frozen rim, refinement accepts elements it cannot fix,
+  because rim edges can be neither flipped nor split; the ceiling-and-floor
+  sizing rule removes the pressure that made this catastrophic and
+  `DegenerateRepair` refuses a recurrence, but quality there is still accepted
+  rather than guaranteed.
 - [ ] Deformation-first repair for small motions: move the existing vertices
   with a cap-free displacement field and re-legalize, carving only what inverts.
   Keeps connectivity for nudges; carving stays as the fallback underneath.
@@ -131,6 +137,73 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Requests are a ceiling, the existing density the floor
+
+Two reports against the requested-size refill. A repaired band came out about
+twice as fine as adaptation had made the same place, and wiggling a two-sided
+subdomain boundary a few times with adaptation on produced super-fine elements,
+`Invalid solution-indicator mesh`, a dt near 1e-8 and a frozen app.
+
+Both reproduced from the autosave: one closed seven-span curve between two
+materials, a 2.5 Hz source beside it, target 0.08, adaptation 0.02–0.16 with
+the UI's options (512 changes per pass, collapse 0.65, 12°). A headless loop
+runs the indicator on a synthetic wave from the source, one adaptation pass,
+then a 3 mm move of one control. The first repair inserted 7,501 triangles for
+599 removed, 139 of them under one degree, dt 2.3e-8, and every indicator pass
+after that rejected the mesh. The same cavity with the size field off refilled
+with 481 triangles at 18°; with no adaptation at all, 528. It also reproduces
+in core with no adaptation: a fresh 0.08 mesh, a constant 0.04 request stamped
+on every triangle, one wiggle — 3,692 inserted, 115 degenerate.
+
+The ×2 is the indicator's semantics. Its target is
+`(current edge × scale).clamp(min, max)` with the scale in `[0.6, 2.2]`: a
+step from the current size that adaptation takes once and re-measures.
+Stamping the step's endpoint as an absolute request and refilling a band to it
+in one go lands at `0.6×`, and each wiggle re-applies the step to the already
+refilled band.
+
+The degenerate elements are born in the cavity's initial triangulation, across
+nearly collinear frozen rim vertices, exactly as the fresh mesher's corner fans
+are; a builder tripwire showed them pushed from `step_clip` before any
+refinement. The fresh mesher splits such fans away through its boundary edges.
+Rim edges can be neither split nor flipped — a flip needs a strictly convex
+quadrilateral — and a sliver's circumcenter lands outside the cavity, so
+refinement drops it and accepts the element. With no pressure to refine finer
+than the rim, legalization alone cleans the initial triangulation up; with a
+request finer than the rim, thousands of insertions leave the slivers in
+place. Only 7 of the 139 shared an edge with a kept triangle, so the rim
+hypothesis alone would have been wrong: it is the pressure, not the adjacency.
+
+The rule: per removed triangle the refill target is
+`min(meshing target, max(request, the edge length the triangle had))`. Requests
+can only coarsen a refill, never refine it below what was there, so nothing
+compounds, and the band matches what adaptation realized rather than what it
+asked for. Refill triangles still inherit the request itself. Measured: the
+core reproduction goes to 652 inserted, 0 degenerate, 18.3°; the autosave loop
+runs three adaptation passes and three wiggles with 0 degenerate elements, dt
+steady at 1.2e-3, and repairs inserting about what they remove.
+
+Two guards beside it. A carve verifies its refill and fails with
+`MeshError::DegenerateRepair` — the count, the worst angle, its place and the
+floor, half the mesher's minimum angle or half the repaired mesh's worst angle
+— so the runtime's fallback line names the defect and a recurrence is a bug
+report, not noise; the floor follows the mesh so a legitimately small input
+angle does not trip it. And the mesher's capacity caps now bound what a repair
+adds rather than the whole mesh: with converged adaptation the mesh was 23k
+triangles and the repair failed with `Mesh capacity reached at 12000 vertices`,
+falling back to a rebuild that lost the adaptation.
+
+Tests: the inclusion curve with constant and stepped requests keeps the fresh
+mesh's worst angle within a degree and inserts at most twice what it removes;
+the verifier is refused by name on a hand-built degenerate refill and passes a
+mesh whose poor angle it inherited; a mesh beyond the caps repairs. The browser
+check gains the wiggle with adaptation on.
+
+The refill's quality beside the rim is still "accept what cannot be fixed";
+the rule removes the pressure that made that catastrophic, and the verifier
+catches a recurrence. Guaranteeing quality there means letting the refill
+legalize or split into the first ring of kept triangles; recorded as a TODO.
 
 ## 2026-09-15 — Repairs refill at requested sizes, not measured ones
 

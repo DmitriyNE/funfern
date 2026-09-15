@@ -360,10 +360,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   edits repair the active mesh instead: moving a control or a junction, adding
   or deleting a curve, and changing a span's behaviour carve out the band the
   changed boundary touched and refill it, however far the boundary moved, and
-  everything else stays as it was, refinement included. The refill follows the
-  element sizes adaptation asked for, not the sizes it finds, so dragging one
-  curve back and forth over the same ground leaves the mesh where it was
-  instead of grinding it finer with every pass. Assigning another
+  everything else stays as it was, refinement included. The refill matches the
+  density around the band, coarsening where adaptation asks for it but never
+  refining finer than the mesh it joins, so dragging one curve back and forth
+  over the same ground leaves the mesh where it was instead of grinding it
+  finer with every pass. Assigning another
   material to a subdomain relabels its elements without carving. The running
   field crosses over with every node outside the band copied exactly. The
   Performance panel's handoff line reports the repair with its kept, removed and

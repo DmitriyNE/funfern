@@ -138,9 +138,15 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   hole survives and the handoff reports a repair. Drag one control of a hole
   back and forth over the same ground twenty times, with adaptation off and
   again with it on: the mesh size in Performance and the solver dt must settle
-  after the first pass rather than climb or shrink with every pass. Change the
-  resolution or drag the domain edge: those still read `Full rebuild`. A `Full
-  rebuild: mesh repair failed (...)` line is a bug report.
+  after the first pass rather than climb or shrink with every pass. With
+  adaptation on and the wave hitting a two-sided subdomain boundary, wiggle one
+  of its controls by a few pixels several times: each repair inserts about as
+  many elements as it removes, the solver dt does not drop, and the adaptation
+  status never reads `Invalid solution-indicator mesh`. Change the resolution or
+  drag the domain edge: those still read `Full rebuild`. A `Full rebuild: mesh
+  repair failed (...)` line is a bug report; one that says `Mesh repair produced
+  N degenerate elements` is the refill defect showing again, so record the
+  scene and the move.
 - [ ] In Simulation, switch Mesh resolution between Coarse, Medium, and Fine, then
   drag the Target edge slider. Each change rebuilds the mesh when the control is
   released and carries the running field across; Performance names the rebuild
