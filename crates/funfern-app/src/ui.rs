@@ -2371,8 +2371,11 @@ impl Playground {
             }
         }
         ui.separator();
+        // Framed, because arming a mode is an action. A bare selectable label
+        // reads as a caption until it is switched on.
         if ui
-            .selectable_label(self.pulse_mode, "Place pulse")
+            .add(egui::Button::new("Place pulse").selected(self.pulse_mode))
+            .on_hover_text("Click in the scene to drop a pulse; click here again to stop")
             .clicked()
         {
             self.pulse_mode = !self.pulse_mode;
@@ -2917,17 +2920,34 @@ impl Playground {
     fn probes_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Probes");
         ui.horizontal_wrapped(|ui| {
-            for (mode, label) in [
-                (ProbePlacement::Point, "Point"),
-                (ProbePlacement::Segment { start: None }, "Line"),
-                (ProbePlacement::Disk { center: None }, "Disk"),
-                (ProbePlacement::Region, "Region"),
+            for (mode, label, hint) in [
+                (
+                    ProbePlacement::Point,
+                    "Point",
+                    "Click in the scene to place a point probe",
+                ),
+                (
+                    ProbePlacement::Segment { start: None },
+                    "Line",
+                    "Click the line's start, then its end",
+                ),
+                (
+                    ProbePlacement::Disk { center: None },
+                    "Disk",
+                    "Click the disk's centre, then a point on its rim",
+                ),
+                (
+                    ProbePlacement::Region,
+                    "Region",
+                    "Click a subdomain to probe the whole of it",
+                ),
             ] {
                 let selected = self.probe_mode.is_some_and(|active| {
                     std::mem::discriminant(&active) == std::mem::discriminant(&mode)
                 });
                 if ui
-                    .selectable_label(selected, format!("+ {label}"))
+                    .add(egui::Button::new(format!("+ {label}")).selected(selected))
+                    .on_hover_text(hint)
                     .clicked()
                 {
                     self.probe_mode = (!selected).then_some(mode);

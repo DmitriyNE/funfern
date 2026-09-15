@@ -138,6 +138,24 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — The mode arms are buttons, not captions
+
+`Place pulse` was a bare `selectable_label`, which egui draws as plain text until
+it is switched on, so it read as a caption over the pulse sliders rather than the
+thing that arms pulse placing. It is a framed `Button` with `.selected()` now, the
+same shape the far-field window's `Live` uses, and it says on hover what arming
+does. The four probe placements - `+ Point`, `+ Line`, `+ Disk`, `+ Region` -
+were the same widget and toggle against the same pair of mode flags, so they
+moved with it and each gained the hint for how many clicks its shape takes.
+
+Nothing behind the widgets changed: the modes still clear each other, the
+crosshair cursor still marks an armed mode, and Escape still cancels through
+`cancel_interaction`. No test - this is the widget, not the rule behind it.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked`, `cargo build --release -p
+funfern-app --locked`.
+
 ## 2026-09-15 — Transmit and Boundary report a state instead of offering an action
 
 The pair of buttons showed nothing about where a selection stood: each was
