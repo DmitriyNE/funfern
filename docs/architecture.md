@@ -823,6 +823,16 @@ The f32 GPU kernel stores both committed time levels, a scratch level, and the t
 inverse-derivative filter stages in one storage buffer. Each solution-DOF invocation
 gathers its CSR row and writes only its own scratch value; a second dispatch advances
 the reconstruction and rotates levels. This avoids scatter atomics.
+
+Both stiffness operators are applied in difference form, `Σ_j K_ij (u_j - u_i)`, on
+the CPU and the GPU. Every assembled row sums to zero in exact arithmetic, so the
+two forms agree, but only the difference form is exactly zero on a constant field
+once the rows have been divided by the lumped mass and rounded to f32. The plain
+row product leaves a residual of about `1e-7` relative that acts as a permanent
+force on the free constant mode of a reflecting cavity and grew a uniform offset
+quadratically in time; Dirichlet walls pin that mode, which is why they seemed
+immune. A row-sum test covers every assembly path, and an f32 emulation of the
+kernel checks that a constant field is held bit for bit.
 The operator, state, sources, and controls use Bevy's render-world buffers and its
 existing wgpu device. State remains GPU-resident; asynchronous readback supplies
 the egui field colors and energy diagnostic. Each readback carries a GPU-written

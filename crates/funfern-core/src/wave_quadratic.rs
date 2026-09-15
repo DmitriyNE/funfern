@@ -1132,19 +1132,24 @@ impl QuadraticWaveState {
                 self.scratch[i] = prescribed;
                 continue;
             }
-            let stiffness = (operator.row_offsets[i] as usize
+            // Both operators annihilate constants, so `K u` is evaluated on the
+            // differences `u_j - u_i`. That form is exactly zero on a constant
+            // field in floating point, where the plain row product leaves a
+            // rounding residual that acts as a permanent force on the free
+            // constant mode of a Neumann cavity. `wave.wgsl` uses the same form.
+            let (displacement, memory) = (self.current[i], self.auxiliary[i]);
+            let (stiffness, auxiliary) = (operator.row_offsets[i] as usize
                 ..operator.row_offsets[i + 1] as usize)
-                .map(|entry| {
-                    operator.stiffness[entry] * self.current[operator.columns[entry] as usize]
-                })
-                .sum::<f64>();
-            let auxiliary = (operator.row_offsets[i] as usize
-                ..operator.row_offsets[i + 1] as usize)
-                .map(|entry| {
-                    operator.auxiliary_stiffness[entry]
-                        * self.auxiliary[operator.columns[entry] as usize]
-                })
-                .sum::<f64>();
+                .fold((0.0, 0.0), |(stiffness, auxiliary), entry| {
+                    let column = operator.columns[entry] as usize;
+                    (
+                        stiffness
+                            + operator.stiffness[entry] * (self.current[column] - displacement),
+                        auxiliary
+                            + operator.auxiliary_stiffness[entry]
+                                * (self.auxiliary[column] - memory),
+                    )
+                });
             let gamma = operator.lumped_damping[i] / operator.lumped_mass[i];
             let source = acceleration.get(i).copied().unwrap_or(0.0)
                 + operator.neumann_acceleration(i, time);
@@ -3146,6 +3151,177 @@ mod tests {
                 assert!((operator.stiffness[entry] - operator.stiffness[reverse]).abs() < 1.0e-12);
             }
         }
+    }
+
+    /// Every operator the solver can build must have exactly zero row sums in
+    /// both stiffness matrices, because the time step applies them to the
+    /// differences `u_j - u_i` and that form only equals `K u` when the rows
+    /// annihilate constants. Outgoing edges, curved absorbers, thin gaps,
+    /// material interfaces, and the topology assembly path are all covered.
+    #[test]
+    fn every_assembled_stiffness_row_sums_to_zero() {
+        let mut hole_scene = Scene::initial();
+        hole_scene.obstacles[0].span_conditions[0] = FaceBoundaryCondition::SecondOrderOutgoing;
+        hole_scene.obstacles[0].span_conditions[1] =
+            FaceBoundaryCondition::Impedance { ratio: 1.0 };
+        let hole_mesh = mesh_scene(&hole_scene, 12, MeshingOptions::default()).unwrap();
+        let (gap_scene, gap_mesh) = open_baffle_scene(InternalBoundaryLaw {
+            coupling: InternalBoundaryCoupling::ThinGap {
+                stiffness_ratio: 25.0,
+            },
+            ..InternalBoundaryLaw::REFLECTING
+        });
+        let materials = two_material_scene();
+        let material_mesh = mesh_scene(&materials, 13, MeshingOptions::default()).unwrap();
+        let (plan, topology_mesh, topology_scene) = topology_baffle(
+            SpanBehavior::Separated {
+                left: FaceBoundaryCondition::SecondOrderOutgoing,
+                right: FaceBoundaryCondition::Impedance { ratio: 0.5 },
+                coupling: InternalBoundaryCoupling::Independent,
+            },
+            41,
+        );
+        let operators = [
+            (
+                "second-order outer",
+                true,
+                QuadraticWaveOperator::assemble_with_boundary(
+                    &square_with_outer_boundary(),
+                    WaveCoefficients::default(),
+                    OuterBoundaryCondition::SecondOrderOutgoing,
+                )
+                .unwrap(),
+            ),
+            (
+                "curved absorber and impedance",
+                true,
+                QuadraticWaveOperator::assemble_scene(
+                    &hole_mesh,
+                    &hole_scene,
+                    OuterBoundaryCondition::FirstOrderOutgoing,
+                )
+                .unwrap(),
+            ),
+            (
+                "thin gap",
+                false,
+                QuadraticWaveOperator::assemble_scene(
+                    &gap_mesh,
+                    &gap_scene,
+                    OuterBoundaryCondition::Reflecting,
+                )
+                .unwrap(),
+            ),
+            (
+                "material interface",
+                false,
+                QuadraticWaveOperator::assemble_scene(
+                    &material_mesh,
+                    &materials,
+                    OuterBoundaryCondition::Reflecting,
+                )
+                .unwrap(),
+            ),
+            (
+                "topology baffle with a second-order face",
+                true,
+                QuadraticWaveOperator::assemble_topology(
+                    &topology_mesh,
+                    &plan,
+                    TopologyWaveModel::from_scene(&topology_scene),
+                )
+                .unwrap(),
+            ),
+        ];
+        for (name, expects_auxiliary, operator) in &operators {
+            let mut saw_auxiliary = false;
+            for row in 0..operator.degrees_of_freedom() {
+                let entries =
+                    operator.row_offsets[row] as usize..operator.row_offsets[row + 1] as usize;
+                let (sum, scale) = entries.clone().fold((0.0, 0.0), |(sum, scale), entry| {
+                    (
+                        sum + operator.stiffness[entry],
+                        scale + operator.stiffness[entry].abs(),
+                    )
+                });
+                assert!(
+                    scale > 0.0 && sum.abs() <= 1.0e-12 * scale,
+                    "{name}: stiffness row {row} sums to {sum:e} against {scale:e}"
+                );
+                let (sum, scale) = entries.fold((0.0, 0.0), |(sum, scale), entry| {
+                    (
+                        sum + operator.auxiliary_stiffness[entry],
+                        scale + operator.auxiliary_stiffness[entry].abs(),
+                    )
+                });
+                saw_auxiliary |= scale > 0.0;
+                assert!(
+                    sum.abs() <= 1.0e-12 * scale.max(1.0e-300),
+                    "{name}: auxiliary row {row} sums to {sum:e} against {scale:e}"
+                );
+            }
+            assert_eq!(
+                saw_auxiliary, *expects_auxiliary,
+                "{name}: second-order edge coverage differs from the fixture's intent"
+            );
+        }
+    }
+
+    /// Mirrors `advance_wave` in `wave.wgsl` on the f32 operator the GPU
+    /// receives. A reflecting cavity holding a constant field must keep it bit
+    /// for bit; the plain row product drifts because its rounded rows do not
+    /// sum to zero, which is the uniform offset that used to grow in enclosed
+    /// Neumann subdomains.
+    #[test]
+    fn the_f32_kernel_form_holds_a_constant_field_exactly() {
+        let mesh = mesh_scene(
+            &Scene::default(),
+            5,
+            MeshingOptions {
+                target_edge_length: 0.12,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let operator = QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()).unwrap();
+        let normalized = operator.normalized_stiffness_f32().unwrap();
+        let dt2 = (operator.recommended_time_step() as f32).powi(2);
+        let count = operator.degrees_of_freedom();
+        let run = |difference_form: bool| {
+            let mut previous = vec![1.0f32; count];
+            let mut current = vec![1.0f32; count];
+            let mut next = vec![0.0f32; count];
+            for _ in 0..2_000 {
+                for i in 0..count {
+                    let row =
+                        operator.row_offsets[i] as usize..operator.row_offsets[i + 1] as usize;
+                    let mut ku = 0.0f32;
+                    for (coefficient, column) in
+                        normalized[row.clone()].iter().zip(&operator.columns[row])
+                    {
+                        let column = *column as usize;
+                        ku += coefficient
+                            * if difference_form {
+                                current[column] - current[i]
+                            } else {
+                                current[column]
+                            };
+                    }
+                    next[i] = 2.0 * current[i] - previous[i] - dt2 * ku;
+                }
+                std::mem::swap(&mut previous, &mut current);
+                std::mem::swap(&mut current, &mut next);
+            }
+            current
+                .iter()
+                .map(|value| (value - 1.0).abs())
+                .fold(0.0f32, f32::max)
+        };
+        assert_eq!(run(true), 0.0);
+        assert!(
+            run(false) > 1.0e-7,
+            "the row-product form is expected to drift"
+        );
     }
 
     #[test]

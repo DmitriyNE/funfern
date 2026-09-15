@@ -105,6 +105,39 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — A constant field stays constant on the GPU
+
+Enclosed subdomains with reflecting walls grew a uniform offset that reached
+several percent of the field within tens of thousands of steps; Dirichlet walls
+did not show it. The mechanism is floating point, not physics. The GPU applies
+the operator as a CSR of `K_ij / M_i` in f32, and once each entry is divided and
+rounded the rows no longer sum to zero. On a constant field that residual is a
+permanent per-node acceleration. Homogeneous Neumann leaves the constant mode
+free, so it integrates without bound; Dirichlet pins it, so the same residual
+only produces a bounded static offset there.
+
+Measured on a reflecting unit cavity at `h = 0.06`, stepping a field of `1.0`
+exactly as `advance_wave` does: f64 row sums are `2.8e-16` relative, the f32 rows
+are `1e-7` relative, and the mean drift was `1.2e-5` after 3,000 steps,
+`5.3e-4` after 10,000 and `3.5e-2` after 30,000, almost entirely in the uniform
+mode. The f64 reference stayed at `5.6e-10`.
+
+Both stiffness products are now evaluated in difference form,
+`Σ_j K_ij (u_j - u_i)`, on the CPU and in the shader. The forms agree whenever
+the rows annihilate constants, which every assembly path does, and the
+difference form is exactly zero on a constant field in any precision. It costs
+nothing and the diagonal needs no special case, since its term is `K_ii · 0`.
+Two tests pin the property: every assembled operator, across second-order outer
+edges, curved absorbers, thin gaps, material interfaces and the topology path,
+has zero row sums in both matrices; and an f32 emulation of the kernel holds a
+constant field bit for bit while the old row product is shown to drift. The
+edited shader was parsed and validated with the naga version the app links.
+
+A separate effect remains and is physics: a source switched on abruptly leaves
+a nonzero mean velocity, and in a Neumann cavity that gives a linear drift that
+the f64 reference also shows. Quadratic versus linear growth tells the two
+apart.
+
 ## 2026-09-15 — The example loads and the checklist describes this app
 
 `examples/eight-obstacles.json` was still schema version 1 and could not load

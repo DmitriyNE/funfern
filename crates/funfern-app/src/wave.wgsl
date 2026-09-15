@@ -122,17 +122,25 @@ fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
         states[i].levels.w = parameters.time_data.w + 1.0;
         return;
     }
+    // Both stiffness operators annihilate constants, so they are applied to the
+    // differences against this node. The plain row product does not sum to zero
+    // once each entry has been divided by the lumped mass and rounded to f32;
+    // that residual is a permanent force on the free constant mode of a Neumann
+    // cavity and grows a uniform offset without bound. The difference form is
+    // exactly zero on a constant field. The CPU solver uses the same form.
     var ku = 0.0;
     var entry = row_offsets[i];
     let end = row_offsets[i + 1u];
+    let displacement = states[i].levels.y;
+    let memory = states[i].auxiliary.x;
     loop {
         if entry >= end {
             break;
         }
         let column = columns[entry];
         let coefficients = matrix_over_mass[entry].coefficients;
-        ku += coefficients.x * states[column].levels.y
-            + coefficients.y * states[column].auxiliary.x;
+        ku += coefficients.x * (states[column].levels.y - displacement)
+            + coefficients.y * (states[column].auxiliary.x - memory);
         entry += 1u;
     }
     let dt2 = parameters.time_data.y;
