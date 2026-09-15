@@ -241,7 +241,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   mesh. Profile placement appears for the selected subdomain and can be adjusted
   numerically or with its viewport origin/rotation gizmo. View can overlay Materials (each face in
   its assigned material's colour), Subdomains (a categorical colour per stable
-  region, so neighbouring faces sharing a material stay distinct), density,
+  region, so neighbouring faces sharing a material stay distinct), the adaptation
+  target, density,
   stiffness, damping, wave speed, impedance, anisotropy, or volume-source
   amplitude with linear/log and
   automatic/manual range controls plus a local-coordinate hover readout. The
@@ -391,7 +392,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   in bounded frame slices. Fast, Balanced, and Detailed presets set the error and
   wavelength targets; advanced controls bound the smallest and largest element.
   Refinement reacts immediately, while coarsening requires two quiet estimates and
-  has its own transaction quota. The View panel can overlay the current target field.
+  has its own transaction quota. View's Overlay list carries the current target
+  field alongside the material overlays, blue where the estimate wants the finest
+  elements and orange where it wants the coarsest, and says which of adaptation
+  being off, no estimate yet, or an estimate behind the mesh is leaving it empty.
 - **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
   Gaussian displacement with zero initial velocity. The optional point source is
   repositioned by dragging its viewport marker. Simulation speed is bounded to 16

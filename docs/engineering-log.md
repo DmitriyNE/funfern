@@ -138,6 +138,38 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — The adaptation target is an overlay, so it is finally visible
+
+Reported invisible, and it was: `draw_solution` painted the target wash first,
+then the Materials fill, then the field - and with the Overlay list on `Off` the
+field is fully opaque, since `field_color` lerps from an opaque base and only
+`field_color_over_overlay` carries alpha. So the wash sat under an opaque field,
+or under the default Materials fill, whichever the scene had. It was only ever
+visible with the field switched off.
+
+It is a `MaterialOverlay` choice now rather than its own checkbox, which is where
+it belonged: that slot is what fills the domain under a field the same slot turns
+translucent. Being one of the overlays also makes it exclusive with them, which
+it always was in practice. It draws as a single `egui::Mesh` like the categorical
+fill next to it - per-triangle polygons carry their own antialiased outlines and
+imprint the mesh on the wash - and takes its alpha from the Overlay intensity
+slider instead of a hardcoded 75.
+
+The overlay had three ways of being empty and said nothing about any of them:
+adaptation off, no estimate yet, or an estimate whose element count no longer
+matches the mesh after an adaptation. The View panel now names whichever applies,
+and shows the target range when the overlay is live.
+
+`PresentationSettings.adaptation_target` is gone. The stored key is still read,
+so a scene that had the flag on and no material overlay arrives with the new
+overlay selected - an overlay that was actually visible wins - and is still
+written as `false` so a build from before this change can load a scene saved
+after it. Covered by `presentation_round_trips_and_older_scenes_receive_defaults`.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked`, `cargo build --release -p
+funfern-app --locked`.
+
 ## 2026-09-15 — The mode arms are buttons, not captions
 
 `Place pulse` was a bare `selectable_label`, which egui draws as plain text until

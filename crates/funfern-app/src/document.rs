@@ -16,6 +16,10 @@ pub enum MaterialOverlay {
     /// Every face takes a categorical colour keyed by its stable `RegionId`, so
     /// neighbouring subdomains that happen to share a material stay distinct.
     Subdomains,
+    /// Every element takes the edge length the adaptation estimate last asked
+    /// for. It shares the slot with the material overlays because it fills the
+    /// domain the same way: under a field that turns translucent over it.
+    AdaptationTarget,
     Property(MaterialProperty),
 }
 
@@ -25,6 +29,7 @@ impl MaterialOverlay {
             Self::Off => "Off",
             Self::Regions => "Materials",
             Self::Subdomains => "Subdomains",
+            Self::AdaptationTarget => "Adaptation target",
             Self::Property(property) => property.label(),
         }
     }
@@ -34,6 +39,7 @@ impl MaterialOverlay {
             Self::Off => "Off",
             Self::Regions => "Materials",
             Self::Subdomains => "Subdomains",
+            Self::AdaptationTarget => "Adaptation target",
             Self::Property(property) => property.label_for(physics),
         }
     }
@@ -165,7 +171,6 @@ pub struct PresentationSettings {
     pub boundary_conditions: bool,
     pub mesh: bool,
     pub mesh_boundaries: bool,
-    pub adaptation_target: bool,
     pub point_probes: bool,
     pub line_probes: bool,
     pub boundary_probes: bool,
@@ -211,7 +216,6 @@ impl Default for PresentationSettings {
             boundary_conditions: false,
             mesh: false,
             mesh_boundaries: true,
-            adaptation_target: false,
             point_probes: true,
             line_probes: true,
             boundary_probes: true,

@@ -297,7 +297,6 @@ fn presentation_round_trips_and_older_scenes_receive_defaults() {
             boundary_conditions: true,
             mesh: true,
             mesh_boundaries: false,
-            adaptation_target: true,
             point_probes: false,
             line_probes: false,
             boundary_probes: false,
@@ -329,6 +328,34 @@ fn presentation_round_trips_and_older_scenes_receive_defaults() {
     assert!(current.contains("\"complementary_field_rate\""));
     let alternate_name = current.replace("\"complementary_field_rate\"", "\"complementary_field\"");
     assert_eq!(decode(alternate_name.as_bytes()).unwrap(), vector_document);
+
+    let mut target_document = document.clone();
+    target_document.presentation.material_overlay = MaterialOverlay::AdaptationTarget;
+    let target = save(&target_document).unwrap();
+    assert_eq!(decode(target.as_bytes()).unwrap(), target_document);
+
+    // A scene from before the adaptation target moved into the overlay slot
+    // carries it as its own flag. The flag fills an empty slot and yields to an
+    // overlay that was actually visible. The key is still written, so a build
+    // from before the move can still read a scene saved after it.
+    assert!(json.contains("adaptation_target"));
+    let mut flagged: serde_json::Value = serde_json::from_str(&json).unwrap();
+    flagged["presentation"]["adaptation_target"] = true.into();
+    assert_eq!(
+        decode(serde_json::to_string(&flagged).unwrap().as_bytes())
+            .unwrap()
+            .presentation
+            .material_overlay,
+        MaterialOverlay::Property(MaterialProperty::Impedance)
+    );
+    flagged["presentation"]["material_overlay"] = serde_json::json!({ "kind": "off" });
+    assert_eq!(
+        decode(serde_json::to_string(&flagged).unwrap().as_bytes())
+            .unwrap()
+            .presentation
+            .material_overlay,
+        MaterialOverlay::AdaptationTarget
+    );
 
     let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
     set_file_version(&mut legacy, 15);

@@ -57,6 +57,10 @@ pub(crate) struct StoredPresentation {
     boundary_conditions: bool,
     mesh: bool,
     mesh_boundaries: bool,
+    /// Retired: the adaptation target is a `material_overlay` choice now. Still
+    /// read, so an older scene that had it on is migrated, and still written as
+    /// `false`, because a build from before the move requires the key.
+    #[serde(default)]
     adaptation_target: bool,
     point_probes: bool,
     line_probes: bool,
@@ -112,6 +116,7 @@ enum StoredMaterialOverlay {
     Off,
     Regions,
     Subdomains,
+    AdaptationTarget,
     Property(StoredMaterialProperty),
 }
 
@@ -1449,7 +1454,7 @@ pub(crate) fn encode_presentation(settings: PresentationSettings) -> StoredPrese
         boundary_conditions: settings.boundary_conditions,
         mesh: settings.mesh,
         mesh_boundaries: settings.mesh_boundaries,
-        adaptation_target: settings.adaptation_target,
+        adaptation_target: false,
         point_probes: settings.point_probes,
         line_probes: settings.line_probes,
         boundary_probes: settings.boundary_probes,
@@ -1470,6 +1475,7 @@ pub(crate) fn encode_presentation(settings: PresentationSettings) -> StoredPrese
             MaterialOverlay::Off => StoredMaterialOverlay::Off,
             MaterialOverlay::Regions => StoredMaterialOverlay::Regions,
             MaterialOverlay::Subdomains => StoredMaterialOverlay::Subdomains,
+            MaterialOverlay::AdaptationTarget => StoredMaterialOverlay::AdaptationTarget,
             MaterialOverlay::Property(property) => {
                 StoredMaterialOverlay::Property(match property {
                     MaterialProperty::Density => StoredMaterialProperty::Density,
@@ -1501,7 +1507,6 @@ pub(crate) fn decode_presentation(
         boundary_conditions: stored.boundary_conditions,
         mesh: stored.mesh,
         mesh_boundaries: stored.mesh_boundaries,
-        adaptation_target: stored.adaptation_target,
         point_probes: stored.point_probes,
         line_probes: stored.line_probes,
         boundary_probes: stored.boundary_probes,
@@ -1518,10 +1523,17 @@ pub(crate) fn decode_presentation(
         vector_overlay_smoothed: stored.vector_overlay_smoothed,
         vector_overlay_density: stored.vector_overlay_density,
         vector_overlay_gain: stored.vector_overlay_gain,
+        // A scene from before the move carries the target as its own flag. It
+        // becomes the overlay it now is, unless that slot already holds a
+        // material overlay, which is the one that was actually visible.
         material_overlay: match stored.material_overlay {
+            StoredMaterialOverlay::Off if stored.adaptation_target => {
+                MaterialOverlay::AdaptationTarget
+            }
             StoredMaterialOverlay::Off => MaterialOverlay::Off,
             StoredMaterialOverlay::Regions => MaterialOverlay::Regions,
             StoredMaterialOverlay::Subdomains => MaterialOverlay::Subdomains,
+            StoredMaterialOverlay::AdaptationTarget => MaterialOverlay::AdaptationTarget,
             StoredMaterialOverlay::Property(property) => {
                 MaterialOverlay::Property(match property {
                     StoredMaterialProperty::Density => MaterialProperty::Density,

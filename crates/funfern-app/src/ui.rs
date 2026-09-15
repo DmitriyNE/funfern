@@ -2135,7 +2135,6 @@ impl Playground {
         ui.checkbox(&mut p.boundary_conditions, "Boundary conditions");
         ui.checkbox(&mut p.mesh, "Mesh");
         ui.checkbox(&mut p.mesh_boundaries, "Mesh boundaries");
-        ui.checkbox(&mut p.adaptation_target, "Adaptation target");
         ui.checkbox(&mut p.field, "Field");
         ui.add(egui::Slider::new(&mut p.field_gain, 0.25..=12.0).text("Field intensity"));
         let physics = self.editor.document.model.draft.physics;
@@ -2164,7 +2163,11 @@ impl Playground {
             )
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut p.material_overlay, MaterialOverlay::Off, "Off");
-                for overlay in [MaterialOverlay::Regions, MaterialOverlay::Subdomains] {
+                for overlay in [
+                    MaterialOverlay::Regions,
+                    MaterialOverlay::Subdomains,
+                    MaterialOverlay::AdaptationTarget,
+                ] {
                     ui.selectable_value(&mut p.material_overlay, overlay, overlay.label());
                 }
                 for property in [
@@ -2187,6 +2190,34 @@ impl Playground {
             egui::Slider::new(&mut p.material_overlay_opacity, 0.05..=1.0)
                 .text("Overlay intensity"),
         );
+        if p.material_overlay == MaterialOverlay::AdaptationTarget {
+            ui.small("Blue where the estimate wants the finest elements, orange the coarsest");
+            // The overlay has three ways of being empty and none of them used to
+            // say anything, which is how it came to look broken.
+            if !self.amr_enabled {
+                ui.colored_label(GOLD, "Adaptation is off in Simulation");
+            } else {
+                match &self.amr_indicator_result {
+                    None => {
+                        ui.colored_label(GOLD, format!("No estimate yet · {}", self.amr_status))
+                    }
+                    Some(result) => {
+                        let triangles = self
+                            .runtime
+                            .active()
+                            .map(|active| active.mesh.triangles.len());
+                        if triangles.is_some_and(|count| count != result.element_targets.len()) {
+                            ui.colored_label(GOLD, "The estimate is behind the current mesh")
+                        } else {
+                            ui.small(format!(
+                                "Targets {:.3}–{:.3}",
+                                result.report.minimum_target, result.report.maximum_target
+                            ))
+                        }
+                    }
+                };
+            }
+        }
         if matches!(p.material_overlay, MaterialOverlay::Property(_)) {
             ui.checkbox(&mut p.material_overlay_auto_range, "Automatic range");
             ui.checkbox(&mut p.material_overlay_logarithmic, "Logarithmic scale");
@@ -3319,22 +3350,29 @@ impl Playground {
         };
         let mesh = &active.mesh;
         let presentation = self.editor.document.presentation;
-        if presentation.adaptation_target
+        // One mesh rather than a polygon per triangle, for the reason the
+        // categorical overlay gives below: per-polygon outlines would imprint
+        // the mesh on the wash whether or not the user asked to see it.
+        if presentation.material_overlay == MaterialOverlay::AdaptationTarget
             && let Some(result) = &self.amr_indicator_result
             && result.element_targets.len() == mesh.triangles.len()
         {
             let span = (self.amr_maximum_edge - self.amr_minimum_edge).max(f64::MIN_POSITIVE);
+            let alpha = (presentation.material_overlay_opacity * 210.0).round() as u8;
+            let mut targets = egui::Mesh::default();
+            targets.reserve_vertices(mesh.triangles.len() * 3);
+            targets.reserve_triangles(mesh.triangles.len());
             for (triangle, target) in mesh.triangles.iter().zip(&result.element_targets) {
                 let fraction = ((*target - self.amr_minimum_edge) / span).clamp(0.0, 1.0) as f32;
-                let color = amr_target_color(fraction);
-                let points = triangle
-                    .vertices
-                    .map(|index| self.screen(mesh.vertices[index].point, r));
-                painter.add(egui::Shape::convex_polygon(
-                    points.to_vec(),
-                    color,
-                    Stroke::NONE,
-                ));
+                let color = amr_target_color(fraction, alpha);
+                let first = targets.vertices.len() as u32;
+                for index in triangle.vertices {
+                    targets.colored_vertex(self.screen(mesh.vertices[index].point, r), color);
+                }
+                targets.add_triangle(first, first + 1, first + 2);
+            }
+            if !targets.is_empty() {
+                painter.add(egui::Shape::mesh(targets));
             }
         }
         if let MaterialOverlay::Property(property) = presentation.material_overlay
@@ -9634,7 +9672,7 @@ fn overlay_property_color(property: MaterialProperty, fraction: f32, alpha: u8) 
     Color32::from_rgba_unmultiplied(channel(0), channel(1), channel(2), alpha)
 }
 
-fn amr_target_color(fraction: f32) -> Color32 {
+fn amr_target_color(fraction: f32, alpha: u8) -> Color32 {
     let fraction = fraction.clamp(0.0, 1.0);
     let fine = [71.0, 144.0, 232.0];
     let coarse = [246.0, 183.0, 92.0];
@@ -9642,7 +9680,7 @@ fn amr_target_color(fraction: f32) -> Color32 {
         egui::lerp(fine[0]..=coarse[0], fraction) as u8,
         egui::lerp(fine[1]..=coarse[1], fraction) as u8,
         egui::lerp(fine[2]..=coarse[2], fraction) as u8,
-        75,
+        alpha,
     )
 }
 
