@@ -8,9 +8,11 @@ use crate::{
 use crate::{Scene, WORLD_TOLERANCE};
 mod adaptation;
 mod amr;
+mod carve;
 mod topology_plan;
 pub use adaptation::*;
 pub use amr::*;
+pub use carve::*;
 pub use topology_plan::*;
 
 pub(super) fn boundary_adjacency(label: BoundaryLabel) -> usize {
@@ -277,6 +279,18 @@ struct MeshBuilder {
     stats: MeshingStats,
     incident: Vec<BTreeSet<usize>>,
     repair_region: Option<Vec<bool>>,
+    /// Triangles below this index were imported from an earlier mesh and are
+    /// never flipped, split or refined; edges they share with new triangles
+    /// behave as constraints. Used by carving, where the imported part of the
+    /// mesh must come out exactly as it went in.
+    frozen_triangles: usize,
+    /// Vertices below this index came with the frozen triangles. A refinement
+    /// candidate lies strictly inside a live triangle, so only vertices added
+    /// since can coincide with it, and the duplicate scan starts here.
+    frozen_vertices: usize,
+    /// Local edge-length targets sampled from triangles that a repair removed,
+    /// so a rebuilt band keeps the density it had.
+    size_field: Option<carve::LocalSizeField>,
 }
 
 #[derive(Clone, Copy)]
@@ -482,7 +496,46 @@ impl MeshBuilder {
             stats: MeshingStats::default(),
             incident: vec![],
             repair_region: None,
+            frozen_triangles: 0,
+            frozen_vertices: 0,
+            size_field: None,
         }
+    }
+
+    /// The edge length a triangle is refined towards: the global target, or a
+    /// smaller local size where a repair removed finer triangles.
+    fn local_target(&self, triangle: MeshTriangle) -> f64 {
+        let target = self.options.target_edge_length;
+        let Some(field) = &self.size_field else {
+            return target;
+        };
+        let [a, b, c] = self.triangle_points(triangle);
+        field
+            .size_at((a + b + c) / 3.0)
+            .map_or(target, |size| size.min(target))
+    }
+
+    /// The edge length a boundary chain is subdivided towards: the global
+    /// target, or the finest local size a repair removed along the chord.
+    fn chain_target(&self, points: [Point2; 2]) -> f64 {
+        let target = self.options.target_edge_length;
+        let Some(field) = &self.size_field else {
+            return target;
+        };
+        [0.0, 0.25, 0.5, 0.75, 1.0]
+            .into_iter()
+            .filter_map(|fraction| field.size_at(points[0].lerp(points[1], fraction)))
+            .fold(target, f64::min)
+    }
+
+    /// Whether an edge borders a frozen imported triangle.
+    fn edge_touches_frozen(&self, edge: (usize, usize)) -> bool {
+        self.frozen_triangles > 0
+            && self.adjacency.get(&edge).is_some_and(|sides| {
+                sides
+                    .iter()
+                    .any(|(triangle, _)| *triangle < self.frozen_triangles)
+            })
     }
 
     fn queue_edge(&mut self, edge: (usize, usize)) {
@@ -513,12 +566,13 @@ impl MeshBuilder {
             .vertices
             .iter()
             .any(|vertex| self.internal_trace_vertices.contains(vertex));
-        let long = quality.maximum_edge_length > self.options.target_edge_length * 1.05;
+        let target = self.local_target(triangle);
+        let long = quality.maximum_edge_length > target * 1.05;
         let narrow = !touches_trace
             && quality.minimum_angle_degrees + 1.0e-9 < self.options.minimum_angle_degrees;
         if long || narrow {
             // Nonnegative IEEE floats have the same ordering as their bit patterns.
-            let score = (quality.maximum_edge_length / self.options.target_edge_length)
+            let score = (quality.maximum_edge_length / target)
                 .max(if touches_trace {
                     0.0
                 } else {
@@ -942,6 +996,9 @@ impl MeshBuilder {
             return Ok(());
         }
         let [(left_index, c), (right_index, d)] = [sides[0], sides[1]];
+        if left_index < self.frozen_triangles || right_index < self.frozen_triangles {
+            return Ok(());
+        }
         let region = self.triangles[left_index].region;
         if self.triangles[right_index].region != region {
             return Err(MeshError::Topology(
@@ -1041,9 +1098,16 @@ impl MeshBuilder {
         )
     }
 
+    /// Locates a point among the triangles that may still change. Frozen
+    /// imported triangles are skipped: no insertion may land in them.
     fn containing_triangle(&self, point: Point2) -> Option<(usize, PolygonLocation)> {
         let mut boundary = None;
-        for (index, triangle) in self.triangles.iter().enumerate() {
+        for (index, triangle) in self
+            .triangles
+            .iter()
+            .enumerate()
+            .skip(self.frozen_triangles)
+        {
             let location = point_in_triangle(point, self.triangle_points(*triangle));
             if location == PolygonLocation::Inside {
                 return Some((index, location));
@@ -1779,43 +1843,69 @@ impl MeshBuilder {
                 "quality repair reached the fixed patch boundary",
             ));
         }
+        if triangle_index < self.frozen_triangles {
+            self.drop_bad_triangle(triangle_index);
+            return Ok(false);
+        }
         let points = self.triangle_points(triangle);
         let centroid = (points[0] + points[1] + points[2]) / 3.0;
-        let mut candidate = self
-            .circumcenter(triangle)
-            .filter(|point| {
-                self.containing_triangle(*point).is_some_and(|(index, _)| {
-                    self.triangles[index].region == triangle.region
-                        && self.repair_region.as_ref().is_none_or(|region| {
-                            self.triangles[index].vertices.iter().all(|v| region[*v])
-                        })
-                })
+        let circumcenter = self.circumcenter(triangle).filter(|point| {
+            self.containing_triangle(*point).is_some_and(|(index, _)| {
+                self.triangles[index].region == triangle.region
+                    && self.repair_region.as_ref().is_none_or(|region| {
+                        self.triangles[index].vertices.iter().all(|v| region[*v])
+                    })
             })
-            .unwrap_or(centroid);
+        });
+        let mut candidate = circumcenter.unwrap_or(centroid);
         if self.region_at(candidate) != Some(triangle.region) {
             candidate = centroid;
+        }
+        // Beside frozen triangles a circumcenter often falls outside the
+        // cavity. Splitting such an element at its centroid instead only
+        // breeds nested slivers along the median, so the element stays.
+        if self.frozen_triangles > 0 && candidate == centroid {
+            self.drop_bad_triangle(triangle_index);
+            return Ok(false);
         }
         // Coincident two-faced traces are distinct topological vertices. A
         // circumcenter can land exactly on the opposite trace even though it is
         // unrelated to the element being refined; use the element centroid in
         // that ambiguous geometric case.
+        let coincides = |builder: &Self, candidate: Point2| {
+            builder
+                .vertices
+                .iter()
+                .skip(builder.frozen_vertices)
+                .any(|vertex| {
+                    (vertex.point - candidate).norm() <= builder.options.curve_tolerance * 0.1
+                })
+        };
         for attempt in 0..8 {
-            if !self.vertices.iter().any(|vertex| {
-                (vertex.point - candidate).norm() <= self.options.curve_tolerance * 0.1
-            }) {
+            if !coincides(self, candidate) {
                 break;
             }
             candidate = centroid.lerp(points[attempt % 3], 0.01 * (attempt + 1) as f64);
         }
-        if self
-            .vertices
-            .iter()
-            .any(|vertex| (vertex.point - candidate).norm() <= self.options.curve_tolerance * 0.1)
-        {
-            if let Some(score) = self.scores[triangle_index].take() {
-                self.bad_triangles.remove(&(score, triangle_index));
-            }
+        if coincides(self, candidate) {
+            self.drop_bad_triangle(triangle_index);
             return Ok(false);
+        }
+        // A candidate on an edge shared with a frozen triangle would split
+        // that triangle; the band accepts the element as it is instead.
+        if self.frozen_triangles > 0
+            && let Some((index, PolygonLocation::Boundary)) = self.containing_triangle(candidate)
+        {
+            let host = self.triangles[index];
+            let frozen = (0..3).any(|corner| {
+                let edge = [host.vertices[corner], host.vertices[(corner + 1) % 3]];
+                on_segment(candidate, self.point(edge[0]), self.point(edge[1]))
+                    && self.edge_touches_frozen(edge_key(edge[0], edge[1]))
+            });
+            if frozen {
+                self.drop_bad_triangle(triangle_index);
+                return Ok(false);
+            }
         }
         if let Some(edge_index) = self.boundary_edges.iter().position(|edge| {
             if matches!(edge.label, BoundaryLabel::InternalBoundary { .. }) {
@@ -1836,12 +1926,25 @@ impl MeshBuilder {
             }) {
                 return Err(MeshError::Topology("boundary repair left the local patch"));
             }
+            let encroached = self.boundary_edges[edge_index].vertices;
+            if self.edge_touches_frozen(edge_key(encroached[0], encroached[1])) {
+                self.drop_bad_triangle(triangle_index);
+                return Ok(false);
+            }
             self.split_boundary(edge_index)?;
         } else {
             self.insert_point(candidate)?;
         }
         self.stats.refinement_insertions += 1;
         Ok(false)
+    }
+
+    /// Leaves a triangle as it is: it is removed from the refinement queue
+    /// without changing the mesh.
+    fn drop_bad_triangle(&mut self, index: usize) {
+        if let Some(score) = self.scores[index].take() {
+            self.bad_triangles.remove(&(score, index));
+        }
     }
 }
 

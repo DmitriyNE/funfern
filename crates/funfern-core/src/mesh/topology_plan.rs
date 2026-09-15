@@ -41,10 +41,10 @@ impl CurveTraceSide {
 }
 
 #[derive(Clone, Debug)]
-struct ExpandedChain {
-    traces: [TraceVertexId; 2],
-    vertices: Vec<usize>,
-    parameters: Vec<f64>,
+pub(super) struct ExpandedChain {
+    pub(super) traces: [TraceVertexId; 2],
+    pub(super) vertices: Vec<usize>,
+    pub(super) parameters: Vec<f64>,
 }
 
 /// Builds a constrained triangular mesh directly from the compiled topology
@@ -88,6 +88,10 @@ pub struct TopologyMeshingJob {
     slit_steps: Vec<PlannedFaceStep>,
     legalization_work: usize,
     state: TopologyMeshingState,
+    /// Triangles below this index were imported by a repair and are verified
+    /// for orientation and adjacency only; their regions were settled by the
+    /// repair against the compiled topology.
+    region_check_from: usize,
 }
 
 impl TopologyMeshingJob {
@@ -102,6 +106,36 @@ impl TopologyMeshingJob {
             slit_steps: vec![],
             legalization_work: 0,
             state: TopologyMeshingState::Initialize,
+            region_check_from: 0,
+        }
+    }
+
+    /// Continues meshing from a builder that a repair has prepared: imported
+    /// triangles below `region_check_from` are frozen, and the builder's
+    /// domains are the cavity polygons to bridge, clip, legalize and refine
+    /// before the slit runs are cut and the whole mesh is verified.
+    pub(super) fn resume(
+        plan: TopologyMeshPlan,
+        mesh_revision: u64,
+        builder: MeshBuilder,
+        trace_vertices: BTreeMap<TraceVertexId, usize>,
+        slit_runs: Vec<(RegionId, Vec<PlannedFaceStep>)>,
+        region_check_from: usize,
+    ) -> Self {
+        let state = match builder.domains.first().cloned() {
+            Some(domain) => TopologyMeshingState::Bridge(new_bridge_search(domain, 0)),
+            None => TopologyMeshingState::Legalize,
+        };
+        Self {
+            plan,
+            mesh_revision,
+            builder,
+            trace_vertices,
+            slit_runs,
+            slit_steps: vec![],
+            legalization_work: 0,
+            state,
+            region_check_from,
         }
     }
 
@@ -234,7 +268,12 @@ impl TopologyMeshingJob {
                 if index == b.triangles.len() {
                     TopologyMeshingState::VerifyBoundary { index: 0, quality }
                 } else {
-                    verify_topology_triangle(b, index, &mut quality)?;
+                    verify_topology_triangle(
+                        b,
+                        index,
+                        &mut quality,
+                        index >= self.region_check_from,
+                    )?;
                     TopologyMeshingState::VerifyTriangles {
                         index: index + 1,
                         quality,
@@ -536,7 +575,7 @@ fn prepare_topology_builder(
     })
 }
 
-fn new_bridge_search(domain: TriangulationDomain, index: usize) -> BridgeSearch {
+pub(super) fn new_bridge_search(domain: TriangulationDomain, index: usize) -> BridgeSearch {
     BridgeSearch {
         polygon: domain.outer,
         holes: domain.holes,
@@ -631,17 +670,18 @@ fn step_bridge_visibility(
     Ok(())
 }
 
-fn verify_topology_triangle(
+pub(super) fn verify_topology_triangle(
     builder: &MeshBuilder,
     index: usize,
     quality: &mut MeshQuality,
+    check_region: bool,
 ) -> Result<(), MeshError> {
     let triangle = builder.triangles[index];
     let [a, b, c] = builder.triangle_points(triangle);
     if orient2d(a, b, c) != PredicateSign::Positive {
         return Err(MeshError::Topology("mesh contains an inverted triangle"));
     }
-    if builder.region_at((a + b + c) / 3.0) != Some(triangle.region) {
+    if check_region && builder.region_at((a + b + c) / 3.0) != Some(triangle.region) {
         return Err(MeshError::Topology(
             "triangle has the wrong topology face region",
         ));
@@ -655,11 +695,15 @@ fn verify_topology_triangle(
             .adjacency
             .get(&edge)
             .ok_or(MeshError::Topology("missing adjacency"))?;
-        let expected = builder
-            .boundary_edges
-            .iter()
-            .find(|boundary| edge_key(boundary.vertices[0], boundary.vertices[1]) == edge)
-            .map_or(2, |boundary| boundary_adjacency(boundary.label));
+        let expected = if builder.boundary_keys.contains(&edge) {
+            builder
+                .boundary_edges
+                .iter()
+                .find(|boundary| edge_key(boundary.vertices[0], boundary.vertices[1]) == edge)
+                .map_or(2, |boundary| boundary_adjacency(boundary.label))
+        } else {
+            2
+        };
         if sides.len() != expected || !sides.contains(&(index, triangle.vertices[opposite])) {
             return Err(MeshError::Topology("mesh has a crack or non-manifold edge"));
         }
@@ -697,7 +741,9 @@ fn verify_topology_boundary(builder: &MeshBuilder, index: usize) -> Result<(), M
     Ok(())
 }
 
-fn split_slit_runs(steps: &[PlannedFaceStep]) -> Result<Vec<Vec<PlannedFaceStep>>, MeshError> {
+pub(super) fn split_slit_runs(
+    steps: &[PlannedFaceStep],
+) -> Result<Vec<Vec<PlannedFaceStep>>, MeshError> {
     let mut left = steps
         .iter()
         .filter(|step| {
@@ -799,9 +845,7 @@ fn cut_free_slit(
     for step in &left {
         let edge = step.boundary;
         let length = (edge.points[1] - edge.points[0]).norm();
-        let pieces = (length / builder.options.target_edge_length)
-            .ceil()
-            .max(1.0) as usize;
+        let pieces = (length / builder.chain_target(edge.points)).ceil().max(1.0) as usize;
         for piece in 0..pieces {
             let fraction = piece as f64 / pieces as f64;
             samples.push((
@@ -1307,7 +1351,7 @@ pub(super) fn topology_label(boundary: PlannedBoundaryEdge) -> BoundaryLabel {
     }
 }
 
-fn trace_mesh_vertex(
+pub(super) fn trace_mesh_vertex(
     builder: &mut MeshBuilder,
     points: &BTreeMap<TraceVertexId, Point2>,
     vertices: &mut BTreeMap<TraceVertexId, usize>,
@@ -1325,7 +1369,7 @@ fn trace_mesh_vertex(
     Ok(vertex)
 }
 
-fn expand_step_chain(
+pub(super) fn expand_step_chain(
     builder: &mut MeshBuilder,
     points: &BTreeMap<TraceVertexId, Point2>,
     trace_vertices: &mut BTreeMap<TraceVertexId, usize>,
@@ -1334,7 +1378,7 @@ fn expand_step_chain(
     let boundary = step.boundary;
     let label = topology_label(boundary);
     let length = (boundary.points[1] - boundary.points[0]).norm();
-    let pieces = (length / builder.options.target_edge_length)
+    let pieces = (length / builder.chain_target(boundary.points))
         .ceil()
         .max(1.0) as usize;
     let mut vertices = Vec::with_capacity(pieces + 1);

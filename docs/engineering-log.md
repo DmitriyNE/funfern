@@ -45,21 +45,17 @@ Carried over from the cutover follow-up work, not from the review:
 
 Longer-standing work:
 
-- [ ] After the atomic topology application cutover, add sector-aware local mesh
-  repair for unified curve coordinate edits. The first cutover deliberately takes
-  a cooperative full rebuild for curve and junction movement while preserving
-  exact mesh reuse for material, source, and boundary-law edits. Design outline
-  agreed for discussion on 2026-09-15, to be planned before any code: pair atoms
-  between the previous and next coarsened plans by span, side and parameter
-  range when the topology signatures match; move each boundary mesh vertex to
-  its parameter on the new atom; route the legacy `MeshUpdateJob`'s scene
-  lookups through a small geometry trait with a plan-backed implementation so
-  its motion radius, ring expansion, smoothing, inversion check, retry and
-  full-rebuild fallback are reused; take junction sectors from the AMR
-  contract's pinned sectors; give the transfer map an identity fast path for
-  untouched nodes. Open questions for the user: repair per drag frame or on
-  release as edits run today, and whether a span whose atom count changes is
-  repaired with boundary splits and collapses or rebuilt for that face.
+- [ ] Incremental mesh repair by carving, agreed 2026-09-15 to replace the
+  deferred coordinate repair and its caps. Stage 1, the core carving job, landed
+  2026-09-15 (`mesh/carve.rs`). Remaining stages: an exact identity path in the
+  transfer map for nodes outside the band; runtime plumbing with a Repairing
+  phase, a repair update action, and the full rebuild as the fallback on a carve
+  error, with the reason and the kept and removed counts in the Performance
+  panel; widening the classifier so every plan difference except the outer
+  domain, a resolution change and a requested rebuild is a repair; docs and
+  browser checks. Backlog once those land: deformation-first repair for small
+  motions with carving as the fallback; live repair during drags once the carve
+  time is measured in the app; outer-domain resize through carving.
 - [ ] Raise viewport video capture from the initial 30 FPS implementation to 60 FPS.
   Measure browser encoding and native GPU-readback pressure first, retain bounded
   native queues and wall-clock pacing, and report dropped frames rather than slowing
@@ -126,6 +122,78 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Mesh repair by carving the changed band
+
+The topology mesher had no incremental path: every curve or junction movement
+classified as `CoordinateRepairDeferred` and took the full rebuild. The legacy
+repair it was meant to replace moved existing vertices with a diffused
+displacement and fenced off where that inverts elements, refusing any motion
+over four target edges and any patch over a third of the mesh. The user asked
+for different heuristics rather than a retune, and the agreed mechanism is
+carving: the plan is a set of straight atoms, so only the atoms that differ
+between two plans matter to the mesh.
+
+`TopologyCarveJob` in `mesh/carve.rs` takes the previous mesh, both plans and
+the compiled topology. Two atoms are the same when their source, separated
+flag, face, region, parameter range and endpoints agree; trace ids are left
+out because every compile reissues them. Triangles incident to a changed old
+atom go, triangles a changed new atom passes through go, one more ring goes
+so the rim does not hug the new boundary, and tiny kept islands go. The kept
+remainder is flood-filled across unconstrained edges; each component lies in
+one face of the new topology, so one face lookup on its largest triangle
+relabels it or, for an excluded face, removes it. A separated curve that a
+removed triangle touches is rebuilt whole, so slit recovery always sees
+complete runs; the selection repeats until that set is stable. Kept atoms'
+endpoints receive their new trace ids through the kept boundary edges, whose
+labels and parameters are exact copies of the plan's, so a changed atom that
+ends at a kept vertex reuses it. Changed atoms are expanded with the mesher's
+own chain expansion; rim edges are oriented with the removed side on the left
+and take the region of the kept triangle or of the plan's atom on that side;
+walking those edges with the sharpest clockwise turn at each vertex gives the
+cavity cycles, counter-clockwise ones being components and clockwise ones
+holes of the smallest component containing them. From there the topology
+meshing job resumes at its bridge state with the imported triangles frozen:
+`MeshBuilder` gained `frozen_triangles`, and legalization, refinement and
+splits skip anything that would change one, so the kept part comes out exactly
+as it went in. A `LocalSizeField` over the removed triangles feeds the
+refinement scoring and the chain subdivision, so a band cut through an adapted
+mesh is refilled at the density it had. There is no motion cap and no patch
+cap; the only fallback left is a genuine mesher error.
+
+Two things broke on the first run. Slit recovery failed because the removed
+band's old vertices stayed in the builder until compaction and the constraint
+insertion snaps to any vertex within a tenth of the curve tolerance, so a
+moved baffle grabbed an orphan at its old position; orphans are now not
+imported at all. Three hole cases ended in a scale-degenerate triangle: beside
+a frozen rim the circumcenter of a bad element often falls outside the cavity,
+the refiner then split the element at its centroid, and nested centroids of
+the child slivers are collinear along the median. With frozen triangles the
+refiner now leaves such an element alone.
+
+Nine tests cover a nudged hole with every kept triangle reappearing unchanged
+and the region areas equal to a fresh mesh's, a hole dragged 1.1 across the
+domain, a hole brought closer to the wall than an edge, a baffle rebuilt whole
+with both sides paired, a moved separated junction keeping its three sector
+traces, a nudge through an AMR-refined mesh keeping the band at the fine size,
+a hole activated as a subdomain and filled in place, the identity carve, and
+determinism across slice sizes. Every result also passes the adaptation
+contract import, the strictest reader of a topology mesh.
+
+Release timing on a single rounded hole in the unit domain, Apple M1 Max:
+
+| target | triangles | full rebuild | carve, nudge 0.02 | carve, drag 0.5 |
+| --- | --- | --- | --- | --- |
+| 0.06 | 4,713 | 62 ms | 10 ms, 95% kept | 15 ms, 87% kept |
+| 0.03 | 18,927 | 606 ms | 38 ms, 98% kept | 62 ms, 90% kept |
+
+What remains is proportional to the whole mesh: indexing, import and the final
+verification are about 2.5 µs per triangle together, and all of it is sliced
+per item, so the frame budget holds. The kept-triangle assertions are
+at-least rather than equal because a Delaunay refill of the band can reproduce
+a removed triangle exactly. Verification also stopped searching the boundary
+list for every edge of every triangle; it consults the key set first, which
+the full mesher benefits from as well.
 
 ## 2026-09-15 — Mesh atoms merge to the meshing tolerance
 
