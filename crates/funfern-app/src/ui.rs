@@ -8,7 +8,7 @@ use crate::material_overlay::{
 use crate::recording::{self, DestinationRequest, RecordingEvent, RecordingSpec, VideoRecorder};
 use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, AreaProbeRecord, CurveProbeDisplay, CurveProbeInput,
-    CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldClock, FarFieldDisplay, FarFieldHandoff,
+    CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldDisplay, FarFieldHandoff, FarFieldHistory,
     FarFieldInput, FarFieldRecord, MAX_STEPS_PER_FRAME, PointProbeRecord, ProbeDisplay,
     PulseSettings, WaveDisplay, WaveGpuRequest, WaveTransfer,
 };
@@ -653,6 +653,10 @@ pub struct Playground {
     autosave_observed: TopologyDocument,
     autosave_due: Option<Instant>,
     probe_upload: Option<ProbeUpload>,
+    /// The upload before it, kept because the readback it issued is still in
+    /// flight when the next one is made, and the samples in it are the last of
+    /// the old mesh rather than anything the new one will record again.
+    probe_upload_previous: Option<ProbeUpload>,
     probe_clock_restarted: bool,
     /// Simulated time the far-field ring started recording from, or `None` when
     /// no recorder is running.
@@ -798,6 +802,7 @@ impl Default for Playground {
             autosave_observed: document,
             autosave_due: None,
             probe_upload: None,
+            probe_upload_previous: None,
             probe_clock_restarted: true,
             far_field_recording_from: None,
             frame_ms: 16.0,
@@ -6101,6 +6106,23 @@ impl Playground {
                 }
             } else {
                 let dt = candidate.operator.recommended_time_step();
+                // What the step counter of the generation about to start counts
+                // from. The wave readback is a frame or two behind what has been
+                // encoded, and `caught_up` above says the encoded count is the
+                // whole of it, so the solver's own tally is the one that keeps
+                // this clock from losing a few milliseconds per handoff. It is
+                // read before the upload, which resets it.
+                let time_offset = if candidate.fresh {
+                    0.0
+                } else {
+                    self.runtime
+                        .active()
+                        .map_or(self.sim_time_offset, |active| {
+                            self.sim_time_offset
+                                + request.stats().completed_steps() as f64
+                                    * active.operator.recommended_time_step()
+                        })
+                };
                 let upload = if candidate.fresh || self.runtime.active().is_none() {
                     request.replace_with_volume_sources(
                         assets,
@@ -6141,17 +6163,6 @@ impl Playground {
                 };
                 match upload {
                     Ok(()) => {
-                        let time_offset = if candidate.fresh {
-                            0.0
-                        } else {
-                            self.runtime
-                                .active()
-                                .map_or(self.sim_time_offset, |active| {
-                                    self.sim_time_offset
-                                        + display.completed_steps as f64
-                                            * active.operator.recommended_time_step()
-                                })
-                        };
                         self.handoff_upload = Some(Instant::now());
                         self.uploading = Some(Uploading {
                             token: candidate.bundle.token,
@@ -6444,14 +6455,16 @@ impl Playground {
         // The recorder's history is a time series at fixed world points, so a
         // new mesh over the same contour takes it over. Only a clock that
         // restarted, or a contour that moved, starts the delay window again.
-        let clock = FarFieldClock {
-            origin: self.sim_time_offset,
-            keep_history: !std::mem::take(&mut self.probe_clock_restarted),
+        let restarted = std::mem::take(&mut self.probe_clock_restarted);
+        let history = if restarted {
+            FarFieldHistory::Restart
+        } else {
+            FarFieldHistory::Keep
         };
-        match request.update_far_field(assets, commands, far.as_ref(), dt, clock) {
+        match request.update_far_field(assets, commands, far.as_ref(), dt, history) {
             Ok(FarFieldHandoff::Restarted) => {
                 self.far_field_trace = FarFieldTrace::default();
-                self.far_field_recording_from = Some(self.sim_time_offset);
+                self.far_field_recording_from = Some(self.simulated_time());
             }
             Ok(FarFieldHandoff::Off) => self.far_field_recording_from = None,
             Ok(FarFieldHandoff::Kept) => {}
@@ -6463,6 +6476,9 @@ impl Playground {
         // Recorded whatever happened: a rejected recorder setting is rejected
         // the same way every frame, and the readback filter below keys on these
         // revisions, so what the GPU actually holds is what is written down.
+        // A restarted clock disowns the run before it; anything else leaves the
+        // last upload addressable, for the readback still on its way here.
+        self.probe_upload_previous = (!restarted).then_some(self.probe_upload).flatten();
         self.probe_upload = Some(ProbeUpload {
             token: active.bundle.token,
             generation: request.generation(),
@@ -6482,6 +6498,7 @@ impl Playground {
         self.area_probe_traces.clear();
         self.far_field_trace = FarFieldTrace::default();
         self.probe_clock_restarted = true;
+        self.probe_upload_previous = None;
     }
     fn simulated_time(&self) -> f64 {
         let dt = self
@@ -6767,10 +6784,16 @@ impl Playground {
         revision: u64,
         recorded: impl Fn(&ProbeUpload) -> u64,
     ) -> bool {
-        self.probe_upload
-            .as_ref()
-            .is_some_and(|upload| upload.generation == generation && recorded(upload) == revision)
+        [&self.probe_upload, &self.probe_upload_previous]
+            .into_iter()
+            .flatten()
+            .any(|upload| upload.generation == generation && recorded(upload) == revision)
     }
+    /// Every recorder stamps its samples with the solver's own clock, which the
+    /// transfer carries into the buffers that replace it. That clock is already
+    /// the app's, and adding `sim_time_offset` to it counted the run so far a
+    /// second time — a jump the width of the previous mesh's whole lifetime at
+    /// every handoff, which is what put the holes in these traces.
     fn ingest_probes(&mut self, display: &ProbeDisplay) {
         if display.readbacks == self.probe_readback
             || !self.readback_is_current(display.generation, display.revision, |upload| {
@@ -6785,8 +6808,7 @@ impl Playground {
                 .probe_traces
                 .entry(ProbeId(record.probe_id))
                 .or_default();
-            let mut record = *record;
-            record.time += self.sim_time_offset;
+            let record = *record;
             if record.time > trace.last_time {
                 trace.last_time = record.time;
                 trace.samples.push_back(record);
@@ -6813,8 +6835,7 @@ impl Playground {
                     .curve_probe_traces
                     .entry(ProbeId(record.probe_id))
                     .or_default();
-                let mut record = record.clone();
-                record.time += self.sim_time_offset;
+                let record = record.clone();
                 if record.time > trace.last_time {
                     trace.last_time = record.time;
                     trace.records.push_back(record);
@@ -6835,8 +6856,7 @@ impl Playground {
                     .area_probe_traces
                     .entry(ProbeId(record.probe_id))
                     .or_default();
-                let mut record = *record;
-                record.time += self.sim_time_offset;
+                let record = *record;
                 if record.time > trace.last_time {
                     trace.last_time = record.time;
                     trace.records.push_back(record);
@@ -11315,11 +11335,15 @@ mod probe_interaction_tests {
             mesh_generation: 1,
         };
         state.probe_upload = Some(probe_upload(token, 1, 1));
+        // A recorder stamps the solver's clock, which the transfer carries from
+        // one generation into the next. `sim_time_offset` turns this
+        // generation's step count into that clock; adding it to a time already
+        // on it counts the run so far a second time.
         state.sim_time_offset = 4.0;
         state.ingest_probes(&ProbeDisplay {
             generation: 1,
             revision: 1,
-            records: vec![sample(0.5), sample(1.0)],
+            records: vec![sample(4.5), sample(5.0)],
             readbacks: 1,
         });
         let samples = |state: &Playground| -> Vec<f64> {

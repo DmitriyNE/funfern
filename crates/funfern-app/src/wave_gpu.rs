@@ -197,14 +197,20 @@ pub enum FarFieldHandoff {
     Restarted,
 }
 
-/// Where the far-field ring sits on the wave clock.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FarFieldClock {
-    /// Simulated time at the GPU's zero, so recorded times are the app's times.
-    pub origin: f64,
-    /// False when the clock itself restarted and the history is of another run.
-    pub keep_history: bool,
+/// Whether a recorder replacing another inherits what it recorded. The solver
+/// clock is carried across a transfer, so a ring only has to start over when
+/// the clock itself does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FarFieldHistory {
+    Keep,
+    Restart,
 }
+
+/// What an unwritten ring frame holds. A recorded time is never negative, and
+/// a comparison against a real number is one no compiler is free to fold away,
+/// which `w != w` is: under the fast-math the Metal backend compiles with, a
+/// NaN test silently becomes `false` and every unwritten frame reads as data.
+const FAR_FIELD_UNRECORDED: f32 = -1.0e30;
 
 /// The ring is a time series, not a step series: a frame is one bucket of the
 /// wave clock, so a mesh swap that moves the time step neither shifts the write
@@ -705,7 +711,7 @@ impl WaveGpuRequest {
         commands: &mut Commands,
         input: Option<&FarFieldInput>,
         time_step: f64,
-        clock: FarFieldClock,
+        history: FarFieldHistory,
     ) -> Result<FarFieldHandoff, String> {
         let Some(input) = input else {
             self.clear_far_field_buffers(assets, commands);
@@ -720,7 +726,6 @@ impl WaveGpuRequest {
             || input.delay_margin <= 0.0
             || !time_step.is_finite()
             || time_step <= 0.0
-            || !clock.origin.is_finite()
         {
             self.clear_far_field_buffers(assets, commands);
             return Err("Invalid far-field recorder settings".into());
@@ -774,13 +779,13 @@ impl WaveGpuRequest {
                 input.wave_speed as f32,
                 input.sample_spacing as f32,
                 input.delay_margin as f32,
-                clock.origin as f32,
+                0.0,
             ),
         };
         // The history is a record of the exterior at fixed world points, so a
         // handoff needs nothing from the old mesh: the stencils that read the
         // new one take over the ring the old one was filling.
-        let kept = clock.keep_history
+        let kept = history == FarFieldHistory::Keep
             && self
                 .far_field
                 .as_ref()
@@ -799,11 +804,15 @@ impl WaveGpuRequest {
         } else {
             self.clear_far_field_buffers(assets, commands);
             let raw = vec![
-                GpuProbeSample { values: Vec4::NAN };
+                GpuProbeSample {
+                    values: Vec4::new(0.0, 0.0, 0.0, FAR_FIELD_UNRECORDED),
+                };
                 FAR_FIELD_RING_FRAMES * FAR_FIELD_CONTOUR_POINTS
             ];
             let output = vec![
-                GpuProbeSample { values: Vec4::NAN };
+                GpuProbeSample {
+                    values: Vec4::new(0.0, 0.0, FAR_FIELD_UNRECORDED, 0.0),
+                };
                 FAR_FIELD_RING_FRAMES * FAR_FIELD_DIRECTIONS
             ];
             FarFieldBufferHandles {
@@ -1041,14 +1050,13 @@ impl WaveGpuRequest {
         dof_count: u32,
         transfer: Option<WaveTransferHandles>,
     ) {
-        self.clear_probe_buffers(assets, commands);
-        self.clear_curve_probe_buffers(assets, commands);
-        self.clear_area_probe_buffers(assets, commands);
-        // The far-field ring outlives the buffers it was sampled through: what
-        // it holds is the exterior at fixed world points, and `update_far_field`
-        // decides whether the next mesh inherits it. Nothing samples into it
-        // meanwhile, because a far-field pass is only ever encoded inside the
-        // step loop and no step is encoded until the handoff commits.
+        // Every recorder outlives the buffers it was sampled through. What they
+        // hold is the field at fixed world points on a clock the transfer
+        // carries across, so the readback that is already in flight still
+        // lands, and `update_*_probes` decides what the next mesh inherits.
+        // Nothing samples into them meanwhile, because a recorder pass is only
+        // ever encoded inside the step loop and no step is encoded until the
+        // handoff commits.
         let expects_transfer = transfer.is_some();
         if let Some(entity) = self.readback_entity.take() {
             commands.entity(entity).despawn();
@@ -2464,17 +2472,16 @@ fn receive_far_field_readback(
     let mut records = Vec::new();
     for frame in 0..FAR_FIELD_RING_FRAMES {
         let row = &samples[frame * FAR_FIELD_DIRECTIONS..(frame + 1) * FAR_FIELD_DIRECTIONS];
-        let Some(time) = row
-            .iter()
-            .map(|sample| sample.values.z)
-            .find(|time| time.is_finite())
-        else {
-            continue;
-        };
+        // One direction that could not read the whole contour is a frame that
+        // cannot be plotted: the pattern would have a hole in it.
         if row
             .iter()
             .any(|sample| !sample.values.is_finite() || sample.values.w < 0.5)
         {
+            continue;
+        }
+        let time = row[0].values.z;
+        if time < 0.0 || !time.is_finite() {
             continue;
         }
         records.push(FarFieldRecord {
@@ -4076,15 +4083,29 @@ mod tests {
         assert!(shader.contains("let age = delay / period;"));
         assert!(shader.contains("sample.z - dot(normal, ray) * sample.y / wave_speed"));
         assert!(shader.contains("amplitude * amplitude"));
-        assert!(shader.contains("bitcast<f32>(0x7fc00000u | (direction & 1u))"));
     }
 
     #[test]
-    fn far_field_shader_keys_its_ring_to_the_app_clock_and_recorded_times() {
+    fn far_field_validity_never_rests_on_a_nan_comparison() {
+        let shader = include_str!("far_field.wgsl");
+        // `w != w` is a NaN test, and these shaders compile under fast math,
+        // where it is folded to `false` and every unwritten frame reads as data.
+        assert!(!shader.contains("!= newer.w"));
+        assert!(!shader.contains("!= older.w"));
+        assert!(!shader.contains("recorded == recorded"));
+        assert!(shader.contains("const UNRECORDED: f32 = -1.0e30;"));
+        assert!(shader.contains("if newer.w < 0.0 || older.w < 0.0 {"));
+    }
+
+    #[test]
+    fn far_field_shader_keys_its_ring_to_the_solver_clock_and_recorded_times() {
         let shader = include_str!("far_field.wgsl");
         // The ring is a function of the clock, not of this generation's steps,
-        // which is what lets a new mesh keep writing into an old ring.
-        assert!(shader.contains("return control.projection.w + parameters.time_data.z"));
+        // which is what lets a new mesh keep writing into an old ring. That
+        // clock is the transferred one every other probe records against, and
+        // adding an offset of the app's own would count it twice.
+        assert!(shader.contains("return parameters.time_data.z - parameters.time_data.x;"));
+        assert!(!shader.contains("control.projection.w + parameters.time_data.z"));
         assert!(!shader.contains("completed % stride"));
         assert!(!shader.contains("let frame = (completed / stride) % frames;"));
         // And the projection reads by recorded time, so buckets filled at one
@@ -4209,15 +4230,12 @@ mod tests {
         let mut world = World::new();
         let mut assets = Assets::<ShaderBuffer>::default();
         let mut request = WaveGpuRequest::default();
-        let keeping = FarFieldClock {
-            origin: 0.0,
-            keep_history: true,
-        };
+        let keeping = FarFieldHistory::Keep;
         let mut update = |request: &mut WaveGpuRequest,
                           assets: &mut Assets<ShaderBuffer>,
                           input: &FarFieldInput,
                           time_step: f64,
-                          clock: FarFieldClock| {
+                          history: FarFieldHistory| {
             let mut queue = CommandQueue::default();
             let handoff = request
                 .update_far_field(
@@ -4225,7 +4243,7 @@ mod tests {
                     &mut Commands::new(&mut queue, &world),
                     Some(input),
                     time_step,
-                    clock,
+                    history,
                 )
                 .unwrap();
             queue.apply(&mut world);
@@ -4259,10 +4277,7 @@ mod tests {
                 &mut assets,
                 &input,
                 7.0e-4,
-                FarFieldClock {
-                    origin: 0.0,
-                    keep_history: false,
-                },
+                FarFieldHistory::Restart,
             ),
             FarFieldHandoff::Restarted
         );

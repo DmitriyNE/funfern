@@ -282,7 +282,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   change the time span. The widest view returns to Live automatically; Live can also
   be selected directly. Sampling follows
   solver time rather than browser frame rate. Definitions are saved and undoable;
-  recorded traces are transient.
+  recorded traces are transient. Every trace runs on the solver's own clock,
+  which a remesh carries across, so adaptation leaves the recording continuous
+  rather than stepping its time axis forward. Reset restarts that clock, and the
+  traces with it.
 - **Line probes:** place an independent straight sampling segment with two clicks.
   Drag either endpoint to reshape it or drag its body as one rigid object. The arrow
   shows the positive left normal; Flip direction reverses both the sampling order

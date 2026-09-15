@@ -138,6 +138,64 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — The solver clock is carried, so nothing may add to it
+
+Reported: the probe traces gained holes at every remesh, and the far field still
+never appeared under adaptation. One bug behind both, and it was mine to find in
+the shader I had not read closely enough.
+
+`wave_transfer_new.wgsl:170` writes the old generation's `time_data.z` into the
+buffers that replace it - only the step counter restarts. Every recorder stamps
+that clock, so its samples are already on the app's timeline, which is what
+`probe_shader_uses_the_continuous_transferred_solver_clock` has been saying all
+along. `ingest_probes` added `sim_time_offset` on top of it, counting the run so
+far a second time. The gap at a handoff is therefore the whole lifetime of the
+mesh that just ended, not anything the handoff costs: measured on the autosave,
+a trace running to 0.746 s resumed at 1.832 s, and the next handoff moved it on
+by another 0.724 s.
+
+The far field had the same fault, introduced by me: I passed `sim_time_offset`
+as the ring's clock origin, so every handoff jumped the ring about a second
+forward and left 54 empty buckets inside a 205-bucket window - then 97, then 111.
+A single hole invalidates every direction that reaches through it, permanently,
+which is why nothing was ever plotted. The ring itself was being kept at all 26
+handoffs of the run. The origin is gone; `state_time` is the solver's clock, the
+same expression probe.wgsl uses.
+
+Two more things the measurement turned up:
+
+- `newer.w != newer.w` never fired. These shaders compile under fast math, where
+  a NaN self-comparison is folded to `false`, so every unwritten frame read as
+  data and the rings came back flagged valid with NaN amplitudes - only the
+  readback's `is_finite` filter was rejecting them. Both rings carry a finite
+  `-1.0e30` sentinel now and the guard is a comparison against a real number.
+- `sim_time_offset` was computed from the wave readback's step count, one or two
+  frames behind what had been encoded - 1166 against 1176 - losing about 8 ms of
+  clock per handoff. It comes from the solver's own tally now, read before the
+  upload resets it. It is still what turns a step count into a time; it is no
+  longer added to a time.
+
+`install` no longer drops the point, curve, and area rings either, for the same
+reason it stopped dropping the far field's: the readback already in flight still
+lands, and the app keeps the previous upload addressable so those last samples
+are ingested rather than filtered out as stale. Worst hole in a 30 s run with 25
+adaptations: 0.71 s before, 33 ms after, most under 20 ms.
+
+Measured with the app itself rather than reasoned about - the autosave loaded, a
+point probe injected at startup, the contour ring temporarily read back and its
+bucket coverage printed. That is what showed the ring was being kept while the
+window had holes in it, which no amount of reading the diff was going to.
+
+Left open: the samples between the last readback issued and the freeze still go
+with the ring when the commit rebuilds it, 1 to 4 of them at 120 Hz. Closing it
+needs the point, curve, and area rings keyed to the clock the way the far
+field's now is, since their cursor is still a generation-local step count.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked`, `cargo build --release -p
+funfern-app --locked`, the shader validated with naga 29, and a 30 s run of the
+app against the autosave with adaptation on.
+
 ## 2026-09-15 — The far-field recording outlives the mesh it was read through
 
 Reported as no handoff procedure: the plot restarts on every remesh, and with

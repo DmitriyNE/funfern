@@ -24,9 +24,14 @@ struct FarFieldStencil {
 struct FarFieldControl {
     // Sample period, ring frames, contour points, directions.
     sampling: vec4<f32>,
-    // Exterior speed, contour spacing, delay margin, clock origin.
+    // Exterior speed, contour spacing, delay margin, unused.
     projection: vec4<f32>,
 }
+
+// What an unwritten frame holds. A recorded time is never negative, so this is
+// a comparison against a real number rather than a NaN test, which the fast
+// math these shaders compile under is free to fold away.
+const UNRECORDED: f32 = -1.0e30;
 
 struct ProbeSample {
     values: vec4<f32>,
@@ -47,10 +52,11 @@ fn ring_frame(frame: u32, age: u32, frames: u32) -> u32 {
     return (frame + frames - (age % frames)) % frames;
 }
 
-// Time of the state the solver has just produced, on the app's clock rather
-// than this generation's, so a ring carried across a mesh swap stays ordered.
+// Time of the state the solver has just produced. The transfer carries this
+// clock into the buffers that replace it, so it spans the mesh swaps the ring
+// spans and needs no offset of its own.
 fn state_time() -> f32 {
-    return control.projection.w + parameters.time_data.z - parameters.time_data.x;
+    return parameters.time_data.z - parameters.time_data.x;
 }
 
 // A frame is one bucket of that clock. The first step to reach a bucket records
@@ -69,7 +75,7 @@ fn bucket_frame(bucket: f32, frames: u32) -> u32 {
 // picks irrelevant: it only has to be dense enough to visit every bucket, and
 // the clock it estimates need not be the clock recorded here.
 fn bucket_recorded(recorded: f32, bucket: f32) -> bool {
-    return recorded == recorded && bucket_of(recorded) == bucket;
+    return recorded > UNRECORDED * 0.5 && bucket_of(recorded) == bucket;
 }
 
 @compute @workgroup_size(64)
@@ -145,7 +151,7 @@ fn project_directions(@builtin(global_invocation_id) invocation: vec3<u32>) {
         var newer = contour_history[ring_frame(current_frame, index, frames) * point_count + point].values;
         var older = contour_history[ring_frame(current_frame, index + 1u, frames) * point_count + point].values;
         for (var step = 0u; step < 4u; step += 1u) {
-            if newer.w != newer.w || older.w != older.w {
+            if newer.w < 0.0 || older.w < 0.0 {
                 break;
             }
             if retarded > newer.w && index > 0u {
@@ -158,9 +164,9 @@ fn project_directions(@builtin(global_invocation_id) invocation: vec3<u32>) {
             newer = contour_history[ring_frame(current_frame, index, frames) * point_count + point].values;
             older = contour_history[ring_frame(current_frame, index + 1u, frames) * point_count + point].values;
         }
-        // Unwritten frames carry NaN, and a frame the search could not bracket
-        // is a lap-old leftover in a ring that has not filled yet.
-        if newer.w != newer.w || older.w != older.w
+        // A frame the search could not bracket is either unwritten or a lap-old
+        // leftover, both of which mean the ring does not reach back this far.
+        if newer.w < 0.0 || older.w < 0.0
             || retarded > newer.w + period || retarded < older.w - period {
             valid = false;
             continue;
@@ -176,9 +182,7 @@ fn project_directions(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if valid {
         directional_history[slot].values = vec4<f32>(amplitude, amplitude * amplitude, far_time, 1.0);
     } else {
-        // WebGPU rejects a constant expression whose value is NaN. Keep the
-        // readback sentinel, but construct it from the runtime direction.
-        let nan = bitcast<f32>(0x7fc00000u | (direction & 1u));
-        directional_history[slot].values = vec4<f32>(nan, nan, far_time, 0.0);
+        // The last component is what the readback reads as "do not plot this".
+        directional_history[slot].values = vec4<f32>(0.0, 0.0, far_time, 0.0);
     }
 }
