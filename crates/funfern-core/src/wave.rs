@@ -347,7 +347,15 @@ impl Default for PointSource {
             position: Point2::new(-0.45, 0.0),
             width: 0.06,
             region: BACKGROUND_REGION,
-            signal: TimeSignal::harmonic(0.0, 18.0, 2.5, 0.0),
+            // A quarter turn, not zero. Switching a sinusoid on at t = 0 leaves
+            // the field a mean velocity of `amplitude * cos(phase) / omega`,
+            // because that is what the forcing's running integral keeps. In an
+            // open domain it drains through the boundary; a region sealed by
+            // reflecting walls has nowhere to put it, so its level rises without
+            // bound for as long as the run lasts. A cosine start carries no such
+            // impulse and looks the same. Any other phase the user picks does
+            // carry one, and that is theirs to choose.
+            signal: TimeSignal::harmonic(0.0, 18.0, 2.5, std::f64::consts::FRAC_PI_2),
         }
     }
 }
