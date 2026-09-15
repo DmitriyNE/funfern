@@ -38,6 +38,7 @@ impl AcceptedTopology {
         mesh_generation: u64,
         authored: TopologyScene,
         compiled: CompiledTopologyScene,
+        coarsening: AtomCoarsening,
     ) -> Result<Self, String> {
         let topology_revision = compiled.topology.revision;
         let assignments = authored
@@ -58,6 +59,14 @@ impl AcceptedTopology {
         {
             return Err("Compiled topology does not match its authored scene".into());
         }
+        // The compiled plan carries one atom per arrangement segment; the mesh
+        // is built from atoms merged to the meshing tolerance.
+        let plan = compiled
+            .plan
+            .coarsened(&compiled.topology, coarsening)
+            .map_err(|issue| {
+                format!("Compiled topology could not be prepared for meshing: {issue}")
+            })?;
         Ok(Self {
             token: TopologyToken {
                 document_revision,
@@ -66,7 +75,7 @@ impl AcceptedTopology {
             },
             authored: Arc::new(authored),
             snapshot: Arc::new(compiled.topology),
-            plan: Arc::new(compiled.plan),
+            plan: Arc::new(plan),
         })
     }
 
@@ -235,8 +244,23 @@ impl TopologyPreparationJob {
         let same_authored_scene = previous
             .as_ref()
             .is_some_and(|previous| *previous.bundle.authored == document.model.accepted);
+        let coarsening = AtomCoarsening::from_meshing(options);
         let bundle = if same_authored_scene {
             let previous = previous.as_ref().unwrap();
+            // The plan's atoms depend on the meshing options, so a changed
+            // resolution re-derives them from the same compiled scene.
+            let plan = if previous.meshing == options {
+                previous.bundle.plan.clone()
+            } else {
+                Arc::new(
+                    compiled
+                        .plan
+                        .coarsened(&compiled.topology, coarsening)
+                        .map_err(|issue| {
+                            format!("Compiled topology could not be prepared for meshing: {issue}")
+                        })?,
+                )
+            };
             Arc::new(AcceptedTopology {
                 token: TopologyToken {
                     document_revision,
@@ -245,7 +269,7 @@ impl TopologyPreparationJob {
                 },
                 authored: previous.bundle.authored.clone(),
                 snapshot: previous.bundle.snapshot.clone(),
-                plan: previous.bundle.plan.clone(),
+                plan,
             })
         } else {
             Arc::new(AcceptedTopology::new(
@@ -253,19 +277,21 @@ impl TopologyPreparationJob {
                 mesh_revision,
                 document.model.accepted.clone(),
                 compiled,
+                coarsening,
             )?)
         };
+        // Changed options re-derive the plan's atoms, so they are decided
+        // before the plans are compared; otherwise the comparison would read
+        // the re-atomised boundaries as moved geometry.
         let mesh_action = match previous.as_ref() {
             None => TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::DomainChanged),
+            Some(previous) if previous.meshing != options => TopologyMeshUpdateAction::FullRebuild(
+                TopologyFullRebuildReason::MeshingOptionsChanged,
+            ),
             Some(previous) => {
                 match topology_mesh_update_action(&previous.bundle.plan, &bundle.plan) {
                     TopologyMeshUpdateAction::Reuse if force_rebuild => {
                         TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::Requested)
-                    }
-                    TopologyMeshUpdateAction::Reuse if previous.meshing != options => {
-                        TopologyMeshUpdateAction::FullRebuild(
-                            TopologyFullRebuildReason::MeshingOptionsChanged,
-                        )
                     }
                     action => action,
                 }
@@ -1190,6 +1216,51 @@ mod tests {
         assert_eq!(bounded.commit_ready(token).unwrap().timing.slices, calls);
     }
 
+    /// The accepted bundle carries the plan the mesh is built from, whose atoms
+    /// merge arrangement segments within the meshing tolerance; coarser options
+    /// give fewer atoms, and the editor's own compiled plan stays fine.
+    #[test]
+    fn the_accepted_plan_is_coarsened_to_the_meshing_options() {
+        let mut editor = TopologyEditor::default();
+        editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.3),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let atoms = |curve_tolerance: f64| {
+            let mut runtime = TopologyRuntime::default();
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    MeshingOptions {
+                        curve_tolerance,
+                        ..options()
+                    },
+                    true,
+                )
+                .unwrap();
+            assert_eq!(prepare(&mut runtime).unwrap(), token);
+            runtime
+                .commit_ready(token)
+                .unwrap()
+                .bundle
+                .plan
+                .boundaries
+                .len()
+        };
+        let fine = editor.compiled_accepted.plan.boundaries.len();
+        let (tight, loose) = (atoms(1.0e-6), atoms(1.0e-3));
+        assert!(tight <= fine, "{tight} atoms from {fine} segments");
+        assert!(
+            loose * 2 < tight,
+            "{loose} loose against {tight} tight atoms"
+        );
+    }
+
     /// A resolution change rebuilds the mesh although the plan is unchanged:
     /// the operator follows the new mesh and the running field crosses through
     /// a transfer map. The same options again are an ordinary reuse.
@@ -1317,7 +1388,16 @@ mod tests {
         let mut other = TopologyScene::default();
         other.geometry.domain.max_x = 1.5;
         let compiled = other.compile(4).unwrap();
-        assert!(AcceptedTopology::new(7, 1, authored, compiled).is_err());
+        assert!(
+            AcceptedTopology::new(
+                7,
+                1,
+                authored,
+                compiled,
+                AtomCoarsening::from_meshing(options())
+            )
+            .is_err()
+        );
     }
 
     #[test]

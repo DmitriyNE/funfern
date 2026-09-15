@@ -1545,11 +1545,12 @@ pub fn topology_mesh_update_action(
     if previous.junctions != next.junctions {
         return TopologyMeshUpdateAction::FullRebuild(Reason::TraceEquivalenceChanged);
     }
-    let same_geometry = previous
-        .boundaries
-        .iter()
-        .zip(&next.boundaries)
-        .all(|(a, b)| a.points == b.points && a.parameter == b.parameter)
+    let same_geometry = previous.boundaries.len() == next.boundaries.len()
+        && previous
+            .boundaries
+            .iter()
+            .zip(&next.boundaries)
+            .all(|(a, b)| a.points == b.points && a.parameter == b.parameter)
         && previous
             .vertices
             .iter()
@@ -1750,6 +1751,303 @@ impl TopologyMeshPlan {
         });
         let boundary = matches.next()?;
         matches.next().is_none().then_some(boundary)
+    }
+}
+
+/// How arrangement segments merge into mesh atoms. The tolerance is the chord
+/// deviation the mesher already promises for curves, and the cap keeps an atom
+/// no longer than the target edge, so subdividing an atom linearly, as the
+/// mesher and adaptation do, stays within that tolerance of the curve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AtomCoarsening {
+    pub tolerance: f64,
+    pub maximum_chord: f64,
+}
+
+impl AtomCoarsening {
+    pub fn from_meshing(options: super::MeshingOptions) -> Self {
+        Self {
+            tolerance: options.curve_tolerance,
+            maximum_chord: options.target_edge_length,
+        }
+    }
+
+    fn active(self) -> bool {
+        self.tolerance.is_finite()
+            && self.tolerance > 0.0
+            && self.maximum_chord.is_finite()
+            && self.maximum_chord > 0.0
+    }
+}
+
+/// The span or outer side an arrangement segment belongs to, independent of
+/// which face's side is being planned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum AtomKey {
+    Outer(crate::OuterSide),
+    Span(CurveSpanId),
+}
+
+impl AtomKey {
+    fn of(edge: &CompiledEdge) -> Self {
+        match edge.source {
+            CompiledEdgeSource::Outer(side) => Self::Outer(side),
+            CompiledEdgeSource::Curve(span) => Self::Span(span),
+        }
+    }
+}
+
+/// Whether every interior joint of `edges`, a run in increasing parameter
+/// order, lies within the tolerance of the chord from the run's start to its
+/// end, and the chord is no longer than the cap.
+fn chord_within(topology: &TopologySnapshot, edges: &[usize], coarsening: AtomCoarsening) -> bool {
+    let start = topology.edges[edges[0]].points[0];
+    let end = topology.edges[edges[edges.len() - 1]].points[1];
+    let chord = end - start;
+    let length_squared = chord.dot(chord);
+    if length_squared > coarsening.maximum_chord * coarsening.maximum_chord {
+        return false;
+    }
+    edges[..edges.len() - 1].iter().all(|&edge| {
+        let point = topology.edges[edge].points[1];
+        let offset = point - start;
+        let along = if length_squared > 0.0 {
+            (offset.dot(chord) / length_squared).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (offset - chord * along).norm() <= coarsening.tolerance
+    })
+}
+
+impl TopologyMeshPlan {
+    /// Merges runs of arrangement segments into mesh atoms. The arrangement
+    /// samples curves finely enough to intersect them robustly, and this plan
+    /// used every one of those segments as a boundary edge, which pinned the
+    /// boundary resolution and the time step far below the target. Runs merge
+    /// while their joints stay within the chord tolerance and the chord under
+    /// the cap; they never cross an authored vertex, a span boundary, an outer
+    /// corner, a change of the faces or behaviour beside them, or any trace
+    /// vertex shared with another source. Both sides of a span merge over the
+    /// same runs, so paired traces stay paired. Face cycles, boundary atoms and
+    /// trace vertices are rewritten consistently; junctions are unchanged.
+    pub fn coarsened(
+        &self,
+        topology: &TopologySnapshot,
+        coarsening: AtomCoarsening,
+    ) -> Result<Self, TopologyMeshPlanError> {
+        if !coarsening.active() {
+            return Ok(self.clone());
+        }
+        let assigned = topology
+            .faces
+            .iter()
+            .map(|face| (face.id, self.region_for_face(face.id)))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut protected = BTreeSet::new();
+        for vertex in &topology.vertices {
+            if vertex.authored.is_some() {
+                protected.extend(vertex.traces.iter().map(|trace| trace.id));
+            }
+        }
+        let mut keys_by_trace = BTreeMap::<TraceVertexId, BTreeSet<AtomKey>>::new();
+        for edge in &topology.edges {
+            for traces in edge.traces {
+                for id in [traces.left, traces.right] {
+                    keys_by_trace
+                        .entry(id)
+                        .or_default()
+                        .insert(AtomKey::of(edge));
+                }
+            }
+        }
+        protected.extend(
+            keys_by_trace
+                .iter()
+                .filter(|(_, keys)| keys.len() > 1)
+                .map(|(id, _)| *id),
+        );
+
+        let mut by_key = BTreeMap::<AtomKey, Vec<usize>>::new();
+        for (index, edge) in topology.edges.iter().enumerate() {
+            by_key.entry(AtomKey::of(edge)).or_default().push(index);
+        }
+        let signature = |index: usize| {
+            let edge = &topology.edges[index];
+            (
+                edge.left,
+                edge.right,
+                effective_curve_behavior(edge, &assigned),
+            )
+        };
+        let mut runs: Vec<Vec<usize>> = vec![];
+        for (_, mut edges) in by_key {
+            edges.sort_by(|a, b| {
+                topology.edges[*a].parameter[0].total_cmp(&topology.edges[*b].parameter[0])
+            });
+            let mut start = 0;
+            while start < edges.len() {
+                let mut end = start;
+                while end + 1 < edges.len() {
+                    let joint = &topology.edges[edges[end]];
+                    let next = &topology.edges[edges[end + 1]];
+                    let continues = joint.parameter[1] == next.parameter[0]
+                        && signature(edges[end]) == signature(edges[end + 1])
+                        && !protected.contains(&joint.traces[1].left)
+                        && !protected.contains(&joint.traces[1].right);
+                    if !continues || !chord_within(topology, &edges[start..=end + 1], coarsening) {
+                        break;
+                    }
+                    end += 1;
+                }
+                runs.push(edges[start..=end].to_vec());
+                start = end + 1;
+            }
+        }
+        runs.sort_by_key(|run| run.iter().copied().min());
+        let mut run_of_edge = vec![usize::MAX; topology.edges.len()];
+        for (index, run) in runs.iter().enumerate() {
+            for &edge in run {
+                run_of_edge[edge] = index;
+            }
+        }
+
+        let mut boundaries = vec![];
+        for run in &runs {
+            let first = &topology.edges[run[0]];
+            let last = &topology.edges[run[run.len() - 1]];
+            let side = |face: FaceId| assigned.get(&face).copied().flatten();
+            let points = [first.points[0], last.points[1]];
+            let parameter = [first.parameter[0], last.parameter[1]];
+            match first.source {
+                CompiledEdgeSource::Outer(outer) => {
+                    if let Some(region) = side(first.left) {
+                        boundaries.push(PlannedBoundaryEdge {
+                            source: PlannedBoundarySource::Outer(outer),
+                            behavior: None,
+                            face: first.left,
+                            region,
+                            traces: [first.traces[0].left, last.traces[1].left],
+                            points,
+                            parameter,
+                        });
+                    }
+                }
+                CompiledEdgeSource::Curve(span) => {
+                    let curve = first
+                        .curve
+                        .ok_or(TopologyMeshPlanError::MissingCurve(span))?;
+                    let behavior = effective_curve_behavior(first, &assigned);
+                    if let Some(region) = side(first.left) {
+                        boundaries.push(PlannedBoundaryEdge {
+                            source: PlannedBoundarySource::Curve {
+                                curve,
+                                span,
+                                side: CurveTraceSide::Left,
+                            },
+                            behavior,
+                            face: first.left,
+                            region,
+                            traces: [first.traces[0].left, last.traces[1].left],
+                            points,
+                            parameter,
+                        });
+                    }
+                    if let Some(region) = side(first.right)
+                        && (behavior != Some(SpanBehavior::Transmitting)
+                            || first.right != first.left)
+                    {
+                        boundaries.push(PlannedBoundaryEdge {
+                            source: PlannedBoundarySource::Curve {
+                                curve,
+                                span,
+                                side: CurveTraceSide::Right,
+                            },
+                            behavior,
+                            face: first.right,
+                            region,
+                            traces: [last.traces[1].right, first.traces[0].right],
+                            points: [last.points[1], first.points[0]],
+                            parameter: [last.parameter[1], first.parameter[0]],
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut domains = Vec::with_capacity(self.domains.len());
+        for domain in &self.domains {
+            let mut cycles = Vec::with_capacity(domain.steps.len());
+            let mut steps = Vec::with_capacity(domain.steps.len());
+            for cycle in &domain.steps {
+                let key = |step: &PlannedFaceStep| {
+                    let side = match step.boundary.source {
+                        PlannedBoundarySource::Outer(_) => None,
+                        PlannedBoundarySource::Curve { side, .. } => Some(side),
+                    };
+                    (run_of_edge[step.edge], side)
+                };
+                let count = cycle.len();
+                if count == 0 {
+                    return Err(TopologyMeshPlanError::BrokenCycle(domain.face));
+                }
+                // Start where a run begins so a run straddling the cycle's
+                // first step is not cut in two.
+                let rotation = (0..count)
+                    .find(|&index| key(&cycle[index]) != key(&cycle[(index + count - 1) % count]))
+                    .unwrap_or(0);
+                let mut merged: Vec<PlannedFaceStep> = vec![];
+                for offset in 0..count {
+                    let step = &cycle[(rotation + offset) % count];
+                    match merged.last_mut() {
+                        Some(last) if key(last) == key(step) => {
+                            last.boundary.traces[1] = step.boundary.traces[1];
+                            last.boundary.points[1] = step.boundary.points[1];
+                            last.boundary.parameter[1] = step.boundary.parameter[1];
+                        }
+                        _ => merged.push(PlannedFaceStep {
+                            edge: runs[run_of_edge[step.edge]].iter().copied().min().unwrap(),
+                            boundary: step.boundary,
+                        }),
+                    }
+                }
+                for pair in 0..merged.len() {
+                    let next = (pair + 1) % merged.len();
+                    if merged[pair].boundary.traces[1] != merged[next].boundary.traces[0] {
+                        return Err(TopologyMeshPlanError::BrokenCycle(domain.face));
+                    }
+                }
+                cycles.push(merged.iter().map(|step| step.boundary.traces[0]).collect());
+                steps.push(merged);
+            }
+            domains.push(PlannedFaceDomain {
+                face: domain.face,
+                region: domain.region,
+                cycles,
+                steps,
+            });
+        }
+
+        let used = domains
+            .iter()
+            .flat_map(|domain| domain.cycles.iter().flatten().copied())
+            .chain(boundaries.iter().flat_map(|boundary| boundary.traces))
+            .collect::<BTreeSet<_>>();
+        let vertices = self
+            .vertices
+            .iter()
+            .copied()
+            .filter(|vertex| used.contains(&vertex.id))
+            .collect();
+        Ok(Self {
+            geometry_revision: self.geometry_revision,
+            domain: self.domain,
+            vertices,
+            junctions: self.junctions.clone(),
+            domains,
+            boundaries,
+        })
     }
 }
 
@@ -2033,6 +2331,261 @@ mod tests {
             .sum()
     }
 
+    fn rounded_hole_topology(behavior: SpanBehavior) -> TopologySnapshot {
+        let spline = PeriodicCubicSpline::rounded(Point2::new(0.1, -0.05), 0.3);
+        let curve = TopologyCurve::new(
+            CurveId(4),
+            CurveSpline::Closed(spline),
+            spans(40, 8, behavior),
+        )
+        .unwrap();
+        compile_topology(
+            &TopologyGeometry {
+                curves: vec![curve],
+                ..TopologyGeometry::default()
+            },
+            19,
+        )
+        .unwrap()
+    }
+
+    /// Largest distance from the arrangement's own sample points inside an
+    /// atom's parameter range to the atom's chord.
+    fn chord_deviation(topology: &TopologySnapshot, atom: &PlannedBoundaryEdge) -> f64 {
+        let [a, b] = atom.parameter;
+        let (low, high) = (a.min(b), a.max(b));
+        let chord = atom.points[1] - atom.points[0];
+        let length_squared = chord.dot(chord);
+        topology
+            .edges
+            .iter()
+            .filter(|edge| match atom.source {
+                PlannedBoundarySource::Outer(side) => {
+                    edge.source == CompiledEdgeSource::Outer(side)
+                }
+                PlannedBoundarySource::Curve { span, .. } => {
+                    edge.source == CompiledEdgeSource::Curve(span)
+                }
+            })
+            .filter(|edge| {
+                edge.parameter[0] >= low - 1.0e-12 && edge.parameter[1] <= high + 1.0e-12
+            })
+            .flat_map(|edge| edge.points)
+            .map(|point| {
+                let offset = point - atom.points[0];
+                let along = (offset.dot(chord) / length_squared).clamp(0.0, 1.0);
+                (offset - chord * along).norm()
+            })
+            .fold(0.0, f64::max)
+    }
+
+    /// Number of arrangement segments an atom covers; more than one means the
+    /// atom is a merged run, which is what the chord cap bounds.
+    fn segments_in(topology: &TopologySnapshot, atom: &PlannedBoundaryEdge) -> usize {
+        let [a, b] = atom.parameter;
+        let (low, high) = (a.min(b), a.max(b));
+        topology
+            .edges
+            .iter()
+            .filter(|edge| match atom.source {
+                PlannedBoundarySource::Outer(side) => {
+                    edge.source == CompiledEdgeSource::Outer(side)
+                }
+                PlannedBoundarySource::Curve { span, .. } => {
+                    edge.source == CompiledEdgeSource::Curve(span)
+                }
+            })
+            .filter(|edge| {
+                edge.parameter[0] >= low - 1.0e-12 && edge.parameter[1] <= high + 1.0e-12
+            })
+            .count()
+    }
+
+    /// Traces of authored vertices that no atom of the plan ends at.
+    fn unused_authored_traces(
+        topology: &TopologySnapshot,
+        plan: &TopologyMeshPlan,
+    ) -> BTreeSet<TraceVertexId> {
+        let endpoints = plan
+            .boundaries
+            .iter()
+            .flat_map(|boundary| boundary.traces)
+            .collect::<BTreeSet<_>>();
+        topology
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.authored.is_some())
+            .flat_map(|vertex| vertex.traces.iter().map(|trace| trace.id))
+            .filter(|trace| !endpoints.contains(trace))
+            .collect()
+    }
+
+    fn region_areas(mesh: &TriMesh) -> BTreeMap<RegionId, f64> {
+        let mut areas = BTreeMap::new();
+        for triangle in &mesh.triangles {
+            let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+            *areas.entry(triangle.region).or_insert(0.0) += (b - a).cross(c - a) * 0.5;
+        }
+        areas
+    }
+
+    /// The arrangement cuts a curve into segments fine enough to intersect it
+    /// robustly; the mesh plan merges them back into atoms within the curve
+    /// tolerance. Both sides of a separated span merge over the same runs, the
+    /// face cycles stay continuous, and the mesh keeps its region areas while
+    /// its shortest boundary edge and the solver's time step grow several times.
+    #[test]
+    fn coarsening_merges_arrangement_segments_within_the_curve_tolerance() {
+        let topology = rounded_hole_topology(SpanBehavior::REFLECTING);
+        let assignments = assign_each_face(&topology);
+        let fine = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        let coarsening = AtomCoarsening {
+            tolerance: 5.0e-4,
+            maximum_chord: 0.15,
+        };
+        let coarse = fine.coarsened(&topology, coarsening).unwrap();
+        let curve_atoms = |plan: &TopologyMeshPlan| {
+            plan.boundaries
+                .iter()
+                .filter(|boundary| matches!(boundary.source, PlannedBoundarySource::Curve { .. }))
+                .count()
+        };
+        assert!(
+            curve_atoms(&fine) >= 4 * curve_atoms(&coarse),
+            "{} fine against {} coarse atoms",
+            curve_atoms(&fine),
+            curve_atoms(&coarse)
+        );
+        let mut merged_atoms = 0;
+        for atom in &coarse.boundaries {
+            assert!(chord_deviation(&topology, atom) <= coarsening.tolerance + 1.0e-12);
+            if segments_in(&topology, atom) > 1 {
+                merged_atoms += 1;
+                assert!(
+                    (atom.points[1] - atom.points[0]).norm() <= coarsening.maximum_chord + 1.0e-12
+                );
+            }
+        }
+        assert!(merged_atoms > 0);
+        assert_eq!(
+            unused_authored_traces(&topology, &coarse),
+            unused_authored_traces(&topology, &fine)
+        );
+        let ranges = |side: CurveTraceSide| {
+            coarse
+                .boundaries
+                .iter()
+                .filter(|boundary| {
+                    matches!(boundary.source, PlannedBoundarySource::Curve { side: candidate, .. } if candidate == side)
+                })
+                .map(|boundary| {
+                    let [a, b] = boundary.parameter;
+                    (a.min(b).to_bits(), a.max(b).to_bits())
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        assert!(!ranges(CurveTraceSide::Left).is_empty());
+        assert_eq!(ranges(CurveTraceSide::Left), ranges(CurveTraceSide::Right));
+        for domain in &coarse.domains {
+            for cycle in &domain.steps {
+                for (index, step) in cycle.iter().enumerate() {
+                    let next = &cycle[(index + 1) % cycle.len()];
+                    assert_eq!(step.boundary.traces[1], next.boundary.traces[0]);
+                    assert!(coarse.boundaries.contains(&step.boundary));
+                }
+            }
+        }
+        assert_eq!(
+            topology_mesh_update_action(&coarse, &coarse),
+            TopologyMeshUpdateAction::Reuse
+        );
+
+        let options = super::super::MeshingOptions {
+            target_edge_length: 0.15,
+            curve_tolerance: 5.0e-4,
+            minimum_angle_degrees: 12.0,
+            max_vertices: 40_000,
+            max_triangles: 80_000,
+            max_refinement_steps: 40_000,
+        };
+        let fine_mesh = mesh_topology_plan(&fine, 78, options).unwrap();
+        let coarse_mesh = mesh_topology_plan(&coarse, 79, options).unwrap();
+        for (region, area) in region_areas(&fine_mesh) {
+            assert!((region_areas(&coarse_mesh)[&region] - area).abs() < 2.0e-3);
+        }
+        assert!(coarse_mesh.boundary_edges.len() * 2 < fine_mesh.boundary_edges.len());
+        let scene = crate::Scene {
+            regions: assignments
+                .iter()
+                .map(|assignment| crate::Region {
+                    id: assignment.region.unwrap(),
+                    material: crate::DEFAULT_MATERIAL,
+                    frame: crate::MaterialFrame::world(),
+                })
+                .collect(),
+            ..crate::Scene::default()
+        };
+        let time_step = |plan: &TopologyMeshPlan, mesh: &TriMesh| {
+            crate::QuadraticWaveOperator::assemble_topology(
+                mesh,
+                plan,
+                crate::TopologyWaveModel::from_scene(&scene),
+            )
+            .unwrap()
+            .recommended_time_step()
+        };
+        let (fine_step, coarse_step) = (
+            time_step(&fine, &fine_mesh),
+            time_step(&coarse, &coarse_mesh),
+        );
+        assert!(
+            coarse_step > 3.0 * fine_step,
+            "time step {fine_step:.3e} fine against {coarse_step:.3e} coarse"
+        );
+    }
+
+    /// Runs never cross an authored vertex, so a junction keeps every sector
+    /// trace as an atom endpoint, and both faces of a transmitting divider still
+    /// share one chain per merged atom.
+    #[test]
+    fn coarsening_keeps_junctions_and_shared_transmitting_chains() {
+        let topology = t_junction_topology();
+        let assignments = assign_each_face(&topology);
+        let fine = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        let coarse = fine
+            .coarsened(
+                &topology,
+                AtomCoarsening {
+                    tolerance: 1.0e-3,
+                    maximum_chord: 0.35,
+                },
+            )
+            .unwrap();
+        // Coarsening loses no authored trace the fine plan used; sector traces
+        // the fine plan never referenced stay unreferenced.
+        assert_eq!(
+            unused_authored_traces(&topology, &coarse),
+            unused_authored_traces(&topology, &fine)
+        );
+        assert!(coarse.boundaries.len() <= fine.boundaries.len());
+        assert_eq!(coarse.junctions, fine.junctions);
+        for atom in &coarse.boundaries {
+            if segments_in(&topology, atom) > 1 {
+                assert!((atom.points[1] - atom.points[0]).norm() <= 0.35 + 1.0e-12);
+            }
+        }
+        let mesh = mesh_topology_plan(&coarse, 80, mesh_options()).unwrap();
+        assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9);
+        assert_eq!(
+            mesh.triangles
+                .iter()
+                .map(|triangle| triangle.region)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
+    }
+
     #[test]
     fn topology_mesher_builds_the_empty_domain_with_trace_lineage() {
         let topology = compile_topology(&TopologyGeometry::default(), 14).unwrap();
@@ -2182,6 +2735,23 @@ mod tests {
 
     #[test]
     fn topology_mesher_handles_an_outer_to_outer_divider_and_t_junction() {
+        let topology = t_junction_topology();
+        assert_eq!(topology.faces.len(), 3);
+        let mesh = mesh_snapshot(&topology, &assign_each_face(&topology));
+        assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9);
+        assert_eq!(
+            mesh.triangles
+                .iter()
+                .map(|triangle| triangle.region)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
+    }
+
+    /// A transmitting divider from the left to the right outer side with a
+    /// branch from the bottom side meeting it at an authored junction.
+    fn t_junction_topology() -> TopologySnapshot {
         let bottom = TopologyVertexId(10);
         let left = TopologyVertexId(11);
         let right = TopologyVertexId(12);
@@ -2213,7 +2783,7 @@ mod tests {
         .unwrap();
         branch.nodes[0].vertex = Some(bottom);
         branch.nodes[1].vertex = Some(center);
-        let topology = compile_topology(
+        compile_topology(
             &TopologyGeometry {
                 curves: vec![horizontal, branch],
                 vertices: vec![
@@ -2247,18 +2817,7 @@ mod tests {
             },
             18,
         )
-        .unwrap();
-        assert_eq!(topology.faces.len(), 3);
-        let mesh = mesh_snapshot(&topology, &assign_each_face(&topology));
-        assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9);
-        assert_eq!(
-            mesh.triangles
-                .iter()
-                .map(|triangle| triangle.region)
-                .collect::<BTreeSet<_>>()
-                .len(),
-            3
-        );
+        .unwrap()
     }
 
     #[test]

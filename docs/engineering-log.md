@@ -81,14 +81,12 @@ Longer-standing work:
   on 2026-09-15 into the isoparametric effort (plan §10), where curvature is
   available exactly; keep examples on reflecting or first-order curved faces
   until then.
-- [ ] Decouple the mesh plan's boundary atoms from the arrangement's sampling
-  density. Every curved span is cut into segments about 7e-3 long by the
-  intersection sampler, the mesher uses each as a boundary edge, and the time
-  step follows: on a single-hole scene at target edge 0.15, coarsening the
-  sampling to the meshing tolerance raised the time step from 1.1e-3 to 1.0e-2
-  while the interior mesh was unchanged. AMR subdivides atoms linearly, so
-  coarser atoms need spline evaluation at atom parameters; this shares its
-  groundwork with coordinate repair.
+- [x] Decouple the mesh plan's boundary atoms from the arrangement's sampling
+  density (2026-09-15, `TopologyMeshPlan::coarsened`). Atoms are merged runs of
+  arrangement segments within the meshing curve tolerance and under the target
+  edge; linear subdivision inside an atom therefore stays within that tolerance
+  of the curve, so no spline evaluation was needed. Coordinate repair will pair
+  atoms between plans by span and parameter range.
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
 - [ ] Decide whether the load-compatible closed-wall role still warrants assigned
@@ -117,6 +115,50 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Mesh atoms merge to the meshing tolerance
+
+The arrangement samples every curve to a chord deviation of about 5e-5 so it
+can intersect curves robustly, and the mesh plan took each of those segments as
+an immutable atom: one boundary edge per segment, 256 of them around a single
+hole, each about 7e-3 long against a target edge of 0.15. The time step
+followed the shortest edge, so every curved scene ran several times slower than
+its interior mesh warranted.
+
+`TopologyMeshPlan::coarsened(topology, AtomCoarsening)` now derives the plan the
+mesh is built from. It groups arrangement segments by span or outer side, sorts
+them by parameter, and merges greedy runs while every joint stays within the
+chord tolerance of the run's chord and the chord stays under the cap; both come
+from the meshing options, the curve tolerance and the target edge. A run never
+crosses an authored vertex's traces, a span boundary, a change of the faces or
+behaviour beside the segment, or any trace vertex shared with another source,
+so junctions, T-junctions, crossings, knots and outer corners all keep their
+atoms. Segmentation is decided once per span in parameter order, so the left
+and right traces of a separated span merge over identical runs and stay paired.
+Face cycles are re-derived by merging consecutive steps that fall in one run,
+rotated so a run straddling the cycle's first step is not cut, and their
+continuity is checked; boundary atoms and trace vertices are rebuilt to match,
+and the merged step keeps the smallest segment index of its run as the key that
+lets both faces of a transmitting divider share one chain.
+
+The accepted bundle's plan is the coarsened one, derived with the request's
+options, and re-derived from the same compiled scene when only the options
+change; the editor's compiled plan stays fine. The reuse decision now checks
+the options before comparing plans, since re-atomised boundaries would
+otherwise read as moved geometry, and the geometry comparison requires equal
+atom counts. The mesher was already splitting each atom into pieces no longer
+than the target edge by linear subdivision, so coarse atoms cost no geometric
+fidelity beyond the tolerance the mesher already promised.
+
+Tests: on a rounded separated loop the coarse plan has a quarter of the curve
+atoms, every atom's arrangement points lie within the tolerance of its chord,
+both sides share the same parameter ranges, the cycles are continuous and the
+atoms match the steps, the coarse mesh keeps every region's area to 2e-3 with
+half the boundary edges, and the solver's time step is more than three times
+larger. On the outer-to-outer divider with a T-junction the coarse plan loses
+no authored trace the fine plan used and meshes to the same three regions.
+Adaptation refines and coarsens on a coarsened plan with its coverage and trace
+checks intact, and the runtime test shows coarser options yielding fewer atoms.
 
 ## 2026-09-15 — Assembly and the transfer map yield between frames
 

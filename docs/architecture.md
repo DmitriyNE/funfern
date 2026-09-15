@@ -1133,8 +1133,19 @@ skipped. Capacity or topology-change exhaustion publishes a valid partial result
 with an explicit limit report; malformed input and total work exhaustion discard
 the candidate.
 
-For a unified topology plan, each sampled `PlannedBoundaryEdge` is the immutable
-geometric atom. Refinement linearly subdivides that atom and coarsening cannot cross
+For a unified topology plan, each `PlannedBoundaryEdge` is the immutable geometric
+atom. The compiled plan carries one atom per arrangement segment, sampled finely
+enough to intersect curves robustly; the plan the mesh is built from merges runs
+of those segments (`TopologyMeshPlan::coarsened`) while every joint stays within
+the meshing curve tolerance of the chord and the chord stays under the target
+edge. Runs never cross an authored vertex, a span boundary, an outer corner, a
+change of the faces or behaviour beside them, or a trace shared with another
+source, and both sides of a span merge over the same runs so paired traces stay
+paired. Before this, every curved span was cut into segments about 7e-3 long and
+the time step followed; the coarsened plan on a single-hole scene gave a time
+step more than three times larger with the same interior mesh. Refinement
+linearly subdivides an atom, which the chord tolerance keeps within the same
+distance of the curve, and coarsening cannot cross
 one of its endpoints. `TraceVertexId` and AMR lineage remain separate: trace identity
 pins a face sector at a sampling point or junction, while lineage controls cooldown
 and preserved-element accounting. Preflight and final publication both verify exact

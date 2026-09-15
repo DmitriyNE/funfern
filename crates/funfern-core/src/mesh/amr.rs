@@ -2744,6 +2744,78 @@ mod tests {
         assert_eq!(malformed.as_ref(), &before);
     }
 
+    /// Adaptation on a coarsened plan: its atoms are merged runs of arrangement
+    /// segments, and refinement subdivides them linearly within the curve
+    /// tolerance while the coverage and trace checks still hold.
+    #[test]
+    fn topology_hole_boundary_adapts_on_a_coarsened_plan() {
+        let curve = TopologyCurve::new(
+            CurveId(5),
+            CurveSpline::Closed(PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.4)),
+            (0..8)
+                .map(|index| CurveSpan {
+                    id: CurveSpanId(50 + index),
+                    behavior: SpanBehavior::REFLECTING,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![curve],
+                ..TopologyGeometry::default()
+            },
+            251,
+        )
+        .unwrap();
+        let hole = topology.face_at(Point2::default()).unwrap();
+        let assignments = topology
+            .faces
+            .iter()
+            .map(|face| FaceRegionAssignment {
+                face: face.id,
+                region: (face.id != hole).then_some(RegionId(1)),
+            })
+            .collect::<Vec<_>>();
+        let fine = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        let mut configuration = options(0.28, 0.07);
+        configuration.max_topology_changes = 4_000;
+        configuration.max_work_units = 20_000_000;
+        let plan = fine
+            .coarsened(
+                &topology,
+                AtomCoarsening::from_meshing(configuration.meshing),
+            )
+            .unwrap();
+        assert!(plan.boundaries.len() * 2 < fine.boundaries.len());
+        let source = Arc::new(mesh_topology_plan(&plan, 351, configuration.meshing).unwrap());
+        let refined = run(
+            MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                352,
+                Arc::new(|_, _| 0.07),
+                configuration,
+            ),
+            43,
+        );
+        assert!(refined.report.converged, "{:?}", refined.report);
+        assert!(refined.mesh.triangles.len() > source.triangles.len());
+        let coarsened = run(
+            MeshAdaptationJob::new_topology(
+                Arc::new(refined.mesh.clone()),
+                &plan,
+                refined.state,
+                353,
+                Arc::new(|_, _| 0.28),
+                configuration,
+            ),
+            43,
+        );
+        assert!(coarsened.mesh.triangles.len() < refined.mesh.triangles.len());
+    }
+
     #[test]
     fn topology_hole_boundary_adapts_without_requiring_an_excluded_partner() {
         let curve = TopologyCurve::new(
