@@ -150,6 +150,57 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — What a line probe actually carries
+
+A line or boundary probe reported the instantaneous normal flux and its arclength
+integral. Neither answers the question the probe is usually placed to ask: a
+standing wave's flux swings symmetrically about zero at twice the driven
+frequency, so a snapshot of it says nothing about transport, and the integral of
+that snapshot is just as ambiguous. The far field has had an averaged pattern
+since it landed; the path probes had no equivalent.
+
+- Added a fifth row to the plot matrix, `LineProbeQuantity::MeanFlux`, drawn from
+  a causal trailing mean of the recorded flux: every frame carries the average of
+  the window ending at its own time, sample point by sample point. All three
+  existing representations then apply unchanged - the profile against arclength,
+  the waterfall against arclength and time, and the arclength integral against
+  time, which is the net power the path carries.
+- The averaging window is a slider, not the visible window. The far field takes
+  its average from what is on screen, which is right for a single polar snapshot
+  and wrong for a time series: zooming would rewrite the numbers instead of
+  moving over them. It defaults to 1.0 s - two and a half periods of the default
+  2.5 Hz source, five of the flux - and is bounded by what the 512-frame trace
+  actually holds at that probe's preset, 17/8.5/4.3 s at Low/Medium/High.
+  Offering more would be a setting that shows nothing however long the run goes.
+- A frame whose window the record does not cover in full yields a row of NaN
+  rather than a partial average. That keeps the derived series one row per
+  recorded frame, so the waterfall's row layout and the profile's nearest-frame
+  pick stay aligned with the raw series, and the renderers already skip what is
+  not finite. The readout reports the fill fraction until it is complete, in the
+  idiom the far-field delay window already uses.
+- Gaps are skipped per point, not per frame: a path that leaves the domain
+  halfway still averages the half that is inside. A width change in the trace -
+  a sampling-preset change, or a boundary remesh - restarts the window, since two
+  sample layouts have no common average.
+- One pass over the trace serves all three averaged views and runs only when one
+  of them is drawn. It is a sliding window with per-point sums and counts, so the
+  cost is one add and one subtract per sample, not a window-sized sum per frame.
+- Two fixes found on the way. The arclength-integral trace now drops non-finite
+  entries instead of pushing them at the plotter, which mapped them to NaN screen
+  positions; and an arclength profile whose samples are all invalid now says so
+  instead of leaving an empty box.
+- The row is called Average flux, not the bracketed notation it started with:
+  egui's default font has no glyph for angle brackets and drew them as tofu.
+- Nothing moved on the GPU, in the core, or in the file format: the recorder has
+  always written `normal_flux` per point per frame, and view state is per-session.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked`, and the release build of
+`funfern-app`. Five new tests cover the withheld window and its fill fraction,
+the cancellation of a standing wave against a travelling one's surviving offset,
+per-point gaps, the layout-change restart, and that the plot matrix addresses
+every cell exactly once.
+
 ## 2026-09-16 — Two ends of the spectrum nothing was taking care of
 
 Two reports, one root: this scheme neither transports nor dissipates its own

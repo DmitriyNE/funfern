@@ -291,19 +291,26 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   shows the positive left normal; Flip direction reverses both the sampling order
   and flux sign. Low, Medium, and High presets record 32/64/128 spatial samples at
   30/60/120 samples per simulated second. A compact Plots menu exposes the signed
-  primary field, transverse-field magnitude, signed normal Poynting flux, and
-  energy as a waterfall, versus arclength, or integrated versus time. Mechanical
-  scenes retain field, normal energy flux, and energy. New readouts initially show field versus
-  arclength, its waterfall, normal power, and integrated energy. All active views
-  share one time window; drag waterfalls vertically and time traces horizontally.
+  primary field, transverse-field magnitude, signed normal Poynting flux, its
+  average over a trailing window, and energy as a waterfall, versus arclength, or
+  integrated versus time. Mechanical scenes retain field, normal energy flux, its
+  average, and energy. New readouts initially show field versus arclength, its
+  waterfall, the Average flux profile, normal power, and integrated energy. All
+  active views share one time window; drag waterfalls vertically and time traces
+  horizontally.
   Portions outside the simulated domain or on a two-trace boundary appear as gaps;
-  the remaining coverage still contributes to the readout.
+  the remaining coverage still contributes to the readout. Average flux reports,
+  at every recorded instant, the mean of the seconds ending there, so a standing
+  wave averages to nothing while a travelling one keeps the power it carries. Its
+  window is a slider in the same menu, independent of the visible one so navigating
+  never rewrites the numbers, and bounded by what the 512-frame trace holds at that
+  preset. The readout says how much of the window is recorded until it is full.
 - **Boundary probes:** select one contiguous run of outer, loop, or baffle spans and
   choose **+ From selected spans** in Probes. The probe follows spline edits and
-  uses the same nine curve readouts. Choose the sampled trace for material
-  interfaces, walls, and baffles. Positive normal flux always points out of that
-  trace; Flip direction reverses only the arclength axis. Whole closed curves use
-  periodic sampling and integration without duplicating the seam.
+  uses the same twelve curve readouts, sixteen in EM scenes. Choose the sampled
+  trace for material interfaces, walls, and baffles. Positive normal flux always
+  points out of that trace; Flip direction reverses only the arclength axis. Whole
+  closed curves use periodic sampling and integration without duplicating the seam.
 - **Area probes:** choose Disk for a two-click center/radius receiver, or Subdomain
   and click inside a material region. Drag a disk body to move it and its edge
   handle to resize it. In EM scenes the GPU recorder reports mean and RMS primary

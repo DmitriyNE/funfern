@@ -50,6 +50,10 @@ const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const FRAME_HISTORY: usize = 120;
+/// Frames one line or boundary probe keeps. With the sampling presets' rates
+/// this is 17, 8.5, or 4.3 seconds of path history, and it bounds how far back
+/// the averaged flux row can look.
+const CURVE_TRACE_FRAMES: usize = 512;
 const GIZMO_PADDING: f32 = 18.0;
 
 /// What the Materials panel lists, and what a viewport click selects with it.
@@ -324,17 +328,25 @@ struct ProbeTrace {
 }
 
 /// A quantity a line or boundary probe samples along its path. The GPU records
-/// all four every frame; the readout chooses which to draw.
+/// four of these every frame; `MeanFlux` is derived here from `Flux`. The
+/// readout chooses which to draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LineProbeQuantity {
     Field,
     Transverse,
     Flux,
+    MeanFlux,
     Energy,
 }
 
 impl LineProbeQuantity {
-    const ALL: [Self; 4] = [Self::Field, Self::Transverse, Self::Flux, Self::Energy];
+    const ALL: [Self; 5] = [
+        Self::Field,
+        Self::Transverse,
+        Self::Flux,
+        Self::MeanFlux,
+        Self::Energy,
+    ];
 
     const fn label_for(self, physics: PhysicsModel) -> &'static str {
         match self {
@@ -344,6 +356,9 @@ impl LineProbeQuantity {
                 PhysicsModel::Mechanical => "Normal energy flux",
                 PhysicsModel::Electromagnetic { .. } => "Normal Poynting flux",
             },
+            // Named plainly rather than with angle brackets: egui's default
+            // font has no glyph for those and drew them as tofu.
+            Self::MeanFlux => "Average flux",
             Self::Energy => "Energy density",
         }
     }
@@ -353,6 +368,7 @@ impl LineProbeQuantity {
             Self::Field => SELECT,
             Self::Transverse => Color32::from_rgb(188, 139, 255),
             Self::Flux => TEAL,
+            Self::MeanFlux => RED,
             Self::Energy => GOLD,
         }
     }
@@ -362,12 +378,19 @@ impl LineProbeQuantity {
             Self::Field => 0,
             Self::Transverse => 3,
             Self::Flux => 6,
-            Self::Energy => 9,
+            Self::MeanFlux => 9,
+            Self::Energy => 12,
         }
     }
 
     const fn applies(self, physics: PhysicsModel) -> bool {
         !matches!(self, Self::Transverse) || matches!(physics, PhysicsModel::Electromagnetic { .. })
+    }
+
+    /// Whether the row is drawn from the trailing mean of the recorded flux
+    /// rather than from the record the GPU wrote.
+    const fn averaged(self) -> bool {
+        matches!(self, Self::MeanFlux)
     }
 }
 
@@ -414,7 +437,11 @@ struct ProbeViewState {
     area_rms_transverse: bool,
     area_mean_energy: bool,
     area_total_energy: bool,
-    line_plots: [bool; 12],
+    line_plots: [bool; 15],
+    /// Seconds of flux the `MeanFlux` row averages over. Fixed rather than tied
+    /// to the visible window, so panning and zooming move the view over the
+    /// same data instead of rewriting it.
+    mean_window: f64,
     far_waterfall: bool,
     far_polar: bool,
     far_power: bool,
@@ -436,13 +463,18 @@ impl ProbeViewState {
             area_rms_transverse: false,
             area_mean_energy: false,
             area_total_energy: true,
-            // Field versus arclength and its waterfall, plus the two integrals.
+            // Field versus arclength and its waterfall, the mean flux profile,
+            // and the two integrals.
             line_plots: [
                 true, true, false, // primary component
                 false, false, false, // transverse magnitude
                 false, false, true, // normal flux
+                true, false, false, // trailing mean of the normal flux
                 false, false, true, // energy density
             ],
+            // Two and a half periods of the default source, five of the flux,
+            // which oscillates at twice the driven frequency.
+            mean_window: 1.0,
             far_waterfall: true,
             far_polar: true,
             far_power: true,
@@ -6866,7 +6898,7 @@ impl Playground {
                 if record.time > trace.last_time {
                     trace.last_time = record.time;
                     trace.records.push_back(record);
-                    while trace.records.len() > 512 {
+                    while trace.records.len() > CURVE_TRACE_FRAMES {
                         trace.records.pop_front();
                     }
                 }
@@ -7621,9 +7653,93 @@ impl Playground {
         match quantity {
             LineProbeQuantity::Field => &frame.displacement,
             LineProbeQuantity::Transverse => &frame.transverse_magnitude,
-            LineProbeQuantity::Flux => &frame.normal_flux,
+            LineProbeQuantity::Flux | LineProbeQuantity::MeanFlux => &frame.normal_flux,
             LineProbeQuantity::Energy => &frame.energy_density,
         }
+    }
+    /// A causal trailing mean of the recorded normal flux: every frame carries
+    /// the average of the `window` seconds ending at its own time, sample point
+    /// by sample point. The instantaneous flux of a standing wave swings
+    /// symmetrically about zero at twice the driven frequency, so only this
+    /// average says how much power a path actually carries.
+    ///
+    /// The window is fixed rather than taken from the visible one, so panning
+    /// and zooming move over the same numbers instead of rewriting them. A
+    /// frame whose window the record does not cover in full yields a row of
+    /// NaN, which keeps the series one row per recorded frame: every
+    /// representation then holds the raw series' time alignment, and the
+    /// renderers already skip what is not finite. The second return is how much
+    /// of the window the newest frame holds, for the readout to report while it
+    /// is still filling.
+    fn curve_probe_running_mean(
+        frames: &[CurveProbeRecord],
+        window: f64,
+    ) -> (Vec<CurveProbeRecord>, f64) {
+        if frames.is_empty() || !window.is_finite() || window <= 0.0 {
+            return (Vec::new(), 0.0);
+        }
+        let mut means = Vec::with_capacity(frames.len());
+        let mut sums: Vec<f64> = Vec::new();
+        let mut counts: Vec<u32> = Vec::new();
+        // The first frame of the run of equal-width records the accumulator was
+        // built for, and the oldest frame still inside the window.
+        let mut run = 0;
+        let mut oldest = 0;
+        let mut filled = 0.0;
+        for (index, frame) in frames.iter().enumerate() {
+            if frame.normal_flux.len() != sums.len() {
+                // A sampling-preset change or a boundary remesh leaves rows of
+                // another length in the same trace, and two layouts have no
+                // common average. The window starts again here.
+                sums = vec![0.0; frame.normal_flux.len()];
+                counts = vec![0; frame.normal_flux.len()];
+                run = index;
+                oldest = index;
+            }
+            for (point, value) in frame.normal_flux.iter().enumerate() {
+                if value.is_finite() {
+                    sums[point] += *value as f64;
+                    counts[point] += 1;
+                }
+            }
+            let begin = frame.time - window;
+            while oldest < index && frames[oldest].time < begin {
+                for (point, value) in frames[oldest].normal_flux.iter().enumerate() {
+                    if value.is_finite() {
+                        sums[point] -= *value as f64;
+                        counts[point] -= 1;
+                    }
+                }
+                oldest += 1;
+            }
+            // Either a frame has already left the window, or the run itself
+            // reaches back past its start. Anything else is a partial average
+            // of whatever happens to be recorded, which is not what the row
+            // claims to show.
+            let covered = oldest > run || frames[run].time <= begin;
+            filled = if covered {
+                1.0
+            } else {
+                ((frame.time - frames[run].time) / window).clamp(0.0, 1.0)
+            };
+            means.push(CurveProbeRecord {
+                probe_id: frame.probe_id,
+                time: frame.time,
+                normal_flux: counts
+                    .iter()
+                    .zip(&sums)
+                    .map(|(count, sum)| {
+                        if covered && *count > 0 {
+                            (sum / *count as f64) as f32
+                        } else {
+                            f32::NAN
+                        }
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        }
+        (means, filled)
     }
     /// Trapezoidal integral along the sampled path, plus the fraction of the
     /// intervals that carried finite values.
@@ -7675,18 +7791,21 @@ impl Playground {
         );
         ui.painter()
             .rect_filled(rect, 2.0, Color32::from_rgb(12, 18, 24));
+        let waiting = |painter: &egui::Painter, message: &str| {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                message,
+                egui::FontId::monospace(11.0),
+                Color32::from_rgb(112, 130, 143),
+            );
+        };
         let Some(frame) = frames.iter().min_by(|a, b| {
             (a.time - view.end_time)
                 .abs()
                 .total_cmp(&(b.time - view.end_time).abs())
         }) else {
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "Waiting for samples",
-                egui::FontId::monospace(11.0),
-                Color32::from_rgb(112, 130, 143),
-            );
+            waiting(ui.painter(), "Waiting for samples");
             return;
         };
         let samples = Self::curve_probe_values(frame, quantity);
@@ -7701,6 +7820,10 @@ impl Playground {
             .filter(|value| value.is_finite())
             .fold(f32::NEG_INFINITY, f32::max);
         if !minimum.is_finite() || !maximum.is_finite() {
+            // Every sample at this time is invalid: outside the domain, on a
+            // two-trace boundary, or - for the averaged row - earlier than the
+            // first full window.
+            waiting(ui.painter(), "No valid samples at this time");
             return;
         }
         if (maximum - minimum).abs() < 1.0e-12 {
@@ -8140,6 +8263,19 @@ impl Playground {
                 TopologyProbeTarget::AreaDisk { .. } | TopologyProbeTarget::AreaRegion(_)
             );
             let (length, closed) = self.probe_metrics.get(&id).copied().unwrap_or((0.0, false));
+            // The averaged flux row can only look back as far as the trace
+            // reaches, which at the faster presets is well short of the history
+            // slider. Offering more than that would be a setting that shows
+            // nothing however long the run continues.
+            let mean_limit = match &probe.target {
+                TopologyProbeTarget::Segment { preset, .. } => Some(*preset),
+                TopologyProbeTarget::Boundary(target) => Some(target.preset),
+                _ => None,
+            }
+            .map_or(history, |preset| {
+                history.min(CURVE_TRACE_FRAMES as f64 / preset.sample_rate())
+            })
+            .max(0.2);
             let curve_times = curve_frames
                 .iter()
                 .map(|frame| PointProbeRecord {
@@ -8164,6 +8300,7 @@ impl Playground {
                 view.end_time = time;
             }
             view.span = view.span.clamp(0.02, history);
+            view.mean_window = view.mean_window.clamp(0.05, mean_limit);
             let kind = match probe.target {
                 TopologyProbeTarget::Point(_) => "point probe",
                 TopologyProbeTarget::Segment { .. } => "line probe",
@@ -8243,6 +8380,16 @@ impl Playground {
                                         egui::Slider::new(&mut view.waterfall_gain, 0.1..=10.0)
                                             .logarithmic(true)
                                             .text("Waterfall gain"),
+                                    );
+                                    ui.add(
+                                        egui::Slider::new(&mut view.mean_window, 0.05..=mean_limit)
+                                            .logarithmic(true)
+                                            .text("Mean window"),
+                                    )
+                                    .on_hover_text(
+                                        "Seconds the averaged flux row looks back over. \
+                                         Cover several periods of the flux, which swings at \
+                                         twice the driven frequency.",
                                     );
                                 });
                         } else if is_area {
@@ -8344,20 +8491,44 @@ impl Playground {
                                 ui.small(format!("Valid coverage {:.0}%", coverage * 100.0));
                             }
                         }
+                        // One pass over the trace serves all three averaged
+                        // views, and none of them asks for it unless drawn.
+                        let averaged =
+                            LineProbeRepresentation::ALL
+                                .into_iter()
+                                .any(|representation| {
+                                    view.line_plots[LineProbeQuantity::MeanFlux.offset()
+                                        + representation.offset()]
+                                });
+                        let (mean_frames, mean_filled) = if averaged {
+                            Self::curve_probe_running_mean(&curve_frames, view.mean_window)
+                        } else {
+                            (Vec::new(), 1.0)
+                        };
+                        if averaged && !curve_frames.is_empty() && mean_filled < 0.999 {
+                            ui.colored_label(
+                                GOLD,
+                                format!(
+                                    "Filling the {:.2} s mean window · {:.0}%",
+                                    view.mean_window,
+                                    mean_filled * 100.0
+                                ),
+                            );
+                        }
                         for quantity in LineProbeQuantity::ALL {
                             if !quantity.applies(physics) {
                                 continue;
                             }
+                            let frames = if quantity.averaged() {
+                                &mean_frames
+                            } else {
+                                &curve_frames
+                            };
                             if view.line_plots
                                 [quantity.offset() + LineProbeRepresentation::Arclength.offset()]
                             {
                                 Self::curve_probe_profile(
-                                    ui,
-                                    &curve_frames,
-                                    &view,
-                                    quantity,
-                                    length,
-                                    physics,
+                                    ui, frames, &view, quantity, length, physics,
                                 );
                             }
                             if view.line_plots
@@ -8365,7 +8536,7 @@ impl Playground {
                             {
                                 Self::curve_probe_waterfall(
                                     ui,
-                                    &curve_frames,
+                                    frames,
                                     &curve_times,
                                     &mut view,
                                     history,
@@ -8376,7 +8547,11 @@ impl Playground {
                             if view.line_plots
                                 [quantity.offset() + LineProbeRepresentation::Integral.offset()]
                             {
-                                let integral = curve_frames
+                                // A frame the averaging window does not cover
+                                // integrates to NaN, and so does one whose
+                                // samples are all invalid. Leaving those out
+                                // shortens the trace rather than breaking it.
+                                let integral = frames
                                     .iter()
                                     .map(|frame| PointProbeRecord {
                                         probe_id: frame.probe_id,
@@ -8387,6 +8562,7 @@ impl Playground {
                                         .0,
                                         ..Default::default()
                                     })
+                                    .filter(|sample| sample.displacement.is_finite())
                                     .collect::<Vec<_>>();
                                 Self::probe_plot(
                                     ui,
@@ -11416,5 +11592,180 @@ mod probe_interaction_tests {
             readbacks: 4,
         });
         assert_eq!(samples(&state), vec![0.25]);
+    }
+
+    #[test]
+    fn the_plot_matrix_addresses_every_cell_exactly_once() {
+        let view = ProbeViewState::new(10.0);
+        let mut seen = BTreeSet::new();
+        for quantity in LineProbeQuantity::ALL {
+            for representation in LineProbeRepresentation::ALL {
+                let index = quantity.offset() + representation.offset();
+                assert!(
+                    index < view.line_plots.len(),
+                    "{quantity:?} {representation:?}"
+                );
+                assert!(
+                    seen.insert(index),
+                    "{quantity:?} {representation:?} collides"
+                );
+            }
+        }
+        assert_eq!(seen.len(), view.line_plots.len());
+
+        // A new readout opens on the field's profile and waterfall, the mean
+        // flux profile, and the two integrals.
+        let enabled = |quantity: LineProbeQuantity, representation: LineProbeRepresentation| {
+            view.line_plots[quantity.offset() + representation.offset()]
+        };
+        assert!(enabled(
+            LineProbeQuantity::Field,
+            LineProbeRepresentation::Arclength
+        ));
+        assert!(enabled(
+            LineProbeQuantity::Field,
+            LineProbeRepresentation::Waterfall
+        ));
+        assert!(enabled(
+            LineProbeQuantity::MeanFlux,
+            LineProbeRepresentation::Arclength
+        ));
+        assert!(enabled(
+            LineProbeQuantity::Flux,
+            LineProbeRepresentation::Integral
+        ));
+        assert!(enabled(
+            LineProbeQuantity::Energy,
+            LineProbeRepresentation::Integral
+        ));
+        assert_eq!(view.line_plots.iter().filter(|plot| **plot).count(), 5);
+    }
+
+    /// Frames of `points` samples at `dt`, each value from the frame's time and
+    /// the point's index.
+    fn flux_trace(
+        count: usize,
+        dt: f64,
+        points: usize,
+        value: impl Fn(f64, usize) -> f32,
+    ) -> Vec<CurveProbeRecord> {
+        (0..count)
+            .map(|frame| {
+                let time = frame as f64 * dt;
+                CurveProbeRecord {
+                    probe_id: 1,
+                    time,
+                    normal_flux: (0..points).map(|point| value(time, point)).collect(),
+                    ..Default::default()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_averaged_flux_row_withholds_a_window_it_cannot_fill() {
+        let frames = flux_trace(40, 0.1, 3, |_, point| 2.0 + point as f32);
+        let (means, filled) = Playground::curve_probe_running_mean(&frames, 1.0);
+
+        // One row per recorded frame, so every representation keeps the raw
+        // series' time alignment.
+        assert_eq!(means.len(), frames.len());
+        assert!(
+            means
+                .iter()
+                .zip(&frames)
+                .all(|(mean, frame)| mean.time == frame.time)
+        );
+
+        // Nothing before the record reaches a full second back: a mean over
+        // whatever happens to be recorded is not what the row claims to show.
+        assert!(
+            means[..10]
+                .iter()
+                .all(|mean| mean.normal_flux.iter().all(|value| value.is_nan()))
+        );
+        for mean in &means[10..] {
+            assert_eq!(mean.normal_flux, vec![2.0, 3.0, 4.0]);
+        }
+        assert_eq!(filled, 1.0);
+
+        // Reported while it fills, so an empty plot reads as a recorder still
+        // filling rather than a silence in the field.
+        let (_, partial) = Playground::curve_probe_running_mean(&frames[..5], 1.0);
+        assert!((partial - 0.4).abs() < 1.0e-9, "{partial}");
+    }
+
+    #[test]
+    fn the_averaged_flux_row_cancels_a_standing_wave_and_keeps_a_net_flow() {
+        // A standing wave's flux swings symmetrically about zero at twice the
+        // driven frequency; a travelling one carries a constant across it. The
+        // instantaneous row cannot tell them apart at an arbitrary instant.
+        let dt = 1.0 / 120.0;
+        let flux = |time: f64, point: usize| {
+            let offset = if point == 0 { 0.0 } else { 0.3 };
+            (offset + (std::f64::consts::TAU * 5.0 * time).sin()) as f32
+        };
+        let frames = flux_trace(600, dt, 2, flux);
+        let (means, _) = Playground::curve_probe_running_mean(&frames, 1.0);
+        let newest = means.last().unwrap();
+
+        // Five whole periods of the oscillation land in the window, to within
+        // the one sample the window's edge is ambiguous by.
+        assert!(
+            newest.normal_flux[0].abs() < 0.02,
+            "{}",
+            newest.normal_flux[0]
+        );
+        assert!(
+            (newest.normal_flux[1] - 0.3).abs() < 0.02,
+            "{}",
+            newest.normal_flux[1]
+        );
+    }
+
+    #[test]
+    fn the_averaged_flux_row_skips_gaps_point_by_point() {
+        // Portions outside the domain or on a two-trace boundary arrive as NaN,
+        // and one bad point must not discard the rest of the path.
+        let frames = flux_trace(40, 0.1, 3, |time, point| match point {
+            0 => f32::NAN,
+            1 if time < 1.5 => f32::NAN,
+            _ => 4.0,
+        });
+        let (means, _) = Playground::curve_probe_running_mean(&frames, 1.0);
+        let newest = means.last().unwrap();
+
+        assert!(newest.normal_flux[0].is_nan());
+        assert_eq!(newest.normal_flux[1], 4.0);
+        assert_eq!(newest.normal_flux[2], 4.0);
+
+        // Halfway through its gap the point averages only what it has, not a
+        // zero for every frame it was missing.
+        let straddling = means
+            .iter()
+            .find(|mean| (mean.time - 2.0).abs() < 1.0e-9)
+            .unwrap();
+        assert_eq!(straddling.normal_flux[1], 4.0);
+    }
+
+    #[test]
+    fn the_averaged_flux_row_restarts_when_the_sample_layout_changes() {
+        // A sampling preset change or a boundary remesh leaves rows of another
+        // length in the same trace. Two layouts have no common average.
+        let mut frames = flux_trace(20, 0.1, 2, |_, _| 1.0);
+        frames.extend(flux_trace(20, 0.1, 4, |_, _| 5.0).into_iter().map(|frame| {
+            CurveProbeRecord {
+                time: frame.time + 2.0,
+                ..frame
+            }
+        }));
+        let (means, filled) = Playground::curve_probe_running_mean(&frames, 1.0);
+
+        assert_eq!(means[19].normal_flux, vec![1.0, 1.0]);
+        // The first second after the change is withheld, then the mean is the
+        // new layout's alone.
+        assert!(means[25].normal_flux.iter().all(|value| value.is_nan()));
+        assert_eq!(means[35].normal_flux, vec![5.0; 4]);
+        assert_eq!(filled, 1.0);
     }
 }
