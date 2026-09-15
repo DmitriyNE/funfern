@@ -2827,6 +2827,124 @@ mod tests {
         assert!(state.auxiliary().iter().all(|value| value.is_finite()));
     }
 
+    /// Reproducer for the open item on second-order outgoing conditions on
+    /// curved and baffle spans, which were reported to inject energy and
+    /// diverge. A hole bounded by second-order faces and a curved baffle with
+    /// second-order faces sit in a reflecting cavity, meshed through the
+    /// topology path the app uses, and a pulse is released beside them. The
+    /// absorbers may only remove energy.
+    ///
+    /// It reproduces the divergence today: the energy grows by eighteen
+    /// orders of magnitude within 8,000 steps, independently of the time step
+    /// and worse under interior refinement, while a straight baffle with the
+    /// same law is stable. See the engineering log for 2026-09-15. It stays
+    /// ignored until the condition is fixed; run it with `--ignored`.
+    #[test]
+    #[ignore = "reproduces the open second-order instability on curved spans"]
+    fn second_order_curved_and_baffle_faces_never_add_energy() {
+        let second_order = SpanBehavior::Separated {
+            left: FaceBoundaryCondition::SecondOrderOutgoing,
+            right: FaceBoundaryCondition::SecondOrderOutgoing,
+            coupling: InternalBoundaryCoupling::Independent,
+        };
+        let hole_spline = PeriodicCubicSpline::rounded(Point2::new(0.1, -0.05), 0.3);
+        let hole_spans = (0..hole_spline.intervals().len())
+            .map(|index| topology_span(index as u64 + 1, second_order))
+            .collect();
+        let hole =
+            TopologyCurve::new(CurveId(1), CurveSpline::Closed(hole_spline), hole_spans).unwrap();
+        let baffle = TopologyCurve::new(
+            CurveId(2),
+            CurveSpline::Open(
+                OpenCubicSpline::uniform(vec![
+                    Point2::new(-0.7, 0.4),
+                    Point2::new(-0.3, 0.6),
+                    Point2::new(0.2, 0.55),
+                    Point2::new(0.6, 0.4),
+                ])
+                .unwrap(),
+            ),
+            vec![topology_span(20, second_order)],
+        )
+        .unwrap();
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![hole, baffle],
+                ..TopologyGeometry::default()
+            },
+            61,
+        )
+        .unwrap();
+        let inside = topology.face_at(Point2::new(0.1, -0.05)).unwrap();
+        let assignments = topology
+            .faces
+            .iter()
+            .map(|face| FaceRegionAssignment {
+                face: face.id,
+                region: (face.id != inside).then_some(BACKGROUND_REGION),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        let mesh = mesh_topology_plan(
+            &plan,
+            161,
+            MeshingOptions {
+                target_edge_length: 0.15,
+                minimum_angle_degrees: 12.0,
+                max_vertices: 40_000,
+                max_triangles: 80_000,
+                max_refinement_steps: 40_000,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scene = Scene::default();
+        let operator = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        assert!(operator.auxiliary_active().iter().any(|active| *active));
+
+        let dt = operator.recommended_time_step();
+        let initial = operator
+            .node_points()
+            .iter()
+            .map(|point| {
+                let (dx, dy) = (point.x + 0.55, point.y + 0.35);
+                (-(dx * dx + dy * dy) / 0.02).exp()
+            })
+            .collect();
+        let mut state = QuadraticWaveState::new(
+            &operator,
+            dt,
+            initial,
+            vec![0.0; operator.degrees_of_freedom()],
+        )
+        .unwrap();
+        let initial_energy = state.energy(&operator).unwrap();
+        let mut peak = initial_energy;
+        for step in 1..=8_000 {
+            state.step(&operator, &[]).unwrap();
+            if step % 50 == 0 {
+                let energy = state.energy(&operator).unwrap();
+                assert!(energy.is_finite(), "energy diverged at step {step}");
+                peak = peak.max(energy);
+            }
+        }
+        let final_energy = state.energy(&operator).unwrap();
+        assert!(
+            peak <= initial_energy * (1.0 + 1.0e-9),
+            "the absorbers added energy: peak {peak:e} against {initial_energy:e}"
+        );
+        assert!(
+            final_energy < initial_energy * 0.5,
+            "the absorbers removed too little: {final_energy:e} of {initial_energy:e}"
+        );
+        assert!(state.auxiliary().iter().all(|value| value.is_finite()));
+    }
+
     #[test]
     fn outgoing_boundary_rejects_malformed_edges() {
         for boundary in [

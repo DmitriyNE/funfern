@@ -75,9 +75,20 @@ Longer-standing work:
 - [ ] Revisit generalized far-field sampling contours when editable outer-domain
   shapes arrive. Keep the automatic inset contour as the simple default and only
   expose custom contour geometry if non-rectangular domains require it.
-- [ ] Diagnose and stabilize second-order outgoing conditions on curved hole or
-  internal-boundary spans. They can inject energy and make the solution diverge;
-  keep examples on reflecting or first-order curved faces until this is resolved.
+- [ ] Stabilize second-order outgoing conditions on curved hole and baffle spans.
+  Diagnosed 2026-09-15 with an ignored reproducer test: the divergence is a
+  property of the condition on curved spans, not of the discretization. Decide
+  between restricting the law to straight spans and outer edges, deriving a
+  curvature-corrected second-order condition, or a Higdon-type condition without
+  tangential derivatives. Keep examples on reflecting or first-order curved faces.
+- [ ] Decouple the mesh plan's boundary atoms from the arrangement's sampling
+  density. Every curved span is cut into segments about 7e-3 long by the
+  intersection sampler, the mesher uses each as a boundary edge, and the time
+  step follows: on a single-hole scene at target edge 0.15, coarsening the
+  sampling to the meshing tolerance raised the time step from 1.1e-3 to 1.0e-2
+  while the interior mesh was unchanged. AMR subdivides atoms linearly, so
+  coarser atoms need spline evaluation at atom parameters; this shares its
+  groundwork with coordinate repair.
 - [ ] Extend outer-boundary measurements across more angles/frequencies and assess
   whether higher auxiliary orders justify their state and compute cost.
 - [ ] Decide whether the load-compatible closed-wall role still warrants assigned
@@ -105,6 +116,50 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — The second-order instability reproduces, and it is the condition
+
+The user could no longer reproduce the divergence of second-order outgoing
+conditions on curved spans in the app. A deterministic test reproduces it on
+the f64 CPU solver through the topology meshing path: a hole and a curved
+baffle, both with second-order faces, in a reflecting cavity with a pulse
+released beside them. The energy grows from 1.6 to 3e18 within 8,000 steps.
+The test is in `wave_quadratic.rs` and stays ignored until the condition is
+fixed; run it with `--ignored`.
+
+A release-mode bisection then isolated the mechanism. Each row is the same
+scene with one thing changed; "grows" means the energy reached 1e26 or more.
+
+| change | outcome |
+| --- | --- |
+| hole only, baffle only | both grow |
+| straight baffle, same law | stable through t = 54 |
+| time step × 0.5, × 0.25, × 0.1, × 0.05 to the same physical time | grows, from the same physical time |
+| interior target edge 0.3, 0.15, 0.08, 0.04, 0.02 | grows, earlier as the mesh refines |
+| second order on the left face only, right only | both grow |
+| arrangement sampling 10× and 100× coarser, boundary edges 0.027 and 0.053 | grows |
+| first-order impedance on the same hole | stable |
+
+So the growth is independent of the time step, worsens under spatial
+refinement, does not depend on which face carries the law or on how finely
+the curve is cut, and is absent on a straight span of the same length with the
+same law. That is the signature of the formulation, not of the discretization:
+the Engquist–Majda second-order condition with its tangential term is applied
+on curved spans without the curvature terms a curved boundary needs, and on
+those spans it injects energy. The tangential stiffness itself is intrinsic to
+arc length and assembles identically on straight and curved polylines, which
+is why nothing in the assembly separates the two cases.
+
+The fix is a design choice recorded in the TODO list: restrict the law to
+straight spans and outer edges, derive a curvature-corrected condition, or move
+to a Higdon-type condition without tangential derivatives.
+
+The bisection produced a second finding. Coarsening the arrangement sampling
+from the default to the meshing tolerance changed nothing about the interior
+mesh at target edge 0.15 but cut the curved boundary from 256 edges of 6.6e-3
+to 32 edges of 0.053, and the recommended time step rose from 1.1e-3 to
+1.0e-2. Every curved scene pays that factor today. It is logged as its own item
+because coarser atoms interact with AMR's linear subdivision of atoms.
 
 ## 2026-09-15 — Mesh resolution is a control again
 
