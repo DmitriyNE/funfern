@@ -322,19 +322,43 @@ fn bounds(points: impl Iterator<Item = Point2>) -> (Point2, Point2) {
 /// bounded by what adaptation asked for and carries nothing the refill made.
 pub(super) struct LocalSizeField {
     grid: TriangleGrid,
+    /// Per removed triangle, the coarser of the size adaptation requested for
+    /// it and the size it had: the request is a ceiling on refinement and the
+    /// existing density is the floor, so a refill never refines the cavity
+    /// finer than the frozen rim that bounds it.
+    targets: Vec<f64>,
+    /// Per removed triangle, the request itself, inherited by the refill's
+    /// triangles so the next repair still knows what adaptation asked for.
     requests: Vec<f64>,
 }
 
 impl LocalSizeField {
     fn new(triangles: Vec<[Point2; 3]>, requests: Vec<f64>) -> Self {
+        let targets = triangles
+            .iter()
+            .zip(&requests)
+            .map(|(triangle, request)| {
+                let longest = (0..3)
+                    .map(|corner| (triangle[(corner + 1) % 3] - triangle[corner]).norm())
+                    .fold(0.0, f64::max);
+                request.max(longest)
+            })
+            .collect();
         let constrained = vec![[false; 3]; triangles.len()];
         Self {
             grid: TriangleGrid::new(triangles, constrained),
+            targets,
             requests,
         }
     }
 
+    /// The edge length the refill works towards at `point`.
     pub(super) fn size_at(&self, point: Point2) -> Option<f64> {
+        self.grid.containing(point).map(|index| self.targets[index])
+    }
+
+    /// The size adaptation requested for the removed triangle under `point`.
+    fn request_at(&self, point: Point2) -> Option<f64> {
         self.grid
             .containing(point)
             .map(|index| self.requests[index])
@@ -384,6 +408,9 @@ pub struct TopologyCarveJob {
     /// Triangles of the previous mesh around each of its vertices.
     incident: Vec<Vec<usize>>,
     areas: Vec<f64>,
+    /// The smallest angle in the previous mesh; the refill may not do worse
+    /// than half of it.
+    previous_worst_angle: f64,
     grid: Option<TriangleGrid>,
     old_boundary_edges: BTreeMap<(usize, usize), usize>,
     builder: Option<MeshBuilder>,
@@ -450,6 +477,7 @@ impl TopologyCarveJob {
             vertex_map: vec![],
             incident: vec![],
             areas: vec![],
+            previous_worst_angle: f64::INFINITY,
             grid: None,
             old_boundary_edges: BTreeMap::new(),
             builder: None,
@@ -518,7 +546,16 @@ impl TopologyCarveJob {
             }
             CarvePhase::ImportVertices(index) => {
                 if index == 0 {
-                    let mut builder = MeshBuilder::new(self.options, self.plan.domain);
+                    // The mesher's caps bound what a repair adds, not what it
+                    // inherits: an adapted mesh may already exceed them.
+                    let mut options = self.options;
+                    options.max_vertices = options
+                        .max_vertices
+                        .saturating_add(self.previous.vertices.len());
+                    options.max_triangles = options
+                        .max_triangles
+                        .saturating_add(self.previous.triangles.len());
+                    let mut builder = MeshBuilder::new(options, self.plan.domain);
                     for atom in &self.plan.boundaries {
                         let label = topology_label(*atom);
                         if let Some((_, regions)) = builder
@@ -635,6 +672,12 @@ impl TopologyCarveJob {
                     .triangles
                     .len()
                     .saturating_sub(self.report.kept_triangles);
+                verify_repair_quality(
+                    &mesh,
+                    self.report.kept_triangles,
+                    self.previous_worst_angle,
+                    self.options,
+                )?;
                 return Ok(Some(mesh));
             }
             CarvePhase::Done => CarvePhase::Done,
@@ -706,6 +749,10 @@ impl TopologyCarveJob {
         }
         let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
         self.areas.push((b - a).cross(c - a).abs());
+        if let Some(quality) = mesh.triangle_quality(index) {
+            self.previous_worst_angle =
+                self.previous_worst_angle.min(quality.minimum_angle_degrees);
+        }
         Ok(())
     }
 
@@ -1318,7 +1365,7 @@ impl TopologyCarveJob {
                     let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
                     self.size_field
                         .as_ref()
-                        .and_then(|field| field.size_at((a + b + c) / 3.0))
+                        .and_then(|field| field.request_at((a + b + c) / 3.0))
                 }
             })
             .collect::<Vec<_>>();
@@ -1359,6 +1406,48 @@ impl TopologyCarveJob {
     }
 }
 
+/// Refuses a refill with elements the solver could not step. Refinement
+/// beside frozen rim edges accepts elements it cannot fix, so the floor is
+/// generous: half the mesher's minimum angle, or half the worst angle the
+/// repaired mesh already had, whichever is lower. Anything below is a refill
+/// defect, and the error says so by name and place, so a fallback that shows
+/// it in the panel is a bug report rather than noise.
+fn verify_repair_quality(
+    mesh: &TriMesh,
+    kept: usize,
+    previous_worst_angle: f64,
+    options: MeshingOptions,
+) -> Result<(), MeshError> {
+    let floor = 0.5 * options.minimum_angle_degrees.min(previous_worst_angle);
+    let mut count = 0;
+    let mut worst = f64::INFINITY;
+    let mut point = Point2::default();
+    for index in kept..mesh.triangles.len() {
+        let angle = mesh
+            .triangle_quality(index)
+            .map_or(0.0, |quality| quality.minimum_angle_degrees);
+        if angle < floor {
+            count += 1;
+            if angle < worst {
+                worst = angle;
+                let [a, b, c] = mesh.triangles[index]
+                    .vertices
+                    .map(|vertex| mesh.vertices[vertex].point);
+                point = (a + b + c) / 3.0;
+            }
+        }
+    }
+    if count > 0 {
+        return Err(MeshError::DegenerateRepair {
+            count,
+            worst_angle_degrees: worst,
+            floor_degrees: floor,
+            point,
+        });
+    }
+    Ok(())
+}
+
 /// Runs a carve to completion.
 pub fn carve_topology_mesh(
     previous: Arc<TriMesh>,
@@ -1390,9 +1479,10 @@ mod tests {
     use super::*;
     use crate::{
         CurveSpan, CurveSpline, FaceRegionAssignment, MeshAdaptationJob, MeshAdaptationOptions,
-        MeshAdaptationResult, MeshAdaptationState, MeshSizeField, OpenCubicSpline, OuterSide,
-        PeriodicCubicSpline, TopologyCurve, TopologyGeometry, TopologyVertex, TopologyVertexId,
-        TopologyVertexLocation, compile_topology, mesh_topology_plan,
+        MeshAdaptationResult, MeshAdaptationState, MeshQuality, MeshSizeField, MeshVertex,
+        OpenCubicSpline, OuterSide, PeriodicCubicSpline, TopologyCurve, TopologyGeometry,
+        TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology,
+        mesh_topology_plan,
     };
 
     fn spans(start: u64, count: usize, behavior: SpanBehavior) -> Vec<CurveSpan> {
@@ -2635,5 +2725,194 @@ mod tests {
                 .iter()
                 .all(|request| *request == Some(options.target_edge_length))
         );
+    }
+
+    /// The inclusion of a user's scene: a closed two-sided curve between two
+    /// active materials, at its authored controls except the fifth.
+    fn inclusion_geometry(fifth: Point2) -> TopologyGeometry {
+        let mut controls = vec![
+            Point2::new(0.37743732302351307, -0.41795853199421185),
+            Point2::new(0.3882473077514753, 0.18781370939737263),
+            Point2::new(0.3682460466589229, 0.43497683417714367),
+            Point2::new(0.0059816045202802925, 0.657774891371061),
+            Point2::new(-0.30916722337740166, 0.7926036509316865),
+            Point2::new(-0.5397094743163924, 0.3830903697048762),
+            Point2::new(-0.13801587861941852, 0.25352651762887213),
+            Point2::new(-0.21215140207099628, -0.042954644373032855),
+            Point2::new(-0.11644986653581002, -0.13581191948070834),
+        ];
+        controls[5] = fifth;
+        let spline = PeriodicCubicSpline::new_with_multiplicities(
+            controls,
+            vec![1.0; 7],
+            vec![3, 1, 1, 1, 1, 1, 1],
+        )
+        .unwrap();
+        TopologyGeometry {
+            domain: crate::DomainRect {
+                min_x: -2.0843804802813337,
+                max_x: 1.9812315400322542,
+                min_y: -1.2682000961099806,
+                max_y: 1.8085514175081223,
+            },
+            curves: vec![
+                TopologyCurve::new(
+                    CurveId(9),
+                    CurveSpline::Closed(spline),
+                    spans(67, 7, SpanBehavior::REFLECTING),
+                )
+                .unwrap(),
+            ],
+            ..TopologyGeometry::default()
+        }
+    }
+
+    fn worst_angle(mesh: &TriMesh) -> f64 {
+        (0..mesh.triangles.len())
+            .map(|index| mesh.triangle_quality(index).unwrap().minimum_angle_degrees)
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// A user adapted this inclusion, then nudged one control by 3 mm. With
+    /// requests finer than the mesh around the band, the refill refined the
+    /// frozen cavity towards them: 3,692 triangles inserted for 534 removed
+    /// and 115 of them under one degree, because a sliver across nearly
+    /// collinear rim vertices can be neither flipped nor split. Requests are
+    /// a ceiling; the density that was there is the floor.
+    #[test]
+    fn a_repair_never_refines_a_cavity_finer_than_its_rim() {
+        let options = MeshingOptions {
+            target_edge_length: 0.08,
+            curve_tolerance: 5.0e-4,
+            ..MeshingOptions::default()
+        };
+        let rest = Point2::new(-0.5397094743163924, 0.3830903697048762);
+        let inside = Point2::new(0.1, 0.2);
+        let topology = compile_topology(&inclusion_geometry(rest), 1).unwrap();
+        let plan = plan_for(&topology, inside, Some(RegionId(2)), options);
+        let fresh = mesh_topology_plan(&plan, 10, options).unwrap();
+        let nudged = rest + Point2::new(0.003, 0.0015);
+        let moved = compile_topology(&inclusion_geometry(nudged), 2).unwrap();
+        let next = plan_for(&moved, inside, Some(RegionId(2)), options);
+        let constant = vec![Some(0.04); fresh.triangles.len()];
+        let stepped = fresh
+            .triangles
+            .iter()
+            .map(|triangle| Some((0.6 * max_edge(&fresh, triangle)).clamp(0.02, 0.16)))
+            .collect::<Vec<_>>();
+        for (name, requests) in [("constant", constant), ("stepped", stepped)] {
+            let mut mesh = fresh.clone();
+            mesh.requested_sizes = requests;
+            let (carved, report) = carve(&mesh, &plan, &next, &moved, options);
+            assert_contract(&carved, &next, options);
+            assert!(
+                worst_angle(&carved) >= worst_angle(&fresh) - 1.0,
+                "{name}: worst angle {} after the repair, {} before",
+                worst_angle(&carved),
+                worst_angle(&fresh)
+            );
+            assert!(
+                report.inserted_triangles <= report.removed_triangles * 2,
+                "{name}: {report:?}"
+            );
+            if name == "constant" {
+                assert!(
+                    carved.requested_sizes[report.kept_triangles..]
+                        .iter()
+                        .flatten()
+                        .all(|request| *request == 0.04)
+                );
+            }
+        }
+    }
+
+    fn flat_mesh(points: &[[f64; 2]], triangles: &[[usize; 3]]) -> TriMesh {
+        TriMesh {
+            geometry_revision: 1,
+            mesh_revision: 1,
+            vertices: points
+                .iter()
+                .map(|[x, y]| MeshVertex {
+                    point: Point2::new(*x, *y),
+                    boundary: None,
+                    trace: None,
+                })
+                .collect(),
+            triangles: triangles
+                .iter()
+                .map(|vertices| MeshTriangle {
+                    vertices: *vertices,
+                    region: RegionId(1),
+                })
+                .collect(),
+            boundary_edges: vec![],
+            quality: MeshQuality {
+                minimum_angle_degrees: 0.0,
+                maximum_edge_length: 1.0,
+            },
+            requested_sizes: vec![],
+        }
+    }
+
+    /// A refill that leaves a degenerate element is refused with the count,
+    /// the worst angle and where it is, so the fallback names the defect.
+    #[test]
+    fn a_repair_with_degenerate_elements_is_refused_by_name() {
+        let mesh = flat_mesh(
+            &[
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [2.0, 0.0],
+                [1.5, 1.0],
+                [0.5, 1.0e-5],
+            ],
+            &[[0, 1, 2], [1, 3, 4], [0, 1, 5]],
+        );
+        let options = MeshingOptions::default();
+        assert!(verify_repair_quality(&mesh, 3, 45.0, options).is_ok());
+        assert!(verify_repair_quality(&mesh, 2, 45.0, options).is_err());
+        let error = verify_repair_quality(&mesh, 1, 45.0, options).unwrap_err();
+        let MeshError::DegenerateRepair {
+            count,
+            worst_angle_degrees,
+            floor_degrees,
+            point,
+        } = error.clone()
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!(count, 1);
+        assert!(worst_angle_degrees < 0.01, "{worst_angle_degrees}");
+        assert_eq!(floor_degrees, 9.0);
+        assert!((point - Point2::new(0.5, 1.0e-5 / 3.0)).norm() < 1.0e-9);
+        let message = error.to_string();
+        assert!(message.contains("1 degenerate element"), "{message}");
+        assert!(message.contains("9.0° floor"), "{message}");
+        // A mesh that already had a poor angle lowers the floor with it.
+        assert!(verify_repair_quality(&mesh, 1, 0.001, options).is_ok());
+    }
+
+    /// An adapted mesh may already exceed the mesher's caps; they bound what
+    /// a repair adds, not what it inherits.
+    #[test]
+    fn a_repair_of_a_mesh_beyond_the_mesher_caps_still_fits() {
+        let scene = moved_hole(Point2::new(0.0, 0.0), Point2::new(0.04, 0.03), 0.06);
+        assert!(scene.before.vertices.len() > 1_000 && scene.before.triangles.len() > 2_000);
+        let capped = MeshingOptions {
+            max_vertices: 1_000,
+            max_triangles: 2_000,
+            ..scene.options
+        };
+        let (carved, report) = carve(
+            &scene.before,
+            &scene.before_plan,
+            &scene.after_plan,
+            &scene.after_topology,
+            capped,
+        );
+        assert_contract(&carved, &scene.after_plan, scene.options);
+        assert_same_areas(&carved, &scene.fresh);
+        assert!(report.kept_triangles > 0, "{report:?}");
     }
 }

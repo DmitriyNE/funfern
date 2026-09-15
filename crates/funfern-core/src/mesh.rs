@@ -220,9 +220,21 @@ pub enum MeshError {
     InvalidOptions,
     InvalidGeometry(ValidationIssue),
     Sampling(ObstacleId),
-    Capacity { vertices: usize, triangles: usize },
+    Capacity {
+        vertices: usize,
+        triangles: usize,
+    },
     Topology(&'static str),
     RefinementLimit(MeshQuality),
+    /// A repair's refill produced elements below the angle floor. The carve
+    /// is refused rather than handing the solver a collapsed timestep, and
+    /// the error names the defect so a fallback in the panel says what it is.
+    DegenerateRepair {
+        count: usize,
+        worst_angle_degrees: f64,
+        floor_degrees: f64,
+        point: Point2,
+    },
 }
 
 impl std::fmt::Display for MeshError {
@@ -243,6 +255,18 @@ impl std::fmt::Display for MeshError {
                 f,
                 "Refinement limit reached (minimum angle {:.1}°, maximum edge {:.3})",
                 quality.minimum_angle_degrees, quality.maximum_edge_length
+            ),
+            Self::DegenerateRepair {
+                count,
+                worst_angle_degrees,
+                floor_degrees,
+                point,
+            } => write!(
+                f,
+                "Mesh repair produced {count} degenerate elements, the worst with a \
+                 {worst_angle_degrees:.4}° angle near ({:.3}, {:.3}) against a \
+                 {floor_degrees:.1}° floor",
+                point.x, point.y
             ),
         }
     }

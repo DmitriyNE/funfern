@@ -184,6 +184,8 @@ fn classify_failure(error: &MeshError) -> MeshUpdateFailure {
         MeshError::Sampling(_) => MeshUpdateFailureKind::BoundarySampling,
         MeshError::Capacity { .. } => MeshUpdateFailureKind::Capacity,
         MeshError::RefinementLimit(_) => MeshUpdateFailureKind::RefinementLimit,
+        // Only a carve refuses its own refill; the legacy path never sees it.
+        MeshError::DegenerateRepair { .. } => MeshUpdateFailureKind::ElementInversion,
         MeshError::Topology(reason) => {
             if reason.contains("paired baffle trace") {
                 MeshUpdateFailureKind::PairedTraceMismatch
