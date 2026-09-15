@@ -568,6 +568,9 @@ pub struct Playground {
     material_edit: Option<Material>,
     material_formula_edits: BTreeMap<(u64, u8), String>,
     material_formula_errors: BTreeMap<(u64, u8), String>,
+    /// Whether the formula reference is showing. It is a window rather than a
+    /// menu so it stays readable while a formula is being typed.
+    formula_help_open: bool,
     material_color_edit: Option<(MaterialId, [u8; 3])>,
     new_separator_material: MaterialId,
     mesh_edge: f64,
@@ -711,6 +714,7 @@ impl Default for Playground {
             material_edit: None,
             material_formula_edits: BTreeMap::new(),
             material_formula_errors: BTreeMap::new(),
+            formula_help_open: false,
             material_color_edit: None,
             new_separator_material: DEFAULT_MATERIAL,
             mesh_edge: 0.08,
@@ -2572,7 +2576,15 @@ impl Playground {
                 parameters: vec![],
                 signal: TimeSignal::harmonic(0.0, 12.0, 3.0, 0.0),
             });
-            let mut source_changed = ui.checkbox(&mut source.enabled, "Volume source").changed();
+            let mut source_changed = false;
+            ui.horizontal(|ui| {
+                source_changed = ui.checkbox(&mut source.enabled, "Volume source").changed();
+                // Only beside a visible profile editor: with the source off
+                // there is no formula on screen to explain.
+                if source.enabled {
+                    self.formula_help_toggle(ui);
+                }
+            });
             // The editors follow the checkbox exactly. Turning the source off
             // keeps its profile and signal in the document, so turning it back
             // on restores what was there.
@@ -2669,9 +2681,7 @@ impl Playground {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Library");
-            ui.small_button("?").on_hover_text(
-                "Formulas use x, y, r, theta and material parameters. Functions: abs, sqrt, exp, ln, sin, cos, tan, min, max, clamp, pow.",
-            );
+            self.formula_help_toggle(ui);
             if ui.button("+").clicked() {
                 match self.editor.add_material() {
                     Ok(id) => {
@@ -8420,6 +8430,64 @@ impl Playground {
             });
         self.diagnostics_open = open;
     }
+    /// The `?` beside a place where formulas are typed.
+    fn formula_help_toggle(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .small_button("?")
+            .on_hover_text("Formula syntax reference")
+            .clicked()
+        {
+            self.formula_help_open = !self.formula_help_open;
+        }
+    }
+
+    fn formula_help_window(&mut self, ctx: &egui::Context) {
+        if !self.formula_help_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Formula syntax")
+            .id(egui::Id::new("formula_help"))
+            .open(&mut open)
+            .default_width(340.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.small("Every material coefficient and every source profile takes either a constant or a formula in these terms.");
+                ui.separator();
+                ui.strong("Coordinates and constants");
+                egui::Grid::new("formula_help_symbols")
+                    .num_columns(2)
+                    .spacing([12.0, 2.0])
+                    .show(ui, |ui| {
+                        for (names, meaning) in FORMULA_SYMBOLS {
+                            ui.monospace(names);
+                            ui.small(meaning);
+                            ui.end_row();
+                        }
+                    });
+                ui.small("A material's own named parameters can be used directly.");
+                ui.separator();
+                ui.strong("Operators");
+                ui.monospace("+  -  *  /  ^  ( )");
+                ui.small("^ raises to a power and groups to the right.");
+                ui.separator();
+                ui.strong("Functions");
+                egui::Grid::new("formula_help_functions")
+                    .num_columns(2)
+                    .spacing([12.0, 2.0])
+                    .show(ui, |ui| {
+                        for (signature, meaning, _) in FORMULA_FUNCTIONS {
+                            ui.monospace(signature);
+                            ui.small(meaning);
+                            ui.end_row();
+                        }
+                    });
+                ui.separator();
+                ui.small("A radial profile, for example: parameter R = 0.35 with stiffness 2 - clamp(0, 1, r / R)^2.");
+            });
+        self.formula_help_open = open;
+    }
+
     fn frame_section(&self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Frame")
             .default_open(true)
@@ -8796,6 +8864,7 @@ impl Playground {
         if !self.capturing() {
             self.probe_windows(root.ctx());
             self.diagnostics_window(root.ctx());
+            self.formula_help_window(root.ctx());
         }
         self.keyboard_focus_previous = root.ctx().egui_wants_keyboard_input();
         viewport
@@ -8814,6 +8883,42 @@ fn timing_line(timing: TopologyPreparationTiming) -> String {
         timing.longest_slice_ms,
     )
 }
+
+/// The coordinates and constants a formula can name, as the reference lists
+/// them. Names within an entry are comma separated so the test can evaluate
+/// each one on its own.
+const FORMULA_SYMBOLS: [(&str, &str); 4] = [
+    ("x, y", "position in the region's frame, world units"),
+    ("r", "distance from the frame's origin"),
+    ("theta", "angle from the frame's x axis, radians"),
+    ("pi, e", "3.14159..., 2.71828..."),
+];
+
+/// The functions a formula can call, each with an expression the parser has to
+/// accept. The reference drifted from the parser once already - it advertised
+/// `ln` and `pow`, which the language has never had - so these examples are
+/// what keeps the two in step.
+const FORMULA_FUNCTIONS: [(&str, &str, &str); 11] = [
+    ("sqrt(v)", "square root", "sqrt(r)"),
+    ("abs(v)", "magnitude", "abs(x)"),
+    ("sin(v)", "sine of an angle in radians", "sin(theta)"),
+    ("cos(v)", "cosine of an angle in radians", "cos(theta)"),
+    ("tan(v)", "tangent of an angle in radians", "tan(theta)"),
+    ("exp(v)", "e raised to v", "exp(-r)"),
+    ("log(v)", "natural logarithm", "log(1 + r)"),
+    ("min(a, b)", "the smaller of the two", "min(x, y)"),
+    ("max(a, b)", "the larger of the two", "max(x, y)"),
+    (
+        "clamp(min, max, v)",
+        "v held inside [min, max]",
+        "clamp(0, 1, r)",
+    ),
+    (
+        "smoothstep(edge0, edge1, v)",
+        "0 below edge0, 1 above edge1, smooth between",
+        "smoothstep(0, 1, r)",
+    ),
+];
 
 #[allow(clippy::too_many_arguments)]
 fn material_scalar_editor(
@@ -9734,6 +9839,42 @@ pub fn frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_formula_reference_names_what_the_parser_accepts() {
+        let origin = MaterialCoordinates {
+            x: 0.0,
+            y: 0.0,
+            r: 0.0,
+            theta: 0.0,
+        };
+        for (names, _) in FORMULA_SYMBOLS {
+            for name in names.split(", ") {
+                // An unknown name parses as a material parameter and only fails
+                // once it is evaluated without one, so the evaluation is what
+                // proves the reference still names something built in.
+                let field = ScalarField::formula(name).expect("a listed symbol parses");
+                assert!(
+                    field.evaluate(origin, &[]).is_ok(),
+                    "the reference lists `{name}`, which the parser does not know"
+                );
+            }
+        }
+        for (signature, _, example) in FORMULA_FUNCTIONS {
+            let field = ScalarField::formula(example)
+                .unwrap_or_else(|error| panic!("{signature}: `{example}` is rejected: {error}"));
+            assert!(
+                field.evaluate(origin, &[]).is_ok(),
+                "{signature}: `{example}` does not evaluate"
+            );
+        }
+        for retired in ["ln(1 + r)", "pow(r, 2)"] {
+            assert!(
+                ScalarField::formula(retired).is_err(),
+                "`{retired}` parses, so the reference should be listing it"
+            );
+        }
+    }
 
     #[test]
     fn marquee_operation_and_direction_are_live_conventions() {

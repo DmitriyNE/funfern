@@ -216,7 +216,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   parameters, arithmetic, powers, and `sqrt`, `abs`, `sin`, `cos`, `tan`, `exp`,
   `log`, `min`, `max`, `clamp`, and `smoothstep`. For example, a radial profile can
   define parameter `R = 0.35` and stiffness `2 - clamp(0, 1, r / R)^2`. The `?`
-  control beside the material-property note opens a compact syntax reference.
+  beside Library, and the one beside an enabled volume source, open a compact
+  syntax reference that stays up while a formula is typed.
   Coordinates are measured in world units in a rigid orthonormal frame: origin and
   angle set placement, with no hidden coordinate scaling. A new subdomain's frame starts at the
   centre of the face it owns, so a local profile is usable before touching the

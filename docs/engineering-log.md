@@ -138,6 +138,33 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — The formula reference is a window again, pinned to the parser
+
+The unified-topology swap kept the material panel's `?` but lost what it opened.
+The menu popup added with the reference became a `small_button` carrying a
+one-line hover tooltip, and the tooltip had drifted from the language: it
+advertised `ln` and `pow`, which the parser has never accepted, and omitted
+`log`, `^`, `smoothstep`, `pi`, and `e`. The harness test that had guarded the
+popup went out with the old UI harness, so nothing noticed.
+
+`?` now toggles a `Formula syntax` window — deliberately a window and not a
+menu, because a menu closes the moment the pointer enters the formula field,
+which is when the reference is wanted. It lists coordinates and constants,
+operators, and every function with its argument order, and it sits beside the
+material Library and beside an enabled volume source's profile.
+
+The reference is data: `FORMULA_SYMBOLS` and `FORMULA_FUNCTIONS` in `ui.rs`,
+each function entry carrying an expression. `the_formula_reference_names_what_the_parser_accepts`
+parses and evaluates every one of them through `ScalarField::formula` with no
+parameters — an unknown name parses as a parameter and only fails on
+evaluation, so evaluating is what proves a listed symbol is built in — and
+asserts `ln(1 + r)` and `pow(r, 2)` are still rejected. The reference cannot
+drift from the parser again without a red test.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked`, `cargo build --release -p
+funfern-app --locked`.
+
 ## 2026-09-15 — Requests are a ceiling, the existing density the floor
 
 Two reports against the requested-size refill. A repaired band came out about
