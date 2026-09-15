@@ -26,6 +26,18 @@ Follow-ups from the welding work:
   Reachable at about 41 polygon vertices. The message says so; a pre-emptive gate
   would need the cost of the whole attachment, not just of one knot.
 
+Low priority, correctness rather than anything that shows:
+
+- [ ] A recorder loses the samples between its last readback and the freeze when
+  a handoff rebuilds its ring: 2 to 4 of them at 120 Hz, a 33 ms hole measured
+  over 25 adaptations. The traces are polylines, so it draws as one straight
+  segment under 2% of a default window rather than a break, and nothing in the
+  readouts integrates along the time axis, so no reported number is wrong. What
+  it would take: the point, curve, and area rings keyed to the wave clock the
+  way the far field's now is, so a new mesh inherits the ring instead of
+  starting one — their write cursor is still a generation-local step count,
+  which is why keeping the buffer across a handoff would scramble it.
+
 Carried over from the cutover follow-up work, not from the review:
 
 - [ ] A deletion that needs a survivor closes the entry before asking, so a
@@ -186,10 +198,9 @@ point probe injected at startup, the contour ring temporarily read back and its
 bucket coverage printed. That is what showed the ring was being kept while the
 window had holes in it, which no amount of reading the diff was going to.
 
-Left open: the samples between the last readback issued and the freeze still go
-with the ring when the commit rebuilds it, 1 to 4 of them at 120 Hz. Closing it
-needs the point, curve, and area rings keyed to the clock the way the far
-field's now is, since their cursor is still a generation-local step count.
+Left open, as a low-priority item in the TODOs above: the samples between the
+last readback issued and the freeze still go with the ring when the commit
+rebuilds it, 2 to 4 of them at 120 Hz.
 
 Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
 warnings`, `cargo test --workspace --locked`, `cargo build --release -p
