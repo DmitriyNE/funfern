@@ -3605,7 +3605,7 @@ impl Playground {
                     if tangent.length_sq() <= f32::EPSILON {
                         continue;
                     }
-                    let normal = egui::vec2(-tangent.y, tangent.x).normalized() * offset;
+                    let normal = side_offset(tangent, CurveTraceSide::Left) * offset;
                     painter.line_segment([a + normal, b + normal], Stroke::new(1.4, left));
                     painter.line_segment([a - normal, b - normal], Stroke::new(1.4, right));
                 }
@@ -3636,6 +3636,68 @@ impl Playground {
                     if selected { SELECT } else { color },
                 ),
             ));
+        }
+        // The side the Boundary inspector is editing. A span's two traces are
+        // geometrically coincident, so without a band in the scene the Left and
+        // Right buttons name something the scene never shows. The arrow gives
+        // the start-to-end direction those names are measured from.
+        if interactive {
+            // Clear of the condition strokes when they are on, and tight against
+            // the span when they are not.
+            let offset = width * 0.5
+                + if self.editor.document.presentation.boundary_conditions {
+                    7.5
+                } else {
+                    4.0
+                };
+            for span in &sampled.spans {
+                if !matches!(span.target, TopologySpanTarget::Curve(_))
+                    || !self.span_selected(span.target)
+                {
+                    continue;
+                }
+                let Some(middle) = span
+                    .samples
+                    .first()
+                    .zip(span.samples.last())
+                    .map(|(first, last)| 0.5 * (first.t + last.t))
+                else {
+                    continue;
+                };
+                let mut arrow: Option<(f64, Pos2, Pos2)> = None;
+                for segment in span.samples.windows(2) {
+                    let a = self.screen(segment[0].point, r);
+                    let b = self.screen(segment[1].point, r);
+                    let normal = side_offset(b - a, self.selected_side);
+                    if normal == egui::Vec2::ZERO {
+                        continue;
+                    }
+                    let normal = normal * offset;
+                    painter
+                        .line_segment([a + normal, b + normal], Stroke::new(3.0, Color32::WHITE));
+                    let score = (0.5 * (segment[0].t + segment[1].t) - middle).abs();
+                    if arrow.is_none_or(|(best, _, _)| score < best) {
+                        arrow = Some((score, a, b));
+                    }
+                }
+                if let Some((_, start, end)) = arrow {
+                    let tangent = end - start;
+                    let direction = tangent / tangent.length();
+                    let normal = egui::vec2(-direction.y, direction.x);
+                    let center = start + 0.5 * tangent;
+                    painter.line_segment(
+                        [center - direction * 7.0, center + direction * 7.0],
+                        Stroke::new(1.5, GOLD),
+                    );
+                    let tip = center + direction * 7.0;
+                    for barb in [normal, -normal] {
+                        painter.line_segment(
+                            [tip, tip - direction * 5.0 + barb * 3.0],
+                            Stroke::new(1.5, GOLD),
+                        );
+                    }
+                }
+            }
         }
         if interactive && self.editor.document.presentation.handles {
             // A control belongs to a selection only through a selected span it
@@ -8884,6 +8946,22 @@ fn timing_line(timing: TopologyPreparationTiming) -> String {
     )
 }
 
+/// The screen-space unit normal pointing to one side of a span running along
+/// `tangent`, or zero for a degenerate segment. Left of increasing parameter in
+/// the world is `(t.y, -t.x)` on screen, because the viewport flips the vertical
+/// axis; `screen_side` classifies a point by the same rule.
+fn side_offset(tangent: egui::Vec2, side: CurveTraceSide) -> egui::Vec2 {
+    let length = tangent.length();
+    if !length.is_finite() || length <= f32::EPSILON {
+        return egui::Vec2::ZERO;
+    }
+    let left = egui::vec2(tangent.y, -tangent.x) / length;
+    match side {
+        CurveTraceSide::Left => left,
+        CurveTraceSide::Right => -left,
+    }
+}
+
 /// The coordinates and constants a formula can name, as the reference lists
 /// them. Names within an entry are comma separated so the test can evaluate
 /// each one on its own.
@@ -9839,6 +9917,41 @@ pub fn frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use funfern_app::topology_viewport::screen_side;
+
+    #[test]
+    fn the_side_band_falls_where_a_click_reads_the_same_side() {
+        // A span drawn left to right on screen runs along +x in the world, so
+        // its left side is up the screen.
+        assert_eq!(
+            side_offset(egui::vec2(2.0, 0.0), CurveTraceSide::Left),
+            egui::vec2(0.0, -1.0)
+        );
+        for (x, y) in [
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (-1.0, 0.0),
+            (0.0, -1.0),
+            (3.0, -2.0),
+            (-1.5, -4.0),
+        ] {
+            let a = ScreenPoint::new(0.0, 0.0);
+            let b = ScreenPoint::new(f64::from(x), f64::from(y));
+            for side in [CurveTraceSide::Left, CurveTraceSide::Right] {
+                let offset = side_offset(egui::vec2(x, y), side) * 3.0;
+                let point = ScreenPoint::new(f64::from(offset.x), f64::from(offset.y));
+                assert_eq!(
+                    screen_side(a, b, point),
+                    side,
+                    "a band on the {side:?} of ({x}, {y}) reads back as the other side"
+                );
+            }
+        }
+        assert_eq!(
+            side_offset(egui::Vec2::ZERO, CurveTraceSide::Left),
+            egui::Vec2::ZERO
+        );
+    }
 
     #[test]
     fn the_formula_reference_names_what_the_parser_accepts() {

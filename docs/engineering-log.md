@@ -138,6 +138,38 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — A span's selected side is visible again, and on the right side
+
+Reported: the Left/Right selector for baffle faces is hard to use because the
+scene never shows which side is selected. Two things were wrong, both from the
+unified-topology swap.
+
+The white band the pre-swap UI painted along the selected side of every selected
+baffle span, and the gold start-to-end arrow beside it, were dropped with the old
+renderer. `README.md` still described the arrow. Both are back, drawn for every
+selected curve span on `selected_side`, sitting clear of the condition strokes
+when that overlay is on.
+
+Worse, the condition strokes themselves were mirrored. `draw_sampled` offset by
+`(-t.y, t.x)` in screen space and painted the left law there, but the viewport
+flips the vertical axis, so that direction is world-space right. `left_probe`
+defines `edge.left` as the world-space left of increasing parameter, `hit_edge`
+classifies a click as Left by the negative screen cross product, and the pre-swap
+renderer used `(t.y, -t.x)`; the overlay disagreed with all three, so View >
+Boundary conditions has been showing each law on the wrong side of the curve.
+
+The convention now lives in two named places that a test holds together:
+`screen_side` in `topology_viewport.rs` (extracted from the cross product inside
+`hit_edge`, unchanged) and `side_offset` in `ui.rs`, which every band and stroke
+offsets by. `the_side_band_falls_where_a_click_reads_the_same_side` offsets a
+point to each side of several tangents and asserts a click there reads back the
+same side; restoring the old normal makes it fail.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked`, `cargo build --release -p
+funfern-app --locked`. The band, arrow and stroke sides are geometry the tests
+pin, but their look on screen is for the next interactive pass.
+
 ## 2026-09-15 — The formula reference is a window again, pinned to the parser
 
 The unified-topology swap kept the material panel's `?` but lost what it opened.

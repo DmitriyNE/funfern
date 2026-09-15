@@ -982,14 +982,9 @@ fn hit_edge(
                             return None;
                         }
                     } else {
-                        // World-space left becomes the negative cross-product
-                        // side after the viewport's vertical-axis flip.
-                        let cross =
-                            (b.x - a.x) * (pointer.y - a.y) - (b.y - a.y) * (pointer.x - a.x);
-                        if cross <= 0.0 {
-                            (CurveTraceSide::Left, edge.left)
-                        } else {
-                            (CurveTraceSide::Right, edge.right)
+                        match screen_side(a, b, pointer) {
+                            CurveTraceSide::Left => (CurveTraceSide::Left, edge.left),
+                            CurveTraceSide::Right => (CurveTraceSide::Right, edge.right),
                         }
                     };
                     let parameter =
@@ -1013,6 +1008,20 @@ fn hit_edge(
             }
         })
         .min_by(|left, right| left.distance.total_cmp(&right.distance))
+}
+
+/// Which side of the screen-space segment `a -> b` a point falls on. World-space
+/// left of increasing parameter becomes the negative cross-product side after
+/// the viewport's vertical-axis flip, so everything that has to agree about a
+/// side - hit testing, the condition strokes, the selected-side band - reads it
+/// from here.
+pub fn screen_side(a: ScreenPoint, b: ScreenPoint, point: ScreenPoint) -> CurveTraceSide {
+    let cross = (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x);
+    if cross <= 0.0 {
+        CurveTraceSide::Left
+    } else {
+        CurveTraceSide::Right
+    }
 }
 
 /// The controls that shape the selected curve spans, as `(curve, control)`

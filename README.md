@@ -136,13 +136,15 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   conditions. Hole and baffle faces support the same choices, with an adjustable
   impedance ratio for first-order outgoing behavior. The baffle face selector stays
   in the inspector because its left and right traces are geometrically coincident;
-  viewport arrows show the start-to-end direction defining those sides.
+  the viewport bands the selected side of every selected span in white and marks
+  the start-to-end direction those two names are measured from with a gold arrow.
   A baffle span instead can use one conservative thin-gap law coupling both traces;
   applying a face condition converts it back to independent faces, and increasing
   gap stiffness can reduce the solver time step.
   New scenes start with the second-order auxiliary condition on all four outer
   edges. View > Boundary conditions colors the assigned laws directly on the
-  outer box, hole spans, and both baffle traces.
+  outer box, hole spans, and both baffle traces, each law on its own side of the
+  span.
 - **Physics skins:** Simulation switches the shared scalar PDE between mechanical,
   electromagnetic TM (`E_z`), and electromagnetic TE (`H_z`) views. Mechanical
   materials expose density, stiffness, and damping. EM materials expose relative
