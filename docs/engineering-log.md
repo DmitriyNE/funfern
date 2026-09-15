@@ -138,6 +138,67 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — The far-field recording outlives the mesh it was read through
+
+Reported as no handoff procedure: the plot restarts on every remesh, and with
+adaptation on it never appears at all. It did not appear because a projection
+cannot report anything until the ring holds a whole delay window - every
+direction reads all 256 contour points at their own retarded times, and one NaN
+or out-of-range age invalidates the whole direction - and `update_far_field`
+opened by clearing the ring, on every commit. For the current autosave that
+window is 3.4 s of simulated time (a 1.79 s margin to the domain's corner plus
+1.63 s of contour reach at c = 1), while adaptation re-evaluates every 0.75 s
+and adapts as soon as four elements want refining. The ring never survived long
+enough to fill once.
+
+Nothing about the recording is mesh-bound. `rectangular_far_field_contour` takes
+the positions, normals, spacing, speed, and margin from the document; only the
+seven-node stencil per point reads the mesh. So the ring is now keyed to what it
+describes - `FarFieldContour` - and a new mesh over the same contour swaps the
+stencils and keeps recording. `install` no longer clears it: what it holds is the
+exterior at fixed world points, and `update_far_field` decides. Nothing samples
+into it while a handoff is in flight, because a recorder pass is only ever
+encoded inside the step loop and no step is encoded until the commit.
+
+Two things stood in the way of keeping it, and both were the ring being counted
+in steps. The cursor was `(completed / stride) % frames` over a step counter that
+restarts with each GPU generation, and `sample_interval = stride * dt` changed
+whenever an adaptation moved the time step. A frame is a bucket of the app's
+clock now - `floor((origin + t) / period)` with the period leaving 1/60 s only
+for a step longer than that - so the cursor is a function of time and continuous
+across a swap by construction, and the projection brackets by the times recorded
+in the ring rather than by a uniform age, so buckets filled at one step size
+still read correctly under another.
+
+The dispatch gate cannot follow the solver's clock: `time_data.z` accumulates a
+step at a time in f32 and runs away from any arithmetic over step counts by more
+than a whole step within a few thousand steps, and a missed dispatch is a hole
+that invalidates every projection reaching back through it for a whole lap. So
+the shader asks the ring instead - a frame already holding a sample of this
+bucket is done - and the stride only has to be dense enough to visit every
+bucket. A quarter of a bucket keeps the recorded sample near its start.
+
+`a_new_mesh_over_the_same_contour_inherits_the_far_field_ring` runs the real
+`update_far_field` over a `World`: an adaptation at a shorter step keeps the ring
+and replaces the stencils, a restarted clock and a moved contour do not, and
+nothing is left in `Assets` afterwards. The ring's own rule is run at a clock
+that drifts and then changes step, and held to one sample per bucket with no
+gaps, by `the_far_field_ring_records_every_bucket_once_across_a_handoff`.
+
+The readout and the Probes panel now say how much of the delay window is
+recorded, which is the difference between a plot that is empty and a recorder
+that is not ready.
+
+One limit left where it was: the wave clock is f32, so a long enough run loses
+the resolution to separate buckets. It is the same clock the solver and every
+other probe already run on.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked`, `cargo build --release -p
+funfern-app --locked`. The shaders were also parsed and validated with naga 29
+outside the workspace, which is what caught `target` being a reserved word in
+WGSL before it reached a GPU.
+
 ## 2026-09-15 — Probes belong to the wave buffers, so they follow them back
 
 Reported as probes sticking after a Reset, with Clear as the only way out. Two

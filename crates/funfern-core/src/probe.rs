@@ -147,6 +147,21 @@ pub struct QuadraticFarFieldStencil {
     pub delay_margin: f64,
 }
 
+impl QuadraticFarFieldStencil {
+    /// How much contour history one projection reads. A direction integrates
+    /// every contour point at its own retarded time, and the oldest of those is
+    /// the point furthest against the ray, so nothing can be reported until the
+    /// recorder holds this many seconds.
+    pub fn history_seconds(&self) -> f64 {
+        let reach = self
+            .samples
+            .iter()
+            .map(|(_, position, _)| position.norm())
+            .fold(0.0, f64::max);
+        self.delay_margin + reach / self.wave_speed
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FarFieldCompileOptions<'a> {
     pub inset: f64,
@@ -1952,6 +1967,15 @@ mod tests {
         assert!((compiled.wave_speed - 1.0).abs() < 1.0e-12);
         assert!((compiled.sample_spacing - 7.04 / 64.0).abs() < 1.0e-12);
         assert!((compiled.delay_margin - 2.0_f64.sqrt()).abs() < 1.0e-12);
+        // The delay margin reaches the domain's corner; the history a projection
+        // reads reaches from there to the contour point furthest the other way.
+        let reach = compiled
+            .samples
+            .iter()
+            .map(|(_, point, _)| point.norm())
+            .fold(0.0, f64::max);
+        assert!(reach > 0.0 && reach < compiled.delay_margin);
+        assert!((compiled.history_seconds() - (compiled.delay_margin + reach)).abs() < 1.0e-12);
         assert!(compiled.samples.iter().all(|(stencil, point, normal)| {
             stencil.region == BACKGROUND_REGION
                 && (normal.norm() - 1.0).abs() < 1.0e-12

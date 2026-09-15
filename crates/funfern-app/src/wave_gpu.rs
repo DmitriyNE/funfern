@@ -166,7 +166,77 @@ struct FarFieldBufferHandles {
     control: Handle<ShaderBuffer>,
     raw: Handle<ShaderBuffer>,
     output: Handle<ShaderBuffer>,
+    /// What the recorded history describes. Only the stencils behind it are
+    /// mesh-bound, so a new mesh over the same contour inherits the ring.
+    contour: FarFieldContour,
     sample_stride: u64,
+}
+
+/// The part of a far-field recorder that the mesh does not name: where the
+/// contour is, how fast the exterior carries a wave, and the bucket the ring
+/// counts in. Two recorders that agree here record the same time series.
+#[derive(Clone, Debug, PartialEq)]
+struct FarFieldContour {
+    points: Vec<(Point2, Point2)>,
+    wave_speed: f64,
+    sample_spacing: f64,
+    delay_margin: f64,
+    period: f64,
+}
+
+/// What became of the recorded history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FarFieldHandoff {
+    /// No recorder is running.
+    Off,
+    /// The contour is the one already being recorded, so the new mesh took over
+    /// the ring and the projection keeps reading across the swap.
+    Kept,
+    /// The ring starts over, and reports nothing until it holds a whole delay
+    /// window again.
+    Restarted,
+}
+
+/// Where the far-field ring sits on the wave clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FarFieldClock {
+    /// Simulated time at the GPU's zero, so recorded times are the app's times.
+    pub origin: f64,
+    /// False when the clock itself restarted and the history is of another run.
+    pub keep_history: bool,
+}
+
+/// The ring is a time series, not a step series: a frame is one bucket of the
+/// wave clock, so a mesh swap that moves the time step neither shifts the write
+/// cursor nor restretches what is already recorded. The period leaves 1/60 s
+/// only for a step longer than that, which keeps it fixed under the small
+/// changes an adaptation makes.
+fn far_field_period(time_step: f64) -> f64 {
+    let mut period = 1.0 / FAR_FIELD_SAMPLE_RATE;
+    for _ in 0..64 {
+        if period >= time_step {
+            break;
+        }
+        period *= 2.0;
+    }
+    period
+}
+
+fn far_field_bucket(time: f64, period: f64) -> f64 {
+    (time / period).floor()
+}
+
+/// How often to encode a recorder pass. The shader decides what to keep, by
+/// asking the ring whether the bucket it has reached is already recorded, so
+/// this only has to be dense enough to visit every bucket — it cannot skip one,
+/// and it need not track the solver's own clock, which drifts from step times
+/// by more than a step over a long run. The quarter-bucket spacing is what
+/// keeps a recorded sample near the start of its bucket.
+fn far_field_sample_stride(period: f64, time_step: f64) -> u64 {
+    if !period.is_finite() || !time_step.is_finite() || period <= 0.0 || time_step <= 0.0 {
+        return 1;
+    }
+    ((period / (4.0 * time_step)).floor() as u64).max(1)
 }
 
 impl FarFieldBufferHandles {
@@ -635,10 +705,11 @@ impl WaveGpuRequest {
         commands: &mut Commands,
         input: Option<&FarFieldInput>,
         time_step: f64,
-    ) -> Result<(), String> {
-        self.clear_far_field_buffers(assets, commands);
+        clock: FarFieldClock,
+    ) -> Result<FarFieldHandoff, String> {
         let Some(input) = input else {
-            return Ok(());
+            self.clear_far_field_buffers(assets, commands);
+            return Ok(FarFieldHandoff::Off);
         };
         if input.samples.len() != FAR_FIELD_CONTOUR_POINTS
             || !input.wave_speed.is_finite()
@@ -649,11 +720,23 @@ impl WaveGpuRequest {
             || input.delay_margin <= 0.0
             || !time_step.is_finite()
             || time_step <= 0.0
+            || !clock.origin.is_finite()
         {
+            self.clear_far_field_buffers(assets, commands);
             return Err("Invalid far-field recorder settings".into());
         }
-        let sample_stride = (1.0 / (FAR_FIELD_SAMPLE_RATE * time_step)).round().max(1.0) as u64;
-        let sample_time = sample_stride as f64 * time_step;
+        let period = far_field_period(time_step);
+        let contour = FarFieldContour {
+            points: input
+                .samples
+                .iter()
+                .map(|(_, position, normal)| (*position, *normal))
+                .collect(),
+            wave_speed: input.wave_speed,
+            sample_spacing: input.sample_spacing,
+            delay_margin: input.delay_margin,
+            period,
+        };
         let stencils = input
             .samples
             .iter()
@@ -669,10 +752,12 @@ impl WaveGpuRequest {
                 || !stencil.gradient_y_b.is_finite()
                 || !stencil.position_normal.is_finite()
         }) {
+            self.clear_far_field_buffers(assets, commands);
             return Err("Far-field stencils cannot be represented on the GPU".into());
         }
-        let maximum_history = (FAR_FIELD_RING_FRAMES - 2) as f64 * sample_time;
-        if 2.0 * input.delay_margin > maximum_history {
+        let maximum_history = (FAR_FIELD_RING_FRAMES - 2) as f64 * period;
+        if input.history_seconds() > maximum_history {
+            self.clear_far_field_buffers(assets, commands);
             return Err(format!(
                 "Exterior wave speed is too low for the {:.1} s far-field delay window",
                 maximum_history
@@ -680,7 +765,7 @@ impl WaveGpuRequest {
         }
         let control = GpuFarFieldControl {
             sampling: Vec4::new(
-                sample_stride as f32,
+                period as f32,
                 FAR_FIELD_RING_FRAMES as f32,
                 FAR_FIELD_CONTOUR_POINTS as f32,
                 FAR_FIELD_DIRECTIONS as f32,
@@ -689,24 +774,50 @@ impl WaveGpuRequest {
                 input.wave_speed as f32,
                 input.sample_spacing as f32,
                 input.delay_margin as f32,
-                sample_time as f32,
+                clock.origin as f32,
             ),
         };
-        let raw = vec![
-            GpuProbeSample { values: Vec4::NAN };
-            FAR_FIELD_RING_FRAMES * FAR_FIELD_CONTOUR_POINTS
-        ];
-        let output = vec![
-            GpuProbeSample { values: Vec4::NAN };
-            FAR_FIELD_RING_FRAMES * FAR_FIELD_DIRECTIONS
-        ];
-        let handles = FarFieldBufferHandles {
-            stencils: assets.add(ShaderBuffer::from(stencils)),
-            control: assets.add(ShaderBuffer::from(control)),
-            raw: assets.add(ShaderBuffer::from(raw)),
-            output: assets.add(ShaderBuffer::from(output)),
-            sample_stride,
+        // The history is a record of the exterior at fixed world points, so a
+        // handoff needs nothing from the old mesh: the stencils that read the
+        // new one take over the ring the old one was filling.
+        let kept = clock.keep_history
+            && self
+                .far_field
+                .as_ref()
+                .is_some_and(|handles| handles.contour == contour);
+        let handles = if kept {
+            let previous = self.far_field.take().expect("a kept ring exists");
+            assets.remove(previous.stencils.id());
+            assets.remove(previous.control.id());
+            FarFieldBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                contour,
+                sample_stride: far_field_sample_stride(period, time_step),
+                ..previous
+            }
+        } else {
+            self.clear_far_field_buffers(assets, commands);
+            let raw = vec![
+                GpuProbeSample { values: Vec4::NAN };
+                FAR_FIELD_RING_FRAMES * FAR_FIELD_CONTOUR_POINTS
+            ];
+            let output = vec![
+                GpuProbeSample { values: Vec4::NAN };
+                FAR_FIELD_RING_FRAMES * FAR_FIELD_DIRECTIONS
+            ];
+            FarFieldBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                raw: assets.add(ShaderBuffer::from(raw)),
+                output: assets.add(ShaderBuffer::from(output)),
+                contour,
+                sample_stride: far_field_sample_stride(period, time_step),
+            }
         };
+        if let Some(entity) = self.far_field_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
         self.far_field_revision = self.far_field_revision.wrapping_add(1).max(1);
         self.far_field_readback_entity = Some(
             commands
@@ -720,7 +831,11 @@ impl WaveGpuRequest {
                 .id(),
         );
         self.far_field = Some(handles);
-        Ok(())
+        Ok(if kept {
+            FarFieldHandoff::Kept
+        } else {
+            FarFieldHandoff::Restarted
+        })
     }
 
     fn clear_far_field_buffers(
@@ -883,7 +998,6 @@ impl WaveGpuRequest {
         self.clear_probe_buffers(assets, commands);
         self.clear_curve_probe_buffers(assets, commands);
         self.clear_area_probe_buffers(assets, commands);
-        self.clear_far_field_buffers(assets, commands);
         let transfer = self
             .transfer
             .take()
@@ -930,7 +1044,11 @@ impl WaveGpuRequest {
         self.clear_probe_buffers(assets, commands);
         self.clear_curve_probe_buffers(assets, commands);
         self.clear_area_probe_buffers(assets, commands);
-        self.clear_far_field_buffers(assets, commands);
+        // The far-field ring outlives the buffers it was sampled through: what
+        // it holds is the exterior at fixed world points, and `update_far_field`
+        // decides whether the next mesh inherits it. Nothing samples into it
+        // meanwhile, because a far-field pass is only ever encoded inside the
+        // step loop and no step is encoded until the handoff commits.
         let expects_transfer = transfer.is_some();
         if let Some(entity) = self.readback_entity.take() {
             commands.entity(entity).despawn();
@@ -1716,6 +1834,19 @@ pub struct FarFieldInput {
     pub wave_speed: f64,
     pub sample_spacing: f64,
     pub delay_margin: f64,
+}
+
+impl FarFieldInput {
+    /// The window a projection reads, as `QuadraticFarFieldStencil` reports it
+    /// to the panel: a ring shorter than this can never report anything.
+    fn history_seconds(&self) -> f64 {
+        let reach = self
+            .samples
+            .iter()
+            .map(|(_, position, _)| position.norm())
+            .fold(0.0, f64::max);
+        self.delay_margin + reach / self.wave_speed
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3297,6 +3428,9 @@ fn compute_wave(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::world::CommandQueue;
+    use std::collections::BTreeMap;
+
     use funfern_core::{
         CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline, FaceRegionAssignment,
         MeshingOptions, OpenCubicSpline, OuterSide, Region, Scene, SpanBehavior, TopologyCurve,
@@ -3939,10 +4073,247 @@ mod tests {
         let shader = include_str!("far_field.wgsl");
         assert!(shader.contains("fn sample_contour"));
         assert!(shader.contains("fn project_directions"));
-        assert!(shader.contains("let age = (margin - projection) / sample_interval;"));
+        assert!(shader.contains("let age = delay / period;"));
         assert!(shader.contains("sample.z - dot(normal, ray) * sample.y / wave_speed"));
         assert!(shader.contains("amplitude * amplitude"));
         assert!(shader.contains("bitcast<f32>(0x7fc00000u | (direction & 1u))"));
+    }
+
+    #[test]
+    fn far_field_shader_keys_its_ring_to_the_app_clock_and_recorded_times() {
+        let shader = include_str!("far_field.wgsl");
+        // The ring is a function of the clock, not of this generation's steps,
+        // which is what lets a new mesh keep writing into an old ring.
+        assert!(shader.contains("return control.projection.w + parameters.time_data.z"));
+        assert!(!shader.contains("completed % stride"));
+        assert!(!shader.contains("let frame = (completed / stride) % frames;"));
+        // And the projection reads by recorded time, so buckets filled at one
+        // time step still bracket correctly after another one takes over.
+        assert!(shader.contains("if retarded > newer.w && index > 0u {"));
+        assert!(shader.contains("fraction = clamp((newer.w - retarded) / span, 0.0, 1.0);"));
+    }
+
+    /// The recorder in the shader's terms: a dispatched step records the bucket
+    /// its clock has reached, unless the ring frame for that bucket already
+    /// holds a sample of it. Runs of this stand in for what the GPU does, at
+    /// clocks the CPU cannot predict.
+    #[derive(Default)]
+    struct FarFieldRing {
+        frames: usize,
+        recorded: BTreeMap<usize, f64>,
+    }
+
+    impl FarFieldRing {
+        fn record(&mut self, state_time: f64, period: f64) -> Option<f64> {
+            let bucket = far_field_bucket(state_time, period);
+            let frame = bucket.rem_euclid(self.frames as f64) as usize;
+            if self
+                .recorded
+                .get(&frame)
+                .is_some_and(|recorded| far_field_bucket(*recorded, period) == bucket)
+            {
+                return None;
+            }
+            self.recorded.insert(frame, state_time);
+            Some(bucket)
+        }
+    }
+
+    #[test]
+    fn the_far_field_period_stays_put_unless_a_step_outgrows_it() {
+        let base = 1.0 / FAR_FIELD_SAMPLE_RATE;
+        // The time steps an adaptation moves between all share one period.
+        for time_step in [1.0e-5, 1.0e-4, 3.7e-4, 1.0e-3, base] {
+            assert_eq!(far_field_period(time_step), base);
+        }
+        for time_step in [0.02, 0.03, 0.05, 0.3] {
+            let period = far_field_period(time_step);
+            assert!(period >= time_step, "{time_step} outgrew {period}");
+            assert!((period / base).log2().fract() < 1.0e-12);
+            assert!(period * 0.5 < time_step.max(base));
+        }
+    }
+
+    #[test]
+    fn the_far_field_ring_records_every_bucket_once_across_a_handoff() {
+        let period = far_field_period(1.0e-3);
+        let mut ring = FarFieldRing {
+            frames: FAR_FIELD_RING_FRAMES,
+            ..FarFieldRing::default()
+        };
+        let mut buckets = Vec::new();
+        // The solver's own clock accumulates a step at a time in f32 and runs
+        // away from any arithmetic done over step counts, so the run below
+        // drifts by more than a step and changes step mid-flight.
+        let mut run = |origin: f64, time_step: f64, steps: u64, drift: f64| {
+            let stride = far_field_sample_stride(period, time_step);
+            for step in 1..=steps {
+                if !probe_sample_due(step, stride) {
+                    continue;
+                }
+                let state = origin + (step - 1) as f64 * time_step + drift * step as f64;
+                if let Some(bucket) = ring.record(state, period) {
+                    buckets.push(bucket);
+                }
+            }
+        };
+        let first_step = 1.0 / 700.0;
+        let steps = 4000;
+        run(0.0, first_step, steps, first_step * 0.002);
+        // A finer mesh takes the ring over from where the first one stopped.
+        let handoff = steps as f64 * first_step + first_step * 0.002 * steps as f64;
+        run(handoff, 1.0 / 1100.0, 4000, 0.0);
+
+        assert!(buckets.len() > 300);
+        assert_eq!(buckets[0], 0.0);
+        for pair in buckets.windows(2) {
+            // A hole in the ring is a hole in every projection that reaches back
+            // through it, and a bucket recorded twice is a sample of the wrong
+            // moment standing in for the right one.
+            assert_eq!(
+                pair[1] - pair[0],
+                1.0,
+                "{:?} follows {:?}",
+                pair[1],
+                pair[0]
+            );
+        }
+    }
+
+    fn far_field_input(shift: f64) -> FarFieldInput {
+        let stencil = QuadraticPointStencil {
+            nodes: [0; 7],
+            value_weights: [0.0; 7],
+            gradient_weights: [Point2::default(); 7],
+            region: funfern_core::BACKGROUND_REGION,
+            mass_density: 1.0,
+            stiffness: funfern_core::SymmetricTensor2::isotropic(1.0),
+        };
+        let samples = (0..FAR_FIELD_CONTOUR_POINTS)
+            .map(|point| {
+                let angle = std::f64::consts::TAU * point as f64 / FAR_FIELD_CONTOUR_POINTS as f64;
+                let normal = Point2::new(angle.cos(), angle.sin());
+                (stencil, Point2::new(normal.x + shift, normal.y), normal)
+            })
+            .collect();
+        FarFieldInput {
+            samples,
+            wave_speed: 1.0,
+            sample_spacing: 0.02,
+            delay_margin: 1.2,
+        }
+    }
+
+    #[test]
+    fn a_new_mesh_over_the_same_contour_inherits_the_far_field_ring() {
+        let mut world = World::new();
+        let mut assets = Assets::<ShaderBuffer>::default();
+        let mut request = WaveGpuRequest::default();
+        let keeping = FarFieldClock {
+            origin: 0.0,
+            keep_history: true,
+        };
+        let mut update = |request: &mut WaveGpuRequest,
+                          assets: &mut Assets<ShaderBuffer>,
+                          input: &FarFieldInput,
+                          time_step: f64,
+                          clock: FarFieldClock| {
+            let mut queue = CommandQueue::default();
+            let handoff = request
+                .update_far_field(
+                    assets,
+                    &mut Commands::new(&mut queue, &world),
+                    Some(input),
+                    time_step,
+                    clock,
+                )
+                .unwrap();
+            queue.apply(&mut world);
+            handoff
+        };
+        let ring = |request: &WaveGpuRequest| request.far_field.as_ref().unwrap().raw.id();
+        let stencils = |request: &WaveGpuRequest| request.far_field.as_ref().unwrap().stencils.id();
+
+        let input = far_field_input(0.0);
+        assert_eq!(
+            update(&mut request, &mut assets, &input, 1.0e-3, keeping),
+            FarFieldHandoff::Restarted
+        );
+        let recorded = ring(&request);
+        let first_stencils = stencils(&request);
+
+        // An adaptation: the same contour read through a new mesh, at the
+        // shorter step the finer elements ask for. The stencils are replaced and
+        // the recording carries on.
+        assert_eq!(
+            update(&mut request, &mut assets, &input, 7.0e-4, keeping),
+            FarFieldHandoff::Kept
+        );
+        assert_eq!(ring(&request), recorded);
+        assert_ne!(stencils(&request), first_stencils);
+
+        // A clock that restarted has nothing to hand over.
+        assert_eq!(
+            update(
+                &mut request,
+                &mut assets,
+                &input,
+                7.0e-4,
+                FarFieldClock {
+                    origin: 0.0,
+                    keep_history: false,
+                },
+            ),
+            FarFieldHandoff::Restarted
+        );
+        assert_ne!(ring(&request), recorded);
+        let recorded = ring(&request);
+
+        // And so does a contour that moved: what is recorded describes where the
+        // samples were taken, not just when.
+        assert_eq!(
+            update(
+                &mut request,
+                &mut assets,
+                &far_field_input(0.25),
+                7.0e-4,
+                keeping
+            ),
+            FarFieldHandoff::Restarted
+        );
+        assert_ne!(ring(&request), recorded);
+
+        // Nothing is left behind by any of it.
+        let mut queue = CommandQueue::default();
+        request
+            .update_far_field(
+                &mut assets,
+                &mut Commands::new(&mut queue, &world),
+                None,
+                7.0e-4,
+                keeping,
+            )
+            .unwrap();
+        queue.apply(&mut world);
+        assert!(request.far_field.is_none());
+        assert_eq!(assets.len(), 0);
+    }
+
+    #[test]
+    fn the_far_field_dispatch_visits_every_bucket_it_has_to_record() {
+        for time_step in [1.0e-4, 1.0 / 700.0, 0.004, 0.02, 0.4] {
+            let period = far_field_period(time_step);
+            let stride = far_field_sample_stride(period, time_step);
+            let spacing = stride as f64 * time_step;
+            assert!(
+                spacing <= period,
+                "{spacing} between passes leaves a bucket of {period} unvisited"
+            );
+            // Dense enough to land near the start of a bucket, sparse enough
+            // that the projection is not re-run through every step of one.
+            // Rounding a quarter bucket down to whole steps can halve it.
+            assert!(spacing >= period * 0.125 || stride == 1);
+        }
     }
 
     #[test]

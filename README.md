@@ -317,6 +317,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   visible-window-averaged polar patterns, and radiated power over time. Double-click
   the contour or its `FF` badge to open it. The contour must enclose every modeled boundary
   and stay in the lossless background material; View can hide its overlay.
+  Every direction reads the contour at its own retarded time, so nothing is
+  plotted until the recorder holds a whole delay window; Probes and the readout
+  report how much of it is recorded. The recording is of the exterior at fixed
+  world points, so a remesh - an adaptation included - keeps it and reads on
+  through the new mesh. Moving the contour, changing the exterior, and restarting
+  the solver start it again.
 - **Navigate:** right-drag or Space + left-drag pans with a mouse. On touch screens,
   drag an object to manipulate it, drag empty canvas with one finger to marquee
   spans, and use two fingers to pan and pinch around their shared center. Touch hit

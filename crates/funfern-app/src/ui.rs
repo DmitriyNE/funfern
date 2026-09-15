@@ -8,9 +8,9 @@ use crate::material_overlay::{
 use crate::recording::{self, DestinationRequest, RecordingEvent, RecordingSpec, VideoRecorder};
 use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, AreaProbeRecord, CurveProbeDisplay, CurveProbeInput,
-    CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldDisplay, FarFieldInput, FarFieldRecord,
-    MAX_STEPS_PER_FRAME, PointProbeRecord, ProbeDisplay, PulseSettings, WaveDisplay,
-    WaveGpuRequest, WaveTransfer,
+    CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldClock, FarFieldDisplay, FarFieldHandoff,
+    FarFieldInput, FarFieldRecord, MAX_STEPS_PER_FRAME, PointProbeRecord, ProbeDisplay,
+    PulseSettings, WaveDisplay, WaveGpuRequest, WaveTransfer,
 };
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -653,6 +653,10 @@ pub struct Playground {
     autosave_observed: TopologyDocument,
     autosave_due: Option<Instant>,
     probe_upload: Option<ProbeUpload>,
+    probe_clock_restarted: bool,
+    /// Simulated time the far-field ring started recording from, or `None` when
+    /// no recorder is running.
+    far_field_recording_from: Option<f64>,
     frame_ms: f32,
     wave_energy: Option<f64>,
     vector_overlay_average: BTreeMap<(i32, i32), Point2>,
@@ -794,6 +798,8 @@ impl Default for Playground {
             autosave_observed: document,
             autosave_due: None,
             probe_upload: None,
+            probe_clock_restarted: true,
+            far_field_recording_from: None,
             frame_ms: 16.0,
             wave_energy: None,
             vector_overlay_average: BTreeMap::new(),
@@ -3108,6 +3114,20 @@ impl Playground {
             if let Err(error) = self.editor.set_far_field(far) {
                 self.notify(error)
             }
+        }
+        if let Some(recorded) = self.far_field_recording() {
+            ui.small(
+                egui::RichText::new(format!(
+                    "Recording the delay window · {:.0}%",
+                    recorded * 100.0
+                ))
+                .color(GOLD),
+            )
+            .on_hover_text(
+                "Every observation angle reads the contour at its own retarded time, \
+                 so the recorder reports nothing until it holds a whole window. \
+                 A remesh keeps what it has; moving the contour starts it again.",
+            );
         }
     }
     /// Name, color, and target settings for the selected probe. The name is
@@ -6421,8 +6441,24 @@ impl Playground {
                 sample_spacing: stencil.sample_spacing,
                 delay_margin: stencil.delay_margin,
             });
-        if let Err(error) = request.update_far_field(assets, commands, far.as_ref(), dt) {
-            self.message = error;
+        // The recorder's history is a time series at fixed world points, so a
+        // new mesh over the same contour takes it over. Only a clock that
+        // restarted, or a contour that moved, starts the delay window again.
+        let clock = FarFieldClock {
+            origin: self.sim_time_offset,
+            keep_history: !std::mem::take(&mut self.probe_clock_restarted),
+        };
+        match request.update_far_field(assets, commands, far.as_ref(), dt, clock) {
+            Ok(FarFieldHandoff::Restarted) => {
+                self.far_field_trace = FarFieldTrace::default();
+                self.far_field_recording_from = Some(self.sim_time_offset);
+            }
+            Ok(FarFieldHandoff::Off) => self.far_field_recording_from = None,
+            Ok(FarFieldHandoff::Kept) => {}
+            Err(error) => {
+                self.far_field_recording_from = None;
+                self.message = error;
+            }
         }
         // Recorded whatever happened: a rejected recorder setting is rejected
         // the same way every frame, and the readback filter below keys on these
@@ -6445,6 +6481,30 @@ impl Playground {
         self.curve_probe_traces.clear();
         self.area_probe_traces.clear();
         self.far_field_trace = FarFieldTrace::default();
+        self.probe_clock_restarted = true;
+    }
+    fn simulated_time(&self) -> f64 {
+        let dt = self
+            .runtime
+            .active()
+            .map_or(0.0, |active| active.operator.recommended_time_step());
+        self.sim_time_offset + self.completed_steps as f64 * dt
+    }
+    /// How much of the delay window the far-field recorder holds, once it is
+    /// running and has not filled it yet. Nothing can be projected before it is
+    /// whole, and the empty plot says nothing on its own.
+    fn far_field_recording(&self) -> Option<f64> {
+        let history = self
+            .runtime
+            .active()?
+            .far_field
+            .as_ref()?
+            .as_ref()
+            .ok()?
+            .history_seconds();
+        let from = self.far_field_recording_from?;
+        let recorded = (self.simulated_time() - from) / history;
+        (history > 0.0 && recorded < 1.0).then(|| recorded.clamp(0.0, 1.0))
     }
     fn refresh_amr(&mut self, request: &WaveGpuRequest, display: &WaveDisplay) {
         if !self.amr_enabled {
@@ -6793,8 +6853,9 @@ impl Playground {
         {
             self.far_field_readback = far.readbacks;
             for record in &far.records {
-                let mut record = record.clone();
-                record.time += self.sim_time_offset;
+                // Stamped on the app's clock by the recorder, which has to hold
+                // one across the mesh swaps its ring survives.
+                let record = record.clone();
                 if record.time > self.far_field_trace.last_time {
                     self.far_field_trace.last_time = record.time;
                     self.far_field_trace.records.push_back(record);
@@ -8473,6 +8534,7 @@ impl Playground {
             .active()
             .and_then(|active| active.far_field.as_ref())
             .and_then(|result| result.as_ref().err().cloned());
+        let recording = self.far_field_recording();
         let mut open = true;
         let mut clear = false;
         egui::Window::new("Outer-domain far field")
@@ -8526,6 +8588,15 @@ impl Playground {
                 if let Some(status) = &status {
                     ui.colored_label(RED, status);
                     return;
+                }
+                // A projection needs the whole delay window before it can report
+                // anything, so an empty plot here is a recorder still filling
+                // rather than a silence in the field.
+                if let Some(recorded) = recording {
+                    ui.colored_label(
+                        GOLD,
+                        format!("Recording the delay window · {:.0}%", recorded * 100.0),
+                    );
                 }
                 if self.far_field_view.far_waterfall {
                     Self::far_field_waterfall(
@@ -8943,7 +9014,7 @@ impl Playground {
                         ));
                         ui.small(format!(
                             "Simulated time {:.4} s · {} completed steps",
-                            self.sim_time_offset + self.completed_steps as f64 * dt,
+                            self.simulated_time(),
                             self.completed_steps,
                         ));
                     }
