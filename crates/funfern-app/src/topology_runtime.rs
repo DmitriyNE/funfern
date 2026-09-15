@@ -1766,6 +1766,48 @@ mod tests {
         assert!(repaired.mesh.triangles.len() > base.mesh.triangles.len() * 3 / 2);
     }
 
+    /// A topology change is a repair too: a new baffle carves the band it
+    /// passes through and the field crosses over with most nodes copied
+    /// exactly.
+    #[test]
+    fn adding_a_baffle_repairs_the_active_mesh() {
+        let (mut editor, _, mut runtime) = hole_runtime();
+        let before = runtime.active().unwrap().clone();
+        editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(0.5, -0.5), Point2::new(0.6, 0.5)])
+                    .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.preparing.as_ref().unwrap().mesh_action,
+            TopologyMeshUpdateAction::Repair(TopologyRepairReason::CurveOrSpanTopologyChanged)
+        );
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let repaired = runtime.commit_ready(token).unwrap();
+        let report = repaired.carve.expect("a repair reports its carve");
+        assert!(
+            report.kept_triangles * 2 > before.mesh.triangles.len(),
+            "{report:?}"
+        );
+        assert_eq!(report.rebuilt_curves, 1, "{report:?}");
+        let transfer = repaired.transfer.as_ref().expect("the field crosses over");
+        assert!(transfer.exact_nodes() * 2 > repaired.operator.degrees_of_freedom());
+    }
+
     #[test]
     fn failed_or_superseded_candidate_never_replaces_active_state() {
         let editor = TopologyEditor::default();

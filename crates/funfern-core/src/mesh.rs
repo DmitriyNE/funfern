@@ -522,9 +522,17 @@ impl MeshBuilder {
         let Some(field) = &self.size_field else {
             return target;
         };
+        // Both sides of a separated span must subdivide identically, so the
+        // samples are taken along the chord in one canonical direction.
+        let [a, b] = points;
+        let (a, b) = if (a.x, a.y) <= (b.x, b.y) {
+            (a, b)
+        } else {
+            (b, a)
+        };
         [0.0, 0.25, 0.5, 0.75, 1.0]
             .into_iter()
-            .filter_map(|fraction| field.size_at(points[0].lerp(points[1], fraction)))
+            .filter_map(|fraction| field.size_at(a.lerp(b, fraction)))
             .fold(target, f64::min)
     }
 
@@ -1227,7 +1235,7 @@ impl MeshBuilder {
                         "refinement point lies on a constrained edge",
                     ));
                 }
-                return self.split_boundary(boundary_index);
+                return self.split_boundary_paired(boundary_index);
             }
             self.split_edge(edge, vertex)
         } else {
@@ -1927,16 +1935,76 @@ impl MeshBuilder {
                 return Err(MeshError::Topology("boundary repair left the local patch"));
             }
             let encroached = self.boundary_edges[edge_index].vertices;
-            if self.edge_touches_frozen(edge_key(encroached[0], encroached[1])) {
+            let partner = self.paired_boundary_edge(edge_index);
+            let frozen = self.edge_touches_frozen(edge_key(encroached[0], encroached[1]))
+                || partner.is_some_and(|partner| {
+                    let vertices = self.boundary_edges[partner].vertices;
+                    self.edge_touches_frozen(edge_key(vertices[0], vertices[1]))
+                });
+            if frozen {
                 self.drop_bad_triangle(triangle_index);
                 return Ok(false);
             }
-            self.split_boundary(edge_index)?;
+            self.split_boundary_paired(edge_index)?;
         } else {
             self.insert_point(candidate)?;
         }
         self.stats.refinement_insertions += 1;
         Ok(false)
+    }
+
+    /// Splits a boundary edge at its midpoint. The two sides of a separated
+    /// span between two faces are distinct chains that must stay subdivided
+    /// alike, so the partner edge splits at the same parameter with a
+    /// coincident vertex.
+    fn split_boundary_paired(&mut self, edge_index: usize) -> Result<(), MeshError> {
+        let partner = self.paired_boundary_edge(edge_index);
+        self.split_boundary(edge_index)?;
+        if let Some(partner) = partner {
+            let point = self.vertices[self.vertices.len() - 1].point;
+            let edge = self.boundary_edges[partner];
+            let parameter = (edge.parameters[0] + edge.parameters[1]) * 0.5;
+            let vertex = self.add_vertex(
+                point,
+                Some(BoundaryPoint {
+                    label: edge.label,
+                    parameter,
+                }),
+            )?;
+            self.split_boundary_at_vertex(partner, vertex, parameter)?;
+        }
+        Ok(())
+    }
+
+    /// The other side of a separated curve span covering the same parameter
+    /// interval as boundary edge `index`, when both sides are meshed.
+    fn paired_boundary_edge(&self, index: usize) -> Option<usize> {
+        let edge = self.boundary_edges[index];
+        let BoundaryLabel::Curve {
+            curve,
+            span,
+            side,
+            separated: true,
+        } = edge.label
+        else {
+            return None;
+        };
+        let partner = BoundaryLabel::Curve {
+            curve,
+            span,
+            side: side.opposite(),
+            separated: true,
+        };
+        let interval = |parameters: [f64; 2]| {
+            (
+                parameters[0].min(parameters[1]),
+                parameters[0].max(parameters[1]),
+            )
+        };
+        let wanted = interval(edge.parameters);
+        self.boundary_edges.iter().position(|candidate| {
+            candidate.label == partner && interval(candidate.parameters) == wanted
+        })
     }
 
     /// Leaves a triangle as it is: it is removed from the refinement queue

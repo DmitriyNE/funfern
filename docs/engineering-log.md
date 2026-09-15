@@ -47,14 +47,16 @@ Longer-standing work:
 
 - [ ] Incremental mesh repair by carving, agreed 2026-09-15 to replace the
   deferred coordinate repair and its caps. Landed 2026-09-15: the core carving
-  job (`mesh/carve.rs`), the exact identity path in the transfer map, and the
-  runtime's Repairing phase for coordinate edits with the full rebuild as the
-  fallback and the counts in the Performance panel. Remaining: widening the
-  classifier so every plan difference except the outer domain, a resolution
-  change and a requested rebuild is a repair; docs and browser checks. Backlog
-  once those land: deformation-first repair for small motions with carving as
-  the fallback; live repair during drags now that the carve time shows in the
-  panel; outer-domain resize through carving.
+  job (`mesh/carve.rs`), the exact identity path in the transfer map, the
+  runtime's Repairing phase with the full rebuild as the fallback and the
+  counts in the Performance panel, and the classifier treating every plan
+  difference except the outer domain, a resolution change and a requested
+  rebuild as a repair. Remaining: docs and browser checks. Backlog once those
+  land: deformation-first repair for small motions with carving as the
+  fallback; live repair during drags now that the carve time shows in the
+  panel; outer-domain resize through carving; splitting arrangement segments
+  longer than the chord cap into several atoms, so a wall attachment move
+  carves a local band instead of the whole wall.
 - [ ] Raise viewport video capture from the initial 30 FPS implementation to 60 FPS.
   Measure browser encoding and native GPU-readback pressure first, retain bounded
   native queues and wall-clock pacing, and report dropped frames rather than slowing
@@ -121,6 +123,51 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Every topology change is a repair
+
+The classifier now returns a repair for every plan difference except a
+changed outer domain, a resolution change and a requested rebuild. The former
+full-rebuild reasons for face assignments, curve or span topology, span
+behaviour and trace equivalence became `TopologyRepairReason` variants and
+name the kind of change in the handoff line; the carve itself works from the
+atoms whatever the edit was. Two changes in the carve make that true.
+
+Atom identity is purely geometric: label, separated flag, parameter range and
+endpoints. Faces and regions belong to the triangles and are relabeled from
+the new topology, so a face that only changes its material or its id keeps
+every atom and carves nothing; the test asserts zero removed and zero inserted
+triangles for a reassignment. And kept atoms meeting at one point must agree
+on its sectors, one old vertex per new trace and one new trace per old vertex;
+where they do not, because a divider attached to the wall turned reflecting
+and the wall junction gained a sector, every atom meeting there is rebuilt.
+The selection loop grows by those points the way it grows by touched
+separated curves.
+
+Tests: a face reassignment relabels without carving; a new baffle carves only
+its band and is cut as a slit; removing a divider merges the faces in place
+with the absorbed side relabeled; a divider flipped from transmitting to
+reflecting is rebuilt with two sides; a junction of two dividers moves with
+both curves' spans beside it rebuilt and the far span and every wall atom
+kept. A runtime test adds a baffle to the hole scene and gets a repair.
+
+The flip test found two mesher gaps that predate carving, both in how the two
+sides of a separated span between two active faces are subdivided. The chain
+expansion computed interior pieces from each side's own direction, so pieces
+of a span longer than the target differed in the last bits between the sides,
+and refinement split a boundary edge on one side only. Both violate the
+adaptation contract's identical-subdivision rule, so adaptation could not
+import a fresh mesh of a straight reflecting divider between two subdomains.
+Pieces are now computed from the lower parameter upwards for both sides, and
+every midpoint split goes through `split_boundary_paired`, which splits the
+partner edge at the same parameter with a coincident vertex. The flip test
+checks the fresh mesh against the contract as the regression.
+
+One consequence of the plan's atoms surfaced in the crossing test: an outer
+wall is one atom per side, because coarsening merges arrangement segments but
+never splits one, so moving a curve's attachment along a wall rebuilds the
+whole wall band. Splitting long segments to the chord cap would keep those
+bands local; it is on the backlog.
 
 ## 2026-09-15 — Coordinate edits repair the active mesh by carving
 

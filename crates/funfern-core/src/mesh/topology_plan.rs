@@ -1381,6 +1381,38 @@ pub(super) fn expand_step_chain(
     let pieces = (length / builder.chain_target(boundary.points))
         .ceil()
         .max(1.0) as usize;
+    // The two sides of a separated span are expanded as separate chains that
+    // run in opposite directions and must subdivide identically, so the
+    // interior pieces are computed from the lower parameter to the higher one
+    // and reversed afterwards when the step runs the other way.
+    let forward = boundary.parameter[0] <= boundary.parameter[1];
+    let (low_point, high_point, low, high) = if forward {
+        (
+            boundary.points[0],
+            boundary.points[1],
+            boundary.parameter[0],
+            boundary.parameter[1],
+        )
+    } else {
+        (
+            boundary.points[1],
+            boundary.points[0],
+            boundary.parameter[1],
+            boundary.parameter[0],
+        )
+    };
+    let mut interior = (1..pieces)
+        .map(|piece| {
+            let fraction = piece as f64 / pieces as f64;
+            (
+                low_point.lerp(high_point, fraction),
+                low + (high - low) * fraction,
+            )
+        })
+        .collect::<Vec<_>>();
+    if !forward {
+        interior.reverse();
+    }
     let mut vertices = Vec::with_capacity(pieces + 1);
     let mut parameters = Vec::with_capacity(pieces + 1);
     vertices.push(trace_mesh_vertex(
@@ -1390,14 +1422,8 @@ pub(super) fn expand_step_chain(
         boundary.traces[0],
     )?);
     parameters.push(boundary.parameter[0]);
-    for piece in 1..pieces {
-        let fraction = piece as f64 / pieces as f64;
-        let parameter =
-            boundary.parameter[0] + (boundary.parameter[1] - boundary.parameter[0]) * fraction;
-        vertices.push(builder.add_vertex(
-            boundary.points[0].lerp(boundary.points[1], fraction),
-            Some(BoundaryPoint { label, parameter }),
-        )?);
+    for (point, parameter) in interior {
+        vertices.push(builder.add_vertex(point, Some(BoundaryPoint { label, parameter }))?);
         parameters.push(parameter);
     }
     vertices.push(trace_mesh_vertex(
@@ -1407,14 +1433,9 @@ pub(super) fn expand_step_chain(
         boundary.traces[1],
     )?);
     parameters.push(boundary.parameter[1]);
-    for (index, vertex) in vertices.iter().copied().enumerate() {
+    for (vertex, parameter) in vertices.iter().copied().zip(parameters.iter().copied()) {
         if builder.vertices[vertex].boundary.is_none() {
-            let fraction = index as f64 / pieces as f64;
-            builder.vertices[vertex].boundary = Some(BoundaryPoint {
-                label,
-                parameter: boundary.parameter[0]
-                    + (boundary.parameter[1] - boundary.parameter[0]) * fraction,
-            });
+            builder.vertices[vertex].boundary = Some(BoundaryPoint { label, parameter });
         }
     }
     Ok(ExpandedChain {
@@ -1512,14 +1533,24 @@ pub enum TopologyMeshUpdateAction {
     FullRebuild(TopologyFullRebuildReason),
 }
 
+/// What differs between two plans that carving can follow. The kinds are
+/// diagnostic: the carve itself works from the atoms, whatever the edit was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TopologyRepairReason {
+    FaceAssignmentsChanged,
+    CurveOrSpanTopologyChanged,
+    SpanBehaviorChanged,
+    TraceEquivalenceChanged,
     CurveOrJunctionMoved,
 }
 
 impl TopologyRepairReason {
     pub const fn label(self) -> &'static str {
         match self {
+            Self::FaceAssignmentsChanged => "face assignments changed",
+            Self::CurveOrSpanTopologyChanged => "curve or span topology changed",
+            Self::SpanBehaviorChanged => "span behavior changed",
+            Self::TraceEquivalenceChanged => "trace equivalence changed",
             Self::CurveOrJunctionMoved => "curve or junction moved",
         }
     }
@@ -1528,10 +1559,6 @@ impl TopologyRepairReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TopologyFullRebuildReason {
     DomainChanged,
-    FaceAssignmentsChanged,
-    CurveOrSpanTopologyChanged,
-    SpanBehaviorChanged,
-    TraceEquivalenceChanged,
     /// The plan is unchanged but the meshing options, such as the target edge
     /// length, are not those the active mesh was built with.
     MeshingOptionsChanged,
@@ -1547,10 +1574,6 @@ impl TopologyFullRebuildReason {
     pub const fn label(self) -> &'static str {
         match self {
             Self::DomainChanged => "outer domain changed",
-            Self::FaceAssignmentsChanged => "face assignments changed",
-            Self::CurveOrSpanTopologyChanged => "curve or span topology changed",
-            Self::SpanBehaviorChanged => "span behavior changed",
-            Self::TraceEquivalenceChanged => "trace equivalence changed",
             Self::MeshingOptionsChanged => "mesh resolution changed",
             Self::Requested => "rebuild requested",
             Self::RepairFailed => "mesh repair failed",
@@ -1559,16 +1582,15 @@ impl TopologyFullRebuildReason {
 }
 
 /// Classifies reuse before starting mesh work. Identical plans reuse the
-/// mesh, a plan whose only difference is moved geometry is repaired by
-/// carving, and every other difference receives a stable, inspectable full
-/// rebuild reason.
+/// mesh; a changed outer domain rebuilds it; every other difference is a
+/// repair by carving, named by the kind of change for the diagnostics.
 pub fn topology_mesh_update_action(
     previous: &TopologyMeshPlan,
     next: &TopologyMeshPlan,
 ) -> TopologyMeshUpdateAction {
-    use TopologyFullRebuildReason as Reason;
+    use TopologyRepairReason as Reason;
     if previous.domain != next.domain {
-        return TopologyMeshUpdateAction::FullRebuild(Reason::DomainChanged);
+        return TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::DomainChanged);
     }
     let face_signature = |plan: &TopologyMeshPlan| {
         plan.domains
@@ -1577,7 +1599,7 @@ pub fn topology_mesh_update_action(
             .collect::<Vec<_>>()
     };
     if face_signature(previous) != face_signature(next) {
-        return TopologyMeshUpdateAction::FullRebuild(Reason::FaceAssignmentsChanged);
+        return TopologyMeshUpdateAction::Repair(Reason::FaceAssignmentsChanged);
     }
     let source_signature = |plan: &TopologyMeshPlan| {
         plan.boundaries
@@ -1586,7 +1608,7 @@ pub fn topology_mesh_update_action(
             .collect::<BTreeSet<_>>()
     };
     if source_signature(previous) != source_signature(next) {
-        return TopologyMeshUpdateAction::FullRebuild(Reason::CurveOrSpanTopologyChanged);
+        return TopologyMeshUpdateAction::Repair(Reason::CurveOrSpanTopologyChanged);
     }
     let behavior_signature = |plan: &TopologyMeshPlan| {
         plan.boundaries
@@ -1600,10 +1622,10 @@ pub fn topology_mesh_update_action(
             .collect::<BTreeMap<_, _>>()
     };
     if behavior_signature(previous) != behavior_signature(next) {
-        return TopologyMeshUpdateAction::FullRebuild(Reason::SpanBehaviorChanged);
+        return TopologyMeshUpdateAction::Repair(Reason::SpanBehaviorChanged);
     }
     if previous.junctions != next.junctions {
-        return TopologyMeshUpdateAction::FullRebuild(Reason::TraceEquivalenceChanged);
+        return TopologyMeshUpdateAction::Repair(Reason::TraceEquivalenceChanged);
     }
     let same_geometry = previous.boundaries.len() == next.boundaries.len()
         && previous
@@ -1619,7 +1641,7 @@ pub fn topology_mesh_update_action(
     if same_geometry {
         TopologyMeshUpdateAction::Reuse
     } else {
-        TopologyMeshUpdateAction::Repair(TopologyRepairReason::CurveOrJunctionMoved)
+        TopologyMeshUpdateAction::Repair(Reason::CurveOrJunctionMoved)
     }
 }
 
@@ -3135,9 +3157,13 @@ mod tests {
         reassigned.domains[0].region = RegionId(99);
         assert_eq!(
             topology_mesh_update_action(&first, &reassigned),
-            TopologyMeshUpdateAction::FullRebuild(
-                TopologyFullRebuildReason::FaceAssignmentsChanged
-            )
+            TopologyMeshUpdateAction::Repair(TopologyRepairReason::FaceAssignmentsChanged)
+        );
+        let mut resized = identical.clone();
+        resized.domain.max_x += 0.5;
+        assert_eq!(
+            topology_mesh_update_action(&first, &resized),
+            TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::DomainChanged)
         );
 
         let separated_snapshot = compile_topology(

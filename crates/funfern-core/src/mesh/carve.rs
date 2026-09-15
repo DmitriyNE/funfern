@@ -21,7 +21,7 @@ use super::{
     locate_in_polygon, on_segment, point_in_triangle, segment_relation, valid_options,
 };
 use crate::{
-    CurveId, CurveSpanId, FaceId, OuterSide, Point2, RegionId, SpanBehavior, TopologySnapshot,
+    CurveId, CurveSpanId, OuterSide, Point2, RegionId, SpanBehavior, TopologySnapshot,
     TraceVertexId,
 };
 
@@ -44,14 +44,15 @@ pub struct CarveReport {
     pub cavities: usize,
 }
 
-/// Everything about an atom the mesh can observe. Trace ids are left out:
-/// they are reissued by every compile and are paired by geometry instead.
+/// Everything about an atom the mesh's boundary can observe: its label and
+/// its geometry. Trace ids are left out because every compile reissues them,
+/// and faces and regions are left out because they belong to the triangles,
+/// which are relabeled from the new topology; so a face that only changes
+/// its material or its id keeps every atom and carves nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct AtomKey {
     source: PlannedBoundarySource,
     separated: bool,
-    face: FaceId,
-    region: RegionId,
     parameter: [u64; 2],
     points: [[u64; 2]; 2],
 }
@@ -60,8 +61,6 @@ fn atom_key(atom: &PlannedBoundaryEdge) -> AtomKey {
     AtomKey {
         source: atom.source,
         separated: matches!(atom.behavior, Some(SpanBehavior::Separated { .. })),
-        face: atom.face,
-        region: atom.region,
         parameter: atom.parameter.map(f64::to_bits),
         points: atom
             .points
@@ -119,6 +118,29 @@ fn label_key(label: BoundaryLabel) -> Result<LabelKey, MeshError> {
 
 fn parameter_close(a: f64, b: f64) -> bool {
     (a - b).abs() <= 32.0 * f64::EPSILON * (1.0 + a.abs().max(b.abs()))
+}
+
+fn point_bits(point: Point2) -> [u64; 2] {
+    [point.x.to_bits(), point.y.to_bits()]
+}
+
+/// The vertex a boundary edge of label `key` has at `parameter`, exactly or
+/// within a few ulps, among the recorded edge endpoints.
+fn endpoint_vertex(
+    endpoints: &BTreeMap<LabelKey, Vec<(f64, usize)>>,
+    key: LabelKey,
+    parameter: f64,
+) -> Option<usize> {
+    let candidates = endpoints.get(&key)?;
+    candidates
+        .iter()
+        .find(|(candidate, _)| *candidate == parameter)
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|(candidate, _)| parameter_close(*candidate, parameter))
+        })
+        .map(|(_, vertex)| *vertex)
 }
 
 fn signed_area(points: impl Iterator<Item = Point2>) -> f64 {
@@ -332,6 +354,9 @@ pub struct TopologyCarveJob {
     options: MeshingOptions,
     kept_keys: BTreeSet<AtomKey>,
     rebuilt_curves: BTreeSet<CurveId>,
+    /// Junction points whose sector structure changed; every atom ending at
+    /// one of them is rebuilt so the sectors come out of the new plan.
+    rebuilt_points: BTreeSet<[u64; 2]>,
     changed_new_keys: BTreeSet<AtomKey>,
     changed_edge: Vec<bool>,
     deleted: Vec<bool>,
@@ -396,6 +421,7 @@ impl TopologyCarveJob {
             options,
             kept_keys,
             rebuilt_curves,
+            rebuilt_points: BTreeSet::new(),
             changed_new_keys: BTreeSet::new(),
             changed_edge: vec![],
             deleted: vec![],
@@ -669,7 +695,12 @@ impl TopologyCarveJob {
                 atom_curve(atom).is_some_and(|curve| self.rebuilt_curves.contains(&curve))
             };
             let changed = |atom: &PlannedBoundaryEdge| {
-                !self.kept_keys.contains(&atom_key(atom)) || rebuilt(atom)
+                !self.kept_keys.contains(&atom_key(atom))
+                    || rebuilt(atom)
+                    || atom
+                        .points
+                        .iter()
+                        .any(|point| self.rebuilt_points.contains(&point_bits(*point)))
             };
             let changed_old = self
                 .old_atoms
@@ -804,6 +835,55 @@ impl TopologyCarveJob {
             }
 
             let mut grew = false;
+            // Kept atoms meeting at one point must agree on its sectors: one
+            // old vertex per new trace and one new trace per old vertex. A
+            // junction that gained or lost sectors, for instance because a
+            // divider attached to the wall turned reflecting, fails that, and
+            // every atom meeting there is rebuilt from the new plan.
+            let changed_new_keys = changed_new.iter().map(atom_key).collect::<BTreeSet<_>>();
+            let mut endpoints = BTreeMap::<LabelKey, Vec<(f64, usize)>>::new();
+            for (index, edge) in mesh.boundary_edges.iter().enumerate() {
+                if changed_edge[index] {
+                    continue;
+                }
+                let key = label_key(edge.label)?;
+                for endpoint in 0..2 {
+                    endpoints
+                        .entry(key)
+                        .or_default()
+                        .push((edge.parameters[endpoint], edge.vertices[endpoint]));
+                }
+            }
+            let mut claims = BTreeMap::<usize, TraceVertexId>::new();
+            let mut owners = BTreeMap::<TraceVertexId, usize>::new();
+            for atom in self
+                .plan
+                .boundaries
+                .iter()
+                .filter(|atom| !changed_new_keys.contains(&atom_key(atom)))
+            {
+                let key = label_key(topology_label(*atom))?;
+                for endpoint in 0..2 {
+                    let Some(vertex) = endpoint_vertex(&endpoints, key, atom.parameter[endpoint])
+                    else {
+                        continue;
+                    };
+                    let trace = atom.traces[endpoint];
+                    let conflict = claims
+                        .insert(vertex, trace)
+                        .is_some_and(|existing| existing != trace)
+                        || owners
+                            .insert(trace, vertex)
+                            .is_some_and(|existing| existing != vertex);
+                    if conflict
+                        && self
+                            .rebuilt_points
+                            .insert(point_bits(atom.points[endpoint]))
+                    {
+                        grew = true;
+                    }
+                }
+            }
             for (index, edge) in mesh.boundary_edges.iter().enumerate() {
                 if changed_edge[index] {
                     continue;
@@ -832,7 +912,7 @@ impl TopologyCarveJob {
             self.report.rebuilt_curves = self.rebuilt_curves.len();
             self.report.removed_triangles = deleted.iter().filter(|deleted| **deleted).count();
             self.report.relabeled_triangles = relabeled;
-            self.changed_new_keys = changed_new.iter().map(atom_key).collect();
+            self.changed_new_keys = changed_new_keys;
             self.kept_order = (0..count).filter(|index| !deleted[*index]).collect();
             let mut vertex_map = vec![usize::MAX; mesh.vertices.len()];
             for &index in &self.kept_order {
@@ -880,23 +960,9 @@ impl TopologyCarveJob {
         {
             let key = label_key(topology_label(*atom))?;
             for endpoint in 0..2 {
-                let parameter = atom.parameter[endpoint];
-                let vertex = endpoints
-                    .get(&key)
-                    .and_then(|candidates| {
-                        candidates
-                            .iter()
-                            .find(|(candidate, _)| *candidate == parameter)
-                            .or_else(|| {
-                                candidates
-                                    .iter()
-                                    .find(|(candidate, _)| parameter_close(*candidate, parameter))
-                            })
-                    })
-                    .map(|(_, vertex)| *vertex)
-                    .ok_or(MeshError::Topology(
-                        "a kept atom endpoint is missing from the previous mesh",
-                    ))?;
+                let vertex = endpoint_vertex(&endpoints, key, atom.parameter[endpoint]).ok_or(
+                    MeshError::Topology("a kept atom endpoint is missing from the previous mesh"),
+                )?;
                 let trace = atom.traces[endpoint];
                 if builder.vertices[vertex]
                     .trace
@@ -1272,9 +1338,9 @@ mod tests {
     use super::*;
     use crate::{
         CurveSpan, CurveSpline, FaceRegionAssignment, MeshAdaptationJob, MeshAdaptationOptions,
-        MeshAdaptationState, OpenCubicSpline, PeriodicCubicSpline, TopologyCurve, TopologyGeometry,
-        TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology,
-        mesh_topology_plan,
+        MeshAdaptationState, OpenCubicSpline, OuterSide, PeriodicCubicSpline, TopologyCurve,
+        TopologyGeometry, TopologyVertex, TopologyVertexId, TopologyVertexLocation,
+        compile_topology, mesh_topology_plan,
     };
 
     fn spans(start: u64, count: usize, behavior: SpanBehavior) -> Vec<CurveSpan> {
@@ -1849,5 +1915,352 @@ mod tests {
         let a = run(1);
         let b = run(977);
         assert_eq!(a, b);
+    }
+
+    /// A vertical divider from the bottom to the top wall at `x`, attached to
+    /// the outer boundary by authored vertices.
+    fn vertical_divider(
+        id: u64,
+        x: f64,
+        behavior: SpanBehavior,
+    ) -> (TopologyCurve, [TopologyVertex; 2]) {
+        let bottom = TopologyVertexId(id * 10);
+        let top = TopologyVertexId(id * 10 + 1);
+        let mut divider = TopologyCurve::new(
+            CurveId(id),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(x, -1.0), Point2::new(x, 1.0)]).unwrap(),
+            ),
+            spans(id * 10, 1, behavior),
+        )
+        .unwrap();
+        divider.nodes[0].vertex = Some(bottom);
+        divider.nodes[1].vertex = Some(top);
+        let fraction = (x + 1.0) / 2.0;
+        (
+            divider,
+            [
+                TopologyVertex {
+                    id: bottom,
+                    location: TopologyVertexLocation::Outer {
+                        side: OuterSide::Bottom,
+                        fraction,
+                    },
+                },
+                TopologyVertex {
+                    id: top,
+                    location: TopologyVertexLocation::Outer {
+                        side: OuterSide::Top,
+                        fraction,
+                    },
+                },
+            ],
+        )
+    }
+
+    /// A horizontal transmitting divider with three spans and a second one
+    /// with two, meeting at an authored junction at `(x, 0)`; all four arms
+    /// end on the outer walls at fixed points, so moving `x` bends the second
+    /// divider and changes the horizontal spans beside the junction only. The
+    /// horizontal divider's first span, from the left wall to `x = -0.4`, and
+    /// every wall atom do not depend on `x`.
+    fn cross_geometry(x: f64) -> TopologyGeometry {
+        let junction = TopologyVertexId(99);
+        let mut horizontal = TopologyCurve::new(
+            CurveId(2),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-1.0, 0.0),
+                    Point2::new(-0.4, 0.0),
+                    Point2::new(x, 0.0),
+                    Point2::new(1.0, 0.0),
+                ])
+                .unwrap(),
+            ),
+            spans(20, 3, SpanBehavior::Transmitting),
+        )
+        .unwrap();
+        horizontal.nodes[0].vertex = Some(TopologyVertexId(20));
+        horizontal.nodes[2].vertex = Some(junction);
+        horizontal.nodes[3].vertex = Some(TopologyVertexId(21));
+        let mut vertical = TopologyCurve::new(
+            CurveId(1),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.5, -1.0),
+                    Point2::new(x, 0.0),
+                    Point2::new(0.5, 1.0),
+                ])
+                .unwrap(),
+            ),
+            spans(10, 2, SpanBehavior::Transmitting),
+        )
+        .unwrap();
+        vertical.nodes[0].vertex = Some(TopologyVertexId(10));
+        vertical.nodes[1].vertex = Some(junction);
+        vertical.nodes[2].vertex = Some(TopologyVertexId(11));
+        let outer = |id: u64, side: OuterSide, fraction: f64| TopologyVertex {
+            id: TopologyVertexId(id),
+            location: TopologyVertexLocation::Outer { side, fraction },
+        };
+        let mut geometry = TopologyGeometry {
+            curves: vec![horizontal, vertical],
+            vertices: vec![
+                outer(20, OuterSide::Left, 0.5),
+                outer(21, OuterSide::Right, 0.5),
+                // The bottom side runs left to right and the top side right
+                // to left, so these fractions both land at x = 0.5.
+                outer(10, OuterSide::Bottom, 0.75),
+                outer(11, OuterSide::Top, 0.25),
+                TopologyVertex {
+                    id: junction,
+                    location: TopologyVertexLocation::Interior(Point2::new(x, 0.0)),
+                },
+            ],
+            ..TopologyGeometry::default()
+        };
+        geometry.synchronize_vertices().unwrap();
+        geometry
+    }
+
+    fn geometry_of(parts: Vec<(TopologyCurve, [TopologyVertex; 2])>) -> TopologyGeometry {
+        let mut geometry = TopologyGeometry::default();
+        for (curve, vertices) in parts {
+            geometry.curves.push(curve);
+            geometry.vertices.extend(vertices);
+        }
+        geometry.synchronize_vertices().unwrap();
+        geometry
+    }
+
+    /// Every face gets its own region, numbered by the face's position.
+    fn plan_by_face(topology: &TopologySnapshot, options: MeshingOptions) -> TopologyMeshPlan {
+        let assignments = topology
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(index, face)| FaceRegionAssignment {
+                face: face.id,
+                region: Some(RegionId(index as u64 + 1)),
+            })
+            .collect::<Vec<_>>();
+        TopologyMeshPlan::new(topology, &assignments)
+            .unwrap()
+            .coarsened(
+                topology,
+                super::super::AtomCoarsening::from_meshing(options),
+            )
+            .unwrap()
+    }
+
+    /// Faces and regions belong to the triangles, not to the atoms: a face
+    /// that only changes its region keeps every atom, so nothing is carved and
+    /// the face's triangles are relabeled in place.
+    #[test]
+    fn a_face_reassignment_relabels_kept_triangles_without_carving() {
+        let options = options(0.14);
+        let topology = compile_topology(
+            &geometry_of(vec![vertical_divider(1, 0.0, SpanBehavior::Transmitting)]),
+            1,
+        )
+        .unwrap();
+        let before_plan = plan_by_face(&topology, options);
+        let before = mesh_topology_plan(&before_plan, 10, options).unwrap();
+        let second = topology.faces[1].id;
+        let assignments = topology
+            .faces
+            .iter()
+            .map(|face| FaceRegionAssignment {
+                face: face.id,
+                region: Some(if face.id == second {
+                    RegionId(3)
+                } else {
+                    RegionId(1)
+                }),
+            })
+            .collect::<Vec<_>>();
+        let after_plan = TopologyMeshPlan::new(&topology, &assignments)
+            .unwrap()
+            .coarsened(
+                &topology,
+                super::super::AtomCoarsening::from_meshing(options),
+            )
+            .unwrap();
+        let (carved, report) = carve(&before, &before_plan, &after_plan, &topology, options);
+        assert_contract(&carved, &after_plan, options);
+        assert_eq!(report.removed_triangles, 0, "{report:?}");
+        assert_eq!(report.inserted_triangles, 0, "{report:?}");
+        assert_eq!(report.changed_atoms, 0, "{report:?}");
+        assert!(report.relabeled_triangles > 0, "{report:?}");
+        assert_eq!(carved.triangles.len(), before.triangles.len());
+        let before_areas = region_areas(&before);
+        let after_areas = region_areas(&carved);
+        assert!((after_areas[&RegionId(3)] - before_areas[&RegionId(2)]).abs() < 1.0e-12);
+        assert!((after_areas[&RegionId(1)] - before_areas[&RegionId(1)]).abs() < 1.0e-12);
+    }
+
+    /// A new baffle inside a face carves the band it passes through and is
+    /// cut as a slit inside it; the rest of the face is untouched.
+    #[test]
+    fn adding_a_baffle_carves_only_its_band() {
+        let options = options(0.12);
+        let empty = compile_topology(&TopologyGeometry::default(), 1).unwrap();
+        let before_plan = single_face_plan(&empty, options);
+        let before = mesh_topology_plan(&before_plan, 10, options).unwrap();
+        let with_baffle = compile_topology(
+            &baffle_geometry(vec![
+                Point2::new(-0.5, 0.1),
+                Point2::new(-0.1, 0.2),
+                Point2::new(0.3, 0.1),
+                Point2::new(0.6, -0.1),
+            ]),
+            2,
+        )
+        .unwrap();
+        let after_plan = single_face_plan(&with_baffle, options);
+        let (carved, report) = carve(&before, &before_plan, &after_plan, &with_baffle, options);
+        assert_contract(&carved, &after_plan, options);
+        assert_eq!(report.rebuilt_curves, 1, "{report:?}");
+        assert!(
+            report.kept_triangles * 2 > before.triangles.len(),
+            "{report:?}"
+        );
+        let fresh = mesh_topology_plan(&after_plan, 11, options).unwrap();
+        assert_same_areas(&carved, &fresh);
+        assert!(carved.boundary_edges.iter().any(|edge| {
+            matches!(
+                edge.label,
+                BoundaryLabel::Curve {
+                    separated: true,
+                    ..
+                }
+            )
+        }));
+    }
+
+    /// Removing a divider merges its two faces: the strip where it ran is
+    /// refilled and the absorbed face's triangles are relabeled to the
+    /// survivor, nothing else changes.
+    #[test]
+    fn removing_a_divider_merges_the_faces_in_place() {
+        let options = options(0.12);
+        let divided = compile_topology(
+            &geometry_of(vec![vertical_divider(1, 0.1, SpanBehavior::Transmitting)]),
+            1,
+        )
+        .unwrap();
+        let before_plan = plan_by_face(&divided, options);
+        let before = mesh_topology_plan(&before_plan, 10, options).unwrap();
+        assert_eq!(region_areas(&before).len(), 2);
+        let empty = compile_topology(&TopologyGeometry::default(), 2).unwrap();
+        let after_plan = single_face_plan(&empty, options);
+        let (carved, report) = carve(&before, &before_plan, &after_plan, &empty, options);
+        assert_contract(&carved, &after_plan, options);
+        assert!(report.relabeled_triangles > 0, "{report:?}");
+        assert!(
+            report.removed_triangles * 2 < before.triangles.len(),
+            "{report:?}"
+        );
+        assert!(report.kept_triangles > 0, "{report:?}");
+        let areas = region_areas(&carved);
+        assert_eq!(areas.len(), 1);
+        assert!((areas[&RegionId(1)] - 4.0).abs() < 1.0e-9, "{areas:?}");
+    }
+
+    /// Flipping a divider from transmitting to reflecting changes the label of
+    /// every atom on it; the band along the curve is rebuilt with two sides.
+    #[test]
+    fn a_behaviour_flip_rebuilds_the_curve_band() {
+        let options = options(0.12);
+        let transmitting = compile_topology(
+            &geometry_of(vec![vertical_divider(1, 0.0, SpanBehavior::Transmitting)]),
+            1,
+        )
+        .unwrap();
+        let before_plan = plan_by_face(&transmitting, options);
+        let before = mesh_topology_plan(&before_plan, 10, options).unwrap();
+        let reflecting = compile_topology(
+            &geometry_of(vec![vertical_divider(1, 0.0, SpanBehavior::REFLECTING)]),
+            2,
+        )
+        .unwrap();
+        let after_plan = plan_by_face(&reflecting, options);
+        // A fresh mesh of a two-sided reflecting divider must itself satisfy
+        // the contract: refinement splits both sides of a separated span.
+        let fresh = mesh_topology_plan(&after_plan, 11, options).unwrap();
+        assert_contract(&fresh, &after_plan, options);
+        let (carved, report) = carve(&before, &before_plan, &after_plan, &reflecting, options);
+        assert_contract(&carved, &after_plan, options);
+        assert!(
+            report.kept_triangles * 2 > before.triangles.len(),
+            "{report:?}"
+        );
+        assert_eq!(report.rebuilt_curves, 1, "{report:?}");
+        let sides = carved
+            .boundary_edges
+            .iter()
+            .filter_map(|edge| match edge.label {
+                BoundaryLabel::Curve {
+                    side,
+                    separated: true,
+                    ..
+                } => Some(side),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(sides.len(), 2);
+        assert_same_areas(&carved, &fresh);
+    }
+
+    /// Two transmitting dividers meet at an authored junction. Moving the
+    /// junction moves the vertical divider and the horizontal spans beside
+    /// it, while the horizontal divider's far span is kept as it was.
+    #[test]
+    fn a_moved_crossing_carves_both_curves_near_it() {
+        let options = options(0.12);
+        let before_topology = compile_topology(&cross_geometry(0.5), 1).unwrap();
+        assert_eq!(before_topology.faces.len(), 4, "four quadrants");
+        let before_plan = plan_by_face(&before_topology, options);
+        let before = mesh_topology_plan(&before_plan, 10, options).unwrap();
+        let after_topology = compile_topology(&cross_geometry(0.2), 2).unwrap();
+        let after_plan = plan_by_face(&after_topology, options);
+        let (carved, report) = carve(&before, &before_plan, &after_plan, &after_topology, options);
+        assert_contract(&carved, &after_plan, options);
+        assert!(report.kept_triangles > 0, "{report:?}");
+        let wall_atoms_changed = before_plan
+            .boundaries
+            .iter()
+            .filter(|atom| matches!(atom.source, PlannedBoundarySource::Outer(_)))
+            .filter(|atom| {
+                !after_plan
+                    .boundaries
+                    .iter()
+                    .any(|new| atom_key(new) == atom_key(atom))
+            })
+            .count();
+        assert_eq!(
+            wall_atoms_changed, 0,
+            "the walls are untouched by the junction move"
+        );
+        // The band reaches the end of the moved span at x = -0.4 and one ring
+        // beyond; everything further left is kept triangle for triangle. The
+        // regions are compared separately, since the faces are renumbered by
+        // the compile and the kept triangles are relabeled accordingly.
+        let far_left = |mesh: &TriMesh| {
+            mesh.triangles
+                .iter()
+                .filter(|triangle| {
+                    triangle
+                        .vertices
+                        .iter()
+                        .all(|vertex| mesh.vertices[*vertex].point.x < -0.65)
+                })
+                .map(|triangle| triangle_keys_one(mesh, triangle).0)
+                .collect::<BTreeSet<_>>()
+        };
+        assert!(!far_left(&before).is_empty());
+        assert_eq!(far_left(&carved), far_left(&before));
+        let fresh = mesh_topology_plan(&after_plan, 11, options).unwrap();
+        assert_same_areas(&carved, &fresh);
     }
 }
