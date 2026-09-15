@@ -123,6 +123,19 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — The transfer copies untouched nodes exactly
+
+After a carve most target nodes sit at exactly the point a source node had.
+`QuadraticTransferWork` now indexes the source nodes by exact point during
+validation, for topology meshes only, and a target node whose point is held by
+exactly one source node becomes a unit-weight sample on it instead of a bin
+search and a barycentric evaluation. Two source nodes at one point are the two
+sides of a separated curve, and those keep the trace-aware location. The map
+reports the count as `exact_nodes` for the handoff record. A test carves a
+nudged hole, assembles both operators, and checks that every coincident node's
+value comes back bit for bit, that over 80% of the nodes are exact, and that
+the only exposed nodes lie in the area the hole uncovered.
+
 ## 2026-09-15 — Mesh repair by carving the changed band
 
 The topology mesher had no incremental path: every curve or junction movement

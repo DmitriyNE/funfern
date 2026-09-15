@@ -362,6 +362,16 @@ impl QuadraticTransferMap {
             .count()
     }
 
+    /// Target nodes that copy one source node exactly, because they sit at
+    /// the same point; after a local repair that is every node outside the
+    /// rebuilt band.
+    pub fn exact_nodes(&self) -> usize {
+        self.samples
+            .iter()
+            .filter(|sample| sample.as_ref().is_some_and(is_exact_copy))
+            .count()
+    }
+
     pub fn interpolate(
         &self,
         source_values: &[f64],
@@ -423,7 +433,29 @@ struct QuadraticTransferWork {
     region_groups: Option<BTreeMap<crate::RegionId, crate::RegionId>>,
     target_traces: Vec<TargetTracePreference>,
     source_traces: SourceTraceTriangles,
+    /// Source nodes by exact point. A target node at a point held by exactly
+    /// one source node copies it; coincident nodes on separated sides stay
+    /// with the trace-aware location below.
+    source_by_point: BTreeMap<[u64; 2], Vec<u32>>,
     samples: Vec<Option<QuadraticTransferSample>>,
+}
+
+fn point_key(point: Point2) -> [u64; 2] {
+    [point.x.to_bits(), point.y.to_bits()]
+}
+
+fn exact_sample(node: u32) -> QuadraticTransferSample {
+    let mut sample = QuadraticTransferSample {
+        nodes: [0; 7],
+        weights: [0.0; 7],
+    };
+    sample.nodes[0] = node;
+    sample.weights[0] = 1.0;
+    sample
+}
+
+fn is_exact_copy(sample: &QuadraticTransferSample) -> bool {
+    sample.weights[0] == 1.0 && sample.weights[1..].iter().all(|weight| *weight == 0.0)
 }
 
 impl QuadraticTransferWork {
@@ -435,6 +467,7 @@ impl QuadraticTransferWork {
             region_groups: None,
             target_traces: Vec::new(),
             source_traces: SourceTraceTriangles::default(),
+            source_by_point: BTreeMap::new(),
             samples: Vec::new(),
         }
     }
@@ -487,6 +520,14 @@ impl QuadraticTransferWork {
                 }
                 self.target_traces = quadratic_trace_nodes(target_mesh, target_operator)?;
                 self.source_traces = source_trace_triangles(source_mesh)?;
+                if unified_topology {
+                    for (index, point) in source_operator.node_points().iter().enumerate() {
+                        self.source_by_point
+                            .entry(point_key(*point))
+                            .or_default()
+                            .push(index as u32);
+                    }
+                }
                 self.bins = Some(SourceBins::new(source_mesh)?);
                 self.samples = Vec::with_capacity(target_operator.degrees_of_freedom());
                 self.phase = TransferPhase::Bins(0);
@@ -512,23 +553,32 @@ impl QuadraticTransferWork {
                         samples: std::mem::take(&mut self.samples),
                     }));
                 }
-                let preferred =
-                    preferred_trace_triangles(&self.target_traces[index], &self.source_traces);
-                let sample = self
-                    .bins
-                    .as_ref()
-                    .unwrap()
-                    .locate(
-                        source_mesh,
-                        points[index],
-                        self.target_groups[index],
-                        self.region_groups.as_ref(),
-                        preferred.as_ref(),
-                    )
-                    .map(|(triangle, weights)| QuadraticTransferSample {
-                        nodes: source_operator.element_nodes()[triangle as usize],
-                        weights: enriched_quadratic_basis(weights),
-                    });
+                let exact = match self
+                    .source_by_point
+                    .get(&point_key(points[index]))
+                    .map(Vec::as_slice)
+                {
+                    Some([node]) => Some(exact_sample(*node)),
+                    _ => None,
+                };
+                let sample = exact.or_else(|| {
+                    let preferred =
+                        preferred_trace_triangles(&self.target_traces[index], &self.source_traces);
+                    self.bins
+                        .as_ref()
+                        .unwrap()
+                        .locate(
+                            source_mesh,
+                            points[index],
+                            self.target_groups[index],
+                            self.region_groups.as_ref(),
+                            preferred.as_ref(),
+                        )
+                        .map(|(triangle, weights)| QuadraticTransferSample {
+                            nodes: source_operator.element_nodes()[triangle as usize],
+                            weights: enriched_quadratic_basis(weights),
+                        })
+                });
                 self.samples.push(sample);
                 self.phase = TransferPhase::Locate(index + 1);
             }
@@ -978,14 +1028,132 @@ fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, BoundarySide, CurveNode, CurveSpan,
-        CurveSpanId, CurveSpline, FaceRegionAssignment, LoopRole, Material, MaterialId,
+        AtomCoarsening, BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, BoundarySide, CurveNode,
+        CurveSpan, CurveSpanId, CurveSpline, FaceRegionAssignment, LoopRole, Material, MaterialId,
         MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, Obstacle, ObstacleId,
         OpenCubicSpline, OuterBoundaryCondition, OuterBoundaryConditions, PeriodicCubicSpline,
         Region, RegionId, Scene, SpanBehavior, TopologyCurve, TopologyGeometry, TopologyMeshPlan,
         TopologyVertex, TopologyVertexId, TopologyVertexLocation, TopologyWaveModel,
-        WaveCoefficients, compile_topology, mesh_topology_plan,
+        WaveCoefficients, carve_topology_mesh, compile_topology, mesh_topology_plan,
     };
+
+    /// A carved mesh keeps most of its nodes at exactly their old points, and
+    /// the transfer copies those one to one, bit for bit, instead of locating
+    /// and interpolating them. Nodes inside the rebuilt band still interpolate.
+    #[test]
+    fn carved_meshes_transfer_untouched_nodes_exactly() {
+        let options = MeshingOptions {
+            target_edge_length: 0.12,
+            curve_tolerance: 8.0e-4,
+            minimum_angle_degrees: 10.0,
+            max_vertices: 40_000,
+            max_triangles: 80_000,
+            max_refinement_steps: 40_000,
+        };
+        let hole = |center: Point2| TopologyGeometry {
+            curves: vec![
+                TopologyCurve::new(
+                    crate::CurveId(4),
+                    CurveSpline::Closed(PeriodicCubicSpline::rounded(center, 0.3)),
+                    (0..8)
+                        .map(|index| CurveSpan {
+                            id: CurveSpanId(40 + index),
+                            behavior: SpanBehavior::REFLECTING,
+                        })
+                        .collect(),
+                )
+                .unwrap(),
+            ],
+            ..TopologyGeometry::default()
+        };
+        let plan_for = |topology: &crate::TopologySnapshot, center: Point2| {
+            let inner = topology.face_at(center).unwrap();
+            let assignments = topology
+                .faces
+                .iter()
+                .map(|face| FaceRegionAssignment {
+                    face: face.id,
+                    region: (face.id != inner).then_some(RegionId(1)),
+                })
+                .collect::<Vec<_>>();
+            TopologyMeshPlan::new(topology, &assignments)
+                .unwrap()
+                .coarsened(topology, AtomCoarsening::from_meshing(options))
+                .unwrap()
+        };
+        let from = Point2::new(0.0, 0.0);
+        let to = Point2::new(0.04, 0.03);
+        let before_topology = compile_topology(&hole(from), 1).unwrap();
+        let before_plan = plan_for(&before_topology, from);
+        let before = mesh_topology_plan(&before_plan, 10, options).unwrap();
+        let after_topology = compile_topology(&hole(to), 2).unwrap();
+        let after_plan = plan_for(&after_topology, to);
+        let (after, report) = carve_topology_mesh(
+            Arc::new(before.clone()),
+            &before_plan,
+            after_plan.clone(),
+            Arc::new(after_topology),
+            11,
+            options,
+        )
+        .unwrap();
+
+        let materials = [Material::default_medium()];
+        let regions = [Region {
+            id: RegionId(1),
+            material: MaterialId(1),
+            frame: crate::MaterialFrame::world(),
+        }];
+        let model = TopologyWaveModel {
+            physics: crate::PhysicsModel::Mechanical,
+            materials: &materials,
+            regions: &regions,
+            outer_boundaries: OuterBoundaryConditions::default(),
+        };
+        let source_operator =
+            QuadraticWaveOperator::assemble_topology(&before, &before_plan, model).unwrap();
+        let target_operator =
+            QuadraticWaveOperator::assemble_topology(&after, &after_plan, model).unwrap();
+        let map = QuadraticTransferMap::build(&before, &source_operator, &after, &target_operator)
+            .unwrap();
+
+        let field = |point: Point2| (3.1 * point.x).sin() * (2.3 * point.y).cos() + 0.37 * point.x;
+        let source_values = source_operator
+            .node_points()
+            .iter()
+            .map(|point| field(*point))
+            .collect::<Vec<_>>();
+        const EXPOSED: f64 = 1.0e9;
+        let target_values = map.interpolate(&source_values, EXPOSED).unwrap();
+        let source_by_point = source_operator
+            .node_points()
+            .iter()
+            .zip(&source_values)
+            .map(|(point, value)| (point_key(*point), *value))
+            .collect::<BTreeMap<_, _>>();
+        let mut coincident = 0;
+        let mut exposed = 0;
+        for (point, value) in target_operator.node_points().iter().zip(&target_values) {
+            if let Some(source_value) = source_by_point.get(&point_key(*point)) {
+                coincident += 1;
+                assert_eq!(value.to_bits(), source_value.to_bits(), "{point:?}");
+            }
+            if *value == EXPOSED {
+                // Only the area the hole uncovered has no source.
+                exposed += 1;
+                assert!((*point - from).norm() < 0.32, "{point:?}");
+            }
+        }
+        assert!(report.kept_triangles > 0);
+        assert_eq!(map.exact_nodes(), coincident);
+        assert!(
+            coincident * 10 > target_operator.degrees_of_freedom() * 8,
+            "{coincident}"
+        );
+        assert!(coincident < target_operator.degrees_of_freedom());
+        assert_eq!(map.exposed_nodes(), exposed);
+        assert!(exposed > 0);
+    }
 
     fn mesh(revision: u64, points: &[[f64; 2]], triangles: &[[usize; 3]]) -> TriMesh {
         TriMesh {
