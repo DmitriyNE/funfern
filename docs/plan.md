@@ -911,6 +911,11 @@ predictable on representative dense scenes.
 - Reuse the UI and transaction lifecycle, with discretization-specific numerical
   kernels where appropriate.
 - Compare propagation, editing behavior, and cost against the triangular solver.
+- Revisit second-order outgoing conditions on curved spans here, where the
+  boundary curvature is available exactly. On the triangle solver the
+  Engquist-Majda tangential term injects energy on curved spans (reproducer
+  test ignored in `wave_quadratic.rs`, diagnosis in the engineering log for
+  2026-09-15); until then curved faces stay reflecting or first order.
 
 **Completion:** an interactive browser IGA wave example works on one patch, with
 documented numerical and performance observations.

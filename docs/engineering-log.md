@@ -77,10 +77,10 @@ Longer-standing work:
   expose custom contour geometry if non-rectangular domains require it.
 - [ ] Stabilize second-order outgoing conditions on curved hole and baffle spans.
   Diagnosed 2026-09-15 with an ignored reproducer test: the divergence is a
-  property of the condition on curved spans, not of the discretization. Decide
-  between restricting the law to straight spans and outer edges, deriving a
-  curvature-corrected second-order condition, or a Higdon-type condition without
-  tangential derivatives. Keep examples on reflecting or first-order curved faces.
+  property of the condition on curved spans, not of the discretization. Postponed
+  on 2026-09-15 into the isoparametric effort (plan §10), where curvature is
+  available exactly; keep examples on reflecting or first-order curved faces
+  until then.
 - [ ] Decouple the mesh plan's boundary atoms from the arrangement's sampling
   density. Every curved span is cut into segments about 7e-3 long by the
   intersection sampler, the mesher uses each as a boundary edge, and the time
@@ -96,10 +96,12 @@ Longer-standing work:
 - [ ] Evaluate a dissipative relative dashpot for thin gaps. Keeping centered time
   integration would require an off-diagonal damping solve; the implemented gap
   spring is conservative.
-- [ ] Profile the complete geometry-edit handoff on representative full-rebuild
-  cases now that preparation is sliced by time (2026-09-15). The step-count
-  slicing explained the seconds-long rebuilds; what remains to measure is the
-  synchronous assembly, transfer and upload tail on larger discretizations.
+- [ ] Make operator assembly and transfer-map construction resumable. Measured
+  2026-09-15 on the Obstacle array in release mode: the synchronous tail is
+  22–32 ms at 17,000 DOFs and 36–50 ms at 29,000 DOFs, and it runs inside the
+  slice that finishes meshing, so every handover, including an AMR handoff,
+  costs two to three frames at once. The GPU upload frame is not yet measured
+  in-app; the handoff record's `upload_ms` is the place to read it.
 - [ ] Replace the sharp zero initialization at newly exposed domain with a localized
   transition/blur pass. A hard jump against the retained field produces artificial
   wideband excitation when an obstacle boundary moves inward. Measure added spectral
@@ -116,6 +118,28 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Where a handover's frame goes
+
+The user sees frame hiccups at the handover after an edit and after an AMR
+adaptation. A release-mode probe of the runtime on the Obstacle array, since
+deleted, split one handover's CPU work:
+
+| target edge | DOFs | meshing (sliced) | assembly | transfer map | f32 conversion |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.08 | 17,465 | 305 ms | 18 ms | 9 ms | 0.6 ms |
+| 0.05 | 29,105 | 555 ms | 31 ms | 14 ms | 0.9 ms |
+
+Meshing is cooperative and now sliced by time, so it is latency but not a
+hiccup. Assembly and the transfer map are synchronous, and they run inside the
+same slice that finishes meshing, so the frame that completes a rebuild pays 22
+to 50 ms at once. An AMR handoff has no meshing but the same tail, 28 ms and 50
+ms here. That is two to three dropped frames per handover on this scene, which
+matches the report. The GPU upload frame was not measured from the probe; the
+Performance panel's handoff record shows it as `upload_ms`. Fixing this is
+mechanical: both loops become resumable jobs under the existing frame budget,
+with the timing buckets already in place. Recorded as a TODO above. The
+second-order item moved into the isoparametric plan (§10) at the user's request.
 
 ## 2026-09-15 — The second-order instability reproduces, and it is the condition
 
