@@ -138,6 +138,30 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — Transmit and Boundary report a state instead of offering an action
+
+The pair of buttons showed nothing about where a selection stood: each was
+disabled once it had been applied, which is only a hint, and the test behind the
+Boundary one was `behavior == REFLECTING` exactly, so a baffle with a Dirichlet
+side or thin-gap coupling left both buttons enabled and looked like neither
+state.
+
+They are tick boxes now, side by side. Transmit is ticked when every selected
+span transmits, Boundary when every one of them is separated, whatever its faces
+carry; a selection holding both ticks neither and says `Mixed` beside them.
+Ticking applies, unticking does nothing, since there is no third state to fall
+into. The one thing lost is the old Boundary button's side effect of resetting
+custom conditions back to reflecting; the condition editor below does that a side
+at a time, and a widget that reports a state should not also be a reset.
+
+`span_behavior_state` holds the rule, away from egui, and
+`a_span_selection_reports_one_state_only_when_every_span_agrees` covers the three
+answers including the impedance case the buttons could not express.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked`, `cargo build --release -p
+funfern-app --locked`.
+
 ## 2026-09-15 — A span's selected side is visible again, and on the right side
 
 Reported: the Left/Right selector for baffle faces is hard to use because the

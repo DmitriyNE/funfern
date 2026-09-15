@@ -1671,45 +1671,42 @@ impl Playground {
             }
         }
         if !curve_spans.is_empty() {
-            // Offer a law only when applying it would change something.
-            let already = |behavior: SpanBehavior| {
-                self.editor
-                    .document
-                    .model
-                    .draft
-                    .geometry
-                    .curves
-                    .iter()
-                    .flat_map(|curve| curve.spans.iter())
-                    .filter(|span| curve_spans.contains(&span.id))
-                    .all(|span| span.behavior == behavior)
-            };
-            let transmitting = already(SpanBehavior::Transmitting);
-            let reflecting = already(SpanBehavior::REFLECTING);
+            // The boxes report which of the two states the selection is in
+            // rather than offering an action. A mixed selection ticks neither,
+            // and unticking the state a span is already in would leave it in no
+            // state at all, so only a tick applies anything.
+            let state =
+                span_behavior_state(&self.editor.document.model.draft.geometry, &curve_spans);
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!transmitting, egui::Button::new("Transmit"))
-                    .on_disabled_hover_text("These spans already transmit")
-                    .clicked()
-                {
-                    if let Err(error) = self
-                        .editor
-                        .set_span_behavior(&curve_spans, SpanBehavior::Transmitting)
+                for (value, label, hint, behavior) in [
+                    (
+                        SpanBehaviorState::Transmit,
+                        "Transmit",
+                        "The field crosses these spans",
+                        SpanBehavior::Transmitting,
+                    ),
+                    (
+                        SpanBehaviorState::Boundary,
+                        "Boundary",
+                        "Each side of these spans carries its own condition",
+                        SpanBehavior::REFLECTING,
+                    ),
+                ] {
+                    let mut checked = state == Some(value);
+                    if ui
+                        .checkbox(&mut checked, label)
+                        .on_hover_text(hint)
+                        .changed()
+                        && checked
+                        && let Err(error) = self.editor.set_span_behavior(&curve_spans, behavior)
                     {
                         self.notify(error);
                     }
                 }
-                if ui
-                    .add_enabled(!reflecting, egui::Button::new("Boundary"))
-                    .on_disabled_hover_text("These spans are already reflecting boundaries")
-                    .clicked()
-                {
-                    if let Err(error) = self
-                        .editor
-                        .set_span_behavior(&curve_spans, SpanBehavior::REFLECTING)
-                    {
-                        self.notify(error);
-                    }
+                if state.is_none() {
+                    ui.weak("Mixed").on_hover_text(
+                        "These spans are not all in the same state; tick one to put them there",
+                    );
                 }
             });
             ui.horizontal(|ui| {
@@ -8946,6 +8943,40 @@ fn timing_line(timing: TopologyPreparationTiming) -> String {
     )
 }
 
+/// Which of the two states a span selection is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpanBehaviorState {
+    Transmit,
+    Boundary,
+}
+
+/// The state every selected span shares, or `None` when they disagree. A
+/// separated span counts as a boundary whatever its two faces carry, so a
+/// Dirichlet or thin-gap baffle reports the state it is actually in rather than
+/// reading as neither.
+fn span_behavior_state(
+    geometry: &TopologyGeometry,
+    spans: &BTreeSet<CurveSpanId>,
+) -> Option<SpanBehaviorState> {
+    let mut state = None;
+    for span in geometry
+        .curves
+        .iter()
+        .flat_map(|curve| &curve.spans)
+        .filter(|span| spans.contains(&span.id))
+    {
+        let current = match span.behavior {
+            SpanBehavior::Transmitting => SpanBehaviorState::Transmit,
+            SpanBehavior::Separated { .. } => SpanBehaviorState::Boundary,
+        };
+        if state.is_some_and(|previous| previous != current) {
+            return None;
+        }
+        state = Some(current);
+    }
+    state
+}
+
 /// The screen-space unit normal pointing to one side of a span running along
 /// `tangent`, or zero for a degenerate segment. Left of increasing parameter in
 /// the world is `(t.y, -t.x)` on screen, because the viewport flips the vertical
@@ -9918,6 +9949,54 @@ pub fn frame(
 mod tests {
     use super::*;
     use funfern_app::topology_viewport::screen_side;
+
+    #[test]
+    fn a_span_selection_reports_one_state_only_when_every_span_agrees() {
+        let mut editor = TopologyEditor::default();
+        editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.3),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        let spans = editor.document.model.draft.geometry.curves[0]
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<BTreeSet<_>>();
+        assert!(spans.len() > 1);
+        let first = BTreeSet::from([*spans.first().unwrap()]);
+        let state = |editor: &TopologyEditor, spans: &BTreeSet<CurveSpanId>| {
+            span_behavior_state(&editor.document.model.draft.geometry, spans)
+        };
+
+        // A closed subdomain's spans start out transmitting.
+        assert_eq!(state(&editor, &spans), Some(SpanBehaviorState::Transmit));
+
+        editor
+            .set_span_behavior(&first, SpanBehavior::REFLECTING)
+            .unwrap();
+        assert_eq!(state(&editor, &spans), None);
+        assert_eq!(state(&editor, &first), Some(SpanBehaviorState::Boundary));
+
+        // A boundary stays a boundary whatever its faces carry, which is what
+        // the old pair of buttons could not say.
+        editor
+            .set_span_face_condition(
+                &first,
+                CurveTraceSide::Left,
+                FaceBoundaryCondition::Impedance { ratio: 2.0 },
+            )
+            .unwrap();
+        assert_eq!(state(&editor, &first), Some(SpanBehaviorState::Boundary));
+
+        editor
+            .set_span_behavior(&spans, SpanBehavior::REFLECTING)
+            .unwrap();
+        assert_eq!(state(&editor, &spans), Some(SpanBehaviorState::Boundary));
+    }
 
     #[test]
     fn the_side_band_falls_where_a_click_reads_the_same_side() {

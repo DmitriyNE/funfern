@@ -128,7 +128,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Removing a divider that merges several subdomains highlights the candidates in
   the scene and takes a click as the survivor.
 - **Boundaries:** one Boundary inspector applies conditions to every compatible
-  selected span and reports mixed assignments. A span excluded on both sides, one
+  selected span and reports mixed assignments. Transmit and Boundary are tick
+  boxes reporting which state the selection is in: a separated span reads as a
+  boundary whatever conditions its two faces carry, a selection holding both
+  states ticks neither and is marked Mixed, and ticking a box puts every selected
+  span in that state. A span excluded on both sides, one
   between two holes say, is marked Inactive, since nothing it carries reaches the
   simulation. Outer edges support reflecting,
   prescribed
