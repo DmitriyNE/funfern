@@ -1105,7 +1105,11 @@ as a fallback for large or troublesome edits.
 samples a spatial target length at triangle vertices, edge midpoints, and centroids;
 coarsens short edges; restores local constrained-Delaunay legality; refines long
 edges; verifies the result; and compacts it. Every phase resumes under the caller's
-work budget. The app gives it the same soft 2 ms frame slice as ordinary meshing.
+work budget. The app gives it a soft 2 ms frame slice. Ordinary topology
+preparation is advanced for 6 ms of wall time per frame rather than a fixed step
+count: its cooperative steps are so fine that 256 steps per frame stretched a
+60 ms single-loop rebuild across more than eight hundred frames, most visibly
+as seconds spent in "Connecting holes".
 Refinement starts above `1.05 h_target`; collapse uses a configurable lower ratio.
 Automatic solution adaptation uses `0.65 h_target`, with post-collapse size and
 quality checks providing the final guard. Both directions work in passes: one

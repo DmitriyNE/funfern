@@ -5744,6 +5744,11 @@ impl Playground {
         self.pending_pulse = Some((point, region));
         self.message = format!("Pulse queued in region {}", region.0);
     }
+    /// Wall time a frame lends to topology preparation. The cooperative jobs
+    /// step at very fine granularity, so the earlier fixed 256 steps per frame
+    /// stretched a 60 ms rebuild across hundreds of frames.
+    const PREPARATION_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
+
     fn request_runtime(&mut self) {
         if self.editor.acceptance != TopologyAcceptance::Valid || self.editor.editing() {
             return;
@@ -5823,7 +5828,10 @@ impl Playground {
         if self.uploading.is_none() {
             self.request_runtime();
         }
-        if let Some(Ok(_)) = self.runtime.advance(256) {
+        if let Some(Ok(_)) = self
+            .runtime
+            .advance_for(Self::PREPARATION_FRAME_BUDGET, 256)
+        {
             self.handoff_ready = Some(Instant::now());
         }
         if self.uploading.is_none() && self.runtime.ready().is_some() && request.caught_up() {

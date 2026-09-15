@@ -12,6 +12,7 @@ use crate::topology_editor::{
 use bevy::platform::time::Instant;
 use funfern_core::*;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub const FAR_FIELD_CONTOUR_POINTS: usize = 256;
 
@@ -349,7 +350,39 @@ impl TopologyPreparationJob {
             return None;
         }
         let started = Instant::now();
-        let mut outcome = self.advance_slice(budget);
+        let outcome = self.advance_slice(budget);
+        self.finish_slice(started, outcome)
+    }
+
+    /// Runs slices of `steps` until the job finishes or `budget` of wall time
+    /// has passed, and counts the whole call as one slice. The cooperative
+    /// jobs step at very fine granularity, so a fixed step count per frame
+    /// stretched a 60 ms rebuild across hundreds of frames; a time budget
+    /// spends the frame's headroom instead.
+    pub fn advance_for(
+        &mut self,
+        budget: Duration,
+        steps: usize,
+    ) -> Option<Result<PreparedTopology, TopologyPreparationError>> {
+        if self.done || steps == 0 {
+            return None;
+        }
+        let started = Instant::now();
+        let mut outcome = None;
+        while outcome.is_none() && !self.done {
+            outcome = self.advance_slice(steps);
+            if started.elapsed() >= budget {
+                break;
+            }
+        }
+        self.finish_slice(started, outcome)
+    }
+
+    fn finish_slice(
+        &mut self,
+        started: Instant,
+        mut outcome: Option<Result<PreparedTopology, TopologyPreparationError>>,
+    ) -> Option<Result<PreparedTopology, TopologyPreparationError>> {
         self.timing.slices = self.timing.slices.saturating_add(1);
         self.timing.longest_slice_ms = self.timing.longest_slice_ms.max(elapsed_ms(started));
         // A finished handoff copied the timing before this slice was counted, so
@@ -630,6 +663,25 @@ impl TopologyRuntime {
     ) -> Option<Result<TopologyToken, TopologyPreparationError>> {
         let result = self.preparing.as_mut()?.advance(budget)?;
         self.preparing = None;
+        self.settle(result)
+    }
+
+    /// Time-budgeted counterpart of `advance`; see
+    /// `TopologyPreparationJob::advance_for`.
+    pub fn advance_for(
+        &mut self,
+        budget: Duration,
+        steps: usize,
+    ) -> Option<Result<TopologyToken, TopologyPreparationError>> {
+        let result = self.preparing.as_mut()?.advance_for(budget, steps)?;
+        self.preparing = None;
+        self.settle(result)
+    }
+
+    fn settle(
+        &mut self,
+        result: Result<PreparedTopology, TopologyPreparationError>,
+    ) -> Option<Result<TopologyToken, TopologyPreparationError>> {
         match result {
             Ok(candidate) if Some(candidate.bundle.token) == self.requested => {
                 let token = candidate.bundle.token;
@@ -922,6 +974,56 @@ mod tests {
             committed.operator.mesh_revision(),
             committed.mesh.mesh_revision
         );
+    }
+
+    /// A frame lends the preparation wall time, not a step count. Without a
+    /// deadline one call finishes a fresh preparation and reports one slice,
+    /// with the same mesh the step-counted path produces; with a zero budget
+    /// every call still makes one slice of progress.
+    #[test]
+    fn a_time_budget_finishes_a_preparation_in_one_call_without_a_deadline() {
+        let editor = TopologyEditor::default();
+        let request = |runtime: &mut TopologyRuntime| {
+            runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap()
+        };
+
+        let mut unbounded = TopologyRuntime::default();
+        let token = request(&mut unbounded);
+        let finished = unbounded
+            .advance_for(Duration::from_secs(600), 256)
+            .expect("one unbounded call finishes the preparation")
+            .unwrap();
+        assert_eq!(finished, token);
+        let committed = unbounded.commit_ready(token).unwrap();
+        assert_eq!(committed.timing.slices, 1);
+
+        let mut stepped = TopologyRuntime::default();
+        let token = request(&mut stepped);
+        assert_eq!(prepare(&mut stepped).unwrap(), token);
+        let reference = stepped.commit_ready(token).unwrap();
+        assert_eq!(*committed.mesh, *reference.mesh);
+
+        let mut bounded = TopologyRuntime::default();
+        let token = request(&mut bounded);
+        let mut calls = 0u32;
+        let finished = loop {
+            calls += 1;
+            if let Some(result) = bounded.advance_for(Duration::ZERO, 256) {
+                break result.unwrap();
+            }
+            assert!(calls < 1_000_000, "preparation did not finish");
+        };
+        assert_eq!(finished, token);
+        assert!(calls > 1, "a zero budget still yields after one slice");
+        assert_eq!(bounded.commit_ready(token).unwrap().timing.slices, calls);
     }
 
     /// The timing a handoff carries has to include the slice that finished it,

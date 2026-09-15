@@ -86,8 +86,9 @@ Longer-standing work:
   integration would require an off-diagonal damping solve; the implemented gap
   spring is conservative.
 - [ ] Profile the complete geometry-edit handoff on representative full-rebuild
-  and local-repair cases. The user reports that the end-to-end handoff still feels
-  slow even though the small scripted transfer case is much faster.
+  cases now that preparation is sliced by time (2026-09-15). The step-count
+  slicing explained the seconds-long rebuilds; what remains to measure is the
+  synchronous assembly, transfer and upload tail on larger discretizations.
 - [ ] Replace the sharp zero initialization at newly exposed domain with a localized
   transition/blur pass. A hard jump against the retained field produces artificial
   wideband excitation when an obstacle boundary moves inward. Measure added spectral
@@ -104,6 +105,34 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Preparation is sliced by time, not by step count
+
+The user reported "Connecting holes" taking about two seconds on a single-loop
+scene. Profiling the topology mesher on such a scene at the app's options gave
+the whole picture: the rebuild is 60 ms of compute for a hole and 105 ms for
+two subdomains, but the frame loop advanced it by 256 cooperative steps per
+frame, and those steps are tiny. The bridge search alone takes 26,000 steps,
+which is 100 frames, and ear clipping 137,000 to 204,000, which is 500 to 800
+frames. The whole rebuild needed 800 to 1,200 frames, so ten to twenty seconds
+at 60 Hz, for a tenth of a second of work.
+
+| phase | steps | compute | frames at 256 steps |
+| --- | ---: | ---: | ---: |
+| Connecting holes | 26,061 | 0.75 ms | 102 |
+| Triangulating | 137,288 | 5.9 ms | 536 |
+| Legalizing edges | 43,579 | 19.9 ms | 170 |
+| Refining | 1,440 | 24.3 ms | 6 |
+| Checking mesh | 3,592 | 11.5 ms | 14 |
+
+The preparation job and the runtime gained `advance_for`, which runs slices of
+256 steps until the job finishes or a wall-time budget has passed and counts
+the call as one slice. The frame lends it 6 ms, so the same rebuild now takes
+ten to twenty frames. The step-counted `advance` stays for tests. A test checks
+that one unbounded call finishes a fresh preparation and reports one slice with
+the same mesh the stepped path produces, and that a zero budget still makes one
+slice of progress per call. The remaining open item on preparation latency is
+the synchronous operator assembly and transfer tail, already logged above.
 
 ## 2026-09-15 — A stale adaptation is dropped, not reported
 
