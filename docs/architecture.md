@@ -744,9 +744,17 @@ components and clockwise ones holes. The meshing job then resumes at its bridge
 state with the imported triangles frozen: legalization, refinement and splits
 skip anything that would change one, so the kept part comes out exactly as it
 went in, and an element whose circumcenter falls outside the cavity is left as
-it is rather than split at its centroid. A size field over the removed triangles
-drives refinement and chain subdivision, so a band cut through an adapted mesh
-is refilled at the density it had. There is no motion cap and no patch cap; a
+it is rather than split at its centroid. Refinement and chain subdivision in
+the cavity follow the edge lengths adaptation *requested* for the removed
+triangles, which every adapted mesh records per triangle, never the lengths those
+triangles had: a refill has to meet frozen rim vertices and the boundary's own
+chords with elements smaller than the target, and reading that smallness back as
+a target made repeated repairs of one curve refine the mesh without bound. A
+request is copied, so it is bounded by what adaptation asked for; the refill's
+own triangles inherit the request beneath them, ground a moved hole uncovers has
+none, and a mesh no adaptation has touched refills at the meshing target. The
+application passes its adaptation switch to the carve; off, the band returns to
+the target regardless of stale requests. There is no motion cap and no patch cap; a
 carve that fails falls back to the full rebuild with the reason attached to the
 candidate. Because coarsening merges arrangement segments but never splits one,
 an outer wall is a single atom per side and a wall attachment move rebuilds the
@@ -816,9 +824,12 @@ topology plan. It validates the existing mesh against the plan before changing i
 pins every sampled endpoint and junction-sector trace, and restricts boundary
 changes to AMR-created vertices inside one sampled plan segment. Transmitting
 constraints remain shared, while two active sides of a separated constraint split
-and collapse atomically by curve/span/parameter identity. Refinement an adaptation
-added survives a repair outside the carved band, and the band itself is refilled
-at the density it had; the application uses the unified topology path end to end.
+and collapse atomically by curve/span/parameter identity. Every pass stamps each
+triangle with the size the field asks for where it lies, read from the finished
+mesh. Refinement an adaptation added survives a repair outside the carved band,
+the band itself is refilled at those requested sizes, and a refilled band is
+ordinary mesh to the next pass, which collapses it wherever the field no longer
+wants it fine; the application uses the unified topology path end to end.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a

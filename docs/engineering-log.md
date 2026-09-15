@@ -132,6 +132,54 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — Repairs refill at requested sizes, not measured ones
+
+Dragging one curve back and forth over the same ground refined the mesh
+without bound. Reproduced in core: a 5 cm nudge of a hole repeated fourteen
+times at target 0.06 took the mesh from 4,746 to 10,343 triangles and the
+shortest edge from 0.0133 to 0.0007, the removed band growing every pass
+(235 → 2,428 triangles). The size field the carve built over the removed
+triangles recorded their measured longest edges, and the refill took the
+minimum of that and the target. Two sources of smallness are always present
+and neither is adaptation: a fresh mesh already has elements about 4.5× finer
+than the target beside a curved boundary, from the chord subdivision, and the
+refill has to meet frozen rim vertices at arbitrary distances, which
+encroachment splits answer with smaller elements still. Both were recorded,
+copied into what had become interior, recorded again, and min'ed with the next
+pass's slivers — a monotone min with a fresh supply of small elements every
+time. Switching the field off held the mesh at the fresh count and shortest
+edge for all fourteen passes; widening the band to one target length with the
+field on made it three times worse (31,630 triangles), so the band width was
+never the lever.
+
+The fix is one mechanism, as agreed: every `TriMesh` carries `requested_sizes`,
+per triangle the edge length adaptation last asked for where it lies, stamped
+by the adaptation job at compaction from `triangle_target` on the finished
+mesh and empty for meshes no adaptation has touched. The carve's
+`LocalSizeField` is built from those requests only; measured sizes are gone
+from it. Kept triangles keep their request, the refill's triangles inherit the
+request of the removed triangle under their centroid, and ground a moved hole
+uncovers has none and refills at the target. A request is copied, never
+re-measured, so it is bounded by adaptation's minimum and nothing compounds.
+The carve takes `preserve_adaptation`; the runtime's `set_preserve_adaptation`
+receives the UI's adaptation switch before every request, so with adaptation
+off the band returns to the target regardless of stale requests, and with
+adaptation on but never run the result is the same because there is nothing to
+copy. Coarsening in `amr.rs` orders collapses by lineage but does not gate them
+on it, so a refilled band is ordinary mesh to the next pass: with a uniform
+coarse field, a repaired adapted mesh went 3,421 → 1,671 triangles in three
+generations.
+
+Tests: the fourteen-pass drag holds within 5% of the fresh count and 95% of its
+shortest edge; an adapted mesh dragged twelve passes stays within ±10% of its
+count with over 95% of triangles carrying a request; kept triangles keep their
+request and refill triangles over removed ground inherit theirs while the
+uncovered crescent carries none; without preserving adaptation the refill is
+coarser and carries no request; adaptation coarsens a repaired band it no longer
+wants fine; the adaptation job stamps every triangle with exactly the field's
+minimum over its seven samples; and the runtime test flips the switch between
+two repairs. A browser check for the back-and-forth drag is listed, not run.
+
 ## 2026-09-15 — Carving documented
 
 The architecture notes describe carving next to the full-rebuild baseline, the

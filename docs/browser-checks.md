@@ -135,9 +135,12 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   `curve or span topology changed`. Assign another material to a subdomain: a
   repair with zero removed and zero inserted elements. Enable adaptation until it
   refines around a hole, then nudge a different curve: the refinement around the
-  hole survives and the handoff reports a repair. Change the resolution or drag
-  the domain edge: those still read `Full rebuild`. A `Full rebuild: mesh repair
-  failed (...)` line is a bug report.
+  hole survives and the handoff reports a repair. Drag one control of a hole
+  back and forth over the same ground twenty times, with adaptation off and
+  again with it on: the mesh size in Performance and the solver dt must settle
+  after the first pass rather than climb or shrink with every pass. Change the
+  resolution or drag the domain edge: those still read `Full rebuild`. A `Full
+  rebuild: mesh repair failed (...)` line is a bug report.
 - [ ] In Simulation, switch Mesh resolution between Coarse, Medium, and Fine, then
   drag the Target edge slider. Each change rebuilds the mesh when the control is
   released and carries the running field across; Performance names the rebuild
