@@ -715,6 +715,17 @@ branched separated junction, recovery first installs every incident run; a final
 fan pass crosses transmitting edges, stops at separated edges, and duplicates the
 junction vertex once per compiled sector trace. An
 unchanged plan reuses its mesh, and changing only a boundary law does not remesh.
+A slit - a separated span whose two sides face the same face - is left out of
+the polygon and cut back in after the face is triangulated, so removing it may
+break the face cycle it sits in into several closed stretches: a slit bridging
+two holes, joining a hole to the outer boundary, or meeting itself is walked
+twice by a cycle that runs through both of the loops it joins. Each stretch
+becomes its own polygon, and outer versus hole follows the orientation rather
+than the order, counter-clockwise being the outer boundary, since such a split
+can produce one of each from the face's first cycle. A stretch that leaves a
+junction through one sector and returns through another closes on a different
+trace at the same point; the two are one mesh vertex while the face is
+triangulated, and the final fan pass separates the sectors again.
 `TopologyMeshingJob` runs the full baseline cooperatively: bridge search, ear
 clipping, legalization, refinement, separated-curve recovery, and verification
 are explicit phases, and changing the caller work slice does not change the

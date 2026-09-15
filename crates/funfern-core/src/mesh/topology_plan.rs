@@ -457,6 +457,48 @@ struct PreparedTopology {
     slit_runs: Vec<(RegionId, Vec<PlannedFaceStep>)>,
 }
 
+/// Ends one stretch of a face cycle. The stretch has to come back to where it
+/// started, or the cycle walked out of the face and never returned, which the
+/// plan is not allowed to produce. The two ends are compared by position, not
+/// by identity: a junction carries one trace vertex per sector, so a stretch
+/// that leaves and returns through the same junction ends on a different trace
+/// at the same point - which is how `cut_free_slit` pairs the two sides of a
+/// slit as well.
+fn close_face_cycle(
+    points: &BTreeMap<TraceVertexId, Point2>,
+    polygon: &mut Vec<usize>,
+    ends: &mut Option<[TraceVertexId; 2]>,
+    cycles: &mut Vec<Vec<usize>>,
+) -> Result<(), MeshError> {
+    let Some(ends) = ends.take() else {
+        return Ok(());
+    };
+    let polygon = std::mem::take(polygon);
+    if polygon.is_empty() {
+        return Ok(());
+    }
+    let [first, last] = ends.map(|trace| points.get(&trace));
+    let (Some(first), Some(last)) = (first, last) else {
+        return Err(MeshError::Topology("topology trace vertex is missing"));
+    };
+    if polygon.len() < 3 || first != last {
+        return Err(MeshError::Topology("topology face cycle is incomplete"));
+    }
+    cycles.push(polygon);
+    Ok(())
+}
+
+fn signed_polygon_area(builder: &MeshBuilder, polygon: &[usize]) -> f64 {
+    let area = (0..polygon.len())
+        .map(|index| {
+            let from = builder.point(polygon[index]);
+            let to = builder.point(polygon[(index + 1) % polygon.len()]);
+            from.cross(to)
+        })
+        .sum::<f64>();
+    0.5 * area
+}
+
 fn prepare_topology_builder(
     plan: &TopologyMeshPlan,
     builder: &mut MeshBuilder,
@@ -490,9 +532,26 @@ fn prepare_topology_builder(
         }
         let mut cycles = Vec::with_capacity(domain.steps.len());
         for cycle in &domain.steps {
+            // A slit is left out of the polygon here and cut back into the
+            // triangulated face afterwards. Removing it can break one cycle
+            // into several: a slit that bridges two holes, joins a hole to the
+            // outer boundary, or meets itself is traversed twice by a cycle
+            // that runs through both of the loops it joins. Each stretch
+            // between two removals closes on the trace vertex the slit left
+            // from, so the stretches are collected as separate polygons.
+            // Concatenating them instead leaves a polygon that jumps across
+            // the slit - a zero-width channel with no interior, which no
+            // refinement can ever make well shaped.
+            //
+            // Starting just after the first removal keeps a stretch that spans
+            // the cycle's own start in one piece.
+            let start = cycle.iter().position(&is_slit).map_or(0, |index| index + 1);
             let mut polygon = vec![];
-            for step in cycle {
+            let mut ends: Option<[TraceVertexId; 2]> = None;
+            for offset in 0..cycle.len() {
+                let step = &cycle[(start + offset) % cycle.len()];
                 if is_slit(step) {
+                    close_face_cycle(&trace_points, &mut polygon, &mut ends, &mut cycles)?;
                     continue;
                 }
                 let separated =
@@ -501,6 +560,23 @@ fn prepare_topology_builder(
                     PlannedBoundarySource::Curve { side, .. } if separated => Some(side),
                     _ => None,
                 };
+                // A stretch that leaves a junction through one sector and
+                // returns through another names two traces at one point of one
+                // face - a curve that meets itself does this, and so does a
+                // slit's attachment. They are one mesh vertex: seeding it
+                // before the chain is expanded keeps the boundary edges and the
+                // polygon on the same vertex instead of leaving the arriving
+                // one with no triangle to belong to. The sectors are separated
+                // again by `split_slit_trace_vertices` once the slits are cut.
+                if let Some([first, _]) = ends
+                    && step.boundary.traces[1] != first
+                    && trace_points.get(&step.boundary.traces[1]) == trace_points.get(&first)
+                    && let Some(vertex) = trace_vertices.get(&first).copied()
+                {
+                    trace_vertices
+                        .entry(step.boundary.traces[1])
+                        .or_insert(vertex);
+                }
                 let key = (step.edge, side);
                 if let std::collections::btree_map::Entry::Vacant(entry) = chains.entry(key) {
                     let chain =
@@ -542,23 +618,32 @@ fn prepare_topology_builder(
                         });
                     }
                 }
+                ends = Some([
+                    ends.map_or(step.boundary.traces[0], |ends| ends[0]),
+                    step.boundary.traces[1],
+                ]);
             }
-            if polygon.is_empty() {
-                continue;
-            }
-            if polygon.len() < 3 {
-                return Err(MeshError::Topology("topology face cycle is incomplete"));
-            }
-            cycles.push(polygon);
+            close_face_cycle(&trace_points, &mut polygon, &mut ends, &mut cycles)?;
         }
-        let outer = cycles
-            .first()
-            .cloned()
-            .ok_or(MeshError::Topology("topology face has no outer cycle"))?;
+        // Every cycle runs with the face on its left, so the outer boundary
+        // turns positively and each hole turns the other way. Order no longer
+        // settles which is which: a slit joining a hole to the outer boundary
+        // splits the face's first cycle into one of each.
+        let mut outer = None;
+        let mut holes = vec![];
+        for polygon in cycles {
+            if signed_polygon_area(builder, &polygon) > 0.0 {
+                if outer.replace(polygon).is_some() {
+                    return Err(MeshError::Topology("topology face has two outer cycles"));
+                }
+            } else {
+                holes.push(polygon);
+            }
+        }
         builder.domains.push(TriangulationDomain {
             region: domain.region,
-            outer,
-            holes: cycles.into_iter().skip(1).collect(),
+            outer: outer.ok_or(MeshError::Topology("topology face has no outer cycle"))?,
+            holes,
         });
     }
 
@@ -2395,6 +2480,25 @@ mod tests {
         mesh_topology_plan(&plan, 77, mesh_options()).unwrap()
     }
 
+    /// The same, at an edge length the caller picks. Some arrangements only
+    /// come apart once the boundary is sampled finely enough to put several
+    /// vertices on each span.
+    fn mesh_snapshot_at(
+        topology: &TopologySnapshot,
+        assignments: &[FaceRegionAssignment],
+        target_edge_length: f64,
+    ) -> Result<TriMesh, MeshError> {
+        let plan = TopologyMeshPlan::new(topology, assignments).unwrap();
+        mesh_topology_plan(
+            &plan,
+            77,
+            super::super::MeshingOptions {
+                target_edge_length,
+                ..mesh_options()
+            },
+        )
+    }
+
     fn run_topology_job(plan: TopologyMeshPlan, budget: usize) -> TriMesh {
         let mut job = TopologyMeshingJob::new(plan, 77, mesh_options());
         loop {
@@ -3377,5 +3481,217 @@ mod tests {
                 .iter()
                 .any(|vertex| vertex.point == Point2::new(0.0, -1.0))
         );
+    }
+
+    /// The node of a closed curve that sits on `point`, for attaching a bridge
+    /// to a corner of one of these test polygons.
+    fn node_at(curve: &TopologyCurve, point: Point2) -> usize {
+        (0..curve.spline.node_count())
+            .find(|node| curve.spline.node_point(*node) == Some(point))
+            .expect("a node at that point")
+    }
+
+    fn box_curve(
+        id: u64,
+        spans_from: u64,
+        centre: Point2,
+        behavior: SpanBehavior,
+    ) -> TopologyCurve {
+        let spline = PeriodicCubicSpline::polygon(vec![
+            Point2::new(centre.x - 0.2, centre.y - 0.25),
+            Point2::new(centre.x + 0.2, centre.y - 0.25),
+            Point2::new(centre.x + 0.2, centre.y + 0.25),
+            Point2::new(centre.x - 0.2, centre.y + 0.25),
+        ])
+        .unwrap();
+        TopologyCurve::new(
+            CurveId(id),
+            CurveSpline::Closed(spline),
+            spans(spans_from, 4, behavior),
+        )
+        .unwrap()
+    }
+
+    fn orphan_vertices(mesh: &TriMesh) -> usize {
+        let used = mesh
+            .triangles
+            .iter()
+            .flat_map(|triangle| triangle.vertices)
+            .collect::<BTreeSet<_>>();
+        mesh.vertices.len() - used.len()
+    }
+
+    /// A baffle between two loops is a slit whose removal breaks the face's
+    /// boundary into two: the cycle around the background runs through both
+    /// loops and crosses the bridge twice. Keeping it as one polygon leaves a
+    /// zero-width channel between the loops that no refinement can ever fill.
+    #[test]
+    fn topology_mesher_bridges_two_loops_with_a_baffle() {
+        let left_vertex = TopologyVertexId(60);
+        let right_vertex = TopologyVertexId(61);
+        let mut left = box_curve(60, 600, Point2::new(-0.5, 0.0), SpanBehavior::Transmitting);
+        let mut right = box_curve(61, 610, Point2::new(0.5, 0.0), SpanBehavior::Transmitting);
+        let start = Point2::new(-0.3, -0.25);
+        let end = Point2::new(0.3, -0.25);
+        let node = node_at(&left, start);
+        left.nodes[node].vertex = Some(left_vertex);
+        let node = node_at(&right, end);
+        right.nodes[node].vertex = Some(right_vertex);
+        let mut bridge = TopologyCurve::new(
+            CurveId(62),
+            CurveSpline::Open(OpenCubicSpline::polyline(vec![start, end]).unwrap()),
+            spans(620, 1, SpanBehavior::REFLECTING),
+        )
+        .unwrap();
+        bridge.nodes[0].vertex = Some(left_vertex);
+        bridge.nodes[1].vertex = Some(right_vertex);
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![left, right, bridge],
+                vertices: vec![
+                    TopologyVertex {
+                        id: left_vertex,
+                        location: TopologyVertexLocation::Interior(start),
+                    },
+                    TopologyVertex {
+                        id: right_vertex,
+                        location: TopologyVertexLocation::Interior(end),
+                    },
+                ],
+                ..TopologyGeometry::default()
+            },
+            19,
+        )
+        .unwrap();
+        assert_eq!(topology.faces.len(), 3);
+        let mesh = mesh_snapshot(&topology, &assign_each_face(&topology));
+        assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9);
+        assert_eq!(orphan_vertices(&mesh), 0);
+        assert_eq!(
+            mesh.triangles
+                .iter()
+                .map(|triangle| triangle.region)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3,
+            "both loops keep their own region beside the background"
+        );
+        // The bridge is a slit: the background meets it from both sides.
+        let sides = mesh
+            .boundary_edges
+            .iter()
+            .filter_map(|edge| match edge.label {
+                BoundaryLabel::Curve {
+                    curve: CurveId(62),
+                    side,
+                    ..
+                } => Some(side),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            sides,
+            BTreeSet::from([CurveTraceSide::Left, CurveTraceSide::Right])
+        );
+    }
+
+    /// The same shape against the outer boundary, where the split cycle is the
+    /// face's outer one: what is left of it is the domain's own boundary plus a
+    /// hole, so which run is which can no longer come from their order.
+    #[test]
+    fn topology_mesher_bridges_a_loop_to_the_outer_boundary() {
+        let corner = TopologyVertexId(70);
+        let wall = TopologyVertexId(71);
+        let mut ring = box_curve(70, 700, Point2::new(0.0, 0.0), SpanBehavior::Transmitting);
+        let start = Point2::new(-0.2, 0.25);
+        let node = node_at(&ring, start);
+        ring.nodes[node].vertex = Some(corner);
+        let mut bridge = TopologyCurve::new(
+            CurveId(71),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![start, Point2::new(-0.2, 1.0)]).unwrap(),
+            ),
+            spans(710, 1, SpanBehavior::REFLECTING),
+        )
+        .unwrap();
+        bridge.nodes[0].vertex = Some(corner);
+        bridge.nodes[1].vertex = Some(wall);
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![ring, bridge],
+                vertices: vec![
+                    TopologyVertex {
+                        id: corner,
+                        location: TopologyVertexLocation::Interior(start),
+                    },
+                    TopologyVertex {
+                        id: wall,
+                        location: TopologyVertexLocation::Outer {
+                            // The top side runs right to left, so this is
+                            // x = 1 - 2 * 0.6 = -0.2, over the bridge's end.
+                            side: crate::OuterSide::Top,
+                            fraction: 0.6,
+                        },
+                    },
+                ],
+                ..TopologyGeometry::default()
+            },
+            20,
+        )
+        .unwrap();
+        let mesh = mesh_snapshot(&topology, &assign_each_face(&topology));
+        assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9);
+        assert_eq!(orphan_vertices(&mesh), 0);
+    }
+
+    /// A curve that comes back to its own interior pinches its face at that
+    /// point: the boundary leaves through one sector of the junction and
+    /// returns through another, and both name the same place. This is the
+    /// shape an editor produces by drawing from a curve's middle round to its
+    /// own loose end - the loop comes first and the tail hangs off the pinch.
+    #[test]
+    fn topology_mesher_meshes_a_curve_that_touches_itself() {
+        let pinch = TopologyVertexId(80);
+        let point = Point2::new(-0.03, 0.13);
+        let mut curve = TopologyCurve::new(
+            CurveId(80),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![
+                    point,
+                    Point2::new(0.08, -0.49),
+                    Point2::new(0.53, -0.71),
+                    Point2::new(0.67, -0.29),
+                    Point2::new(0.59, -0.11),
+                    Point2::new(0.17, 0.07),
+                    point,
+                    Point2::new(-0.23, 0.19),
+                    Point2::new(-0.61, 0.33),
+                ])
+                .unwrap(),
+            ),
+            spans(800, 8, SpanBehavior::REFLECTING),
+        )
+        .unwrap();
+        curve.nodes[0].vertex = Some(pinch);
+        curve.nodes[6].vertex = Some(pinch);
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![curve],
+                vertices: vec![TopologyVertex {
+                    id: pinch,
+                    location: TopologyVertexLocation::Interior(point),
+                }],
+                ..TopologyGeometry::default()
+            },
+            21,
+        )
+        .unwrap();
+        assert_eq!(topology.faces.len(), 2, "the loop encloses one face");
+        for edge in [0.35, 0.12] {
+            let mesh = mesh_snapshot_at(&topology, &assign_each_face(&topology), edge)
+                .unwrap_or_else(|error| panic!("{edge}: {error}"));
+            assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9, "{edge}");
+            assert_eq!(orphan_vertices(&mesh), 0, "{edge}");
+        }
     }
 }

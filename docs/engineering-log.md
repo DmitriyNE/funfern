@@ -150,6 +150,76 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — A slit that joins two loops breaks the face it cuts
+
+Two reports, one defect. A file whose geometry could not be meshed, and a
+separate one a day later: two subdomain loops with a baffle drawn between them,
+which the mesher also refused. Both came back as `Refinement limit reached
+(minimum angle 0.0°)` - a degenerate triangle nothing can repair.
+
+**What was wrong.** A separated span whose two sides face the same face is a
+slit: `prepare_topology_builder` leaves it out of the face's polygon,
+triangulates without it, and cuts it back in afterwards. That is sound only when
+removing the slit leaves one closed loop. A slit that *bridges* does not: the
+face's cycle runs around one loop, along the slit, around the other, and back
+along the slit, so the two holes are one cycle. Dropping the slit steps and
+keeping the remainder as one polygon concatenated the two loop boundaries, with
+a zero-width jump across the gap at each end. That jump is the 0° triangle.
+
+Measured on the shapes, before the fix:
+
+| shape | before |
+| --- | --- |
+| baffle hanging off one loop, free tip | meshes |
+| baffle chord across one loop (splits the face) | meshes |
+| baffle T onto another baffle | meshes |
+| baffle bridging two loops | refinement limit, 0° |
+| baffle bridging a loop to the outer wall | refinement point outside the domain |
+| a curve meeting its own interior (a loop on a stem) | fails |
+| the same bridge switched to Transmit | meshes |
+
+The transmitting version always worked, which is what localized it: a
+transmitting edge is interior to one face and never goes through the slit path.
+
+**The fix**, all in `mesh/topology_plan.rs`:
+
+- A face cycle is now split at slit removals into closed stretches, one polygon
+  each, starting just after the first removal so a stretch spanning the cycle's
+  own start stays in one piece. Each stretch has to come back to the point it
+  started from, which is an assertion now rather than an assumption.
+- Outer versus hole can no longer come from cycle order: a slit joining a hole
+  to the outer boundary splits the face's *first* cycle into one of each. They
+  are classified by orientation instead - the plan's cycles run with the face on
+  the left, so the outer boundary turns counter-clockwise. Exactly one per face,
+  checked.
+- A stretch that leaves a junction through one sector and returns through
+  another closes on a different trace vertex at the same point. That vertex is
+  seeded to the departing one before the chain is expanded, so the boundary
+  edges and the polygon agree; otherwise the arriving one belongs to no triangle
+  and the slit leaving that junction is cut from a vertex the mesh does not
+  have. `split_slit_trace_vertices` separates the sectors again after the cut,
+  which is what it is for. This is the self-touching case.
+
+Both reported documents mesh now: the bridged pair at 3024 triangles and the
+earlier loop-on-a-stem at 2932, with no vertex left out of the triangulation in
+either. A first attempt resolved the missing vertex inside `cut_free_slit`
+instead; seeding it upstream made that unnecessary and was removed.
+
+**Also measured, not fixed.** A baffle lying exactly on y = 0, the domain's own
+centre line, still fails to mesh at fine resolutions with `could not recover an
+internal-boundary segment`. Any offset works - y = 0.05, 0.1234, -0.37 all mesh
+- so it is an exact-symmetry degeneracy in constrained recovery, not the same
+defect. Worth its own look; reachable, since the grid snaps there.
+
+- [ ] A separated span lying exactly on the domain's centre line fails
+  constrained recovery at fine target edge lengths.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked` (497 tests), and the release build.
+Three new mesher tests - the two-loop bridge, the bridge to the outer wall, and
+the self-touching curve - each verified to fail on the previous code and to pass
+on this one, and each asserting total area and that no vertex is orphaned.
+
 ## 2026-09-16 — What a line probe actually carries
 
 A line or boundary probe reported the instantaneous normal flux and its arclength
