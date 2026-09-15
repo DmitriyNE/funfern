@@ -205,6 +205,14 @@ earlier loop-on-a-stem at 2932, with no vertex left out of the triangulation in
 either. A first attempt resolved the missing vertex inside `cut_free_slit`
 instead; seeding it upstream made that unnecessary and was removed.
 
+**Follow-up the same day.** Classifying every positively-oriented run as an
+outer cycle is too strict: a cycle that walks a transmitting chain out and back
+encloses no area at all, and whether its shoelace sum lands just above or just
+below zero is rounding. The largest signed area is the outer boundary instead.
+Nothing legal reaches that today - a dangling transmitting chain needs a free
+transmitting end, which the compiler refuses - but it is what a free separator
+would produce, and the old order-based rule had handled it by accident.
+
 **Also measured, not fixed.** A baffle lying exactly on y = 0, the domain's own
 centre line, still fails to mesh at fine resolutions with `could not recover an
 internal-boundary segment`. Any offset works - y = 0.05, 0.1234, -0.37 all mesh

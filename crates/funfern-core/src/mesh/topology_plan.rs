@@ -626,23 +626,37 @@ fn prepare_topology_builder(
             close_face_cycle(&trace_points, &mut polygon, &mut ends, &mut cycles)?;
         }
         // Every cycle runs with the face on its left, so the outer boundary
-        // turns positively and each hole turns the other way. Order no longer
-        // settles which is which: a slit joining a hole to the outer boundary
-        // splits the face's first cycle into one of each.
+        // turns positively and encloses every hole, which turns the other way.
+        // Order no longer settles which is which: a slit joining a hole to the
+        // outer boundary splits the face's first cycle into one of each. The
+        // largest signed area is the outer boundary - taking every positive one
+        // would instead trip over a cycle that walks a transmitting chain out
+        // and back, whose area is zero up to rounding.
         let mut outer = None;
-        let mut holes = vec![];
+        let mut holes = Vec::with_capacity(cycles.len());
         for polygon in cycles {
-            if signed_polygon_area(builder, &polygon) > 0.0 {
-                if outer.replace(polygon).is_some() {
-                    return Err(MeshError::Topology("topology face has two outer cycles"));
+            let area = signed_polygon_area(builder, &polygon);
+            match outer.take() {
+                Some((best_area, best)) if best_area >= area => {
+                    outer = Some((best_area, best));
+                    holes.push(polygon);
                 }
-            } else {
-                holes.push(polygon);
+                Some((_, best)) => {
+                    outer = Some((area, polygon));
+                    holes.push(best);
+                }
+                None => outer = Some((area, polygon)),
             }
         }
+        let Some(outer) = outer
+            .filter(|(area, _)| *area > 0.0)
+            .map(|(_, polygon)| polygon)
+        else {
+            return Err(MeshError::Topology("topology face has no outer cycle"));
+        };
         builder.domains.push(TriangulationDomain {
             region: domain.region,
-            outer: outer.ok_or(MeshError::Topology("topology face has no outer cycle"))?,
+            outer,
             holes,
         });
     }
