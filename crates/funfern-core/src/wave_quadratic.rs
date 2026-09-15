@@ -9,6 +9,29 @@ use crate::{
     TimeSignal, TopologyMeshPlan, TriMesh, WaveCoefficients, WaveError,
 };
 
+/// How much of a mode sitting at the operator's eigenvalue ceiling one
+/// application of the grid-scale filter removes. Steps and other sharp events
+/// leave a residue at the top of the mesh's spectrum that neither travels nor
+/// fades; this is what clears it. Measured on a reflecting unit cavity at
+/// `h = 0.05`, with the filter applied every [`GRID_SCALE_FILTER_CADENCE`]
+/// steps: the residue a released step leaves behind loses a factor of three to
+/// four over twelve seconds, while a wave resolved by the ten nodes per
+/// wavelength the mesh indicator asks for keeps over 99% of its energy over
+/// thirty-two seconds, and one resolved by sixteen keeps over 99.8%.
+pub const GRID_SCALE_FILTER_STRENGTH: f64 = 1.5;
+
+/// Steps between applications. The filter costs two extra gathers each time, so
+/// spreading it over sixteen steps keeps it near a tenth of the solver's work
+/// while removing the same amount per unit time as applying a sixteenth of it
+/// every step.
+pub const GRID_SCALE_FILTER_CADENCE: u64 = 16;
+
+/// A mode at the eigenvalue ceiling is scaled by `1 - strength` each
+/// application, so anything past two amplifies instead of damping. The shipped
+/// strength sits well inside this; the bound is here so a future edit cannot
+/// walk past it unnoticed.
+pub const GRID_SCALE_FILTER_LIMIT: f64 = 2.0;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BoundaryLoad {
     pub signal: TimeSignal,
@@ -479,6 +502,85 @@ impl QuadraticWaveOperator {
         Ok(result)
     }
 
+    /// Removes the part of a two-level state that this mesh cannot carry.
+    ///
+    /// Nothing in the scheme dissipates at any wavelength, and the top of the
+    /// element's spectrum has almost no group velocity, so whatever lands there
+    /// stays where it landed for the rest of the run. A step in the field puts
+    /// a lot there at once — deleting a wall that held a DC offset is the
+    /// sharpest event the editor can produce — and it shows as a speckle that
+    /// neither travels nor fades.
+    ///
+    /// The operator supplies its own filter shape. `L = (K/M) / lambda_max` has
+    /// eigenvalues in `[0, 1]`, is exactly zero on a constant field, and scales
+    /// as the square of a mode's frequency, so applying it twice separates the
+    /// physical band from the mesh ceiling by the fourth power of their
+    /// frequency ratio. `strength` is the fraction of a mode at that ceiling
+    /// that one application removes.
+    ///
+    /// Only the difference between the two levels is damped, and symmetrically,
+    /// so the midpoint never moves: a static field is left exactly where it is,
+    /// including the standing DC offset a sealed Neumann region is entitled to.
+    /// Prescribed nodes are skipped so the filter never argues with a boundary
+    /// condition. `wave.wgsl` runs the same two passes.
+    pub fn apply_grid_scale_filter(
+        &self,
+        current: &mut [f64],
+        previous: &mut [f64],
+        strength: f64,
+    ) -> Result<(), WaveError> {
+        let count = self.degrees_of_freedom();
+        if current.len() != count || previous.len() != count {
+            return Err(WaveError::SizeMismatch {
+                expected: count,
+                actual: current.len().min(previous.len()),
+            });
+        }
+        if !strength.is_finite() || !(0.0..=GRID_SCALE_FILTER_LIMIT).contains(&strength) {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        if strength == 0.0 {
+            return Ok(());
+        }
+        let mut stage = current
+            .iter()
+            .zip(previous.iter())
+            .map(|(current, previous)| current - previous)
+            .collect::<Vec<_>>();
+        for _ in 0..2 {
+            stage = self.normalized_difference_product(&stage);
+        }
+        for node in 0..count {
+            if self.dirichlet_signals[node].is_some() {
+                continue;
+            }
+            let half = 0.5 * strength * stage[node];
+            current[node] -= half;
+            previous[node] += half;
+            if !current[node].is_finite() || !previous[node].is_finite() {
+                return Err(WaveError::InvalidState);
+            }
+        }
+        Ok(())
+    }
+
+    /// `sum_j K_ij (v_j - v_i) / (M_i lambda_max)`, the one gather both filter
+    /// passes make. The difference form is what makes it exactly zero on a
+    /// constant field rather than merely small.
+    fn normalized_difference_product(&self, values: &[f64]) -> Vec<f64> {
+        (0..values.len())
+            .map(|row| {
+                let here = values[row];
+                (self.row_offsets[row] as usize..self.row_offsets[row + 1] as usize)
+                    .map(|entry| {
+                        self.stiffness[entry] * (values[self.columns[entry] as usize] - here)
+                    })
+                    .sum::<f64>()
+                    / (self.lumped_mass[row] * self.maximum_eigenvalue_bound)
+            })
+            .collect()
+    }
+
     /// Values for the GPU gather kernel, normalized row-wise by lumped mass.
     pub fn normalized_stiffness_f32(&self) -> Result<Vec<f32>, WaveError> {
         let mut result = Vec::with_capacity(self.stiffness.len());
@@ -657,6 +759,7 @@ pub struct QuadraticWaveState {
     auxiliary: Vec<f64>,
     time_step: f64,
     steps: u64,
+    grid_scale_filter: f64,
 }
 
 impl QuadraticWaveState {
@@ -730,6 +833,7 @@ impl QuadraticWaveState {
             auxiliary,
             time_step,
             steps: 0,
+            grid_scale_filter: 0.0,
         })
     }
 
@@ -838,7 +942,31 @@ impl QuadraticWaveState {
         std::mem::swap(&mut self.previous, &mut self.current);
         std::mem::swap(&mut self.current, &mut self.scratch);
         self.steps = self.steps.checked_add(1).ok_or(WaveError::InvalidState)?;
+        if self.grid_scale_filter > 0.0 && self.steps.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
+            operator.apply_grid_scale_filter(
+                &mut self.current,
+                &mut self.previous,
+                self.grid_scale_filter,
+            )?;
+        }
         Ok(())
+    }
+
+    /// Turns the grid-scale filter on for this state at `strength`, or off at
+    /// zero. It is off by default so the reference solver and the conservation
+    /// tests keep stepping the bare scheme; the application enables it through
+    /// the same constant the shader uses. See
+    /// [`QuadraticWaveOperator::apply_grid_scale_filter`].
+    pub fn set_grid_scale_filter(&mut self, strength: f64) -> Result<(), WaveError> {
+        if !strength.is_finite() || !(0.0..=GRID_SCALE_FILTER_LIMIT).contains(&strength) {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        self.grid_scale_filter = strength;
+        Ok(())
+    }
+
+    pub fn grid_scale_filter(&self) -> f64 {
+        self.grid_scale_filter
     }
 
     pub fn add_displacement(&mut self, values: &[f64]) -> Result<(), WaveError> {
@@ -3667,6 +3795,181 @@ mod tests {
                 "{name}: second-order edge coverage differs from the fixture's intent"
             );
         }
+    }
+
+    fn cavity(edge: f64, boundary: OuterBoundaryCondition) -> QuadraticWaveOperator {
+        let mesh = mesh_scene(
+            &Scene::default(),
+            5,
+            MeshingOptions {
+                target_edge_length: edge,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        QuadraticWaveOperator::assemble_with_boundary(&mesh, WaveCoefficients::default(), boundary)
+            .unwrap()
+    }
+
+    fn mass_norm(operator: &QuadraticWaveOperator, values: &[f64]) -> f64 {
+        values
+            .iter()
+            .zip(operator.lumped_mass())
+            .map(|(value, mass)| mass * value * value)
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    /// Leapfrog's conserved quantity. The bare scheme holds it to roundoff, so
+    /// what a filtered run loses is exactly what the filter took.
+    fn leapfrog_energy(state: &QuadraticWaveState, operator: &QuadraticWaveOperator) -> f64 {
+        let stiffness = operator.apply_stiffness(state.previous()).unwrap();
+        let kinetic: f64 = state
+            .current()
+            .iter()
+            .zip(state.previous())
+            .zip(operator.lumped_mass())
+            .map(|((current, previous), mass)| {
+                0.5 * mass * ((current - previous) / state.time_step()).powi(2)
+            })
+            .sum();
+        let potential: f64 = state
+            .current()
+            .iter()
+            .zip(&stiffness)
+            .map(|(current, force)| 0.5 * current * force)
+            .sum();
+        kinetic + potential
+    }
+
+    fn settle(
+        operator: &QuadraticWaveOperator,
+        displacement: Vec<f64>,
+        seconds: f64,
+        strength: f64,
+    ) -> QuadraticWaveState {
+        let dt = operator.recommended_time_step();
+        let zero = vec![0.0; operator.degrees_of_freedom()];
+        let mut state = QuadraticWaveState::new(operator, dt, displacement, zero).unwrap();
+        state.set_grid_scale_filter(strength).unwrap();
+        for _ in 0..(seconds / dt) as usize {
+            state.step(operator, &[]).unwrap();
+        }
+        state
+    }
+
+    /// `L` is built from the difference form, so it is zero on a constant field
+    /// in any precision. A region sealed by reflecting walls is entitled to a
+    /// standing offset and the filter must not erode it.
+    #[test]
+    fn the_grid_scale_filter_leaves_a_constant_field_alone() {
+        let operator = cavity(0.12, OuterBoundaryCondition::Reflecting);
+        let count = operator.degrees_of_freedom();
+        let mut current = vec![2.5; count];
+        let mut previous = vec![2.5; count];
+        operator
+            .apply_grid_scale_filter(&mut current, &mut previous, GRID_SCALE_FILTER_LIMIT)
+            .unwrap();
+        assert_eq!(current, vec![2.5; count]);
+        assert_eq!(previous, vec![2.5; count]);
+    }
+
+    /// Only the difference between the levels is damped, and symmetrically, so
+    /// the midpoint the two straddle never moves.
+    #[test]
+    fn the_grid_scale_filter_moves_no_midpoint() {
+        let operator = cavity(0.12, OuterBoundaryCondition::Reflecting);
+        let points = operator.node_points().to_vec();
+        let mut current = points
+            .iter()
+            .map(|point| (3.0 * point.x).sin() + 0.4 * point.y)
+            .collect::<Vec<_>>();
+        let mut previous = points
+            .iter()
+            .map(|point| (3.0 * point.x).sin() - 0.2 * point.y)
+            .collect::<Vec<_>>();
+        let before = current
+            .iter()
+            .zip(&previous)
+            .map(|(current, previous)| current + previous)
+            .collect::<Vec<_>>();
+        operator
+            .apply_grid_scale_filter(&mut current, &mut previous, GRID_SCALE_FILTER_STRENGTH)
+            .unwrap();
+        for ((current, previous), before) in current.iter().zip(&previous).zip(&before) {
+            assert!((current + previous - before).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn the_grid_scale_filter_refuses_a_strength_that_would_amplify() {
+        let operator = cavity(0.2, OuterBoundaryCondition::Reflecting);
+        let count = operator.degrees_of_freedom();
+        let (mut current, mut previous) = (vec![0.0; count], vec![0.0; count]);
+        for strength in [
+            GRID_SCALE_FILTER_LIMIT + 1.0e-9,
+            -1.0e-9,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            assert_eq!(
+                operator.apply_grid_scale_filter(&mut current, &mut previous, strength),
+                Err(WaveError::InvalidCoefficients),
+                "{strength} should not be accepted"
+            );
+        }
+        let mut state =
+            QuadraticWaveState::zero(&operator, operator.recommended_time_step()).unwrap();
+        assert_eq!(
+            state.set_grid_scale_filter(GRID_SCALE_FILTER_LIMIT + 1.0),
+            Err(WaveError::InvalidCoefficients)
+        );
+        assert_eq!(state.grid_scale_filter(), 0.0);
+    }
+
+    /// The calibration, in the two halves that matter. Releasing a step leaves a
+    /// residue at the top of the mesh's spectrum that nothing transports and
+    /// nothing damps; with an open wall everything that can propagate leaves, so
+    /// what is still there is exactly that residue. Against it, a mode resolved
+    /// about as well as the mesh indicator asks for must come through nearly
+    /// untouched.
+    #[test]
+    fn the_grid_scale_filter_clears_the_stuck_residue_and_spares_the_resolved_band() {
+        let open = cavity(0.12, OuterBoundaryCondition::FirstOrderOutgoing);
+        let step = open
+            .node_points()
+            .iter()
+            .map(|point| f64::from(point.x * point.x + point.y * point.y < 0.5 * 0.5))
+            .collect::<Vec<_>>();
+        let bare = settle(&open, step.clone(), 14.0, 0.0);
+        let filtered = settle(&open, step.clone(), 14.0, GRID_SCALE_FILTER_STRENGTH);
+        let bare_residue = mass_norm(&open, bare.current());
+        let filtered_residue = mass_norm(&open, filtered.current());
+        assert!(
+            filtered_residue < 0.35 * bare_residue,
+            "the filter left {filtered_residue:e} of a residue against {bare_residue:e} unfiltered"
+        );
+
+        let sealed = cavity(0.12, OuterBoundaryCondition::Reflecting);
+        // `cos(5 pi (x + 1) / 2)` has a wavelength of 0.8 and satisfies the walls
+        // exactly, so it is a mode of the cavity rather than a mode plus an edge
+        // mismatch. At this resolution that is about thirteen nodes across a
+        // wavelength, a little finer than the five elements per wavelength the
+        // mesh indicator aims for.
+        let mode = sealed
+            .node_points()
+            .iter()
+            .map(|point| (5.0 * std::f64::consts::PI * (point.x + 1.0) / 2.0).cos())
+            .collect::<Vec<_>>();
+        let bare = settle(&sealed, mode.clone(), 14.0, 0.0);
+        let filtered = settle(&sealed, mode.clone(), 14.0, GRID_SCALE_FILTER_STRENGTH);
+        let kept = leapfrog_energy(&filtered, &sealed) / leapfrog_energy(&bare, &sealed);
+        assert!(
+            kept > 0.99,
+            "a resolved mode kept only {kept} of its energy through the filter"
+        );
+        // Measured here: the residue comes back a little under a quarter of what
+        // the bare scheme leaves, and the resolved mode keeps 99.95%.
     }
 
     /// Mirrors `advance_wave` in `wave.wgsl` on the f32 operator the GPU

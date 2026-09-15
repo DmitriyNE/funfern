@@ -673,6 +673,7 @@ pub struct Playground {
     amr_enabled: bool,
     amr_minimum_edge: f64,
     amr_maximum_edge: f64,
+    grid_scale_filter: bool,
     amr_status: String,
     amr_error: Option<String>,
     amr_last_started: Option<Instant>,
@@ -817,6 +818,7 @@ impl Default for Playground {
             amr_enabled: true,
             amr_minimum_edge: 0.02,
             amr_maximum_edge: 0.16,
+            grid_scale_filter: true,
             amr_status: "waiting for solution".into(),
             amr_error: None,
             amr_last_started: None,
@@ -2451,7 +2453,29 @@ impl Playground {
                 self.wave_energy.map_or("—".into(), |v| format!("{v:.4e}"))
             ));
         }
+        ui.separator();
+        self.advanced_solver_settings(ui);
     }
+
+    /// Numerical hygiene rather than physics, so it is folded away by default.
+    /// Anything here changes what the solver does, not what it shows.
+    fn advanced_solver_settings(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Advanced settings")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.checkbox(&mut self.grid_scale_filter, "Damp unresolvable detail")
+                    .on_hover_text(
+                        "The scheme does not dissipate at any wavelength, and the fastest \
+                         modes a mesh can hold barely travel, so a sharp event - deleting a \
+                         wall the field had a step across, or a source narrower than a few \
+                         nodes - leaves a speckle that stays put for the rest of the run. \
+                         This removes it, at a cost of well under a percent per half minute \
+                         to a wave resolved by the ten nodes per wavelength the mesh aims \
+                         for. Turn it off to see the untouched scheme.",
+                    );
+            });
+    }
+
     fn materials_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Materials");
         ui.horizontal(|ui| {
@@ -6066,6 +6090,9 @@ impl Playground {
         // in-flight commit then fails after the GPU has already been finalised.
         // The edit is picked up on a later frame; `request_runtime` compares the
         // document revision every frame.
+        // A plain toggle: the strength lives in the buffers the generation was
+        // built with, and this only decides whether the dispatches are encoded.
+        request.set_grid_scale_filter(self.grid_scale_filter);
         if self.uploading.is_none() {
             self.request_runtime();
         }

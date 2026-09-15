@@ -28,9 +28,10 @@ use bevy::{
     },
 };
 use funfern_core::{
-    CompiledVolumeSources, MAX_VOLUME_SOURCES, OuterBoundaryConditions, PhysicsModel, Point2,
-    PointSource, QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil,
-    QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh,
+    CompiledVolumeSources, GRID_SCALE_FILTER_CADENCE, GRID_SCALE_FILTER_STRENGTH,
+    MAX_VOLUME_SOURCES, OuterBoundaryConditions, PhysicsModel, Point2, PointSource,
+    QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil, QuadraticTransferMap,
+    QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh,
 };
 
 const WORKGROUP_SIZE: u32 = 128;
@@ -313,6 +314,7 @@ pub struct WaveGpuRequest {
     far_field: Option<FarFieldBufferHandles>,
     far_field_revision: u64,
     far_field_readback_entity: Option<Entity>,
+    grid_scale_filter: bool,
 }
 
 impl Default for WaveGpuRequest {
@@ -339,6 +341,7 @@ impl Default for WaveGpuRequest {
             far_field: None,
             far_field_revision: 0,
             far_field_readback_entity: None,
+            grid_scale_filter: true,
         }
     }
 }
@@ -346,6 +349,17 @@ impl Default for WaveGpuRequest {
 impl WaveGpuRequest {
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Whether the solver removes what the mesh cannot carry. See
+    /// [`QuadraticWaveOperator::apply_grid_scale_filter`]; the dispatcher runs
+    /// it every [`GRID_SCALE_FILTER_CADENCE`] steps while this is set.
+    pub fn grid_scale_filter(&self) -> bool {
+        self.grid_scale_filter
+    }
+
+    pub fn set_grid_scale_filter(&mut self, enabled: bool) {
+        self.grid_scale_filter = enabled;
     }
 
     pub fn buffer_revision(&self) -> u64 {
@@ -1374,6 +1388,12 @@ fn create_buffers(
     let parameters = GpuParameters {
         time_data: Vec4::new(dt, dt * dt, 0.0, 0.0),
         count_data: UVec4::new(dof_count, 0, 0, 0),
+        filter_data: Vec4::new(
+            (1.0 / operator.maximum_eigenvalue_bound()) as f32,
+            GRID_SCALE_FILTER_STRENGTH as f32,
+            0.0,
+            0.0,
+        ),
     };
     let pulse = PulseSettings {
         position: Point2::default(),
@@ -1961,6 +1981,10 @@ pub struct FarFieldDisplay {
 struct GpuParameters {
     time_data: Vec4,
     count_data: UVec4,
+    /// The grid-scale filter's reciprocal eigenvalue ceiling and its strength.
+    /// Both are fixed for the life of a generation; the toggle works by leaving
+    /// the two filter dispatches out, not by zeroing this.
+    filter_data: Vec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -2552,6 +2576,8 @@ struct WavePipeline {
     step: CachedComputePipelineId,
     rotate: CachedComputePipelineId,
     inject: CachedComputePipelineId,
+    filter_stage: CachedComputePipelineId,
+    filter_apply: CachedComputePipelineId,
     transfer_velocity: CachedComputePipelineId,
     transfer_old: CachedComputePipelineId,
     transfer_boundary: CachedComputePipelineId,
@@ -2596,6 +2622,8 @@ fn init_pipeline(
     let step = pipeline_cache.queue_compute_pipeline(pipeline("advance_wave"));
     let rotate = pipeline_cache.queue_compute_pipeline(pipeline("rotate"));
     let inject = pipeline_cache.queue_compute_pipeline(pipeline("inject"));
+    let filter_stage = pipeline_cache.queue_compute_pipeline(pipeline("filter_stage"));
+    let filter_apply = pipeline_cache.queue_compute_pipeline(pipeline("filter_apply"));
     let probe_layout = BindGroupLayoutDescriptor::new(
         "wave point-probe buffers",
         &BindGroupLayoutEntries::sequential(
@@ -2779,6 +2807,8 @@ fn init_pipeline(
         step,
         rotate,
         inject,
+        filter_stage,
+        filter_apply,
         transfer_velocity,
         transfer_old,
         transfer_boundary,
@@ -3222,6 +3252,8 @@ fn compute_wave(
         pipeline.area_probe_reduce,
         pipeline.far_field_sample,
         pipeline.far_field_project,
+        pipeline.filter_stage,
+        pipeline.filter_apply,
     ];
     if pipelines.iter().any(|id| {
         matches!(
@@ -3238,6 +3270,19 @@ fn compute_wave(
         pipeline_cache.get_compute_pipeline(pipeline.inject),
     ) else {
         return;
+    };
+    // Both passes or neither: the second reads what the first stages, so a half
+    // ready pair would apply a correction built from whatever the slot held.
+    let filter = request.grid_scale_filter.then(|| {
+        Some((
+            pipeline_cache.get_compute_pipeline(pipeline.filter_stage)?,
+            pipeline_cache.get_compute_pipeline(pipeline.filter_apply)?,
+        ))
+    });
+    let filter = match filter {
+        Some(None) => return,
+        Some(Some(pair)) => Some(pair),
+        None => None,
     };
     let workgroups = request.dof_count.div_ceil(WORKGROUP_SIZE);
     if workgroups == 0 {
@@ -3359,6 +3404,14 @@ fn compute_wave(
         pass.set_pipeline(rotate);
         pass.dispatch_workgroups(workgroups, 1, 1);
         let step_after = group.completed_steps + offset + 1;
+        if let Some((filter_stage, filter_apply)) = filter
+            && step_after.is_multiple_of(GRID_SCALE_FILTER_CADENCE)
+        {
+            pass.set_pipeline(filter_stage);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+            pass.set_pipeline(filter_apply);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
         if request
             .probes
             .as_ref()
@@ -3910,6 +3963,56 @@ mod tests {
         assert!(shader.contains("dot(gradient, flux)"));
         assert!(shader.contains("length(potential_flux)"));
         assert!(shader.contains("let poynting = select(0.0, abs(displacement) * transverse"));
+    }
+
+    /// The shader pair and the CPU mirror have to stay the same arithmetic, and
+    /// the one parameter buffer has to have one layout across every shader that
+    /// binds it.
+    #[test]
+    fn the_grid_scale_filter_passes_match_the_solver_they_mirror() {
+        let wave = include_str!("wave.wgsl");
+        for shader in [
+            wave,
+            include_str!("probe.wgsl"),
+            include_str!("curve_probe.wgsl"),
+            include_str!("area_probe.wgsl"),
+            include_str!("far_field.wgsl"),
+            include_str!("wave_transfer_old.wgsl"),
+            include_str!("wave_transfer_new.wgsl"),
+        ] {
+            assert!(shader.contains("filter_data: vec4<f32>"));
+        }
+        assert!(wave.contains("fn filter_stage("));
+        assert!(wave.contains("fn filter_apply("));
+        // Both gathers are differences against this node, which is what makes
+        // the filter exactly zero on a constant field rather than merely small.
+        assert!(wave.contains(
+            "            * ((states[column].levels.y - states[column].levels.x) - difference);"
+        ));
+        assert!(
+            wave.contains("            * (states[column].reconstruction.w - staged);"),
+            "the apply pass must gather differences of the staged values"
+        );
+        // Symmetric about the midpoint, so a static field does not move.
+        assert!(wave.contains("    states[i].levels.y -= half;"));
+        assert!(wave.contains("    states[i].levels.x += half;"));
+        // A prescribed node carries its boundary condition, not a solution.
+        assert!(wave.contains("    if nodes[i].boundary.x != 0u {\n        return;\n    }"));
+    }
+
+    /// The handoff shaders evaluate the same stiffness product the step does,
+    /// and it sets the velocity the next generation starts from, so a rounding
+    /// residual there becomes a mean velocity that generation keeps.
+    #[test]
+    fn the_transfer_shaders_evaluate_the_stiffness_on_differences() {
+        let old = include_str!("wave_transfer_old.wgsl");
+        assert!(old.contains(
+            "        ku += coefficients.x * (states[column].levels.y - displacement)\n            + coefficients.y * (states[column].auxiliary.x - memory);"
+        ));
+        let new = include_str!("wave_transfer_new.wgsl");
+        assert!(new.contains(
+            "        ku += coefficients.x * (transfers[column].mapped.y - current)\n            + coefficients.y * (transfers[column].mapped.z - memory);"
+        ));
     }
 
     #[test]

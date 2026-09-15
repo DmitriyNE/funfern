@@ -1,6 +1,9 @@
 struct Parameters {
     time_data: vec4<f32>,
     count_data: vec4<u32>,
+    // Reciprocal eigenvalue ceiling and strength for the grid-scale filter in
+    // `wave.wgsl`. Declared everywhere so the shared buffer has one layout.
+    filter_data: vec4<f32>,
 }
 
 struct State {

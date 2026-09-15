@@ -1,6 +1,9 @@
 struct Parameters {
     time_data: vec4<f32>,
     count_data: vec4<u32>,
+    // Reciprocal eigenvalue ceiling and strength for the grid-scale filter in
+    // `wave.wgsl`. Declared everywhere so the shared buffer has one layout.
+    filter_data: vec4<f32>,
 }
 
 struct TimeSignal {
@@ -200,6 +203,81 @@ fn rotate(@builtin(global_invocation_id) id: vec3<u32>) {
         parameters.time_data.z += parameters.time_data.x;
         parameters.time_data.w += 1.0;
     }
+}
+
+// Nothing in this scheme dissipates at any wavelength, and the top of the
+// element's spectrum has almost no group velocity, so whatever lands there stays
+// where it landed for the rest of the run. A step in the field puts a lot there
+// at once - deleting a wall that held a DC offset is the sharpest event the
+// editor can produce - and it shows as a speckle that neither travels nor fades.
+//
+// These two passes remove it. The operator supplies its own filter shape:
+// `L = (K/M) / lambda_max` has eigenvalues in [0, 1], is exactly zero on a
+// constant field, and scales as the square of a mode's frequency, so applying it
+// twice separates the physical band from the mesh ceiling by the fourth power of
+// their frequency ratio. `parameters.filter_data.x` is `1 / lambda_max` and
+// `parameters.filter_data.y` is the fraction of a mode at that ceiling one
+// application removes.
+//
+// Only the difference between the two levels is damped, and symmetrically, so
+// the midpoint never moves: a static field stays exactly where it is, including
+// the standing offset a region sealed by reflecting walls is entitled to. The
+// dispatcher runs this pair every `GRID_SCALE_FILTER_CADENCE` steps, after
+// `rotate` has committed the levels. `auxiliary.y/z` keep the step's own
+// acceleration and velocity, so a probe reading them during an application sees
+// the field the filter is about to correct, which is the part being removed.
+// `QuadraticWaveOperator::apply_grid_scale_filter` is the same arithmetic.
+@compute @workgroup_size(128)
+fn filter_stage(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= parameters.count_data.x {
+        return;
+    }
+    let difference = states[i].levels.y - states[i].levels.x;
+    var sum = 0.0;
+    var entry = row_offsets[i];
+    let end = row_offsets[i + 1u];
+    loop {
+        if entry >= end {
+            break;
+        }
+        let column = columns[entry];
+        sum += matrix_over_mass[entry].coefficients.x
+            * ((states[column].levels.y - states[column].levels.x) - difference);
+        entry += 1u;
+    }
+    // The only slot of the state the solver does not otherwise use. It is
+    // written here and read by the pass below, within one application.
+    states[i].reconstruction.w = sum * parameters.filter_data.x;
+}
+
+@compute @workgroup_size(128)
+fn filter_apply(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= parameters.count_data.x {
+        return;
+    }
+    // A prescribed node carries its boundary condition, not a solution, so the
+    // filter has nothing to say about it.
+    if nodes[i].boundary.x != 0u {
+        return;
+    }
+    let staged = states[i].reconstruction.w;
+    var sum = 0.0;
+    var entry = row_offsets[i];
+    let end = row_offsets[i + 1u];
+    loop {
+        if entry >= end {
+            break;
+        }
+        let column = columns[entry];
+        sum += matrix_over_mass[entry].coefficients.x
+            * (states[column].reconstruction.w - staged);
+        entry += 1u;
+    }
+    let half = 0.5 * parameters.filter_data.y * sum * parameters.filter_data.x;
+    states[i].levels.y -= half;
+    states[i].levels.x += half;
 }
 
 @compute @workgroup_size(128)
