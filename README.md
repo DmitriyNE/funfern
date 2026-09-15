@@ -416,6 +416,14 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   goes around a free endpoint instead of jumping through coincident faces.
   The panel reports DOFs, GPU buffer size, operator-derived timestep, simulated
   time, substeps, throughput, operator/map preparation time, and discrete energy.
+  Advanced settings, folded away at the bottom, holds Damp unresolvable detail,
+  on by default: the scheme dissipates at no wavelength and the fastest modes a
+  mesh can hold barely travel, so a sharp event leaves a speckle that stays put
+  for the rest of the run, and this removes it for well under a percent per half
+  minute of a wave resolved as finely as the mesh indicator aims for. The default
+  point source starts on a cosine, which carries no net impulse; any other phase
+  hands the field a mean velocity, and a region sealed by reflecting walls has
+  nowhere to put one, so its level then rises for as long as the run lasts.
 - **Outer boundary:** select each box side independently and assign zero Neumann
   (reflecting), prescribed Neumann flux, prescribed Dirichlet displacement,
   first-order outgoing, or second-order auxiliary behavior. Prescribed data uses

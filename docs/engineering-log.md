@@ -150,6 +150,95 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — Two ends of the spectrum nothing was taking care of
+
+Two reports, one root: this scheme neither transports nor dissipates its own
+extremes, and an enclosure keeps whatever lands in them.
+
+**The DC runaway is not a regression.** The difference form from 2026-09-15 is
+holding: a sealed reflecting cavity carrying a displacement bump with zero mean
+velocity kept its mean at `1.0053e-2` unchanged over 32 s, and a reflecting loop
+present from the first step, driven from outside, sat at `3.9e-10` after 24 s.
+What the report hit is the residual that entry flagged and left open. A sealed
+Neumann region conserves its mean velocity exactly, so any trapped mean velocity
+integrates without bound and does it perfectly linearly: seeding `v0 = 1.0053e-2`
+gave a mean matching `v0 * t` to five digits at 8, 16 and 32 s. Raising a wall
+over a live wave traps whatever is passing — measured at a constant `-0.0105` per
+second afterwards — and no source change can prevent that.
+
+Two things inject the velocity. Sealing over a live field is one, and it is the
+model being right: with `Reflecting` as zero normal gradient, a free-edge region
+that can translate does translate. Nothing here drains it, because a drain would
+pick one physical reading over another and need a corner frequency that would be
+wrong for somebody's cavity. The second was ours. Switching a sinusoid on at
+`t = 0` leaves the field a mean velocity of `amplitude * cos(phase) / omega` —
+what the forcing's running integral keeps — and the default source shipped at
+phase zero. In an open domain it drains through the boundary; measured with the
+same source, a reflecting outer wall ramped `5.18e-2, 1.04e-1, 1.55e-1, 2.07e-1`
+at 8/16/24/32 s while second-order outgoing sat at `3.0e-3` and decayed. The
+default is now a cosine start, which looks the same and carries no impulse. A
+phase the user picks does carry one; that is theirs.
+
+**The speckle is the other end, and it is now filtered.** Nothing dissipates at
+any wavelength: a seeded grid-scale field held its energy to five digits over
+32 s, and the rough part of a released step stayed in the radius bin holding the
+old wall from 8 s to 32 s without moving or fading. Releasing a step leaves a
+residue at 0.44 of the operator's spectrum; remeshing was ruled out as a source,
+since a full remesh of a smooth field with 3 of 32363 nodes landing exactly took
+roughness *down* and 25 rounds left it unchanged.
+
+`QuadraticWaveOperator::apply_grid_scale_filter` and the `filter_stage` /
+`filter_apply` pair in `wave.wgsl` remove it. `L = (K/M) / lambda_max` has
+eigenvalues in `[0, 1]`, is exactly zero on a constant field, and scales as the
+square of a mode's frequency, so applying it twice separates the physical band
+from the mesh ceiling by the fourth power of their frequency ratio. Only the
+difference between the two levels is damped, symmetrically, so the midpoint never
+moves and a sealed region's standing offset is untouched; prescribed nodes are
+skipped. It runs every 16 steps, which is two extra gathers for about a tenth of
+the solver's work, and the toggle leaves the dispatches out rather than zeroing
+anything.
+
+Two choices were settled by measurement rather than argument. Normalising per row
+instead of by one global bound is locally the more meaningful thing to do, and it
+does clean a 7:1 graded mesh uniformly where the global bound is 53x weaker on
+the coarse half — but at matched residue removal it costs the resolved band four
+times as much (`0.978` against `0.995` at ten nodes per wavelength), because the
+residue concentrates on exactly the rows the global bound weights hardest. Global
+it is. A fourth power instead of a square was no better at matched cleanup and
+slightly worse, because the residue is not a thin spike at the ceiling. Strength
+`1.5` against a hard limit of `2.0`, where a mode at the ceiling would stop
+decaying; `3.2` was still stable in practice and `8.0` was not.
+
+Measured by the test that pins it, at `h = 0.12` over 14 s: the residue comes
+back at `1.65e-2` against `7.13e-2` unfiltered, and a mode at about thirteen
+nodes per wavelength keeps 99.95% of its energy. At `h = 0.05` over 32 s the cost
+is 0.15% at sixteen nodes per wavelength and 1.0% at the ten the mesh indicator
+asks for, rising steeply below that — which is the honest shape of a grid-scale
+filter, and the reason the knee and the indicator's target have to stay in step.
+
+What it does not do, learned from running it: it clears what a sharp event
+leaves behind, not what a source keeps making. On the default scene with the mesh
+pinned and a width-0.06 source on `h = 0.18`, filtered and unfiltered runs sat at
+the same roughness to within half a percent, because a source that badly under
+resolved re-injects as fast as this removes. That is the mesh indicator's job,
+and AMR does it. The dispatch itself was confirmed wired by counting it in the
+render node: both passes over 67 workgroups every sixteenth step with the toggle
+on, cleanly absent with it off.
+
+Also: both handoff shaders were still evaluating the stiffness as a plain row
+product, so the previous entry's "on the CPU and in the shader" was half true.
+Worth about `5e-8` of a DC offset per handoff — invisible, but it sets the
+velocity the next generation starts from, and a reader was entitled to believe
+the claim. Both are differences now, with a test on each.
+
+`filter` is a reserved WGSL keyword; the throwaway naga validator caught it
+before the GPU did, as it did `target` last time.
+
+- Verification: formatting, Clippy across all targets with warnings denied, all
+  **489 workspace tests**, and the native release build. The solver setting is
+  session state, matching `amr_enabled` and `mesh_edge`, so nothing is persisted
+  and no schema version moves.
+
 ## 2026-09-15 — The solver clock is carried, so nothing may add to it
 
 Reported: the probe traces gained holes at every remesh, and the far field still
