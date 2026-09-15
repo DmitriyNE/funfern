@@ -1,6 +1,9 @@
 struct Parameters {
     time_data: vec4<f32>,
     count_data: vec4<u32>,
+    // Reciprocal eigenvalue ceiling and strength for the grid-scale filter in
+    // `wave.wgsl`. Declared everywhere so the shared buffer has one layout.
+    filter_data: vec4<f32>,
 }
 
 struct TimeSignal {
@@ -113,6 +116,12 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let current = transfers[i].mapped.y;
     let velocity = transfers[i].mapped.x;
+    // Difference form, for the reason `advance_wave` gives: the rounded f32 rows
+    // do not sum to zero, and the plain product turns a uniform field into a
+    // spurious acceleration. Here it would land in the previous level this
+    // handoff writes, so the new generation would start with a mean velocity the
+    // old one did not have.
+    let memory = transfers[i].mapped.z;
     var ku = 0.0;
     var entry = row_offsets[i];
     let end = row_offsets[i + 1u];
@@ -122,8 +131,8 @@ fn transfer(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let column = columns[entry];
         let coefficients = matrix_over_mass[entry].coefficients;
-        ku += coefficients.x * transfers[column].mapped.y
-            + coefficients.y * transfers[column].mapped.z;
+        ku += coefficients.x * (transfers[column].mapped.y - current)
+            + coefficients.y * (transfers[column].mapped.z - memory);
         entry += 1u;
     }
     let time = transfers[0].auxiliary.x;

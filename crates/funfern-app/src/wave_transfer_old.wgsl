@@ -1,6 +1,9 @@
 struct Parameters {
     time_data: vec4<f32>,
     count_data: vec4<u32>,
+    // Reciprocal eigenvalue ceiling and strength for the grid-scale filter in
+    // `wave.wgsl`. Declared everywhere so the shared buffer has one layout.
+    filter_data: vec4<f32>,
 }
 
 struct TimeSignal {
@@ -102,6 +105,11 @@ fn compute_velocity(i: u32) -> f32 {
         return (signal_value(nodes[i].dirichlet_signal, parameters.time_data.z + dt)
             - signal_value(nodes[i].dirichlet_signal, parameters.time_data.z - dt)) / (2.0 * dt);
     }
+    // Difference form, for the reason `advance_wave` gives. This product sets the
+    // velocity the handoff carries across, so a residual here becomes a mean
+    // velocity the next generation keeps.
+    let displacement = states[i].levels.y;
+    let memory = states[i].auxiliary.x;
     var ku = 0.0;
     var entry = row_offsets[i];
     let end = row_offsets[i + 1u];
@@ -111,8 +119,8 @@ fn compute_velocity(i: u32) -> f32 {
         }
         let column = columns[entry];
         let coefficients = matrix_over_mass[entry].coefficients;
-        ku += coefficients.x * states[column].levels.y
-            + coefficients.y * states[column].auxiliary.x;
+        ku += coefficients.x * (states[column].levels.y - displacement)
+            + coefficients.y * (states[column].auxiliary.x - memory);
         entry += 1u;
     }
     let current = states[i].levels.y;
