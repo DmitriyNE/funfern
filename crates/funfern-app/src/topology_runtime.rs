@@ -96,14 +96,16 @@ pub struct CompiledTopologyProbe {
     pub result: TopologyProbeCompilation,
 }
 
-/// Wall-clock breakdown of one candidate's CPU preparation. Meshing and volume
-/// sources are cooperative; assembly, transfer, probes, and far field currently
-/// run to completion inside the slice that reaches them, so their buckets show
-/// the synchronous tail directly.
+/// Wall-clock breakdown of one candidate's CPU preparation. Meshing, assembly,
+/// the transfer map, and volume sources are cooperative and yield between
+/// slices; probes and the far field still run to completion inside the slice
+/// that reaches them, so the measurements bucket shows that synchronous tail
+/// directly.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TopologyPreparationTiming {
     pub meshing_ms: f64,
     pub assembly_ms: f64,
+    pub transfer_ms: f64,
     pub sources_ms: f64,
     pub measurements_ms: f64,
     pub slices: u32,
@@ -112,7 +114,11 @@ pub struct TopologyPreparationTiming {
 
 impl TopologyPreparationTiming {
     pub fn total_ms(self) -> f64 {
-        self.meshing_ms + self.assembly_ms + self.sources_ms + self.measurements_ms
+        self.meshing_ms
+            + self.assembly_ms
+            + self.transfer_ms
+            + self.sources_ms
+            + self.measurements_ms
     }
 }
 
@@ -152,6 +158,7 @@ pub struct PreparedTopology {
 pub enum TopologyPreparationPhase {
     Meshing,
     Assembling,
+    Transferring,
     CompilingSources,
     CompilingMeasurements,
     Ready,
@@ -163,6 +170,7 @@ impl TopologyPreparationPhase {
         match self {
             Self::Meshing => "Mesh rebuilding",
             Self::Assembling => "Assembling wave operator",
+            Self::Transferring => "Carrying the field across",
             Self::CompilingSources => "Compiling sources",
             Self::CompilingMeasurements => "Compiling probes",
             Self::Ready => "Ready for GPU upload",
@@ -197,7 +205,9 @@ pub struct TopologyPreparationJob {
     phase: TopologyPreparationPhase,
     mesh_job: Option<TopologyMeshingJob>,
     mesh: Option<Arc<TriMesh>>,
+    assembly_job: Option<QuadraticAssemblyJob>,
     operator: Option<Arc<QuadraticWaveOperator>>,
+    transfer_job: Option<QuadraticTransferJob>,
     transfer: Option<Arc<QuadraticTransferMap>>,
     source_job: Option<VolumeSourceCompileJob>,
     volume_sources: Option<Arc<CompiledVolumeSources>>,
@@ -300,6 +310,8 @@ impl TopologyPreparationJob {
             mesh_job,
             mesh,
             operator,
+            assembly_job: None,
+            transfer_job: None,
             transfer: None,
             source_job: None,
             volume_sources,
@@ -346,6 +358,8 @@ impl TopologyPreparationJob {
             mesh_job: None,
             mesh: Some(Arc::new(mesh)),
             operator: None,
+            assembly_job: None,
+            transfer_job: None,
             transfer: None,
             source_job: None,
             volume_sources: None,
@@ -365,9 +379,15 @@ impl TopologyPreparationJob {
     }
 
     pub fn detail(&self) -> &'static str {
-        self.mesh_job
-            .as_ref()
-            .map_or_else(|| self.phase.label(), TopologyMeshingJob::phase)
+        if let Some(job) = &self.mesh_job {
+            job.phase()
+        } else if let Some(job) = &self.assembly_job {
+            job.phase()
+        } else if let Some(job) = &self.transfer_job {
+            job.phase()
+        } else {
+            self.phase.label()
+        }
     }
 
     pub fn timing(&self) -> TopologyPreparationTiming {
@@ -444,52 +464,71 @@ impl TopologyPreparationJob {
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             }
         }
-        let assembly_started = Instant::now();
+        // Assembly and the transfer map used to run to completion inside the
+        // slice that finished meshing, which cost every handover two to three
+        // frames at once. Both are cooperative jobs now and yield like the mesh.
         if self.operator.is_none() {
             let mesh = self.mesh.as_ref().unwrap().clone();
-            let operator = match QuadraticWaveOperator::assemble_topology(
-                &mesh,
-                &self.bundle.plan,
-                self.bundle.model(),
-            ) {
-                Ok(operator) => Arc::new(operator),
-                Err(error) => return Some(Err(self.fail(error.to_string()))),
-            };
-            if !self.fresh
-                && let Some(previous) = &self.previous
-            {
-                match QuadraticTransferMap::build(
-                    &previous.mesh,
-                    &previous.operator,
-                    &mesh,
-                    &operator,
+            if self.assembly_job.is_none() {
+                self.phase = TopologyPreparationPhase::Assembling;
+                match QuadraticAssemblyJob::new_topology(
+                    mesh.clone(),
+                    self.bundle.plan.clone(),
+                    self.bundle.model(),
                 ) {
-                    Ok(transfer) => self.transfer = Some(Arc::new(transfer)),
+                    Ok(job) => self.assembly_job = Some(job),
                     Err(error) => return Some(Err(self.fail(error.to_string()))),
                 }
             }
+            let started = Instant::now();
+            let result = self.assembly_job.as_mut().unwrap().advance(budget);
+            self.timing.assembly_ms += elapsed_ms(started);
+            let result = result?;
+            self.assembly_job = None;
+            let operator = match result {
+                Ok(operator) => Arc::new(operator),
+                Err(error) => return Some(Err(self.fail(error.to_string()))),
+            };
             match self.validate_point_source(&mesh, &operator) {
                 Ok(()) => {}
                 Err(error) => return Some(Err(self.fail(error))),
             }
             self.operator = Some(operator.clone());
-            self.phase = TopologyPreparationPhase::CompilingSources;
-            match VolumeSourceCompileJob::new_topology(
-                mesh,
-                operator,
-                &self.bundle.plan,
-                self.bundle.model(),
-                &self.bundle.authored.volume_sources,
-            ) {
-                Ok(job) => self.source_job = Some(job),
-                Err(error) => return Some(Err(self.fail(error.to_string()))),
+            if !self.fresh
+                && let Some(previous) = &self.previous
+            {
+                self.phase = TopologyPreparationPhase::Transferring;
+                self.transfer_job = Some(QuadraticTransferJob::new(
+                    previous.mesh.clone(),
+                    previous.operator.clone(),
+                    mesh,
+                    operator,
+                ));
+            } else if let Err(error) = self.start_sources(mesh, operator) {
+                return Some(Err(self.fail(error)));
             }
-        } else if let Err(error) =
-            self.validate_point_source(self.mesh.as_ref().unwrap(), self.operator.as_ref().unwrap())
+        } else if self.transfer_job.is_none()
+            && let Err(error) = self
+                .validate_point_source(self.mesh.as_ref().unwrap(), self.operator.as_ref().unwrap())
         {
             return Some(Err(self.fail(error)));
         }
-        self.timing.assembly_ms += elapsed_ms(assembly_started);
+        if let Some(job) = &mut self.transfer_job {
+            let started = Instant::now();
+            let result = job.advance(budget);
+            self.timing.transfer_ms += elapsed_ms(started);
+            let result = result?;
+            self.transfer_job = None;
+            match result {
+                Ok(transfer) => self.transfer = Some(Arc::new(transfer)),
+                Err(error) => return Some(Err(self.fail(error.to_string()))),
+            }
+            let mesh = self.mesh.as_ref().unwrap().clone();
+            let operator = self.operator.as_ref().unwrap().clone();
+            if let Err(error) = self.start_sources(mesh, operator) {
+                return Some(Err(self.fail(error)));
+            }
+        }
         if let Some(job) = &mut self.source_job {
             let started = Instant::now();
             let result = job.advance(budget);
@@ -541,6 +580,26 @@ impl TopologyPreparationJob {
             timing: self.timing,
             meshing: self.meshing,
         }))
+    }
+
+    /// Starts the cooperative volume-source compilation once the operator and,
+    /// when one is needed, the transfer map exist.
+    fn start_sources(
+        &mut self,
+        mesh: Arc<TriMesh>,
+        operator: Arc<QuadraticWaveOperator>,
+    ) -> Result<(), String> {
+        self.phase = TopologyPreparationPhase::CompilingSources;
+        let job = VolumeSourceCompileJob::new_topology(
+            mesh,
+            operator,
+            &self.bundle.plan,
+            self.bundle.model(),
+            &self.bundle.authored.volume_sources,
+        )
+        .map_err(|error| error.to_string())?;
+        self.source_job = Some(job);
+        Ok(())
     }
 
     fn validate_point_source(
@@ -1020,6 +1079,65 @@ mod tests {
             committed.operator.mesh_revision(),
             committed.mesh.mesh_revision
         );
+    }
+
+    /// Assembly and the transfer map yield like the mesh: a stepped preparation
+    /// passes through both phases across many slices, and what it produces
+    /// equals the one-shot operator and map.
+    #[test]
+    fn assembly_and_transfer_yield_between_slices() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let request = |runtime: &mut TopologyRuntime, fresh| {
+            runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    fresh,
+                )
+                .unwrap()
+        };
+        let token = request(&mut runtime, true);
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let first = runtime.commit_ready(token).unwrap();
+
+        runtime.request_full_rebuild();
+        let token = request(&mut runtime, false);
+        let mut seen = std::collections::BTreeMap::<&'static str, u32>::new();
+        let finished = loop {
+            if let Some(phase) = runtime.phase() {
+                *seen.entry(phase.label()).or_default() += 1;
+            }
+            if let Some(result) = runtime.advance(64) {
+                break result.unwrap();
+            }
+            assert!(
+                seen.values().sum::<u32>() < 1_000_000,
+                "preparation did not finish"
+            );
+        };
+        assert_eq!(finished, token);
+        let second = runtime.commit_ready(token).unwrap();
+        assert!(seen["Assembling wave operator"] > 1, "{seen:?}");
+        assert!(seen["Carrying the field across"] > 1, "{seen:?}");
+
+        let expected = QuadraticWaveOperator::assemble_topology(
+            &second.mesh,
+            &second.bundle.plan,
+            second.bundle.model(),
+        )
+        .unwrap();
+        assert_eq!(*second.operator, expected);
+        let map = QuadraticTransferMap::build(
+            &first.mesh,
+            &first.operator,
+            &second.mesh,
+            &second.operator,
+        )
+        .unwrap();
+        assert_eq!(**second.transfer.as_ref().unwrap(), map);
     }
 
     /// A frame lends the preparation wall time, not a step count. Without a

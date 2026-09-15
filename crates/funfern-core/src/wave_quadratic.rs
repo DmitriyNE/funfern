@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::{
     BACKGROUND_REGION, BoundaryLabel, DirectionalWaveCoefficients, FaceBoundaryCondition,
@@ -267,347 +268,12 @@ impl QuadraticWaveOperator {
         topology: Option<&TopologyMeshPlan>,
         physics: PhysicsModel,
     ) -> Result<Self, WaveError> {
-        if !outer_boundaries.valid() {
-            return Err(WaveError::InvalidCoefficients);
-        }
-        let outer_boundaries = OuterBoundaryConditions {
-            sides: outer_boundaries
-                .sides
-                .map(|condition| condition.resolved(physics)),
-        };
-        if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
-            return Err(WaveError::InvalidMesh("the mesh is empty"));
-        }
-        let mut node_points = mesh
-            .vertices
-            .iter()
-            .map(|vertex| vertex.point)
-            .collect::<Vec<_>>();
-        if node_points.iter().any(|point| !point.finite()) {
-            return Err(WaveError::InvalidMesh("a vertex is non-finite"));
-        }
-
-        let mut edge_nodes = BTreeMap::<(usize, usize), usize>::new();
-        let mut local_nodes = Vec::with_capacity(mesh.triangles.len());
-        for triangle in &mesh.triangles {
-            let [a, b, c] = triangle.vertices;
-            if a >= mesh.vertices.len()
-                || b >= mesh.vertices.len()
-                || c >= mesh.vertices.len()
-                || a == b
-                || b == c
-                || c == a
-            {
-                return Err(WaveError::InvalidMesh(
-                    "a triangle has invalid vertex indices",
-                ));
-            }
-            let points = [node_points[a], node_points[b], node_points[c]];
-            let twice_area = (points[1] - points[0]).cross(points[2] - points[0]);
-            if !twice_area.is_finite() || twice_area <= 0.0 {
-                return Err(WaveError::InvalidMesh("a triangle has non-positive area"));
-            }
-            let mut edge = [0; 3];
-            for (slot, pair) in [[a, b], [b, c], [c, a]].into_iter().enumerate() {
-                let key = if pair[0] < pair[1] {
-                    (pair[0], pair[1])
-                } else {
-                    (pair[1], pair[0])
-                };
-                edge[slot] = *edge_nodes.entry(key).or_insert_with(|| {
-                    let index = node_points.len();
-                    node_points.push((node_points[key.0] + node_points[key.1]) / 2.0);
-                    index
-                });
-            }
-            let centroid = node_points.len();
-            node_points.push((points[0] + points[1] + points[2]) / 3.0);
-            local_nodes.push([a, b, c, edge[0], edge[1], edge[2], centroid]);
-        }
-        if node_points.len() > u32::MAX as usize {
-            return Err(WaveError::InvalidMesh(
-                "the quadratic operator has too many degrees of freedom",
-            ));
-        }
-
-        let count = node_points.len();
-        let mut rows = vec![BTreeMap::<usize, f64>::new(); count];
-        let mut auxiliary_rows = vec![BTreeMap::<usize, f64>::new(); count];
-        let mut auxiliary_active = vec![false; count];
-        let mut dirichlet_sides = vec![None; count];
-        let mut dirichlet_signals = vec![None; count];
-        let mut neumann_weights = vec![[0.0; 4]; count];
-        let mut face_neumann_loads = vec![[BoundaryLoad::default(); 2]; count];
-        let mut mass = vec![0.0; count];
-        let mut damping = vec![0.0; count];
-        let mut maximum_wave_speed = 0.0_f64;
-        for (triangle, indices) in mesh.triangles.iter().zip(&local_nodes) {
-            let points = triangle.vertices.map(|index| mesh.vertices[index].point);
-            let twice_area = (points[1] - points[0]).cross(points[2] - points[0]);
-            let area = 0.5 * twice_area;
-            let barycentric_gradients = [
-                Point2::new(points[1].y - points[2].y, points[2].x - points[1].x) / twice_area,
-                Point2::new(points[2].y - points[0].y, points[0].x - points[2].x) / twice_area,
-                Point2::new(points[0].y - points[1].y, points[1].x - points[0].x) / twice_area,
-            ];
-
-            const MASS_WEIGHTS: [f64; 7] = [
-                1.0 / 20.0,
-                1.0 / 20.0,
-                1.0 / 20.0,
-                2.0 / 15.0,
-                2.0 / 15.0,
-                2.0 / 15.0,
-                9.0 / 20.0,
-            ];
-            for local in 0..7 {
-                let values = coefficients.at(triangle.region, node_points[indices[local]])?;
-                maximum_wave_speed = maximum_wave_speed.max(values.maximum_wave_speed());
-                mass[indices[local]] += values.mass_density * area * MASS_WEIGHTS[local];
-                damping[indices[local]] += values.damping * area * MASS_WEIGHTS[local];
-            }
-
-            let mut local_stiffness = [[0.0; 7]; 7];
-            for (barycentric, weight) in stiffness_quadrature() {
-                let point = points[0] * barycentric[0]
-                    + points[1] * barycentric[1]
-                    + points[2] * barycentric[2];
-                let values = coefficients.at(triangle.region, point)?;
-                maximum_wave_speed = maximum_wave_speed.max(values.maximum_wave_speed());
-                let gradients =
-                    enriched_quadratic_basis_gradients(barycentric, barycentric_gradients);
-                for i in 0..7 {
-                    for j in 0..7 {
-                        local_stiffness[i][j] +=
-                            weight * gradients[i].dot(values.stiffness.apply(gradients[j]));
-                    }
-                }
-            }
-            for i in 0..7 {
-                for j in 0..7 {
-                    *rows[indices[i]].entry(indices[j]).or_default() +=
-                        area * local_stiffness[i][j];
-                }
+        let mut work = QuadraticAssemblyWork::new(outer_boundaries, physics)?;
+        loop {
+            if let Some(operator) = work.step(mesh, coefficients, scene, topology, physics)? {
+                return Ok(operator);
             }
         }
-        let mut visited = BTreeSet::new();
-        for boundary in &mesh.boundary_edges {
-            let BoundaryLabel::Outer(side) = boundary.label else {
-                continue;
-            };
-            let condition = outer_boundaries.get(side);
-            let [a, b] = boundary.vertices;
-            if a >= mesh.vertices.len() || b >= mesh.vertices.len() || a == b {
-                return Err(WaveError::InvalidMesh(
-                    "an outer boundary edge has invalid vertex indices",
-                ));
-            }
-            let key = if a < b { (a, b) } else { (b, a) };
-            if !visited.insert(key) {
-                return Err(WaveError::InvalidMesh(
-                    "an outer boundary edge is duplicated",
-                ));
-            }
-            let midpoint = *edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
-                "an outer boundary edge does not belong to a triangle",
-            ))?;
-            let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
-            if !length.is_finite() || length <= 0.0 {
-                return Err(WaveError::InvalidMesh(
-                    "an outer boundary edge has invalid length",
-                ));
-            }
-            let nodes = [a, b, midpoint];
-            let region = if let Some(plan) = topology {
-                topology_outer_region(plan, side, boundary.parameters)?
-            } else {
-                BACKGROUND_REGION
-            };
-            let node_coefficients = [
-                coefficients.at(region, node_points[nodes[0]])?,
-                coefficients.at(region, node_points[nodes[1]])?,
-                coefficients.at(region, node_points[nodes[2]])?,
-            ];
-            let line_weights = [length / 6.0, length / 6.0, 2.0 * length / 3.0];
-            let normal = outer_normal(side);
-            match condition {
-                OuterBoundaryCondition::Reflecting => {}
-                OuterBoundaryCondition::Neumann { .. } => {
-                    for (node, weight) in nodes.into_iter().zip(line_weights) {
-                        neumann_weights[node][side.index()] += weight;
-                    }
-                }
-                OuterBoundaryCondition::Dirichlet { signal } => {
-                    for node in nodes {
-                        if let Some(previous_side) = dirichlet_sides[node]
-                            && outer_boundaries.get(previous_side).signal() != Some(signal)
-                        {
-                            return Err(WaveError::InvalidMesh(
-                                "adjacent Dirichlet sides disagree at their shared corner",
-                            ));
-                        }
-                        assign_dirichlet(&mut dirichlet_signals, node, signal)?;
-                        dirichlet_sides[node] = Some(side);
-                    }
-                }
-                OuterBoundaryCondition::FirstOrderOutgoing
-                | OuterBoundaryCondition::SecondOrderOutgoing => {
-                    for ((node, weight), values) in
-                        nodes.into_iter().zip(line_weights).zip(node_coefficients)
-                    {
-                        let impedance = values.normal_impedance(normal);
-                        damping[node] += impedance * weight;
-                    }
-                }
-                OuterBoundaryCondition::ElectricWall | OuterBoundaryCondition::MagneticWall => {
-                    unreachable!()
-                }
-            }
-            if condition == OuterBoundaryCondition::SecondOrderOutgoing {
-                // P2 line-element stiffness in endpoint/endpoint/midpoint order.
-                // Sharing vertex indices across incident sides supplies the
-                // corner coupling in the assembled tangential operator.
-                let middle = node_coefficients[2];
-                assemble_auxiliary_line(
-                    nodes,
-                    length,
-                    middle.stiffness.determinant() / (2.0 * middle.normal_impedance(normal)),
-                    &mut auxiliary_rows,
-                    &mut auxiliary_active,
-                );
-            }
-        }
-        if let Some(scene) = scene {
-            let mut assembly = BoundaryAssembly {
-                edge_nodes: &edge_nodes,
-                rows: &mut rows,
-                auxiliary_rows: &mut auxiliary_rows,
-                auxiliary_active: &mut auxiliary_active,
-                dirichlet_signals: &mut dirichlet_signals,
-                face_neumann_loads: &mut face_neumann_loads,
-                damping: &mut damping,
-            };
-            assemble_hole_boundary_conditions(mesh, scene, coefficients, &mut assembly)?;
-            assemble_internal_boundary_laws(mesh, scene, coefficients, &mut assembly)?;
-        }
-        if let Some(plan) = topology {
-            let mut assembly = BoundaryAssembly {
-                edge_nodes: &edge_nodes,
-                rows: &mut rows,
-                auxiliary_rows: &mut auxiliary_rows,
-                auxiliary_active: &mut auxiliary_active,
-                dirichlet_signals: &mut dirichlet_signals,
-                face_neumann_loads: &mut face_neumann_loads,
-                damping: &mut damping,
-            };
-            assemble_topology_boundary_laws(mesh, plan, physics, coefficients, &mut assembly)?;
-        }
-        if mass.iter().any(|value| !value.is_finite() || *value <= 0.0)
-            || damping
-                .iter()
-                .any(|value| !value.is_finite() || *value < 0.0)
-        {
-            return Err(WaveError::InvalidMesh(
-                "a quadratic node has invalid lumped mass",
-            ));
-        }
-        for (weights, mass) in neumann_weights.iter_mut().zip(&mass) {
-            for weight in weights {
-                *weight /= *mass;
-            }
-        }
-        for (loads, mass) in face_neumann_loads.iter_mut().zip(&mass) {
-            for load in loads {
-                load.normalized_weight /= *mass;
-            }
-        }
-
-        for (row, auxiliary) in rows.iter_mut().zip(&auxiliary_rows) {
-            for column in auxiliary.keys() {
-                row.entry(*column).or_default();
-            }
-        }
-        let entries = rows.iter().map(BTreeMap::len).sum::<usize>();
-        if entries > u32::MAX as usize {
-            return Err(WaveError::InvalidMesh(
-                "the quadratic operator has too many matrix entries",
-            ));
-        }
-        let mut row_offsets = Vec::with_capacity(count + 1);
-        let mut columns = Vec::with_capacity(entries);
-        let mut stiffness = Vec::with_capacity(entries);
-        let mut auxiliary_stiffness = Vec::with_capacity(entries);
-        let mut maximum_eigenvalue_bound = 0.0_f64;
-        row_offsets.push(0);
-        for (row, values) in rows.into_iter().enumerate() {
-            maximum_eigenvalue_bound = maximum_eigenvalue_bound
-                .max(values.values().map(|value| value.abs()).sum::<f64>() / mass[row]);
-            for (column, value) in values {
-                if !value.is_finite() {
-                    return Err(WaveError::InvalidMesh("the stiffness matrix is non-finite"));
-                }
-                columns.push(column as u32);
-                stiffness.push(value);
-                auxiliary_stiffness.push(
-                    auxiliary_rows[row]
-                        .get(&column)
-                        .copied()
-                        .unwrap_or_default(),
-                );
-            }
-            row_offsets.push(columns.len() as u32);
-        }
-        if !maximum_eigenvalue_bound.is_finite() || maximum_eigenvalue_bound <= 0.0 {
-            return Err(WaveError::InvalidMesh(
-                "the quadratic stiffness bound is not positive",
-            ));
-        }
-        let maximum_time_step = 2.0 / maximum_eigenvalue_bound.sqrt();
-        let minimum_edge_length = mesh
-            .triangles
-            .iter()
-            .flat_map(|triangle| {
-                let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
-                [
-                    (points[1] - points[0]).norm(),
-                    (points[2] - points[1]).norm(),
-                    (points[0] - points[2]).norm(),
-                ]
-            })
-            .fold(f64::INFINITY, f64::min);
-        if !minimum_edge_length.is_finite()
-            || !maximum_wave_speed.is_finite()
-            || maximum_wave_speed <= 0.0
-            || maximum_time_step < minimum_edge_length / maximum_wave_speed * 1.0e-6
-        {
-            return Err(WaveError::InvalidMesh(
-                "a near-degenerate element collapses the explicit CFL timestep",
-            ));
-        }
-        let element_nodes = local_nodes
-            .into_iter()
-            .map(|indices| indices.map(|index| index as u32))
-            .collect();
-        Ok(Self {
-            geometry_revision: mesh.geometry_revision,
-            mesh_revision: mesh.mesh_revision,
-            outer_boundaries,
-            node_points,
-            element_nodes,
-            row_offsets,
-            columns,
-            stiffness,
-            auxiliary_stiffness,
-            auxiliary_active,
-            dirichlet_sides,
-            dirichlet_signals,
-            normalized_neumann_weights: neumann_weights,
-            face_neumann_loads,
-            lumped_mass: mass,
-            lumped_damping: damping,
-            maximum_eigenvalue_bound,
-            maximum_time_step,
-        })
     }
 
     pub fn geometry_revision(&self) -> u64 {
@@ -1801,6 +1467,573 @@ fn assembly_point(node: usize, mesh: &TriMesh, midpoint: usize, a: usize, b: usi
         (mesh.vertices[a].point + mesh.vertices[b].point) / 2.0
     } else {
         mesh.vertices[node].point
+    }
+}
+
+/// Phases of one operator assembly. Numbering and element work step one
+/// triangle at a time and row compression one row at a time, so a job can
+/// stop after any step; the boundary and finishing passes are single steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AssemblyPhase {
+    Numbering(usize),
+    Elements(usize),
+    Boundary,
+    Csr(usize),
+    Finish,
+    Done,
+}
+
+impl AssemblyPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Numbering(_) => "Numbering wave nodes",
+            Self::Elements(_) => "Assembling wave elements",
+            Self::Boundary => "Assembling boundary laws",
+            Self::Csr(_) => "Compressing the wave operator",
+            Self::Finish => "Bounding the time step",
+            Self::Done => "Finished",
+        }
+    }
+}
+
+/// Resumable state of `QuadraticWaveOperator` assembly. `assemble_with_provider`
+/// drives it to completion in one call and `QuadraticAssemblyJob` spreads the
+/// same steps across frames, so the two paths produce equal operators.
+struct QuadraticAssemblyWork {
+    phase: AssemblyPhase,
+    outer_boundaries: OuterBoundaryConditions,
+    node_points: Vec<Point2>,
+    edge_nodes: BTreeMap<(usize, usize), usize>,
+    local_nodes: Vec<[usize; 7]>,
+    rows: Vec<BTreeMap<usize, f64>>,
+    auxiliary_rows: Vec<BTreeMap<usize, f64>>,
+    auxiliary_active: Vec<bool>,
+    dirichlet_sides: Vec<Option<OuterSide>>,
+    dirichlet_signals: Vec<Option<TimeSignal>>,
+    neumann_weights: Vec<[f64; 4]>,
+    face_neumann_loads: Vec<[BoundaryLoad; 2]>,
+    mass: Vec<f64>,
+    damping: Vec<f64>,
+    maximum_wave_speed: f64,
+    row_offsets: Vec<u32>,
+    columns: Vec<u32>,
+    stiffness: Vec<f64>,
+    auxiliary_stiffness: Vec<f64>,
+    maximum_eigenvalue_bound: f64,
+}
+
+impl QuadraticAssemblyWork {
+    fn new(
+        outer_boundaries: OuterBoundaryConditions,
+        physics: PhysicsModel,
+    ) -> Result<Self, WaveError> {
+        if !outer_boundaries.valid() {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        Ok(Self {
+            phase: AssemblyPhase::Numbering(0),
+            outer_boundaries: OuterBoundaryConditions {
+                sides: outer_boundaries
+                    .sides
+                    .map(|condition| condition.resolved(physics)),
+            },
+            node_points: Vec::new(),
+            edge_nodes: BTreeMap::new(),
+            local_nodes: Vec::new(),
+            rows: Vec::new(),
+            auxiliary_rows: Vec::new(),
+            auxiliary_active: Vec::new(),
+            dirichlet_sides: Vec::new(),
+            dirichlet_signals: Vec::new(),
+            neumann_weights: Vec::new(),
+            face_neumann_loads: Vec::new(),
+            mass: Vec::new(),
+            damping: Vec::new(),
+            maximum_wave_speed: 0.0,
+            row_offsets: Vec::new(),
+            columns: Vec::new(),
+            stiffness: Vec::new(),
+            auxiliary_stiffness: Vec::new(),
+            maximum_eigenvalue_bound: 0.0,
+        })
+    }
+
+    fn step(
+        &mut self,
+        mesh: &TriMesh,
+        coefficients: CoefficientProvider<'_>,
+        scene: Option<&Scene>,
+        topology: Option<&TopologyMeshPlan>,
+        physics: PhysicsModel,
+    ) -> Result<Option<QuadraticWaveOperator>, WaveError> {
+        match self.phase {
+            AssemblyPhase::Numbering(index) => self.number(mesh, index)?,
+            AssemblyPhase::Elements(index) => self.element(mesh, coefficients, index)?,
+            AssemblyPhase::Boundary => {
+                self.boundaries(mesh, coefficients, scene, topology, physics)?;
+            }
+            AssemblyPhase::Csr(row) => self.compress(row)?,
+            AssemblyPhase::Finish => return self.finish(mesh).map(Some),
+            AssemblyPhase::Done => {}
+        }
+        Ok(None)
+    }
+
+    /// Numbers the seven nodes of triangle `index`: vertices, edge midpoints
+    /// shared with neighbours, and the interior bubble.
+    fn number(&mut self, mesh: &TriMesh, index: usize) -> Result<(), WaveError> {
+        if index == 0 {
+            if mesh.vertices.is_empty() || mesh.triangles.is_empty() {
+                return Err(WaveError::InvalidMesh("the mesh is empty"));
+            }
+            self.node_points = mesh.vertices.iter().map(|vertex| vertex.point).collect();
+            if self.node_points.iter().any(|point| !point.finite()) {
+                return Err(WaveError::InvalidMesh("a vertex is non-finite"));
+            }
+            self.local_nodes = Vec::with_capacity(mesh.triangles.len());
+        }
+        if index == mesh.triangles.len() {
+            if self.node_points.len() > u32::MAX as usize {
+                return Err(WaveError::InvalidMesh(
+                    "the quadratic operator has too many degrees of freedom",
+                ));
+            }
+            let count = self.node_points.len();
+            self.rows = vec![BTreeMap::new(); count];
+            self.auxiliary_rows = vec![BTreeMap::new(); count];
+            self.auxiliary_active = vec![false; count];
+            self.dirichlet_sides = vec![None; count];
+            self.dirichlet_signals = vec![None; count];
+            self.neumann_weights = vec![[0.0; 4]; count];
+            self.face_neumann_loads = vec![[BoundaryLoad::default(); 2]; count];
+            self.mass = vec![0.0; count];
+            self.damping = vec![0.0; count];
+            self.phase = AssemblyPhase::Elements(0);
+            return Ok(());
+        }
+        let [a, b, c] = mesh.triangles[index].vertices;
+        if a >= mesh.vertices.len()
+            || b >= mesh.vertices.len()
+            || c >= mesh.vertices.len()
+            || a == b
+            || b == c
+            || c == a
+        {
+            return Err(WaveError::InvalidMesh(
+                "a triangle has invalid vertex indices",
+            ));
+        }
+        let points = [
+            self.node_points[a],
+            self.node_points[b],
+            self.node_points[c],
+        ];
+        let twice_area = (points[1] - points[0]).cross(points[2] - points[0]);
+        if !twice_area.is_finite() || twice_area <= 0.0 {
+            return Err(WaveError::InvalidMesh("a triangle has non-positive area"));
+        }
+        let mut edge = [0; 3];
+        for (slot, pair) in [[a, b], [b, c], [c, a]].into_iter().enumerate() {
+            let key = if pair[0] < pair[1] {
+                (pair[0], pair[1])
+            } else {
+                (pair[1], pair[0])
+            };
+            let node_points = &mut self.node_points;
+            edge[slot] = *self.edge_nodes.entry(key).or_insert_with(|| {
+                let index = node_points.len();
+                node_points.push((node_points[key.0] + node_points[key.1]) / 2.0);
+                index
+            });
+        }
+        let centroid = self.node_points.len();
+        self.node_points
+            .push((points[0] + points[1] + points[2]) / 3.0);
+        self.local_nodes
+            .push([a, b, c, edge[0], edge[1], edge[2], centroid]);
+        self.phase = AssemblyPhase::Numbering(index + 1);
+        Ok(())
+    }
+
+    /// Adds triangle `index`'s lumped mass, damping, and stiffness.
+    fn element(
+        &mut self,
+        mesh: &TriMesh,
+        coefficients: CoefficientProvider<'_>,
+        index: usize,
+    ) -> Result<(), WaveError> {
+        if index == mesh.triangles.len() {
+            self.phase = AssemblyPhase::Boundary;
+            return Ok(());
+        }
+        let triangle = mesh.triangles[index];
+        let indices = self.local_nodes[index];
+        let points = triangle.vertices.map(|index| mesh.vertices[index].point);
+        let twice_area = (points[1] - points[0]).cross(points[2] - points[0]);
+        let area = 0.5 * twice_area;
+        let barycentric_gradients = [
+            Point2::new(points[1].y - points[2].y, points[2].x - points[1].x) / twice_area,
+            Point2::new(points[2].y - points[0].y, points[0].x - points[2].x) / twice_area,
+            Point2::new(points[0].y - points[1].y, points[1].x - points[0].x) / twice_area,
+        ];
+
+        const MASS_WEIGHTS: [f64; 7] = [
+            1.0 / 20.0,
+            1.0 / 20.0,
+            1.0 / 20.0,
+            2.0 / 15.0,
+            2.0 / 15.0,
+            2.0 / 15.0,
+            9.0 / 20.0,
+        ];
+        for local in 0..7 {
+            let values = coefficients.at(triangle.region, self.node_points[indices[local]])?;
+            self.maximum_wave_speed = self.maximum_wave_speed.max(values.maximum_wave_speed());
+            self.mass[indices[local]] += values.mass_density * area * MASS_WEIGHTS[local];
+            self.damping[indices[local]] += values.damping * area * MASS_WEIGHTS[local];
+        }
+
+        let mut local_stiffness = [[0.0; 7]; 7];
+        for (barycentric, weight) in stiffness_quadrature() {
+            let point = points[0] * barycentric[0]
+                + points[1] * barycentric[1]
+                + points[2] * barycentric[2];
+            let values = coefficients.at(triangle.region, point)?;
+            self.maximum_wave_speed = self.maximum_wave_speed.max(values.maximum_wave_speed());
+            let gradients = enriched_quadratic_basis_gradients(barycentric, barycentric_gradients);
+            for i in 0..7 {
+                for j in 0..7 {
+                    local_stiffness[i][j] +=
+                        weight * gradients[i].dot(values.stiffness.apply(gradients[j]));
+                }
+            }
+        }
+        for i in 0..7 {
+            for j in 0..7 {
+                *self.rows[indices[i]].entry(indices[j]).or_default() +=
+                    area * local_stiffness[i][j];
+            }
+        }
+        self.phase = AssemblyPhase::Elements(index + 1);
+        Ok(())
+    }
+
+    /// Applies the outer, hole, baffle, and topology boundary laws, normalises
+    /// the boundary loads by the lumped mass, and sizes the compressed rows.
+    fn boundaries(
+        &mut self,
+        mesh: &TriMesh,
+        coefficients: CoefficientProvider<'_>,
+        scene: Option<&Scene>,
+        topology: Option<&TopologyMeshPlan>,
+        physics: PhysicsModel,
+    ) -> Result<(), WaveError> {
+        let mut visited = BTreeSet::new();
+        for boundary in &mesh.boundary_edges {
+            let BoundaryLabel::Outer(side) = boundary.label else {
+                continue;
+            };
+            let condition = self.outer_boundaries.get(side);
+            let [a, b] = boundary.vertices;
+            if a >= mesh.vertices.len() || b >= mesh.vertices.len() || a == b {
+                return Err(WaveError::InvalidMesh(
+                    "an outer boundary edge has invalid vertex indices",
+                ));
+            }
+            let key = if a < b { (a, b) } else { (b, a) };
+            if !visited.insert(key) {
+                return Err(WaveError::InvalidMesh(
+                    "an outer boundary edge is duplicated",
+                ));
+            }
+            let midpoint = *self.edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
+                "an outer boundary edge does not belong to a triangle",
+            ))?;
+            let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
+            if !length.is_finite() || length <= 0.0 {
+                return Err(WaveError::InvalidMesh(
+                    "an outer boundary edge has invalid length",
+                ));
+            }
+            let nodes = [a, b, midpoint];
+            let region = if let Some(plan) = topology {
+                topology_outer_region(plan, side, boundary.parameters)?
+            } else {
+                BACKGROUND_REGION
+            };
+            let node_coefficients = [
+                coefficients.at(region, self.node_points[nodes[0]])?,
+                coefficients.at(region, self.node_points[nodes[1]])?,
+                coefficients.at(region, self.node_points[nodes[2]])?,
+            ];
+            let line_weights = [length / 6.0, length / 6.0, 2.0 * length / 3.0];
+            let normal = outer_normal(side);
+            match condition {
+                OuterBoundaryCondition::Reflecting => {}
+                OuterBoundaryCondition::Neumann { .. } => {
+                    for (node, weight) in nodes.into_iter().zip(line_weights) {
+                        self.neumann_weights[node][side.index()] += weight;
+                    }
+                }
+                OuterBoundaryCondition::Dirichlet { signal } => {
+                    for node in nodes {
+                        if let Some(previous_side) = self.dirichlet_sides[node]
+                            && self.outer_boundaries.get(previous_side).signal() != Some(signal)
+                        {
+                            return Err(WaveError::InvalidMesh(
+                                "adjacent Dirichlet sides disagree at their shared corner",
+                            ));
+                        }
+                        assign_dirichlet(&mut self.dirichlet_signals, node, signal)?;
+                        self.dirichlet_sides[node] = Some(side);
+                    }
+                }
+                OuterBoundaryCondition::FirstOrderOutgoing
+                | OuterBoundaryCondition::SecondOrderOutgoing => {
+                    for ((node, weight), values) in
+                        nodes.into_iter().zip(line_weights).zip(node_coefficients)
+                    {
+                        let impedance = values.normal_impedance(normal);
+                        self.damping[node] += impedance * weight;
+                    }
+                }
+                OuterBoundaryCondition::ElectricWall | OuterBoundaryCondition::MagneticWall => {
+                    unreachable!()
+                }
+            }
+            if condition == OuterBoundaryCondition::SecondOrderOutgoing {
+                // P2 line-element stiffness in endpoint/endpoint/midpoint order.
+                // Sharing vertex indices across incident sides supplies the
+                // corner coupling in the assembled tangential operator.
+                let middle = node_coefficients[2];
+                assemble_auxiliary_line(
+                    nodes,
+                    length,
+                    middle.stiffness.determinant() / (2.0 * middle.normal_impedance(normal)),
+                    &mut self.auxiliary_rows,
+                    &mut self.auxiliary_active,
+                );
+            }
+        }
+        if let Some(scene) = scene {
+            let mut assembly = BoundaryAssembly {
+                edge_nodes: &self.edge_nodes,
+                rows: &mut self.rows,
+                auxiliary_rows: &mut self.auxiliary_rows,
+                auxiliary_active: &mut self.auxiliary_active,
+                dirichlet_signals: &mut self.dirichlet_signals,
+                face_neumann_loads: &mut self.face_neumann_loads,
+                damping: &mut self.damping,
+            };
+            assemble_hole_boundary_conditions(mesh, scene, coefficients, &mut assembly)?;
+            assemble_internal_boundary_laws(mesh, scene, coefficients, &mut assembly)?;
+        }
+        if let Some(plan) = topology {
+            let mut assembly = BoundaryAssembly {
+                edge_nodes: &self.edge_nodes,
+                rows: &mut self.rows,
+                auxiliary_rows: &mut self.auxiliary_rows,
+                auxiliary_active: &mut self.auxiliary_active,
+                dirichlet_signals: &mut self.dirichlet_signals,
+                face_neumann_loads: &mut self.face_neumann_loads,
+                damping: &mut self.damping,
+            };
+            assemble_topology_boundary_laws(mesh, plan, physics, coefficients, &mut assembly)?;
+        }
+        if self
+            .mass
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+            || self
+                .damping
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(WaveError::InvalidMesh(
+                "a quadratic node has invalid lumped mass",
+            ));
+        }
+        for (weights, mass) in self.neumann_weights.iter_mut().zip(&self.mass) {
+            for weight in weights {
+                *weight /= *mass;
+            }
+        }
+        for (loads, mass) in self.face_neumann_loads.iter_mut().zip(&self.mass) {
+            for load in loads {
+                load.normalized_weight /= *mass;
+            }
+        }
+
+        for (row, auxiliary) in self.rows.iter_mut().zip(&self.auxiliary_rows) {
+            for column in auxiliary.keys() {
+                row.entry(*column).or_default();
+            }
+        }
+        let entries = self.rows.iter().map(BTreeMap::len).sum::<usize>();
+        if entries > u32::MAX as usize {
+            return Err(WaveError::InvalidMesh(
+                "the quadratic operator has too many matrix entries",
+            ));
+        }
+        self.row_offsets = Vec::with_capacity(self.rows.len() + 1);
+        self.row_offsets.push(0);
+        self.columns = Vec::with_capacity(entries);
+        self.stiffness = Vec::with_capacity(entries);
+        self.auxiliary_stiffness = Vec::with_capacity(entries);
+        self.phase = AssemblyPhase::Csr(0);
+        Ok(())
+    }
+
+    /// Compresses row `row` into the CSR arrays and folds it into the
+    /// Gershgorin bound.
+    fn compress(&mut self, row: usize) -> Result<(), WaveError> {
+        if row == self.rows.len() {
+            self.phase = AssemblyPhase::Finish;
+            return Ok(());
+        }
+        let values = std::mem::take(&mut self.rows[row]);
+        self.maximum_eigenvalue_bound = self
+            .maximum_eigenvalue_bound
+            .max(values.values().map(|value| value.abs()).sum::<f64>() / self.mass[row]);
+        for (column, value) in values {
+            if !value.is_finite() {
+                return Err(WaveError::InvalidMesh("the stiffness matrix is non-finite"));
+            }
+            self.columns.push(column as u32);
+            self.stiffness.push(value);
+            self.auxiliary_stiffness.push(
+                self.auxiliary_rows[row]
+                    .get(&column)
+                    .copied()
+                    .unwrap_or_default(),
+            );
+        }
+        self.row_offsets.push(self.columns.len() as u32);
+        self.phase = AssemblyPhase::Csr(row + 1);
+        Ok(())
+    }
+
+    fn finish(&mut self, mesh: &TriMesh) -> Result<QuadraticWaveOperator, WaveError> {
+        if !self.maximum_eigenvalue_bound.is_finite() || self.maximum_eigenvalue_bound <= 0.0 {
+            return Err(WaveError::InvalidMesh(
+                "the quadratic stiffness bound is not positive",
+            ));
+        }
+        let maximum_time_step = 2.0 / self.maximum_eigenvalue_bound.sqrt();
+        let minimum_edge_length = mesh
+            .triangles
+            .iter()
+            .flat_map(|triangle| {
+                let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+                [
+                    (points[1] - points[0]).norm(),
+                    (points[2] - points[1]).norm(),
+                    (points[0] - points[2]).norm(),
+                ]
+            })
+            .fold(f64::INFINITY, f64::min);
+        if !minimum_edge_length.is_finite()
+            || !self.maximum_wave_speed.is_finite()
+            || self.maximum_wave_speed <= 0.0
+            || maximum_time_step < minimum_edge_length / self.maximum_wave_speed * 1.0e-6
+        {
+            return Err(WaveError::InvalidMesh(
+                "a near-degenerate element collapses the explicit CFL timestep",
+            ));
+        }
+        let element_nodes = std::mem::take(&mut self.local_nodes)
+            .into_iter()
+            .map(|indices| indices.map(|index| index as u32))
+            .collect();
+        self.phase = AssemblyPhase::Done;
+        Ok(QuadraticWaveOperator {
+            geometry_revision: mesh.geometry_revision,
+            mesh_revision: mesh.mesh_revision,
+            outer_boundaries: self.outer_boundaries,
+            node_points: std::mem::take(&mut self.node_points),
+            element_nodes,
+            row_offsets: std::mem::take(&mut self.row_offsets),
+            columns: std::mem::take(&mut self.columns),
+            stiffness: std::mem::take(&mut self.stiffness),
+            auxiliary_stiffness: std::mem::take(&mut self.auxiliary_stiffness),
+            auxiliary_active: std::mem::take(&mut self.auxiliary_active),
+            dirichlet_sides: std::mem::take(&mut self.dirichlet_sides),
+            dirichlet_signals: std::mem::take(&mut self.dirichlet_signals),
+            normalized_neumann_weights: std::mem::take(&mut self.neumann_weights),
+            face_neumann_loads: std::mem::take(&mut self.face_neumann_loads),
+            lumped_mass: std::mem::take(&mut self.mass),
+            lumped_damping: std::mem::take(&mut self.damping),
+            maximum_eigenvalue_bound: self.maximum_eigenvalue_bound,
+            maximum_time_step,
+        })
+    }
+}
+
+/// Assembles a topology operator across frames. It owns everything it reads,
+/// so a preparation can hold it while the document keeps changing.
+pub struct QuadraticAssemblyJob {
+    mesh: Arc<TriMesh>,
+    plan: Arc<TopologyMeshPlan>,
+    model: OwnedTopologyWaveModel,
+    work: QuadraticAssemblyWork,
+    done: bool,
+}
+
+impl QuadraticAssemblyJob {
+    pub fn new_topology(
+        mesh: Arc<TriMesh>,
+        plan: Arc<TopologyMeshPlan>,
+        model: TopologyWaveModel<'_>,
+    ) -> Result<Self, WaveError> {
+        if !model.valid_for(&plan) {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        let work = QuadraticAssemblyWork::new(model.outer_boundaries, model.physics)?;
+        Ok(Self {
+            mesh,
+            plan,
+            model: OwnedTopologyWaveModel {
+                physics: model.physics,
+                materials: model.materials.to_vec(),
+                regions: model.regions.to_vec(),
+                outer_boundaries: model.outer_boundaries,
+            },
+            work,
+            done: false,
+        })
+    }
+
+    pub fn phase(&self) -> &'static str {
+        self.work.phase.label()
+    }
+
+    /// Runs up to `budget` steps. `Some` carries the finished operator or the
+    /// first error, after which the job is spent.
+    pub fn advance(&mut self, budget: usize) -> Option<Result<QuadraticWaveOperator, WaveError>> {
+        for _ in 0..budget {
+            if self.done {
+                return None;
+            }
+            let model = self.model.as_model();
+            match self.work.step(
+                &self.mesh,
+                CoefficientProvider::Topology(model),
+                None,
+                Some(&self.plan),
+                model.physics,
+            ) {
+                Ok(Some(operator)) => {
+                    self.done = true;
+                    return Some(Ok(operator));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.done = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+        None
     }
 }
 
@@ -3269,6 +3502,56 @@ mod tests {
                 assert!((operator.stiffness[entry] - operator.stiffness[reverse]).abs() < 1.0e-12);
             }
         }
+    }
+
+    /// The cooperative assembly runs the same steps one at a time, passes
+    /// through every phase, and lands on the same operator as the one-shot path.
+    #[test]
+    fn the_assembly_job_matches_the_one_shot_operator() {
+        let (plan, mesh, scene) = topology_baffle(
+            SpanBehavior::Separated {
+                left: FaceBoundaryCondition::SecondOrderOutgoing,
+                right: FaceBoundaryCondition::Impedance { ratio: 0.5 },
+                coupling: InternalBoundaryCoupling::Independent,
+            },
+            43,
+        );
+        let expected = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        let mut job = QuadraticAssemblyJob::new_topology(
+            Arc::new(mesh.clone()),
+            Arc::new(plan.clone()),
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        let mut steps = 0usize;
+        let mut phases: Vec<&'static str> = Vec::new();
+        let assembled = loop {
+            steps += 1;
+            let phase = job.phase();
+            if phases.last() != Some(&phase) {
+                phases.push(phase);
+            }
+            if let Some(result) = job.advance(1) {
+                break result.unwrap();
+            }
+        };
+        assert_eq!(assembled, expected);
+        assert!(steps > 2 * mesh.triangles.len(), "{steps}");
+        assert_eq!(
+            phases,
+            [
+                "Numbering wave nodes",
+                "Assembling wave elements",
+                "Assembling boundary laws",
+                "Compressing the wave operator",
+                "Bounding the time step",
+            ]
+        );
     }
 
     /// Every operator the solver can build must have exactly zero row sums in

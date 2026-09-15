@@ -96,12 +96,11 @@ Longer-standing work:
 - [ ] Evaluate a dissipative relative dashpot for thin gaps. Keeping centered time
   integration would require an off-diagonal damping solve; the implemented gap
   spring is conservative.
-- [ ] Make operator assembly and transfer-map construction resumable. Measured
-  2026-09-15 on the Obstacle array in release mode: the synchronous tail is
-  22–32 ms at 17,000 DOFs and 36–50 ms at 29,000 DOFs, and it runs inside the
-  slice that finishes meshing, so every handover, including an AMR handoff,
-  costs two to three frames at once. The GPU upload frame is not yet measured
-  in-app; the handoff record's `upload_ms` is the place to read it.
+- [x] Make operator assembly and transfer-map construction resumable
+  (2026-09-15). Probes and the far field still run inside one slice; they
+  measured at 0.0 ms on the Obstacle array, so they stay synchronous until a
+  scene shows otherwise. The GPU upload frame is not yet measured in-app; the
+  handoff record's `upload_ms` is the place to read it.
 - [ ] Replace the sharp zero initialization at newly exposed domain with a localized
   transition/blur pass. A hard jump against the retained field produces artificial
   wideband excitation when an obstacle boundary moves inward. Measure added spectral
@@ -118,6 +117,30 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Assembly and the transfer map yield between frames
+
+The measured handover tail, 22 to 50 ms of operator assembly and transfer-map
+construction inside the slice that finished meshing, is now cooperative.
+`assemble_with_provider` was restructured into `QuadraticAssemblyWork`, a state
+machine with one step per triangle for node numbering and element assembly,
+one step for the boundary laws, one step per row for CSR compression and one
+finishing step. The one-shot `assemble_topology` drives it to completion in a
+loop, and the new `QuadraticAssemblyJob`, which owns its mesh, plan and an
+`OwnedTopologyWaveModel`, spreads the same steps across frames. The transfer
+map got the same treatment: the P1 locator's grid became `SourceBins` with
+one insertion per source triangle and one lookup per target node, and
+`QuadraticTransferWork` runs validation, binning and location as phases behind
+both `QuadraticTransferMap::build` and the new `QuadraticTransferJob`.
+
+The preparation job holds both jobs and advances them under the same step
+budget as meshing, with a new `Transferring` phase and a `transfer_ms` timing
+bucket that the handoff record and Performance panel show. Volume-source
+compilation starts once the transfer exists. Tests assert that the stepped
+assembly passes through all five phases and equals the one-shot operator, that
+the stepped transfer equals the one-shot map, and that a stepped runtime
+preparation visits both phases across many slices with an operator and map
+equal to their one-shot counterparts.
 
 ## 2026-09-15 — Where a handover's frame goes
 

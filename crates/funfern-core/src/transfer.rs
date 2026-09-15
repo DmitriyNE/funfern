@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::{
-    BoundaryLabel, CurveId, CurveTraceSide, InternalBoundaryId, InternalBoundarySide, MeshVertex,
-    Point2, QuadraticWaveOperator, TraceVertexId, TriMesh, enriched_quadratic_basis,
+    BoundaryLabel, CurveId, CurveTraceSide, InternalBoundaryId, InternalBoundarySide, Point2,
+    QuadraticWaveOperator, TraceVertexId, TriMesh, enriched_quadratic_basis,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -126,97 +127,33 @@ impl TransferMap {
             return Err(TransferError::InvalidTarget);
         }
 
-        let mut minimum = Point2::new(f64::INFINITY, f64::INFINITY);
-        let mut maximum = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
-        for vertex in &source.vertices {
-            minimum.x = minimum.x.min(vertex.point.x);
-            minimum.y = minimum.y.min(vertex.point.y);
-            maximum.x = maximum.x.max(vertex.point.x);
-            maximum.y = maximum.y.max(vertex.point.y);
-        }
-        let extent = Point2::new(maximum.x - minimum.x, maximum.y - minimum.y);
-        if !(extent.x > 0.0 && extent.y > 0.0) {
-            return Err(TransferError::InvalidSource);
-        }
-        let dimension = (source.triangles.len() as f64).sqrt().ceil() as usize;
-        let dimension = dimension.clamp(8, 512);
-        let mut bins = vec![Vec::<u32>::new(); dimension * dimension];
-        let cell = Point2::new(extent.x / dimension as f64, extent.y / dimension as f64);
-        for (triangle_index, triangle) in source.triangles.iter().enumerate() {
-            let points = triangle.vertices.map(|i| source.vertices[i].point);
-            let lo = Point2::new(
-                points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
-                points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
-            );
-            let hi = Point2::new(
-                points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
-                points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
-            );
-            let [x0, y0] = bin_index(lo, minimum, cell, dimension);
-            let [x1, y1] = bin_index(hi, minimum, cell, dimension);
-            let triangle_index =
-                u32::try_from(triangle_index).map_err(|_| TransferError::InvalidSource)?;
-            for y in y0..=y1 {
-                for x in x0..=x1 {
-                    bins[y * dimension + x].push(triangle_index);
-                }
-            }
+        let mut bins = SourceBins::new(source)?;
+        for index in 0..source.triangles.len() {
+            bins.insert(source, index)?;
         }
 
         let mut samples = Vec::with_capacity(target.vertices.len());
         for (target_index, (vertex, target_group)) in
             target.vertices.iter().zip(target_groups).enumerate()
         {
-            let point = vertex.point;
-            if point.x < minimum.x
-                || point.x > maximum.x
-                || point.y < minimum.y
-                || point.y > maximum.y
-            {
-                samples.push(None);
-                continue;
-            }
-            let [x, y] = bin_index(point, minimum, cell, dimension);
-            let mut found = None;
             let preferred = trace_restrictions.and_then(|traces| {
                 preferred_trace_triangles(&traces.target[target_index], traces.source)
             });
-            for require_preferred in [true, false] {
-                if require_preferred && preferred.is_none() {
-                    continue;
-                }
-                for &triangle_index in &bins[y * dimension + x] {
-                    if require_preferred
-                        && preferred
-                            .as_ref()
-                            .is_some_and(|triangles| !triangles.contains(&triangle_index))
-                    {
-                        continue;
-                    }
-                    let triangle = source.triangles[triangle_index as usize];
-                    if let Some(target_group) = target_group {
-                        let source_group = region_groups
-                            .and_then(|groups| groups.get(&triangle.region))
-                            .copied()
-                            .unwrap_or(triangle.region);
-                        if source_group != *target_group {
-                            continue;
-                        }
-                    }
-                    let points = triangle.vertices.map(|i| source.vertices[i].point);
-                    if let Some(weights) = barycentric(point, points) {
-                        found = Some(TransferSample {
-                            vertices: triangle.vertices.map(|i| i as u32),
-                            weights,
-                        });
-                        break;
-                    }
-                }
-                if found.is_some() {
-                    break;
-                }
-            }
-            samples.push(found);
+            samples.push(
+                bins.locate(
+                    source,
+                    vertex.point,
+                    *target_group,
+                    region_groups,
+                    preferred.as_ref(),
+                )
+                .map(|(triangle, weights)| TransferSample {
+                    vertices: source.triangles[triangle as usize]
+                        .vertices
+                        .map(|i| i as u32),
+                    weights,
+                }),
+            );
         }
         Ok(Self {
             source_revision: source.geometry_revision,
@@ -383,96 +320,14 @@ impl QuadraticTransferMap {
         target_mesh: &TriMesh,
         target_operator: &QuadraticWaveOperator,
     ) -> Result<Self, TransferError> {
-        validate_quadratic_pair(source_mesh, source_operator, true)?;
-        validate_quadratic_pair(target_mesh, target_operator, false)?;
-
-        // The P1 locator only needs target points; its triangle validation remains
-        // valid because a quadratic operator starts with the parent mesh vertices.
-        let mut expanded_target = target_mesh.clone();
-        expanded_target.vertices = target_operator
-            .node_points()
-            .iter()
-            .map(|point| MeshVertex {
-                point: *point,
-                boundary: None,
-                trace: None,
-            })
-            .collect();
-        // Unified topology meshes carry exact separated curve sides and sector
-        // trace lineage. Region IDs may legitimately appear or disappear when a
-        // transmitting divider splits or merges a face, so spatial transfer must
-        // not require the same RegionId on both revisions. Legacy meshes retain
-        // their region-component restriction for closed two-sided walls.
-        let unified_topology =
-            has_unified_topology(source_mesh) || has_unified_topology(target_mesh);
-        let region_groups = (!unified_topology)
-            .then(|| region_components(target_mesh))
-            .transpose()?;
-        let mut target_groups = vec![None; target_operator.degrees_of_freedom()];
-        if let Some(region_groups) = &region_groups {
-            for (triangle, nodes) in target_mesh
-                .triangles
-                .iter()
-                .zip(target_operator.element_nodes())
+        let mut work = QuadraticTransferWork::new();
+        loop {
+            if let Some(map) =
+                work.step(source_mesh, source_operator, target_mesh, target_operator)?
             {
-                let group = *region_groups
-                    .get(&triangle.region)
-                    .ok_or(TransferError::InvalidTarget)?;
-                for node in nodes {
-                    let assigned = &mut target_groups[*node as usize];
-                    if assigned.is_some_and(|assigned| assigned != group) {
-                        return Err(TransferError::InvalidTarget);
-                    }
-                    *assigned = Some(group);
-                }
+                return Ok(map);
             }
         }
-        let target_traces = quadratic_trace_nodes(target_mesh, target_operator)?;
-        let source_traces = source_trace_triangles(source_mesh)?;
-        let located = TransferMap::build_restricted(
-            source_mesh,
-            &expanded_target,
-            &target_groups,
-            region_groups.as_ref(),
-            Some(TraceRestrictions {
-                target: &target_traces,
-                source: &source_traces,
-            }),
-        )?;
-
-        let elements = source_mesh
-            .triangles
-            .iter()
-            .zip(source_operator.element_nodes())
-            .map(|(triangle, nodes)| (triangle.vertices.map(|index| index as u32), *nodes))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let samples = located
-            .samples()
-            .iter()
-            .map(|sample| {
-                let Some(sample) = sample else {
-                    return Ok(None);
-                };
-                elements
-                    .get(&sample.vertices)
-                    .copied()
-                    .map(|nodes| {
-                        Some(QuadraticTransferSample {
-                            nodes,
-                            weights: enriched_quadratic_basis(sample.weights),
-                        })
-                    })
-                    .ok_or(TransferError::InvalidSource)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            source_revision: source_mesh.geometry_revision,
-            target_revision: target_mesh.geometry_revision,
-            source_mesh_revision: source_mesh.mesh_revision,
-            target_mesh_revision: target_mesh.mesh_revision,
-            source_dofs: source_operator.degrees_of_freedom(),
-            samples,
-        })
     }
 
     pub fn source_dofs(&self) -> usize {
@@ -534,6 +389,215 @@ impl QuadraticTransferMap {
                 None => exposed_value,
             })
             .collect())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransferPhase {
+    Validate,
+    Bins(usize),
+    Locate(usize),
+    Done,
+}
+
+impl TransferPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Validate => "Checking the field transfer",
+            Self::Bins(_) => "Indexing the previous mesh",
+            Self::Locate(_) => "Locating field samples",
+            Self::Done => "Finished",
+        }
+    }
+}
+
+/// Resumable construction of a `QuadraticTransferMap`: validation and the
+/// restriction tables in one step, then one source triangle per step into the
+/// locator grid, then one target node per step. `QuadraticTransferMap::build`
+/// drives it to completion in one call; `QuadraticTransferJob` spreads the same
+/// steps across frames, so both produce the same map.
+struct QuadraticTransferWork {
+    phase: TransferPhase,
+    bins: Option<SourceBins>,
+    target_groups: Vec<Option<crate::RegionId>>,
+    region_groups: Option<BTreeMap<crate::RegionId, crate::RegionId>>,
+    target_traces: Vec<TargetTracePreference>,
+    source_traces: SourceTraceTriangles,
+    samples: Vec<Option<QuadraticTransferSample>>,
+}
+
+impl QuadraticTransferWork {
+    fn new() -> Self {
+        Self {
+            phase: TransferPhase::Validate,
+            bins: None,
+            target_groups: Vec::new(),
+            region_groups: None,
+            target_traces: Vec::new(),
+            source_traces: SourceTraceTriangles::default(),
+            samples: Vec::new(),
+        }
+    }
+
+    fn step(
+        &mut self,
+        source_mesh: &TriMesh,
+        source_operator: &QuadraticWaveOperator,
+        target_mesh: &TriMesh,
+        target_operator: &QuadraticWaveOperator,
+    ) -> Result<Option<QuadraticTransferMap>, TransferError> {
+        match self.phase {
+            TransferPhase::Validate => {
+                validate_quadratic_pair(source_mesh, source_operator, true)?;
+                validate_quadratic_pair(target_mesh, target_operator, false)?;
+                if source_mesh.triangles.is_empty() {
+                    return Err(TransferError::EmptySource);
+                }
+                validate_mesh(source_mesh, true)?;
+                validate_mesh(target_mesh, false)?;
+                // Unified topology meshes carry exact separated curve sides and
+                // sector trace lineage. Region IDs may legitimately appear or
+                // disappear when a transmitting divider splits or merges a face,
+                // so spatial transfer must not require the same RegionId on both
+                // revisions. Legacy meshes retain their region-component
+                // restriction for closed two-sided walls.
+                let unified_topology =
+                    has_unified_topology(source_mesh) || has_unified_topology(target_mesh);
+                self.region_groups = (!unified_topology)
+                    .then(|| region_components(target_mesh))
+                    .transpose()?;
+                self.target_groups = vec![None; target_operator.degrees_of_freedom()];
+                if let Some(region_groups) = &self.region_groups {
+                    for (triangle, nodes) in target_mesh
+                        .triangles
+                        .iter()
+                        .zip(target_operator.element_nodes())
+                    {
+                        let group = *region_groups
+                            .get(&triangle.region)
+                            .ok_or(TransferError::InvalidTarget)?;
+                        for node in nodes {
+                            let assigned = &mut self.target_groups[*node as usize];
+                            if assigned.is_some_and(|assigned| assigned != group) {
+                                return Err(TransferError::InvalidTarget);
+                            }
+                            *assigned = Some(group);
+                        }
+                    }
+                }
+                self.target_traces = quadratic_trace_nodes(target_mesh, target_operator)?;
+                self.source_traces = source_trace_triangles(source_mesh)?;
+                self.bins = Some(SourceBins::new(source_mesh)?);
+                self.samples = Vec::with_capacity(target_operator.degrees_of_freedom());
+                self.phase = TransferPhase::Bins(0);
+            }
+            TransferPhase::Bins(index) => {
+                if index == source_mesh.triangles.len() {
+                    self.phase = TransferPhase::Locate(0);
+                } else {
+                    self.bins.as_mut().unwrap().insert(source_mesh, index)?;
+                    self.phase = TransferPhase::Bins(index + 1);
+                }
+            }
+            TransferPhase::Locate(index) => {
+                let points = target_operator.node_points();
+                if index == points.len() {
+                    self.phase = TransferPhase::Done;
+                    return Ok(Some(QuadraticTransferMap {
+                        source_revision: source_mesh.geometry_revision,
+                        target_revision: target_mesh.geometry_revision,
+                        source_mesh_revision: source_mesh.mesh_revision,
+                        target_mesh_revision: target_mesh.mesh_revision,
+                        source_dofs: source_operator.degrees_of_freedom(),
+                        samples: std::mem::take(&mut self.samples),
+                    }));
+                }
+                let preferred =
+                    preferred_trace_triangles(&self.target_traces[index], &self.source_traces);
+                let sample = self
+                    .bins
+                    .as_ref()
+                    .unwrap()
+                    .locate(
+                        source_mesh,
+                        points[index],
+                        self.target_groups[index],
+                        self.region_groups.as_ref(),
+                        preferred.as_ref(),
+                    )
+                    .map(|(triangle, weights)| QuadraticTransferSample {
+                        nodes: source_operator.element_nodes()[triangle as usize],
+                        weights: enriched_quadratic_basis(weights),
+                    });
+                self.samples.push(sample);
+                self.phase = TransferPhase::Locate(index + 1);
+            }
+            TransferPhase::Done => {}
+        }
+        Ok(None)
+    }
+}
+
+/// Builds a `QuadraticTransferMap` across frames. It owns both discretizations,
+/// so a preparation can hold it while the document keeps changing.
+pub struct QuadraticTransferJob {
+    source_mesh: Arc<TriMesh>,
+    source_operator: Arc<QuadraticWaveOperator>,
+    target_mesh: Arc<TriMesh>,
+    target_operator: Arc<QuadraticWaveOperator>,
+    work: QuadraticTransferWork,
+    done: bool,
+}
+
+impl QuadraticTransferJob {
+    pub fn new(
+        source_mesh: Arc<TriMesh>,
+        source_operator: Arc<QuadraticWaveOperator>,
+        target_mesh: Arc<TriMesh>,
+        target_operator: Arc<QuadraticWaveOperator>,
+    ) -> Self {
+        Self {
+            source_mesh,
+            source_operator,
+            target_mesh,
+            target_operator,
+            work: QuadraticTransferWork::new(),
+            done: false,
+        }
+    }
+
+    pub fn phase(&self) -> &'static str {
+        self.work.phase.label()
+    }
+
+    /// Runs up to `budget` steps. `Some` carries the finished map or the first
+    /// error, after which the job is spent.
+    pub fn advance(
+        &mut self,
+        budget: usize,
+    ) -> Option<Result<QuadraticTransferMap, TransferError>> {
+        for _ in 0..budget {
+            if self.done {
+                return None;
+            }
+            match self.work.step(
+                &self.source_mesh,
+                &self.source_operator,
+                &self.target_mesh,
+                &self.target_operator,
+            ) {
+                Ok(Some(map)) => {
+                    self.done = true;
+                    return Some(Ok(map));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.done = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+        None
     }
 }
 
@@ -733,6 +797,114 @@ fn validate_mesh(mesh: &TriMesh, source: bool) -> Result<(), TransferError> {
         return Err(error);
     }
     Ok(())
+}
+
+/// Uniform grid over the source triangles' bounding box. It is filled one
+/// triangle at a time and queried one point at a time so that a cooperative
+/// job can spread both halves of the location work across frames.
+struct SourceBins {
+    minimum: Point2,
+    maximum: Point2,
+    cell: Point2,
+    dimension: usize,
+    bins: Vec<Vec<u32>>,
+}
+
+impl SourceBins {
+    fn new(source: &TriMesh) -> Result<Self, TransferError> {
+        let mut minimum = Point2::new(f64::INFINITY, f64::INFINITY);
+        let mut maximum = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for vertex in &source.vertices {
+            minimum.x = minimum.x.min(vertex.point.x);
+            minimum.y = minimum.y.min(vertex.point.y);
+            maximum.x = maximum.x.max(vertex.point.x);
+            maximum.y = maximum.y.max(vertex.point.y);
+        }
+        let extent = Point2::new(maximum.x - minimum.x, maximum.y - minimum.y);
+        if !(extent.x > 0.0 && extent.y > 0.0) {
+            return Err(TransferError::InvalidSource);
+        }
+        let dimension = (source.triangles.len() as f64).sqrt().ceil() as usize;
+        let dimension = dimension.clamp(8, 512);
+        Ok(Self {
+            minimum,
+            maximum,
+            cell: Point2::new(extent.x / dimension as f64, extent.y / dimension as f64),
+            dimension,
+            bins: vec![Vec::<u32>::new(); dimension * dimension],
+        })
+    }
+
+    fn insert(&mut self, source: &TriMesh, triangle_index: usize) -> Result<(), TransferError> {
+        let triangle = source.triangles[triangle_index];
+        let points = triangle.vertices.map(|i| source.vertices[i].point);
+        let lo = Point2::new(
+            points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
+            points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
+        );
+        let hi = Point2::new(
+            points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
+            points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
+        );
+        let [x0, y0] = bin_index(lo, self.minimum, self.cell, self.dimension);
+        let [x1, y1] = bin_index(hi, self.minimum, self.cell, self.dimension);
+        let triangle_index =
+            u32::try_from(triangle_index).map_err(|_| TransferError::InvalidSource)?;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                self.bins[y * self.dimension + x].push(triangle_index);
+            }
+        }
+        Ok(())
+    }
+
+    /// The source triangle containing `point` and its barycentric weights.
+    /// Preferred triangles are tried first, and a region group restricts the
+    /// candidates when the caller supplies one.
+    fn locate(
+        &self,
+        source: &TriMesh,
+        point: Point2,
+        target_group: Option<crate::RegionId>,
+        region_groups: Option<&BTreeMap<crate::RegionId, crate::RegionId>>,
+        preferred: Option<&BTreeSet<u32>>,
+    ) -> Option<(u32, [f64; 3])> {
+        if point.x < self.minimum.x
+            || point.x > self.maximum.x
+            || point.y < self.minimum.y
+            || point.y > self.maximum.y
+        {
+            return None;
+        }
+        let [x, y] = bin_index(point, self.minimum, self.cell, self.dimension);
+        for require_preferred in [true, false] {
+            if require_preferred && preferred.is_none() {
+                continue;
+            }
+            for &triangle_index in &self.bins[y * self.dimension + x] {
+                if require_preferred
+                    && preferred.is_some_and(|triangles| !triangles.contains(&triangle_index))
+                {
+                    continue;
+                }
+                let triangle = source.triangles[triangle_index as usize];
+                if let Some(target_group) = target_group {
+                    let source_group = region_groups
+                        .and_then(|groups| groups.get(&triangle.region))
+                        .copied()
+                        .unwrap_or(triangle.region);
+                    if source_group != target_group {
+                        continue;
+                    }
+                }
+                let points = triangle.vertices.map(|i| source.vertices[i].point);
+                if let Some(weights) = barycentric(point, points) {
+                    return Some((triangle_index, weights));
+                }
+            }
+        }
+        None
+    }
 }
 
 fn bin_index(point: Point2, minimum: Point2, cell: Point2, dimension: usize) -> [usize; 2] {
@@ -1128,6 +1300,23 @@ mod tests {
         .unwrap();
         let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
             .unwrap();
+        // The cooperative job runs the same steps one at a time and lands on
+        // the same map.
+        let mut job = QuadraticTransferJob::new(
+            Arc::new(source.clone()),
+            Arc::new(source_operator.clone()),
+            Arc::new(target.clone()),
+            Arc::new(target_operator.clone()),
+        );
+        let mut steps = 0usize;
+        let stepped = loop {
+            steps += 1;
+            if let Some(result) = job.advance(1) {
+                break result.unwrap();
+            }
+        };
+        assert_eq!(stepped, map);
+        assert!(steps > source.triangles.len() + 1, "{steps}");
         let mut values = vec![0.0; source_operator.degrees_of_freedom()];
         for node in source_operator.element_nodes()[0] {
             values[node as usize] = 1.0;

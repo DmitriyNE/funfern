@@ -8775,9 +8775,10 @@ impl Playground {
 
 fn timing_line(timing: TopologyPreparationTiming) -> String {
     format!(
-        "mesh {:.1} · assembly {:.1} · sources {:.1} · probes {:.1} ms · {} slices · longest {:.1} ms",
+        "mesh {:.1} · assembly {:.1} · transfer {:.1} · sources {:.1} · probes {:.1} ms · {} slices · longest {:.1} ms",
         timing.meshing_ms,
         timing.assembly_ms,
+        timing.transfer_ms,
         timing.sources_ms,
         timing.measurements_ms,
         timing.slices,

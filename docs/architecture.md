@@ -58,8 +58,8 @@ accepted token and the live preparation breakdown, the committed mesh and its
 adaptation, the three handoff waits (CPU preparation, draining the solver's
 requested steps, GPU upload) with what each transaction reused, and the running
 solver's throughput and outstanding step backlog. Preparation carries its own
-wall-clock buckets so the cooperative mesh phase and the synchronous assembly,
-transfer, probe, and far-field tail are distinguishable. Preparation and
+wall-clock buckets so the cooperative mesh, assembly, and transfer phases and the
+remaining synchronous probe and far-field tail are distinguishable. Preparation and
 adaptation errors open diagnostics and light the warning marker;
 ordinary rebuilding does neither. Validation, mesh, and handoff stages share the
 middle of the status strip, while successful document and handoff actions appear as
@@ -1007,10 +1007,11 @@ candidate, and the latest requested geometry revision.
 6. Switch all accepted resources together, then schedule the latest outstanding
    request if necessary.
 
-Candidate mesh construction remains resumable. Operator assembly and the spatial
-transfer map are currently prepared synchronously when meshing finishes; their
-measured cost is small at current capacities, but this is the remaining bounded-work
-gap in the transaction. The old solver continues until all previously requested
+Candidate mesh construction, operator assembly, and the spatial transfer map are
+all resumable and yield under the frame's step budget; assembly steps one
+triangle at a time and the transfer one source triangle or target node at a
+time. Probe and far-field compilation still run inside one slice, which measured
+at a fraction of a millisecond. The old solver continues until all previously requested
 steps have been encoded. The application then pauses scheduling briefly, dispatches
 the transfer, and waits for a generation-tagged finite GPU readback before switching
 mesh, operator, timestep, and displayed field together. A shader failure restores
