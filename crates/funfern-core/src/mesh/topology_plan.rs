@@ -1476,6 +1476,12 @@ pub enum TopologyFullRebuildReason {
     /// rewiring from the new topology model. That migration is deliberately
     /// deferred until all numerical consumers use `TopologyMeshPlan`.
     CoordinateRepairDeferred,
+    /// The plan is unchanged but the meshing options, such as the target edge
+    /// length, are not those the active mesh was built with.
+    MeshingOptionsChanged,
+    /// The user asked for a rebuild of an unchanged plan, for instance to
+    /// return from an adapted mesh to the base resolution.
+    Requested,
 }
 
 impl TopologyFullRebuildReason {
@@ -1487,6 +1493,8 @@ impl TopologyFullRebuildReason {
             Self::SpanBehaviorChanged => "span behavior changed",
             Self::TraceEquivalenceChanged => "trace equivalence changed",
             Self::CoordinateRepairDeferred => "curve or junction moved",
+            Self::MeshingOptionsChanged => "mesh resolution changed",
+            Self::Requested => "rebuild requested",
         }
     }
 }

@@ -116,6 +116,14 @@ impl TopologyPreparationTiming {
     }
 }
 
+/// How a request relates to the active topology: whether the field starts
+/// from zero and whether an unchanged plan must be remeshed anyway.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreparationIntent {
+    pub fresh: bool,
+    pub force_rebuild: bool,
+}
+
 fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
@@ -135,6 +143,9 @@ pub struct PreparedTopology {
     pub operator_reused: bool,
     pub adapted: bool,
     pub timing: TopologyPreparationTiming,
+    /// Options the mesh was built with. A request with different options is
+    /// a full rebuild even when the plan is unchanged.
+    pub meshing: MeshingOptions,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,6 +205,7 @@ pub struct TopologyPreparationJob {
     adapted: bool,
     done: bool,
     timing: TopologyPreparationTiming,
+    meshing: MeshingOptions,
 }
 
 impl TopologyPreparationJob {
@@ -204,8 +216,12 @@ impl TopologyPreparationJob {
         previous: Option<Arc<PreparedTopology>>,
         mesh_revision: u64,
         options: MeshingOptions,
-        fresh: bool,
+        intent: PreparationIntent,
     ) -> Result<Self, String> {
+        let PreparationIntent {
+            fresh,
+            force_rebuild,
+        } = intent;
         let same_authored_scene = previous
             .as_ref()
             .is_some_and(|previous| *previous.bundle.authored == document.model.accepted);
@@ -229,10 +245,22 @@ impl TopologyPreparationJob {
                 compiled,
             )?)
         };
-        let mesh_action = previous.as_ref().map_or(
-            TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::DomainChanged),
-            |previous| topology_mesh_update_action(&previous.bundle.plan, &bundle.plan),
-        );
+        let mesh_action = match previous.as_ref() {
+            None => TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::DomainChanged),
+            Some(previous) => {
+                match topology_mesh_update_action(&previous.bundle.plan, &bundle.plan) {
+                    TopologyMeshUpdateAction::Reuse if force_rebuild => {
+                        TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::Requested)
+                    }
+                    TopologyMeshUpdateAction::Reuse if previous.meshing != options => {
+                        TopologyMeshUpdateAction::FullRebuild(
+                            TopologyFullRebuildReason::MeshingOptionsChanged,
+                        )
+                    }
+                    action => action,
+                }
+            }
+        };
         let (mesh_job, mesh, phase) = match mesh_action {
             TopologyMeshUpdateAction::Reuse => {
                 let mesh = if same_authored_scene {
@@ -254,7 +282,9 @@ impl TopologyPreparationJob {
                 TopologyPreparationPhase::Meshing,
             ),
         };
-        let operator_reused = same_authored_scene;
+        // A rebuilt mesh needs a fresh operator even when the scene is unchanged.
+        let operator_reused =
+            same_authored_scene && matches!(mesh_action, TopologyMeshUpdateAction::Reuse);
         let operator = operator_reused.then(|| previous.as_ref().unwrap().operator.clone());
         let volume_sources =
             operator_reused.then(|| previous.as_ref().unwrap().volume_sources.clone());
@@ -277,6 +307,7 @@ impl TopologyPreparationJob {
             adapted: false,
             done: false,
             timing: TopologyPreparationTiming::default(),
+            meshing: options,
         })
     }
 
@@ -307,6 +338,7 @@ impl TopologyPreparationJob {
             probes: document.model.probes.clone().into(),
             point_source: document.model.source,
             far_field: document.model.far_field,
+            meshing: previous.meshing,
             previous: Some(previous),
             mesh_action: TopologyMeshUpdateAction::Reuse,
             fresh: false,
@@ -507,6 +539,7 @@ impl TopologyPreparationJob {
             operator_reused: self.operator_reused,
             adapted: self.adapted,
             timing: self.timing,
+            meshing: self.meshing,
         }))
     }
 
@@ -560,6 +593,9 @@ pub struct TopologyRuntime {
     requested: Option<TopologyToken>,
     next_mesh_revision: u64,
     last_error: Option<TopologyPreparationError>,
+    /// Consumed by the next `request`: rebuild the mesh even for an unchanged
+    /// plan with unchanged options.
+    force_rebuild: bool,
 }
 
 impl Default for TopologyRuntime {
@@ -571,11 +607,18 @@ impl Default for TopologyRuntime {
             requested: None,
             next_mesh_revision: 1,
             last_error: None,
+            force_rebuild: false,
         }
     }
 }
 
 impl TopologyRuntime {
+    /// Makes the next `request` rebuild the mesh even when the plan and the
+    /// meshing options are unchanged, for instance to leave an adapted mesh.
+    pub fn request_full_rebuild(&mut self) {
+        self.force_rebuild = true;
+    }
+
     pub fn reserve_mesh_revision(&mut self) -> u64 {
         let revision = self.next_mesh_revision;
         self.next_mesh_revision = self.next_mesh_revision.wrapping_add(1).max(1);
@@ -598,7 +641,10 @@ impl TopologyRuntime {
             self.active.clone(),
             mesh_revision,
             options,
-            fresh,
+            PreparationIntent {
+                fresh,
+                force_rebuild: std::mem::take(&mut self.force_rebuild),
+            },
         )?;
         let token = job.token();
         self.preparing = Some(job);
@@ -1024,6 +1070,94 @@ mod tests {
         assert_eq!(finished, token);
         assert!(calls > 1, "a zero budget still yields after one slice");
         assert_eq!(bounded.commit_ready(token).unwrap().timing.slices, calls);
+    }
+
+    /// A resolution change rebuilds the mesh although the plan is unchanged:
+    /// the operator follows the new mesh and the running field crosses through
+    /// a transfer map. The same options again are an ordinary reuse.
+    #[test]
+    fn changing_the_meshing_options_rebuilds_the_mesh() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let coarse = options();
+        let request = |runtime: &mut TopologyRuntime, revision, options, fresh| {
+            runtime
+                .request(
+                    revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options,
+                    fresh,
+                )
+                .unwrap()
+        };
+        let token = request(&mut runtime, editor.revision, coarse, true);
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let first = runtime.commit_ready(token).unwrap();
+        assert_eq!(first.meshing, coarse);
+
+        let fine = MeshingOptions {
+            target_edge_length: 0.09,
+            ..coarse
+        };
+        let token = request(&mut runtime, editor.revision, fine, false);
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let second = runtime.commit_ready(token).unwrap();
+        assert_eq!(
+            second.mesh_action,
+            TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::MeshingOptionsChanged)
+        );
+        assert!(!second.operator_reused);
+        assert!(second.transfer.is_some());
+        assert!(second.mesh.triangles.len() > first.mesh.triangles.len());
+        assert_eq!(second.meshing, fine);
+
+        let token = request(&mut runtime, editor.revision + 1, fine, false);
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let third = runtime.commit_ready(token).unwrap();
+        assert_eq!(third.mesh_action, TopologyMeshUpdateAction::Reuse);
+        assert!(third.operator_reused);
+    }
+
+    /// A requested rebuild remeshes an unchanged scene once, which is how the
+    /// user returns from an adapted mesh to the base resolution.
+    #[test]
+    fn a_requested_rebuild_remeshes_an_unchanged_scene_once() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let request = |runtime: &mut TopologyRuntime, revision, fresh| {
+            runtime
+                .request(
+                    revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    fresh,
+                )
+                .unwrap()
+        };
+        let token = request(&mut runtime, editor.revision, true);
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let first = runtime.commit_ready(token).unwrap();
+
+        runtime.request_full_rebuild();
+        let token = request(&mut runtime, editor.revision, false);
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let second = runtime.commit_ready(token).unwrap();
+        assert_eq!(
+            second.mesh_action,
+            TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::Requested)
+        );
+        assert_ne!(second.mesh.mesh_revision, first.mesh.mesh_revision);
+        assert!(!second.operator_reused);
+        assert!(second.transfer.is_some());
+
+        let token = request(&mut runtime, editor.revision + 1, false);
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        assert_eq!(
+            runtime.commit_ready(token).unwrap().mesh_action,
+            TopologyMeshUpdateAction::Reuse
+        );
     }
 
     /// The timing a handoff carries has to include the slice that finished it,

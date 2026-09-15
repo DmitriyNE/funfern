@@ -106,6 +106,28 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — Mesh resolution is a control again
+
+The switch to the unified topology runtime dropped the Coarse, Medium and Fine
+presets and left a Target edge slider that did nothing: the runtime decides
+reuse from the mesh plan alone, and a resolution change leaves the plan
+unchanged, so every request came back as a reuse of the existing mesh.
+
+`PreparedTopology` now records the options its mesh was built with, and a
+request whose options differ from those is a full rebuild with its own reason,
+"mesh resolution changed", even when the plan is identical. A rebuilt mesh also
+takes a fresh operator and a transfer map, so the running field survives the
+change. A second reason, "rebuild requested", backs a Remesh button through
+`request_full_rebuild`, which the next request consumes; it is how the user
+leaves an adapted mesh for the base resolution without editing geometry.
+
+The Simulation panel has the "Mesh resolution" heading back with the three
+presets and Custom, keeps the slider underneath it, and shows the active versus
+requested target while they differ. The rebuild waits until the slider is
+released rather than starting one per frame of the drag. Two runtime tests cover
+the options change and the requested rebuild, including that the request is
+consumed once and the following request reuses again.
+
 ## 2026-09-15 — Preparation is sliced by time, not by step count
 
 The user reported "Connecting holes" taking about two seconds on a single-loop

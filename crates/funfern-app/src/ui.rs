@@ -567,6 +567,11 @@ pub struct Playground {
     material_color_edit: Option<(MaterialId, [u8; 3])>,
     new_separator_material: MaterialId,
     mesh_edge: f64,
+    /// The slider produces a value per frame; the rebuild waits for release.
+    mesh_edge_dragging: bool,
+    /// The Remesh button: rebuild at the current resolution even though
+    /// nothing changed, which also leaves an adapted mesh.
+    remesh_requested: bool,
     requested_edge: f64,
     requested_revision: Option<u64>,
     uploading: Option<Uploading>,
@@ -705,6 +710,8 @@ impl Default for Playground {
             material_color_edit: None,
             new_separator_material: DEFAULT_MATERIAL,
             mesh_edge: 0.08,
+            mesh_edge_dragging: false,
+            remesh_requested: false,
             requested_edge: f64::NAN,
             requested_revision: None,
             uploading: None,
@@ -2236,11 +2243,56 @@ impl Playground {
                 self.notify(error)
             }
         }
-        ui.add(
+        ui.separator();
+        ui.label("Mesh resolution");
+        const PRESETS: [(f64, &str); 3] = [(0.16, "Coarse"), (0.08, "Medium"), (0.04, "Fine")];
+        let preset_name = |edge: f64| {
+            PRESETS
+                .iter()
+                .find(|(value, _)| (edge - value).abs() < 1.0e-9)
+                .map_or("Custom", |(_, name)| name)
+        };
+        egui::ComboBox::from_id_salt("mesh_resolution")
+            .width(ui.available_width())
+            .selected_text(format!(
+                "{} · target edge {:.3}",
+                preset_name(self.mesh_edge),
+                self.mesh_edge
+            ))
+            .show_ui(ui, |ui| {
+                for (value, name) in PRESETS {
+                    ui.selectable_value(
+                        &mut self.mesh_edge,
+                        value,
+                        format!("{name} · h ≤ {value:.2}"),
+                    );
+                }
+            });
+        let slider = ui.add(
             egui::Slider::new(&mut self.mesh_edge, 0.02..=0.25)
                 .logarithmic(true)
                 .text("Target edge"),
         );
+        self.mesh_edge_dragging = slider.dragged();
+        ui.horizontal(|ui| {
+            if ui
+                .button("Remesh")
+                .on_hover_text(
+                    "Rebuild the mesh at this resolution, leaving any adapted mesh behind",
+                )
+                .clicked()
+            {
+                self.remesh_requested = true;
+            }
+            if let Some(active) = self.runtime.active()
+                && (active.meshing.target_edge_length - self.mesh_edge).abs() > 1.0e-9
+            {
+                ui.small(format!(
+                    "Active {:.3} · requested {:.3}",
+                    active.meshing.target_edge_length, self.mesh_edge
+                ));
+            }
+        });
         ui.separator();
         let before_amr = (
             self.amr_enabled,
@@ -5750,7 +5802,10 @@ impl Playground {
     const PREPARATION_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 
     fn request_runtime(&mut self) {
-        if self.editor.acceptance != TopologyAcceptance::Valid || self.editor.editing() {
+        if self.editor.acceptance != TopologyAcceptance::Valid
+            || self.editor.editing()
+            || self.mesh_edge_dragging
+        {
             return;
         }
         let options = MeshingOptions {
@@ -5758,7 +5813,8 @@ impl Playground {
             curve_tolerance: (self.mesh_edge * 0.02).min(5e-4),
             ..MeshingOptions::default()
         };
-        if self.requested_revision == Some(self.editor.revision)
+        if !self.remesh_requested
+            && self.requested_revision == Some(self.editor.revision)
             && self.requested_edge == self.mesh_edge
             && (self.runtime.phase().is_some()
                 || self.runtime.active().is_some_and(|active| {
@@ -5768,6 +5824,9 @@ impl Playground {
             return;
         }
         let fresh = self.runtime.active().is_none() || self.reset_requested;
+        if std::mem::take(&mut self.remesh_requested) {
+            self.runtime.request_full_rebuild();
+        }
         match self.runtime.request(
             self.editor.revision,
             &self.editor.document,
@@ -8458,7 +8517,7 @@ impl Playground {
                             "Minimum angle {:.1}° · maximum edge {:.3} · target {:.3}",
                             active.mesh.quality.minimum_angle_degrees,
                             active.mesh.quality.maximum_edge_length,
-                            self.mesh_edge,
+                            active.meshing.target_edge_length,
                         ));
                     }
                     None => {

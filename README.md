@@ -350,9 +350,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   progress, build/work time, longest mesh slice, and explicit construction
   failures. Meshing targets a soft 2 ms per frame. An invalid draft keeps the last
   accepted mesh.
-- **Resolution:** parent maximum edge 0.08 is the default for P2e; choose 0.04 for
-  a finer solve or 0.16 for a quick preview. Changing resolution rebuilds the
-  accepted mesh without changing geometry/history. Resolution is not stored in scene files.
+- **Resolution:** the Simulation panel offers Coarse (0.16), Medium (0.08, the
+  default) and Fine (0.04) presets and a Target edge slider. Changing resolution
+  rebuilds the accepted mesh when the control is released, without touching
+  geometry or history, and carries the running field across. Remesh rebuilds at
+  the current resolution, which also leaves an adapted mesh. Resolution is not
+  stored in scene files.
   Full fine builds can take tens of seconds when spread across frames. Small
   hole, material-interface, and open-baffle control-point edits reuse and repair a
   bounded region of the previous mesh. Baffle repair keeps its coincident left/right

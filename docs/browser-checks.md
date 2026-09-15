@@ -131,6 +131,12 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   result, nonzero repaired-baffle/paired-segment counts, and a successful solver
   handoff. A normal rebuild must not open diagnostics or show a warning; an injected
   or real mesh/solver error should do both.
+- [ ] In Simulation, switch Mesh resolution between Coarse, Medium, and Fine, then
+  drag the Target edge slider. Each change rebuilds the mesh when the control is
+  released and carries the running field across; Performance names the rebuild
+  reason as a resolution change. Remesh rebuilds at the current resolution with no
+  geometry change, including after an adaptation has refined the mesh. A rebuild of
+  a single-loop scene should take a fraction of a second, not seconds.
 - [ ] Disable WebGPU or use an unsupported browser and reload. Readable startup
   guidance must remain visible. Also check an adapter/device initialization failure.
 - [ ] Load `examples/eight-obstacles.json`, or Obstacle array from the gallery,
