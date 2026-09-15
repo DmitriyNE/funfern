@@ -83,6 +83,11 @@ pub struct MeshAdaptationReport {
     pub converged: bool,
     pub limit: Option<MeshAdaptationLimit>,
     pub work_units: usize,
+    /// Full passes over the mesh looking for collapses and for refinements.
+    /// Each pass applies every candidate it found, so the count stays small
+    /// even when hundreds of edges change.
+    pub collapse_passes: usize,
+    pub refine_passes: usize,
     pub topology_changes: usize,
     pub coarsening_changes: usize,
     pub inserted_vertices: usize,
@@ -469,10 +474,7 @@ enum AdaptationPhase {
     FindCollapse(usize),
     ApplyCollapse(Option<CollapseCandidate>),
     LegalizeAfterCollapse,
-    FindRefine {
-        index: usize,
-        best: Option<(u64, [usize; 2])>,
-    },
+    FindRefine(usize),
     ApplyRefine(Option<[usize; 2]>),
     LegalizeAfterRefine,
     VerifyTriangles(usize, MeshQuality),
@@ -496,6 +498,12 @@ pub struct MeshAdaptationJob {
     next_generation: u64,
     blocked: BTreeSet<CollapseKey>,
     collapse_candidates: Vec<CollapseCandidate>,
+    /// Over-ratio edges gathered by one refinement scan, sorted so `pop()`
+    /// yields the worst. Stale entries are skipped at apply time.
+    refine_candidates: Vec<(u64, [usize; 2])>,
+    /// Whether the current scan's candidates changed the mesh; a further scan
+    /// is only worth its cost when they did.
+    changed_since_scan: bool,
     report: MeshAdaptationReport,
     source_triangle_keys: BTreeSet<[u64; 3]>,
     source_points_by_lineage: BTreeMap<u64, Point2>,
@@ -581,6 +589,8 @@ impl MeshAdaptationJob {
             next_generation,
             blocked: BTreeSet::new(),
             collapse_candidates: Vec::new(),
+            refine_candidates: Vec::new(),
+            changed_since_scan: false,
             report,
             source_triangle_keys: BTreeSet::new(),
             source_points_by_lineage: BTreeMap::new(),
@@ -604,7 +614,7 @@ impl MeshAdaptationJob {
             AdaptationPhase::LegalizeAfterCollapse | AdaptationPhase::LegalizeAfterRefine => {
                 "Legalizing adaptive mesh"
             }
-            AdaptationPhase::FindRefine { .. } | AdaptationPhase::ApplyRefine(_) => {
+            AdaptationPhase::FindRefine(_) | AdaptationPhase::ApplyRefine(_) => {
                 "Refining adaptive mesh"
             }
             AdaptationPhase::VerifyTriangles(_, _)
@@ -662,20 +672,17 @@ impl MeshAdaptationJob {
             AdaptationPhase::ApplyCollapse(candidate) => self.apply_collapse(candidate)?,
             AdaptationPhase::LegalizeAfterCollapse => {
                 if self.builder.dirty_edges.is_empty() {
-                    self.phase = AdaptationPhase::FindCollapse(0);
+                    self.phase = AdaptationPhase::ApplyCollapse(self.collapse_candidates.pop());
                 } else {
                     self.builder.legalize_one()?;
                     self.phase = AdaptationPhase::LegalizeAfterCollapse;
                 }
             }
-            AdaptationPhase::FindRefine { index, best } => self.find_refine(index, best)?,
+            AdaptationPhase::FindRefine(index) => self.find_refine(index)?,
             AdaptationPhase::ApplyRefine(edge) => self.apply_refine(edge)?,
             AdaptationPhase::LegalizeAfterRefine => {
                 if self.builder.dirty_edges.is_empty() {
-                    self.phase = AdaptationPhase::FindRefine {
-                        index: 0,
-                        best: None,
-                    };
+                    self.phase = AdaptationPhase::ApplyRefine(self.next_refine());
                 } else {
                     self.builder.legalize_one()?;
                     self.phase = AdaptationPhase::LegalizeAfterRefine;
@@ -944,19 +951,18 @@ impl MeshAdaptationJob {
         if self.report.topology_changes >= self.options.max_topology_changes {
             self.collapse_candidates.clear();
             self.report.limit = Some(MeshAdaptationLimit::TopologyChanges);
-            self.phase = AdaptationPhase::FindRefine {
-                index: 0,
-                best: None,
-            };
+            self.phase = AdaptationPhase::FindRefine(0);
             return Ok(());
         }
         if self.report.coarsening_changes >= self.options.max_coarsening_changes {
             self.collapse_candidates.clear();
-            self.phase = AdaptationPhase::FindRefine {
-                index: 0,
-                best: None,
-            };
+            self.phase = AdaptationPhase::FindRefine(0);
             return Ok(());
+        }
+        if index == 0 {
+            self.report.collapse_passes += 1;
+            self.changed_since_scan = false;
+            self.collapse_candidates.clear();
         }
         if index == self.builder.vertices.len() {
             self.collapse_candidates.sort_unstable_by(|left, right| {
@@ -1176,12 +1182,39 @@ impl MeshAdaptationJob {
         candidate: Option<CollapseCandidate>,
     ) -> Result<(), MeshAdaptationError> {
         let Some(candidate) = candidate else {
-            self.phase = AdaptationPhase::FindRefine {
-                index: 0,
-                best: None,
+            // The scan's candidates are spent. A collapse can expose its
+            // neighbours, so rescan after a pass that changed something and
+            // move on after one that did not.
+            self.phase = if self.changed_since_scan {
+                AdaptationPhase::FindCollapse(0)
+            } else {
+                AdaptationPhase::FindRefine(0)
             };
             return Ok(());
         };
+        if self.report.topology_changes >= self.options.max_topology_changes
+            || self.report.coarsening_changes >= self.options.max_coarsening_changes
+        {
+            self.collapse_candidates.clear();
+            self.phase = AdaptationPhase::ApplyCollapse(None);
+            return Ok(());
+        }
+        // Candidates were scored before earlier collapses of this pass ran.
+        // One whose vertex is gone, cooling down, or no longer on the boundary
+        // is simply stale; the plan builders below reject the rest.
+        let remove = candidate.key.remove;
+        let stale = self.builder.incident[remove].is_empty()
+            || !self.vertex_ready(remove)
+            || (candidate.boundary && self.builder.vertices[remove].boundary.is_none())
+            || (!candidate.boundary
+                && !self
+                    .builder
+                    .adjacency
+                    .contains_key(&edge_key(remove, candidate.key.keep)));
+        if stale {
+            self.phase = AdaptationPhase::ApplyCollapse(self.collapse_candidates.pop());
+            return Ok(());
+        }
         let pair_count = if candidate.boundary
             && self.builder.vertices[candidate.key.remove]
                 .boundary
@@ -1198,7 +1231,7 @@ impl MeshAdaptationJob {
             self.collapse_interior(candidate.key)?
         };
         if changed {
-            self.collapse_candidates.clear();
+            self.changed_since_scan = true;
             self.report.topology_changes += 1;
             self.report.coarsening_changes += 1;
             self.report.collapsed_vertices += pair_count;
@@ -1569,17 +1602,28 @@ impl MeshAdaptationJob {
         }
     }
 
-    fn find_refine(
-        &mut self,
-        index: usize,
-        mut best: Option<(u64, [usize; 2])>,
-    ) -> Result<(), MeshAdaptationError> {
+    fn next_refine(&mut self) -> Option<[usize; 2]> {
+        self.refine_candidates.pop().map(|(_, edge)| edge)
+    }
+
+    /// One pass nominates the longest edge of every over-ratio triangle. The
+    /// whole list is then applied worst first, so a pass costs one sweep of
+    /// the mesh however many edges it splits, rather than one sweep per split.
+    fn find_refine(&mut self, index: usize) -> Result<(), MeshAdaptationError> {
+        if index == 0 {
+            self.report.refine_passes += 1;
+            self.changed_since_scan = false;
+            self.refine_candidates.clear();
+        }
         if index == self.builder.triangles.len() {
             if self.report.topology_changes >= self.options.max_topology_changes {
                 self.report.limit = Some(MeshAdaptationLimit::TopologyChanges);
+                self.refine_candidates.clear();
                 self.phase = AdaptationPhase::ApplyRefine(None);
             } else {
-                self.phase = AdaptationPhase::ApplyRefine(best.map(|(_, edge)| edge));
+                self.refine_candidates.sort_unstable();
+                self.refine_candidates.dedup();
+                self.phase = AdaptationPhase::ApplyRefine(self.next_refine());
             }
             return Ok(());
         }
@@ -1601,20 +1645,23 @@ impl MeshAdaptationJob {
             .max_by(|left, right| left.0.total_cmp(&right.0))
             .unwrap();
         let ratio = length / target;
-        if ratio > self.options.refine_ratio
-            && best.is_none_or(|current| ratio.to_bits() > current.0)
-        {
-            best = Some((ratio.to_bits(), edge));
+        if ratio > self.options.refine_ratio {
+            let (a, b) = edge_key(edge[0], edge[1]);
+            self.refine_candidates.push((ratio.to_bits(), [a, b]));
         }
-        self.phase = AdaptationPhase::FindRefine {
-            index: index + 1,
-            best,
-        };
+        self.phase = AdaptationPhase::FindRefine(index + 1);
         Ok(())
     }
 
     fn apply_refine(&mut self, edge: Option<[usize; 2]>) -> Result<(), MeshAdaptationError> {
         let Some(edge) = edge else {
+            // Splits create edges the last scan never saw, so a pass that
+            // changed the mesh is followed by another scan; a pass that found
+            // nothing, or ran into a limit, ends refinement.
+            if self.report.limit.is_none() && self.changed_since_scan {
+                self.phase = AdaptationPhase::FindRefine(0);
+                return Ok(());
+            }
             self.report.remaining_oversized_triangles = self.count_oversized()?;
             self.report.converged =
                 self.report.remaining_oversized_triangles == 0 && self.report.limit.is_none();
@@ -1630,14 +1677,26 @@ impl MeshAdaptationJob {
             );
             return Ok(());
         };
+        if self.report.topology_changes >= self.options.max_topology_changes {
+            self.report.limit = Some(MeshAdaptationLimit::TopologyChanges);
+            self.refine_candidates.clear();
+            self.phase = AdaptationPhase::ApplyRefine(None);
+            return Ok(());
+        }
         if self.builder.vertices.len() >= self.options.meshing.max_vertices
             || self.builder.triangles.len() + 4 > self.options.meshing.max_triangles
         {
             self.report.limit = Some(MeshAdaptationLimit::Capacity);
+            self.refine_candidates.clear();
             self.phase = AdaptationPhase::ApplyRefine(None);
             return Ok(());
         }
         let key = edge_key(edge[0], edge[1]);
+        // An earlier split or flip of this pass may have consumed the edge.
+        if !self.builder.adjacency.contains_key(&key) {
+            self.phase = AdaptationPhase::ApplyRefine(self.next_refine());
+            return Ok(());
+        }
         if let Some(found) = self
             .builder
             .boundary_edges
@@ -1697,6 +1756,7 @@ impl MeshAdaptationJob {
             self.report.inserted_vertices += 1;
         }
         self.report.topology_changes += 1;
+        self.changed_since_scan = true;
         self.phase = AdaptationPhase::LegalizeAfterRefine;
         Ok(())
     }
@@ -2370,6 +2430,67 @@ mod tests {
         assert_eq!(one.mesh.mesh_revision, 21);
         assert_eq!(one.report.topology_changes, 0);
         assert!(one.report.converged);
+    }
+
+    /// Refinement and coarsening apply every candidate a scan found before
+    /// scanning again. Before this, each split or collapse cost a full sweep
+    /// of the mesh, so a few hundred changes on a medium mesh exhausted the
+    /// work budget and surfaced as "Mesh adaptation work limit reached".
+    #[test]
+    fn a_pass_applies_every_candidate_instead_of_rescanning_per_change() {
+        let scene = Scene::initial();
+        let configuration = options(0.24, 0.08);
+        let source = Arc::new(mesh_scene(&scene, 7, configuration.meshing).unwrap());
+        let refined = run(
+            MeshAdaptationJob::new(
+                source.clone(),
+                scene.clone(),
+                MeshAdaptationState::from_mesh(&source),
+                31,
+                Arc::new(|_, _| 0.12),
+                configuration,
+            ),
+            64,
+        );
+        assert!(refined.report.converged, "{:?}", refined.report);
+        assert!(
+            refined.report.topology_changes > 100,
+            "{:?}",
+            refined.report
+        );
+        assert!(refined.report.refine_passes <= 12, "{:?}", refined.report);
+        assert!(
+            refined.report.work_units < 40 * refined.mesh.triangles.len(),
+            "{:?}",
+            refined.report
+        );
+
+        let coarsened = run(
+            MeshAdaptationJob::new(
+                Arc::new(refined.mesh.clone()),
+                scene,
+                refined.state,
+                32,
+                Arc::new(|_, _| 0.24),
+                configuration,
+            ),
+            64,
+        );
+        assert!(
+            coarsened.report.coarsening_changes > 50,
+            "{:?}",
+            coarsened.report
+        );
+        assert!(
+            coarsened.report.collapse_passes <= 12,
+            "{:?}",
+            coarsened.report
+        );
+        assert!(
+            coarsened.report.work_units < 40 * refined.mesh.triangles.len(),
+            "{:?}",
+            coarsened.report
+        );
     }
 
     #[test]

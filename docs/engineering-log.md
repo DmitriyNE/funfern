@@ -105,6 +105,27 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — Adaptation applies a pass at a time
+
+"Mesh adaptation work limit reached" was structural. The refinement scan walked
+every triangle to nominate a single edge, split it, legalised, and walked every
+triangle again; coarsening did the same per collapse. The cost was changes times
+mesh size, so 512 changes on a 20,000-triangle mesh needed ten million work
+units against a budget of five million, and the job gave up before it had done
+what the indicator asked for.
+
+Both directions now gather every candidate in one sweep, sort them worst first,
+and apply the whole list before sweeping again. A candidate whose edge or vertex
+an earlier change of the same pass consumed, or whose vertex is cooling down, is
+skipped at apply time; the plan builders reject the rest as before. A further
+sweep runs only when the previous pass changed the mesh, so convergence keeps
+its fixpoint meaning. On the initial scene, refining from `h = 0.23` to `0.12`
+made 463 changes in 4 passes and 15,400 work units, and coarsening back made 259
+collapses in 3 passes and 12,700 units. The deterministic-result tests still
+pass, and a new one bounds the work at forty units per final triangle, which the
+one-sweep-per-change loop exceeded by an order of magnitude. The report and the
+Performance panel show the pass counts.
+
 ## 2026-09-15 — A constant field stays constant on the GPU
 
 Enclosed subdomains with reflecting walls grew a uniform offset that reached

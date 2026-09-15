@@ -8459,6 +8459,10 @@ impl Playground {
                         report.skipped_collapses,
                     ));
                     ui.small(format!(
+                        "{} refine passes · {} coarsen passes · {} work units",
+                        report.refine_passes, report.collapse_passes, report.work_units,
+                    ));
+                    ui.small(format!(
                         "{:.0}% of the source triangles survived · {} still oversized",
                         100.0 * report.preserved_triangles as f64
                             / report.original_triangles.max(1) as f64,

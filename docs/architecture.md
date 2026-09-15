@@ -1108,7 +1108,12 @@ edges; verifies the result; and compacts it. Every phase resumes under the calle
 work budget. The app gives it the same soft 2 ms frame slice as ordinary meshing.
 Refinement starts above `1.05 h_target`; collapse uses a configurable lower ratio.
 Automatic solution adaptation uses `0.65 h_target`, with post-collapse size and
-quality checks providing the final guard.
+quality checks providing the final guard. Both directions work in passes: one
+sweep of the mesh gathers every candidate, the whole list is applied worst first
+with stale entries skipped, and the mesh is swept again only when a pass changed
+it. A pass therefore costs one sweep however many edges it splits or collapses;
+the earlier one-sweep-per-change loop made a few hundred changes on a medium mesh
+exhaust the work budget.
 Persistent vertex lineage records the generation of each topology change, and a
 configurable generation cooldown prevents an immediately changed vertex from
 oscillating on the next pass.
