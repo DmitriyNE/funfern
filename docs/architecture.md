@@ -715,11 +715,42 @@ branched separated junction, recovery first installs every incident run; a final
 fan pass crosses transmitting edges, stops at separated edges, and duplicates the
 junction vertex once per compiled sector trace. An
 unchanged plan reuses its mesh, and changing only a boundary law does not remesh.
-Coordinate edits use a typed full rebuild until the patch repair receives unified
-curve evaluation and junction-sector rewiring. `TopologyMeshingJob` runs the full
-baseline cooperatively: bridge search, ear clipping, legalization, refinement,
-separated-curve recovery, and verification are explicit phases, and changing the
-caller work slice does not change the published mesh.
+`TopologyMeshingJob` runs the full baseline cooperatively: bridge search, ear
+clipping, legalization, refinement, separated-curve recovery, and verification
+are explicit phases, and changing the caller work slice does not change the
+published mesh. The two sides of a separated span between two active faces are
+distinct chains that must subdivide identically; chain expansion computes their
+pieces from the lower parameter upwards for both, and every midpoint split of a
+boundary edge also splits the partner edge at the same parameter.
+
+Every plan difference other than a changed outer rectangle, a resolution change
+or a requested rebuild is a repair by carving (`TopologyCarveJob`). The plan is a
+set of straight atoms, and only the atoms that differ matter to the mesh. Two
+atoms are the same when their label, separated flag, parameter range and
+endpoints agree; trace ids are reissued by every compile and faces and regions
+belong to the triangles, so a face that only changes its material or its id
+keeps every atom. Triangles incident to a changed old atom, triangles a changed
+new atom passes through, one more ring, and tiny kept islands are removed. The
+kept remainder is flood-filled across unconstrained edges; each component lies in
+one face of the new topology, so one face lookup relabels it or, for an excluded
+face, removes it. A separated curve that a removed triangle touches is rebuilt
+whole, so slit recovery always sees complete runs, and a junction whose kept
+atoms disagree about its sectors has every atom meeting there rebuilt; the
+selection repeats until both sets are stable. Kept atoms' endpoints receive their
+new trace ids through the kept boundary edges, changed atoms are expanded with
+the mesher's chain expansion, and the rim edges of the removed triangles plus the
+new chains are walked into cavity cycles, counter-clockwise ones being
+components and clockwise ones holes. The meshing job then resumes at its bridge
+state with the imported triangles frozen: legalization, refinement and splits
+skip anything that would change one, so the kept part comes out exactly as it
+went in, and an element whose circumcenter falls outside the cavity is left as
+it is rather than split at its centroid. A size field over the removed triangles
+drives refinement and chain subdivision, so a band cut through an adapted mesh
+is refilled at the density it had. There is no motion cap and no patch cap; a
+carve that fails falls back to the full rebuild with the reason attached to the
+candidate. Because coarsening merges arrangement segments but never splits one,
+an outer wall is a single atom per side and a wall attachment move rebuilds the
+whole wall band.
 
 Application preparation binds these objects with a `TopologyToken` containing the
 document and topology revisions. `AcceptedTopology` owns the authored scene,
@@ -732,8 +763,11 @@ same token through `TopologyRuntime::commit_ready`. Upload rejection, preparatio
 failure, supersession, or a stale token leaves the previous runtime untouched.
 Document-only changes to point sources, probes, and far-field settings preserve the
 topology token and reuse the exact mesh and operator. Material and boundary-law
-changes retain the mesh but assemble a new operator; coordinate or graph changes
-use the typed cooperative full rebuild until topology-aware local repair arrives.
+changes retain the mesh but assemble a new operator; coordinate and graph changes
+carve the active mesh, adapted or not, in a Repairing phase, assemble a new
+operator, and carry the field across a transfer that copies every node outside
+the band exactly. The prepared topology carries the carve report, or the reason a
+carve fell back to the full rebuild, for the Performance panel.
 
 The enriched-quadratic CPU operator has a topology-plan assembly entry point.
 Materials and local frames come from the region library keyed by each triangle's
@@ -782,10 +816,9 @@ topology plan. It validates the existing mesh against the plan before changing i
 pins every sampled endpoint and junction-sector trace, and restricts boundary
 changes to AMR-created vertices inside one sampled plan segment. Transmitting
 constraints remain shared, while two active sides of a separated constraint split
-and collapse atomically by curve/span/parameter identity. Coordinate edits
-currently request the verified cooperative topology full rebuild. Topology-aware
-local curve and junction-sector repair remains a follow-up; the application
-otherwise uses the unified topology path end to end.
+and collapse atomically by curve/span/parameter identity. Refinement an adaptation
+added survives a repair outside the carved band, and the band itself is refilled
+at the density it had; the application uses the unified topology path end to end.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a

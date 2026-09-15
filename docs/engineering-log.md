@@ -45,18 +45,26 @@ Carried over from the cutover follow-up work, not from the review:
 
 Longer-standing work:
 
-- [ ] Incremental mesh repair by carving, agreed 2026-09-15 to replace the
-  deferred coordinate repair and its caps. Landed 2026-09-15: the core carving
-  job (`mesh/carve.rs`), the exact identity path in the transfer map, the
-  runtime's Repairing phase with the full rebuild as the fallback and the
-  counts in the Performance panel, and the classifier treating every plan
-  difference except the outer domain, a resolution change and a requested
-  rebuild as a repair. Remaining: docs and browser checks. Backlog once those
-  land: deformation-first repair for small motions with carving as the
-  fallback; live repair during drags now that the carve time shows in the
-  panel; outer-domain resize through carving; splitting arrangement segments
-  longer than the chord cap into several atoms, so a wall attachment move
-  carves a local band instead of the whole wall.
+- [x] Incremental mesh repair by carving (2026-09-15), replacing the deferred
+  coordinate repair and the legacy caps: the core carving job (`mesh/carve.rs`),
+  the exact identity path in the transfer map, the runtime's Repairing phase
+  with the full rebuild as the fallback and the counts in the Performance
+  panel, and the classifier treating every plan difference except the outer
+  domain, a resolution change and a requested rebuild as a repair. Browser
+  checks for it are listed in `docs/browser-checks.md` and not yet run.
+- [ ] Deformation-first repair for small motions: move the existing vertices
+  with a cap-free displacement field and re-legalize, carving only what inverts.
+  Keeps connectivity for nudges; carving stays as the fallback underneath.
+- [ ] Live repair during drags. The runtime never sees a gesture today; the
+  carve time in the Performance panel says whether a per-frame repair is
+  affordable, and cancel semantics for a gesture whose field changes have
+  already happened need deciding.
+- [ ] Outer-domain resize through carving; it is the one geometry change that
+  still takes the full rebuild.
+- [ ] Split arrangement segments longer than the chord cap into several atoms.
+  An outer wall is one atom per side today, so moving a curve's attachment along
+  a wall rebuilds the whole wall band, and pieces longer than the target are
+  what makes the two sides of a separated span subdivide independently.
 - [ ] Raise viewport video capture from the initial 30 FPS implementation to 60 FPS.
   Measure browser encoding and native GPU-readback pressure first, retain bounded
   native queues and wall-clock pacing, and report dropped frames rather than slowing
@@ -123,6 +131,20 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-15 — Carving documented
+
+The architecture notes describe carving next to the full-rebuild baseline, the
+atom identity rule, the junction and separated-curve growth rules, the frozen
+import and the size field, plus the paired subdivision rule the flip test
+forced into the mesher. The README's resolution bullet now says which edits
+repair and which still rebuild, in the user's terms. The plan's statements that
+coordinate edits take a full rebuild until local repair arrives are updated to
+say it arrived. The browser checks gain a mesh-repair item covering a nudge, a
+long drag, a baffle end, a junction, adding and deleting a curve, a material
+change without carving, a repair through an adapted mesh, and the two edits
+that still rebuild; they are listed, not yet run. The TODO item is closed and
+its four follow-ups stand as their own items.
 
 ## 2026-09-15 — Every topology change is a repair
 

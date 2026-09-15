@@ -203,8 +203,9 @@ their free tips so waves can diffract around them. Nested
 ownership is validated, triangles carry regions, P2e assembly is piecewise, and
 coefficient edits use a same-mesh field-transfer transaction. Version 4 scene
 files introduced open-spline span laws; version 5 also preserves periodic hole-span
-conditions. Older loops migrate to reflecting spans. Multi-region coordinate edits currently take the full-mesh path; extending
-bounded repair across region topology remains adaptation work.
+conditions. Older loops migrate to reflecting spans. Multi-region coordinate edits
+took the full-mesh path until carving arrived on 2026-09-15; the carve relabels
+kept elements from the compiled topology, so region changes need no special case.
 
 Open dividers stay staged until both ends attach to an outer edge or another divider.
 Curve attachment inserts a shape-preserving C0 breakpoint and junction automatically.
@@ -212,8 +213,8 @@ The graph stores per-span left/right regions and explicit junctions,
 meshes all transmitting branches as one conforming trace, and supports T/crossing
 sector relabeling, junction dragging, and region-merge removal by selected
 junction-to-junction section. Version 21 persists the graph in draft and accepted
-scenes. Coordinate-edit local repair currently falls back to a full rebuild for
-these graph edges.
+scenes. Since 2026-09-15 coordinate and graph edits repair the mesh by carving
+(see the engineering log); only the outer rectangle and the resolution rebuild.
 
 - Give regions, materials, interfaces, and internal walls stable semantic IDs
   independent of mesh vertices and element indices. Keep holes, transmitting
@@ -358,11 +359,12 @@ its rectangular Huygens stencils.
 ##### Topology-aware fixed-geometry AMR slice (implemented)
 
 This slice migrates solution-driven refinement and coarsening on an unchanged
-`TopologyMeshPlan`. It does not migrate coordinate-edit repair. Moving a curve,
-moving a junction, changing span behavior, splitting or merging faces, and changing
-the outer rectangle continue through `TopologyMeshUpdateAction::FullRebuild`.
-That distinction keeps the AMR transaction local: its input geometry, face graph,
-trace equivalence, and boundary sampling are immutable for the lifetime of the job.
+`TopologyMeshPlan`. It does not migrate coordinate-edit repair; that arrived
+separately as carving (`TopologyMeshUpdateAction::Repair`), which takes the
+adapted mesh as its input and keeps the refinement outside the carved band. Only
+a changed outer rectangle still goes through `FullRebuild`. The AMR transaction
+itself stays local: its input geometry, face graph, trace equivalence, and
+boundary sampling are immutable for the lifetime of the job.
 
 **Geometry contract and preflight**
 
@@ -486,10 +488,9 @@ trace equivalence, and boundary sampling are immutable for the lifetime of the j
   examples as fixtures. Do not retain a production legacy-geometry adapter solely
   for these comparisons.
 - Keep exact mesh reuse for unchanged topology plans and skip remeshing for
-  boundary-law-only changes. Coordinate motion currently takes a typed full
-  rebuild. Migrating local repair requires topology-curve evaluation and
-  sector-aware endpoint rewiring; do that after the numerical consumers no longer
-  depend on legacy scene categories.
+  boundary-law-only changes. Coordinate motion and graph edits repair the mesh
+  by carving the changed atoms' band (done 2026-09-15); no spline evaluation is
+  needed because the plan's atoms are straight.
 
 **Exit criterion:** the solver and probes use no coordinate-side guesses for
 region or trace identity, existing examples retain their behavior, and junction
@@ -636,9 +637,9 @@ deterministic cooperative job before the application document changes over.
   handoff; example load and explicit reset still request a fresh field.
 - Use `topology_mesh_update_action` for transaction classification. Material,
   formula, source, boundary-law, and presentation changes reuse geometry. Curve
-  coordinate and graph changes take the verified full topology rebuild initially.
-  Report the latter as a typed `CoordinateRepairDeferred` decision so later local
-  repair can replace it without changing UI policy.
+  coordinate and graph changes took the verified full topology rebuild initially,
+  reported as a typed `CoordinateRepairDeferred` decision; that decision became
+  `Repair` by carving on 2026-09-15 without a change of UI policy.
 - Route production calls through `assemble_topology`, topology volume-source and
   probe compilers, `SolutionIndicatorJob::new_topology`,
   `MeshAdaptationJob::new_topology`, and topology far-field compilation. Material
@@ -826,8 +827,8 @@ fixtures while shared scalar serialization helpers are extracted.
   Keep legacy core algorithms temporarily only where they provide numerical
   equivalence fixtures; do not ship a compatibility adapter.
 - Update architecture notes, file-format documentation, examples, help text, and
-  the engineering log. Record topology coordinate movement's initial full-rebuild
-  behavior and the deferred local-repair work explicitly.
+  the engineering log. Topology coordinate movement's initial full-rebuild
+  behavior and its replacement by carving are both recorded there.
 - Run formatting, Clippy with warnings denied, the complete core/app suite, native
   release compilation, release Trunk/WebGPU compilation, scene fixtures, and the
   local browser smoke suite where WebGPU is available. Record handoff times for a

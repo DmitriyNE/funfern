@@ -356,15 +356,16 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   geometry or history, and carries the running field across. Remesh rebuilds at
   the current resolution, which also leaves an adapted mesh. Resolution is not
   stored in scene files.
-  Full fine builds can take tens of seconds when spread across frames. Small
-  hole, material-interface, and open-baffle control-point edits reuse and repair a
-  bounded region of the previous mesh. Baffle repair keeps its coincident left/right
-  traces and shared free tips intact, and subdivides both faces together. A failed
-  local repair retries from the unchanged committed mesh with up to two larger guard
-  regions before using a full rebuild. The Performance panel reports attempts, retry
-  causes, patch size, repaired baffles/trace segments, unchanged elements, and a
-  session fallback-cause count. Creation, deletion, knot/topology changes, closed-wall
-  motion, large edits, and exhausted repairs still rebuild.
+  A full Fine build can take a second when spread across frames, so geometry
+  edits repair the active mesh instead: moving a control or a junction, adding
+  or deleting a curve, and changing a span's behaviour carve out the band the
+  changed boundary touched and refill it, however far the boundary moved, and
+  everything else stays as it was, refinement included. Assigning another
+  material to a subdomain relabels its elements without carving. The running
+  field crosses over with every node outside the band copied exactly. The
+  Performance panel's handoff line reports the repair with its kept, removed and
+  inserted element counts, or the reason a repair fell back to a full rebuild.
+  Resizing the domain and changing the resolution still rebuild.
   Open-curve insertion reuses safe nearby bulk vertices at the exact curve position
   to avoid tiny CFL-limiting elements around baffles.
 - **Adaptive mesh foundation:** the core can refine and coarsen an existing mesh

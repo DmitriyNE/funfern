@@ -123,14 +123,21 @@ Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
   material is assigned. Region rows and canvas material colors remain consistent.
 - [ ] Open Performance from the lower-right summary. Verify FPS, steps/s, DOFs,
   mesh size, solver dt, energy, frame-time graph/statistics, mesh quality, handoff,
-  and solver sections. After moving a hole and a material interface, verify local
-  attempt count, retry causes, repair vertices/triangles, moved/inserted/collapsed
-  vertices, reuse percentage, and the session fallback histogram. During a retry,
-  the status should read `Mesh rebuilding: Expanding local repair`. Move, rotate,
-  scale, straighten, and locally reshape a baffle; verify a local
-  result, nonzero repaired-baffle/paired-segment counts, and a successful solver
-  handoff. A normal rebuild must not open diagnostics or show a warning; an injected
-  or real mesh/solver error should do both.
+  and solver sections. A normal rebuild must not open diagnostics or show a
+  warning; an injected or real mesh/solver error should do both.
+- [ ] Mesh repair. With the simulation running, nudge one control of a hole: the
+  handoff line reads `Mesh repaired: curve or junction moved` with kept, removed
+  and inserted counts, the kept count is most of the mesh, the field keeps running
+  without a visible seam, and the line below says how many nodes were copied
+  exactly. Drag the hole across the domain in one gesture: still a repair, no
+  fallback. Move a baffle's end and a junction where several curves meet; both
+  are repairs. Add a baffle inside a subdomain and delete it again: both repairs,
+  `curve or span topology changed`. Assign another material to a subdomain: a
+  repair with zero removed and zero inserted elements. Enable adaptation until it
+  refines around a hole, then nudge a different curve: the refinement around the
+  hole survives and the handoff reports a repair. Change the resolution or drag
+  the domain edge: those still read `Full rebuild`. A `Full rebuild: mesh repair
+  failed (...)` line is a bug report.
 - [ ] In Simulation, switch Mesh resolution between Coarse, Medium, and Fine, then
   drag the Target edge slider. Each change rebuilds the mesh when the control is
   released and carries the running field across; Performance names the rebuild
