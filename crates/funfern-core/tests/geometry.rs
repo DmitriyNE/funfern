@@ -1166,7 +1166,6 @@ fn user_facing_errors_read_as_sentences() {
             first: CompiledEdgeSource::Curve(CurveSpanId(1)),
             second: CompiledEdgeSource::Curve(CurveSpanId(2)),
         },
-        TopologyIssue::FreeTransmittingEnd(CurveId(2)),
         TopologyIssue::TooManySegments,
         TopologyIssue::TooManyFaces,
     ] {

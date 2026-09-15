@@ -117,11 +117,13 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   shape.
 - **Topology:** drawing is geometry-first. Closed curves offer Circle, Rectangle,
   Polygon, and Spline tools with an initial Subdomain/Hole purpose. Open curves
-  offer Polyline and Spline tools with an initial Separator/Baffle purpose. A
-  separator must start and finish on boundaries, and both ends of an open curve
-  must touch the same subdomain; baffles may have free ends. Which subdomain a
-  curve belongs to is read from where the curve is drawn, not from which side of
-  a boundary a click landed on - clicking a boundary names the boundary.
+  offer Polyline and Spline tools with an initial Separator/Baffle purpose.
+  Either kind may have free ends: a separator that meets nothing divides
+  nothing, which is how a wall is switched off without being deleted, or a
+  divider drawn now and attached later. Both ends of an open curve must touch the
+  same subdomain, and which subdomain a curve belongs to is read from where the
+  curve is drawn, not from which side of a boundary a click landed on - clicking
+  a boundary names the boundary.
   Attached endpoints share an authoritative junction, follow outer-domain
   resizing, and can be detached from the selected junction.
   While drawing an open curve, eligible outer edges, inner curves, existing
@@ -167,10 +169,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   same EM material law.
 - **Geometry role:** Draw contains closed and open curve tools. Closed curves start
   as subdomains or holes. Open curves start as transmitting separators or
-  two-sided baffles; a separator must begin on a boundary with an active
-  subdomain on one side of it. Gold highlights and a 14-pixel screen-space query
-  show the exact available attachments on the outer domain, inner curves, and
-  junctions, either side of each being a target.
+  two-sided baffles, either of which may be left unattached. The material chosen
+  for a separator applies only if it encloses a face as it is drawn; a face
+  enclosed later, by attaching an end, inherits the material of the region it is
+  cut out of. Gold highlights and a 14-pixel screen-space query show the exact
+  available attachments on the outer domain, inner curves, and junctions, either
+  side of each being a target.
 - **Circle:** click to place eight controls on a radius `0.15` circle, then
   automatically return to selection. The spline lies inside its control polygon.
 - **Rectangle:** two opposite-corner clicks create an axis-aligned rectangular

@@ -705,6 +705,17 @@ Creation, deletion, knot edits, resolution changes, excessive motion and failed
 repair use the full resumable mesher. Resolution remains an application preference,
 excluded from geometry files and undo history.
 
+A transmitting curve may end in open space. Such an end divides nothing: the
+same face lies on both sides of the span, which carries no boundary condition
+and changes no material, so the curve is inert until an end is attached. It is
+how a wall is switched off without being deleted, and how a divider is drawn
+before it is attached. The mesher carries the resulting dangling chain as an
+internal constraint; carving cannot follow one being introduced - the cavity rim
+it walks runs into the chain's dead end - so that one edit falls back to a full
+rebuild, and edits elsewhere still carve. A separator only receives the material
+chosen while drawing it if it encloses a face there and then; a face enclosed
+later inherits the region it was cut out of.
+
 An open curve belongs to one face, and the editor reads which one from the
 curve itself: the faces sampled along the drawn path, falling back to the sides
 the attachments named and then to the only face the two ends share. A click on a

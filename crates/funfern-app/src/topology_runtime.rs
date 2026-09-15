@@ -1908,6 +1908,107 @@ mod tests {
         assert!(transfer.exact_nodes() * 2 > repaired.operator.degrees_of_freedom());
     }
 
+    /// A separator with free ends divides nothing, so it is a transmitting
+    /// chain dangling inside one face - a shape carving has never seen. Adding
+    /// one falls back to a full rebuild, because the cavity rim a carve walks
+    /// runs into the dead end of the chain. The mesh is still correct and the
+    /// field still crosses over; only the incremental path is given up, and
+    /// only for the edit that introduces the chain.
+    #[test]
+    fn adding_a_free_separator_rebuilds_and_leaves_carving_alone_elsewhere() {
+        let (mut editor, hole, mut runtime) = hole_runtime();
+        let before = runtime.active().unwrap().clone();
+        let separator = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![Point2::new(0.45, -0.55), Point2::new(0.62, 0.48)])
+                    .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: DEFAULT_MATERIAL,
+                },
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(
+            editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(separator)
+                .unwrap()
+                .nodes
+                .iter()
+                .all(|node| node.vertex.is_none()),
+            "both ends stay free"
+        );
+        assert_eq!(
+            editor.document.model.draft.regions.len(),
+            before.bundle.authored.regions.len(),
+            "dividing nothing creates no region"
+        );
+
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let rebuilt = runtime.commit_ready(token).unwrap();
+        assert!(
+            rebuilt.carve.is_none() && rebuilt.repair_fallback.is_some(),
+            "the carve gives up and says so: {:?}",
+            rebuilt.repair_fallback
+        );
+        assert!(
+            rebuilt
+                .transfer
+                .as_ref()
+                .is_some_and(|transfer| transfer.exact_nodes() > 0),
+            "the field still crosses over"
+        );
+        // The chain is in the mesh, and both of its sides name the one face it
+        // lies in, so nothing along it bounds anything.
+        assert!(
+            rebuilt.mesh.boundary_edges.iter().any(|edge| matches!(
+                edge.label,
+                BoundaryLabel::Curve {
+                    curve: candidate,
+                    separated: false,
+                    ..
+                } if candidate == separator
+            )),
+            "the separator is traced into the mesh"
+        );
+
+        // An edit away from the chain still carves, so one free separator does
+        // not cost the whole scene its incremental path.
+        nudge(&mut editor, hole);
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let repaired = runtime.commit_ready(token).unwrap();
+        assert!(
+            repaired.carve.is_some(),
+            "a distant edit still repairs: {:?}",
+            repaired.repair_fallback
+        );
+    }
+
     #[test]
     fn failed_or_superseded_candidate_never_replaces_active_state() {
         let editor = TopologyEditor::default();

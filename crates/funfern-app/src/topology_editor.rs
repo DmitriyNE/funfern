@@ -866,14 +866,13 @@ impl TopologyEditor {
             .map(|assignment| assignment.region)
             .ok_or("Attachment face no longer exists")?;
         let new_material = match purpose {
+            // A separator with a free end divides nothing yet, which is a
+            // reasonable thing to draw: it is inert until an end is attached,
+            // and the material chosen here applies only if it encloses
+            // something now. A face enclosed later inherits from the region it
+            // was cut out of, as attaching an end already does.
             OpenCurvePurpose::SubdomainSeparator { material } => {
                 self.require_material(material)?;
-                if start.is_none() || end.is_none() {
-                    return Err("A subdomain separator needs two attached endpoints".into());
-                }
-                if source_region.is_none() {
-                    return Err("A subdomain separator cannot split an excluded face".into());
-                }
                 Some(material)
             }
             OpenCurvePurpose::BoundaryBaffle => None,
@@ -2817,8 +2816,11 @@ impl TopologyEditor {
             .map(|face| face.id)
             .filter(|face| !assigned.contains(face))
             .collect::<Vec<_>>();
-        if separator_material.is_some() && new_faces.len() != 1 {
-            return Err("Subdomain separator must create exactly one new face".into());
+        if separator_material.is_some() && new_faces.len() > 1 {
+            return Err("A subdomain separator cannot divide more than one face at once".into());
+        }
+        if separator_material.is_some() && !new_faces.is_empty() && source_region.is_none() {
+            return Err("A subdomain separator cannot split an excluded face".into());
         }
         let source = source_region
             .map(|region| {
@@ -5818,6 +5820,144 @@ mod tests {
         }
     }
 
+    /// A separator that meets nothing divides nothing, which is a state worth
+    /// holding: a wall switched off without being deleted, or a separator drawn
+    /// before it is attached. The material chosen while drawing it goes unused,
+    /// because there is no new face to give it to.
+    #[test]
+    fn a_separator_may_be_drawn_with_free_ends() {
+        let mut editor = TopologyEditor::default();
+        let unused_material = editor.add_material().unwrap();
+        settle(&mut editor);
+        let regions_before = editor.document.model.draft.regions.len();
+        let separator = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.41, 0.13),
+                    Point2::new(0.02, -0.07),
+                    Point2::new(0.37, -0.19),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: unused_material,
+                },
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let drawn = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(separator)
+            .expect("the separator");
+        assert!(
+            drawn
+                .spans
+                .iter()
+                .all(|span| span.behavior == SpanBehavior::Transmitting),
+            "it transmits"
+        );
+        assert!(
+            drawn.nodes.iter().all(|node| node.vertex.is_none()),
+            "both ends stay free"
+        );
+        assert_eq!(
+            editor.document.model.draft.regions.len(),
+            regions_before,
+            "dividing nothing creates no region"
+        );
+        assert_eq!(
+            editor.compiled_accepted.topology.faces.len(),
+            1,
+            "the domain is still one face"
+        );
+    }
+
+    /// Attaching both ends of a free separator is when it finally divides, and
+    /// the daughter face inherits the material of the region it was cut out of,
+    /// rather than whatever the draw panel had selected when the curve was
+    /// drawn, which by then is long forgotten.
+    #[test]
+    fn a_separator_attached_later_inherits_the_material_it_divides() {
+        let mut editor = TopologyEditor::default();
+        let ring = subdomain_ring(&mut editor, Point2::new(0.03, 0.05), 0.45);
+        let enclosing_material = editor.add_material().unwrap();
+        let drawn_material = editor.add_material().unwrap();
+        let enclosing_region = editor
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .map(|region| region.id)
+            .find(|region| *region != BACKGROUND_REGION)
+            .expect("the ring's own region");
+        editor
+            .set_region_material(enclosing_region, enclosing_material)
+            .unwrap();
+        settle(&mut editor);
+
+        let (start_point, start) = span_anchor(&editor, ring, 0, false);
+        let (end_point, end) = span_anchor(&editor, ring, 4, false);
+        // Strictly inside: until its ends are attached the separator must touch
+        // nothing, or the two curves meet with no junction between them.
+        let centre = Point2::new(0.03, 0.05);
+        let inset = |point: Point2| {
+            Point2::new(
+                centre.x + (point.x - centre.x) * 0.8,
+                centre.y + (point.y - centre.y) * 0.8,
+            )
+        };
+        let separator = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![inset(start_point), centre, inset(end_point)])
+                    .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: drawn_material,
+                },
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        assert_eq!(
+            editor.document.model.draft.regions.len(),
+            2,
+            "free ends divide nothing yet"
+        );
+
+        editor.attach_endpoint(separator, 0, start).unwrap();
+        settle(&mut editor);
+        assert_eq!(
+            editor.document.model.draft.regions.len(),
+            2,
+            "one attached end still divides nothing"
+        );
+        editor.attach_endpoint(separator, 1, end).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+
+        let daughter = editor
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .find(|region| region.id != BACKGROUND_REGION && region.id != enclosing_region)
+            .expect("the ring's interior was divided");
+        assert_eq!(
+            daughter.material, enclosing_material,
+            "the daughter keeps what it was cut out of"
+        );
+        assert_ne!(daughter.material, drawn_material);
+    }
+
     /// A reshaping control deletion must not tear an incident junction off its
     /// authoritative topology vertex, and must not let a face anchor drift
     /// across a junction into a face that another assignment already owns.
@@ -5948,6 +6088,9 @@ mod tests {
         }
     }
 
+    /// Invalid because the detached end still lies on the outer wall with no
+    /// junction holding it there, not because it transmits: a transmitting end
+    /// that meets nothing is a state the compiler accepts.
     #[test]
     fn detaching_a_separator_is_an_invalid_draft_that_undo_restores() {
         let mut editor = TopologyEditor::default();

@@ -150,6 +150,61 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — A curve that divides nothing is a state worth holding
+
+Four separate rules refused a separator that does not divide: the compiler's
+`FreeTransmittingEnd`, the editor's "needs two attached endpoints" and "must
+create exactly one new face", and the viewport's "Start a separator on an active
+boundary". None of them defended a capability the engine lacks. Bypassing the
+compiler's check and running a free transmitting curve end to end: it compiles
+to one face, and it meshes at 0.08 and 0.18 with total area exactly 4.000000 and
+no vertex left out of the triangulation.
+
+Which makes the refusal a modelling opinion, and a costly one - the plainest way
+to switch a wall off without deleting it is to set its spans transmitting, and
+for a *free* baffle, the commonest kind, that made the document invalid. An
+attached baffle could already be toggled: drawing a chord across a subdomain and
+switching it to Transmit compiles, stays valid and meshes, merging the two faces
+back into one.
+
+- Removed the check and the `TopologyIssue::FreeTransmittingEnd` variant. Its
+  two tests now assert the opposite: a transmitting curve alone in the domain
+  leaves one face with itself on both sides of it, and a transmitting crossing
+  with four free ends is atomized into a vertex without dividing anything.
+- The editor draws a separator with any number of attachments. `assign_new_faces`
+  accepts zero new faces - there is nothing to give a material to - and still
+  refuses more than one. The excluded-face rule moved there too, so it fires
+  when a face would actually be cut out of an excluded one rather than on every
+  separator drawn in one.
+- The viewport no longer requires a separator's first click to land anywhere in
+  particular, and paints every boundary as a target for both purposes.
+- The material chosen while drawing applies only if the separator encloses
+  something as it is drawn. A face enclosed later, by attaching an end, inherits
+  the region it was cut out of - which is what the attach path already did, and
+  is the only version that does not require remembering a panel selection across
+  arbitrarily many edits.
+
+**Checked past a fresh mesh**, since a dangling transmitting chain is a shape
+several paths had never seen:
+
+- Carving cannot follow one being introduced: the cavity rim walks into the
+  chain's dead end and the repair falls back to a full rebuild. The mesh is
+  correct and the field still transfers; only the incremental path is given up,
+  and only for that edit - an edit elsewhere in the same scene still carves. A
+  test pins both halves.
+- Adaptation over a free separator refines cleanly: 541 triangles to 2116, area
+  exactly 4.000000, no orphans.
+- A boundary probe compiles on one side of a free separator and reports
+  "Boundary probe span has no active trace" on the other, because the plan
+  carries one trace where both sides name the same face. Honest, and it starts
+  working on both sides once the curve divides something.
+
+- [ ] Teach carving to follow a dangling transmitting chain, so introducing a
+  free separator repairs instead of rebuilding.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked` (502 tests), and the release build.
+
 ## 2026-09-16 — A click names a boundary, not a side of one
 
 Connecting two closed curves with a baffle was refused with "Open-curve

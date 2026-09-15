@@ -580,7 +580,6 @@ pub enum TopologyIssue {
         first: CompiledEdgeSource,
         second: CompiledEdgeSource,
     },
-    FreeTransmittingEnd(CurveId),
     TooManySegments,
     TooManyFaces,
 }
@@ -620,11 +619,6 @@ impl std::fmt::Display for TopologyIssue {
             Self::IncompatibleCrossing { first, second } => write!(
                 formatter,
                 "{first} and {second} cross, which needs both of them to transmit"
-            ),
-            Self::FreeTransmittingEnd(curve) => write!(
-                formatter,
-                "curve {} transmits but ends in open space",
-                curve.0
             ),
             Self::TooManySegments => {
                 formatter.write_str("this geometry has too many segments to trace")
@@ -1462,31 +1456,12 @@ impl GraphBuilder {
             });
         }
 
-        for curve in &geometry.curves {
-            if !curve.spline.is_open() {
-                continue;
-            }
-            for endpoint in [0, curve.nodes.len() - 1] {
-                let span = if endpoint == 0 {
-                    curve.spans[0]
-                } else {
-                    *curve.spans.last().unwrap()
-                };
-                if !span.behavior.transmitting() {
-                    continue;
-                }
-                let point = curve.spline.node_point(endpoint).unwrap();
-                let degree = vertices
-                    .iter()
-                    .position(|vertex| (vertex.point - point).norm() <= tolerance * 0.25)
-                    .map(|vertex| outgoing[vertex].len())
-                    .unwrap_or(0);
-                if degree <= 1 {
-                    return Err(TopologyIssue::FreeTransmittingEnd(curve.id));
-                }
-            }
-        }
-
+        // A transmitting end that meets nothing was refused here once, on the
+        // grounds that a curve which divides nothing is an unfinished one. It
+        // is a legitimate thing to hold: a wall switched off without being
+        // deleted, or a separator drawn now and attached later. Both sides of
+        // such a span name the same face, which carries no boundary condition
+        // and changes no material, so it is inert until an end is attached.
         Ok(TopologySnapshot {
             revision,
             domain: geometry.domain,
@@ -1979,18 +1954,30 @@ mod tests {
         );
     }
 
+    /// A transmitting curve that meets nothing divides nothing, which is a
+    /// state worth holding rather than refusing: a wall switched off without
+    /// being deleted, or a separator drawn before it is attached.
     #[test]
-    fn transmitting_free_end_is_an_invalid_draft() {
+    fn a_transmitting_curve_may_end_in_open_space() {
         let divider = open(1, 1, &[[0.0, 0.0], [0.5, 0.0]], SpanBehavior::Transmitting);
-        let issue = compile_topology(
+        let topology = compile_topology(
             &TopologyGeometry {
                 curves: vec![divider],
                 ..TopologyGeometry::default()
             },
             0,
         )
-        .unwrap_err();
-        assert_eq!(issue, TopologyIssue::FreeTransmittingEnd(CurveId(1)));
+        .unwrap();
+        assert_eq!(topology.faces.len(), 1, "it separates nothing");
+        let edge = topology
+            .edges
+            .iter()
+            .find(|edge| matches!(edge.source, CompiledEdgeSource::Curve(_)))
+            .expect("the curve is traced");
+        assert_eq!(
+            edge.left, edge.right,
+            "the same face lies on both sides of it"
+        );
     }
 
     #[test]
@@ -2127,12 +2114,17 @@ mod tests {
             curves: vec![horizontal.clone(), vertical],
             ..TopologyGeometry::default()
         };
-        // All four free ends still make the transmitting draft incomplete, but
-        // the proper crossing itself is accepted and atomized.
-        assert!(matches!(
-            compile_topology(&geometry, 0),
-            Err(TopologyIssue::FreeTransmittingEnd(_))
-        ));
+        // Four free ends divide nothing, so the crossing pair is one face; the
+        // crossing itself is accepted and atomized.
+        let crossed = compile_topology(&geometry, 0).unwrap();
+        assert_eq!(crossed.faces.len(), 1);
+        assert!(
+            crossed
+                .vertices
+                .iter()
+                .any(|vertex| vertex.point == Point2::new(0.0, 0.0)),
+            "the crossing is atomized into a vertex"
+        );
 
         let separated = open(3, 3, &[[0.0, -0.8], [0.0, 0.8]], SpanBehavior::REFLECTING);
         let issue = compile_topology(

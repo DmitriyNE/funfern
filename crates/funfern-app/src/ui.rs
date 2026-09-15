@@ -24,7 +24,7 @@ use funfern_app::document::{ProbeId, ProbeSamplingPreset, VectorOverlay};
 use funfern_app::topology_editor::{
     ClosedCurvePurpose, JoinRecord, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
     TopologyBoundaryProbeTarget, TopologyCurveRemoval, TopologyDocument, TopologyEditor,
-    TopologyProbeDefinition, TopologyProbeTarget, TopologySpanRemoval, attachment_faces,
+    TopologyProbeDefinition, TopologyProbeTarget, TopologySpanRemoval,
 };
 use funfern_app::topology_persistence::{self as persistence, TopologyLoadCandidate};
 use funfern_app::topology_runtime::{
@@ -4345,21 +4345,6 @@ impl Playground {
             None,
             None,
         )?;
-        // A separator has to start somewhere it can divide, so its first point
-        // needs a boundary with an active subdomain on one side or the other.
-        if self.open_purpose == OpenPurpose::Separator
-            && draw.points.is_empty()
-            && !attachment_faces(hit.attachment, compiled)
-                .into_iter()
-                .any(|face| {
-                    compiled
-                        .assignments
-                        .iter()
-                        .any(|assignment| assignment.face == face && assignment.region.is_some())
-                })
-        {
-            return None;
-        }
         Some(hit)
     }
     fn draw_attachment_targets(&self, painter: &egui::Painter, r: Rect, draw: &DrawGesture) {
@@ -4369,44 +4354,21 @@ impl Playground {
         let Some(compiled) = &self.editor.compiled_draft else {
             return;
         };
-        let active_faces = compiled
-            .assignments
-            .iter()
-            .filter_map(|assignment| assignment.region.map(|_| assignment.face))
-            .collect::<BTreeSet<_>>();
-        // Either side of a boundary makes it a target: the side a click lands
-        // on is not a choice the user is making, and the editor reads the face
-        // from where the curve is drawn.
-        let eligible = |faces: &[FaceId]| {
-            self.open_purpose == OpenPurpose::Baffle
-                || faces.iter().any(|face| active_faces.contains(face))
-        };
+        // Every boundary is a target for either purpose. A separator no longer
+        // has to divide something the moment it is drawn, and which side of a
+        // boundary a click lands on is not a choice the user is making.
         let stroke = Stroke::new(2.2, Color32::from_rgba_unmultiplied(248, 196, 112, 105));
         for edge in &compiled.topology.edges {
-            let faces = match edge.source {
-                CompiledEdgeSource::Outer(_) => [edge.left, edge.left],
-                CompiledEdgeSource::Curve(_) => [edge.left, edge.right],
-            };
-            if eligible(&faces) {
-                painter.line_segment(
-                    [
-                        self.screen(edge.points[0], r),
-                        self.screen(edge.points[1], r),
-                    ],
-                    stroke,
-                );
-            }
+            painter.line_segment(
+                [
+                    self.screen(edge.points[0], r),
+                    self.screen(edge.points[1], r),
+                ],
+                stroke,
+            );
         }
         for vertex in &compiled.topology.vertices {
-            if vertex.authored.is_some()
-                && eligible(
-                    &vertex
-                        .traces
-                        .iter()
-                        .map(|trace| trace.face)
-                        .collect::<Vec<_>>(),
-                )
-            {
+            if vertex.authored.is_some() {
                 painter.circle_filled(self.screen(vertex.point, r), 5.0, GOLD);
             }
         }
@@ -5655,14 +5617,6 @@ impl Playground {
             if let Some(hit) = snap {
                 point = hit.point;
                 attachment = Some(hit.attachment);
-            }
-            if self.open_purpose == OpenPurpose::Separator
-                && gesture.points.is_empty()
-                && attachment.is_none()
-            {
-                self.message = "Start a separator on an active boundary".into();
-                self.draw = Some(gesture);
-                return;
             }
         }
         if gesture
