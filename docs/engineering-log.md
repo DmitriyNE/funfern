@@ -138,6 +138,45 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-15 — Probes belong to the wave buffers, so they follow them back
+
+Reported as probes sticking after a Reset, with Clear as the only way out. Two
+faults, stacked.
+
+Every probe buffer lives and dies with the wave buffers: `install` opens by
+clearing the point, curve, area, and far-field buffers and despawning their
+readbacks. The only thing that ever recreated them was `configure_probes`, and
+it was reachable only from the two commit paths. A reset changes no document
+revision, so no candidate is prepared and no commit arrives - the probes were
+left with no buffers and no way back, and a rolled-back transfer was the same.
+`probe_gpu_token` was written at both commits and never read: the staleness
+comparison it was meant to drive was lost in the unified-topology swap, where
+the old engine had `probe_compiled` keyed to the GPU generation and revisions.
+
+It is `probe_upload` now - topology token, GPU generation, and the four probe
+revisions - and one check per frame re-runs the upload whenever the token or the
+generation moves. That covers the commits it replaces, the reset, and the
+rollback, by construction rather than by remembering to call it. It waits while
+an upload is in flight, like the pulse below it, because mid-upload the buffers
+are the candidate's while `runtime.active()` still names the old mesh.
+
+The second fault outlives the buffers. Reset puts `sim_time_offset` back to zero
+while the traces keep their high-water mark, and ingestion only takes a record
+newer than the trace's last, so every sample of the new run was dropped - until
+Clear removed the trace and its mark with it. The clock restarting is what makes
+the old samples foreign, so `restart_probe_traces` now runs where it restarts:
+the reset path, and a `fresh` commit, which is how loading a file or an example
+arrives. Ingestion also checks the generation and revision a readback was
+recorded against, so a readback still in flight from the run that ended cannot
+land in the run that started.
+
+Both guards were confirmed to bite by disabling each in turn against
+`a_restarted_run_records_from_its_own_clock`.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked`, `cargo build --release -p
+funfern-app --locked`.
+
 ## 2026-09-15 — The adaptation target is an overlay, so it is finally visible
 
 Reported invisible, and it was: `draw_solution` painted the target wash first,

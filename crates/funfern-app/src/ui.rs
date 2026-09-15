@@ -528,6 +528,25 @@ struct Uploading {
     degrees_of_freedom: usize,
 }
 
+/// What the probe buffers on the GPU were last built for. The topology names
+/// the stencils, but the wave buffers own the probes: every path that replaces
+/// them drops each probe's buffers and readback, and a reset or a rolled-back
+/// transfer takes that path without a commit. Keying the upload to the GPU
+/// generation as well is what brings the probes back afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProbeUpload {
+    token: TopologyToken,
+    generation: u64,
+    revision: u64,
+    curve_revision: u64,
+    area_revision: u64,
+    far_field_revision: u64,
+}
+
+fn probes_need_upload(upload: Option<ProbeUpload>, token: TopologyToken, generation: u64) -> bool {
+    upload.is_none_or(|upload| upload.token != token || upload.generation != generation)
+}
+
 #[derive(Resource)]
 pub struct Playground {
     editor: TopologyEditor,
@@ -633,7 +652,7 @@ pub struct Playground {
     startup_done: bool,
     autosave_observed: TopologyDocument,
     autosave_due: Option<Instant>,
-    probe_gpu_token: Option<TopologyToken>,
+    probe_upload: Option<ProbeUpload>,
     frame_ms: f32,
     wave_energy: Option<f64>,
     vector_overlay_average: BTreeMap<(i32, i32), Point2>,
@@ -774,7 +793,7 @@ impl Default for Playground {
             startup_done: false,
             autosave_observed: document,
             autosave_due: None,
-            probe_gpu_token: None,
+            probe_upload: None,
             frame_ms: 16.0,
             wave_energy: None,
             vector_overlay_average: BTreeMap::new(),
@@ -6052,7 +6071,6 @@ impl Playground {
                         Ok(active) => {
                             self.message = "Simulation settings committed".into();
                             self.record_handoff(&active);
-                            self.configure_probes(request, assets, commands, &active);
                         }
                         Err(error) => self.message = error,
                     },
@@ -6154,6 +6172,7 @@ impl Playground {
                         self.sim_time_offset = upload.time_offset;
                         if upload.fresh {
                             self.accumulator = 0.0;
+                            self.restart_probe_traces();
                         }
                         self.amr_adaptation_state = if active.adapted {
                             self.amr_pending_state
@@ -6167,10 +6186,8 @@ impl Playground {
                         self.amr_indicator_job = None;
                         self.amr_indicator_result = None;
                         self.amr_last_analyzed_step = None;
-                        self.probe_gpu_token = None;
                         self.message = "Simulation topology committed".into();
                         self.record_handoff(&active);
-                        self.configure_probes(request, assets, commands, &active);
                     }
                     Err(error) => {
                         if request.transfer_pending() {
@@ -6201,8 +6218,23 @@ impl Playground {
                 {
                     self.reset_requested = false;
                     self.sim_time_offset = 0.0;
+                    self.restart_probe_traces();
                 }
             }
+        }
+        // Every probe buffer belongs to the wave buffers and dies with them, so
+        // the upload is repeated whenever the topology or the GPU generation
+        // moves. A commit moves the token; a reset or a rolled-back transfer
+        // moves the generation on its own, and used to leave the probes with
+        // nothing to sample and no way back.
+        // Mid-upload the buffers already belong to the candidate while the
+        // active topology still names the old mesh, so the wait is the same one
+        // the pulse takes below: the commit a few frames later carries both.
+        if self.uploading.is_none()
+            && let Some(active) = self.runtime.active().cloned()
+            && probes_need_upload(self.probe_upload, active.bundle.token, request.generation())
+        {
+            self.configure_probes(request, assets, commands, &active);
         }
         if let Some(active) = self.runtime.active() {
             let dt = active.operator.recommended_time_step();
@@ -6378,7 +6410,6 @@ impl Playground {
             .and_then(|()| request.update_area_probes(assets, commands, &areas, 60.0, dt, physics));
         if let Err(error) = result {
             self.message = error;
-            return;
         }
         let far = active
             .far_field
@@ -6392,9 +6423,28 @@ impl Playground {
             });
         if let Err(error) = request.update_far_field(assets, commands, far.as_ref(), dt) {
             self.message = error;
-        } else {
-            self.probe_gpu_token = Some(active.bundle.token);
         }
+        // Recorded whatever happened: a rejected recorder setting is rejected
+        // the same way every frame, and the readback filter below keys on these
+        // revisions, so what the GPU actually holds is what is written down.
+        self.probe_upload = Some(ProbeUpload {
+            token: active.bundle.token,
+            generation: request.generation(),
+            revision: request.probe_revision(),
+            curve_revision: request.curve_probe_revision(),
+            area_revision: request.area_probe_revision(),
+            far_field_revision: request.far_field_revision(),
+        });
+    }
+    /// The simulation clock is starting over at zero. Ingestion only takes a
+    /// record newer than the trace's last one, so a trace carried across the
+    /// restart would refuse the entire new run — which is what made a reset
+    /// look like it had frozen the probes until the traces were cleared by hand.
+    fn restart_probe_traces(&mut self) {
+        self.probe_traces.clear();
+        self.curve_probe_traces.clear();
+        self.area_probe_traces.clear();
+        self.far_field_trace = FarFieldTrace::default();
     }
     fn refresh_amr(&mut self, request: &WaveGpuRequest, display: &WaveDisplay) {
         if !self.amr_enabled {
@@ -6647,8 +6697,26 @@ impl Playground {
         self.amr_last_started = Some(Instant::now());
         self.amr_status = "preparing estimate".into();
     }
+    /// A readback carries the generation and the revision it was recorded
+    /// against. Anything else is a ring the app no longer owns — the tail of the
+    /// run before a reset, or of the probe set before an edit — and its times
+    /// belong to a clock the traces have left behind.
+    fn readback_is_current(
+        &self,
+        generation: u64,
+        revision: u64,
+        recorded: impl Fn(&ProbeUpload) -> u64,
+    ) -> bool {
+        self.probe_upload
+            .as_ref()
+            .is_some_and(|upload| upload.generation == generation && recorded(upload) == revision)
+    }
     fn ingest_probes(&mut self, display: &ProbeDisplay) {
-        if display.readbacks == self.probe_readback {
+        if display.readbacks == self.probe_readback
+            || !self.readback_is_current(display.generation, display.revision, |upload| {
+                upload.revision
+            })
+        {
             return;
         }
         self.probe_readback = display.readbacks;
@@ -6674,7 +6742,11 @@ impl Playground {
         areas: &AreaProbeDisplay,
         far: &FarFieldDisplay,
     ) {
-        if curves.readbacks != self.curve_probe_readback {
+        if curves.readbacks != self.curve_probe_readback
+            && self.readback_is_current(curves.generation, curves.revision, |upload| {
+                upload.curve_revision
+            })
+        {
             self.curve_probe_readback = curves.readbacks;
             for record in &curves.records {
                 let trace = self
@@ -6692,7 +6764,11 @@ impl Playground {
                 }
             }
         }
-        if areas.readbacks != self.area_probe_readback {
+        if areas.readbacks != self.area_probe_readback
+            && self.readback_is_current(areas.generation, areas.revision, |upload| {
+                upload.area_revision
+            })
+        {
             self.area_probe_readback = areas.readbacks;
             for record in &areas.records {
                 let trace = self
@@ -6710,7 +6786,11 @@ impl Playground {
                 }
             }
         }
-        if far.readbacks != self.far_field_readback {
+        if far.readbacks != self.far_field_readback
+            && self.readback_is_current(far.generation, far.revision, |upload| {
+                upload.far_field_revision
+            })
+        {
             self.far_field_readback = far.readbacks;
             for record in &far.records {
                 let mut record = record.clone();
@@ -11111,5 +11191,108 @@ mod probe_interaction_tests {
             "status was {:?}",
             state.amr_status
         );
+    }
+
+    fn probe_upload(token: TopologyToken, generation: u64, revision: u64) -> ProbeUpload {
+        ProbeUpload {
+            token,
+            generation,
+            revision,
+            curve_revision: revision,
+            area_revision: revision,
+            far_field_revision: revision,
+        }
+    }
+
+    #[test]
+    fn replacing_the_wave_buffers_asks_for_the_probe_buffers_again() {
+        let token = TopologyToken {
+            document_revision: 4,
+            topology_revision: 3,
+            mesh_generation: 2,
+        };
+        let upload = probe_upload(token, 7, 1);
+        assert!(probes_need_upload(None, token, 7));
+        assert!(!probes_need_upload(Some(upload), token, 7));
+
+        // A reset keeps the topology and replaces the wave buffers, and every
+        // probe buffer goes with them. Nothing else says so.
+        assert!(probes_need_upload(Some(upload), token, 8));
+
+        // A commit that reuses the buffers still moves the stencils.
+        assert!(probes_need_upload(
+            Some(upload),
+            TopologyToken {
+                mesh_generation: 3,
+                ..token
+            },
+            7
+        ));
+    }
+
+    #[test]
+    fn a_restarted_run_records_from_its_own_clock() {
+        let sample = |time: f64| PointProbeRecord {
+            probe_id: 1,
+            time,
+            ..PointProbeRecord::default()
+        };
+        let mut state = Playground::default();
+        let token = TopologyToken {
+            document_revision: 1,
+            topology_revision: 1,
+            mesh_generation: 1,
+        };
+        state.probe_upload = Some(probe_upload(token, 1, 1));
+        state.sim_time_offset = 4.0;
+        state.ingest_probes(&ProbeDisplay {
+            generation: 1,
+            revision: 1,
+            records: vec![sample(0.5), sample(1.0)],
+            readbacks: 1,
+        });
+        let samples = |state: &Playground| -> Vec<f64> {
+            state
+                .probe_traces
+                .get(&ProbeId(1))
+                .map(|trace| trace.samples.iter().map(|sample| sample.time).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(samples(&state), vec![4.5, 5.0]);
+
+        // The run restarts: new buffers, new probes, and a clock back at zero.
+        // With the previous run's samples still in the trace every record of the
+        // new one sits below its high-water mark and is dropped — the freeze
+        // that only Clear could undo.
+        state.sim_time_offset = 0.0;
+        state.probe_upload = Some(probe_upload(token, 2, 2));
+        state.ingest_probes(&ProbeDisplay {
+            generation: 2,
+            revision: 2,
+            records: vec![sample(0.25)],
+            readbacks: 2,
+        });
+        assert_eq!(samples(&state), vec![4.5, 5.0]);
+
+        state.restart_probe_traces();
+
+        // A readback still in flight from the run that ended carries times from
+        // a clock the trace has left behind, and would land ahead of everything
+        // the new run is about to record.
+        state.ingest_probes(&ProbeDisplay {
+            generation: 1,
+            revision: 1,
+            records: vec![sample(1.5)],
+            readbacks: 3,
+        });
+        assert_eq!(samples(&state), Vec::<f64>::new());
+
+        state.ingest_probes(&ProbeDisplay {
+            generation: 2,
+            revision: 2,
+            records: vec![sample(0.25)],
+            readbacks: 4,
+        });
+        assert_eq!(samples(&state), vec![0.25]);
     }
 }

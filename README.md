@@ -396,7 +396,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   field alongside the material overlays, blue where the estimate wants the finest
   elements and orange where it wants the coarsest, and says which of adaptation
   being off, no estimate yet, or an estimate behind the mesh is leaving it empty.
-- **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Place pulse adds a
+- **Waves:** Run/Pause, Step, and Reset operate the GPU solver. Reset restarts the
+  clock at zero, so it clears the probe traces and records the new run from its
+  own start rather than appending to the previous one. Place pulse adds a
   Gaussian displacement with zero initial velocity. The optional point source is
   repositioned by dragging its viewport marker. Simulation speed is bounded to 16
   substeps per display frame. Field colors use an adjustable symmetric gain.
