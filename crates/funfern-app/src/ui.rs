@@ -3464,7 +3464,10 @@ impl Playground {
                 changed |= sampling_preset_picker(ui, id, &mut target.preset);
                 let mut side = target.side;
                 ui.horizontal(|ui| {
-                    ui.label("Trace side");
+                    ui.label("Trace side").on_hover_text(
+                        "Which of the span's two traces is read. The band in the scene runs \
+                         along it and the arrow leaves it, which is where positive flux points",
+                    );
                     for (value, label) in [
                         (CurveTraceSide::Left, "Left"),
                         (CurveTraceSide::Right, "Right"),
@@ -3481,7 +3484,10 @@ impl Playground {
                 let mut reversed = target.reversed;
                 if ui
                     .checkbox(&mut reversed, "Reverse direction")
-                    .on_hover_text("Sample the path against increasing curve parameter")
+                    .on_hover_text(
+                        "Sample the path against increasing curve parameter. The chevron in \
+                         the scene follows, and sits where the arclength axis starts",
+                    )
                     .changed()
                 {
                     target.reversed = reversed;
@@ -4188,11 +4194,49 @@ impl Playground {
                 }
                 TopologyProbeTarget::Boundary(target) => {
                     let path = self.boundary_probe_polyline(target);
+                    let width = if selected { 4.0 } else { 2.5 };
                     for pair in path.windows(2) {
                         painter.line_segment(
                             [self.screen(pair[0], r), self.screen(pair[1], r)],
-                            Stroke::new(if selected { 4.0 } else { 2.5 }, color),
+                            Stroke::new(width, color),
                         );
+                    }
+                    // A span's two traces are geometrically coincident, so
+                    // which one the probe reads is only visible if the scene
+                    // draws it: a band along that side, a chevron running the
+                    // way the arclength axis does, and at the badge the normal
+                    // the flux sign is measured against, leaving that side.
+                    let band = width * 0.5 + 3.5;
+                    let side =
+                        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 150);
+                    for pair in path.windows(2) {
+                        let a = self.screen(pair[0], r);
+                        let b = self.screen(pair[1], r);
+                        let offset = side_offset(b - a, target.side);
+                        if offset == egui::Vec2::ZERO {
+                            continue;
+                        }
+                        let offset = offset * band;
+                        painter.line_segment(
+                            [a + offset, b + offset],
+                            Stroke::new(if selected { 1.8 } else { 1.3 }, side),
+                        );
+                    }
+                    if let Some((point, outward, along)) =
+                        boundary_probe_orientation(&path, target.side, target.reversed, 0.25)
+                    {
+                        let direction = screen_direction(along);
+                        let center = self.screen(point, r) - screen_direction(outward) * band;
+                        let normal = egui::vec2(-direction.y, direction.x);
+                        let tip = center + direction * 5.0;
+                        painter
+                            .line_segment([center - direction * 5.0, tip], Stroke::new(1.5, color));
+                        for barb in [normal, -normal] {
+                            painter.line_segment(
+                                [tip, tip - direction * 4.5 + barb * 3.0],
+                                Stroke::new(1.5, color),
+                            );
+                        }
                     }
                     if let Some(badge) = Self::polyline_midpoint(&path) {
                         let badge = self.screen(badge, r);
@@ -4201,6 +4245,17 @@ impl Playground {
                             badge,
                             if selected { 9.0 } else { 7.5 },
                             Stroke::new(1.5, Color32::WHITE),
+                        );
+                    }
+                    if let Some((point, outward, _)) =
+                        boundary_probe_orientation(&path, target.side, target.reversed, 0.5)
+                    {
+                        let direction = screen_direction(outward);
+                        let ring = if selected { 9.0 } else { 7.5 };
+                        painter.arrow(
+                            self.screen(point, r) + direction * ring,
+                            direction * 16.0,
+                            Stroke::new(if selected { 2.0 } else { 1.5 }, color),
                         );
                     }
                 }
@@ -7391,11 +7446,11 @@ impl Playground {
         }
         path
     }
-    /// Point half way along a polyline by arclength, used to badge and hit the
-    /// probe where the eye expects it rather than at an arbitrary end.
-    fn polyline_midpoint(path: &[Point2]) -> Option<Point2> {
+    /// Point a fraction of the way along a polyline by arclength, with the
+    /// segment carrying it - which is what orients anything drawn there.
+    fn polyline_anchor(path: &[Point2], fraction: f64) -> Option<(Point2, [Point2; 2])> {
         let total: f64 = path.windows(2).map(|pair| (pair[1] - pair[0]).norm()).sum();
-        let mut remaining = total * 0.5;
+        let mut remaining = total * fraction;
         for pair in path.windows(2) {
             let length = (pair[1] - pair[0]).norm();
             if remaining <= length {
@@ -7404,11 +7459,18 @@ impl Playground {
                 } else {
                     0.0
                 };
-                return Some(pair[0].lerp(pair[1], fraction));
+                return Some((pair[0].lerp(pair[1], fraction), [pair[0], pair[1]]));
             }
             remaining -= length;
         }
-        path.first().copied()
+        None
+    }
+    /// Point half way along a polyline by arclength, used to badge and hit the
+    /// probe where the eye expects it rather than at an arbitrary end.
+    fn polyline_midpoint(path: &[Point2]) -> Option<Point2> {
+        Self::polyline_anchor(path, 0.5)
+            .map(|(point, _)| point)
+            .or_else(|| path.first().copied())
     }
     fn probe_badge(&self, probe: &TopologyProbeDefinition) -> Option<Point2> {
         match &probe.target {
@@ -9705,6 +9767,43 @@ fn span_behavior_state(
     state
 }
 
+/// A world direction as a screen one. The viewport scales uniformly and flips
+/// y, so a unit vector stays a unit vector.
+fn screen_direction(direction: Point2) -> egui::Vec2 {
+    egui::vec2(direction.x as f32, -direction.y as f32)
+}
+
+/// Where a boundary probe reads, and which way, a fraction of the way along the
+/// arclength it reports. The path arrives in increasing curve parameter, and
+/// `Left` names the face on the left of that direction, so the normal that
+/// leaves a left trace is the right one. That normal is what the flux sign is
+/// measured against: a positive reading is power crossing away from the side
+/// the probe reads. `along` runs the way the arclength axis does, which
+/// `reversed` turns without moving the side, so the fraction is measured from
+/// whichever end the axis starts at.
+fn boundary_probe_orientation(
+    path: &[Point2],
+    side: CurveTraceSide,
+    reversed: bool,
+    fraction: f64,
+) -> Option<(Point2, Point2, Point2)> {
+    let fraction = if reversed { 1.0 - fraction } else { fraction };
+    let (point, [start, end]) = Playground::polyline_anchor(path, fraction)?;
+    let tangent = end - start;
+    let length = tangent.norm();
+    if !length.is_finite() || length <= f64::EPSILON {
+        return None;
+    }
+    let tangent = tangent / length;
+    let left = Point2::new(-tangent.y, tangent.x);
+    let outward = match side {
+        CurveTraceSide::Left => left * -1.0,
+        CurveTraceSide::Right => left,
+    };
+    let along = if reversed { tangent * -1.0 } else { tangent };
+    Some((point, outward, along))
+}
+
 /// The screen-space unit normal pointing to one side of a span running along
 /// `tangent`, or zero for a degenerate segment. Left of increasing parameter in
 /// the world is `(t.y, -t.x)` on screen, because the viewport flips the vertical
@@ -11179,6 +11278,78 @@ mod probe_interaction_tests {
             Some(Point2::new(1.0, 3.0))
         );
         assert_eq!(Playground::polyline_midpoint(&[]), None);
+    }
+
+    #[test]
+    fn polyline_anchor_carries_the_segment_it_landed_on() {
+        let path = [
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0),
+        ];
+        let (point, segment) = Playground::polyline_anchor(&path, 0.25).unwrap();
+        assert!((point - Point2::new(1.0, 0.0)).norm() < 1.0e-12);
+        assert_eq!(segment, [path[0], path[1]]);
+        let (point, segment) = Playground::polyline_anchor(&path, 0.75).unwrap();
+        assert!((point - Point2::new(2.0, 1.0)).norm() < 1.0e-12);
+        assert_eq!(segment, [path[1], path[2]]);
+        assert_eq!(
+            Playground::polyline_anchor(&[Point2::new(1.0, 3.0)], 0.5),
+            None
+        );
+    }
+
+    /// The arrow is the flux sign made visible, so it has to leave the trace
+    /// the probe reads. `Left` names the face on the left of increasing
+    /// parameter, so on a path running east the left trace is the northern one
+    /// and the normal leaving it points south.
+    #[test]
+    fn a_boundary_probes_arrow_leaves_the_trace_it_reads() {
+        let path = [Point2::new(-1.0, 0.0), Point2::new(1.0, 0.0)];
+        let outward = |side, reversed| {
+            boundary_probe_orientation(&path, side, reversed, 0.5)
+                .unwrap()
+                .1
+        };
+        assert!((outward(CurveTraceSide::Left, false) - Point2::new(0.0, -1.0)).norm() < 1.0e-12);
+        assert!((outward(CurveTraceSide::Right, false) - Point2::new(0.0, 1.0)).norm() < 1.0e-12);
+        // Reversing turns the arclength axis, never the side that is read.
+        assert!((outward(CurveTraceSide::Left, true) - Point2::new(0.0, -1.0)).norm() < 1.0e-12);
+        assert!((outward(CurveTraceSide::Right, true) - Point2::new(0.0, 1.0)).norm() < 1.0e-12);
+    }
+
+    /// Reversing turns the chevron and moves it to the other end, because a
+    /// quarter of the way along is measured from wherever arclength starts.
+    #[test]
+    fn reversing_a_boundary_probe_turns_its_chevron_alone() {
+        let path = [
+            Point2::new(-1.0, 0.0),
+            Point2::new(0.0, 0.0),
+            Point2::new(0.0, 2.0),
+        ];
+        let quarter = |reversed| {
+            boundary_probe_orientation(&path, CurveTraceSide::Left, reversed, 0.25).unwrap()
+        };
+        let (forward_point, forward_outward, forward_along) = quarter(false);
+        let (back_point, back_outward, back_along) = quarter(true);
+        assert!((forward_point - Point2::new(-0.25, 0.0)).norm() < 1.0e-12);
+        assert!((back_point - Point2::new(0.0, 1.25)).norm() < 1.0e-12);
+        assert!((forward_along - Point2::new(1.0, 0.0)).norm() < 1.0e-12);
+        assert!((back_along - Point2::new(0.0, -1.0)).norm() < 1.0e-12);
+        // Both anchors read the left trace, so both normals leave it.
+        assert!((forward_outward - Point2::new(0.0, -1.0)).norm() < 1.0e-12);
+        assert!((back_outward - Point2::new(1.0, 0.0)).norm() < 1.0e-12);
+    }
+
+    #[test]
+    fn a_boundary_path_too_short_to_orient_draws_no_marks() {
+        for path in [vec![], vec![Point2::new(0.0, 0.0)]] {
+            assert!(boundary_probe_orientation(&path, CurveTraceSide::Left, false, 0.5).is_none());
+        }
+        let stationary = [Point2::new(1.0, 1.0), Point2::new(1.0, 1.0)];
+        assert!(
+            boundary_probe_orientation(&stationary, CurveTraceSide::Left, false, 0.5).is_none()
+        );
     }
 
     /// Every probe kind must resolve a badge point, otherwise it draws no label.

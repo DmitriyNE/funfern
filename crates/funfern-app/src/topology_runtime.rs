@@ -1172,6 +1172,9 @@ mod tests {
         ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
         TopologyEditor,
     };
+    use crate::topology_viewport::{
+        SampledTopologyGeometry, ScreenPoint, TopologySpanTarget, ViewportTransform,
+    };
 
     fn options() -> MeshingOptions {
         MeshingOptions {
@@ -2373,6 +2376,158 @@ mod tests {
             (left.x + right.x).abs() < 1.0e-9 && (left.y + right.y).abs() < 1.0e-9,
             "the two sides face opposite ways: {left:?} {right:?}"
         );
+    }
+
+    /// The scene draws a boundary probe's band and flux arrow from the sampled
+    /// polyline and the trace side alone, so that pair has to agree with the
+    /// normal the stencil derives from the mesh. `Left` names the face on the
+    /// left of increasing parameter - which is the side the band is drawn - and
+    /// the normal leaving it points right of the drawn path.
+    #[test]
+    fn a_left_traces_normal_points_right_of_the_drawn_path() {
+        let mut editor = TopologyEditor::default();
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.4),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let spans = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(loop_id)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<Vec<_>>();
+        let probe = editor
+            .create_probe(
+                "Left".into(),
+                [200, 160, 90],
+                TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                    curve: loop_id,
+                    spans: spans.clone(),
+                    side: CurveTraceSide::Left,
+                    reversed: false,
+                    preset: crate::document::ProbeSamplingPreset::default(),
+                }),
+            )
+            .unwrap();
+        settle(&mut editor);
+        let compiled = editor.compiled_accepted.clone();
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                compiled.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let active = runtime.commit_ready(token).unwrap();
+
+        // The plan puts a left trace on the face that lies to the left of the
+        // curve's own direction, so an offset band names the face it covers.
+        let mut checked = 0;
+        for boundary in &active.bundle.plan.boundaries {
+            let PlannedBoundarySource::Curve {
+                curve,
+                side: CurveTraceSide::Left,
+                ..
+            } = boundary.source
+            else {
+                continue;
+            };
+            if curve != loop_id {
+                continue;
+            }
+            let tangent = boundary.points[1] - boundary.points[0];
+            let tangent = tangent / tangent.norm();
+            let left = Point2::new(-tangent.y, tangent.x);
+            let middle = (boundary.points[0] + boundary.points[1]) * 0.5;
+            assert_eq!(
+                compiled.topology.face_at(middle + left * 0.02),
+                Some(boundary.face),
+                "a left trace at {middle:?} covers the face on its left"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "the loop planned left traces");
+
+        // The polyline the scene draws, in the order `boundary_probe_polyline`
+        // assembles it.
+        let sampled = SampledTopologyGeometry::new(
+            &editor.document.model.draft.geometry,
+            ViewportTransform {
+                screen_center: ScreenPoint::new(100.0, 100.0),
+                world_center: Point2::default(),
+                pixels_per_world: 100.0,
+            },
+            0.25,
+        )
+        .unwrap();
+        let mut drawn = Vec::new();
+        for span in &spans {
+            let piece = sampled
+                .spans
+                .iter()
+                .find(|candidate| candidate.target == TopologySpanTarget::Curve(*span))
+                .expect("the span is drawn");
+            for sample in &piece.samples {
+                if drawn.last() != Some(&sample.point) {
+                    drawn.push(sample.point);
+                }
+            }
+        }
+        let tangent_at = |point: Point2| {
+            drawn
+                .windows(2)
+                .filter_map(|pair| {
+                    let segment = pair[1] - pair[0];
+                    let length = segment.norm();
+                    if length <= 0.0 {
+                        return None;
+                    }
+                    let fraction =
+                        ((point - pair[0]).dot(segment) / (length * length)).clamp(0.0, 1.0);
+                    let closest = pair[0].lerp(pair[1], fraction);
+                    Some(((point - closest).norm(), segment / length))
+                })
+                .min_by(|left, right| left.0.total_cmp(&right.0))
+                .map(|(_, tangent)| tangent)
+                .expect("the path has a segment")
+        };
+
+        let compiled_probe = active
+            .probes
+            .iter()
+            .find(|candidate| candidate.id == probe)
+            .expect("the probe compiled");
+        let TopologyProbeCompilation::Ready(stencil) = &compiled_probe.result else {
+            panic!("the probe did not compile: {:?}", compiled_probe.result);
+        };
+        let TopologyProbeStencil::Boundary(points) = stencil.as_ref() else {
+            panic!("the probe compiled to {stencil:?}");
+        };
+        assert!(!points.is_empty(), "the probe sampled the trace");
+        for sample in points.iter() {
+            let tangent = tangent_at(sample.point);
+            let right = Point2::new(tangent.y, -tangent.x);
+            assert!(
+                sample.outward_normal.dot(right) > 0.9,
+                "the left trace's normal {:?} at {:?} leaves the path running {tangent:?}",
+                sample.outward_normal,
+                sample.point
+            );
+        }
     }
 
     #[test]

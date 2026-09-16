@@ -150,6 +150,53 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — A boundary probe now says which trace it reads
+
+A span's two traces are geometrically coincident, so a boundary probe drew as a
+line with a badge and nothing in the scene distinguished the side it sampled
+from the side it ignored. Neither did anything show which way its arclength axis
+ran. Both were in the inspector only.
+
+A line probe carries one arrow because Swap ends flips the arclength order and
+the flux sign together. A boundary probe cannot: `side` picks the trace, and
+with it the direction positive flux points, while Flip reverses the arclength
+axis alone - `compile_boundary_probe` filters the planned pieces by `side`
+whatever `reversed` says, and only reverses their order afterwards. So the two
+facts need two marks, and the side needs a third that is not an arrow, because
+an arrow leaving a side names it only by its tail.
+
+The scene now draws a thin band offset onto the sampled trace, a chevron on that
+band a quarter of the way along the arclength, and at the badge the line probe's
+own arrow along the outward normal. The band reuses `side_offset`, which the
+editor already uses to show a selected span's side, so the two agree by
+construction. The chevron's quarter is measured from wherever arclength starts,
+so reversing moves it to the other end rather than only turning it.
+
+The directions come from the drawn polyline: its samples run with increasing
+curve parameter, `Left` names the face on that side, and the normal leaving a
+left trace is therefore the right one. Getting that backwards is invisible in a
+screenshot and wrong in a reading, so a test in the runtime pins it to the
+solver rather than to the reasoning: on a closed subdomain, every planned left
+trace covers the face `face_at` finds on its left, and every stencil sample's
+`outward_normal` points right of the nearest segment of the polyline the scene
+draws. Both halves fail when either is flipped.
+
+That test first went to a free separator and failed. The first sample sits on
+the dangling tip, where the boundary wraps around the end and the element behind
+it can be on either side - a real ambiguity at a free end, not a wrong
+convention. A closed loop has no such point.
+
+`polyline_midpoint` came out into `polyline_anchor`, which returns the segment
+carrying the point, since a mark needs the direction there and not only the
+place. The midpoint is now that at a half, falling back to the first point as
+before for a path too short to walk.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. Five new tests: the anchor and its segment,
+the normal leaving the trace on both sides, reversal turning the chevron and not
+the side, a path too short to orient, and the runtime's convention check.
+
 ## 2026-09-16 — The grid had no rows, and was under the field anyway
 
 Two things, and together they made the toggle do nothing visible.
