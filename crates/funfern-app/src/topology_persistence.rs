@@ -1,18 +1,13 @@
 //! Version-22 persistence for the unified topology document.
 //!
-//! This is deliberately a hard schema boundary. Production accepts only version
-//! 22 and has no legacy geometry adapter; the older codec remains solely as an
-//! editor regression fixture while its shared scalar codecs are extracted.
+//! This is deliberately a hard schema boundary: production accepts only version
+//! 22, and there is no legacy geometry adapter behind it. The whole schema
+//! lives here, value codecs included, so a field that changes shape changes in
+//! one file.
 
-use crate::document::{MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, ProbeId};
-pub use crate::persistence::MAX_FILE_BYTES;
-use crate::persistence::{
-    StoredFaceCondition, StoredOuterBoundaryCondition, StoredPhysicsModel, StoredPresentation,
-    StoredProbeSamplingPreset, StoredScalarField, StoredTimeSignal, decode_face_condition,
-    decode_open_spline, decode_outer_condition, decode_physics, decode_presentation,
-    decode_probe_preset, decode_scalar_field, decode_signal, decode_spline, encode_face_condition,
-    encode_outer_condition, encode_physics, encode_presentation, encode_probe_preset,
-    encode_scalar_field, encode_signal,
+use crate::document::{
+    MAX_PROBES, MAX_SEGMENT_PROBE_POINTS, MaterialOverlay, MaterialProperty, PresentationSettings,
+    ProbeId, ProbeSamplingPreset, VectorOverlay,
 };
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyDocumentModel, TopologyProbeDefinition,
@@ -23,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const TOPOLOGY_FILE_VERSION: u32 = 22;
+pub const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct Header {
@@ -507,10 +503,10 @@ fn decode_scene(stored: StoredTopologyScene) -> Result<TopologyScene, String> {
                 Ok(Material {
                     id: MaterialId(material.id),
                     name: material.name,
-                    mass_density: decode_scalar_field(material.mass_density, true)?,
-                    stiffness: decode_scalar_field(material.stiffness, true)?,
-                    damping: decode_scalar_field(material.damping, true)?,
-                    axis_ratio: decode_scalar_field(material.axis_ratio, true)?,
+                    mass_density: decode_scalar_field(material.mass_density)?,
+                    stiffness: decode_scalar_field(material.stiffness)?,
+                    damping: decode_scalar_field(material.damping)?,
+                    axis_ratio: decode_scalar_field(material.axis_ratio)?,
                     parameters: decode_parameters(material.parameters),
                     color: material.color,
                 })
@@ -540,7 +536,7 @@ fn decode_scene(stored: StoredTopologyScene) -> Result<TopologyScene, String> {
                 Ok(VolumeSource {
                     region: RegionId(source.region),
                     enabled: source.enabled,
-                    profile: decode_scalar_field(source.profile, true)?,
+                    profile: decode_scalar_field(source.profile)?,
                     parameters: decode_parameters(source.parameters),
                     signal: decode_signal(source.signal),
                 })
@@ -1044,6 +1040,462 @@ fn encode_points(points: &[Point2]) -> Vec<[f64; 2]> {
     points.iter().map(|point| [point.x, point.y]).collect()
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredPresentation {
+    grid: bool,
+    control_polygons: bool,
+    handles: bool,
+    accepted_reference: bool,
+    boundary_conditions: bool,
+    mesh: bool,
+    mesh_boundaries: bool,
+    /// Retired: the adaptation target is a `material_overlay` choice now. Still
+    /// read, so an older scene that had it on is migrated, and still written as
+    /// `false`, because a build from before the move requires the key.
+    #[serde(default)]
+    adaptation_target: bool,
+    point_probes: bool,
+    line_probes: bool,
+    boundary_probes: bool,
+    area_probes: bool,
+    far_field_contour: bool,
+    #[serde(default = "default_probe_labels")]
+    probe_labels: bool,
+    field: bool,
+    field_gain: f32,
+    #[serde(default)]
+    vector_overlay: StoredVectorOverlay,
+    #[serde(default = "default_vector_overlay_smoothed")]
+    vector_overlay_smoothed: bool,
+    #[serde(default = "default_vector_overlay_density")]
+    vector_overlay_density: f32,
+    #[serde(default = "default_vector_overlay_gain")]
+    vector_overlay_gain: f32,
+    material_overlay: StoredMaterialOverlay,
+    material_overlay_opacity: f32,
+    material_overlay_auto_range: bool,
+    material_overlay_logarithmic: bool,
+    material_overlay_manual_min: f64,
+    material_overlay_manual_max: f64,
+}
+
+const fn default_probe_labels() -> bool {
+    true
+}
+const fn default_vector_overlay_smoothed() -> bool {
+    true
+}
+const fn default_vector_overlay_density() -> f32 {
+    54.0
+}
+const fn default_vector_overlay_gain() -> f32 {
+    1.0
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum StoredVectorOverlay {
+    #[default]
+    Off,
+    #[serde(rename = "complementary_field_rate", alias = "complementary_field")]
+    ComplementaryField,
+    RelativeEnergyFlow,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", content = "property", rename_all = "snake_case")]
+enum StoredMaterialOverlay {
+    Off,
+    Regions,
+    Subdomains,
+    AdaptationTarget,
+    Property(StoredMaterialProperty),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredMaterialProperty {
+    Density,
+    Stiffness,
+    Damping,
+    WaveSpeed,
+    Impedance,
+    Anisotropy,
+    VolumeSource,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredProbeSamplingPreset {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredPhysicsModel {
+    Mechanical,
+    Electromagnetic { polarization: StoredPolarization },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredPolarization {
+    Tm,
+    Te,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredScalarField {
+    Constant { value: f64 },
+    Formula { source: String },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredFaceCondition {
+    Reflecting,
+    Impedance { ratio: f64 },
+    SecondOrderOutgoing,
+    ElectricWall,
+    MagneticWall,
+    Neumann { signal: StoredTimeSignal },
+    Dirichlet { signal: StoredTimeSignal },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredOuterBoundaryCondition {
+    Reflecting,
+    FirstOrderOutgoing,
+    SecondOrderOutgoing,
+    ElectricWall,
+    MagneticWall,
+    Neumann { signal: StoredTimeSignal },
+    Dirichlet { signal: StoredTimeSignal },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredTimeSignal {
+    Harmonic {
+        offset: f64,
+        amplitude: f64,
+        frequency_hz: f64,
+        phase_radians: f64,
+    },
+}
+
+fn encode_physics(physics: PhysicsModel) -> StoredPhysicsModel {
+    match physics {
+        PhysicsModel::Mechanical => StoredPhysicsModel::Mechanical,
+        PhysicsModel::Electromagnetic { polarization } => StoredPhysicsModel::Electromagnetic {
+            polarization: match polarization {
+                ElectromagneticPolarization::Tm => StoredPolarization::Tm,
+                ElectromagneticPolarization::Te => StoredPolarization::Te,
+            },
+        },
+    }
+}
+
+fn decode_physics(physics: StoredPhysicsModel) -> PhysicsModel {
+    match physics {
+        StoredPhysicsModel::Mechanical => PhysicsModel::Mechanical,
+        StoredPhysicsModel::Electromagnetic { polarization } => PhysicsModel::Electromagnetic {
+            polarization: match polarization {
+                StoredPolarization::Tm => ElectromagneticPolarization::Tm,
+                StoredPolarization::Te => ElectromagneticPolarization::Te,
+            },
+        },
+    }
+}
+
+fn encode_scalar_field(field: &ScalarField) -> StoredScalarField {
+    match field {
+        ScalarField::Constant(value) => StoredScalarField::Constant { value: *value },
+        ScalarField::Formula(formula) => StoredScalarField::Formula {
+            source: formula.source().into(),
+        },
+    }
+}
+
+fn decode_scalar_field(field: StoredScalarField) -> Result<ScalarField, String> {
+    match field {
+        StoredScalarField::Constant { value } => Ok(ScalarField::constant(value)),
+        StoredScalarField::Formula { source } => {
+            ScalarField::formula(source).map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn encode_signal(signal: TimeSignal) -> StoredTimeSignal {
+    let [offset, amplitude, frequency_hz, phase_radians] = signal.harmonic_parameters();
+    StoredTimeSignal::Harmonic {
+        offset,
+        amplitude,
+        frequency_hz,
+        phase_radians,
+    }
+}
+
+fn decode_signal(signal: StoredTimeSignal) -> TimeSignal {
+    let StoredTimeSignal::Harmonic {
+        offset,
+        amplitude,
+        frequency_hz,
+        phase_radians,
+    } = signal;
+    TimeSignal::Harmonic {
+        offset,
+        amplitude,
+        frequency_hz,
+        phase_radians,
+    }
+}
+
+fn encode_outer_condition(condition: OuterBoundaryCondition) -> StoredOuterBoundaryCondition {
+    match condition {
+        OuterBoundaryCondition::Reflecting => StoredOuterBoundaryCondition::Reflecting,
+        OuterBoundaryCondition::FirstOrderOutgoing => {
+            StoredOuterBoundaryCondition::FirstOrderOutgoing
+        }
+        OuterBoundaryCondition::SecondOrderOutgoing => {
+            StoredOuterBoundaryCondition::SecondOrderOutgoing
+        }
+        OuterBoundaryCondition::ElectricWall => StoredOuterBoundaryCondition::ElectricWall,
+        OuterBoundaryCondition::MagneticWall => StoredOuterBoundaryCondition::MagneticWall,
+        OuterBoundaryCondition::Neumann { signal } => StoredOuterBoundaryCondition::Neumann {
+            signal: encode_signal(signal),
+        },
+        OuterBoundaryCondition::Dirichlet { signal } => StoredOuterBoundaryCondition::Dirichlet {
+            signal: encode_signal(signal),
+        },
+    }
+}
+
+fn decode_outer_condition(condition: StoredOuterBoundaryCondition) -> OuterBoundaryCondition {
+    match condition {
+        StoredOuterBoundaryCondition::Reflecting => OuterBoundaryCondition::Reflecting,
+        StoredOuterBoundaryCondition::FirstOrderOutgoing => {
+            OuterBoundaryCondition::FirstOrderOutgoing
+        }
+        StoredOuterBoundaryCondition::SecondOrderOutgoing => {
+            OuterBoundaryCondition::SecondOrderOutgoing
+        }
+        StoredOuterBoundaryCondition::ElectricWall => OuterBoundaryCondition::ElectricWall,
+        StoredOuterBoundaryCondition::MagneticWall => OuterBoundaryCondition::MagneticWall,
+        StoredOuterBoundaryCondition::Neumann { signal } => OuterBoundaryCondition::Neumann {
+            signal: decode_signal(signal),
+        },
+        StoredOuterBoundaryCondition::Dirichlet { signal } => OuterBoundaryCondition::Dirichlet {
+            signal: decode_signal(signal),
+        },
+    }
+}
+
+fn encode_face_condition(condition: FaceBoundaryCondition) -> StoredFaceCondition {
+    match condition {
+        FaceBoundaryCondition::Reflecting => StoredFaceCondition::Reflecting,
+        FaceBoundaryCondition::Impedance { ratio } => StoredFaceCondition::Impedance { ratio },
+        FaceBoundaryCondition::SecondOrderOutgoing => StoredFaceCondition::SecondOrderOutgoing,
+        FaceBoundaryCondition::ElectricWall => StoredFaceCondition::ElectricWall,
+        FaceBoundaryCondition::MagneticWall => StoredFaceCondition::MagneticWall,
+        FaceBoundaryCondition::Neumann { signal } => StoredFaceCondition::Neumann {
+            signal: encode_signal(signal),
+        },
+        FaceBoundaryCondition::Dirichlet { signal } => StoredFaceCondition::Dirichlet {
+            signal: encode_signal(signal),
+        },
+    }
+}
+
+fn decode_face_condition(condition: StoredFaceCondition) -> FaceBoundaryCondition {
+    match condition {
+        StoredFaceCondition::Reflecting => FaceBoundaryCondition::Reflecting,
+        StoredFaceCondition::Impedance { ratio } => FaceBoundaryCondition::Impedance { ratio },
+        StoredFaceCondition::SecondOrderOutgoing => FaceBoundaryCondition::SecondOrderOutgoing,
+        StoredFaceCondition::ElectricWall => FaceBoundaryCondition::ElectricWall,
+        StoredFaceCondition::MagneticWall => FaceBoundaryCondition::MagneticWall,
+        StoredFaceCondition::Neumann { signal } => FaceBoundaryCondition::Neumann {
+            signal: decode_signal(signal),
+        },
+        StoredFaceCondition::Dirichlet { signal } => FaceBoundaryCondition::Dirichlet {
+            signal: decode_signal(signal),
+        },
+    }
+}
+
+fn decode_spline(
+    controls: Vec<[f64; 2]>,
+    intervals: Vec<f64>,
+    multiplicities: Vec<u8>,
+) -> Result<PeriodicCubicSpline, String> {
+    if controls.iter().flatten().any(|value| !value.is_finite()) {
+        return Err("Coordinates must be finite".into());
+    }
+    let controls = controls
+        .into_iter()
+        .map(|[x, y]| Point2::new(x, y))
+        .collect();
+    if multiplicities.is_empty() {
+        PeriodicCubicSpline::new(controls, intervals)
+    } else {
+        PeriodicCubicSpline::new_with_multiplicities(controls, intervals, multiplicities)
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn decode_open_spline(
+    controls: Vec<[f64; 2]>,
+    intervals: Vec<f64>,
+    multiplicities: Vec<u8>,
+) -> Result<OpenCubicSpline, String> {
+    if controls.iter().flatten().any(|value| !value.is_finite()) {
+        return Err("Coordinates must be finite".into());
+    }
+    let controls = controls
+        .into_iter()
+        .map(|[x, y]| Point2::new(x, y))
+        .collect();
+    if multiplicities.is_empty() {
+        OpenCubicSpline::new(controls, intervals)
+    } else {
+        OpenCubicSpline::new_with_multiplicities(controls, intervals, multiplicities)
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
+    StoredPresentation {
+        grid: settings.grid,
+        control_polygons: settings.control_polygons,
+        handles: settings.handles,
+        accepted_reference: settings.accepted_reference,
+        boundary_conditions: settings.boundary_conditions,
+        mesh: settings.mesh,
+        mesh_boundaries: settings.mesh_boundaries,
+        adaptation_target: false,
+        point_probes: settings.point_probes,
+        line_probes: settings.line_probes,
+        boundary_probes: settings.boundary_probes,
+        area_probes: settings.area_probes,
+        far_field_contour: settings.far_field_contour,
+        probe_labels: settings.probe_labels,
+        field: settings.field,
+        field_gain: settings.field_gain,
+        vector_overlay: match settings.vector_overlay {
+            VectorOverlay::Off => StoredVectorOverlay::Off,
+            VectorOverlay::ComplementaryField => StoredVectorOverlay::ComplementaryField,
+            VectorOverlay::RelativeEnergyFlow => StoredVectorOverlay::RelativeEnergyFlow,
+        },
+        vector_overlay_smoothed: settings.vector_overlay_smoothed,
+        vector_overlay_density: settings.vector_overlay_density,
+        vector_overlay_gain: settings.vector_overlay_gain,
+        material_overlay: match settings.material_overlay {
+            MaterialOverlay::Off => StoredMaterialOverlay::Off,
+            MaterialOverlay::Regions => StoredMaterialOverlay::Regions,
+            MaterialOverlay::Subdomains => StoredMaterialOverlay::Subdomains,
+            MaterialOverlay::AdaptationTarget => StoredMaterialOverlay::AdaptationTarget,
+            MaterialOverlay::Property(property) => {
+                StoredMaterialOverlay::Property(match property {
+                    MaterialProperty::Density => StoredMaterialProperty::Density,
+                    MaterialProperty::Stiffness => StoredMaterialProperty::Stiffness,
+                    MaterialProperty::Damping => StoredMaterialProperty::Damping,
+                    MaterialProperty::WaveSpeed => StoredMaterialProperty::WaveSpeed,
+                    MaterialProperty::Impedance => StoredMaterialProperty::Impedance,
+                    MaterialProperty::Anisotropy => StoredMaterialProperty::Anisotropy,
+                    MaterialProperty::VolumeSource => StoredMaterialProperty::VolumeSource,
+                })
+            }
+        },
+        material_overlay_opacity: settings.material_overlay_opacity,
+        material_overlay_auto_range: settings.material_overlay_auto_range,
+        material_overlay_logarithmic: settings.material_overlay_logarithmic,
+        material_overlay_manual_min: settings.material_overlay_manual_min,
+        material_overlay_manual_max: settings.material_overlay_manual_max,
+    }
+}
+
+fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSettings, String> {
+    let settings = PresentationSettings {
+        grid: stored.grid,
+        control_polygons: stored.control_polygons,
+        handles: stored.handles,
+        accepted_reference: stored.accepted_reference,
+        boundary_conditions: stored.boundary_conditions,
+        mesh: stored.mesh,
+        mesh_boundaries: stored.mesh_boundaries,
+        point_probes: stored.point_probes,
+        line_probes: stored.line_probes,
+        boundary_probes: stored.boundary_probes,
+        area_probes: stored.area_probes,
+        far_field_contour: stored.far_field_contour,
+        probe_labels: stored.probe_labels,
+        field: stored.field,
+        field_gain: stored.field_gain,
+        vector_overlay: match stored.vector_overlay {
+            StoredVectorOverlay::Off => VectorOverlay::Off,
+            StoredVectorOverlay::ComplementaryField => VectorOverlay::ComplementaryField,
+            StoredVectorOverlay::RelativeEnergyFlow => VectorOverlay::RelativeEnergyFlow,
+        },
+        vector_overlay_smoothed: stored.vector_overlay_smoothed,
+        vector_overlay_density: stored.vector_overlay_density,
+        vector_overlay_gain: stored.vector_overlay_gain,
+        // A scene from before the move carries the target as its own flag. It
+        // becomes the overlay it now is, unless that slot already holds a
+        // material overlay, which is the one that was actually visible.
+        material_overlay: match stored.material_overlay {
+            StoredMaterialOverlay::Off if stored.adaptation_target => {
+                MaterialOverlay::AdaptationTarget
+            }
+            StoredMaterialOverlay::Off => MaterialOverlay::Off,
+            StoredMaterialOverlay::Regions => MaterialOverlay::Regions,
+            StoredMaterialOverlay::Subdomains => MaterialOverlay::Subdomains,
+            StoredMaterialOverlay::AdaptationTarget => MaterialOverlay::AdaptationTarget,
+            StoredMaterialOverlay::Property(property) => {
+                MaterialOverlay::Property(match property {
+                    StoredMaterialProperty::Density => MaterialProperty::Density,
+                    StoredMaterialProperty::Stiffness => MaterialProperty::Stiffness,
+                    StoredMaterialProperty::Damping => MaterialProperty::Damping,
+                    StoredMaterialProperty::WaveSpeed => MaterialProperty::WaveSpeed,
+                    StoredMaterialProperty::Impedance => MaterialProperty::Impedance,
+                    StoredMaterialProperty::Anisotropy => MaterialProperty::Anisotropy,
+                    StoredMaterialProperty::VolumeSource => MaterialProperty::VolumeSource,
+                })
+            }
+        },
+        material_overlay_opacity: stored.material_overlay_opacity,
+        material_overlay_auto_range: stored.material_overlay_auto_range,
+        material_overlay_logarithmic: stored.material_overlay_logarithmic,
+        material_overlay_manual_min: stored.material_overlay_manual_min,
+        material_overlay_manual_max: stored.material_overlay_manual_max,
+    };
+    if settings.valid() {
+        Ok(settings)
+    } else {
+        Err("Scene contains invalid presentation settings".into())
+    }
+}
+
+fn encode_probe_preset(preset: ProbeSamplingPreset) -> StoredProbeSamplingPreset {
+    match preset {
+        ProbeSamplingPreset::Low => StoredProbeSamplingPreset::Low,
+        ProbeSamplingPreset::Medium => StoredProbeSamplingPreset::Medium,
+        ProbeSamplingPreset::High => StoredProbeSamplingPreset::High,
+    }
+}
+
+fn decode_probe_preset(preset: StoredProbeSamplingPreset) -> ProbeSamplingPreset {
+    match preset {
+        StoredProbeSamplingPreset::Low => ProbeSamplingPreset::Low,
+        StoredProbeSamplingPreset::Medium => ProbeSamplingPreset::Medium,
+        StoredProbeSamplingPreset::High => ProbeSamplingPreset::High,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1222,5 +1674,274 @@ mod tests {
         value.as_object_mut().unwrap().remove("unexpected");
         value["model"]["accepted"]["domain"] = serde_json::json!([1.0, -1.0, -1.0, 1.0]);
         assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn every_physics_model_and_polarization_round_trips() {
+        for physics in [
+            PhysicsModel::Mechanical,
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+            PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            },
+        ] {
+            let mut document = TopologyDocument::default();
+            document.model.draft.physics = physics;
+            document.model.accepted.physics = physics;
+            let encoded = save(&document).unwrap();
+            assert_eq!(
+                parse_document(encoded.as_bytes()).unwrap(),
+                document,
+                "{physics:?} did not survive the file"
+            );
+        }
+    }
+
+    /// Every boundary condition, on the outer walls and on a divider's spans,
+    /// carries its own signal across the file. The rotation means each condition
+    /// appears on every wall and on both sides of a span across the passes, so a
+    /// swapped arm in either direction shows up.
+    #[test]
+    fn every_boundary_condition_round_trips_with_its_signal() {
+        let signal = TimeSignal::harmonic(0.25, 1.5, 3.0, 0.75);
+        let faces = [
+            FaceBoundaryCondition::Reflecting,
+            FaceBoundaryCondition::Impedance { ratio: 0.4 },
+            FaceBoundaryCondition::SecondOrderOutgoing,
+            FaceBoundaryCondition::ElectricWall,
+            FaceBoundaryCondition::MagneticWall,
+            FaceBoundaryCondition::Neumann { signal },
+            FaceBoundaryCondition::Dirichlet { signal },
+        ];
+        let outers = [
+            OuterBoundaryCondition::Reflecting,
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            OuterBoundaryCondition::ElectricWall,
+            OuterBoundaryCondition::MagneticWall,
+            OuterBoundaryCondition::Neumann { signal },
+            OuterBoundaryCondition::Dirichlet { signal },
+        ];
+        for pass in 0..faces.len() {
+            let (mut editor, curve_id) = divider_document();
+            let curve = editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curves
+                .iter_mut()
+                .find(|curve| curve.id == curve_id)
+                .unwrap();
+            curve.spans[0].behavior = SpanBehavior::Separated {
+                left: faces[pass],
+                right: faces[(pass + 1) % faces.len()],
+                coupling: InternalBoundaryCoupling::Independent,
+            };
+            // A thin gap is only a law between two reflecting faces, so it
+            // rides along on the other span rather than in the rotation.
+            curve.spans[1].behavior = SpanBehavior::Separated {
+                left: FaceBoundaryCondition::Reflecting,
+                right: FaceBoundaryCondition::Reflecting,
+                coupling: InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 0.3,
+                },
+            };
+            // Two walls meeting at a corner may not resolve to Dirichlet with
+            // different signals, so a pass wears one condition all the way
+            // round. The mixed set below pins which slot is which wall.
+            for scene in [
+                &mut editor.document.model.draft,
+                &mut editor.document.model.accepted,
+            ] {
+                scene.outer_boundaries.sides = [outers[pass]; 4];
+            }
+            let encoded = save(&editor.document).unwrap();
+            assert_eq!(
+                parse_document(encoded.as_bytes()).unwrap(),
+                editor.document,
+                "pass {pass} did not survive the file"
+            );
+        }
+
+        let (mut editor, _) = divider_document();
+        let mixed = [
+            OuterBoundaryCondition::Reflecting,
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            OuterBoundaryCondition::Neumann { signal },
+        ];
+        for scene in [
+            &mut editor.document.model.draft,
+            &mut editor.document.model.accepted,
+        ] {
+            scene.outer_boundaries.sides = mixed;
+        }
+        let encoded = save(&editor.document).unwrap();
+        assert_eq!(parse_document(encoded.as_bytes()).unwrap(), editor.document);
+    }
+
+    #[test]
+    fn every_overlay_and_sampling_preset_round_trips() {
+        let overlays = [
+            MaterialOverlay::Off,
+            MaterialOverlay::Regions,
+            MaterialOverlay::Subdomains,
+            MaterialOverlay::AdaptationTarget,
+            MaterialOverlay::Property(MaterialProperty::Density),
+            MaterialOverlay::Property(MaterialProperty::Stiffness),
+            MaterialOverlay::Property(MaterialProperty::Damping),
+            MaterialOverlay::Property(MaterialProperty::WaveSpeed),
+            MaterialOverlay::Property(MaterialProperty::Impedance),
+            MaterialOverlay::Property(MaterialProperty::Anisotropy),
+            MaterialOverlay::Property(MaterialProperty::VolumeSource),
+        ];
+        let vectors = [
+            VectorOverlay::Off,
+            VectorOverlay::ComplementaryField,
+            VectorOverlay::RelativeEnergyFlow,
+        ];
+        let presets = [
+            ProbeSamplingPreset::Low,
+            ProbeSamplingPreset::Medium,
+            ProbeSamplingPreset::High,
+        ];
+        for (index, overlay) in overlays.into_iter().enumerate() {
+            let mut document = TopologyDocument::default();
+            let flag = index.is_multiple_of(2);
+            document.presentation = PresentationSettings {
+                grid: flag,
+                control_polygons: !flag,
+                handles: flag,
+                accepted_reference: !flag,
+                boundary_conditions: flag,
+                mesh: !flag,
+                mesh_boundaries: flag,
+                point_probes: !flag,
+                line_probes: flag,
+                boundary_probes: !flag,
+                area_probes: flag,
+                far_field_contour: !flag,
+                probe_labels: flag,
+                field: !flag,
+                field_gain: 3.25,
+                vector_overlay: vectors[index % vectors.len()],
+                vector_overlay_smoothed: flag,
+                vector_overlay_density: 71.5,
+                vector_overlay_gain: 2.5,
+                material_overlay: overlay,
+                material_overlay_opacity: 0.75,
+                material_overlay_auto_range: flag,
+                material_overlay_logarithmic: !flag,
+                material_overlay_manual_min: -2.5,
+                material_overlay_manual_max: 4.5,
+            };
+            document.model.probes = vec![TopologyProbeDefinition {
+                id: ProbeId(1),
+                name: "line".into(),
+                color: [10, 20, 30],
+                enabled: true,
+                target: TopologyProbeTarget::Segment {
+                    start: Point2::new(-0.4, -0.2),
+                    end: Point2::new(0.4, 0.2),
+                    preset: presets[index % presets.len()],
+                },
+            }];
+            let encoded = save(&document).unwrap();
+            assert_eq!(
+                parse_document(encoded.as_bytes()).unwrap(),
+                document,
+                "{overlay:?} did not survive the file"
+            );
+        }
+    }
+
+    /// Several presentation keys arrived after version 22 froze and are written
+    /// with a serde default, so a file from an earlier build of this version
+    /// still loads. The retired adaptation-target flag is the one that migrates
+    /// rather than defaults.
+    #[test]
+    fn a_version_22_file_from_an_earlier_build_takes_the_presentation_defaults() {
+        let document = TopologyDocument::default();
+        let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        let presentation = value["presentation"].as_object_mut().unwrap();
+        for key in [
+            "adaptation_target",
+            "probe_labels",
+            "vector_overlay",
+            "vector_overlay_smoothed",
+            "vector_overlay_density",
+            "vector_overlay_gain",
+        ] {
+            assert!(presentation.remove(key).is_some(), "{key} was not written");
+        }
+        let decoded = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+        assert_eq!(decoded.presentation, PresentationSettings::default());
+
+        value["presentation"]["adaptation_target"] = true.into();
+        value["presentation"]["material_overlay"] = serde_json::json!({ "kind": "off" });
+        let migrated = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+        assert_eq!(
+            migrated.presentation.material_overlay,
+            MaterialOverlay::AdaptationTarget
+        );
+    }
+
+    /// The value codecs are the last guard before a bad number reaches the
+    /// solver. Version 22 also never wrote a bare coefficient or an untagged
+    /// signal, so neither is accepted back.
+    #[test]
+    fn malformed_values_are_rejected() {
+        let document = TopologyDocument::default();
+        let original: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+
+        // Damping, because zero damping is otherwise a legal material: the
+        // rejection has to come from the formula and not from a later guard.
+        let mut value = original.clone();
+        value["model"]["draft"]["materials"][0]["damping"] =
+            serde_json::json!({ "kind": "formula", "source": "1 +" });
+        let issue = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap_err();
+        assert!(issue.contains("unexpected token"), "{issue}");
+
+        let mut value = original.clone();
+        value["model"]["draft"]["materials"][0]["stiffness"] = serde_json::json!(1.5);
+        assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
+
+        let mut value = original.clone();
+        value["model"]["source"]["signal"] = serde_json::json!({
+            "offset": 0.0,
+            "amplitude": 1.0,
+            "frequency_hz": 2.0,
+            "phase_radians": 0.0,
+        });
+        assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
+
+        // JSON has no infinity, so the overflowing literal goes in as text and
+        // is unquoted afterwards. It is the reader that turns it away, which is
+        // why the codec's own guard is checked directly below.
+        let (editor, _) = divider_document();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&save(&editor.document).unwrap()).unwrap();
+        value["model"]["draft"]["curves"][0]["spline"]["controls"][0][0] =
+            serde_json::json!("overflow");
+        let text = serde_json::to_string(&value)
+            .unwrap()
+            .replace("\"overflow\"", "1e400");
+        assert!(parse_document(text.as_bytes()).is_err());
+
+        for coordinate in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let controls = vec![[coordinate, 0.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]];
+            assert_eq!(
+                decode_open_spline(controls.clone(), vec![1.0], Vec::new()).unwrap_err(),
+                "Coordinates must be finite"
+            );
+            let controls = [controls.clone(), controls].concat();
+            assert_eq!(
+                decode_spline(controls, vec![1.0; 8], Vec::new()).unwrap_err(),
+                "Coordinates must be finite"
+            );
+        }
     }
 }

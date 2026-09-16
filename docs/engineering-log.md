@@ -21,24 +21,10 @@ Low priority, correctness rather than anything that shows:
 
 Carried over from the cutover follow-up work, not from the review:
 
-- [ ] Retire the pre-cutover `editor` module. It is not dead code reachable only
-  from its own 54-test file, as this entry used to say: `topology_persistence`
-  imports the shared scalar codecs named at the top of it from `persistence`,
-  which takes its document types from `editor`, so the live schema sits on top of
-  both. Extracting those codecs is the first step and is already named in
-  `topology_persistence.rs`'s own header; deleting the two modules and their tests
-  is the second. Or keep them deliberately as the migration path's regression
-  suite and say so.
-  Two things to know before starting. `persistence.rs` has no inline tests and
-  `topology_persistence.rs` has four, so `tests/editor.rs`'s 54 are the only
-  direct coverage the shared codecs have: the extraction has to bring round-trip
-  tests of its own or the deletion takes the coverage with it. And the codecs
-  carry migration variants — `StoredScalarFieldV14`, `StoredTimeSignalV17` —
-  that version 22 never reaches, so what moves is smaller than what is there.
-  `tests/examples.rs` and its two tests are current, not legacy: they parse the
-  shipped examples through `topology_persistence` and stay. Sizes at the time of
-  writing: `editor.rs` 4,003 lines, `persistence.rs` 1,868, plus
-  `tests/fixtures/eight-obstacles-v1.json`, which only `tests/editor.rs` reads.
+- [x] Retire the pre-cutover `editor` and `persistence` modules (2026-09-16).
+  The shared value codecs moved into `topology_persistence`, which was their only
+  caller, and brought five round-trip tests with them; 8,977 lines of legacy
+  editor, legacy schema, legacy suite and its fixture went with them.
 - [ ] Measure representative browser frame timing for the cooperative topology
   job. The cutover recorded that it advances in fixed 256-work-unit slices but
   never measured what that costs in a real browser frame.
@@ -135,6 +121,63 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-16 — The last schema with two owners
+
+The version-22 file was written by `topology_persistence` but its scalar values
+— physics, material coefficients, time signals, wall and face conditions,
+splines, presentation, probe presets — were encoded by `persistence`, the
+pre-cutover schema, which in turn took its document types from `editor`, the
+pre-cutover editor. So the live file format sat on 5,871 lines of code nothing
+else called, and the only direct test of the codecs it borrowed was
+`tests/editor.rs`, a suite about loops, holes and material interfaces that the
+application no longer has.
+
+The codecs went into `topology_persistence` rather than into a module of their
+own. They had exactly one caller, and a module that exists to serve one caller
+is a hop, not a boundary; the whole version-22 schema now reads top to bottom in
+one file. Two migration wrappers came off on the way: `StoredScalarField` was an
+untagged enum over a bare version-14 number and the tagged shape, and
+`StoredTimeSignal` an untagged enum over the version-17 shape and the
+version-16 one. Version 22 writes only the tagged shape and, since it accepts
+only its own version, can only ever read it back, so both collapsed onto the
+tagged inner enum. That is byte-identical on the way out and a tightening on the
+way in: a bare coefficient inside a version-22 file is now turned away by the
+reader rather than by a hand-written message.
+
+Byte-identity was the thing to prove, not to assume. A throwaway test hashed
+what `save` produces for the default document, all eight catalog examples and
+the shipped `eight-obstacles.json` before the move and again after: the same ten
+digests and the same ten lengths. Nothing a user has on disk sees any of this.
+
+Five tests replace what the deleted suite covered, and cover more than it did:
+every physics model and polarization; every wall and face condition carrying its
+own signal; every material and vector overlay and every sampling preset; a
+version-22 file written by an earlier build, which still loads because six
+presentation keys have serde defaults and the retired adaptation-target flag
+still migrates to the overlay it became; and the value guards — a formula that
+does not parse, a bare coefficient, an untagged signal, a non-finite control
+point. Each was run against a deliberately broken codec first: nine breakages,
+nine failures.
+
+Two of those tests were wrong when first written, and the code was right both
+times. A thin-gap coupling is only a law between two reflecting faces, so
+rotating arbitrary conditions through it is not a valid span. And two walls
+meeting at a corner may not resolve to Dirichlet with different signals — in
+mechanical physics an electric wall resolves to Dirichlet with a zero signal, so
+it cannot sit beside a prescribed one. A pass now wears one condition all the
+way round, with a separate mixed-but-legal set to pin which slot is which wall.
+
+One guard turned out to be unreachable from a file: a control point of `1e400`
+is rejected by serde_json as out of range before `decode_open_spline` can call
+it non-finite, and JSON has no way to write an infinity or a NaN at all. The
+guard stays — the codecs are callable from elsewhere — but the test now checks
+the reader and the codec separately rather than claiming one covers the other.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings`, `cargo test --workspace --locked` (121 app lib, 95 app bin, 2
+examples, 1 shaders, 215 core lib, 33 geometry, 30 mesh), `cargo build --release
+-p funfern-app --locked`.
 
 ## 2026-09-16 — The grid shows what it snaps to
 

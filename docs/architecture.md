@@ -307,27 +307,35 @@ with empty history. The eight built-in examples are authored directly as topolog
 documents and exercise geometry, sources, probes, spatial materials, EM modes,
 far-field settings, and presentation presets without a legacy conversion layer.
 
-The production application reads and writes only version 22. The version 21
-decoder remains compiled temporarily as an editor regression fixture, but the UI,
-file picker, shared links, recovery, examples, and autosave never call it. There is
-no production compatibility adapter.
+The production application reads and writes only version 22, and that is the only
+decoder in the tree. The pre-cutover `editor` and `persistence` modules were
+removed once the value codecs they held — physics, material coefficients, time
+signals, wall and face conditions, splines, presentation, sampling presets —
+moved into `topology_persistence`, beside the schema that is their only caller.
+There is no compatibility adapter and no migration code: a file that is not
+version 22 is turned away by its version header, and version 22's own decoder
+accepts only the tagged value shapes it writes. Several presentation keys carry
+serde defaults so that a version-22 file written by an earlier build still loads,
+and the retired adaptation-target flag still migrates to the material overlay it
+became; those are the only tolerances inside the version.
 
-Version 21 adds open material-interface splines, stable breakpoint nodes, per-span
-left/right regions, and explicit interior/outer junctions. Version 20 adds the optional material axis-ratio field and anisotropy presentation
-overlay; versions 1–19 migrate missing ratios to one. Version 19 moves the editable axis-aligned domain into both draft and accepted
-scenes; older files migrate their historical top-level fixed domain. Version 18
-adds the scene physics model, polarization, explicit electric/magnetic
-wall variants, and a tagged material law whose serialized property names follow
-the active physics. Version-17 and older materials migrate exactly to Mechanical.
-It also persists the derived vector-overlay mode, smoothing, density, and gain.
-Version 17 introduces the tagged shared time-signal representation and moves the
-point source into the numerical core alongside its spatial carrier. Version 16 adds
-presentation settings. Version 15 adds region-owned volume sources
-and their profiles, parameters, and harmonic signals to both draft and accepted
-scenes. Version 14 stores constant/formula coefficient variants, material parameters,
-and every region's material frame. Older scalar coefficients migrate as constants;
-older interior regions receive a centered, attached, world-unit frame, and versions
-before 16 receive default presentation settings. File loading, bundled examples,
+Versions 1 to 21 are recorded below because they explain the shape of the current
+file, not because anything still reads them. Version 21 added open
+material-interface splines, stable breakpoint nodes, per-span left/right regions,
+and explicit interior/outer junctions. Version 20 added the optional material
+axis-ratio field and anisotropy presentation overlay. Version 19 moved the
+editable axis-aligned domain into both draft and accepted scenes. Version 18
+added the scene physics model, polarization, explicit electric/magnetic wall
+variants, and a tagged material law whose serialized property names follow the
+active physics; it also persists the derived vector-overlay mode, smoothing,
+density, and gain. Version 17 introduced the tagged shared time-signal
+representation and moved the point source into the numerical core alongside its
+spatial carrier. Version 16 added presentation settings. Version 15 added
+region-owned volume sources and their profiles, parameters, and harmonic signals
+to both draft and accepted scenes. Version 14 stored constant/formula coefficient
+variants, material parameters, and every region's material frame.
+
+File loading, bundled examples,
 crash recovery, and shared links all pass through the same structural decoder and
 bounded accepted-scene validator before replacing the editor document. Examples
 carry names and descriptions and render their thumbnails directly from the accepted
