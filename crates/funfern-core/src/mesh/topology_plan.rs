@@ -1090,33 +1090,71 @@ fn label_transmitting_slit(
         let PlannedBoundarySource::Curve { span, .. } = planned.boundary.source else {
             return Err(MeshError::Topology("slit trace has a non-curve label"));
         };
+        // One edge, labelled by the side the face's first traversal names; the
+        // other side is registered as carrying the region but adds no second
+        // edge, exactly as the full rebuild's deduplication leaves it.
+        let label = BoundaryLabel::Curve {
+            curve,
+            span,
+            side: CurveTraceSide::Left,
+            separated: false,
+        };
+        let key = edge_key(pair[0].0, pair[1].0);
+        if !builder.boundary_keys.contains(&key) {
+            builder.add_boundary_edge(BoundaryEdge {
+                vertices: [pair[0].0, pair[1].0],
+                label,
+                parameters: [pair[0].1, pair[1].1],
+            });
+        }
         for side in [CurveTraceSide::Left, CurveTraceSide::Right] {
-            let label = BoundaryLabel::Curve {
+            let sided = BoundaryLabel::Curve {
                 curve,
                 span,
                 side,
                 separated: false,
             };
-            if side == CurveTraceSide::Left {
-                let key = edge_key(pair[0].0, pair[1].0);
-                if !builder.boundary_keys.contains(&key) {
-                    builder.add_boundary_edge(BoundaryEdge {
-                        vertices: [pair[0].0, pair[1].0],
-                        label,
-                        parameters: [pair[0].1, pair[1].1],
-                    });
-                }
-            }
             if let Some((_, regions)) = builder
                 .boundary_regions
                 .iter_mut()
-                .find(|(candidate, _)| *candidate == label)
+                .find(|(candidate, _)| *candidate == sided)
             {
                 regions.insert(region);
             } else {
                 builder
                     .boundary_regions
-                    .push((label, BTreeSet::from([region])));
+                    .push((sided, BTreeSet::from([region])));
+            }
+        }
+        // A vertex the recovery created carries no lineage of its own, and an
+        // adaptation checks every constrained edge against the plan: an
+        // interval's endpoint has to hold its trace, and everything between
+        // them the label and parameter it sits at.
+        for (vertex, parameter) in [pair[0], pair[1]] {
+            let planned = left.iter().find_map(|step| {
+                step.boundary
+                    .parameter
+                    .iter()
+                    .zip(step.boundary.traces)
+                    .find_map(|(end, trace)| (*end == parameter).then_some(trace))
+            });
+            match planned {
+                Some(trace) => {
+                    if builder.vertices[vertex]
+                        .trace
+                        .is_some_and(|existing| existing != trace)
+                    {
+                        return Err(MeshError::Topology("slit trace lineage is inconsistent"));
+                    }
+                    builder.vertices[vertex].trace = Some(trace);
+                    trace_vertices.insert(trace, vertex);
+                }
+                None => {
+                    if builder.vertices[vertex].trace.is_none() {
+                        builder.vertices[vertex].boundary =
+                            Some(BoundaryPoint { label, parameter });
+                    }
+                }
             }
         }
     }

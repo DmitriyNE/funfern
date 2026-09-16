@@ -191,6 +191,16 @@ separator all carving, the self-drawing gesture in both directions, and the
 centre-line slit at the application's own settings - the core's test options are
 coarser and never reproduced it.
 
+**The recovered chain needed its lineage.** Adapting a mesh whose transmitting
+chain had come from a carve rather than a rebuild failed with "topology interval
+endpoint lost its trace identity", intermittently: the adaptation checks every
+constrained edge against the plan, and a vertex the recovery created carries
+nothing of its own, so an interval endpoint held a trace only when it happened
+to be a vertex some other chain had already made. Labelling now assigns each
+interval endpoint its trace and each vertex between them the label and parameter
+it sits at, which is what the cut does for a separated slit. A fourth test
+carves a free separator and then adapts over it.
+
 Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
 warnings`, `cargo test --workspace --locked` (506 tests), and the release build.
 

@@ -2058,6 +2058,106 @@ mod tests {
         });
     }
 
+    /// Adaptation checks every constrained edge against the plan it came from,
+    /// so a chain the carve recovered has to carry the same lineage a rebuild
+    /// would have given it: its interval endpoints hold their traces, and the
+    /// vertices between them the label and parameter they sit at.
+    #[test]
+    fn an_adaptation_follows_a_free_separator_the_carve_recovered() {
+        let mut editor = TopologyEditor::default();
+        let separator = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.41, 0.13),
+                    Point2::new(0.02, -0.07),
+                    Point2::new(0.37, -0.19),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: DEFAULT_MATERIAL,
+                },
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        runtime.commit_ready(token).unwrap();
+
+        editor
+            .set_control(separator, 0, Point2::new(-0.45, 0.17))
+            .unwrap();
+        settle(&mut editor);
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let carved = runtime.commit_ready(token).unwrap();
+        assert!(
+            carved.carve.is_some(),
+            "the move repaired: {:?}",
+            carved.repair_fallback
+        );
+
+        let fine = options().target_edge_length * 0.4;
+        let mut adaptation = MeshAdaptationJob::new_topology(
+            carved.mesh.clone(),
+            &carved.bundle.plan,
+            MeshAdaptationState::from_mesh(&carved.mesh),
+            runtime.reserve_mesh_revision(),
+            Arc::new(move |point: Point2, _| {
+                if point.x > 0.0 {
+                    fine
+                } else {
+                    options().target_edge_length
+                }
+            }),
+            MeshAdaptationOptions {
+                meshing: options(),
+                minimum_target_edge_length: fine,
+                maximum_target_edge_length: options().target_edge_length,
+                max_topology_changes: 8_000,
+                max_work_units: 50_000_000,
+                ..MeshAdaptationOptions::default()
+            },
+        );
+        let adapted = loop {
+            if let Some(result) = adaptation.advance(4096) {
+                break result
+                    .unwrap_or_else(|error| panic!("adaptation refused the carve: {error}"));
+            }
+        };
+        assert!(adapted.mesh.triangles.len() > carved.mesh.triangles.len());
+        assert!(
+            adapted.mesh.boundary_edges.iter().any(|edge| matches!(
+                edge.label,
+                BoundaryLabel::Curve {
+                    curve: candidate,
+                    separated: false,
+                    ..
+                } if candidate == separator
+            )),
+            "the separator survives the adaptation"
+        );
+    }
+
     /// Carrying a probe is the point of a dangling separator, and a probe reads
     /// one side of a boundary. Both sides of this one name the same face, so
     /// both have to compile - they sample the same field with opposite normals,
