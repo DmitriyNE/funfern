@@ -299,7 +299,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   another's reads the same. Auto exposure can be turned off, which puts the
   intensity slider back in charge of the whole scale. The scale is a high quantile of the current frame; it
   rises the instant the field does, so a placed pulse is never clipped, and falls
-  back over a second or so, so that pulse does not darken everything after it. It
+  back slowly — slower than a field drains away, so a domain that has emptied goes
+  dark instead of being renormalized back to full brightness. A placed pulse
+  therefore holds the scale for some seconds before the view returns to normal. It
   will not fall below a thousandth of the loudest level seen, which stops a field
   that has decayed into rounding noise from being magnified back into view. Field
   intensity and arrow gain trim that automatic scale rather than replacing it, and

@@ -10898,7 +10898,29 @@ impl AutoExposure {
     /// moves by a factor rather than by a difference takes the same time to
     /// clear a spike whatever its size, which is the only behaviour that reads
     /// the same on a field of 6e-3 and one of 7e-1.
-    const RELEASE_PER_SECOND: f64 = 8.0;
+    ///
+    /// This has to be *slower* than the field's own decay or the scale simply
+    /// follows it down and a domain that has emptied still paints at full
+    /// brightness. Measured on a recorded level series from a scene whose walls
+    /// all radiate: after the sources stop the field drains 2000-fold in eight
+    /// seconds, and at the 8.0 this started at that still painted 48 % — the
+    /// wave looked like it never left. The rates trade against each other in one
+    /// direction, the tail brightness a field settles at against how long a
+    /// placed pulse holds the scale:
+    ///
+    /// | per second | drain tail | 20x spike clears |
+    /// | --- | --- | --- |
+    /// | 1.15 | 0.07-0.37 % | 21 s |
+    /// | 1.4 | up to 3.8 % | 9 s |
+    /// | 1.7 | up to 8.2 % | 6 s |
+    /// | 8.0 | 100 % then 48 % | 2 s |
+    ///
+    /// Above about 1.25 the scale catches up with the slow late decay and the
+    /// picture creeps back up — which is also what made the high-frequency modes
+    /// the grid-scale filter is busy killing swim back into view. 1.15 never
+    /// does; the cost is that a pulse holds the scale for some twenty seconds,
+    /// which is honest, since the pulse really was that much brighter.
+    const RELEASE_PER_SECOND: f64 = 1.15;
     /// How far under the loudest level seen the reference may go.
     const QUIET_FLOOR: f64 = 1.0e-3;
     /// The longest step the release is allowed to take at once, so a stalled
@@ -11772,12 +11794,42 @@ mod tests {
             exposure.update(1.0, 1.0 / 60.0);
         }
         assert_eq!(exposure.update(20.0, 1.0 / 60.0), Some(20.0), "clipped");
-        // Two seconds is more than the release needs to give up a twentyfold
-        // spike at eight times a second, so it settles exactly on the field.
-        for _ in 0..120 {
+        // The release gives up a factor of 1.15 a second, so a twentyfold spike
+        // takes some twenty-one seconds to walk off. Bounded is the property
+        // that matters — the run peak it replaced never gave it up at all.
+        for _ in 0..1_500 {
             exposure.update(1.0, 1.0 / 60.0);
         }
         assert_eq!(exposure.reference(), Some(1.0));
+    }
+
+    /// The failure this release rate was chosen for. A scale that falls faster
+    /// than the field does simply follows it down, so a domain that has emptied
+    /// still paints at full brightness and the wave looks like it never left.
+    /// The shape here is the recorded one: full amplitude, then three decades
+    /// over eight seconds once the sources stop.
+    #[test]
+    fn a_field_that_drains_away_stops_being_painted() {
+        let mut exposure = AutoExposure::default();
+        for _ in 0..600 {
+            exposure.update(3.0e-2, 1.0 / 60.0);
+        }
+        let mut level = 3.0e-2;
+        for _ in 0..480 {
+            level *= 0.985_7;
+            exposure.update(level, 1.0 / 60.0);
+        }
+        let reference = exposure.reference().unwrap();
+        let painted = level / reference;
+        assert!(
+            level < 3.0e-5,
+            "the fixture did not actually drain: {level:e}"
+        );
+        assert!(
+            painted < 0.05,
+            "a drained domain still paints at {:.1}%",
+            painted * 100.0
+        );
     }
 
     /// And the failure the other way: once a field has decayed into rounding
@@ -11787,7 +11839,8 @@ mod tests {
     fn an_exposure_refuses_to_magnify_decayed_noise() {
         let mut exposure = AutoExposure::default();
         exposure.update(1.0, 1.0 / 60.0);
-        for _ in 0..600 {
+        // Three decades down to the floor at 1.15 a second is about fifty.
+        for _ in 0..3_600 {
             exposure.update(1.0e-9, 1.0 / 60.0);
         }
         let floor = exposure.reference().unwrap();

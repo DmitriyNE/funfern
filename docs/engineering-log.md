@@ -148,6 +148,52 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The scale stops chasing a field on its way out
+
+Two reported artifacts, one cause. When the sources stop, the field drains and
+then weak reflections slosh and decay — but the view kept them at full
+brightness, so the wave looked like it never left. And the high-frequency modes
+the grid-scale filter exists to kill swam back into view as the scale caught up
+with their artificial decay.
+
+The exposure was already asymmetric — instant attack, geometric release. The
+release was simply far faster than anything it was following, at eight times a
+second, so the reference sat on the level and the painted brightness never
+changed. Recorded a level series from the running app to measure what it has to
+beat, and replayed candidate settings against it offline rather than guessing.
+
+The first measurement was on the Starter obstacle and was wrong to use: two of
+its walls reflect, so modes with nodes at the outgoing walls are trapped and the
+field relaxes toward a standing mode rather than draining. Re-measured with all
+four walls radiating, where the field really does empty: it falls two thousandfold
+in eight seconds after the sources stop, and the old rate still painted that at
+48 %.
+
+| per second | drain tail | 20x spike clears |
+| --- | --- | --- |
+| 1.15 | 0.07-0.37 % | 21 s |
+| 1.25 | up to 1.4 % | 13 s |
+| 1.4 | up to 3.8 % | 9 s |
+| 1.7 | up to 8.2 % | 6 s |
+| 8.0 | 100 % then 48 % | 2 s |
+
+Above about 1.25 the scale catches the slow late decay and the picture creeps
+back up, which is the second artifact in miniature. 1.15 never does.
+
+A two-stage follower was built and measured first — a fast release floored on a
+slowly-moving baseline — which clears a spike in two seconds instead of
+twenty-one. It was dropped: on the tail that matters here it is *worse* than the
+flat slow rate, 1.6-1.9 % against 0.07-0.37 %, because its baseline eventually
+follows the decay down while a flat release just runs out of room against the
+quiet floor. One extra state variable bought only the pulse recovery, so the
+simpler change won. The two-stage shape is worth remembering if placing pulses in
+sequence turns out to grate.
+
+One objection raised against the simple rate did not survive checking: a slow
+release sags to 82 % during steady drive because it cannot follow the level's own
+dips. In colour that is `tanh(0.82)` against `tanh(1.0)`, 0.68 against 0.76, which
+is not visible.
+
 ## 2026-09-16 — The view stops being fooled by a rigid offset
 
 A field that has radiated away leaves a uniform offset behind, and because the

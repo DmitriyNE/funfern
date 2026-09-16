@@ -417,12 +417,14 @@ full colour, and at the slider's maximum three still did. The scale is a high
 quantile of the current frame — the 98th over a strided sample of the nodes for
 the field, the 90th over the drawn arrows for the overlay. It rises to a louder
 field at once, so nothing is clipped, and falls back by at most a fixed factor a
-second, so a transient such as a placed pulse leaves the scale within a second or
-two instead of setting it for the rest of the run. Falling by a factor rather
-than by a difference is what makes the recovery take the same time whatever the
-size of the spike. The scale never falls below a thousandth of the loudest level
-the run has reached, which is what keeps a field that has decayed into rounding
-noise from being magnified back into view.
+second. Falling by a factor rather than by a difference is what makes a spike of
+any size take the same time to walk off. That factor has to be smaller than the
+field's own decay, or the scale merely follows a draining domain down and the
+wave looks like it never left; the rate trades the brightness a decayed field
+settles at against how long a placed pulse holds the scale, and is set from a
+recorded level series rather than by taste. The scale never falls below a
+thousandth of the loudest level the run has reached, which is the backstop that
+keeps a field decayed into rounding noise from being magnified back into view.
 
 A new solver generation — a reset, a rebuilt set of buffers, a mesh handoff —
 clears the scale but keeps how loud the run has been, so the next frame sets the
