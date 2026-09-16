@@ -139,6 +139,26 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The shaders are read by the suite now
+
+Nothing in the workspace parsed the seven WGSL kernels. Every edit to them was
+checked by hand against a throwaway naga crate outside the build, which worked
+because it was remembered, and did not the once it was not: `filter` is a
+reserved WGSL keyword, and that reached the device.
+
+naga 29.0.4 was already in the lockfile under wgpu 29.0.4, so pinning it as a
+dev-dependency adds no tree and means the parse the test does is the parse the
+app's own device does. `tests/shaders.rs` reads every `.wgsl` beside the source,
+parses it, and validates it. It refuses to pass on fewer than seven, so a test
+looking in the wrong directory fails rather than reporting nothing.
+
+Held against real breakage before it was kept: renaming a local to `filter`
+fails with "name `filter` is a reserved keyword", the original bug; giving a
+`let` a type its initialiser does not have fails with the mismatch. It does not
+cover backend translation, so a Metal or browser problem still needs the app.
+
+Checked: fmt, clippy -D warnings, workspace tests, release build.
+
 ## 2026-09-16 — A weld asks the same question a deletion does
 
 The follow-up said a weld can merge subdomains, and the obvious objection is

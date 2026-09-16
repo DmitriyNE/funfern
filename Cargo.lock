@@ -2458,6 +2458,7 @@ dependencies = [
  "funfern-core",
  "image",
  "js-sys",
+ "naga",
  "rfd",
  "serde",
  "serde_json",

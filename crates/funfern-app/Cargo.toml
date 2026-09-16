@@ -23,3 +23,9 @@ js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Blob", "Document", "Element", "History", "HtmlElement", "Location", "Storage", "Url", "Window"] }
+
+[dev-dependencies]
+# Pinned to the version wgpu links, so the parse a test does is the parse the
+# app's own device does. Nothing in the workspace read the shaders before this:
+# every edit was checked by hand against a throwaway crate.
+naga = { version = "=29.0.4", features = ["wgsl-in"] }

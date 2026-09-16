@@ -534,6 +534,10 @@ the same scene.
 
 ## Check
 
+`cargo test --workspace` parses and validates every WGSL shader with the naga
+version wgpu links, so a reserved keyword or a type error in a kernel fails the
+suite rather than the device.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
