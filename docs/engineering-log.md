@@ -150,6 +150,30 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — Steps per second belongs to the solver, not to a generation
+
+The status bar's steps/s dropped to zero on every handover. The GPU's step
+counter belongs to the generation that produced it - `WaveBindGroup` carries it
+forward only while the generation matches, and a handover restarts it at zero,
+which is correct, since it is the generation-local step index the simulation
+clock pairs with `sim_time_offset`. The rate meter was differencing that counter
+across its half-second window, so a commit landed as `saturating_sub` of a
+smaller number by a larger one: zero progress, for up to half a second, every
+time.
+
+The rate now banks what the counter advanced between frames and averages the
+bank, and a changed generation restarts the per-frame baseline at zero rather
+than at the previous generation's total. Keying that on the generation rather
+than on "the counter went backwards" keeps the first frame of a new generation
+exact even when it passes the old total inside that frame. A real stall while a
+candidate is prepared now reads as a dip proportional to the wait, which is what
+it is; it used to be indistinguishable from the reset.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. One new test over the accounting, checked to
+fail against the old expression on exactly the handover window.
+
 ## 2026-09-16 — The diagnostics keep what the channels said
 
 Every channel that reports trouble overwrites itself: a status line by the next

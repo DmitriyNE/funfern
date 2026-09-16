@@ -51,6 +51,8 @@ const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const FRAME_HISTORY: usize = 120;
 const EVENT_LOG_ENTRIES: usize = 200;
+/// Seconds of progress the steps-per-second readout averages over.
+const STEP_RATE_WINDOW: f64 = 0.5;
 /// Frames one line or boundary probe keeps. With the sampling presets' rates
 /// this is 17, 8.5, or 4.3 seconds of path history, and it bounds how far back
 /// the averaged flux row can look.
@@ -693,7 +695,14 @@ pub struct Playground {
     sim_time_offset: f64,
     completed_steps: u64,
     steps_per_second: f64,
+    /// The solver's step counter as of the previous frame. It is
+    /// generation-local, so a handover restarts it and the rate follows what it
+    /// advanced between frames rather than differencing it across the window.
     rate_steps: u64,
+    /// The generation `rate_steps` was read from.
+    rate_generation: u64,
+    /// Steps banked since the window opened, across however many generations.
+    rate_window_steps: u64,
     rate_started: Instant,
     pulse_mode: bool,
     pulse_amplitude: f32,
@@ -857,6 +866,8 @@ impl Default for Playground {
             completed_steps: 0,
             steps_per_second: 0.0,
             rate_steps: 0,
+            rate_generation: 0,
+            rate_window_steps: 0,
             rate_started: Instant::now(),
             pulse_mode: false,
             pulse_amplitude: 1.0,
@@ -6452,11 +6463,31 @@ impl Playground {
                 )
                 .ok();
         }
-        let elapsed = self.rate_started.elapsed().as_secs_f64();
-        if elapsed >= 0.5 {
-            self.steps_per_second =
-                (self.completed_steps.saturating_sub(self.rate_steps)) as f64 / elapsed;
-            self.rate_steps = self.completed_steps;
+        self.accumulate_step_rate(
+            request.generation(),
+            self.completed_steps,
+            self.rate_started.elapsed().as_secs_f64(),
+        );
+    }
+    /// Banks the progress the solver made since the previous frame and closes
+    /// the averaging window when it is full.
+    ///
+    /// The step counter belongs to the generation that produced it and
+    /// restarts at zero with every handover, so differencing it across the
+    /// window read a commit as a window with no progress in it at all and
+    /// dropped the readout to zero for half a second. Keying the restart on the
+    /// generation rather than on the counter going backwards keeps the first
+    /// frame of a new generation exact even when it passes the old total.
+    fn accumulate_step_rate(&mut self, generation: u64, completed: u64, elapsed: f64) {
+        if self.rate_generation != generation {
+            self.rate_generation = generation;
+            self.rate_steps = 0;
+        }
+        self.rate_window_steps += completed.saturating_sub(self.rate_steps);
+        self.rate_steps = completed;
+        if elapsed >= STEP_RATE_WINDOW {
+            self.steps_per_second = self.rate_window_steps as f64 / elapsed;
+            self.rate_window_steps = 0;
             self.rate_started = Instant::now();
         }
     }
@@ -10685,6 +10716,43 @@ mod tests {
         assert!(
             !state.diagnostics_warning(),
             "a rebuild that carried the edit through is not an error"
+        );
+    }
+
+    /// The solver's step counter restarts with every generation, so the rate
+    /// has to follow what it advanced between frames. Differencing the counter
+    /// across the window - what this replaced - read a handover as half a
+    /// second of no progress at all.
+    #[test]
+    fn the_step_rate_survives_a_handover() {
+        let mut state = Playground::default();
+        // Four frames of a settled generation, then the window closes.
+        for (frame, completed) in [(1, 300_u64), (2, 600), (3, 900), (4, 1200)] {
+            state.accumulate_step_rate(7, completed, if frame == 4 { 0.5 } else { 0.1 });
+        }
+        assert_eq!(state.steps_per_second, 2400.0);
+        assert_eq!(state.rate_window_steps, 0, "a closed window starts empty");
+
+        // A handover mid-window: the generation restarts its counter far below
+        // where the last one left off, and the steps already banked stay.
+        state.accumulate_step_rate(7, 1500, 0.1);
+        assert_eq!(state.rate_window_steps, 300);
+        state.accumulate_step_rate(8, 3, 0.1);
+        assert_eq!(
+            state.rate_window_steps, 303,
+            "the new generation's own steps count, and the old ones are kept"
+        );
+        state.accumulate_step_rate(8, 200, 0.5);
+        assert_eq!(state.steps_per_second, 1000.0);
+
+        // The shape that used to read zero: a window holding nothing but the
+        // frames either side of a handover.
+        state.accumulate_step_rate(8, 5000, 0.1);
+        state.accumulate_step_rate(9, 400, 0.5);
+        assert_eq!(state.steps_per_second, (4800.0 + 400.0) / 0.5);
+        assert!(
+            state.steps_per_second > 0.0,
+            "a handover is not a stall in the solver"
         );
     }
 
