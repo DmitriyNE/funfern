@@ -148,6 +148,37 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The scale stops falling off a cliff at every handoff
+
+Reported straight after the release retune: the scale jumps down sometimes
+instead of easing. A fall faster than the release cannot come from the release —
+it is bounded by the rate — so it had to come from something clearing the
+reference outright, and it did. `retune_exposures` zeroed it whenever the
+solver's generation moved, and adaptation moves the generation every second or
+two. Logged against a draining scene, the reference eased down about three and a
+half percent per sample and then collapsed at each boundary:
+
+    gen 18 -> 19   8.09e-3 -> 1.21e-3
+    gen 19 -> 20   1.09e-3 -> 3.39e-4
+    gen 20 -> 21   2.95e-4 -> 7.84e-5
+
+The rule was wrong in its premise. A handoff *transfers* the field: it is the
+same field on a new mesh, so its scale carries across untouched. Only a field
+actually replaced with zeros — a reset, or another document — starts a new run,
+and both of those are now where the clearing happens. The same log now runs
+2.96e-2 down to 8.79e-3 over 8.7 seconds through nine handoffs with no step at
+any of them, a factor of 3.37 against the release rate's 3.36.
+
+`AutoExposure::retune` went with it. Keeping the run's peak while dropping the
+reference only ever made sense for the handoff case, and there is no handoff case
+any more.
+
+Two tests cover it: one that a transferred handoff leaves the scale alone while a
+zeroed one does not, and one that no path through `update` may drop the reference
+faster than the release rate — which is the shape the symptom took. That second
+one needed the same `f32` widening the solver does to compare to the bit; written
+against `1.0 / 60.0` in `f64` it failed on the last few digits.
+
 ## 2026-09-16 — The scale stops chasing a field on its way out
 
 Two reported artifacts, one cause. When the sources stop, the field drains and

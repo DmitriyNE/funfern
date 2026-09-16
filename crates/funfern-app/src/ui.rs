@@ -829,9 +829,6 @@ pub struct Playground {
     vector_overlay_mode: VectorOverlay,
     vector_overlay_exposure: AutoExposure,
     field_exposure: AutoExposure,
-    /// The wave generation both exposures were measured against. A reset or a
-    /// mesh handoff bumps it, and either can change the field's scale outright.
-    exposure_generation: u64,
     /// The operator's free-constant components, cached against the mesh they
     /// were read from.
     field_components: Option<(u64, ConstantModes)>,
@@ -1020,7 +1017,6 @@ impl Default for Playground {
             vector_overlay_mode: VectorOverlay::Off,
             vector_overlay_exposure: AutoExposure::default(),
             field_exposure: AutoExposure::default(),
-            exposure_generation: 0,
             field_components: None,
             field_centred: Vec::new(),
             field_offsets: Vec::new(),
@@ -3933,11 +3929,19 @@ impl Playground {
         ));
     }
 
-    fn retune_exposures(&mut self, generation: u64) {
-        if self.exposure_generation != generation {
-            self.exposure_generation = generation;
-            self.field_exposure.retune();
-            self.vector_overlay_exposure.retune();
+    /// A handoff carries the field onto a new mesh — the same field, renumbered
+    /// — so its scale carries across untouched. Only a field replaced with zeros
+    /// starts a new run.
+    ///
+    /// Keying this on the solver's generation instead was wrong twice over:
+    /// adaptation bumps the generation every second or two, and each bump
+    /// dropped the scale onto the instantaneous level. A decaying field then
+    /// fell in visible steps — 8.09e-3 to 1.21e-3 across one handoff — instead
+    /// of easing down at the release rate.
+    fn restart_exposures_after_handoff(&mut self, fresh: bool) {
+        if fresh {
+            self.field_exposure.clear();
+            self.vector_overlay_exposure.clear();
         }
     }
 
@@ -3945,7 +3949,6 @@ impl Playground {
         let Some(active) = self.runtime.active().cloned() else {
             return;
         };
-        self.retune_exposures(display.generation);
         let mesh = &active.mesh;
         let presentation = self.editor.document.presentation;
         // One mesh rather than a polygon per triangle, for the reason the
@@ -6720,6 +6723,7 @@ impl Playground {
                             self.accumulator = 0.0;
                             self.restart_probe_traces();
                         }
+                        self.restart_exposures_after_handoff(upload.fresh);
                         self.amr_adaptation_state = if active.adapted {
                             self.amr_pending_state
                                 .take()
@@ -6765,6 +6769,10 @@ impl Playground {
                     self.reset_requested = false;
                     self.sim_time_offset = 0.0;
                     self.restart_probe_traces();
+                    // Reset zeroes the field in place without an upload, so the
+                    // scale starts over here too.
+                    self.field_exposure.clear();
+                    self.vector_overlay_exposure.clear();
                 }
             }
         }
@@ -10927,14 +10935,7 @@ impl AutoExposure {
     /// frame cannot drop the scale by an unbounded factor in one go.
     const MAX_STEP_SECONDS: f32 = 1.0;
 
-    /// Forgets the scale but not how loud the run has been, for a field that
-    /// carries on across a new mesh or a fresh set of buffers. The next frame
-    /// sets the reference outright, so the picture does not fade in.
-    fn retune(&mut self) {
-        self.reference = 0.0;
-    }
-
-    /// Forgets both, for a field that has nothing to do with the last one.
+    /// Forgets the run, for a field that has nothing to do with the last one.
     fn clear(&mut self) {
         *self = Self::default();
     }
@@ -11906,37 +11907,50 @@ mod tests {
         );
     }
 
-    /// Clicking through the gallery used to strand the arrow scale on the
-    /// previous example, because the reference was only ever cleared when the
-    /// overlay mode changed.
+    /// Adaptation hands the field to a new mesh every second or two. It is the
+    /// same field, so its scale has to carry across: restarting it there dropped
+    /// the reference onto the instantaneous level, and a decaying field fell in
+    /// visible steps instead of easing down at the release rate.
     #[test]
-    fn a_new_solver_generation_starts_both_exposures_again() {
+    fn a_mesh_handoff_leaves_the_scale_alone() {
         let mut state = Playground::default();
-        state.retune_exposures(4);
         state.field_exposure.update(0.71, 0.016);
         state.vector_overlay_exposure.update(0.71, 0.016);
-        state.retune_exposures(4);
-        assert_eq!(
-            state.field_exposure.reference(),
-            Some(0.71),
-            "cleared early"
-        );
-        state.retune_exposures(5);
+        state.restart_exposures_after_handoff(false);
+        assert_eq!(state.field_exposure.reference(), Some(0.71));
+        assert_eq!(state.vector_overlay_exposure.reference(), Some(0.71));
+
+        // A field replaced with zeros is a different run.
+        state.restart_exposures_after_handoff(true);
         assert_eq!(state.field_exposure.reference(), None);
         assert_eq!(state.vector_overlay_exposure.reference(), None);
-        assert_eq!(state.field_exposure.update(6.0e-3, 0.016), Some(6.0e-3));
-        // A new mesh keeps how loud the run has been, so a field decaying
-        // through an adaptation handoff is not renormalized back into view.
-        state.retune_exposures(6);
-        let floored = state.field_exposure.update(1.0e-9, 0.016).unwrap();
-        assert!(
-            floored > 1.0e-6,
-            "the quiet floor did not survive: {floored}"
-        );
-        // Loading another scene does not.
+
+        // As is another document, which also forgets how loud the last one got.
+        state.field_exposure.update(0.71, 0.016);
         let document = state.editor.document.clone();
         state.set_document(document, false, true).unwrap();
         assert_eq!(state.field_exposure.update(1.0e-9, 0.016), Some(1.0e-9));
+    }
+
+    /// The symptom the handoff bug showed as: a scale that falls faster than the
+    /// release allows. Nothing `update` does may outrun that rate.
+    #[test]
+    fn the_scale_never_falls_faster_than_the_release_rate() {
+        let mut exposure = AutoExposure::default();
+        let mut level = 1.0_f64;
+        let step = 1.0_f32 / 60.0;
+        let mut previous = exposure.update(level, step).unwrap();
+        for _ in 0..1_200 {
+            level *= 0.98;
+            let reference = exposure.update(level, step).unwrap();
+            // The same widening `update` does, so the two agree to the bit.
+            let allowed = previous * AutoExposure::RELEASE_PER_SECOND.powf(-f64::from(step));
+            assert!(
+                reference >= allowed * (1.0 - 1.0e-12),
+                "the scale fell to {reference:e} when {allowed:e} was the floor"
+            );
+            previous = reference;
+        }
     }
 
     /// Turning the automatic scale off has to put the field back exactly where it
