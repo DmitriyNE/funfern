@@ -1487,6 +1487,33 @@ impl MeshBuilder {
         }
     }
 
+    /// The vertex nearest the start of `requested` that lies strictly inside
+    /// it. Such a vertex blocks recovery outright: no edge properly crosses the
+    /// segment, because the way through is a point rather than a gap. The
+    /// segment has to be split there instead, which is what the legacy
+    /// interface recovery does as well.
+    fn vertex_inside_segment(&self, requested: [usize; 2]) -> Option<(usize, f64)> {
+        let start = self.point(requested[0]);
+        let end = self.point(requested[1]);
+        let delta = end - start;
+        self.vertices
+            .iter()
+            .enumerate()
+            .filter(|(vertex, _)| !requested.contains(vertex))
+            .filter(|(_, candidate)| {
+                orient2d(start, end, candidate.point) == PredicateSign::Zero
+                    && on_segment(candidate.point, start, end)
+            })
+            .map(|(vertex, candidate)| {
+                (
+                    vertex,
+                    (candidate.point - start).dot(delta) / delta.dot(delta),
+                )
+            })
+            .filter(|(_, fraction)| *fraction > 0.0 && *fraction < 1.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
     /// Recovers one constrained segment by flipping one intersecting diagonal.
     /// Returns true once the requested edge exists.
     fn recover_constraint_edge(&mut self, requested: [usize; 2]) -> Result<bool, MeshError> {

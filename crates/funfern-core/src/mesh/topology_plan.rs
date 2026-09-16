@@ -230,8 +230,15 @@ impl TopologyMeshingJob {
             }
             TopologyMeshingState::CutSlits { index } => {
                 if let Some((region, run)) = self.slit_runs.get(index) {
-                    cut_free_slit(b, *region, run, &mut self.trace_vertices)?;
-                    self.slit_steps.extend(run.iter().copied());
+                    let separated = run.first().is_some_and(|step| {
+                        matches!(step.boundary.behavior, Some(SpanBehavior::Separated { .. }))
+                    });
+                    if separated {
+                        cut_free_slit(b, *region, run, &mut self.trace_vertices)?;
+                        self.slit_steps.extend(run.iter().copied());
+                    } else {
+                        label_transmitting_slit(b, *region, run, &mut self.trace_vertices)?;
+                    }
                     TopologyMeshingState::CutSlits { index: index + 1 }
                 } else {
                     TopologyMeshingState::SplitSlitVertices
@@ -365,7 +372,20 @@ impl TopologyMeshingJob {
         let b = &mut self.builder;
         let polygon = &mut search.polygon;
         if polygon.len() == 3 {
-            b.push_triangle(b.ccw_triangle([polygon[0], polygon[1], polygon[2]], search.region)?)?;
+            // Three points on one line enclose nothing. A polygon that has
+            // collapsed to a slit - what is left of a transmitting chain the
+            // boundary walked out along and back - contributes no triangle, and
+            // its edges are already constraints.
+            if orient2d(
+                b.point(polygon[0]),
+                b.point(polygon[1]),
+                b.point(polygon[2]),
+            ) != PredicateSign::Zero
+            {
+                b.push_triangle(
+                    b.ccw_triangle([polygon[0], polygon[1], polygon[2]], search.region)?,
+                )?;
+            }
             let next_domain = search.domain + 1;
             return Ok(if let Some(domain) = b.domains.get(next_domain).cloned() {
                 TopologyMeshingState::Bridge(new_bridge_search(domain, next_domain))
@@ -909,12 +929,25 @@ pub(super) fn split_slit_runs(
         .collect())
 }
 
-fn cut_free_slit(
+/// One slit's chain, installed into the triangulation.
+struct RecoveredSlit {
+    curve: CurveId,
+    constraint: usize,
+    /// Mesh vertex and curve parameter of every sample along the chain.
+    chain: Vec<(usize, f64)>,
+    /// The left-hand steps in parameter order, for reading a segment's span.
+    left: Vec<PlannedFaceStep>,
+}
+
+/// Installs one slit's chain into the triangulation: samples it and recovers
+/// every segment as a constrained edge. What happens next depends on whether
+/// the slit separates its two sides.
+fn recover_slit_chain(
     builder: &mut MeshBuilder,
     region: RegionId,
     steps: &[PlannedFaceStep],
     trace_vertices: &mut BTreeMap<TraceVertexId, usize>,
-) -> Result<(), MeshError> {
+) -> Result<RecoveredSlit, MeshError> {
     let mut left = steps
         .iter()
         .filter(|step| {
@@ -996,17 +1029,115 @@ fn cut_free_slit(
         };
         builder.internal_chains[constraint].push((vertex, sample.t));
     }
-    let chain = builder.internal_chains[constraint].clone();
-    for pair in chain.windows(2) {
+    let mut segment = 0;
+    let mut attempts = 0usize;
+    while segment + 1 < builder.internal_chains[constraint].len() {
+        let pair = [
+            builder.internal_chains[constraint][segment],
+            builder.internal_chains[constraint][segment + 1],
+        ];
         let requested = [pair[0].0, pair[1].0];
-        let mut attempts = 0usize;
-        while !builder.recover_constraint_edge(requested)? {
-            attempts += 1;
-            if attempts > builder.options.max_triangles.saturating_mul(8) {
-                return Err(MeshError::Topology("free-slit recovery work limit reached"));
+        // A vertex sitting on the segment leaves no edge to flip - a slit along
+        // a line of symmetry of the domain collects them - so it joins the
+        // chain and the two halves are recovered instead.
+        if let Some((vertex, fraction)) = builder.vertex_inside_segment(requested) {
+            let parameter = pair[0].1 + (pair[1].1 - pair[0].1) * fraction;
+            builder.internal_chains[constraint].insert(segment + 1, (vertex, parameter));
+            continue;
+        }
+        if builder.recover_constraint_edge(requested)? {
+            segment += 1;
+            attempts = 0;
+            continue;
+        }
+        attempts += 1;
+        if attempts > builder.options.max_triangles.saturating_mul(8) {
+            return Err(MeshError::Topology("free-slit recovery work limit reached"));
+        }
+    }
+    let chain = builder.internal_chains[constraint].clone();
+    Ok(RecoveredSlit {
+        curve,
+        constraint,
+        chain,
+        left,
+    })
+}
+
+/// A slit whose two sides transmit: a divider that encloses nothing, which the
+/// face walks out along and back. Nothing is cut - both sides are the same
+/// medium and share their nodes - so the recovered chain only has to be labelled
+/// as the curve it belongs to, one segment at a time against the span it came
+/// from.
+fn label_transmitting_slit(
+    builder: &mut MeshBuilder,
+    region: RegionId,
+    steps: &[PlannedFaceStep],
+    trace_vertices: &mut BTreeMap<TraceVertexId, usize>,
+) -> Result<(), MeshError> {
+    let RecoveredSlit {
+        curve, chain, left, ..
+    } = recover_slit_chain(builder, region, steps, trace_vertices)?;
+    for pair in chain.windows(2) {
+        let parameter = 0.5 * (pair[0].1 + pair[1].1);
+        let planned = left
+            .iter()
+            .find(|step| {
+                let [a, b] = step.boundary.parameter;
+                parameter >= a.min(b) && parameter <= a.max(b)
+            })
+            .ok_or(MeshError::Topology("free-slit span lineage is missing"))?;
+        let PlannedBoundarySource::Curve { span, .. } = planned.boundary.source else {
+            return Err(MeshError::Topology("slit trace has a non-curve label"));
+        };
+        for side in [CurveTraceSide::Left, CurveTraceSide::Right] {
+            let label = BoundaryLabel::Curve {
+                curve,
+                span,
+                side,
+                separated: false,
+            };
+            if side == CurveTraceSide::Left {
+                let key = edge_key(pair[0].0, pair[1].0);
+                if !builder.boundary_keys.contains(&key) {
+                    builder.add_boundary_edge(BoundaryEdge {
+                        vertices: [pair[0].0, pair[1].0],
+                        label,
+                        parameters: [pair[0].1, pair[1].1],
+                    });
+                }
+            }
+            if let Some((_, regions)) = builder
+                .boundary_regions
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == label)
+            {
+                regions.insert(region);
+            } else {
+                builder
+                    .boundary_regions
+                    .push((label, BTreeSet::from([region])));
             }
         }
     }
+    Ok(())
+}
+
+/// A slit that separates its two sides: the mesh is cut along the recovered
+/// chain, giving each side its own vertices, and the cut's internal-boundary
+/// labels become the curve's own.
+fn cut_free_slit(
+    builder: &mut MeshBuilder,
+    region: RegionId,
+    steps: &[PlannedFaceStep],
+    trace_vertices: &mut BTreeMap<TraceVertexId, usize>,
+) -> Result<(), MeshError> {
+    let RecoveredSlit {
+        curve,
+        constraint,
+        chain,
+        left,
+    } = recover_slit_chain(builder, region, steps, trace_vertices)?;
     builder.cut_internal_boundary(constraint)?;
 
     let legacy_id = crate::InternalBoundaryId(curve.0);
@@ -3538,6 +3669,72 @@ mod tests {
             .flat_map(|triangle| triangle.vertices)
             .collect::<BTreeSet<_>>();
         mesh.vertices.len() - used.len()
+    }
+
+    /// A slit lying on a line of symmetry of the domain collects mesh vertices
+    /// exactly on itself, and a vertex in the way of a constrained segment
+    /// leaves no edge to flip: the way through is a point, not a gap. The
+    /// segment is split there instead.
+    #[test]
+    fn topology_mesher_recovers_a_slit_along_the_domain_centre_line() {
+        for points in [
+            vec![
+                Point2::new(-0.6, 0.0),
+                Point2::new(0.0, 0.0),
+                Point2::new(0.6, 0.0),
+            ],
+            vec![Point2::new(0.0, -0.6), Point2::new(0.0, 0.6)],
+        ] {
+            let spans = spans(900, points.len() - 1, SpanBehavior::REFLECTING);
+            let curve = TopologyCurve::new(
+                CurveId(90),
+                CurveSpline::Open(OpenCubicSpline::polyline(points.clone()).unwrap()),
+                spans,
+            )
+            .unwrap();
+            let topology = compile_topology(
+                &TopologyGeometry {
+                    curves: vec![curve],
+                    ..TopologyGeometry::default()
+                },
+                22,
+            )
+            .unwrap();
+            for edge in [0.18, 0.08] {
+                // The application's own settings: a coarsened plan and the
+                // default minimum angle, which is what puts refinement vertices
+                // on the centre line in the first place.
+                let options = super::super::MeshingOptions {
+                    target_edge_length: edge,
+                    curve_tolerance: (edge * 0.02).min(5.0e-4),
+                    ..super::super::MeshingOptions::default()
+                };
+                let plan = TopologyMeshPlan::new(&topology, &assign_each_face(&topology))
+                    .unwrap()
+                    .coarsened(&topology, crate::AtomCoarsening::from_meshing(options))
+                    .unwrap();
+                let mesh = mesh_topology_plan(&plan, 77, options)
+                    .unwrap_or_else(|error| panic!("{points:?} at {edge}: {error}"));
+                assert!(
+                    (mesh_area(&mesh) - 4.0).abs() < 1.0e-9,
+                    "{points:?} at {edge}"
+                );
+                assert_eq!(orphan_vertices(&mesh), 0, "{points:?} at {edge}");
+                let sides = mesh
+                    .boundary_edges
+                    .iter()
+                    .filter_map(|edge| match edge.label {
+                        BoundaryLabel::Curve { side, .. } => Some(side),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(
+                    sides,
+                    BTreeSet::from([CurveTraceSide::Left, CurveTraceSide::Right]),
+                    "{points:?} at {edge}: the slit is cut into two traces"
+                );
+            }
+        }
     }
 
     /// A baffle between two loops is a slit whose removal breaks the face's

@@ -713,7 +713,11 @@ it is attached, and how a probe is carried on a curve that changes nothing. Such
 a chain is topologically a baffle whose two sides are not separated: the face
 walks out along it and back, so the plan carries an atom for each direction even
 though both name the same face, which is what lets carving follow the rim round
-the free tip and lets a probe read either side. Every reader of that list asks
+the free tip and lets a probe read either side. Carving leaves any slit - either
+kind - out of the cavity polygon and recovers it into the triangulation
+afterwards, because a boundary that walks out and back encloses no area and so
+has no orientation to be sorted by; only the tail differs, a separated slit
+being cut apart and a transmitting one only labelled. Every reader of that list asks
 whether some atom matches rather than summing over it, so the pair costs nothing
 elsewhere. A separator only receives the material chosen while drawing it if it
 encloses a face there and then; a face enclosed later inherits the region it was

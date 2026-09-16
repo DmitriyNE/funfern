@@ -913,7 +913,10 @@ impl TopologyEditor {
                     .spline
                     .set_node_point(node, tip)
                     .map_err(|error| error.to_string())?;
-                loose.push((node, other, other_node));
+                // The endpoint, not the node it is at: materialising the other
+                // attachment can split a span of this same curve, and every
+                // node index past the split shifts by one.
+                loose.push((node, other, endpoint));
                 continue;
             }
             let (vertex, point) = self.materialize_attachment(
@@ -935,12 +938,20 @@ impl TopologyEditor {
         let mut surviving = curve_id;
         let mut far_node = last;
         let mut joined = vec![];
-        for (node, other, other_node) in loose {
+        for (node, other, endpoint) in loose {
             if other == surviving {
                 refine_curve_to_spans(&mut candidate, &mut self.next_span, surviving, 2)?;
                 close_curve_geometry(&mut candidate, surviving)?;
                 break;
             }
+            let other_node = loose_end_node(
+                candidate
+                    .draft
+                    .geometry
+                    .curve(other)
+                    .ok_or("Attachment curve no longer exists")?,
+                endpoint,
+            )?;
             let record = if node == 0 {
                 join_curves(&mut candidate, (other, other_node), (surviving, 0))?
             } else {
@@ -5816,6 +5827,116 @@ mod tests {
                 daughter.material, inner_material,
                 "stated background {stated_background}: the daughter belongs to the subdomain \
                  the chord was drawn in"
+            );
+        }
+    }
+
+    /// Drawing from a curve's loose end round onto its own middle works in both
+    /// directions. The middle attachment splits a span of that same curve, and
+    /// the loose end is behind the split, so its node index moves: reading it
+    /// before the split made one of the two directions refuse with a message
+    /// about welding at an end, which is exactly what the gesture was doing.
+    #[test]
+    fn a_curve_may_be_drawn_onto_itself_from_either_end() {
+        for loose_first in [false, true] {
+            let mut editor = TopologyEditor::default();
+            let stem = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![
+                        Point2::new(-0.61, 0.33),
+                        Point2::new(-0.23, 0.19),
+                        Point2::new(0.17, 0.07),
+                        Point2::new(0.59, -0.11),
+                    ])
+                    .unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .curve;
+            settle(&mut editor);
+            let interior = {
+                let owner = editor.document.model.draft.geometry.curve(stem).unwrap();
+                let span = owner.spans[1].id;
+                let [a, b] = owner.spline.span_bounds(1).unwrap();
+                let parameter = (a + b) * 0.5;
+                (
+                    evaluate_curve(owner, parameter),
+                    TopologyAttachment::Boundary(FaceAnchor::Curve {
+                        curve: stem,
+                        span,
+                        side: CurveTraceSide::Left,
+                        parameter,
+                    }),
+                )
+            };
+            let tip = {
+                let owner = editor.document.model.draft.geometry.curve(stem).unwrap();
+                let last = owner.spline.node_count() - 1;
+                owner.spline.node_point(last).unwrap()
+            };
+            let loose = TopologyAttachment::LooseEnd {
+                curve: stem,
+                endpoint: 1,
+            };
+            let around = [
+                Point2::new(interior.0.x + 0.11, interior.0.y - 0.62),
+                Point2::new(0.53, -0.71),
+                Point2::new(0.67, -0.29),
+            ];
+            let (points, start, end) = if loose_first {
+                (
+                    [tip]
+                        .into_iter()
+                        .chain(around.into_iter().rev())
+                        .chain([interior.0])
+                        .collect::<Vec<_>>(),
+                    Some(loose),
+                    Some(interior.1),
+                )
+            } else {
+                (
+                    [interior.0]
+                        .into_iter()
+                        .chain(around)
+                        .chain([tip])
+                        .collect::<Vec<_>>(),
+                    Some(interior.1),
+                    Some(loose),
+                )
+            };
+            let edit = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(points).unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    start,
+                    end,
+                )
+                .unwrap_or_else(|error| panic!("loose end first {loose_first}: {error}"));
+            settle(&mut editor);
+            assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+            let joined = editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(edit.curve)
+                .expect("the two curves became one");
+            let pinch = joined
+                .nodes
+                .iter()
+                .filter_map(|node| node.vertex)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                pinch.len(),
+                1,
+                "loose end first {loose_first}: the curve meets itself at one vertex"
+            );
+            assert_eq!(
+                editor.document.model.draft.geometry.curves.len(),
+                1,
+                "loose end first {loose_first}: the drawn curve dissolved into the stem"
             );
         }
     }

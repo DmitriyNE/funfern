@@ -1082,9 +1082,14 @@ impl TopologyCarveJob {
                 if !self.changed_new_keys.contains(&atom_key(&step.boundary)) {
                     continue;
                 }
-                let separated =
-                    matches!(step.boundary.behavior, Some(SpanBehavior::Separated { .. }));
-                if separated && edge_counts.get(&step.edge).copied().unwrap_or(0) > 1 {
+                // Walked twice by one face: a slit. A separated one is a
+                // baffle and a transmitting one is a divider that encloses
+                // nothing, and both are left out of the cavity polygon and
+                // recovered into the triangulation afterwards. Keeping one in
+                // the polygon makes a needle with no interior, which has no
+                // orientation for the rim walk to sort by and no ear for the
+                // clipper to take.
+                if edge_counts.get(&step.edge).copied().unwrap_or(0) > 1 {
                     let PlannedBoundarySource::Curve { curve, .. } = step.boundary.source else {
                         continue;
                     };
@@ -1094,6 +1099,8 @@ impl TopologyCarveJob {
                         .push(*step);
                     continue;
                 }
+                let separated =
+                    matches!(step.boundary.behavior, Some(SpanBehavior::Separated { .. }));
                 let side = match step.boundary.source {
                     PlannedBoundarySource::Curve { side, .. } if separated => Some(side),
                     _ => None,
@@ -1291,7 +1298,19 @@ impl TopologyCarveJob {
                     return Err(MeshError::Topology("cavity cycle is too short"));
                 }
                 let area = signed_area(cycle.iter().map(|index| point(*index)));
-                cycles.push((area, cycle));
+                // A cavity boundary that walks a transmitting chain out and
+                // back encloses nothing at all: its shoelace sum is zero in
+                // exact arithmetic and lands on either side of zero in floating
+                // point, so the sign cannot be asked which way it turns. Below
+                // what the sum can resolve, call it flat - it is a slit, and it
+                // belongs to a component rather than being one.
+                let perimeter = cycle
+                    .iter()
+                    .zip(cycle.iter().cycle().skip(1))
+                    .map(|(a, b)| (point(*b) - point(*a)).norm())
+                    .sum::<f64>();
+                let flat = 16.0 * f64::EPSILON * perimeter * perimeter;
+                cycles.push((if area.abs() <= flat { 0.0 } else { area }, cycle));
             }
             let mut outers = cycles
                 .iter()
@@ -1302,9 +1321,12 @@ impl TopologyCarveJob {
                 if *area > 0.0 {
                     continue;
                 }
-                if *area == 0.0 {
-                    return Err(MeshError::Topology("cavity cycle has no area"));
-                }
+                // A cycle with no area at all is a chain the cavity boundary
+                // walks out along and back: a transmitting curve interior to
+                // one face, which encloses nothing but still has to be in the
+                // triangulation. It is bridged into its component like any
+                // other hole, which is the same slit the full rebuild builds
+                // from the face's own steps.
                 let candidates = hole
                     .iter()
                     .map(|index| point(*index))

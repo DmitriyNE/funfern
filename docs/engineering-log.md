@@ -150,6 +150,50 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — A slit is pulled out of the polygon, whichever way it transmits
+
+Three things, one shape. A free separator repaired when it was added but rebuilt
+about half the times it was *moved*, with two errors by turns: "cavity cycle has
+no area" and "topology ear clipping stalled".
+
+The cavity boundary that follows a transmitting chain out and back encloses
+nothing. Its shoelace sum is zero in exact arithmetic and lands either side of
+zero in floating point - measured at -1.4e-17 and +6.9e-18 on consecutive moves
+of the same curve - and carving sorts its cavity cycles by that sign. A needle
+that came out positive became a component of its own, and ear clipping has no
+ear to take from a polygon with no interior. That is the coin flip the user saw.
+
+The fix is the one the shape asks for: a slit walked twice by one face is left
+out of the cavity polygon and recovered into the triangulation afterwards, which
+is what carving already did for a baffle. Only the tail differs - a separated
+slit is cut, so each side gets its own vertices; a transmitting one is not, both
+sides being the same medium, so its recovered chain is only labelled. Moving a
+free separator now carves every time, exactly like moving a baffle. The area
+sign is also normalised where it is still read, so a flat cycle cannot be sorted
+by rounding.
+
+**Drawing a curve onto its own middle** worked in one direction and not the
+other: the loose end's node index was read before the other end's attachment
+split a span of that same curve, and every node past a split shifts by one. The
+endpoint is carried now and the node located at join time. Both directions
+produce the same single curve meeting itself at one vertex.
+
+**A slit along the domain's centre line** could not be recovered at fine
+resolutions. Refinement puts vertices exactly on a line of symmetry, and a
+vertex standing in a constrained segment leaves no edge to flip - the way
+through is a point, not a gap. The legacy interface recovery already split the
+segment at such a vertex; the topology path now does the same. Horizontal,
+vertical, and curved slits through the centre all mesh at 0.08 and 0.18, area
+exactly 4.000000, no orphans.
+
+Three tests, each verified to fail beforehand: six consecutive moves of a free
+separator all carving, the self-drawing gesture in both directions, and the
+centre-line slit at the application's own settings - the core's test options are
+coarser and never reproduced it.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
+warnings`, `cargo test --workspace --locked` (506 tests), and the release build.
+
 ## 2026-09-16 — One atom per direction, and both debts are paid
 
 Two consequences were left behind by free separators: adding one forced a full
@@ -360,8 +404,7 @@ internal-boundary segment`. Any offset works - y = 0.05, 0.1234, -0.37 all mesh
 - so it is an exact-symmetry degeneracy in constrained recovery, not the same
 defect. Worth its own look; reachable, since the grid snaps there.
 
-- [ ] A separated span lying exactly on the domain's centre line fails
-  constrained recovery at fine target edge lengths.
+Fixed later the same day, below.
 
 Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked -D
 warnings`, `cargo test --workspace --locked` (497 tests), and the release build.

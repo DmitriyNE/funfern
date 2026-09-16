@@ -1992,6 +1992,72 @@ mod tests {
         );
     }
 
+    /// Moving one has to repair too, not only adding it. A transmitting chain
+    /// the face walks out along and back encloses nothing, so the cavity cycle
+    /// that follows it has no area and no orientation to sort it by; it is a
+    /// slit, and it is pulled out of the cavity polygon and recovered into the
+    /// triangulation exactly as a baffle is.
+    #[test]
+    fn moving_a_free_separator_repairs_like_a_baffle() {
+        let carve_every_move = |purpose: OpenCurvePurpose| {
+            let mut editor = TopologyEditor::default();
+            let curve = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![
+                        Point2::new(0.45, -0.55),
+                        Point2::new(0.62, 0.48),
+                    ])
+                    .unwrap(),
+                    purpose,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .curve;
+            settle(&mut editor);
+            let mut runtime = TopologyRuntime::default();
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            prepare(&mut runtime).unwrap();
+            runtime.commit_ready(token).unwrap();
+
+            for step in 1..=6 {
+                let shift = 0.02 * step as f64;
+                editor
+                    .set_control(curve, 0, Point2::new(0.45 - shift, -0.55 + shift))
+                    .unwrap();
+                settle(&mut editor);
+                let token = runtime
+                    .request(
+                        editor.revision,
+                        &editor.document,
+                        editor.compiled_accepted.clone(),
+                        options(),
+                        false,
+                    )
+                    .unwrap();
+                assert_eq!(prepare(&mut runtime).unwrap(), token);
+                let moved = runtime.commit_ready(token).unwrap();
+                assert!(
+                    moved.carve.is_some(),
+                    "{purpose:?} move {step} fell back: {:?}",
+                    moved.repair_fallback
+                );
+            }
+        };
+        carve_every_move(OpenCurvePurpose::BoundaryBaffle);
+        carve_every_move(OpenCurvePurpose::SubdomainSeparator {
+            material: DEFAULT_MATERIAL,
+        });
+    }
+
     /// Carrying a probe is the point of a dangling separator, and a probe reads
     /// one side of a boundary. Both sides of this one name the same face, so
     /// both have to compile - they sample the same field with opposite normals,
