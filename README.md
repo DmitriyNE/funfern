@@ -82,7 +82,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   Materials contains the material library; Probes contains receivers and recording
   controls. The lower-right status control shows
   FPS, solver steps per second, DOFs, mesh size, and solver dt; clicking it opens
-  the full frame, topology, mesh, handoff, and solver diagnostics. As the window narrows, file
+  the full frame, topology, mesh, handoff, and solver diagnostics, ending in a Log
+  of what those sections said before they were overwritten - status lines,
+  preparation and adaptation errors, and the reason a repair became a rebuild -
+  which can be cleared or copied out. A preparation or adaptation error lights a
+  marker beside the status control and keeps it lit until the diagnostics are
+  opened, rather than opening them. As the window narrows, file
   actions collapse into File first, followed by the inspector switches collapsing
   into Panels. The essential editing and playback controls stay on one row.
 - **Select:** clicking a control or junction selects one handle. Clicking a curve

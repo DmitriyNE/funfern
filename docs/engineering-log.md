@@ -150,6 +150,40 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The diagnostics keep what the channels said
+
+Every channel that reports trouble overwrites itself: a status line by the next
+message, a preparation or adaptation error by the next success, a repair
+fallback by the next transaction. An error that clears itself a frame later was
+unreadable - the window would flash open and the reason would already be gone.
+
+The diagnostics window now ends in a Log: a 200-entry ring, newest first, with
+Clear and Copy, each line stamped with the session time and tagged by the
+channel it came from. Errors read red, repair fallbacks gold, status lines
+plain.
+
+It is filled by watching the channels rather than by instrumenting the places
+that write them. `self.message` alone is assigned from about two dozen sites,
+several inside closures that borrow only that field, so a `notify` funnel would
+have churned them all and still missed whatever it missed; comparing each
+channel against the last value logged from it catches every path by
+construction, and the channel supplies the severity. Identical lines arriving in
+a row count as `×N` rather than filling the ring, which is what an error that
+clears and returns every frame would otherwise do. The one exception is the
+repair fallback, which is queued by the transaction that reported it: a fallback
+is an event, not a state, and two transactions that fall back the same way
+should read as two.
+
+The status marker is now sticky - lit by an error, cleared when the diagnostics
+are opened on it - and the window no longer opens itself. The marker was there
+all along but did nothing, because the window had already popped up; on its own
+it is enough, and it no longer takes the screen away mid-edit.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. Two new tests over the ring: one change per
+channel change, a held value logged once, repeats counted, and the bound.
+
 ## 2026-09-16 — A reused mesh has to be renumbered, not just restamped
 
 Switching a span that separates a hole from the domain to Transmit gave

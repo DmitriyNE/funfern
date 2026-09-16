@@ -50,6 +50,7 @@ const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const FRAME_HISTORY: usize = 120;
+const EVENT_LOG_ENTRIES: usize = 200;
 /// Frames one line or boundary probe keeps. With the sampling presets' rates
 /// this is 17, 8.5, or 4.3 seconds of path history, and it bounds how far back
 /// the averaged flux row can look.
@@ -551,6 +552,59 @@ struct HandoffRecord {
     repair_fallback: Option<String>,
 }
 
+/// Which transient channel a log entry was caught from, which is also how much
+/// it matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventSource {
+    Status,
+    Repair,
+    Preparation,
+    Adaptation,
+}
+
+impl EventSource {
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Repair => "repair",
+            Self::Preparation => "preparation",
+            Self::Adaptation => "adaptation",
+        }
+    }
+    /// Whether an entry from here lights the status marker until the
+    /// diagnostics are opened. A repair fallback explains a rebuild that
+    /// succeeded, so it is worth keeping but not worth interrupting for.
+    const fn error(self) -> bool {
+        matches!(self, Self::Preparation | Self::Adaptation)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct EventEntry {
+    /// Seconds since the window system started, as egui counts them.
+    time: f64,
+    source: EventSource,
+    text: String,
+    /// How many times in a row this same line arrived, so a channel that
+    /// clears and returns every frame cannot flood the ring.
+    repeats: usize,
+}
+
+fn event_line(entry: &EventEntry) -> String {
+    let minutes = (entry.time / 60.0).floor().max(0.0);
+    let seconds = entry.time - minutes * 60.0;
+    format!(
+        "{minutes:.0}:{seconds:04.1} · {} · {}{}",
+        entry.source.tag(),
+        entry.text,
+        if entry.repeats > 1 {
+            format!(" ×{}", entry.repeats)
+        } else {
+            String::new()
+        }
+    )
+}
+
 struct Uploading {
     token: TopologyToken,
     generation: u64,
@@ -724,7 +778,20 @@ pub struct Playground {
     gpu_dispatches: u64,
     step_backlog: u64,
     diagnostics_open: bool,
-    diagnostics_warned: bool,
+    /// What the transient channels said before they were overwritten, newest
+    /// last. Entries are appended when a channel's value changes, which is why
+    /// the last value logged from each is kept beside them.
+    events: VecDeque<EventEntry>,
+    logged_status: Option<String>,
+    logged_preparation: Option<String>,
+    logged_adaptation: Option<String>,
+    /// Repair fallbacks a committed transaction reported, waiting for the next
+    /// frame to stamp them. A fallback is an event rather than a state, so two
+    /// transactions that fall back the same way are two of them.
+    pending_repairs: Vec<String>,
+    /// An error was logged since the diagnostics were last open. Keeps the
+    /// status marker lit for an error that clears itself a frame later.
+    unseen_error: bool,
     frame_history: VecDeque<f32>,
     handoff_requested: Option<Instant>,
     handoff_ready: Option<Instant>,
@@ -867,7 +934,12 @@ impl Default for Playground {
             gpu_dispatches: 0,
             step_backlog: 0,
             diagnostics_open: false,
-            diagnostics_warned: false,
+            events: VecDeque::with_capacity(EVENT_LOG_ENTRIES),
+            logged_status: None,
+            logged_preparation: None,
+            logged_adaptation: None,
+            pending_repairs: vec![],
+            unseen_error: false,
             frame_history: VecDeque::with_capacity(FRAME_HISTORY),
             handoff_requested: None,
             handoff_ready: None,
@@ -6072,6 +6144,11 @@ impl Playground {
             carve: active.carve,
             repair_fallback: active.repair_fallback.clone(),
         });
+        // A fallback is only in the record until the next transaction replaces
+        // it, and the record says nothing about how often one has happened.
+        if let Some(fallback) = &active.repair_fallback {
+            self.pending_repairs.push(fallback.clone());
+        }
         self.handoff_requested = None;
         self.handoff_ready = None;
         self.handoff_upload = None;
@@ -8834,7 +8911,61 @@ impl Playground {
         self.far_field_window = open;
     }
     fn diagnostics_warning(&self) -> bool {
-        self.runtime.last_error().is_some() || self.amr_error.is_some()
+        self.runtime.last_error().is_some() || self.amr_error.is_some() || self.unseen_error
+    }
+    /// Appends what each transient channel says, the moment it changes. Every
+    /// one of them is overwritten by whatever happens next - a status line by
+    /// the next message, a preparation or adaptation error by the next
+    /// success, a repair fallback by the next transaction - so a change is the
+    /// only moment the value can be caught. Watching the values rather than
+    /// the two dozen places that set them is what makes the log complete.
+    fn record_events(&mut self, now: f64) {
+        let status = (!self.message.is_empty()).then(|| self.message.clone());
+        if status != self.logged_status {
+            self.logged_status = status.clone();
+            if let Some(text) = status {
+                self.push_event(now, EventSource::Status, text);
+            }
+        }
+        let preparation = self.runtime.last_error().map(|error| error.to_string());
+        if preparation != self.logged_preparation {
+            self.logged_preparation = preparation.clone();
+            if let Some(text) = preparation {
+                self.push_event(now, EventSource::Preparation, text);
+            }
+        }
+        let adaptation = self.amr_error.clone();
+        if adaptation != self.logged_adaptation {
+            self.logged_adaptation = adaptation.clone();
+            if let Some(text) = adaptation {
+                self.push_event(now, EventSource::Adaptation, text);
+            }
+        }
+        for text in std::mem::take(&mut self.pending_repairs) {
+            self.push_event(now, EventSource::Repair, text);
+        }
+    }
+    fn push_event(&mut self, now: f64, source: EventSource, text: String) {
+        if let Some(last) = self.events.back_mut()
+            && last.source == source
+            && last.text == text
+        {
+            last.repeats += 1;
+            last.time = now;
+            return;
+        }
+        if self.events.len() == EVENT_LOG_ENTRIES {
+            self.events.pop_front();
+        }
+        self.events.push_back(EventEntry {
+            time: now,
+            source,
+            text,
+            repeats: 1,
+        });
+        if source.error() {
+            self.unseen_error = true;
+        }
     }
     fn summary_line(&self) -> String {
         let active = self.runtime.active();
@@ -8851,15 +8982,12 @@ impl Playground {
         )
     }
     /// One draggable window over the whole transaction: the frame it costs, the
-    /// topology and mesh it produced, the handoff waits, and the running solver.
-    /// A preparation or adaptation error opens it once and lights the status
-    /// marker; an ordinary rebuild does neither.
+    /// topology and mesh it produced, the handoff waits, the running solver,
+    /// and the log of what the transient channels said. A preparation or
+    /// adaptation error lights the status marker and keeps it lit until this
+    /// is opened, rather than opening it; an ordinary rebuild does neither.
     fn diagnostics_window(&mut self, ctx: &egui::Context) {
-        let warning = self.diagnostics_warning();
-        if warning && !self.diagnostics_warned {
-            self.diagnostics_open = true;
-        }
-        self.diagnostics_warned = warning;
+        self.record_events(ctx.input(|input| input.time));
         if self.frame_ms.is_finite() && self.frame_ms > 0.0 {
             if self.frame_history.len() == FRAME_HISTORY {
                 self.frame_history.pop_front();
@@ -8869,6 +8997,8 @@ impl Playground {
         if !self.diagnostics_open {
             return;
         }
+        // Open is seen: the log below holds whatever lit the marker.
+        self.unseen_error = false;
         let mut open = true;
         egui::Window::new("Performance diagnostics")
             .open(&mut open)
@@ -8883,6 +9013,7 @@ impl Playground {
                     self.mesh_section(ui);
                     self.handoff_section(ui);
                     self.solver_section(ui);
+                    self.log_section(ui);
                 });
             });
         self.diagnostics_open = open;
@@ -9229,6 +9360,55 @@ impl Playground {
                 }
             });
     }
+    /// What the transient channels said, kept after they were overwritten.
+    fn log_section(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Log")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("Clear")
+                        .on_hover_text("Forget every entry below")
+                        .clicked()
+                    {
+                        self.events.clear();
+                    }
+                    if ui
+                        .small_button("Copy")
+                        .on_hover_text("Copy the whole log, oldest first")
+                        .clicked()
+                    {
+                        let text = self
+                            .events
+                            .iter()
+                            .map(event_line)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.ctx().copy_text(text);
+                    }
+                    ui.weak(format!("{} of {EVENT_LOG_ENTRIES}", self.events.len()));
+                });
+                if self.events.is_empty() {
+                    ui.weak("Nothing recorded yet");
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for entry in self.events.iter().rev() {
+                            let line = event_line(entry);
+                            match entry.source {
+                                EventSource::Preparation | EventSource::Adaptation => {
+                                    ui.colored_label(RED, line)
+                                }
+                                EventSource::Repair => ui.colored_label(GOLD, line),
+                                EventSource::Status => ui.small(line),
+                            };
+                        }
+                    });
+            });
+    }
     fn status_bar(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("status")
             .exact_size(29.0)
@@ -9285,8 +9465,9 @@ impl Playground {
                                 .on_hover_text("Open performance diagnostics")
                                 .clicked();
                             if warning {
-                                ui.colored_label(GOLD, "⚠")
-                                    .on_hover_text("Preparation or adaptation reported an error");
+                                ui.colored_label(GOLD, "⚠").on_hover_text(
+                                    "Preparation or adaptation reported an error; the diagnostics log keeps it",
+                                );
                             }
                             clicked
                         })
@@ -10428,6 +10609,96 @@ mod tests {
                 "`{retired}` parses, so the reference should be listing it"
             );
         }
+    }
+
+    /// Every channel the log watches overwrites itself, so a change is the only
+    /// moment its value can be caught. Holding a value logs it once, clearing
+    /// and returning without anything in between counts a repeat rather than
+    /// filling the ring, and an error keeps the status marker lit until the
+    /// window is opened on it.
+    #[test]
+    fn the_log_keeps_one_entry_per_change_of_a_transient_channel() {
+        let mut state = Playground::default();
+        state.record_events(1.0);
+        assert!(state.events.is_empty());
+        assert!(!state.diagnostics_warning());
+
+        state.message = "Pulse queued in region 1".into();
+        state.record_events(2.0);
+        state.record_events(3.0);
+        assert_eq!(state.events.len(), 1, "a held value is logged once");
+        assert_eq!(state.events[0].source, EventSource::Status);
+        assert_eq!(state.events[0].repeats, 1);
+        assert!(
+            !state.diagnostics_warning(),
+            "a status line is not an error"
+        );
+
+        state.amr_error = Some("Invalid adaptation source".into());
+        state.record_events(4.0);
+        assert_eq!(state.events.len(), 2);
+        assert_eq!(state.events[1].source, EventSource::Adaptation);
+        assert!(state.unseen_error);
+
+        // The adaptation clears itself and fails again with nothing logged in
+        // between, which is the shape that would otherwise flood the ring.
+        for time in [5.0, 6.0, 7.0, 8.0] {
+            state.amr_error = (time as u64)
+                .is_multiple_of(2)
+                .then(|| "Invalid adaptation source".to_owned());
+            state.record_events(time);
+        }
+        assert_eq!(state.events.len(), 2, "{:?}", state.events);
+        assert_eq!(state.events[1].repeats, 3);
+
+        // A different message is its own entry, and the marker survives the
+        // error clearing.
+        state.amr_error = None;
+        state.message = "Simulation topology committed".into();
+        state.record_events(9.0);
+        assert_eq!(state.events.len(), 3);
+        assert_eq!(state.events[2].source, EventSource::Status);
+        assert!(
+            state.diagnostics_warning(),
+            "the marker stays lit for an error the window has not been opened on"
+        );
+
+        state.unseen_error = false;
+        assert!(!state.diagnostics_warning());
+        assert_eq!(
+            event_line(&state.events[1]),
+            "0:08.0 · adaptation · Invalid adaptation source ×3"
+        );
+
+        // A repair fallback is queued by the transaction that reported it and
+        // stamped on the next frame, so two transactions that fall back the
+        // same way are counted rather than reading as one.
+        state.pending_repairs = vec!["mesh repair failed".into(), "mesh repair failed".into()];
+        state.record_events(10.0);
+        assert!(state.pending_repairs.is_empty());
+        assert_eq!(state.events.len(), 4);
+        assert_eq!(state.events[3].source, EventSource::Repair);
+        assert_eq!(state.events[3].repeats, 2);
+        assert!(
+            !state.diagnostics_warning(),
+            "a rebuild that carried the edit through is not an error"
+        );
+    }
+
+    /// The ring drops its oldest rather than growing without bound.
+    #[test]
+    fn the_log_is_bounded() {
+        let mut state = Playground::default();
+        for index in 0..EVENT_LOG_ENTRIES + 20 {
+            state.message = format!("message {index}");
+            state.record_events(index as f64);
+        }
+        assert_eq!(state.events.len(), EVENT_LOG_ENTRIES);
+        assert_eq!(state.events[0].text, format!("message {}", 20));
+        assert_eq!(
+            state.events[EVENT_LOG_ENTRIES - 1].text,
+            format!("message {}", EVENT_LOG_ENTRIES + 19)
+        );
     }
 
     #[test]
