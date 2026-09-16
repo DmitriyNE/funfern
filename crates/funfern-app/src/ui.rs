@@ -8982,8 +8982,8 @@ impl Playground {
         )
     }
     /// One draggable window over the whole transaction: the frame it costs, the
-    /// topology and mesh it produced, the handoff waits, the running solver,
-    /// and the log of what the transient channels said. A preparation or
+    /// log of what the transient channels said, and then the topology and mesh
+    /// it produced, the handoff waits and the running solver. A preparation or
     /// adaptation error lights the status marker and keeps it lit until this
     /// is opened, rather than opening it; an ordinary rebuild does neither.
     fn diagnostics_window(&mut self, ctx: &egui::Context) {
@@ -9009,11 +9009,14 @@ impl Playground {
                     ui.monospace(self.summary_line());
                     ui.separator();
                     self.frame_section(ui);
+                    // Above the sections whose height follows whatever the
+                    // last transaction did, so reading the log does not mean
+                    // chasing it down the window.
+                    self.log_section(ui);
                     self.topology_section(ui);
                     self.mesh_section(ui);
                     self.handoff_section(ui);
                     self.solver_section(ui);
-                    self.log_section(ui);
                 });
             });
         self.diagnostics_open = open;

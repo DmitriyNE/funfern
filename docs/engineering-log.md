@@ -157,10 +157,11 @@ message, a preparation or adaptation error by the next success, a repair
 fallback by the next transaction. An error that clears itself a frame later was
 unreadable - the window would flash open and the reason would already be gone.
 
-The diagnostics window now ends in a Log: a 200-entry ring, newest first, with
-Clear and Copy, each line stamped with the session time and tagged by the
-channel it came from. Errors read red, repair fallbacks gold, status lines
-plain.
+The diagnostics window now carries a Log directly under the frame graph, above
+the sections whose height follows the last transaction: a 200-entry ring, newest
+first, with Clear and Copy, each line stamped with the session time and tagged
+by the channel it came from. Errors read red, repair fallbacks gold, status
+lines plain.
 
 It is filled by watching the channels rather than by instrumenting the places
 that write them. `self.message` alone is assigned from about two dozen sites,
