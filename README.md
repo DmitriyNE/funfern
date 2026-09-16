@@ -342,7 +342,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   handle to resize it. In EM scenes the GPU recorder reports mean and RMS primary
   field, RMS transverse-field magnitude, mean energy density, total energy, and
   target coverage. Mechanical scenes retain their displacement and energy
-  quantities; new readouts initially show RMS primary field and total energy. Area
+  quantities; new readouts initially show RMS primary field and total energy. A
+  subdomain marker sits at the area-weighted centroid of the region it reads, taken
+  from the geometry, so remeshing and adaptation leave it where it is; for a region
+  shaped like a ring that point lands in the hole. Area
   markers and region outlines have an independent
   View toggle. Definitions are saved and undoable while recorded histories remain
   transient across files and continuous across ordinary solver handoffs.

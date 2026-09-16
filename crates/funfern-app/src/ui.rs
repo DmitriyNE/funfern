@@ -746,7 +746,7 @@ pub struct Playground {
     probe_status: BTreeMap<ProbeId, String>,
     probe_metrics: BTreeMap<ProbeId, (f64, bool)>,
     probe_anchors: BTreeMap<ProbeId, Point2>,
-    probe_metadata_token: Option<(TopologyToken, u64)>,
+    probe_metadata_token: Option<(Option<TopologyToken>, u64)>,
     probe_name_edit: Option<(ProbeId, String)>,
     probe_history_seconds: f64,
     far_field_view: ProbeViewState,
@@ -7589,7 +7589,8 @@ impl Playground {
         }
     }
     /// Mirrors the committed compilation status and path metrics of every probe
-    /// so the readouts can report a precise reason and a real arclength axis.
+    /// so the readouts can report a precise reason and a real arclength axis,
+    /// and places each subdomain probe's marker from the compiled geometry.
     fn refresh_probe_metadata(&mut self) {
         let ids = self
             .editor
@@ -7607,17 +7608,39 @@ impl Playground {
         self.probe_views.retain(|id, _| ids.contains(id));
         self.probe_windows.retain(|id| ids.contains(id));
         self.probe_anchors.retain(|id, _| ids.contains(id));
-        let Some(active) = self.runtime.active().cloned() else {
-            return;
-        };
-        // Path metrics and region anchors are derived from the committed mesh,
-        // so they only change when a new candidate or probe set is published.
-        let token = (active.bundle.token, self.editor.revision);
+        // Compilation status and path metrics mirror a committed candidate, so
+        // they change only when one is published or the probe set moves. Region
+        // anchors come from the compiled geometry instead, which is why the
+        // token survives having no candidate at all.
+        let token = (
+            self.runtime.active().map(|active| active.bundle.token),
+            self.editor.revision,
+        );
         if self.probe_metadata_token == Some(token) {
             return;
         }
         self.probe_metadata_token = Some(token);
-        self.probe_anchors.clear();
+        let scene = self
+            .editor
+            .compiled_draft
+            .as_ref()
+            .unwrap_or(&self.editor.compiled_accepted);
+        self.probe_anchors = self
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .filter_map(|probe| match probe.target {
+                TopologyProbeTarget::AreaRegion(region) => {
+                    Some((probe.id, region_anchor(scene, region)?))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let Some(active) = self.runtime.active().cloned() else {
+            return;
+        };
         for compiled in active.probes.iter() {
             match &compiled.result {
                 TopologyProbeCompilation::Ready(stencil) => {
@@ -7646,17 +7669,9 @@ impl Playground {
             }
         }
         for probe in &self.editor.document.model.probes {
-            match probe.target {
-                TopologyProbeTarget::Segment { start, end, .. } => {
-                    self.probe_metrics
-                        .insert(probe.id, ((end - start).norm(), false));
-                }
-                TopologyProbeTarget::AreaRegion(region) => {
-                    if let Some(point) = region_anchor(&active.mesh, region) {
-                        self.probe_anchors.insert(probe.id, point);
-                    }
-                }
-                _ => {}
+            if let TopologyProbeTarget::Segment { start, end, .. } = probe.target {
+                self.probe_metrics
+                    .insert(probe.id, ((end - start).norm(), false));
             }
         }
     }
@@ -10093,24 +10108,29 @@ fn edit_time_signal(ui: &mut egui::Ui, signal: &mut TimeSignal) {
 
 /// Average of the triangle centroids carrying one region, used to anchor a
 /// region probe's viewport label where the region actually is.
-fn region_anchor(mesh: &TriMesh, region: RegionId) -> Option<Point2> {
-    let mut sum = Point2::default();
-    let mut count = 0.0;
-    for triangle in &mesh.triangles {
-        if triangle.region != region {
+/// Where a subdomain probe's marker sits: the area-weighted centroid of the
+/// faces its region covers, taken from the compiled geometry. Averaging the
+/// mesh's triangle centroids instead puts the marker wherever triangles are
+/// dense, which under adaptation is wherever the wave currently is, so it
+/// wandered on every remesh. For a region shaped like a ring the point lands in
+/// the hole, as it does for one such face.
+fn region_anchor(scene: &CompiledTopologyScene, region: RegionId) -> Option<Point2> {
+    let mut moment = Point2::default();
+    let mut area = 0.0;
+    for assignment in &scene.assignments {
+        if assignment.region != Some(region) {
             continue;
         }
-        let centroid = triangle
-            .vertices
-            .iter()
-            .fold(Point2::default(), |total, index| {
-                total + mesh.vertices[*index].point
-            })
-            / 3.0;
-        sum = sum + centroid;
-        count += 1.0;
+        let Some(face) = scene.topology.face(assignment.face) else {
+            continue;
+        };
+        let Some(centroid) = face.centroid() else {
+            continue;
+        };
+        moment = moment + centroid * face.area;
+        area += face.area;
     }
-    (count > 0.0).then(|| sum / count)
+    (area > 0.0).then(|| moment / area)
 }
 
 fn sampling_preset_picker(
@@ -12206,11 +12226,99 @@ mod probe_interaction_tests {
         panic!("topology validation did not finish");
     }
 
+    /// A subdomain marker is placed from the compiled geometry, so it exists
+    /// before any mesh does and sits where the region's area is.
+    #[test]
+    fn a_subdomain_marker_is_placed_from_the_geometry() {
+        let mut state = Playground::default();
+        let probe = state
+            .editor
+            .create_probe(
+                "Field".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::AreaRegion(RegionId(1)),
+            )
+            .unwrap();
+        assert!(
+            state.runtime.active().is_none(),
+            "the scene has not been meshed"
+        );
+        state.refresh_probe_metadata();
+        let anchor = state
+            .probe_anchors
+            .get(&probe)
+            .copied()
+            .expect("the marker is placed without a mesh");
+
+        let scene = &state.editor.compiled_accepted;
+        let hole = scene
+            .assignments
+            .iter()
+            .find(|assignment| assignment.region.is_none())
+            .and_then(|assignment| scene.topology.face(assignment.face))
+            .and_then(|face| face.centroid())
+            .expect("the default scene holds one excluded face");
+        let center = scene.geometry.domain.center();
+        // Taking area out of a shape moves its centroid away from where that
+        // area was, and no further than the area which left could carry it.
+        // Averaging triangle centroids moved it the other way, towards the
+        // dense mesh the hole's boundary asks for.
+        let moved = anchor - center;
+        let away = center - hole;
+        assert!(moved.norm() > 0.0, "the hole moved the marker");
+        assert!(
+            moved.dot(away) / (moved.norm() * away.norm()) > 0.999,
+            "the marker moved {moved:?}, away from the hole is {away:?}"
+        );
+        assert!(moved.norm() < away.norm(), "the marker left the region");
+    }
+
+    /// The marker is the region's, not the mesh's, so meshing the same scene
+    /// twice at different densities has to leave it exactly where it was.
+    #[test]
+    fn a_subdomain_marker_never_moves_with_the_mesh() {
+        let mut state = Playground::default();
+        let probe = state
+            .editor
+            .create_probe(
+                "Field".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::AreaRegion(RegionId(1)),
+            )
+            .unwrap();
+        let mut placed = Vec::new();
+        for target in [0.30, 0.09] {
+            let active = activate_at(&mut state, target);
+            let triangles = active.mesh.triangles.len();
+            state.refresh_probe_metadata();
+            let anchor = state
+                .probe_anchors
+                .get(&probe)
+                .copied()
+                .expect("the marker is placed");
+            placed.push((triangles, anchor));
+        }
+        let [(coarse, first), (fine, second)] = placed[..] else {
+            unreachable!()
+        };
+        assert!(fine > coarse * 4, "the two meshes differ: {coarse} {fine}");
+        assert_eq!(
+            first, second,
+            "the marker moved between a {coarse} and a {fine} triangle mesh"
+        );
+    }
+
     /// Prepares the editor's accepted scene and makes it the active topology,
     /// the way a frame does once the GPU has acknowledged the upload.
     fn activate(state: &mut Playground) -> Arc<PreparedTopology> {
+        activate_at(state, 0.18)
+    }
+
+    /// `activate` at a chosen mesh density, for anything that has to hold
+    /// across two different meshes of one scene.
+    fn activate_at(state: &mut Playground, target_edge_length: f64) -> Arc<PreparedTopology> {
         let options = MeshingOptions {
-            target_edge_length: 0.18,
+            target_edge_length,
             ..MeshingOptions::default()
         };
         let token = state

@@ -150,6 +150,47 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — A subdomain marker was standing where the triangles were
+
+The marker for a subdomain probe drifted on every remesh, and the guess in the
+report was right: it was placed by the mesh. `region_anchor` averaged the
+centroids of the region's triangles with equal weight, so a triangle counted the
+same whether it covered a thousandth of the region or a tenth of it, and the
+marker was pulled wherever triangles were dense. Boundaries are meshed finely, so
+it leaned against whatever the region wrapped around; adaptation refines wherever
+the wave is, so under adaptation it followed the wave about.
+
+Measured on a scene with a small subdomain in one corner, meshing the same
+geometry at three densities moved it (-0.196, +0.162), (-0.057, +0.033),
+(-0.005, -0.006) - about a quarter of a unit on a two-unit domain, all of it
+mesh.
+
+It now comes from the compiled geometry: the area-weighted centroid of the faces
+the region is assigned, over `CompiledFace::centroid` and `::area`. Nothing about
+a mesh enters, so no remesh or adaptation can move it. Area-weighting the mesh
+triangles instead would have fixed the drift under refinement too - splitting a
+triangle preserves its area moment, and it agreed with the geometry answer to
+6e-5 - but it would have left the marker decided by a thing that has no say in
+where a region is.
+
+Two smaller things came with it. The anchor is read from the draft scene falling
+back to the accepted one, so the marker follows an edit instead of holding still
+and jumping at commit. And placing it no longer needs a committed candidate, so
+the probe metadata token had to survive there being none: a subdomain probe is
+now marked in a scene that has never been meshed, where before it had no marker
+at all.
+
+Unchanged: for a region shaped like a ring the centroid is in the hole. That was
+true of the mesh average too, and giving it a guaranteed interior point is a
+different job.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. Two new tests, both checked against the old
+implementation: the marker exists without a mesh and sits away from the hole its
+region wraps, and it is identical across a 323 and a 2198 triangle mesh of one
+scene, which the average moved by 0.041.
+
 ## 2026-09-16 — The probe's arrow points at its marker, not away from it
 
 The first version of the indicator above read badly in the scene, and the fix
