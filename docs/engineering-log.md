@@ -7,6 +7,15 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+Found while pacing the solver, not yet diagnosed:
+
+- [ ] `simulated_time()` runs backwards for a frame or two at a handoff. The
+  offset is only updated when the upload commits, while the step counter resets
+  when the buffers install, so between the two the steps taken on the old
+  generation are missing from the total. Counted per frame over a twenty-second
+  run: 18 of 1876 frames go backwards, worst 1.23 s. Pre-existing and unchanged
+  by the step-ceiling work, which measured 19 of 1929 on the same scene.
+
 The null mode nothing removes:
 
 - [ ] Ease a source out as well as in. The switch-on envelope only covers a
@@ -147,6 +156,45 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-16 — Slow motion shortens the step instead of skipping frames
+
+The speed ceiling shipped a day earlier paced by step *count*: a frame banked its
+wall-clock time, scaled it, and spent it in whole steps of whatever size the mesh
+allowed. Below a ceiling of one step per frame that count floors to zero on most
+frames — measured at 0.53 steps a frame with only 52 % of frames advancing at
+0.05x. The jumps are not the problem; each one is `1 * dt`, smaller than the
+`14 * dt` a full-speed frame moves. The cadence going irregular is, and a
+1-0-1-1-0 pattern reads as judder however small the increments.
+
+The threshold is `dt / frame_time`, which is why a coarse mesh suffers worst: the
+GRIN rod runs `dt` 6.6e-3, so at 120 frames a second it crosses at 0.8x and
+almost the whole slider sits below it.
+
+So beneath that point the step shrinks instead, to the frame budget times the
+ceiling, and every frame gets one. Shrinking is always safe — the mesh's figure
+is a stability limit, an upper bound, and this never goes above it. Measured
+after: 99 % of frames advancing at 0.05x and 95 to 97 % at 0.02x, against 52 %
+before, with full speed untouched because the ceiling only binds below about
+0.13x on that mesh. The residual few percent are frames that arrive faster than
+the fixed 120-per-second budget assumes; halving the budget would close it at
+double the step count, which is not worth it.
+
+The estimate of what this would cost was wrong and the correction came from the
+user: every mesh handoff already changes the step, so the clock accounting, the
+probe strides and the GPU parameter path all already cope. Logged across one run,
+`dt` swings 8.6e-4 to 2.0e-3 — a factor of 2.4 — while `simulated_time` stays
+continuous. So there was no new machinery to build; a ceiling that wants a
+different step just clears the requested revision, the same lever a document load
+pulls, and the scene republishes unchanged onto a reused plan, mesh and operator.
+
+One thing that survives the change and one that does not. The eleven sites
+reading `recommended_time_step()` now read the step the GPU was actually uploaded
+with, because between a speed change and the republish that carries it the two
+differ and the clock and probe strides would disagree with the solver. And the
+clock dip at handoffs, found while checking this, is pre-existing: 18 of 1876
+frames on the unchanged build against 19 of 1929 with the ceiling, so it is
+listed above rather than laid at this change's door.
 
 ## 2026-09-16 — The solver is paced to a speed again
 

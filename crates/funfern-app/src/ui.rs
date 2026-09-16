@@ -766,6 +766,10 @@ pub struct Playground {
     /// shortfall note reads. The raw measurement dips whenever a handoff
     /// withholds stepping inside its window.
     speed_reached: f64,
+    /// The step the GPU was last uploaded with. Not the active operator's
+    /// recommendation: the speed ceiling can ask for a smaller one, and between
+    /// a speed change and the republish that carries it the two differ.
+    uploaded_time_step: f64,
     /// The solver's step counter as of the previous frame. It is
     /// generation-local, so a handover restarts it and the rate follows what it
     /// advanced between frames rather than differencing it across the window.
@@ -965,6 +969,7 @@ impl Default for Playground {
             completed_steps: 0,
             steps_per_second: 0.0,
             speed_reached: 0.0,
+            uploaded_time_step: 0.0,
             rate_steps: 0,
             rate_generation: 0,
             rate_window_steps: 0,
@@ -3931,12 +3936,13 @@ impl Playground {
         let Some((cached, modes)) = self.field_components.take() else {
             return;
         };
+        let time_step = self.solver_time_step();
         self.field_offsets = centre_free_constants(
             &modes,
             active.operator.lumped_mass(),
             &display.current,
             &display.previous,
-            active.operator.recommended_time_step(),
+            time_step,
             &mut self.field_centred,
         );
         self.field_components = Some((cached, modes));
@@ -6628,6 +6634,7 @@ impl Playground {
         // built with, and this only decides whether the dispatches are encoded.
         request.set_grid_scale_filter(self.grid_scale_filter);
         if self.uploading.is_none() {
+            self.retime_for_speed();
             self.request_runtime();
         }
         if let Some(Ok(_)) = self
@@ -6666,7 +6673,10 @@ impl Playground {
                     }
                 }
             } else {
-                let dt = candidate.operator.recommended_time_step();
+                let dt = paced_time_step(
+                    candidate.operator.recommended_time_step(),
+                    self.editor.document.presentation.simulation_speed,
+                );
                 // What the step counter of the generation about to start counts
                 // from. The wave readback is a frame or two behind what has been
                 // encoded, and `caught_up` above says the encoded count is the
@@ -6675,14 +6685,11 @@ impl Playground {
                 // read before the upload, which resets it.
                 let time_offset = if candidate.fresh {
                     0.0
+                } else if self.runtime.active().is_some() {
+                    self.sim_time_offset
+                        + request.stats().completed_steps() as f64 * self.uploaded_time_step
                 } else {
-                    self.runtime
-                        .active()
-                        .map_or(self.sim_time_offset, |active| {
-                            self.sim_time_offset
-                                + request.stats().completed_steps() as f64
-                                    * active.operator.recommended_time_step()
-                        })
+                    self.sim_time_offset
                 };
                 let upload = if candidate.fresh || self.runtime.active().is_none() {
                     request.replace_with_volume_sources(
@@ -6724,6 +6731,7 @@ impl Playground {
                 };
                 match upload {
                     Ok(()) => {
+                        self.uploaded_time_step = dt;
                         self.handoff_upload = Some(Instant::now());
                         self.uploading = Some(Uploading {
                             token: candidate.bundle.token,
@@ -6797,7 +6805,10 @@ impl Playground {
         // stops the solver for good. It stays queued instead.
         if self.reset_requested && self.uploading.is_none() {
             if let Some(active) = self.runtime.active() {
-                let dt = active.operator.recommended_time_step();
+                let dt = paced_time_step(
+                    active.operator.recommended_time_step(),
+                    self.editor.document.presentation.simulation_speed,
+                );
                 if request
                     .reset(
                         assets,
@@ -6810,6 +6821,7 @@ impl Playground {
                     .is_ok()
                 {
                     self.reset_requested = false;
+                    self.uploaded_time_step = dt;
                     self.sim_time_offset = 0.0;
                     self.restart_probe_traces();
                     // The scale is deliberately left alone. Reset zeroes the
@@ -6838,7 +6850,7 @@ impl Playground {
             self.configure_probes(request, assets, commands, &active);
         }
         if let Some(active) = self.runtime.active() {
-            let dt = active.operator.recommended_time_step();
+            let dt = self.solver_time_step();
             // A pulse written during an upload would land in the new buffers
             // through the old operator's stencil, so it waits too.
             if let Some((position, region)) = self
@@ -6909,14 +6921,10 @@ impl Playground {
                 .iter()
                 .map(|value| *value as f64)
                 .collect::<Vec<_>>();
+            let time_step = self.solver_time_step();
             self.wave_energy = active
                 .operator
-                .discrete_energy_with_auxiliary(
-                    &current,
-                    &previous,
-                    &auxiliary,
-                    active.operator.recommended_time_step(),
-                )
+                .discrete_energy_with_auxiliary(&current, &previous, &auxiliary, time_step)
                 .ok();
         }
         self.accumulate_step_rate(
@@ -7022,7 +7030,7 @@ impl Playground {
                 }
             }
         }
-        let dt = active.operator.recommended_time_step();
+        let dt = self.solver_time_step();
         let physics = active.bundle.authored.physics;
         // Every recorder writes a time series on the solver's own clock, and a
         // transfer carries that clock across. So a new mesh over the same
@@ -7100,12 +7108,46 @@ impl Playground {
         self.probe_clock_restarted = true;
         self.probe_upload_previous = None;
     }
-    fn simulated_time(&self) -> f64 {
-        let dt = self
-            .runtime
+    /// The step the GPU is actually running at.
+    fn solver_time_step(&self) -> f64 {
+        if self.uploaded_time_step > 0.0 {
+            return self.uploaded_time_step;
+        }
+        self.runtime
             .active()
-            .map_or(0.0, |active| active.operator.recommended_time_step());
-        self.sim_time_offset + self.completed_steps as f64 * dt
+            .map_or(0.0, |active| active.operator.recommended_time_step())
+    }
+
+    /// Republishes when the speed ceiling wants a different step from the one
+    /// the solver is running.
+    ///
+    /// The scene is unchanged, so the preparation reuses the plan, the mesh and
+    /// the operator and the field crosses on the identity transfer — the same
+    /// path an adaptation handoff takes, which already changes the step every
+    /// time it runs. Clearing the requested revision is the lever a document
+    /// load pulls.
+    fn retime_for_speed(&mut self) {
+        if self.uploaded_time_step <= 0.0
+            || self.uploading.is_some()
+            || self.runtime.phase().is_some()
+            || self.runtime.ready().is_some()
+        {
+            return;
+        }
+        let Some(active) = self.runtime.active() else {
+            return;
+        };
+        let wanted = paced_time_step(
+            active.operator.recommended_time_step(),
+            self.editor.document.presentation.simulation_speed,
+        );
+        if (wanted / self.uploaded_time_step - 1.0).abs() > TIME_STEP_HYSTERESIS {
+            self.requested_revision = None;
+        }
+    }
+
+    fn simulated_time(&self) -> f64 {
+        self.sim_time_offset + self.completed_steps as f64 * self.solver_time_step()
     }
     /// How much of the delay window the far-field recorder holds, once it is
     /// running and has not filled it yet. Nothing can be projected before it is
@@ -7316,7 +7358,7 @@ impl Playground {
             self.amr_status = "monitoring solution".into();
             return;
         }
-        let dt = active.operator.recommended_time_step();
+        let dt = self.solver_time_step();
         let time = self.sim_time_offset + step.saturating_sub(1) as f64 * dt;
         let Some(volume_acceleration) = request.volume_acceleration(time) else {
             self.amr_status = "waiting for source state".into();
@@ -9543,10 +9585,11 @@ impl Playground {
             self.steps_per_second,
             active.map_or(0, |v| v.operator.degrees_of_freedom()),
             active.map_or(0, |v| v.mesh.triangles.len()),
-            active.map_or("—".into(), |v| format!(
-                "{:.2e}",
-                v.operator.recommended_time_step()
-            ))
+            if active.is_some() {
+                format!("{:.2e}", self.solver_time_step())
+            } else {
+                "—".into()
+            }
         )
     }
     /// One draggable window over the whole transaction: the frame it costs, the
@@ -10053,7 +10096,7 @@ impl Playground {
                 ));
                 match self.runtime.active() {
                     Some(active) => {
-                        let dt = active.operator.recommended_time_step();
+                        let dt = self.solver_time_step();
                         ui.small(format!(
                             "{} dofs · {:.2} MiB",
                             active.operator.degrees_of_freedom(),
@@ -11047,6 +11090,36 @@ fn exposure_level(values: &[f32], quantile: f64, scratch: &mut Vec<f64>) -> f64 
         .1
 }
 
+/// Wall-clock seconds a frame is budgeted when deciding how small the solver's
+/// step has to be.
+///
+/// Fixed rather than the measured frame time: a step that moved with the frame
+/// rate would jitter, and each jitter costs a republish. A hundred and twentieth
+/// keeps every frame of a fast display fed.
+const PACING_FRAME_SECONDS: f64 = 1.0 / 120.0;
+
+/// How far the wanted step may drift from the one the solver is running before
+/// it is worth republishing to change it.
+const TIME_STEP_HYSTERESIS: f64 = 0.1;
+
+/// The step the solver runs at: the mesh's stability limit, or smaller when the
+/// speed ceiling is low enough that pacing by step count alone would leave whole
+/// frames without one.
+///
+/// Above a speed of `recommended / PACING_FRAME_SECONDS` this is the
+/// recommendation unchanged and the rate is paced purely by how many steps a
+/// frame asks for. Below it that count floors to zero on most frames and the
+/// picture judders — measured at 0.53 steps a frame with 52 % of frames
+/// advancing at 0.05x, and a coarse mesh crosses the threshold at 0.8x — so the
+/// step shrinks instead and every frame gets one. Shrinking is always safe: the
+/// stability limit is an upper bound, and this never goes above it.
+fn paced_time_step(recommended: f64, speed: f64) -> f64 {
+    if !recommended.is_finite() || recommended <= 0.0 || !speed.is_finite() || speed <= 0.0 {
+        return recommended;
+    }
+    recommended.min(PACING_FRAME_SECONDS * speed)
+}
+
 /// Steps to ask the solver for this frame, spending `accumulator` at
 /// `time_step` a step.
 ///
@@ -12015,6 +12088,67 @@ mod tests {
             field_color_over_overlay(scale).a(),
             (0.761_594_f32 * 220.0).round() as u8
         );
+    }
+
+    /// Below a ceiling of `recommended / PACING_FRAME_SECONDS`, pacing by step
+    /// count alone leaves whole frames without one. The step shrinks there
+    /// instead — always downward, since the mesh's figure is a stability limit.
+    #[test]
+    fn a_low_ceiling_shrinks_the_step_rather_than_skipping_frames() {
+        // The GRIN rod's step at the default mesh, whose threshold is most of
+        // the slider.
+        let recommended = 6.6e-3;
+        let threshold = recommended / PACING_FRAME_SECONDS;
+        assert!(
+            (0.7..0.85).contains(&threshold),
+            "threshold moved: {threshold}"
+        );
+
+        // At and above it the mesh keeps its own step and the count does the work.
+        assert_eq!(paced_time_step(recommended, 1.0), recommended);
+        assert_eq!(paced_time_step(recommended, 2.0), recommended);
+        assert!(
+            paced_time_step(recommended, 1.0e6) <= recommended,
+            "went above the limit"
+        );
+
+        // Below it the step follows the ceiling down.
+        assert_eq!(
+            paced_time_step(recommended, 0.1),
+            PACING_FRAME_SECONDS * 0.1
+        );
+        assert_eq!(
+            paced_time_step(recommended, 0.02),
+            PACING_FRAME_SECONDS * 0.02
+        );
+
+        // Nonsense leaves the mesh's own step alone.
+        assert_eq!(paced_time_step(recommended, 0.0), recommended);
+        assert_eq!(paced_time_step(recommended, f64::NAN), recommended);
+        assert_eq!(paced_time_step(recommended, -1.0), recommended);
+    }
+
+    /// What the cap is for: a frame's budget buys at least one step at every
+    /// ceiling, on coarse meshes and fine. Without it a coarse mesh leaves half
+    /// the frames unadvanced below 0.8x and the picture judders.
+    #[test]
+    fn a_frame_advances_at_every_ceiling() {
+        for recommended in [6.6e-3, 8.9e-4, 6.2e-4] {
+            for speed in [2.0, 1.0, 0.5, 0.2, 0.05, 0.02] {
+                let step = paced_time_step(recommended, speed);
+                assert!(step <= recommended, "{recommended:e} {speed}");
+                let mut accumulator = 0.0;
+                let idle = (0..600)
+                    .filter(|_| {
+                        steps_for_frame(&mut accumulator, PACING_FRAME_SECONDS, speed, step) == 0
+                    })
+                    .count();
+                assert_eq!(
+                    idle, 0,
+                    "recommended {recommended:e} at {speed}x left {idle} frames unadvanced"
+                );
+            }
+        }
     }
 
     /// The ceiling is on simulated seconds per wall second, so half the speed

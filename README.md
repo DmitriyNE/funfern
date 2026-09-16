@@ -508,7 +508,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   solver is paced to it rather than to real time, and says what it is actually
   reaching when a scene costs more per step than a frame can afford. Substeps per
   display frame are bounded, so asking for more than a scene can deliver falls
-  short rather than building a backlog. Field colors use an adjustable symmetric gain.
+  short rather than building a backlog. Slow speeds shorten the solver's own time
+  step rather than skipping frames, so the motion stays smooth instead of
+  advancing in visible jumps; the step never exceeds the stability limit the mesh
+  sets. Field colors use an adjustable symmetric gain.
   Pulses and point sources act only in their containing wall-separated
   region. With open baffles their Gaussian stencil uses mesh-path distance, so it
   goes around a free endpoint instead of jumping through coincident faces.

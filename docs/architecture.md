@@ -1153,7 +1153,15 @@ with DOFs, memory, timestep, and phase/amplitude error.
 The solver is paced to a persisted ceiling on simulated seconds per wall second
 rather than to real time: the wall-clock time a frame took is scaled by that
 ceiling before being spent at one time step a substep, so half the speed asks for
-half the substeps. At most `MAX_STEPS_PER_FRAME` are requested in a frame and the
+half the substeps. Below a ceiling of one time step per frame budget that count
+floors to zero on most frames and the picture judders, so beneath that point the
+step itself shrinks to `PACING_FRAME_SECONDS` times the ceiling and every frame
+gets one. Shrinking is always safe — the mesh's figure is a stability limit, an
+upper bound — and the step never goes above it. A ceiling that wants a different
+step republishes the scene unchanged, so the preparation reuses the plan, the
+mesh and the operator and the field crosses on the identity transfer; that is the
+same path an adaptation handoff takes, which already changes the step on nearly
+every run. At most `MAX_STEPS_PER_FRAME` are requested in a frame and the
 leftover is capped at one frame's worth, so unspent time is dropped rather than
 queued into a backlog that never drains — which is also why asking for more than
 a scene can afford falls short instead of running away. The reached rate is
