@@ -315,8 +315,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   solver time rather than browser frame rate. Definitions are saved and undoable;
   recorded traces are transient. Every trace runs on the solver's own clock,
   which a remesh carries across, so adaptation leaves the recording continuous
-  rather than stepping its time axis forward. Reset restarts that clock, and the
-  traces with it.
+  rather than stepping its time axis forward. A new mesh over the same recorders
+  also takes over the GPU rings they were filling, so the samples written between
+  the last readback and the handoff arrive rather than going with the buffers.
+  Reset restarts that clock, and the traces and rings with it.
 - **Line probes:** place an independent straight sampling segment with two clicks,
   which Shift snaps to the grid.
   Drag either endpoint to reshape it or drag its body as one rigid object. The arrow

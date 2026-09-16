@@ -8,9 +8,9 @@ use crate::material_overlay::{
 use crate::recording::{self, DestinationRequest, RecordingEvent, RecordingSpec, VideoRecorder};
 use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, AreaProbeRecord, CurveProbeDisplay, CurveProbeInput,
-    CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldDisplay, FarFieldHandoff, FarFieldHistory,
-    FarFieldInput, FarFieldRecord, MAX_STEPS_PER_FRAME, PointProbeRecord, ProbeDisplay,
-    PulseSettings, WaveDisplay, WaveGpuRequest, WaveTransfer,
+    CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldDisplay, FarFieldHandoff, FarFieldInput,
+    FarFieldRecord, MAX_STEPS_PER_FRAME, PointProbeRecord, ProbeDisplay, PulseSettings,
+    RecorderContext, RecorderHistory, WaveDisplay, WaveGpuRequest, WaveTransfer,
 };
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -6787,10 +6787,27 @@ impl Playground {
         }
         let dt = active.operator.recommended_time_step();
         let physics = active.bundle.authored.physics;
+        // Every recorder writes a time series on the solver's own clock, and a
+        // transfer carries that clock across. So a new mesh over the same
+        // recorders takes over the rings they were filling, and only a clock
+        // that restarted starts them again. Without that the samples the GPU
+        // wrote since the last readback went with the buffers - two to four of
+        // them at 120 Hz, on every adaptation.
+        let restarted = std::mem::take(&mut self.probe_clock_restarted);
+        let history = if restarted {
+            RecorderHistory::Restart
+        } else {
+            RecorderHistory::Keep
+        };
+        let context = RecorderContext {
+            time_step: dt,
+            physics,
+            history,
+        };
         let result = request
-            .update_point_probes(assets, commands, &points, 120.0, dt, physics)
-            .and_then(|()| request.update_curve_probes(assets, commands, &curves, dt, physics))
-            .and_then(|()| request.update_area_probes(assets, commands, &areas, 60.0, dt, physics));
+            .update_point_probes(assets, commands, &points, 120.0, context)
+            .and_then(|()| request.update_curve_probes(assets, commands, &curves, context))
+            .and_then(|()| request.update_area_probes(assets, commands, &areas, 60.0, context));
         if let Err(error) = result {
             self.message = error;
         }
@@ -6804,15 +6821,9 @@ impl Playground {
                 sample_spacing: stencil.sample_spacing,
                 delay_margin: stencil.delay_margin,
             });
-        // The recorder's history is a time series at fixed world points, so a
-        // new mesh over the same contour takes it over. Only a clock that
-        // restarted, or a contour that moved, starts the delay window again.
-        let restarted = std::mem::take(&mut self.probe_clock_restarted);
-        let history = if restarted {
-            FarFieldHistory::Restart
-        } else {
-            FarFieldHistory::Keep
-        };
+        // The far field records at fixed world points rather than at a probe,
+        // so a contour that moved starts its delay window again even when the
+        // clock did not.
         match request.update_far_field(assets, commands, far.as_ref(), dt, history) {
             Ok(FarFieldHandoff::Restarted) => {
                 self.far_field_trace = FarFieldTrace::default();

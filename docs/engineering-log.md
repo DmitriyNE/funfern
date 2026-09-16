@@ -19,16 +19,6 @@ Follow-ups from the welding work:
 
 Low priority, correctness rather than anything that shows:
 
-- [ ] A recorder loses the samples between its last readback and the freeze when
-  a handoff rebuilds its ring: 2 to 4 of them at 120 Hz, a 33 ms hole measured
-  over 25 adaptations. The traces are polylines, so it draws as one straight
-  segment under 2% of a default window rather than a break, and nothing in the
-  readouts integrates along the time axis, so no reported number is wrong. What
-  it would take: the point, curve, and area rings keyed to the wave clock the
-  way the far field's now is, so a new mesh inherits the ring instead of
-  starting one — their write cursor is still a generation-local step count,
-  which is why keeping the buffer across a handoff would scramble it.
-
 Carried over from the cutover follow-up work, not from the review:
 
 - [ ] Retire the pre-cutover `editor` module. It is not dead code reachable only
@@ -138,6 +128,45 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-16 — The probe rings outlive the mesh that filled them
+
+A handoff rebuilt the point, curve and area rings from scratch, so whatever the
+GPU had written since the last readback went with the old buffers: 2 to 4
+samples at 120 Hz, a 33 ms hole measured over 25 adaptations.
+
+This entry used to say what it would take, and was wrong about it. The claim was
+that the rings had to be rekeyed to the wave clock first, the way the far
+field's are, "because their write cursor is still a generation-local step count,
+which is why keeping the buffer across a handoff would scramble it". The cursor
+is indeed `(completed / stride) % frames` and does restart with the generation.
+It does not matter. Every readback sorts its records by time before the host
+sees them, and ingestion takes a record only when it is newer than the trace's
+last. Slot order carries no meaning at all, so a ring that resumes writing
+somewhere else is not scrambled - the stale entries ahead of the cursor are
+older than what has already been ingested and are dropped, and the entries the
+handoff would have thrown away are newer and are kept. Which is exactly, and
+only, what was missing.
+
+So the fix is the one the far field already had and no shader changed: when the
+clock has not restarted and the recorder set is unchanged, keep the output ring
+and replace the stencils and control around it. Identity is the ordered probe
+ids for points and areas, and the descriptors - id, offset, count - for lines,
+because those are what the ring is addressed by. A probe added, a line reshaped,
+or a reset starts a fresh ring.
+
+Three smaller things went with it. `FarFieldHistory` is `RecorderHistory` now,
+since four recorders share it and one flag decides for all of them, and the step,
+the physics and that flag travel together as a `RecorderContext` rather than as
+three more arguments each. And the three update functions used to clear their
+buffers before validating their arguments, which was harmless when every path
+cleared anyway; now that the success path keeps them, each rejection clears
+explicitly.
+
+Checked: fmt, clippy -D warnings, workspace tests, release build. The test
+holds all three rings across an adaptation at a shorter timestep, and watches
+them restart for a restarted clock, an added probe, and a reshaped line. Held
+against the keep being removed for points and for lines, which fails it.
 
 ## 2026-09-16 — The shaders are read by the suite now
 

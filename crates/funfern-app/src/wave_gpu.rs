@@ -202,9 +202,19 @@ pub enum FarFieldHandoff {
 /// clock is carried across a transfer, so a ring only has to start over when
 /// the clock itself does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FarFieldHistory {
+pub enum RecorderHistory {
     Keep,
     Restart,
+}
+
+/// What every probe recorder needs beyond the probes themselves: the step the
+/// solver is taking, the physics its samples mean, and whether it inherits the
+/// ring the last recorder was filling.
+#[derive(Clone, Copy, Debug)]
+pub struct RecorderContext {
+    pub time_step: f64,
+    pub physics: PhysicsModel,
+    pub history: RecorderHistory,
 }
 
 /// What an unwritten ring frame holds. A recorded time is never negative, and
@@ -392,22 +402,28 @@ impl WaveGpuRequest {
         commands: &mut Commands,
         probes: &[(u64, Option<QuadraticPointStencil>)],
         sample_rate: f64,
-        time_step: f64,
-        physics: PhysicsModel,
+        context: RecorderContext,
     ) -> Result<(), String> {
+        let RecorderContext {
+            time_step,
+            physics,
+            history,
+        } = context;
         if probes.len() > MAX_POINT_PROBES
             || !sample_rate.is_finite()
             || !(30.0..=480.0).contains(&sample_rate)
             || !time_step.is_finite()
             || time_step <= 0.0
         {
+            self.clear_probe_buffers(assets, commands);
             return Err("Invalid point-probe recorder settings".into());
         }
-        self.clear_probe_buffers(assets, commands);
         if probes.is_empty() {
+            self.clear_probe_buffers(assets, commands);
             return Ok(());
         }
         let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
+        let ids = probes.iter().map(|(id, _)| *id).collect::<Arc<[u64]>>();
         let stencils = probes
             .iter()
             .map(|(_, stencil)| gpu_probe_stencil(*stencil))
@@ -420,20 +436,45 @@ impl WaveGpuRequest {
                 probe_physics_flag(physics),
             ),
         };
-        let output = vec![
-            GpuPointProbeSample {
-                primary: Vec4::splat(f32::NAN),
-                secondary: Vec4::splat(f32::NAN),
-            };
-            PROBE_RING_FRAMES * MAX_POINT_PROBES
-        ];
-        let handles = ProbeBufferHandles {
-            stencils: assets.add(ShaderBuffer::from(stencils)),
-            control: assets.add(ShaderBuffer::from(control)),
-            output: assets.add(ShaderBuffer::from(output)),
-            ids: probes.iter().map(|(id, _)| *id).collect(),
-            sample_stride,
+        // The same probes read through a new mesh keep their ring. What the GPU
+        // wrote since the last readback is still in it, and the host takes
+        // records by time rather than by slot, so where the new stencils resume
+        // writing does not matter.
+        let kept = history == RecorderHistory::Keep
+            && self
+                .probes
+                .as_ref()
+                .is_some_and(|handles| handles.ids == ids);
+        let handles = if kept {
+            let previous = self.probes.take().expect("a kept ring exists");
+            assets.remove(previous.stencils.id());
+            assets.remove(previous.control.id());
+            ProbeBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                sample_stride,
+                ..previous
+            }
+        } else {
+            self.clear_probe_buffers(assets, commands);
+            let output = vec![
+                GpuPointProbeSample {
+                    primary: Vec4::splat(f32::NAN),
+                    secondary: Vec4::splat(f32::NAN),
+                };
+                PROBE_RING_FRAMES * MAX_POINT_PROBES
+            ];
+            ProbeBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                output: assets.add(ShaderBuffer::from(output)),
+                ids,
+                sample_stride,
+            }
         };
+        if let Some(entity) = self.probe_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
         self.probe_revision = self.probe_revision.wrapping_add(1).max(1);
         self.probe_readback_entity = Some(
             commands
@@ -468,10 +509,15 @@ impl WaveGpuRequest {
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
         probes: &[CurveProbeInput],
-        time_step: f64,
-        physics: PhysicsModel,
+        context: RecorderContext,
     ) -> Result<(), String> {
+        let RecorderContext {
+            time_step,
+            physics,
+            history,
+        } = context;
         if !time_step.is_finite() || time_step <= 0.0 {
+            self.clear_curve_probe_buffers(assets, commands);
             return Err("Invalid line-probe recorder timestep".into());
         }
         let point_count = probes
@@ -490,10 +536,11 @@ impl WaveGpuRequest {
                         .any(|(_, normal)| !normal.finite())
             })
         {
+            self.clear_curve_probe_buffers(assets, commands);
             return Err("Invalid line-probe recorder settings".into());
         }
-        self.clear_curve_probe_buffers(assets, commands);
         if probes.is_empty() {
+            self.clear_curve_probe_buffers(assets, commands);
             return Ok(());
         }
         let mut stencils = Vec::with_capacity(point_count);
@@ -530,14 +577,38 @@ impl WaveGpuRequest {
             };
             CURVE_PROBE_RING_FRAMES * MAX_CURVE_PROBE_POINTS
         ];
-        let handles = CurveProbeBufferHandles {
-            stencils: assets.add(ShaderBuffer::from(stencils)),
-            control: assets.add(ShaderBuffer::from(control)),
-            output: assets.add(ShaderBuffer::from(output)),
-            descriptors: descriptors.into(),
-            sample_strides: sample_strides.into(),
-            point_count: point_count as u32,
+        let descriptors = Arc::<[CurveProbeDescriptor]>::from(descriptors);
+        // The same probes over the same sample points keep their ring, whatever
+        // mesh the stencils now read. Records are taken by time, not by slot.
+        let kept = history == RecorderHistory::Keep
+            && self
+                .curve_probes
+                .as_ref()
+                .is_some_and(|handles| handles.descriptors == descriptors);
+        let handles = if kept {
+            let previous = self.curve_probes.take().expect("a kept ring exists");
+            assets.remove(previous.stencils.id());
+            assets.remove(previous.control.id());
+            CurveProbeBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                sample_strides: sample_strides.into(),
+                ..previous
+            }
+        } else {
+            self.clear_curve_probe_buffers(assets, commands);
+            CurveProbeBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                output: assets.add(ShaderBuffer::from(output)),
+                descriptors,
+                sample_strides: sample_strides.into(),
+                point_count: point_count as u32,
+            }
         };
+        if let Some(entity) = self.curve_probe_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
         self.curve_probe_revision = self.curve_probe_revision.wrapping_add(1).max(1);
         self.curve_probe_readback_entity = Some(
             commands
@@ -577,19 +648,24 @@ impl WaveGpuRequest {
         commands: &mut Commands,
         probes: &[AreaProbeInput],
         sample_rate: f64,
-        time_step: f64,
-        physics: PhysicsModel,
+        context: RecorderContext,
     ) -> Result<(), String> {
+        let RecorderContext {
+            time_step,
+            physics,
+            history,
+        } = context;
         let contribution_count = probes
             .iter()
             .filter_map(|probe| probe.stencil.as_ref())
             .map(|stencil| stencil.elements.len())
             .sum::<usize>();
-        self.clear_area_probe_buffers(assets, commands);
         if probes.len() > MAX_POINT_PROBES {
+            self.clear_area_probe_buffers(assets, commands);
             return Err(format!("Maximum {MAX_POINT_PROBES} area probes"));
         }
         if contribution_count > MAX_AREA_PROBE_ELEMENTS {
+            self.clear_area_probe_buffers(assets, commands);
             return Err(format!(
                 "Area probes cover {contribution_count} element pieces; maximum is {MAX_AREA_PROBE_ELEMENTS}"
             ));
@@ -599,9 +675,11 @@ impl WaveGpuRequest {
             || !time_step.is_finite()
             || time_step <= 0.0
         {
+            self.clear_area_probe_buffers(assets, commands);
             return Err("Invalid area-probe recorder settings".into());
         }
         if probes.is_empty() {
+            self.clear_area_probe_buffers(assets, commands);
             return Ok(());
         }
         let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
@@ -657,6 +735,7 @@ impl WaveGpuRequest {
             .iter()
             .any(|descriptor| !descriptor.areas.is_finite())
         {
+            self.clear_area_probe_buffers(assets, commands);
             return Err("Area-probe weights cannot be represented on the GPU".into());
         }
         let control = GpuProbeControl {
@@ -668,24 +747,58 @@ impl WaveGpuRequest {
             ),
         };
         let scratch = vec![GpuAreaProbeContributionSample::default(); contribution_count.max(1)];
-        let output = vec![
-            GpuAreaProbeSample {
-                primary: Vec4::splat(f32::NAN),
-                secondary: Vec4::splat(f32::NAN),
-                tertiary: Vec4::splat(f32::NAN),
-            };
-            AREA_PROBE_RING_FRAMES * MAX_POINT_PROBES
-        ];
-        let handles = AreaProbeBufferHandles {
-            contributions: assets.add(ShaderBuffer::from(contributions)),
-            descriptors: assets.add(ShaderBuffer::from(descriptors)),
-            control: assets.add(ShaderBuffer::from(control)),
-            scratch: assets.add(ShaderBuffer::from(scratch)),
-            output: assets.add(ShaderBuffer::from(output)),
-            ids: probes.iter().map(|probe| probe.id).collect(),
-            sample_stride,
-            contribution_count: contribution_count as u32,
+        let ids = probes.iter().map(|probe| probe.id).collect::<Arc<[u64]>>();
+        // Only the output ring carries history. The scratch buffer is one
+        // dispatch's working space, so it is rebuilt with the contributions it
+        // sums.
+        let kept = history == RecorderHistory::Keep
+            && self
+                .area_probes
+                .as_ref()
+                .is_some_and(|handles| handles.ids == ids);
+        let handles = if kept {
+            let previous = self.area_probes.take().expect("a kept ring exists");
+            for handle in [
+                previous.contributions.id(),
+                previous.descriptors.id(),
+                previous.control.id(),
+                previous.scratch.id(),
+            ] {
+                assets.remove(handle);
+            }
+            AreaProbeBufferHandles {
+                contributions: assets.add(ShaderBuffer::from(contributions)),
+                descriptors: assets.add(ShaderBuffer::from(descriptors)),
+                control: assets.add(ShaderBuffer::from(control)),
+                scratch: assets.add(ShaderBuffer::from(scratch)),
+                sample_stride,
+                contribution_count: contribution_count as u32,
+                ..previous
+            }
+        } else {
+            self.clear_area_probe_buffers(assets, commands);
+            let output = vec![
+                GpuAreaProbeSample {
+                    primary: Vec4::splat(f32::NAN),
+                    secondary: Vec4::splat(f32::NAN),
+                    tertiary: Vec4::splat(f32::NAN),
+                };
+                AREA_PROBE_RING_FRAMES * MAX_POINT_PROBES
+            ];
+            AreaProbeBufferHandles {
+                contributions: assets.add(ShaderBuffer::from(contributions)),
+                descriptors: assets.add(ShaderBuffer::from(descriptors)),
+                control: assets.add(ShaderBuffer::from(control)),
+                scratch: assets.add(ShaderBuffer::from(scratch)),
+                output: assets.add(ShaderBuffer::from(output)),
+                ids,
+                sample_stride,
+                contribution_count: contribution_count as u32,
+            }
         };
+        if let Some(entity) = self.area_probe_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
         self.area_probe_revision = self.area_probe_revision.wrapping_add(1).max(1);
         self.area_probe_readback_entity = Some(
             commands
@@ -725,7 +838,7 @@ impl WaveGpuRequest {
         commands: &mut Commands,
         input: Option<&FarFieldInput>,
         time_step: f64,
-        history: FarFieldHistory,
+        history: RecorderHistory,
     ) -> Result<FarFieldHandoff, String> {
         let Some(input) = input else {
             self.clear_far_field_buffers(assets, commands);
@@ -799,7 +912,7 @@ impl WaveGpuRequest {
         // The history is a record of the exterior at fixed world points, so a
         // handoff needs nothing from the old mesh: the stencils that read the
         // new one take over the ring the old one was filling.
-        let kept = history == FarFieldHistory::Keep
+        let kept = history == RecorderHistory::Keep
             && self
                 .far_field
                 .as_ref()
@@ -1877,7 +1990,7 @@ impl FarFieldInput {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CurveProbeDescriptor {
     id: u64,
     offset: u32,
@@ -4304,6 +4417,140 @@ mod tests {
         }
     }
 
+    /// A new mesh over the same recorders keeps the rings they were filling.
+    ///
+    /// The samples the GPU wrote between the last readback and the handoff used
+    /// to go with the buffers - two to four of them at 120 Hz, on every
+    /// adaptation. They survive in the ring now, and the host takes records by
+    /// time rather than by slot, so where the new stencils resume writing does
+    /// not matter.
+    #[test]
+    fn a_new_mesh_over_the_same_probes_inherits_their_rings() {
+        let mut world = World::new();
+        let mut assets = Assets::<ShaderBuffer>::default();
+        let mut request = WaveGpuRequest::default();
+        let points = |ids: &[u64]| {
+            ids.iter()
+                .map(|id| (*id, None::<QuadraticPointStencil>))
+                .collect::<Vec<_>>()
+        };
+        let curves = |id: u64, samples: usize| {
+            vec![CurveProbeInput {
+                id,
+                sample_rate: 60.0,
+                samples: vec![None; samples],
+            }]
+        };
+        let areas = |ids: &[u64]| {
+            ids.iter()
+                .map(|id| AreaProbeInput {
+                    id: *id,
+                    stencil: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut update = |request: &mut WaveGpuRequest,
+                          assets: &mut Assets<ShaderBuffer>,
+                          point_ids: &[u64],
+                          curve_samples: usize,
+                          time_step: f64,
+                          history: RecorderHistory| {
+            let mut queue = CommandQueue::default();
+            {
+                let mut commands = Commands::new(&mut queue, &world);
+                let context = RecorderContext {
+                    time_step,
+                    physics: PhysicsModel::Mechanical,
+                    history,
+                };
+                request
+                    .update_point_probes(assets, &mut commands, &points(point_ids), 120.0, context)
+                    .unwrap();
+                request
+                    .update_curve_probes(assets, &mut commands, &curves(1, curve_samples), context)
+                    .unwrap();
+                request
+                    .update_area_probes(assets, &mut commands, &areas(point_ids), 60.0, context)
+                    .unwrap();
+            }
+            queue.apply(&mut world);
+        };
+        let rings = |request: &WaveGpuRequest| {
+            (
+                request.probes.as_ref().unwrap().output.id(),
+                request.curve_probes.as_ref().unwrap().output.id(),
+                request.area_probes.as_ref().unwrap().output.id(),
+            )
+        };
+        let stencils = |request: &WaveGpuRequest| request.probes.as_ref().unwrap().stencils.id();
+
+        update(
+            &mut request,
+            &mut assets,
+            &[1, 2],
+            8,
+            1.0e-3,
+            RecorderHistory::Keep,
+        );
+        let recorded = rings(&request);
+        let first_stencils = stencils(&request);
+
+        // An adaptation: the same probes read through a new mesh, at the shorter
+        // step the finer elements ask for.
+        update(
+            &mut request,
+            &mut assets,
+            &[1, 2],
+            8,
+            7.0e-4,
+            RecorderHistory::Keep,
+        );
+        assert_eq!(rings(&request), recorded, "the rings carried over");
+        assert_ne!(stencils(&request), first_stencils, "the stencils did not");
+
+        // A clock that restarted has nothing to hand over.
+        update(
+            &mut request,
+            &mut assets,
+            &[1, 2],
+            8,
+            7.0e-4,
+            RecorderHistory::Restart,
+        );
+        assert_ne!(rings(&request), recorded);
+        let recorded = rings(&request);
+
+        // Nor does a recorder set that changed: the rings are addressed by probe
+        // index and by sample offset, so what is in them no longer means what it
+        // did.
+        update(
+            &mut request,
+            &mut assets,
+            &[1, 2, 3],
+            8,
+            7.0e-4,
+            RecorderHistory::Keep,
+        );
+        assert_ne!(rings(&request).0, recorded.0, "a probe was added");
+        assert_ne!(rings(&request).2, recorded.2, "and to the area ring too");
+        let recorded = rings(&request);
+
+        update(
+            &mut request,
+            &mut assets,
+            &[1, 2, 3],
+            9,
+            7.0e-4,
+            RecorderHistory::Keep,
+        );
+        assert_ne!(rings(&request).1, recorded.1, "the line probe was reshaped");
+        assert_eq!(
+            rings(&request).0,
+            recorded.0,
+            "which says nothing about the point ring"
+        );
+    }
+
     fn far_field_input(shift: f64) -> FarFieldInput {
         let stencil = QuadraticPointStencil {
             nodes: [0; 7],
@@ -4333,12 +4580,12 @@ mod tests {
         let mut world = World::new();
         let mut assets = Assets::<ShaderBuffer>::default();
         let mut request = WaveGpuRequest::default();
-        let keeping = FarFieldHistory::Keep;
+        let keeping = RecorderHistory::Keep;
         let mut update = |request: &mut WaveGpuRequest,
                           assets: &mut Assets<ShaderBuffer>,
                           input: &FarFieldInput,
                           time_step: f64,
-                          history: FarFieldHistory| {
+                          history: RecorderHistory| {
             let mut queue = CommandQueue::default();
             let handoff = request
                 .update_far_field(
@@ -4380,7 +4627,7 @@ mod tests {
                 &mut assets,
                 &input,
                 7.0e-4,
-                FarFieldHistory::Restart,
+                RecorderHistory::Restart,
             ),
             FarFieldHandoff::Restarted
         );
