@@ -819,7 +819,16 @@ pub struct Playground {
     vector_overlay_average: BTreeMap<(i32, i32), Point2>,
     vector_overlay_step: u64,
     vector_overlay_mode: VectorOverlay,
-    vector_overlay_peak_reference: f64,
+    vector_overlay_exposure: AutoExposure,
+    field_exposure: AutoExposure,
+    /// The wave generation both exposures were measured against. A reset or a
+    /// mesh handoff bumps it, and either can change the field's scale outright.
+    exposure_generation: u64,
+    /// Reused by the field's quantile so a frame's sample costs no allocation.
+    exposure_scratch: Vec<f64>,
+    /// Wall-clock seconds since the previous frame, which is what the exposures
+    /// release against so they behave the same at any frame rate.
+    frame_delta: f32,
     material_overlay_job: Option<MaterialOverlayJob>,
     material_overlay_snapshot: Option<MaterialOverlaySnapshot>,
     material_overlay_error: Option<String>,
@@ -990,7 +999,11 @@ impl Default for Playground {
             vector_overlay_average: BTreeMap::new(),
             vector_overlay_step: u64::MAX,
             vector_overlay_mode: VectorOverlay::Off,
-            vector_overlay_peak_reference: 0.0,
+            vector_overlay_exposure: AutoExposure::default(),
+            field_exposure: AutoExposure::default(),
+            exposure_generation: 0,
+            exposure_scratch: Vec::new(),
+            frame_delta: 0.0,
             material_overlay_job: None,
             material_overlay_snapshot: None,
             material_overlay_error: None,
@@ -1129,6 +1142,10 @@ impl Playground {
         self.pending_merge = None;
         self.requested_revision = None;
         self.reset_requested = fresh;
+        // A different scene is a different run, so how loud the last one got
+        // says nothing about what counts as noise in this one.
+        self.field_exposure.clear();
+        self.vector_overlay_exposure.clear();
         self.invalidate_samples();
         Ok(())
     }
@@ -2434,6 +2451,7 @@ impl Playground {
     }
     fn view_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("View");
+        let field_reference = self.field_exposure.reference();
         let overlay_error = self.material_overlay_error.clone();
         let overlay_progress = self.material_overlay_job.as_ref().map(|job| job.progress());
         let overlay_invalid = match self.editor.document.presentation.material_overlay {
@@ -2452,6 +2470,13 @@ impl Playground {
         ui.checkbox(&mut p.mesh_boundaries, "Mesh boundaries");
         ui.checkbox(&mut p.field, "Field");
         ui.add(egui::Slider::new(&mut p.field_gain, 0.25..=12.0).text("Field intensity"));
+        // The colours are relative, so the level they are relative to has to be
+        // readable somewhere or a decaying field looks like a steady one.
+        if p.field
+            && let Some(reference) = field_reference
+        {
+            ui.small(format!("Auto scale {reference:.2e}"));
+        }
         let physics = self.editor.document.model.draft.physics;
         p.vector_overlay = p.vector_overlay.resolved(physics);
         egui::ComboBox::from_id_salt("vector-overlay")
@@ -3812,10 +3837,25 @@ impl Playground {
             );
         }
     }
+    /// A reset zeroes the field and a mesh handoff renumbers it; both bump the
+    /// solver's generation, and either can move the field's scale outright.
+    /// Measuring a new field against the old reference would paint its first
+    /// seconds wrong, which is what loading one example over another used to do
+    /// to the arrows. How loud the run has been is kept, so a field decaying
+    /// through an adaptation handoff is not renormalized back into view.
+    fn retune_exposures(&mut self, generation: u64) {
+        if self.exposure_generation != generation {
+            self.exposure_generation = generation;
+            self.field_exposure.retune();
+            self.vector_overlay_exposure.retune();
+        }
+    }
+
     fn draw_solution(&mut self, painter: &egui::Painter, r: Rect, display: &WaveDisplay) {
         let Some(active) = self.runtime.active().cloned() else {
             return;
         };
+        self.retune_exposures(display.generation);
         let mesh = &active.mesh;
         let presentation = self.editor.document.presentation;
         // One mesh rather than a polygon per triangle, for the reason the
@@ -3942,14 +3982,24 @@ impl Playground {
             && display.generation > 0
             && display.current.len() == active.operator.degrees_of_freedom()
         {
+            let level = exposure_level(
+                &display.current,
+                FIELD_EXPOSURE_QUANTILE,
+                &mut self.exposure_scratch,
+            );
+            let reference = self.field_exposure.update(level, self.frame_delta);
+            // Before anything has arrived there is no scale to paint against,
+            // and every node is zero anyway.
+            let scale = reference.map_or(0.0, |reference| 1.0 / reference);
             let mut field = egui::Mesh::default();
             field.reserve_vertices(active.operator.degrees_of_freedom());
             field.reserve_triangles(active.operator.element_nodes().len() * 6);
             for (point, value) in active.operator.node_points().iter().zip(&display.current) {
+                let normalized = (f64::from(*value) * scale) as f32;
                 let color = if presentation.material_overlay == MaterialOverlay::Off {
-                    field_color(*value, presentation.field_gain, Color32::TRANSPARENT)
+                    field_color(normalized, presentation.field_gain, Color32::TRANSPARENT)
                 } else {
-                    field_color_over_overlay(*value, presentation.field_gain)
+                    field_color_over_overlay(normalized, presentation.field_gain)
                 };
                 field.colored_vertex(self.screen(*point, r), color);
             }
@@ -4016,7 +4066,7 @@ impl Playground {
         if self.vector_overlay_mode != mode {
             self.vector_overlay_average.clear();
             self.vector_overlay_step = u64::MAX;
-            self.vector_overlay_peak_reference = 0.0;
+            self.vector_overlay_exposure.clear();
             self.vector_overlay_mode = mode;
         }
         if settings.vector_overlay_smoothed {
@@ -4051,14 +4101,16 @@ impl Playground {
         }
         magnitudes.sort_by(f64::total_cmp);
         let instantaneous = magnitudes[(magnitudes.len() - 1) * 9 / 10];
-        if !instantaneous.is_finite() || instantaneous < 1.0e-6 {
+        // No absolute cutoff and no hard silence below the run peak: the
+        // exposure's own floor keeps decayed noise from being magnified, and
+        // below it the arrows shorten away smoothly instead of vanishing at a
+        // threshold.
+        let Some(reference) = self
+            .vector_overlay_exposure
+            .update(instantaneous, self.frame_delta)
+        else {
             return;
-        }
-        self.vector_overlay_peak_reference = self.vector_overlay_peak_reference.max(instantaneous);
-        if instantaneous < self.vector_overlay_peak_reference * 1.0e-4 {
-            return;
-        }
-        let reference = self.vector_overlay_peak_reference;
+        };
         let maximum_length = settings.vector_overlay_density * 0.46;
         let scale = maximum_length as f64 * settings.vector_overlay_gain as f64 / reference;
         for (_, origin, value) in samples {
@@ -10593,8 +10645,109 @@ fn grid_lines(minimum: f64, maximum: f64, step: f64) -> Vec<f64> {
     lines
 }
 
-fn field_color(value: f32, gain: f32, under: Color32) -> Color32 {
-    let value = (value * gain).tanh();
+/// A display reference level for one measured quantity.
+///
+/// Across the shipped examples the field's own amplitude spans a hundredfold,
+/// which is wider than the intensity slider's whole range, so no fixed gain can
+/// serve them: at the default, seven of the eight painted under a tenth of full
+/// colour, and at the slider's maximum three of them still did. The level is
+/// measured from the field each frame instead.
+///
+/// It rises the instant the field does, so a real transient is never clipped,
+/// and falls back over about a second, so a placed pulse fades out of the scale
+/// rather than darkening everything after it for the rest of the run — which is
+/// what the monotone run peak this replaces used to do. It never falls below a
+/// small fraction of the loudest level seen, and that is what keeps a field
+/// which has decayed into numerical noise from being magnified back into view.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct AutoExposure {
+    reference: f64,
+    peak: f64,
+}
+
+impl AutoExposure {
+    /// The most the reference may fall in a second, as a factor. A scale that
+    /// moves by a factor rather than by a difference takes the same time to
+    /// clear a spike whatever its size, which is the only behaviour that reads
+    /// the same on a field of 6e-3 and one of 7e-1.
+    const RELEASE_PER_SECOND: f64 = 8.0;
+    /// How far under the loudest level seen the reference may go.
+    const QUIET_FLOOR: f64 = 1.0e-3;
+    /// The longest step the release is allowed to take at once, so a stalled
+    /// frame cannot drop the scale by an unbounded factor in one go.
+    const MAX_STEP_SECONDS: f32 = 1.0;
+
+    /// Forgets the scale but not how loud the run has been, for a field that
+    /// carries on across a new mesh or a fresh set of buffers. The next frame
+    /// sets the reference outright, so the picture does not fade in.
+    fn retune(&mut self) {
+        self.reference = 0.0;
+    }
+
+    /// Forgets both, for a field that has nothing to do with the last one.
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn reference(self) -> Option<f64> {
+        (self.reference > 0.0).then_some(self.reference)
+    }
+
+    /// Takes this frame's measured level and the wall-clock seconds since the
+    /// previous one, and answers with the level to divide by.
+    fn update(&mut self, level: f64, elapsed: f32) -> Option<f64> {
+        if level.is_finite() && level > 0.0 {
+            self.peak = self.peak.max(level);
+            let elapsed = f64::from(elapsed.clamp(0.0, Self::MAX_STEP_SECONDS));
+            // The maximum rises to meet a louder field at once, so nothing is
+            // ever clipped, and the release only ever slows the way back down.
+            self.reference = level.max(self.reference * Self::RELEASE_PER_SECOND.powf(-elapsed));
+            self.reference = self.reference.max(self.peak * Self::QUIET_FLOOR);
+        }
+        self.reference()
+    }
+}
+
+/// Where the field's reference level sits in its own distribution: above the
+/// quiet bulk of the domain, below the few nodes right against a source.
+const FIELD_EXPOSURE_QUANTILE: f64 = 0.98;
+
+/// The intensity slider is a trim on the automatic scale rather than the scale
+/// itself. At its default of 2.0 the reference level lands on `tanh(1.0)`,
+/// about three quarters of full colour, which leaves the brightest nodes
+/// brighter still instead of clipping them flat.
+const FIELD_EXPOSURE_GAIN: f32 = 0.5;
+
+/// The `quantile` of `values` by magnitude, sampled rather than sorted.
+///
+/// Sorting every node each frame would spend milliseconds placing a number the
+/// field itself moves by more than the estimate's error. Nodes are numbered in
+/// meshing order, which bears no relation to the field, so a strided sample is
+/// a fair one.
+fn exposure_level(values: &[f32], quantile: f64, scratch: &mut Vec<f64>) -> f64 {
+    const SAMPLES: usize = 4096;
+    scratch.clear();
+    let stride = values.len().div_ceil(SAMPLES).max(1);
+    scratch.extend(
+        values
+            .iter()
+            .step_by(stride)
+            .map(|value| f64::from(value.abs()))
+            .filter(|value| value.is_finite()),
+    );
+    if scratch.is_empty() {
+        return 0.0;
+    }
+    let index = ((scratch.len() - 1) as f64 * quantile).round() as usize;
+    *scratch
+        .select_nth_unstable_by(index, |a, b| a.total_cmp(b))
+        .1
+}
+
+/// `normalized` is the node's value over the exposure's reference level, so
+/// full colour means the same share of the field whatever the field's size.
+fn field_color(normalized: f32, gain: f32, under: Color32) -> Color32 {
+    let value = (normalized * gain * FIELD_EXPOSURE_GAIN).tanh();
     let target = if value >= 0.0 {
         Color32::from_rgb(244, 105, 122)
     } else {
@@ -10613,9 +10766,9 @@ fn field_color(value: f32, gain: f32, under: Color32) -> Color32 {
     )
 }
 
-fn field_color_over_overlay(value: f32, gain: f32) -> Color32 {
-    let value = if value.is_finite() {
-        (value * gain).tanh()
+fn field_color_over_overlay(normalized: f32, gain: f32) -> Color32 {
+    let value = if normalized.is_finite() {
+        (normalized * gain * FIELD_EXPOSURE_GAIN).tanh()
     } else {
         0.0
     };
@@ -11185,6 +11338,7 @@ pub fn frame(
         }
     }
     state.frame_ms = state.frame_ms * 0.95 + time.delta_secs() * 1000.0 * 0.05;
+    state.frame_delta = time.delta_secs();
     state.update_files();
     state.update_recording();
     state.begin_capture_frame();
@@ -11331,6 +11485,160 @@ pub fn frame(
 mod tests {
     use super::*;
     use funfern_app::topology_viewport::screen_side;
+
+    /// The point of the whole mechanism: the catalog's quietest example and its
+    /// loudest sit a hundredfold apart, and both must paint the same picture.
+    #[test]
+    fn an_exposure_paints_the_same_picture_at_any_field_scale() {
+        let scale = 118.0;
+        let mut levels = vec![0.0, 1.0e-3, 6.0e-3, 4.0e-3, 6.2e-3, 5.9e-3, 2.0e-2];
+        // Then all the way down past the exposure's own floor, so a scale that
+        // is relative to the field is told apart from one pinned to a constant.
+        let mut decaying = 2.0e-2;
+        for _ in 0..40 {
+            decaying *= 0.5;
+            levels.push(decaying);
+        }
+        let mut quiet = AutoExposure::default();
+        let mut loud = AutoExposure::default();
+        let mut floored = false;
+        for level in levels {
+            let (Some(a), Some(b)) = (quiet.update(level, 0.1), loud.update(level * scale, 0.1))
+            else {
+                assert_eq!(level, 0.0, "a measured level produced no reference");
+                continue;
+            };
+            floored |= a > level * 2.0;
+            let probe = level * 0.7;
+            assert!(
+                (probe / a - probe * scale / b).abs() < 1.0e-9 * (probe / a).max(1.0e-9),
+                "{level}: {a} against {b}"
+            );
+        }
+        assert!(floored, "the run never reached the quiet floor");
+    }
+
+    /// The failure the monotone run peak had: one placed pulse set the scale for
+    /// the rest of the run.
+    #[test]
+    fn an_exposure_recovers_after_a_transient_spike() {
+        let mut exposure = AutoExposure::default();
+        for _ in 0..120 {
+            exposure.update(1.0, 1.0 / 60.0);
+        }
+        assert_eq!(exposure.update(20.0, 1.0 / 60.0), Some(20.0), "clipped");
+        // Two seconds is more than the release needs to give up a twentyfold
+        // spike at eight times a second, so it settles exactly on the field.
+        for _ in 0..120 {
+            exposure.update(1.0, 1.0 / 60.0);
+        }
+        assert_eq!(exposure.reference(), Some(1.0));
+    }
+
+    /// And the failure the other way: once a field has decayed into rounding
+    /// noise, renormalizing it would fill the view with structure that is not
+    /// there.
+    #[test]
+    fn an_exposure_refuses_to_magnify_decayed_noise() {
+        let mut exposure = AutoExposure::default();
+        exposure.update(1.0, 1.0 / 60.0);
+        for _ in 0..600 {
+            exposure.update(1.0e-9, 1.0 / 60.0);
+        }
+        let floor = exposure.reference().unwrap();
+        assert!(
+            (floor - AutoExposure::QUIET_FLOOR).abs() < 1.0e-12,
+            "{floor}"
+        );
+        assert!(1.0e-9 / floor < 1.0e-5, "noise would still be drawn");
+    }
+
+    /// Release is a rate in seconds, so the same second of wall clock has to
+    /// land in the same place whether it took two frames or two hundred.
+    #[test]
+    fn an_exposure_releases_by_wall_clock_not_by_frame_count() {
+        let mut coarse = AutoExposure::default();
+        let mut fine = AutoExposure::default();
+        coarse.update(10.0, 0.016);
+        fine.update(10.0, 0.016);
+        coarse.update(1.0, 0.5);
+        coarse.update(1.0, 0.5);
+        for _ in 0..100 {
+            fine.update(1.0, 0.01);
+        }
+        // A relative tolerance: the two differ only in how the same decay was
+        // recomposed in floating point.
+        let (a, b) = (coarse.reference().unwrap(), fine.reference().unwrap());
+        assert!((a - b).abs() < a * 1.0e-6, "{a} against {b}");
+    }
+
+    #[test]
+    fn a_sampled_quantile_matches_the_sorted_one() {
+        let mut scratch = Vec::new();
+        let values = (0..50_000)
+            .map(|index| index as f32 / 50_000.0)
+            .collect::<Vec<_>>();
+        let level = exposure_level(&values, 0.98, &mut scratch);
+        assert!((level - 0.98).abs() < 0.01, "{level}");
+        assert_eq!(exposure_level(&[0.0; 32], 0.98, &mut scratch), 0.0);
+        assert_eq!(exposure_level(&[], 0.98, &mut scratch), 0.0);
+        let broken = [f32::NAN, f32::INFINITY, -3.0, 1.0];
+        assert_eq!(exposure_level(&broken, 0.5, &mut scratch), 3.0);
+    }
+
+    /// The default gain has to land the reference level somewhere legible, and
+    /// leave the nodes above it room to read brighter still.
+    #[test]
+    fn the_default_gain_paints_the_reference_level_in_the_readable_band() {
+        let default = funfern_app::document::PresentationSettings::default().field_gain;
+        let base = field_color(0.0, default, Color32::TRANSPARENT);
+        let at_reference = field_color(1.0, default, Color32::TRANSPARENT);
+        let above = field_color(2.0, default, Color32::TRANSPARENT);
+        let reach = |color: Color32| f32::from(color.r() - base.r()) / f32::from(244 - base.r());
+        assert!(
+            (0.7..0.85).contains(&reach(at_reference)),
+            "{}",
+            reach(at_reference)
+        );
+        assert!(reach(above) > reach(at_reference) + 0.1, "no room above");
+        assert_eq!(
+            field_color_over_overlay(1.0, default).a(),
+            (0.761_594_f32 * 220.0).round() as u8
+        );
+    }
+
+    /// Clicking through the gallery used to strand the arrow scale on the
+    /// previous example, because the reference was only ever cleared when the
+    /// overlay mode changed.
+    #[test]
+    fn a_new_solver_generation_starts_both_exposures_again() {
+        let mut state = Playground::default();
+        state.retune_exposures(4);
+        state.field_exposure.update(0.71, 0.016);
+        state.vector_overlay_exposure.update(0.71, 0.016);
+        state.retune_exposures(4);
+        assert_eq!(
+            state.field_exposure.reference(),
+            Some(0.71),
+            "cleared early"
+        );
+        state.retune_exposures(5);
+        assert_eq!(state.field_exposure.reference(), None);
+        assert_eq!(state.vector_overlay_exposure.reference(), None);
+        assert_eq!(state.field_exposure.update(6.0e-3, 0.016), Some(6.0e-3));
+        // A new mesh keeps how loud the run has been, so a field decaying
+        // through an adaptation handoff is not renormalized back into view.
+        state.retune_exposures(6);
+        let floored = state.field_exposure.update(1.0e-9, 0.016).unwrap();
+        assert!(
+            floored > 1.0e-6,
+            "the quiet floor did not survive: {floored}"
+        );
+        // Loading another scene does not.
+        let document = state.editor.document.clone();
+        state.set_document(document, false, true).unwrap();
+        assert_eq!(state.field_exposure.update(1.0e-9, 0.016), Some(1.0e-9));
+    }
 
     /// A thumbnail is rasterized, not traced, so a face covers area rather than
     /// only an outline, and every quad lands inside the scene it came from.

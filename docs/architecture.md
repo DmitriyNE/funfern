@@ -374,18 +374,36 @@ quadratic gradient of `A` and reconstructs `H = (-A_y, A_x)/mu` for TM or
 `E = (A_y, -A_x)/epsilon` for TE. The corresponding Poynting vector is
 `S = -k u grad(A)`, where `k` is `1/mu` for TM or `1/epsilon` for TE. Screen bins
 bound arrow density and an exponential display filter reduces jitter. Arrow
-exposure uses the strongest spatial 90th percentile reached during the current run
-and overlay mode. Once established, this held peak remains the normalization
-reference, so weaker fields stay proportionally shorter instead of being expanded
-back to full-size arrows. The overlay becomes silent when its current 90th
-percentile falls below the absolute floor or 0.01% of the peak. The scale survives
-ordinary solver handoffs and toggling the same overlay, but resets with a fresh field
-or a different vector quantity. Direct GPU resets, fresh-scene replacement, and
-source or same-mesh physics-setting changes clear the exposure, so a newly configured
-field establishes its own scale. Mechanical scenes retain the prior
+exposure shares the automatic scale described below. Mechanical scenes retain the prior
 `-k u_t grad(u)` energy-flow display. These arrows derive the transverse field
 belonging to one scalar polarization and are not presented as a simultaneous
 full-vector Maxwell state.
+
+Both the scalar field and the vector overlay are drawn against a scale measured
+from the field rather than a fixed gain. The shipped examples span a hundredfold
+in amplitude, which is wider than the intensity slider's whole range, so no fixed
+gain can serve them: at the default seven of the eight painted under a tenth of
+full colour, and at the slider's maximum three still did. The scale is a high
+quantile of the current frame — the 98th over a strided sample of the nodes for
+the field, the 90th over the drawn arrows for the overlay. It rises to a louder
+field at once, so nothing is clipped, and falls back by at most a fixed factor a
+second, so a transient such as a placed pulse leaves the scale within a second or
+two instead of setting it for the rest of the run. Falling by a factor rather
+than by a difference is what makes the recovery take the same time whatever the
+size of the spike. The scale never falls below a thousandth of the loudest level
+the run has reached, which is what keeps a field that has decayed into rounding
+noise from being magnified back into view.
+
+A new solver generation — a reset, a rebuilt set of buffers, a mesh handoff —
+clears the scale but keeps how loud the run has been, so the next frame sets the
+scale outright while a field decaying through an adaptation handoff still cannot
+be renormalized. Loading another document clears both, because a different scene
+says nothing about what counts as noise in this one. Field intensity and arrow
+gain trim the automatic scale rather than replacing it, and their persisted
+ranges and defaults are unchanged; the intensity default of 2.0 places the
+reference level at `tanh(1.0)`. The View inspector prints the level the colours
+are relative to, because relative colours otherwise make a decaying field
+indistinguishable from a steady one.
 
 Autosave retains both the accepted scene and any invalid editable draft, writing to
 browser local storage or an atomic per-user native recovery file after a short

@@ -71,11 +71,9 @@ Longer-standing work:
 - [x] Raise viewport video capture from the initial 30 FPS implementation to 60 FPS
   (2026-09-16). Measured first: the rate was never the limit, the single readback
   in flight was. Browser encoding is still unmeasured and needs a real browser.
-- [ ] Replace the vector overlay's run-peak exposure heuristic with a robust
-  automatic scale that can recover after a legitimate transient spike such as
-  **Place pulse**, while still refusing to magnify late numerical noise. Avoid
-  relying on manually identified reset points; investigate a noise-aware envelope,
-  hysteresis, or a scale derived from the evolving field-energy distribution.
+- [x] Replace the vector overlay's run-peak exposure heuristic with a robust
+  automatic scale (2026-09-16). One envelope, used by the scalar field as well,
+  which had the same problem the other way round.
 
 - [ ] Revisit the EM reconstruction's fixed `0.08 Hz` DC-rejection corner when
   editable domain extents or deliberately very-low-frequency sources arrive. It
@@ -131,6 +129,68 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-16 — The field sets its own scale
+
+Reported: the scalar overlay is too faint in several examples and at the default.
+Measured before changing anything, by stepping every catalog example on the CPU
+reference solver at the app's own mesh edge with its real sources, out to
+simulated time 4. Steady-state 90th percentile of the nodal magnitude, and the
+colour the default gain of 2.0 paints:
+
+| Example | p90 | at gain 2 | at gain 12 |
+| --- | --- | --- | --- |
+| Starter obstacle | 3.1e-2 | 6.2% | 35.7% |
+| Double slit | 2.3e-2 | 4.6% | 26.9% |
+| Material lens | 7.5e-3 | 1.5% | 9.0% |
+| GRIN rod | 6.0e-3 | 1.2% | 7.2% |
+| Anisotropic crystal | 7.6e-3 | 1.5% | 9.1% |
+| Luneburg lens | 7.1e-1 | 89.0% | saturated |
+| Phased array | 1.8e-2 | 3.6% | 21.1% |
+| Obstacle array | 1.5e-2 | 2.9% | 17.3% |
+
+So it was never a default-value problem. The amplitudes span 118x and the slider
+spans 48x, so no setting of it serves the catalog: at the maximum, three examples
+still paint under a tenth of full colour while the one that reads well at the
+default washes out flat. The default was left exactly where it was and the scale
+is measured from the field instead.
+
+The vector overlay already had an automatic scale and it had the opposite fault:
+a monotone run peak that never came down, so one **Place pulse** darkened the
+overlay for the rest of the run. It was also only ever cleared on an overlay mode
+change — not on a document load — so clicking from the Luneburg lens to the GRIN
+rod in the new gallery scaled the arrows by a reference 118 times too large, well
+short of the 1e-4 guard that would have silenced them. One mechanism now serves
+both.
+
+The shape that works: rise to a louder field at once, so nothing is clipped; fall
+back by at most a fixed factor a second, so a spike leaves the scale in a second
+or two; and never fall below a thousandth of the loudest level the run reached,
+which is what refuses to magnify decayed noise. Falling by a factor rather than
+by a difference is the part that matters and it was not the first attempt — a
+linear release toward the current level took five seconds to give up a twentyfold
+spike and would have taken longer for a larger one, which the recovery test
+caught. A geometric release takes the same time whatever the size of the spike,
+which is the only behaviour that reads the same on a field of 6e-3 and one of
+7e-1.
+
+A new solver generation clears the scale but keeps the run's loudest level, so a
+field decaying through an adaptation handoff is still held down; loading another
+document clears both. The field's quantile is read from a strided sample of about
+4096 nodes rather than by sorting sixty thousand every frame, which is fair
+because nodes are numbered in meshing order.
+
+Checked against the real GPU field, not just the CPU prediction: every example
+settles with about half its nodes in the lowest quarter of colour, a third in the
+next, and two to three percent above three quarters. The references the running
+app measured — 4.7e-2 for the Starter obstacle, 1.0e-2 for the GRIN rod, 1.03 for
+the Luneburg lens — track the CPU numbers above, which is a useful check on the
+reference solver as well.
+
+That sweep turned up something unrelated, now a TODO: loading a mechanical
+document over an electromagnetic one leaves the field with a large uniform
+offset. It is pre-existing — the exposure only made it legible — and it is not
+touched here.
 
 ## 2026-09-16 — Capture was never limited by the rate it asked for
 

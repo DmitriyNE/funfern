@@ -291,8 +291,19 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   scenes offer energy flow only; the scalar displacement field has no
   complementary transverse vector, so that mode is not listed there. Arrow spacing
   and gain are screen-space presentation controls, with optional temporal
-  smoothing. Each EM mode remains one scalar Maxwell polarization rather than a
+  smoothing; the length arrows are drawn at is set automatically the same way the
+  scalar field's colours are. Each EM mode remains one scalar Maxwell polarization rather than a
   simultaneous six-component field solve.
+- **Field exposure:** the scalar field and the vector overlay each set their own
+  scale from what is on screen, so a scene whose amplitude is a hundredth of
+  another's reads the same. The scale is a high quantile of the current frame; it
+  rises the instant the field does, so a placed pulse is never clipped, and falls
+  back over a second or so, so that pulse does not darken everything after it. It
+  will not fall below a thousandth of the loudest level seen, which stops a field
+  that has decayed into rounding noise from being magnified back into view. Field
+  intensity and arrow gain trim that automatic scale rather than replacing it, and
+  View prints the level the colours are relative to so a decaying field can be
+  told from a steady one.
 - **Region sources:** the selected subdomain can own one distributed source,
   independent of its reusable passive material. Its signed spatial profile uses the
   same region-local world-unit coordinates and its own named parameters, multiplied
