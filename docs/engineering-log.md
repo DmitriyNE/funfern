@@ -150,6 +150,18 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The accuracy reading was leaving the panel between estimates
+
+The estimate line added above appeared only while an estimate was in hand, and
+committing a mesh drops the estimate it was measured against - which every
+adaptation does. So on each cycle the line blinked out and back and took the
+source, pulse and energy sections below it down a line and back up, under
+whatever the pointer was on. It holds its place now and says it has nothing
+instead. The gold line about a forcing under the element floor stays
+conditional: that is a standing condition, not one that flickers.
+
+Checked: fmt, clippy -D warnings, workspace tests, release build.
+
 ## 2026-09-16 — The mesh had a step down and no idea of enough
 
 Adaptation drove the mesh to its smallest element and stayed there. The target

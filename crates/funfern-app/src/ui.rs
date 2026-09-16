@@ -2646,24 +2646,21 @@ impl Playground {
                  element allowed are floors, and go on regardless.",
             );
             ui.small(&self.amr_status);
-            if let Some(result) = &self.amr_indicator_result {
-                ui.small(format!(
-                    "Estimated error {:.1}% · target {:.0}%",
-                    100.0 * result.report.global_indicator,
-                    self.amr_accuracy_percent,
-                ));
-                // Nothing else in the panel explains a mesh pinned at its floor
-                // while the accuracy target reads satisfied.
-                if result.report.smallest_wavelength_target < self.amr_minimum_edge {
-                    ui.colored_label(
-                        GOLD,
-                        format!(
-                            "The forcing wants elements of {:.3}, under the smallest allowed \
-                             of {:.3}, so the mesh sits at its floor whatever the accuracy asks",
-                            result.report.smallest_wavelength_target, self.amr_minimum_edge,
-                        ),
-                    );
-                }
+            ui.small(self.amr_estimate_line());
+            // Nothing else in the panel explains a mesh pinned at its floor
+            // while the accuracy target reads satisfied. It is a standing
+            // condition rather than a passing one, so it may take its own line.
+            if let Some(result) = &self.amr_indicator_result
+                && result.report.smallest_wavelength_target < self.amr_minimum_edge
+            {
+                ui.colored_label(
+                    GOLD,
+                    format!(
+                        "The forcing wants elements of {:.3}, under the smallest allowed \
+                         of {:.3}, so the mesh sits at its floor whatever the accuracy asks",
+                        result.report.smallest_wavelength_target, self.amr_minimum_edge,
+                    ),
+                );
             }
             if let Some(error) = &self.amr_error {
                 ui.colored_label(RED, error);
@@ -2727,6 +2724,25 @@ impl Playground {
             self.amr_last_started = None;
             self.amr_coarsen_streak = 0;
             self.amr_error = None;
+        }
+    }
+
+    /// What the panel says about the estimate, whether or not one is in hand.
+    /// Committing a mesh drops the estimate it was measured against, so a line
+    /// that exists only while there is one comes and goes with every adaptation
+    /// and shifts the panel out from under the pointer. It holds its place and
+    /// says it has nothing instead.
+    fn amr_estimate_line(&self) -> String {
+        match &self.amr_indicator_result {
+            Some(result) => format!(
+                "Estimated error {:.1}% · target {:.0}%",
+                100.0 * result.report.global_indicator,
+                self.amr_accuracy_percent,
+            ),
+            None => format!(
+                "Estimated error — · target {:.0}%",
+                self.amr_accuracy_percent
+            ),
         }
     }
 
@@ -12569,6 +12585,20 @@ mod probe_interaction_tests {
             assert_eq!(amr_accuracy_preset_name(percent), name);
         }
         assert_eq!(amr_accuracy_preset_name(9.0), "Custom");
+    }
+
+    /// Committing a mesh drops the estimate, and every adaptation commits one,
+    /// so a reading that only exists while an estimate is in hand blinks out of
+    /// the panel on every cycle and takes everything below it down a line.
+    #[test]
+    fn the_estimate_reading_holds_its_place_between_estimates() {
+        let state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        assert!(state.amr_indicator_result.is_none());
+        let line = state.amr_estimate_line();
+        assert!(line.contains("target 12%"), "the line read {line:?}");
     }
 
     /// The size limits and the wavelength live in the fold at the bottom of the
