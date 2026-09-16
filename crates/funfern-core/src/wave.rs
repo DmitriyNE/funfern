@@ -321,6 +321,46 @@ impl Default for TimeSignal {
     }
 }
 
+/// Periods of the slowest oscillating source that the switch-on ramp spans.
+///
+/// A sine started from rest at a phase whose cosine is not zero hands the domain
+/// a net impulse: integrating `A sin(w t + p)` from rest leaves the term
+/// `(A cos(p) / w) t`, a uniform drift. Nothing in a closed or radiating scene
+/// removes it — a constant is in the stiffness operator's null space, and an
+/// outgoing wall damps velocity rather than position — so in a cavity the
+/// offset ramps without bound. Easing the amplitude in suppresses that impulse
+/// to about `1 / (w * ramp)` of what it would otherwise be.
+///
+/// One envelope is shared by every source in a scene rather than one per source,
+/// because a phased array steers its beam with the phases *between* its sources
+/// and a per-source delay would turn the beam. Sizing the ramp on the slowest
+/// source keeps the suppression at least this good for all of them.
+pub const SOURCE_RAMP_PERIODS: f64 = 4.0;
+
+/// How long the switch-on envelope runs for a scene whose slowest oscillating
+/// source is at `lowest_frequency_hz`.
+///
+/// Zero when nothing oscillates, which leaves the envelope out of the way: a
+/// steady bias accelerates a free domain however gently it is introduced, so
+/// there is no impulse for a ramp to suppress.
+pub fn source_ramp_seconds(lowest_frequency_hz: f64) -> f64 {
+    if !lowest_frequency_hz.is_finite() || lowest_frequency_hz <= 0.0 {
+        return 0.0;
+    }
+    SOURCE_RAMP_PERIODS / lowest_frequency_hz
+}
+
+/// Smooth switch-on: zero at the start with zero slope, one after `ramp`. The
+/// vanishing slope at both ends is what leaves the residual impulse at second
+/// order in `1 / (w * ramp)` rather than first. `wave.wgsl` mirrors this.
+pub fn source_envelope(time: f64, ramp: f64) -> f64 {
+    if !ramp.is_finite() || ramp <= 0.0 || !time.is_finite() {
+        return 1.0;
+    }
+    let fraction = (time / ramp).clamp(0.0, 1.0);
+    fraction * fraction * (3.0 - 2.0 * fraction)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PointSource {
     pub enabled: bool,

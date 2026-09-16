@@ -2339,9 +2339,9 @@ mod tests {
         BACKGROUND_REGION, BoundaryEdge, CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline,
         FaceRegionAssignment, InternalBoundary, InternalBoundaryLaw, Material, MaterialId,
         MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, Obstacle, ObstacleId,
-        OpenCubicSpline, OuterSide, PeriodicCubicSpline, Region, TopologyCurve, TopologyGeometry,
-        TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology, mesh_scene,
-        mesh_topology_plan,
+        OpenCubicSpline, OuterSide, PeriodicCubicSpline, Region, SOURCE_RAMP_PERIODS,
+        TopologyCurve, TopologyGeometry, TopologyVertex, TopologyVertexId, TopologyVertexLocation,
+        compile_topology, mesh_scene, mesh_topology_plan, source_envelope, source_ramp_seconds,
     };
 
     fn topology_span(id: u64, behavior: SpanBehavior) -> CurveSpan {
@@ -3809,6 +3809,85 @@ mod tests {
         .unwrap();
         QuadraticWaveOperator::assemble_with_boundary(&mesh, WaveCoefficients::default(), boundary)
             .unwrap()
+    }
+
+    /// Drives `operator` with one spatial bump, eased in over `ramp`, and
+    /// answers with how fast the rigid mode drifts once the ramp is past.
+    ///
+    /// The two samples are a whole number of source periods apart, so the
+    /// oscillating part of the mean cancels between them and what is left is the
+    /// drift the switch-on impulse bought. The drive never stops: cutting a sine
+    /// off mid-cycle injects an impulse of its own, which would be measured here
+    /// instead.
+    fn switch_on_drift(operator: &QuadraticWaveOperator, ramp: f64) -> f64 {
+        let dt = operator.recommended_time_step();
+        let signal = TimeSignal::harmonic(0.0, 18.0, 2.5, 0.0);
+        let centre = Point2::new(-0.35, 0.1);
+        let weights = operator
+            .node_points()
+            .iter()
+            .map(|point| (-0.5 * (*point - centre).dot(*point - centre) / (0.06 * 0.06)).exp())
+            .collect::<Vec<_>>();
+        let total: f64 = operator.lumped_mass().iter().sum();
+        let mean = |values: &[f64]| {
+            values
+                .iter()
+                .zip(operator.lumped_mass())
+                .map(|(value, mass)| value * mass)
+                .sum::<f64>()
+                / total
+        };
+        let mut state = QuadraticWaveState::zero(operator, dt).unwrap();
+        let mut acceleration = vec![0.0; operator.degrees_of_freedom()];
+        let (first, second) = (4.0, 8.0);
+        let mut early = 0.0;
+        while state.time() < second {
+            let time = state.time();
+            let value = source_envelope(time, ramp) * signal.value(time);
+            for (target, weight) in acceleration.iter_mut().zip(&weights) {
+                *target = weight * value;
+            }
+            state.step(operator, &acceleration).unwrap();
+            if early == 0.0 && state.time() >= first {
+                early = mean(state.current());
+            }
+        }
+        (mean(state.current()) - early) / (state.time() - first)
+    }
+
+    /// A sine started from rest at a phase whose cosine is not zero hands the
+    /// domain a net impulse. In a reflecting cavity nothing ever takes it back —
+    /// a constant is in the null space of the stiffness operator and there is no
+    /// damping anywhere — so the whole domain drifts and its mean displacement
+    /// ramps without bound. Easing the amplitude in suppresses the impulse.
+    #[test]
+    fn a_switch_on_ramp_leaves_a_free_cavity_nearly_at_rest() {
+        let operator = cavity(0.14, OuterBoundaryCondition::Reflecting);
+        let abrupt = switch_on_drift(&operator, 0.0);
+        let eased = switch_on_drift(&operator, source_ramp_seconds(2.5));
+        assert!(
+            abrupt.abs() > 1.0e-3,
+            "the abrupt start drifted only {abrupt:e}"
+        );
+        assert!(
+            eased.abs() * 10.0 < abrupt.abs(),
+            "easing in barely helped: {eased:e} against {abrupt:e}"
+        );
+    }
+
+    /// The ramp spans whole periods of the slowest source, and stands aside for
+    /// a scene that does not oscillate at all.
+    #[test]
+    fn a_switch_on_ramp_is_measured_in_periods_of_the_slowest_source() {
+        assert_eq!(source_ramp_seconds(2.0), SOURCE_RAMP_PERIODS / 2.0);
+        assert_eq!(source_ramp_seconds(0.0), 0.0);
+        assert_eq!(source_ramp_seconds(f64::INFINITY), 0.0);
+        assert_eq!(source_envelope(0.0, 1.0), 0.0);
+        assert_eq!(source_envelope(1.0, 1.0), 1.0);
+        assert_eq!(source_envelope(4.0, 1.0), 1.0);
+        assert_eq!(source_envelope(0.5, 1.0), 0.5);
+        // No ramp asked for leaves every source at full amplitude.
+        assert_eq!(source_envelope(0.0, 0.0), 1.0);
     }
 
     fn mass_norm(operator: &QuadraticWaveOperator, values: &[f64]) -> f64 {

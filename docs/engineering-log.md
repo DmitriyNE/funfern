@@ -9,6 +9,14 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 The null mode nothing removes:
 
+- [ ] Ease a source out as well as in. The switch-on envelope only covers a
+  source that is live from the run's start; cutting a sine off mid-cycle injects
+  an impulse of the same kind, which is how disabling a source leaves an offset
+  behind. Measured while building the envelope: ramping in but stopping abruptly
+  cut the drift only twofold, against fiftyfold when the stop was taken out of
+  the measurement. A cross-fade between the outgoing and incoming forcing would
+  cover enable, disable, and every amplitude or phase edit with one mechanism,
+  at the cost of carrying both signals on the GPU and a per-change timestamp.
 - [ ] Reproject the constant out of each isolated domain, every displayed frame.
   A constant is in the stiffness operator's null space, and a radiating wall is a
   dashpot with no restoring term, so no outer condition can remove one: a planted
@@ -139,6 +147,42 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-16 — Sources stop kicking the domain on the way in
+
+A harmonic source started from rest at a phase whose cosine is not zero hands the
+domain a net impulse: integrating `A sin(w t + p)` from rest leaves the term
+`(A cos(p) / w) t`. Demonstrated by driving the same scene at two phases and
+measuring the mass-weighted mean afterwards — `cos(p) = 1` settled at +1.09e-2,
+`cos(p) = 0` at +2.2e-4, fifty times less.
+
+Nothing takes that impulse back. A constant is in the stiffness operator's null
+space, and a radiating wall contributes damping and no restoring term, so it is
+transparent to a static offset: a planted 0.37 offset reads 0.370000 after t = 11
+under reflecting *and* under first-order-outgoing walls, identically, while one
+Dirichlet wall drains it to 9.3e-3. With an absorbing wall the drift velocity is
+damped and the offset settles; with none it does not, and the mean velocity held
++1.211486e-2 to seven digits from t = 5.5 to 38.8 while the offset ramped
+linearly and without bound.
+
+So every source in a scene is now eased in together by one smooth envelope over
+four periods of the slowest of them. One envelope rather than one per source,
+because a phased array steers with the phases *between* its sources and a
+per-source delay would turn the beam; and an envelope rather than starting every
+source at a cosine phase, because the phase is the user's and is persisted.
+Integrating by parts, a ramp leaves the residual impulse at `1 / (w * ramp)`
+instead of `1 / w`, and the vanishing slope at both ends of a smoothstep takes it
+to second order. Measured in a reflecting cavity: the switch-on drift fell from
+6.47e-3 to 1.21e-4, a factor of 53. In the app the residual offset over a
+thirteen-second run fell to a hundredth of the field's own spread, from a half on
+the Starter obstacle to -0.01.
+
+The first version of the test measured two-fold, not fifty-fold, because it
+stopped the drive abruptly at the end — and cutting a sine off mid-cycle injects
+exactly the same kind of impulse. The test now drives continuously and samples a
+whole number of periods apart so the oscillating part cancels. Easing a source
+*out* is a separate piece of work and is listed above; this covers a source live
+from the start of a run, which is what every bundled example is.
 
 ## 2026-09-16 — A document load kept the field it was replacing
 

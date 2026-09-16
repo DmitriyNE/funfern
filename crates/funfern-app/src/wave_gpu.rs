@@ -31,7 +31,7 @@ use funfern_core::{
     CompiledVolumeSources, GRID_SCALE_FILTER_CADENCE, GRID_SCALE_FILTER_STRENGTH,
     MAX_VOLUME_SOURCES, OuterBoundaryConditions, PhysicsModel, Point2, PointSource,
     QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil, QuadraticTransferMap,
-    QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh,
+    QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh, source_ramp_seconds,
 };
 
 const WORKGROUP_SIZE: u32 = 128;
@@ -1614,11 +1614,22 @@ fn gpu_forcing(
             return Err("Volume-source signal values cannot be represented on the GPU".into());
         }
     }
+    // One envelope for the whole scene, sized on its slowest oscillating source
+    // so every source is eased in over at least that many of its own periods.
+    // A disabled point source is left out; a compiled volume channel is on by
+    // construction.
+    let lowest = std::iter::once(source.signal)
+        .filter(|_| source.enabled)
+        .chain(volume_sources.signals.iter().copied())
+        .map(TimeSignal::frequency_ceiling_hz)
+        .filter(|frequency| *frequency > 0.0)
+        .fold(f64::INFINITY, f64::min);
     Ok(GpuForcing {
         source: gpu_source(source),
         pulse: gpu_pulse(pulse),
         outer: signals,
         volume,
+        envelope: Vec4::new(source_ramp_seconds(lowest) as f32, 0.0, 0.0, 0.0),
     })
 }
 
@@ -2131,6 +2142,8 @@ struct GpuForcing {
     pulse: GpuPulse,
     outer: [GpuTimeSignal; 4],
     volume: [GpuTimeSignal; MAX_VOLUME_SOURCES],
+    /// `x` is how long the shared switch-on envelope runs; the rest is padding.
+    envelope: Vec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -4076,6 +4089,66 @@ mod tests {
         assert!(shader.contains("dot(gradient, flux)"));
         assert!(shader.contains("length(potential_flux)"));
         assert!(shader.contains("let poynting = select(0.0, abs(displacement) * transverse"));
+    }
+
+    /// One envelope multiplies the whole source term, so a phased array's
+    /// sources ease in together and the phases between them — which are what
+    /// steer the beam — are untouched. A prescribed boundary load is left
+    /// outside it.
+    #[test]
+    fn every_source_is_eased_in_by_one_shared_envelope() {
+        let wave = include_str!("wave.wgsl");
+        assert!(wave.contains("fn source_envelope(time: f32) -> f32 {"));
+        assert!(wave.contains(
+            "    let acceleration = source_envelope(parameters.time_data.z)\n        * (forcing.source.position_width_enabled.w"
+        ));
+        assert!(wave.contains("            + volume_acceleration(i, parameters.time_data.z))"));
+        assert!(wave.contains("        + neumann_acceleration(i, parameters.time_data.z);"));
+        // The same smoothstep `funfern_core::source_envelope` evaluates.
+        assert!(wave.contains("    return fraction * fraction * (3.0 - 2.0 * fraction);"));
+        assert!(wave.contains("    envelope: vec4<f32>,"));
+    }
+
+    /// The ramp reaches the shader from the scene's slowest oscillating source,
+    /// and a scene with nothing oscillating asks for none.
+    #[test]
+    fn the_uploaded_ramp_follows_the_slowest_source() {
+        let sources = CompiledVolumeSources {
+            signals: vec![TimeSignal::harmonic(0.0, 3.0, 8.0, 0.0)],
+            nodes: vec![],
+        };
+        let source = PointSource {
+            enabled: true,
+            signal: TimeSignal::harmonic(0.0, 5.0, 2.0, 0.0),
+            ..PointSource::default()
+        };
+        let boundaries = OuterBoundaryConditions::default();
+        let forcing = gpu_forcing(source, gpu_pulse_settings(), boundaries, &sources).unwrap();
+        assert!((f64::from(forcing.envelope.x) - source_ramp_seconds(2.0)).abs() < 1.0e-6);
+
+        // A disabled point source does not get a say in the ramp.
+        let silent = PointSource {
+            enabled: false,
+            ..source
+        };
+        let forcing = gpu_forcing(silent, gpu_pulse_settings(), boundaries, &sources).unwrap();
+        assert!((f64::from(forcing.envelope.x) - source_ramp_seconds(8.0)).abs() < 1.0e-6);
+
+        let none = CompiledVolumeSources {
+            signals: vec![],
+            nodes: vec![],
+        };
+        let forcing = gpu_forcing(silent, gpu_pulse_settings(), boundaries, &none).unwrap();
+        assert_eq!(forcing.envelope.x, 0.0);
+    }
+
+    fn gpu_pulse_settings() -> PulseSettings {
+        PulseSettings {
+            position: Point2::default(),
+            amplitude: 0.65,
+            width: 0.06,
+            region: funfern_core::BACKGROUND_REGION,
+        }
     }
 
     /// The shader pair and the CPU mirror have to stay the same arithmetic, and

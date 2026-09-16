@@ -27,6 +27,7 @@ struct Forcing {
     pulse: Pulse,
     outer: array<TimeSignal, 4>,
     volume: array<TimeSignal, 33>,
+    envelope: vec4<f32>,
 }
 
 struct ForcingWeightWord {
@@ -72,6 +73,21 @@ const RECONSTRUCTION_DECAY_RATE: f32 = 0.5;
 fn signal_value(signal: TimeSignal, time: f32) -> f32 {
     return signal.values.x
         + signal.values.y * sin(signal.values.z * time + signal.values.w);
+}
+
+// A sine started from rest at a phase whose cosine is not zero hands the domain
+// a net impulse, and in a cavity nothing ever takes it back: a constant is in
+// the null space of the stiffness operator, and a radiating wall damps velocity
+// rather than position. Easing every source in together suppresses that impulse
+// while leaving the phases between them alone, which is what steers a phased
+// array. Mirrors `funfern_core::source_envelope`.
+fn source_envelope(time: f32) -> f32 {
+    let ramp = forcing.envelope.x;
+    if ramp <= 0.0 {
+        return 1.0;
+    }
+    let fraction = clamp(time / ramp, 0.0, 1.0);
+    return fraction * fraction * (3.0 - 2.0 * fraction);
 }
 
 fn boundary_value(side: u32, time: f32) -> f32 {
@@ -148,10 +164,11 @@ fn advance_wave(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let dt2 = parameters.time_data.y;
     let gamma = nodes[i].position_damping.z;
-    let acceleration = forcing.source.position_width_enabled.w
-        * bitcast<f32>(forcing_weights[i].data.x)
-        * signal_value(forcing.source.signal, parameters.time_data.z)
-        + volume_acceleration(i, parameters.time_data.z)
+    let acceleration = source_envelope(parameters.time_data.z)
+        * (forcing.source.position_width_enabled.w
+            * bitcast<f32>(forcing_weights[i].data.x)
+            * signal_value(forcing.source.signal, parameters.time_data.z)
+            + volume_acceleration(i, parameters.time_data.z))
         + neumann_acceleration(i, parameters.time_data.z);
     let previous = states[i].levels.x;
     let current = states[i].levels.y;

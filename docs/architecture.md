@@ -379,6 +379,20 @@ exposure shares the automatic scale described below. Mechanical scenes retain th
 belonging to one scalar polarization and are not presented as a simultaneous
 full-vector Maxwell state.
 
+Every source in a scene is eased in by one shared smooth envelope spanning
+`SOURCE_RAMP_PERIODS` periods of the slowest oscillating source. A sine started
+from rest at a phase whose cosine is not zero injects a net impulse, and no outer
+condition can remove the uniform offset it becomes: a constant lies in the
+stiffness operator's null space, and a radiating wall adds damping without a
+restoring term, so it is transparent to a static field. Where a wall damps, the
+drift settles into a permanent offset; where none does, it ramps without bound.
+The envelope is shared rather than per source because a phased array steers on
+the phases between its sources, and it is an envelope rather than a phase
+convention because the phase is authored and persisted. It multiplies the point
+source and the compiled volume sources; prescribed boundary data is not a force
+and is left alone. `funfern_core::source_envelope` and `wave.wgsl` carry the same
+smoothstep.
+
 Both the scalar field and the vector overlay are drawn against a scale measured
 from the field rather than a fixed gain. The shipped examples span a hundredfold
 in amplitude, which is wider than the intensity slider's whole range, so no fixed
