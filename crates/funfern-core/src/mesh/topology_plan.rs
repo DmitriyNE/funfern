@@ -1837,6 +1837,9 @@ pub enum TopologyFullRebuildReason {
     /// A repair was attempted and the carve failed; the runtime keeps the
     /// message alongside.
     RepairFailed,
+    /// A mesh the plans agreed to reuse carries trace ids the new plan
+    /// renumbered, and the two numberings could not be matched up.
+    TraceIdentityChanged,
 }
 
 impl TopologyFullRebuildReason {
@@ -1846,6 +1849,7 @@ impl TopologyFullRebuildReason {
             Self::MeshingOptionsChanged => "mesh resolution changed",
             Self::Requested => "rebuild requested",
             Self::RepairFailed => "mesh repair failed",
+            Self::TraceIdentityChanged => "boundary trace identity changed",
         }
     }
 }
@@ -1912,6 +1916,61 @@ pub fn topology_mesh_update_action(
     } else {
         TopologyMeshUpdateAction::Repair(Reason::CurveOrJunctionMoved)
     }
+}
+
+/// Carries a reused mesh's trace ids forward to a renumbered plan.
+///
+/// The arrangement hands out one trace id per sector a vertex has, so a span
+/// that stops dividing its faces - transmit switched on against an excluded
+/// face, say - renumbers every trace from there on even though nothing moved
+/// and every atom came out identical. A carve derives its traces from the plan
+/// it is handed, but a reused mesh keeps the numbering it was built with, and
+/// an adaptation checks each one against the plan it is given.
+///
+/// The atoms carry the correspondence: two plans that agree to reuse a mesh
+/// hold the same boundary in the same place, so the traces at its ends name
+/// the same two topological points under either numbering. `None` when the
+/// lists do not line up that way, which the caller answers with a rebuild.
+pub fn topology_trace_remap(
+    previous: &TopologyMeshPlan,
+    next: &TopologyMeshPlan,
+) -> Option<BTreeMap<TraceVertexId, TraceVertexId>> {
+    if previous.boundaries.len() != next.boundaries.len() {
+        return None;
+    }
+    let mut remap = BTreeMap::new();
+    for (before, after) in previous.boundaries.iter().zip(&next.boundaries) {
+        if before.source != after.source
+            || before.face != after.face
+            || before.region != after.region
+            || before.points != after.points
+            || before.parameter != after.parameter
+        {
+            return None;
+        }
+        for (from, to) in before.traces.into_iter().zip(after.traces) {
+            if remap
+                .insert(from, to)
+                .is_some_and(|existing| existing != to)
+            {
+                return None;
+            }
+        }
+    }
+    // Both directions matter: every trace the old mesh can carry has to arrive
+    // somewhere, and what they arrive at has to be the new plan's own list,
+    // which is what an adaptation checks the mesh against.
+    let image = remap.values().copied().collect::<BTreeSet<_>>();
+    if image.len() != remap.len()
+        || previous
+            .vertices
+            .iter()
+            .any(|vertex| !remap.contains_key(&vertex.id))
+        || image != next.vertices.iter().map(|vertex| vertex.id).collect()
+    {
+        return None;
+    }
+    Some(remap)
 }
 
 impl std::fmt::Display for TopologyMeshPlanError {
@@ -3536,6 +3595,111 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    fn walled_loop_plan(behavior: SpanBehavior) -> TopologyMeshPlan {
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![square(behavior)],
+                ..TopologyGeometry::default()
+            },
+            0,
+        )
+        .unwrap();
+        let inner = topology.face_at(Point2::new(0.0, 0.0)).unwrap();
+        let assignments = topology
+            .faces
+            .iter()
+            .map(|face| FaceRegionAssignment {
+                face: face.id,
+                region: (face.id != inner).then_some(RegionId(1)),
+            })
+            .collect::<Vec<_>>();
+        TopologyMeshPlan::new(&topology, &assignments).unwrap()
+    }
+
+    /// A span with an excluded face on one side is walled whether it is
+    /// authored transmitting or separated, so the two plans hold the same
+    /// atoms in the same places and a mesh can be reused across the switch.
+    /// The arrangement still renumbers the traces, though - a transmitting
+    /// vertex carries one for both faces where a separated one carries a pair
+    /// - and the remap is what carries the mesh over.
+    #[test]
+    fn a_walled_span_renumbers_its_traces_without_moving_its_atoms() {
+        let separated = walled_loop_plan(SpanBehavior::REFLECTING);
+        let transmitting = walled_loop_plan(SpanBehavior::Transmitting);
+        assert_eq!(
+            topology_mesh_update_action(&separated, &transmitting),
+            TopologyMeshUpdateAction::Reuse
+        );
+        let remap = topology_trace_remap(&separated, &transmitting)
+            .expect("the atoms line the two numberings up");
+        assert!(
+            remap.iter().any(|(from, to)| from != to),
+            "the switch renumbered the traces: {remap:?}"
+        );
+        let point = |plan: &TopologyMeshPlan, id: TraceVertexId| {
+            plan.vertices
+                .iter()
+                .find(|vertex| vertex.id == id)
+                .map(|vertex| vertex.point)
+        };
+        for (from, to) in &remap {
+            assert_eq!(point(&separated, *from), point(&transmitting, *to));
+        }
+        assert_eq!(
+            remap.values().copied().collect::<BTreeSet<_>>(),
+            transmitting
+                .vertices
+                .iter()
+                .map(|vertex| vertex.id)
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            topology_trace_remap(&transmitting, &separated).map(|back| back.len()),
+            Some(remap.len())
+        );
+    }
+
+    /// Plans that do not hold the same boundaries in the same places have no
+    /// correspondence to offer, and say so rather than guessing one.
+    #[test]
+    fn a_moved_boundary_has_no_trace_remap() {
+        let plan = walled_loop_plan(SpanBehavior::REFLECTING);
+        let moved = {
+            let spline = PeriodicCubicSpline::polygon(vec![
+                Point2::new(-0.4, -0.5),
+                Point2::new(0.5, -0.5),
+                Point2::new(0.5, 0.5),
+                Point2::new(-0.5, 0.5),
+            ])
+            .unwrap();
+            let curve = TopologyCurve::new(
+                CurveId(1),
+                CurveSpline::Closed(spline),
+                spans(1, 4, SpanBehavior::REFLECTING),
+            )
+            .unwrap();
+            let topology = compile_topology(
+                &TopologyGeometry {
+                    curves: vec![curve],
+                    ..TopologyGeometry::default()
+                },
+                0,
+            )
+            .unwrap();
+            let inner = topology.face_at(Point2::new(0.0, 0.0)).unwrap();
+            let assignments = topology
+                .faces
+                .iter()
+                .map(|face| FaceRegionAssignment {
+                    face: face.id,
+                    region: (face.id != inner).then_some(RegionId(1)),
+                })
+                .collect::<Vec<_>>();
+            TopologyMeshPlan::new(&topology, &assignments).unwrap()
+        };
+        assert!(topology_trace_remap(&plan, &moved).is_none());
     }
 
     #[test]

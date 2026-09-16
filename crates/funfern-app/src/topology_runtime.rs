@@ -212,6 +212,33 @@ impl std::fmt::Display for TopologyPreparationError {
 
 impl std::error::Error for TopologyPreparationError {}
 
+/// Copies the active mesh onto a plan that holds the same boundaries in the
+/// same places under a fresh trace numbering. The arrangement hands out one
+/// trace id per sector a vertex has, so switching a span between transmitting
+/// and separated renumbers the traces after it even when the plan is otherwise
+/// identical - which it is when the far side is an excluded face, since the
+/// span is walled either way. A carve derives its traces from the plan it is
+/// handed, but a reused mesh keeps the numbering it was built with, and an
+/// adaptation checks every one of them against the plan.
+///
+/// `None` when the two numberings cannot be matched up, which the caller
+/// answers with a rebuild.
+fn retraced(
+    mesh: &TriMesh,
+    previous: &TopologyMeshPlan,
+    next: &TopologyMeshPlan,
+) -> Option<TriMesh> {
+    let remap = topology_trace_remap(previous, next)?;
+    let mut mesh = mesh.clone();
+    mesh.geometry_revision = next.geometry_revision;
+    for vertex in &mut mesh.vertices {
+        if let Some(trace) = vertex.trace {
+            vertex.trace = Some(remap.get(&trace).copied()?);
+        }
+    }
+    Some(mesh)
+}
+
 pub struct TopologyPreparationJob {
     bundle: Arc<AcceptedTopology>,
     probes: Arc<[TopologyProbeDefinition]>,
@@ -296,7 +323,7 @@ impl TopologyPreparationJob {
         // Changed options re-derive the plan's atoms, so they are decided
         // before the plans are compared; otherwise the comparison would read
         // the re-atomised boundaries as moved geometry.
-        let mesh_action = match previous.as_ref() {
+        let mut mesh_action = match previous.as_ref() {
             None => TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::DomainChanged),
             Some(previous) if previous.meshing != options => TopologyMeshUpdateAction::FullRebuild(
                 TopologyFullRebuildReason::MeshingOptionsChanged,
@@ -310,16 +337,27 @@ impl TopologyPreparationJob {
                 }
             }
         };
+        // The reused mesh is prepared alongside the action, because bringing
+        // its traces onto the new plan can fail and a rebuild is the answer
+        // when it does.
+        let mut reused = None;
+        if matches!(mesh_action, TopologyMeshUpdateAction::Reuse)
+            && let Some(active) = previous.as_ref()
+        {
+            reused = if same_authored_scene {
+                Some(active.mesh.clone())
+            } else {
+                retraced(&active.mesh, &active.bundle.plan, &bundle.plan).map(Arc::new)
+            };
+            if reused.is_none() {
+                mesh_action = TopologyMeshUpdateAction::FullRebuild(
+                    TopologyFullRebuildReason::TraceIdentityChanged,
+                );
+            }
+        }
         let (carve_job, mesh_job, mesh, phase) = match mesh_action {
             TopologyMeshUpdateAction::Reuse => {
-                let mesh = if same_authored_scene {
-                    previous.as_ref().unwrap().mesh.clone()
-                } else {
-                    let mut mesh = previous.as_ref().unwrap().mesh.as_ref().clone();
-                    mesh.geometry_revision = bundle.plan.geometry_revision;
-                    Arc::new(mesh)
-                };
-                (None, None, Some(mesh), TopologyPreparationPhase::Assembling)
+                (None, None, reused, TopologyPreparationPhase::Assembling)
             }
             TopologyMeshUpdateAction::Repair(_) => {
                 let previous = previous.as_ref().unwrap();
@@ -1612,6 +1650,96 @@ mod tests {
         prepare(&mut runtime).unwrap();
         runtime.commit_ready(first).unwrap();
         (editor, curve, runtime)
+    }
+
+    /// Switching a hole's boundary to transmit leaves every atom where it
+    /// was - the far side is excluded, so the span is walled either way - and
+    /// the mesh is reused. The arrangement renumbers the traces across that
+    /// switch, though, and the reused mesh has to come over with them or the
+    /// next adaptation refuses the pair. Both directions, and back again.
+    #[test]
+    fn switching_a_walled_boundary_renumbers_the_reused_mesh() {
+        let (mut editor, curve, mut runtime) = hole_runtime();
+        let spans = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(curve)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        for behavior in [
+            SpanBehavior::Transmitting,
+            SpanBehavior::REFLECTING,
+            SpanBehavior::Transmitting,
+        ] {
+            editor.set_span_behavior(&spans, behavior).unwrap();
+            settle(&mut editor);
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(prepare(&mut runtime).unwrap(), token);
+            let reused = runtime.commit_ready(token).unwrap();
+            assert_eq!(
+                reused.mesh_action,
+                TopologyMeshUpdateAction::Reuse,
+                "a walled span is walled either way, so nothing is remeshed"
+            );
+            let planned = reused
+                .bundle
+                .plan
+                .vertices
+                .iter()
+                .map(|vertex| vertex.id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let carried = reused
+                .mesh
+                .vertices
+                .iter()
+                .filter_map(|vertex| vertex.trace)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(planned, carried, "the reused mesh names the plan's traces");
+
+            let fine = options().target_edge_length * 0.4;
+            let mut adaptation = MeshAdaptationJob::new_topology(
+                reused.mesh.clone(),
+                &reused.bundle.plan,
+                MeshAdaptationState::from_mesh(&reused.mesh),
+                runtime.reserve_mesh_revision(),
+                Arc::new(move |point: Point2, _| {
+                    if point.x > 0.0 {
+                        fine
+                    } else {
+                        options().target_edge_length
+                    }
+                }),
+                MeshAdaptationOptions {
+                    meshing: options(),
+                    minimum_target_edge_length: fine,
+                    maximum_target_edge_length: options().target_edge_length,
+                    max_topology_changes: 8_000,
+                    max_work_units: 50_000_000,
+                    ..MeshAdaptationOptions::default()
+                },
+            );
+            let adapted = loop {
+                if let Some(result) = adaptation.advance(4096) {
+                    break result.unwrap_or_else(|error| {
+                        panic!("adaptation refused the reused mesh: {error}")
+                    });
+                }
+            };
+            assert!(adapted.mesh.triangles.len() > reused.mesh.triangles.len());
+        }
     }
 
     fn nudge(editor: &mut TopologyEditor, curve: CurveId) {

@@ -150,6 +150,51 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — A reused mesh has to be renumbered, not just restamped
+
+Switching a span that separates a hole from the domain to Transmit gave
+"Invalid adaptation source: invalid topology trace vertex". The question that
+came with it - which condition a transmitting span falls back to against an
+excluded face - was already settled and is the one worth wanting: the plan
+rewrites it to `SpanBehavior::REFLECTING`, a homogeneous Neumann wall, and the
+authored span stays transmitting so reactivating the far face restores
+transmission. First-order outgoing is not involved.
+
+The error had nothing to do with the condition. The arrangement hands out one
+trace id per sector a vertex has: a separated node carries a pair, one per face,
+and a transmitting node carries one shared between them. Flipping the variant
+therefore renumbers every trace from that curve onward even though nothing
+moved. Against a hole nothing else moves either - the excluded side never
+emitted an atom, and the live side reads `Separated` before and after, since
+transmit is walled here - so the face, source and behaviour signatures all
+match, `junctions` is empty, and `same_geometry` compares planned trace
+vertices *by point, never by id*. The plans agree to reuse the mesh, and the
+mesh is handed forward with only its `geometry_revision` restamped, still
+carrying the previous numbering. Measured on a 0.2 hole at the default
+resolution: 17 of the plan's 36 traces absent from the mesh and 17 of the
+mesh's absent from the plan, plan trace 17 sitting where the mesh said 25.
+Nothing notices until an adaptation checks each trace against
+`contract.trace_points`.
+
+Only reuse is affected. A carve rebuilds its vertices with no trace at all and
+derives every one of them from the plan it was handed (`pair_traces`), so
+repairs and rebuilds were already right - and they *heal* a mesh that came
+through a bad reuse, which is why a later move made the symptom disappear.
+
+`topology_trace_remap` builds the correspondence from the atoms rather than
+from the vertex list, so a side is part of the match and two traces at one
+point cannot swap: two plans that agree to reuse a mesh hold the same boundary
+in the same place, and its ends are the same two topological points under
+either numbering. It is validated as a bijection onto the new plan's own
+vertices and returns `None` otherwise, which the runtime answers with
+`FullRebuild(TraceIdentityChanged)`. The reused mesh is now prepared alongside
+the action, because preparing it can fail.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. Two new tests; the runtime one was checked
+to fail with the remap stubbed out, on exactly the id sets above.
+
 ## 2026-09-16 — A slit is pulled out of the polygon, whichever way it transmits
 
 Three things, one shape. A free separator repaired when it was added but rebuilt

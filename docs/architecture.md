@@ -741,6 +741,13 @@ branched separated junction, recovery first installs every incident run; a final
 fan pass crosses transmitting edges, stops at separated edges, and duplicates the
 junction vertex once per compiled sector trace. An
 unchanged plan reuses its mesh, and changing only a boundary law does not remesh.
+Reuse carries the mesh's trace ids forward, so it holds only while both plans
+name the same traces. The arrangement issues one id per sector, so switching a
+span between transmitting and separated renumbers every trace from there on even
+when the atoms come out identical - which they do when the far face is excluded
+and the span is walled either way. The atoms line the two numberings up, since
+the same boundary in the same place ends at the same two topological points, and
+the reused mesh is rewritten through that map or rebuilt when no such map exists.
 A slit - a separated span whose two sides face the same face - is left out of
 the polygon and cut back in after the face is triangulated, so removing it may
 break the face cycle it sits in into several closed stretches: a slit bridging
