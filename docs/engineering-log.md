@@ -29,9 +29,6 @@ Carried over from the cutover follow-up work, not from the review:
   `topology_persistence.rs`'s own header; deleting the two modules and their tests
   is the second. Or keep them deliberately as the migration path's regression
   suite and say so.
-- [ ] Decide what "Flip direction" means for a line probe. The README describes it
-  as reversing both the sampling order and the flux sign; segments currently only
-  offer Swap ends, and boundary targets carry a separate `reversed` flag.
 - [ ] Measure representative browser frame timing for the cooperative topology
   job. The cutover recorded that it advances in fixed 256-work-unit slices but
   never measured what that costs in a real browser frame.
@@ -128,6 +125,35 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-16 — The grid shows what it snaps to
+
+Two small ones from the outstanding list.
+
+The README named a control called "Flip direction" in two places. Neither
+exists: a line probe has **Swap ends**, which reverses the arclength axis and
+the flux sign together, and a boundary probe has **Reverse direction**, which
+turns the axis alone and leaves the side and the sign where they are. The
+behaviour is right in both and they are not the same operation, so the two names
+stay and the README says them.
+
+The grid stepped in 1/2/5 per decade from the zoom while Shift snapped to a
+fixed 0.05, so at most zooms it drew one lattice and landed on another. The plan
+was to snap to the drawn step, and that turns out to be too coarse: at the
+default zoom it draws fifths of a unit, and snapping to those is a quarter of
+the precision placement has today. So each decade divides instead - a 2 into
+four parts, a 1 or a 5 into five, all round numbers - the divisions are drawn
+under the labelled lines at a third of their alpha, and Shift lands on them. At
+400 pixels per world unit that puts the fine step at exactly the 0.05 it used to
+be nailed to, so nothing about placing anything feels different; it just follows
+the zoom now, and a line is drawn wherever a point can land.
+
+`snap_point` and `snap_scalar` take the step rather than reading a constant, and
+every caller asks the viewport for it. The two tests that held the old constant
+name their zoom now, which is the honest shape for a test of something the zoom
+decides.
+
+Checked: fmt, clippy -D warnings, workspace tests, release build.
 
 ## 2026-09-16 — The probe rings outlive the mesh that filled them
 

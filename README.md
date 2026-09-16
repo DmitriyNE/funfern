@@ -184,7 +184,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   floating window that can be dragged anywhere and stays up across draws, so one
   primitive follows another; it closes from its own button or the toolbar toggle.
   Holding Shift places each point on the same grid dragging snaps to, except
-  where the point attaches to existing geometry, which outranks it.
+  where the point attaches to existing geometry, which outranks it. That grid is
+  the one drawn in the viewport: it steps in 1/2/5 per decade from the zoom and
+  divides each step into four or five, and Shift lands on those divisions, so
+  what is drawn is what can be reached. Zooming in makes it finer.
   Closed curves start as subdomains or holes. Open curves start as transmitting separators or
   two-sided baffles, either of which may be left unattached. The material chosen
   for a separator applies only if it encloses a face as it is drawn; a face
@@ -322,8 +325,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **Line probes:** place an independent straight sampling segment with two clicks,
   which Shift snaps to the grid.
   Drag either endpoint to reshape it or drag its body as one rigid object. The arrow
-  shows the positive left normal; Flip direction reverses both the sampling order
-  and flux sign. Low, Medium, and High presets record 32/64/128 spatial samples at
+  shows the positive left normal; **Swap ends** reverses the sampling order and
+  the flux sign together. Low, Medium, and High presets record 32/64/128 spatial samples at
   30/60/120 samples per simulated second. A compact Plots menu exposes the signed
   primary field, transverse-field magnitude, signed normal Poynting flux, its
   average over a trailing window, and energy as a waterfall, versus arclength, or
@@ -343,7 +346,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   choose **+ From selected spans** in Probes. The probe follows spline edits and
   uses the same twelve curve readouts, sixteen in EM scenes. Choose the sampled
   trace for material interfaces, walls, and baffles. Positive normal flux always
-  points out of that trace; Flip direction reverses only the arclength axis. Because
+  points out of that trace; **Reverse direction** turns the arclength axis alone,
+  leaving the side and the sign of the flux where they are. Because
   a span's two traces lie on top of each other, the scene says which one is read with
   a stem standing on that side and running into the probe's marker, so the reading
   arrives from the side the stem sits on and travels the way positive flux points. A

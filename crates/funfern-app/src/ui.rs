@@ -53,8 +53,6 @@ const FRAME_HISTORY: usize = 120;
 const EVENT_LOG_ENTRIES: usize = 200;
 /// Seconds of progress the steps-per-second readout averages over.
 const STEP_RATE_WINDOW: f64 = 0.5;
-/// The grid Shift snaps positions and radii to, wherever either is placed.
-const SNAP_STEP: f64 = 0.05;
 /// Frames one line or boundary probe keeps. With the sampling presets' rates
 /// this is 17, 8.5, or 4.3 seconds of path history, and it bounds how far back
 /// the averaged flux row can look.
@@ -2273,7 +2271,12 @@ impl Playground {
         let Some(mode) = self.probe_mode else {
             return;
         };
-        let point = if snap { Self::snap_point(raw) } else { raw };
+        let step = self.snap_step();
+        let point = if snap {
+            Self::snap_point(raw, step)
+        } else {
+            raw
+        };
         let target = match mode {
             ProbePlacement::Point => Some(TopologyProbeTarget::Point(point)),
             ProbePlacement::Segment { start: None } => {
@@ -2302,7 +2305,7 @@ impl Playground {
                 self.probe_mode = Some(ProbePlacement::Disk { center: None });
                 Some(TopologyProbeTarget::AreaDisk {
                     center,
-                    radius: Self::placed_disk_radius(center, raw, snap),
+                    radius: Self::placed_disk_radius(center, raw, snap, step),
                 })
             }
             // A region is picked by the face under the pointer, which
@@ -2332,10 +2335,10 @@ impl Playground {
             }
         }
     }
-    fn snap_point(point: Point2) -> Point2 {
+    fn snap_point(point: Point2, step: f64) -> Point2 {
         Point2::new(
-            (point.x / SNAP_STEP).round() * SNAP_STEP,
-            (point.y / SNAP_STEP).round() * SNAP_STEP,
+            (point.x / step).round() * step,
+            (point.y / step).round() * step,
         )
     }
     fn scale_drag_distance(axis: GizmoScaleAxis, relative: Point2) -> f64 {
@@ -3759,23 +3762,32 @@ impl Playground {
     /// The spacing and the world coordinates the grid draws at. Both axes walk
     /// upwards from the lower corner of the view: `world` flips y, so the
     /// bottom of the screen is the smaller world coordinate.
-    fn grid_axes(&self, r: Rect) -> (f64, Vec<f64>, Vec<f64>) {
+    fn grid_axes(&self, r: Rect, step: f64) -> (Vec<f64>, Vec<f64>) {
         let minimum = self.world(r.left_bottom(), r);
         let maximum = self.world(r.right_top(), r);
-        let step = grid_step(self.scale);
         (
-            step,
             grid_lines(minimum.x, maximum.x, step),
             grid_lines(minimum.y, maximum.y, step),
         )
     }
+
+    /// The lattice Shift lands on: the grid's own fine step, so what is drawn
+    /// is what a snapped position can reach.
+    fn snap_step(&self) -> f64 {
+        grid_steps(self.scale).1
+    }
     fn draw_grid(&self, painter: &egui::Painter, r: Rect) {
-        let (step, columns, rows) = self.grid_axes(r);
+        let (step, fine) = grid_steps(self.scale);
+        let (columns, rows) = self.grid_axes(r, fine);
+        // The fine lattice is what Shift lands on, so it is drawn - faintly,
+        // because it is there to be aimed at rather than read.
         let stroke = |value: f64| {
-            if value.abs() < step * 0.1 {
+            if value.abs() < fine * 0.1 {
                 Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 90))
-            } else {
+            } else if (value / step - (value / step).round()).abs() < 1.0e-6 {
                 Stroke::new(0.5, Color32::from_rgba_unmultiplied(148, 163, 184, 45))
+            } else {
+                Stroke::new(0.5, Color32::from_rgba_unmultiplied(148, 163, 184, 20))
             }
         };
         for x in columns {
@@ -4677,7 +4689,10 @@ impl Playground {
                     .map(|hit| self.screen(hit.point, r))
                     .unwrap_or_else(|| {
                         if painter.ctx().input(|input| input.modifiers.shift) {
-                            self.screen(Self::snap_point(self.world(pointer, r)), r)
+                            self.screen(
+                                Self::snap_point(self.world(pointer, r), self.snap_step()),
+                                r,
+                            )
                         } else {
                             pointer
                         }
@@ -4695,7 +4710,7 @@ impl Playground {
             match self.probe_mode {
                 Some(ProbePlacement::Segment { start: Some(start) }) => {
                     let end = if snap {
-                        self.screen(Self::snap_point(current), r)
+                        self.screen(Self::snap_point(current, self.snap_step()), r)
                     } else {
                         pointer
                     };
@@ -4706,7 +4721,8 @@ impl Playground {
                 }) => {
                     painter.circle_stroke(
                         self.screen(center, r),
-                        (Self::placed_disk_radius(center, current, snap) * self.scale) as f32,
+                        (Self::placed_disk_radius(center, current, snap, self.snap_step())
+                            * self.scale) as f32,
                         Stroke::new(1.5, TEAL),
                     );
                 }
@@ -5627,10 +5643,11 @@ impl Playground {
                     &drag,
                     DragGesture::Marquee { .. } | DragGesture::Pivot { .. }
                 );
+                let step = self.snap_step();
                 let result = match drag {
                     DragGesture::Endpoint { curve, node, .. } => {
                         let point = if shift {
-                            Self::snap_point(point)
+                            Self::snap_point(point, step)
                         } else {
                             point
                         };
@@ -5654,7 +5671,7 @@ impl Playground {
                     }
                     DragGesture::Domain { drag } => {
                         let point = if shift {
-                            Self::snap_point(point)
+                            Self::snap_point(point, step)
                         } else {
                             point
                         };
@@ -5668,7 +5685,7 @@ impl Playground {
                     }
                     DragGesture::Handle { handle } => {
                         let point = if shift {
-                            Self::snap_point(point)
+                            Self::snap_point(point, step)
                         } else {
                             point
                         };
@@ -5687,7 +5704,7 @@ impl Playground {
                     } => {
                         let selected = self.selection.spans().cloned().unwrap_or_default();
                         let target = if shift {
-                            Self::snap_point(pivot + point - start)
+                            Self::snap_point(pivot + point - start, step)
                         } else {
                             pivot + point - start
                         };
@@ -5778,7 +5795,7 @@ impl Playground {
                     DragGesture::Pivot { offset, .. } => {
                         let selected = self.selection.spans().cloned().unwrap_or_default();
                         let target = if shift {
-                            Self::snap_point(point + offset)
+                            Self::snap_point(point + offset, step)
                         } else {
                             point + offset
                         };
@@ -5819,7 +5836,7 @@ impl Playground {
                         match hit {
                             MaterialFrameGizmoHit::Origin => {
                                 frame.origin = if shift {
-                                    Self::snap_point(point)
+                                    Self::snap_point(point, step)
                                 } else {
                                     point
                                 };
@@ -5987,7 +6004,7 @@ impl Playground {
             point = hit.point;
             attachment = Some(hit.attachment);
         } else if snap_to_grid {
-            point = Self::snap_point(point);
+            point = Self::snap_point(point, self.snap_step());
         }
         if gesture.tool == DrawTool::Circle {
             let spline = PeriodicCubicSpline::rounded(point, 0.15);
@@ -7647,17 +7664,17 @@ impl Playground {
     /// itself on the grid rather than the point it was measured to, which is
     /// what dragging a disk's rim already does - snapping the rim point would
     /// leave a radius that is no multiple of anything.
-    fn placed_disk_radius(center: Point2, point: Point2, snap: bool) -> f64 {
+    fn placed_disk_radius(center: Point2, point: Point2, snap: bool, step: f64) -> f64 {
         let radius = (point - center).norm();
         if snap {
             // A click inside the first grid step would round the disk away.
-            Self::snap_scalar(radius).max(SNAP_STEP)
+            Self::snap_scalar(radius, step).max(step)
         } else {
             radius
         }
     }
-    fn snap_scalar(value: f64) -> f64 {
-        (value / SNAP_STEP).round() * SNAP_STEP
+    fn snap_scalar(value: f64, step: f64) -> f64 {
+        (value / step).round() * step
     }
 
     fn drag_probe(
@@ -7667,9 +7684,10 @@ impl Playground {
         delta: Point2,
         snap: bool,
     ) {
+        let step = self.snap_step();
         let place = |point: Point2| {
             if snap {
-                Self::snap_point(point + delta)
+                Self::snap_point(point + delta, step)
             } else {
                 point + delta
             }
@@ -7709,7 +7727,7 @@ impl Playground {
             (ProbeHit::AreaDiskRadius(_), TopologyProbeTarget::AreaDisk { center, radius }) => {
                 let grown = *radius + delta.x;
                 *radius = if snap {
-                    Self::snap_scalar(grown)
+                    Self::snap_scalar(grown, step)
                 } else {
                     grown
                 }
@@ -10430,14 +10448,23 @@ fn closest_curve_parameter(
     best.map(|(_, curve, parameter)| (curve, parameter))
 }
 /// The 1/2/5-per-decade spacing that keeps grid lines about 70 pixels apart.
-fn grid_step(scale: f64) -> f64 {
+/// The step the grid draws at, and the finer one it subdivides to.
+///
+/// Snapping lands on the fine step, so every position Shift can reach has a
+/// line under it. The grid used to step in 1/2/5 per decade from the zoom while
+/// snapping went to a fixed 0.05, so at most zooms it drew one lattice and
+/// landed on another. Each decade divides into round numbers: a 2 into four
+/// parts and a 1 or a 5 into five, which at the default zoom puts the fine step
+/// back at the 0.05 it used to be fixed at.
+fn grid_steps(scale: f64) -> (f64, f64) {
     let raw = 70.0 / scale;
     let power = 10f64.powf(raw.log10().floor());
-    [1.0, 2.0, 5.0, 10.0]
+    let (digit, divisions) = [(1.0, 5.0), (2.0, 4.0), (5.0, 5.0), (10.0, 5.0)]
         .into_iter()
-        .map(|value| value * power)
-        .find(|value| *value >= raw)
-        .unwrap_or(power * 10.0)
+        .find(|(digit, _)| digit * power >= raw)
+        .unwrap_or((10.0, 5.0));
+    let major = digit * power;
+    (major, major / divisions)
 }
 
 /// Every multiple of `step` inside `[minimum, maximum]`, lowest first. Both
@@ -11183,32 +11210,48 @@ mod tests {
             center: Point2::default(),
             ..Playground::default()
         };
-        let (step, columns, rows) = state.grid_axes(Rect::from_min_size(
-            egui::pos2(0.0, 0.0),
-            egui::vec2(800.0, 600.0),
-        ));
+        let view = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let (step, fine) = grid_steps(state.scale);
         assert_eq!(step, 0.5, "70 px at this zoom lands on the half-unit");
+        assert_eq!(fine, 0.1, "which divides into five");
+        let (columns, rows) = state.grid_axes(view, step);
         assert_eq!(columns, vec![-1.5, -1.0, -0.5, 0.0, 0.5, 1.0]);
         assert_eq!(rows, vec![-1.0, -0.5, 0.0, 0.5, 1.0]);
         assert!(
             rows.iter().any(|y| y.abs() < step * 0.1),
             "the horizontal axis is among them, and is the emphasised line"
         );
+        // The fine lattice nests inside the drawn one, so every line that is
+        // drawn is one Shift can land on.
+        assert!(
+            (step / fine - 5.0).abs() < 1.0e-9,
+            "a half-unit divides in five"
+        );
+        let (fine_columns, fine_rows) = state.grid_axes(view, fine);
+        assert!(fine_columns.len() >= columns.len() * 4);
+        assert!(fine_rows.len() >= rows.len() * 4);
 
         // A bound the wrong way round draws nothing rather than looping.
         assert!(grid_lines(1.0, -1.0, step).is_empty());
         assert!(grid_lines(-1.0, 1.0, 0.0).is_empty());
         assert!(grid_lines(f64::NAN, 1.0, step).is_empty());
         // A degenerate zoom cannot hang the painter.
-        assert!(grid_lines(-1.0, 1.0, grid_step(0.0)).is_empty());
+        assert!(grid_lines(-1.0, 1.0, grid_steps(0.0).0).is_empty());
         assert!(grid_lines(-1.0e9, 1.0e9, 1.0e-9).len() <= 4096);
 
-        // The spacing holds its decade: about 70 pixels apart at any zoom.
+        // The spacing holds its decade: about 70 pixels apart at any zoom, and
+        // the step Shift lands on is always a round division of it.
         for scale in [12.0, 37.0, 300.0, 1_500.0, 9_000.0] {
-            let pixels = grid_step(scale) * scale;
+            let (step, fine) = grid_steps(scale);
+            let pixels = step * scale;
             assert!(
                 (35.0..=180.0).contains(&pixels),
                 "{scale} pixels per unit put lines {pixels} apart"
+            );
+            let divisions = step / fine;
+            assert!(
+                (divisions - divisions.round()).abs() < 1.0e-9 && (4.0..=5.0).contains(&divisions),
+                "{scale} divides {step} into {divisions}"
             );
         }
     }
@@ -11219,7 +11262,12 @@ mod tests {
     #[test]
     fn shift_places_a_drawn_point_on_the_grid() {
         let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-        let mut state = Playground::default();
+        // The grid belongs to the zoom, so the zoom is named: 400 pixels per
+        // unit divides fifths of a unit in four, landing on 0.05.
+        let mut state = Playground {
+            scale: 400.0,
+            ..Playground::default()
+        };
         state.begin_draw(DrawTool::Polyline);
         state.draw_click(
             Point2::new(0.117, -0.233),
@@ -11897,10 +11945,16 @@ mod probe_interaction_tests {
     /// Placing a probe reads the same modifier dragging one already does, with
     /// the same conventions: a position lands on the grid, and a disk's radius
     /// is itself a multiple of it rather than the distance to a snapped rim.
+    ///
+    /// The grid is the zoom's, so the zoom is named. At 400 pixels per unit it
+    /// draws fifths of a unit and divides them in four, which is the 0.05 this
+    /// used to be fixed at.
     #[test]
     fn shift_places_a_probe_on_the_grid() {
+        let step = grid_steps(400.0).1;
+        assert!((step - 0.05).abs() < 1.0e-9, "the zoom moved: {step}");
         let on_grid = |value: f64| {
-            let steps = value / SNAP_STEP;
+            let steps = value / step;
             (steps - steps.round()).abs() < 1.0e-9
         };
         let at = |point: Point2, x: f64, y: f64| {
@@ -11915,6 +11969,7 @@ mod probe_interaction_tests {
         };
         let mut state = Playground {
             probe_mode: Some(ProbePlacement::Point),
+            scale: 400.0,
             ..Playground::default()
         };
         state.probe_placement_click(Point2::new(0.117, -0.233), true);
@@ -11955,7 +12010,7 @@ mod probe_interaction_tests {
         };
         at(center, 0.0, 0.0);
         assert!(on_grid(radius), "radius {radius} is off the grid");
-        assert!(radius >= SNAP_STEP);
+        assert!(radius >= step);
 
         // Without the modifier nothing moves.
         state.probe_mode = Some(ProbePlacement::Point);
