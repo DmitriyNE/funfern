@@ -503,8 +503,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   clock at zero, so it clears the probe traces and records the new run from its
   own start rather than appending to the previous one. Place pulse adds a
   Gaussian displacement with zero initial velocity. The optional point source is
-  repositioned by dragging its viewport marker. Simulation speed is bounded to 16
-  substeps per display frame. Field colors use an adjustable symmetric gain.
+  repositioned by dragging its viewport marker. Simulation contains a speed
+  ceiling on simulated seconds per wall second, saved with the document; the
+  solver is paced to it rather than to real time, and says what it is actually
+  reaching when a scene costs more per step than a frame can afford. Substeps per
+  display frame are bounded, so asking for more than a scene can deliver falls
+  short rather than building a backlog. Field colors use an adjustable symmetric gain.
   Pulses and point sources act only in their containing wall-separated
   region. With open baffles their Gaussian stencil uses mesh-path distance, so it
   goes around a free endpoint instead of jumping through coincident faces.

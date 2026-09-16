@@ -762,6 +762,10 @@ pub struct Playground {
     sim_time_offset: f64,
     completed_steps: u64,
     steps_per_second: f64,
+    /// The best simulated-seconds-per-wall-second seen lately, which is what the
+    /// shortfall note reads. The raw measurement dips whenever a handoff
+    /// withholds stepping inside its window.
+    speed_reached: f64,
     /// The solver's step counter as of the previous frame. It is
     /// generation-local, so a handover restarts it and the rate follows what it
     /// advanced between frames rather than differencing it across the window.
@@ -960,6 +964,7 @@ impl Default for Playground {
             sim_time_offset: 0.0,
             completed_steps: 0,
             steps_per_second: 0.0,
+            speed_reached: 0.0,
             rate_steps: 0,
             rate_generation: 0,
             rate_window_steps: 0,
@@ -2614,6 +2619,21 @@ impl Playground {
         ui.checkbox(&mut p.far_field_contour, "Far field");
         ui.checkbox(&mut p.probe_labels, "Probe names");
     }
+    /// The rate the solver is actually reaching, when it is short of the one
+    /// asked for and is genuinely trying to reach it.
+    fn simulation_speed_shortfall(&self) -> Option<f64> {
+        // Not suppressed while a handoff is pending. Adaptation keeps one
+        // pending much of the time on exactly the scenes heavy enough to fall
+        // short, which silenced the note when it mattered most; the held rate
+        // already rides over the few frames a handoff withholds.
+        let stepping = self.runtime.active().is_some() && self.wave_running;
+        speed_shortfall(
+            self.speed_reached,
+            self.editor.document.presentation.simulation_speed,
+            stepping,
+        )
+    }
+
     fn simulation_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Simulation");
         let mut physics = self.editor.document.model.draft.physics;
@@ -2648,6 +2668,28 @@ impl Playground {
             if let Err(error) = self.editor.set_physics(physics) {
                 self.notify(error)
             }
+        }
+        ui.separator();
+        ui.label("Speed");
+        ui.add(
+            egui::Slider::new(
+                &mut self.editor.document.presentation.simulation_speed,
+                0.02..=2.0,
+            )
+            .logarithmic(true)
+            .suffix("×")
+            .text("Simulated s per wall s"),
+        )
+        .on_hover_text(
+            "A ceiling on how fast simulated time runs against the clock. The solver falls \
+             short of it when a step costs more than a frame can afford.",
+        );
+        if let Some(reached) = self.simulation_speed_shortfall() {
+            ui.colored_label(GOLD, format!("Reaching {reached:.2}×"))
+                .on_hover_text(
+                    "The scene costs more per step than the frame budget allows, so simulated \
+                     time runs slower than asked. A coarser mesh buys it back.",
+                );
         }
         ui.separator();
         ui.label("Mesh resolution");
@@ -6825,22 +6867,21 @@ impl Playground {
             let handoff_pending = self.runtime.ready().is_some() || self.uploading.is_some();
             if !handoff_pending {
                 if self.wave_running {
-                    self.accumulator += delta.clamp(0.0, 0.1);
-                    let steps = (self.accumulator / dt)
-                        .floor()
-                        .min(MAX_STEPS_PER_FRAME as f64) as u64;
+                    let steps = steps_for_frame(
+                        &mut self.accumulator,
+                        delta,
+                        self.editor.document.presentation.simulation_speed,
+                        dt,
+                    );
                     if steps > 0 {
                         request.request_steps(steps);
-                        self.accumulator -= steps as f64 * dt;
                     }
-                    // The solver cannot encode more than one frame's worth of
-                    // steps, so unspent wall-clock time is dropped instead of
-                    // queued into a backlog that never drains.
-                    self.accumulator = self.accumulator.min(MAX_STEPS_PER_FRAME as f64 * dt);
                 } else if self.wave_step {
                     request.request_steps(1);
                     self.wave_step = false;
                 }
+                self.speed_reached =
+                    hold_rate(self.speed_reached, self.steps_per_second * dt, delta);
             }
         }
         self.completed_steps = request.stats().completed_steps();
@@ -11006,6 +11047,64 @@ fn exposure_level(values: &[f32], quantile: f64, scratch: &mut Vec<f64>) -> f64 
         .1
 }
 
+/// Steps to ask the solver for this frame, spending `accumulator` at
+/// `time_step` a step.
+///
+/// `speed` is the ceiling on simulated seconds per wall second: the wall-clock
+/// time a frame took is scaled by it before being spent, so half asks for half
+/// the steps. The frame's own delta is clamped first, so a stall cannot spend
+/// more than a tenth of a second at once, and the leftover is capped at one
+/// frame's worth — the solver cannot encode more than `MAX_STEPS_PER_FRAME` in
+/// a frame, so unspent time is dropped rather than queued into a backlog that
+/// never drains. That cap is also why a high speed on a heavy scene simply
+/// falls short instead of running away.
+fn steps_for_frame(accumulator: &mut f64, delta: f64, speed: f64, time_step: f64) -> u64 {
+    if !time_step.is_finite() || time_step <= 0.0 || !speed.is_finite() || speed <= 0.0 {
+        return 0;
+    }
+    *accumulator += delta.clamp(0.0, 0.1) * speed;
+    let steps = (*accumulator / time_step)
+        .floor()
+        .clamp(0.0, MAX_STEPS_PER_FRAME as f64) as u64;
+    *accumulator -= steps as f64 * time_step;
+    *accumulator = accumulator.min(MAX_STEPS_PER_FRAME as f64 * time_step);
+    steps
+}
+
+/// How close the reached rate has to come to the one asked for before the
+/// shortfall is worth mentioning.
+const SPEED_SHORTFALL_MARGIN: f64 = 0.8;
+
+/// How fast the held rate gives up a better reading, as a factor per second.
+///
+/// The windowed measurement dips to about three quarters of the rate asked for
+/// whenever a handoff withholds stepping inside its window — measured at every
+/// speed, including ones the solver reaches comfortably — so comparing it
+/// directly would flash the note at random. Holding the best reading rides over
+/// a dip of a second while still letting a real slowdown through in under two.
+const SPEED_HOLD_PER_SECOND: f64 = 1.15;
+
+/// The best rate seen lately: instant to a better reading, slow to give one up.
+fn hold_rate(held: f64, measured: f64, elapsed: f64) -> f64 {
+    if !measured.is_finite() || measured < 0.0 {
+        return held;
+    }
+    measured.max(held * SPEED_HOLD_PER_SECOND.powf(-elapsed.clamp(0.0, 1.0)))
+}
+
+/// The rate actually being reached, when it falls meaningfully short of `target`
+/// and the solver is genuinely trying.
+///
+/// Both are simulated seconds per wall second. Nothing is said while the solver
+/// is paused or before any steps have been measured — neither is the solver
+/// failing to keep up.
+fn speed_shortfall(measured: f64, target: f64, stepping: bool) -> Option<f64> {
+    if !stepping || !measured.is_finite() || measured <= 0.0 {
+        return None;
+    }
+    (measured < target * SPEED_SHORTFALL_MARGIN).then_some(measured)
+}
+
 /// The factor a node's value is multiplied by before it becomes colour.
 ///
 /// Automatic, the reference level lands on `tanh(gain * FIELD_EXPOSURE_GAIN)`,
@@ -11916,6 +12015,106 @@ mod tests {
             field_color_over_overlay(scale).a(),
             (0.761_594_f32 * 220.0).round() as u8
         );
+    }
+
+    /// The ceiling is on simulated seconds per wall second, so half the speed
+    /// asks for half the steps out of the same frame.
+    #[test]
+    fn speed_scales_the_steps_a_frame_asks_for() {
+        let step = 1.0e-3;
+        let frame = 16.0e-3;
+        let mut full = 0.0;
+        let mut half = 0.0;
+        let mut quiet = 0.0;
+        let (mut full_total, mut half_total, mut quiet_total) = (0, 0, 0);
+        for _ in 0..60 {
+            full_total += steps_for_frame(&mut full, frame, 1.0, step);
+            half_total += steps_for_frame(&mut half, frame, 0.5, step);
+            quiet_total += steps_for_frame(&mut quiet, frame, 0.02, step);
+        }
+        // A second of frames at one millisecond a step.
+        assert_eq!(full_total, 960);
+        assert_eq!(half_total, 480);
+        assert_eq!(quiet_total, 19);
+    }
+
+    /// The per-frame ceiling is what turns a speed the scene cannot afford into
+    /// a shortfall rather than a runaway backlog.
+    #[test]
+    fn the_frame_ceiling_caps_the_steps_and_the_leftover() {
+        let step = 1.0e-3;
+        let mut accumulator = 0.0;
+        // A whole clamped frame at double speed wants 200 steps.
+        let steps = steps_for_frame(&mut accumulator, 1.0, 2.0, step);
+        assert_eq!(steps, MAX_STEPS_PER_FRAME);
+        assert!(
+            accumulator <= MAX_STEPS_PER_FRAME as f64 * step + 1.0e-12,
+            "the leftover built a backlog: {accumulator}"
+        );
+        // And it stays capped however long the solver is behind.
+        for _ in 0..100 {
+            steps_for_frame(&mut accumulator, 1.0, 2.0, step);
+        }
+        assert!(accumulator <= MAX_STEPS_PER_FRAME as f64 * step + 1.0e-12);
+
+        // Nonsense asks for nothing rather than panicking or racing.
+        let mut idle = 0.0;
+        assert_eq!(steps_for_frame(&mut idle, 0.016, 1.0, 0.0), 0);
+        assert_eq!(steps_for_frame(&mut idle, 0.016, 0.0, 1.0e-3), 0);
+        assert_eq!(steps_for_frame(&mut idle, -1.0, 1.0, 1.0e-3), 0);
+    }
+
+    /// The windowed rate dips whenever a handoff withholds stepping inside its
+    /// window, at every speed and including ones the solver reaches easily, so
+    /// the note reads a held best rather than the raw measurement.
+    #[test]
+    fn a_held_rate_rides_over_a_dip_but_not_a_slowdown() {
+        let frame = 1.0 / 60.0;
+        let mut held = 0.0;
+        for _ in 0..120 {
+            held = hold_rate(held, 1.0, frame);
+        }
+        assert_eq!(held, 1.0);
+
+        // A second of the worst dip measured still reads as keeping up.
+        let mut dipped = held;
+        for _ in 0..60 {
+            dipped = hold_rate(dipped, 0.74, frame);
+        }
+        assert!(
+            speed_shortfall(dipped, 1.0, true).is_none(),
+            "a dip was reported as a shortfall: {dipped}"
+        );
+
+        // A real slowdown gets through inside two seconds.
+        let mut slow = held;
+        for _ in 0..120 {
+            slow = hold_rate(slow, 0.5, frame);
+        }
+        assert_eq!(speed_shortfall(slow, 1.0, true), Some(slow));
+
+        // A better reading is taken at once, and nonsense is ignored.
+        assert_eq!(hold_rate(0.5, 2.0, frame), 2.0);
+        assert_eq!(hold_rate(0.5, f64::NAN, frame), 0.5);
+        assert_eq!(hold_rate(0.5, -1.0, frame), 0.5);
+    }
+
+    /// A rate below the one asked for is worth saying, but only when the solver
+    /// is actually trying to reach it.
+    #[test]
+    fn a_shortfall_is_only_reported_while_the_solver_is_trying() {
+        assert_eq!(speed_shortfall(0.34, 1.0, true), Some(0.34));
+        assert_eq!(
+            speed_shortfall(0.98, 1.0, true),
+            None,
+            "jitter is not a shortfall"
+        );
+        assert_eq!(speed_shortfall(0.19, 0.2, true), None);
+        assert_eq!(speed_shortfall(0.09, 0.2, true), Some(0.09));
+        // Paused, mid-handoff, or before anything has been measured.
+        assert_eq!(speed_shortfall(0.34, 1.0, false), None);
+        assert_eq!(speed_shortfall(0.0, 1.0, true), None);
+        assert_eq!(speed_shortfall(f64::NAN, 1.0, true), None);
     }
 
     /// Adaptation hands the field to a new mesh every second or two. It is the

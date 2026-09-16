@@ -299,7 +299,9 @@ selection, panel state, floating-window positions, and solver state are omitted.
 A topology `Document` owns one undoable model plus `PresentationSettings`. The model
 contains draft and accepted scenes, probes, point-source configuration, and far-field
 settings; it is the exact snapshot type stored by Undo/Redo. Presentation contains
-the View inspector's visibility, field-intensity, and material-overlay controls. It
+the View inspector's visibility, field-intensity, and material-overlay controls,
+and the solver's speed ceiling, which travels with a document for the same reason
+the view does. It
 travels through scene files, examples, shared links, and recovery, but stays outside
 history, so model edits never rewind the user's current view. Loading validates the
 accepted scene, reseeds every stable-ID allocator from both snapshots, and starts
@@ -1148,8 +1150,17 @@ higher-degree triangular Lagrange bases must not inherit P1 lumping. Report mesh
 preparation, operator preparation, display time, and stepping throughput separately,
 with DOFs, memory, timestep, and phase/amplitude error.
 
-The application requests at most 16 substeps per display frame and reports achieved
-simulation time per wall time. Pulse injection modifies both stored levels equally,
+The solver is paced to a persisted ceiling on simulated seconds per wall second
+rather than to real time: the wall-clock time a frame took is scaled by that
+ceiling before being spent at one time step a substep, so half the speed asks for
+half the substeps. At most `MAX_STEPS_PER_FRAME` are requested in a frame and the
+leftover is capped at one frame's worth, so unspent time is dropped rather than
+queued into a backlog that never drains — which is also why asking for more than
+a scene can afford falls short instead of running away. The reached rate is
+reported beside the ceiling, read from a held best rather than the raw windowed
+measurement, because that measurement dips to about three quarters whenever a
+handoff withholds stepping inside its window; comparing it directly would report
+a shortfall on scenes that are keeping up perfectly well. Pulse injection modifies both stored levels equally,
 giving zero added velocity; it remains an initial-condition action rather than a
 time signal. The point source is a Gaussian nodal acceleration multiplied by its
 shared time signal. Its default frequency is 2.5 cycles per dimensionless time,

@@ -178,6 +178,10 @@ pub struct PresentationSettings {
     pub far_field_contour: bool,
     pub probe_labels: bool,
     pub field: bool,
+    /// Ceiling on simulated seconds per wall second. The solver is paced to
+    /// this rather than to real time; it falls short of it whenever a step
+    /// costs more than the frame budget allows.
+    pub simulation_speed: f64,
     pub field_gain: f32,
     /// Whether the field's colours are scaled from what is on screen. Off, the
     /// intensity slider is the whole scale, as it was before the field measured
@@ -197,7 +201,9 @@ pub struct PresentationSettings {
 
 impl PresentationSettings {
     pub fn valid(self) -> bool {
-        self.field_gain.is_finite()
+        self.simulation_speed.is_finite()
+            && (0.02..=2.0).contains(&self.simulation_speed)
+            && self.field_gain.is_finite()
             && (0.25..=12.0).contains(&self.field_gain)
             && self.vector_overlay_density.is_finite()
             && (28.0..=120.0).contains(&self.vector_overlay_density)
@@ -227,6 +233,7 @@ impl Default for PresentationSettings {
             far_field_contour: true,
             probe_labels: true,
             field: true,
+            simulation_speed: 1.0,
             field_gain: 2.0,
             field_auto_exposure: true,
             vector_overlay: VectorOverlay::Off,

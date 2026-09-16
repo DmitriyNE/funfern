@@ -148,6 +148,36 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The solver is paced to a speed again
+
+The simulation speed control did not survive the UI rewrite. The pacing that was
+left targeted exactly one simulated second per wall second: a frame's wall-clock
+delta was spent at one time step a substep, capped at `MAX_STEPS_PER_FRAME`. It
+is scaled by a ceiling now, persisted with the document beside the view settings,
+and the panel says what the solver is actually reaching when it falls short.
+
+Two things the measurements changed. The windowed rate dips to about three
+quarters of the rate asked for whenever a handoff withholds stepping inside its
+half-second window — at every speed, including ones the solver reaches
+comfortably, so a direct comparison flashed the note at random. The note reads a
+held best instead: instant to a better reading, giving one up at 1.15 a second,
+which rides over a dip of a second and still lets a real slowdown through in
+under two.
+
+And the note was first suppressed while a handoff was pending, on the reasoning
+that the solver is not to blame there. That silenced it almost entirely on
+exactly the scenes heavy enough to need it, because adaptation keeps a handoff
+pending much of the time: asking for twelve times real time on a 75k-DOF mesh
+reached three and said nothing. The held rate already rides over those frames, so
+the suppression was both redundant and wrong; only a paused solver is quiet now.
+
+Verified at both ends. Asked 0.1, 0.5, 1 and 2 the reached rate tracks to within
+a percent and the note stays quiet through raw dips to 0.82. Asked twelve — past
+the slider, which egui clamps, so the range had to be widened for the run — it
+reaches about three and says so on every sample. On this machine nothing at or
+below the slider's maximum strains it: 78k DOFs at `dt` 8.89e-4 still reaches
+two.
+
 ## 2026-09-16 — Starting the scale again, at the right moment
 
 Reported: pressing Reset over a residual field flashes one frame of that residue
