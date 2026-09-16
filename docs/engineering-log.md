@@ -150,6 +150,37 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The probe's arrow points at its marker, not away from it
+
+The first version of the indicator above read badly in the scene, and the fix
+turned out to cost nothing. The arrow was drawn from the badge outwards, so it
+named the side it read only by where its tail was, which is not how an arrow is
+read. Drawn the other way - from the sampled side into the badge - it says where
+the reading comes from, which is the question someone actually has.
+
+That is the same vector. The sampled side lies at `-outward` from the badge, so
+an arrow running from there into the badge travels `+outward`: it still points
+the way positive flux points. Both meanings sit on one mark, and the earlier
+version had them too, just translated to the side nobody was asking about.
+
+With the arrow living on the side it reads, the offset band said the same thing
+a second time, so it is gone. The arclength arrow was 5 pixels tucked onto that
+band and easy to miss; it now shares the normal arrow's tail at full size, so
+the two read as the probe's local frame - tangent along the arclength axis,
+normal across it - at one anchor clear of the path. The normal's head lands on
+the badge ring rather than short of it, which ties the corner to the marker
+instead of leaving it floating beside the curve.
+
+Anchoring everything at the midpoint removed the reason for
+`boundary_probe_orientation` to take a fraction, and with it the wrinkle that
+the fraction was measured from whichever end the arclength started at. It now
+answers for the badge alone.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. The tests carry over; the arclength one now
+holds that reversing turns one arrow and moves neither the corner nor the side.
+
 ## 2026-09-16 — A boundary probe now says which trace it reads
 
 A span's two traces are geometrically coincident, so a boundary probe drew as a

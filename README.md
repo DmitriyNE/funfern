@@ -331,11 +331,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   uses the same twelve curve readouts, sixteen in EM scenes. Choose the sampled
   trace for material interfaces, walls, and baffles. Positive normal flux always
   points out of that trace; Flip direction reverses only the arclength axis. Because
-  a span's two traces lie on top of each other, the scene says which one is read: a
-  band runs along that side, the arrow at the badge leaves it the way positive flux
-  points, and a chevron on the band runs the way the arclength axis does, from the
-  end it starts at. Whole closed curves use periodic sampling and integration
-  without duplicating the seam.
+  a span's two traces lie on top of each other, the scene says which one is read with
+  a pair of arrows sharing a corner on that side: one runs from there into the
+  probe's marker, so the reading arrives from the side the corner sits on and travels
+  the way positive flux points, and one runs the way the arclength axis does. Whole
+  closed curves use periodic sampling and integration without duplicating the seam.
 - **Area probes:** choose Disk for a two-click center/radius receiver - Shift puts
   the center on the grid and the radius on a multiple of it - or Subdomain
   and click inside a material region. Drag a disk body to move it and its edge
