@@ -1826,6 +1826,14 @@ impl TopologyEditor {
                     }
                     _ => {}
                 }
+            } else if landing.live.len() > 1 {
+                // Several anchors landed on one face naming at most one region
+                // between them - a hole absorbed into its neighbour, or two
+                // holes merging. Two or more would have been the merge face
+                // above. There is nothing to ask, since the face can only
+                // become that one region, but the rebuild still has to be told
+                // which of the anchors decides it.
+                forced.insert(*face, landing.regions().into_iter().next());
             }
         }
         candidate.draft.face_assignments = rebuild_face_assignments(&live, &topology, &forced)?;
@@ -7807,6 +7815,146 @@ mod tests {
         );
         let frame = editor.document.model.draft.region(restored).unwrap().frame;
         assert!((frame.origin - Point2::new(0.1, -0.2)).norm() < 0.05);
+    }
+
+    /// Opening a hole's contour lets its interior back into the neighbour it
+    /// sat in. That is a merge the caller is never asked about - a hole can
+    /// only become the region around it - but two anchors do land on one face,
+    /// and the rebuild has to be told which of them decides it. Every span but
+    /// the one carrying the hole's own anchor used to be refused.
+    #[test]
+    fn opening_a_hole_absorbs_it_without_a_question() {
+        let mut editor = TopologyEditor::default();
+        let background = editor.document.model.draft.face_assignments[0]
+            .region
+            .expect("the background carries a region");
+        let material = editor
+            .document
+            .model
+            .draft
+            .region(background)
+            .unwrap()
+            .material;
+        let hole = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.3),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let spans = span_ids(&editor, hole);
+        assert!(
+            editor.document.model.draft.face_assignments.iter().any(
+                |assignment| assignment.region.is_none()
+                    && matches!(assignment.anchor, FaceAnchor::Curve { span, .. } if span == spans[0])
+            ),
+            "the hole is anchored on the span this test leaves alone"
+        );
+
+        // Any span but the first: the hole's anchor survives the removal and
+        // lands on the face its interior just joined.
+        let selection = BTreeSet::from([spans[3]]);
+        assert_eq!(
+            editor.span_removal_choices(&selection).unwrap(),
+            vec![],
+            "absorbing a hole merges no active regions"
+        );
+        editor.remove_spans(&selection, None).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(
+            editor.document.model.draft.face_assignments.len(),
+            1,
+            "the hole's face is gone"
+        );
+        assert_eq!(
+            editor.document.model.draft.face_assignments[0].region,
+            Some(background)
+        );
+        assert_eq!(
+            editor
+                .document
+                .model
+                .draft
+                .region(background)
+                .unwrap()
+                .material,
+            material,
+            "the background kept what it had"
+        );
+
+        editor.undo();
+        settle(&mut editor);
+        assert_eq!(editor.document.model.draft.face_assignments.len(), 2);
+        assert!(
+            editor
+                .document
+                .model
+                .draft
+                .face_assignments
+                .iter()
+                .any(|assignment| assignment.region.is_none()),
+            "undo brings the hole back"
+        );
+    }
+
+    /// Two holes meeting across the span that divided them leave a face with
+    /// two anchors and no region at all, which is decided the same way.
+    #[test]
+    fn opening_a_divider_between_two_holes_keeps_the_face_empty() {
+        let mut editor = TopologyEditor::default();
+        let material = editor.document.model.draft.materials[0].id;
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.4),
+                ClosedCurvePurpose::Subdomain { material },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let (start_point, start) = curve_target(&editor, loop_id, 0);
+        let (end_point, end) = curve_target(&editor, loop_id, 4);
+        let separator = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![start_point, Point2::default(), end_point]).unwrap(),
+                OpenCurvePurpose::SubdomainSeparator { material },
+                Some(start),
+                Some(end),
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        // Empty both halves, so the separator divides two holes.
+        while let Some(index) = editor
+            .document
+            .model
+            .draft
+            .face_assignments
+            .iter()
+            .position(|assignment| {
+                assignment
+                    .region
+                    .is_some_and(|region| region != BACKGROUND_REGION)
+            })
+        {
+            editor.set_face_disposition(index, None).unwrap();
+            settle(&mut editor);
+        }
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+
+        let selection = BTreeSet::from([span_ids(&editor, separator)[0]]);
+        assert_eq!(editor.span_removal_choices(&selection).unwrap(), vec![]);
+        editor.remove_spans(&selection, None).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let holes = editor
+            .document
+            .model
+            .draft
+            .face_assignments
+            .iter()
+            .filter(|assignment| assignment.region.is_none())
+            .count();
+        assert_eq!(holes, 1, "the two holes became one");
     }
 
     /// Removing a curve between two assigned subdomains must offer both, so the

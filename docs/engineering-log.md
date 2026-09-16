@@ -150,6 +150,43 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — A hole absorbed is a face decided
+
+A contour in the autosave refused almost every span deletion with "Removal
+merged unrelated face assignments". Driven span by span: one worked, twelve
+failed.
+
+The contour's interior is a hole inside the region-1 background. Deleting a span
+opens it, so the interior stops being enclosed and its face joins the
+background - two anchors then resolve to one face, the outer one naming region 1
+and the hole's naming nothing. The merge detector counts only active regions, so
+it saw one, declared no merge and left the face out of `forced`; the rebuild then
+found two anchors for a face nobody had decided and refused. The one span that
+worked was the one carrying the hole's own anchor, which dies with it and leaves
+a single anchor to land - which is why it looked like almost every edge rather
+than all of them.
+
+A face that several anchors land on which name at most one region between them
+is now decided rather than left to the rebuild. Two or more regions would have
+been the merge face already, so there is nothing to ask: the face can only
+become that one region, or stay a hole when there is none. The existing hole
+test removes a whole loop, where every anchor on it dies, so it never reached
+this shape.
+
+All thirteen spans of the autosave contour now delete, none of them asking a
+question, each leaving a scene that compiles.
+
+Not chased, and untested either way: a face whose only surviving anchor is a
+hole's, absorbing an active region whose anchor died on the removed span. It
+would keep the hole rather than the region. Constructing it looks to need a
+merge that cannot happen in one deletion, so it is noted rather than guessed at.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. Two new tests; the first fails without the
+fix with the reported message, the second documents two holes merging, which
+already worked.
+
 ## 2026-09-16 — Shift reaches probe placement too
 
 The other half of the same omission. A probe already snapped to the grid when it
