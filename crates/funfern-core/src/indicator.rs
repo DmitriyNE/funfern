@@ -55,7 +55,7 @@ impl Default for SolutionIndicatorOptions {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SolutionIndicatorReport {
     pub work_units: usize,
     pub minimum_indicator: f64,
@@ -63,6 +63,14 @@ pub struct SolutionIndicatorReport {
     pub minimum_target: f64,
     pub maximum_target: f64,
     pub refine_candidates: usize,
+    /// Of `refine_candidates`, the ones the error estimate itself asks for.
+    /// These are the ones an accuracy target has authority over.
+    pub error_refine_candidates: usize,
+    /// Of `refine_candidates`, the ones a limit asks for while the error
+    /// estimate is content: too coarse to carry the forced wavelength, or
+    /// larger than the largest element allowed. No accuracy target answers for
+    /// these.
+    pub limit_refine_candidates: usize,
     pub coarsen_candidates: usize,
     pub recovery_contribution: f64,
     pub cell_residual_contribution: f64,
@@ -70,6 +78,45 @@ pub struct SolutionIndicatorReport {
     pub boundary_residual_contribution: f64,
     pub boundary_edges_evaluated: usize,
     pub maximum_dirichlet_mismatch: f64,
+    /// Energy of the whole field, the denominator `global_indicator` is taken
+    /// against.
+    pub total_energy: f64,
+    /// Every error contribution summed over every element.
+    pub total_residual: f64,
+    /// Estimated relative error of the whole field in the energy norm. Element
+    /// indicators say where the error is; this says how much of it there is,
+    /// and is the quantity an accuracy target names.
+    pub global_indicator: f64,
+    /// The smallest element the wavelength rule asked for anywhere, or infinity
+    /// where nothing is forced. Below the smallest element allowed it, rather
+    /// than the accuracy target, is what holds the mesh at its floor.
+    pub smallest_wavelength_target: f64,
+}
+
+impl Default for SolutionIndicatorReport {
+    fn default() -> Self {
+        Self {
+            work_units: 0,
+            minimum_indicator: f64::INFINITY,
+            maximum_indicator: 0.0,
+            minimum_target: f64::INFINITY,
+            maximum_target: 0.0,
+            refine_candidates: 0,
+            error_refine_candidates: 0,
+            limit_refine_candidates: 0,
+            coarsen_candidates: 0,
+            recovery_contribution: 0.0,
+            cell_residual_contribution: 0.0,
+            interior_jump_contribution: 0.0,
+            boundary_residual_contribution: 0.0,
+            boundary_edges_evaluated: 0,
+            maximum_dirichlet_mismatch: 0.0,
+            total_energy: 0.0,
+            total_residual: 0.0,
+            global_indicator: 0.0,
+            smallest_wavelength_target: f64::INFINITY,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -317,6 +364,11 @@ pub struct SolutionIndicatorJob {
     estimates: Vec<ElementEstimate>,
     indicators: Vec<f64>,
     targets: Vec<f64>,
+    /// Whether the error estimate on its own wants each element finer than it
+    /// is. Anything else that shrinks a target - the forced wavelength, the
+    /// largest element allowed - is a limit rather than a judgement about
+    /// error, and only this tells the two apart.
+    error_bound: Vec<bool>,
     total_energy: f64,
     total_area: f64,
     report: SolutionIndicatorReport,
@@ -393,13 +445,10 @@ impl SolutionIndicatorJob {
             estimates: vec![ElementEstimate::default(); count],
             indicators: vec![0.0; count],
             targets: vec![0.0; count],
+            error_bound: vec![false; count],
             total_energy: 0.0,
             total_area: 0.0,
-            report: SolutionIndicatorReport {
-                minimum_indicator: f64::INFINITY,
-                minimum_target: f64::INFINITY,
-                ..Default::default()
-            },
+            report: SolutionIndicatorReport::default(),
         }
     }
 
@@ -1250,16 +1299,27 @@ impl SolutionIndicatorJob {
                 .clamp(self.options.minimum_scale, self.options.maximum_scale)
         };
         let material = self.material_samples[index].ok_or(SolutionIndicatorError::InvalidScene)?;
-        let wavelength_target = if self.options.forcing_frequency_hz > 0.0 {
+        // Carrying a forced wavelength is a floor, not an error target: too few
+        // elements across a wave is wrong however small the estimate reads. It
+        // applies wherever the material carries that wave, so which of the two
+        // rules set this element's size is worth keeping - only one of them
+        // answers to an accuracy target.
+        let wavelength_target = (self.options.forcing_frequency_hz > 0.0).then(|| {
             material.minimum_wave_speed
                 / (self.options.forcing_frequency_hz * self.options.elements_per_wavelength)
-        } else {
-            self.options.maximum_edge_length
-        };
-        let target = (estimate.edge * scale).min(wavelength_target).clamp(
-            self.options.minimum_edge_length,
-            self.options.maximum_edge_length,
-        );
+        });
+        if let Some(wavelength) = wavelength_target {
+            self.report.smallest_wavelength_target =
+                self.report.smallest_wavelength_target.min(wavelength);
+        }
+        let error_target = estimate.edge * scale;
+        self.error_bound[index] = estimate.edge > 1.05 * error_target;
+        let target = error_target
+            .min(wavelength_target.unwrap_or(self.options.maximum_edge_length))
+            .clamp(
+                self.options.minimum_edge_length,
+                self.options.maximum_edge_length,
+            );
         self.indicators[index] = indicator;
         self.targets[index] = target;
         self.report.minimum_indicator = self.report.minimum_indicator.min(indicator);
@@ -1313,7 +1373,20 @@ impl SolutionIndicatorJob {
             .collect::<Vec<_>>();
         self.report.minimum_target = self.targets.iter().copied().fold(f64::INFINITY, f64::min);
         self.report.maximum_target = self.targets.iter().copied().fold(0.0, f64::max);
-        for (triangle, target) in self.mesh.triangles.iter().zip(&self.targets) {
+        self.report.total_energy = self.total_energy;
+        self.report.total_residual = self.report.recovery_contribution
+            + self.report.cell_residual_contribution
+            + self.report.interior_jump_contribution
+            + self.report.boundary_residual_contribution;
+        // A field with no energy has no error to speak of, whatever the
+        // residuals of its numerical dust add up to.
+        self.report.global_indicator = if self.total_energy > 0.0 {
+            (self.report.total_residual / self.total_energy).sqrt()
+        } else {
+            0.0
+        };
+        for (index, (triangle, target)) in self.mesh.triangles.iter().zip(&self.targets).enumerate()
+        {
             let points = triangle
                 .vertices
                 .map(|vertex| self.mesh.vertices[vertex].point);
@@ -1324,6 +1397,11 @@ impl SolutionIndicatorJob {
             ];
             if lengths.iter().copied().fold(0.0, f64::max) > 1.05 * target {
                 self.report.refine_candidates += 1;
+                if self.error_bound[index] {
+                    self.report.error_refine_candidates += 1;
+                } else {
+                    self.report.limit_refine_candidates += 1;
+                }
             }
             if lengths
                 .iter()
@@ -2421,6 +2499,148 @@ mod tests {
                 .iter()
                 .all(|target| *target <= 0.020_000_001)
         );
+    }
+
+    /// A target accuracy is compared against the estimate for the whole field,
+    /// so that estimate has to fall when the mesh resolves the field. This is a
+    /// real instant of a real solution - a bump carrying the acceleration the
+    /// wave equation asks of it, died away long before the wall - so resolution
+    /// is the only thing left for the estimate to find. Note what the finest
+    /// mesh reports: the whole field is within a few percent while thousands of
+    /// elements individually still ask to be refined, which is the disagreement
+    /// an accuracy target is there to settle.
+    #[test]
+    fn the_whole_field_estimate_falls_as_the_mesh_resolves_the_field() {
+        let sigma = 0.15;
+        let mut previous = f64::INFINITY;
+        let mut asking = 0;
+        for (edge, revision) in [(0.16, 11), (0.08, 12), (0.04, 13)] {
+            let scene = Scene::default();
+            let mesh = Arc::new(
+                mesh_scene(
+                    &scene,
+                    revision,
+                    MeshingOptions {
+                        curve_tolerance: 1.0e-3,
+                        target_edge_length: edge,
+                        minimum_angle_degrees: 12.0,
+                        max_vertices: 50_000,
+                        max_triangles: 100_000,
+                        max_refinement_steps: 50_000,
+                    },
+                )
+                .unwrap(),
+            );
+            let operator = Arc::new(
+                QuadraticWaveOperator::assemble_scene_with_boundaries(
+                    &mesh,
+                    &scene,
+                    scene.outer_boundaries,
+                )
+                .unwrap(),
+            );
+            let bump = |point: Point2| (-point.dot(point) / (2.0 * sigma * sigma)).exp();
+            let zeros = vec![0.0; operator.degrees_of_freedom()];
+            let state = QuadraticSolutionSnapshot {
+                mesh_revision: mesh.mesh_revision,
+                displacement: operator.node_points().iter().map(|p| bump(*p)).collect(),
+                velocity: zeros.clone(),
+                acceleration: operator
+                    .node_points()
+                    .iter()
+                    .map(|p| bump(*p) * (p.dot(*p) / sigma.powi(4) - 2.0 / (sigma * sigma)))
+                    .collect(),
+                auxiliary: zeros.clone(),
+                volume_acceleration: zeros,
+                time: 0.25,
+                time_step: 0.01,
+            };
+            let result = run(
+                SolutionIndicatorJob::new(
+                    mesh,
+                    operator,
+                    scene,
+                    state,
+                    SolutionIndicatorOptions::default(),
+                ),
+                4096,
+            )
+            .unwrap();
+            let estimate = result.report.global_indicator;
+            assert!(
+                estimate * 3.0 < previous,
+                "halving the edge to {edge} left the estimate at {estimate}, against {previous}",
+            );
+            previous = estimate;
+            asking = result.report.error_refine_candidates;
+        }
+        assert!(
+            previous < 0.06,
+            "the finest mesh still estimates {previous}"
+        );
+        assert!(
+            asking > 0,
+            "no element asked to be refined, so nothing is settled"
+        );
+    }
+
+    /// A forced wavelength is a floor rather than a judgement about error, so
+    /// the refinements it asks for are counted apart from the ones the estimate
+    /// asks for. On a field this coarse mesh carries exactly, the estimate has
+    /// nothing to say.
+    #[test]
+    fn a_forced_wavelength_refines_without_the_error_estimate_asking() {
+        let (mesh, operator, scene) = setup();
+        let state = snapshot(&mesh, &operator, |point| point.x);
+        let result = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions {
+                    minimum_edge_length: 0.005,
+                    maximum_edge_length: 2.0,
+                    forcing_frequency_hz: 10.0,
+                    elements_per_wavelength: 5.0,
+                    ..Default::default()
+                },
+            ),
+            100,
+        )
+        .unwrap();
+        assert!((result.report.smallest_wavelength_target - 0.02).abs() < 1.0e-12);
+        assert_eq!(result.report.refine_candidates, 2);
+        assert_eq!(result.report.limit_refine_candidates, 2);
+        assert_eq!(result.report.error_refine_candidates, 0);
+    }
+
+    /// The largest element allowed is the other limit that shrinks a target
+    /// without the estimate having asked, and with nothing forced there is no
+    /// wavelength to report.
+    #[test]
+    fn the_largest_element_allowed_refines_as_a_limit_not_an_error() {
+        let (mesh, operator, scene) = setup();
+        let state = snapshot(&mesh, &operator, |point| point.x);
+        let result = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions {
+                    minimum_edge_length: 0.005,
+                    maximum_edge_length: 0.5,
+                    ..Default::default()
+                },
+            ),
+            100,
+        )
+        .unwrap();
+        assert!(result.report.smallest_wavelength_target.is_infinite());
+        assert_eq!(result.report.refine_candidates, 2);
+        assert_eq!(result.report.limit_refine_candidates, 2);
+        assert_eq!(result.report.error_refine_candidates, 0);
     }
 
     #[test]

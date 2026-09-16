@@ -434,10 +434,23 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   GPU handoff. Automatic adaptation is enabled by default. A recovery-plus-residual
   indicator reads synchronized displacement, velocity, and acceleration from spare
   lanes in the existing GPU state readback, then builds a graded spatial size field
-  in bounded frame slices. Fast, Balanced, and Detailed presets set the error and
-  wavelength targets; advanced controls bound the smallest and largest element.
-  Refinement reacts immediately, while coarsening requires two quiet estimates and
-  has its own transaction quota. View's Overlay list carries the current target
+  in bounded frame slices. Target accuracy is how much estimated error the whole
+  field may carry, with Coarse, Medium and Fine presets at 24%, 12% and 6% over a
+  slider that reaches everything between; the panel shows the estimate beside the
+  target. Refinement the error estimate asks for stops once the field is inside
+  the target, which is what keeps a mesh off its floor: the estimator's step down
+  is clamped, so anything it cannot satisfy - a boundary the field disagrees with,
+  the grid-scale leftovers of a wave that has passed - otherwise shrinks by that
+  same step every cycle until it reaches the smallest element allowed, whatever
+  the target says. Error concentrated in a small part of a field that is
+  comfortably inside the target is the trade one number for the whole field makes.
+  Carrying a forced wavelength and staying under the largest element allowed are
+  floors rather than judgements about error, so they refine regardless; Advanced
+  settings holds elements per wavelength, at six - twelve nodes, quadratically -
+  and the smallest and largest element, and the panel says when a forced
+  wavelength wants elements under the smallest allowed, which holds the mesh at
+  its floor on its own. Refinement reacts immediately, while coarsening requires
+  two quiet estimates and has its own transaction quota. View's Overlay list carries the current target
   field alongside the material overlays, blue where the estimate wants the finest
   elements and orange where it wants the coarsest, and says which of adaptation
   being off, no estimate yet, or an estimate behind the mesh is leaving it empty.
@@ -452,8 +465,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   goes around a free endpoint instead of jumping through coincident faces.
   The panel reports DOFs, GPU buffer size, operator-derived timestep, simulated
   time, substeps, throughput, operator/map preparation time, and discrete energy.
-  Advanced settings, folded away at the bottom, holds Damp unresolvable detail,
-  on by default: the scheme dissipates at no wavelength and the fastest modes a
+  Advanced settings, folded away at the bottom, holds the adaptation limits -
+  elements per wavelength and the smallest and largest element - and Damp
+  unresolvable detail, on by default: the scheme dissipates at no wavelength and the fastest modes a
   mesh can hold barely travel, so a sharp event leaves a speckle that stays put
   for the rest of the run, and this removes it for well under a percent per half
   minute of a wave resolved as finely as the mesh indicator aims for. The default
@@ -472,8 +486,11 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **Solution adaptation:** a resumable quadratic indicator combines recovered-flux
   defects, interior equation and flux-jump residuals, and the active physical
   boundary laws. It includes paired thin-gap traces and second-order radiation
-  memory while treating prescribed Dirichlet mismatch as a diagnostic. The result
-  drives bounded refinement and coarsening with wavelength and grading limits.
+  memory while treating prescribed Dirichlet mismatch as a diagnostic. It reports
+  the relative error of the whole field in the energy norm alongside the per-element
+  indicators, and counts the refinements it asks for apart from the ones a limit
+  asks for. The result drives bounded refinement and coarsening with wavelength and
+  grading limits.
 - **Interior media:** every triangle carries a stable region ID. The P2e operator
   assembles piecewise mass, stiffness, and damping. Material interfaces use a
   conforming shared trace. Open material dividers may terminate on the outer

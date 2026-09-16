@@ -60,6 +60,20 @@ const SNAP_STEP: f64 = 0.05;
 /// the averaged flux row can look.
 const CURVE_TRACE_FRAMES: usize = 512;
 const GIZMO_PADDING: f32 = 18.0;
+/// Estimated error of the whole field the adaptation aims for, in percent. A
+/// factor of two apart like the mesh resolution presets, and named the same
+/// way, because they answer the same question at either end of the loop: how
+/// much detail is this worth.
+const AMR_ACCURACY_PRESETS: [(f64, &str); 3] = [(24.0, "Coarse"), (12.0, "Medium"), (6.0, "Fine")];
+
+/// What to call the accuracy the adaptation is set to. The slider reaches
+/// everything between, so most values have no name.
+fn amr_accuracy_preset_name(percent: f64) -> &'static str {
+    AMR_ACCURACY_PRESETS
+        .iter()
+        .find(|(value, _)| (percent - value).abs() < 1.0e-9)
+        .map_or("Custom", |(_, name)| *name)
+}
 
 /// What the Materials panel lists, and what a viewport click selects with it.
 /// Faces include holes, which own no region and so cannot appear in the other.
@@ -794,6 +808,11 @@ pub struct Playground {
     material_overlay_snapshot: Option<MaterialOverlaySnapshot>,
     material_overlay_error: Option<String>,
     amr_enabled: bool,
+    /// Estimated error of the whole field the adaptation aims for, as a
+    /// percentage. Held in the units the control shows so the presets are the
+    /// round numbers they read as.
+    amr_accuracy_percent: f64,
+    amr_elements_per_wavelength: f64,
     amr_minimum_edge: f64,
     amr_maximum_edge: f64,
     grid_scale_filter: bool,
@@ -954,6 +973,8 @@ impl Default for Playground {
             material_overlay_snapshot: None,
             material_overlay_error: None,
             amr_enabled: true,
+            amr_accuracy_percent: AMR_ACCURACY_PRESETS[1].0,
+            amr_elements_per_wavelength: 6.0,
             amr_minimum_edge: 0.02,
             amr_maximum_edge: 0.16,
             grid_scale_filter: true,
@@ -2593,48 +2614,61 @@ impl Playground {
             }
         });
         ui.separator();
-        let before_amr = (
-            self.amr_enabled,
-            self.amr_minimum_edge,
-            self.amr_maximum_edge,
-        );
+        let before_amr = self.amr_settings();
         ui.checkbox(&mut self.amr_enabled, "Adapt mesh to the wave");
         ui.add_enabled_ui(self.amr_enabled, |ui| {
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::DragValue::new(&mut self.amr_minimum_edge)
-                        .speed(0.002)
-                        .range(0.005..=1.0)
-                        .prefix("Min "),
-                );
-                ui.add(
-                    egui::DragValue::new(&mut self.amr_maximum_edge)
-                        .speed(0.005)
-                        .range(0.005..=1.0)
-                        .prefix("Max "),
-                );
-            });
-            self.amr_minimum_edge = self.amr_minimum_edge.min(self.amr_maximum_edge).max(0.005);
-            self.amr_maximum_edge = self.amr_maximum_edge.max(self.amr_minimum_edge);
+            let preset = amr_accuracy_preset_name(self.amr_accuracy_percent);
+            egui::ComboBox::from_id_salt("amr_accuracy")
+                .width(ui.available_width())
+                .selected_text(format!(
+                    "{preset} · target accuracy {:.0}%",
+                    self.amr_accuracy_percent
+                ))
+                .show_ui(ui, |ui| {
+                    for (value, name) in AMR_ACCURACY_PRESETS {
+                        ui.selectable_value(
+                            &mut self.amr_accuracy_percent,
+                            value,
+                            format!("{name} · {value:.0}%"),
+                        );
+                    }
+                });
+            ui.add(
+                egui::Slider::new(&mut self.amr_accuracy_percent, 2.0..=50.0)
+                    .logarithmic(true)
+                    .suffix("%")
+                    .text("Target accuracy"),
+            )
+            .on_hover_text(
+                "How much estimated error the whole field is allowed to carry. \
+                 Refinement the error estimate asks for stops once the field is inside \
+                 this; carrying a forced wavelength and staying under the largest \
+                 element allowed are floors, and go on regardless.",
+            );
             ui.small(&self.amr_status);
+            if let Some(result) = &self.amr_indicator_result {
+                ui.small(format!(
+                    "Estimated error {:.1}% · target {:.0}%",
+                    100.0 * result.report.global_indicator,
+                    self.amr_accuracy_percent,
+                ));
+                // Nothing else in the panel explains a mesh pinned at its floor
+                // while the accuracy target reads satisfied.
+                if result.report.smallest_wavelength_target < self.amr_minimum_edge {
+                    ui.colored_label(
+                        GOLD,
+                        format!(
+                            "The forcing wants elements of {:.3}, under the smallest allowed \
+                             of {:.3}, so the mesh sits at its floor whatever the accuracy asks",
+                            result.report.smallest_wavelength_target, self.amr_minimum_edge,
+                        ),
+                    );
+                }
+            }
             if let Some(error) = &self.amr_error {
                 ui.colored_label(RED, error);
             }
         });
-        if before_amr
-            != (
-                self.amr_enabled,
-                self.amr_minimum_edge,
-                self.amr_maximum_edge,
-            )
-        {
-            self.amr_indicator_job = None;
-            self.amr_adaptation_job = None;
-            self.amr_last_analyzed_step = None;
-            self.amr_last_started = None;
-            self.amr_coarsen_streak = 0;
-            self.amr_error = None;
-        }
         ui.separator();
         ui.label("Continuous source");
         let mut source = self.editor.document.model.source;
@@ -2685,15 +2719,81 @@ impl Playground {
             ));
         }
         ui.separator();
-        self.advanced_solver_settings(ui);
+        self.advanced_settings(ui);
+        if self.amr_settings() != before_amr {
+            self.amr_indicator_job = None;
+            self.amr_adaptation_job = None;
+            self.amr_last_analyzed_step = None;
+            self.amr_last_started = None;
+            self.amr_coarsen_streak = 0;
+            self.amr_error = None;
+        }
     }
 
-    /// Numerical hygiene rather than physics, so it is folded away by default.
-    /// Anything here changes what the solver does, not what it shows.
-    fn advanced_solver_settings(&mut self, ui: &mut egui::Ui) {
+    /// The accuracy target as the estimate states it, rather than as the
+    /// control shows it.
+    fn amr_target_accuracy(&self) -> f64 {
+        self.amr_accuracy_percent / 100.0
+    }
+
+    /// Everything an estimate is built from. A change to any of it drops the
+    /// work in flight rather than letting it finish against settings nobody
+    /// asked for - which is why the settings folded away below are read here
+    /// too, and why this is compared after the whole panel has been drawn.
+    fn amr_settings(&self) -> (bool, f64, f64, f64, f64) {
+        (
+            self.amr_enabled,
+            self.amr_accuracy_percent,
+            self.amr_elements_per_wavelength,
+            self.amr_minimum_edge,
+            self.amr_maximum_edge,
+        )
+    }
+
+    /// Numerical hygiene rather than physics, so it is folded away by default:
+    /// the limits adaptation works between, and what the scheme does with detail
+    /// no mesh can carry. Anything here changes what the solver does, not what
+    /// it shows.
+    fn advanced_settings(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Advanced settings")
             .default_open(false)
             .show(ui, |ui| {
+                ui.label("Adaptation");
+                ui.add_enabled_ui(self.amr_enabled, |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.amr_elements_per_wavelength)
+                            .speed(0.1)
+                            .range(2.0..=16.0)
+                            .prefix("Elements per wavelength "),
+                    )
+                    .on_hover_text(
+                        "How finely a forced wave is carried, wherever a source or a \
+                         boundary signal forces one. Quadratic elements put two nodes on \
+                         every edge, so six elements is twelve nodes a wavelength. This is \
+                         a floor the accuracy target does not lift.",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.amr_minimum_edge)
+                                .speed(0.002)
+                                .range(0.005..=1.0)
+                                .prefix("Min "),
+                        )
+                        .on_hover_text("The smallest element adaptation may build");
+                        ui.add(
+                            egui::DragValue::new(&mut self.amr_maximum_edge)
+                                .speed(0.005)
+                                .range(0.005..=1.0)
+                                .prefix("Max "),
+                        )
+                        .on_hover_text("The largest element adaptation may leave standing");
+                    });
+                    self.amr_minimum_edge =
+                        self.amr_minimum_edge.min(self.amr_maximum_edge).max(0.005);
+                    self.amr_maximum_edge = self.amr_maximum_edge.max(self.amr_minimum_edge);
+                });
+                ui.separator();
+                ui.label("Solver");
                 ui.checkbox(&mut self.grid_scale_filter, "Damp unresolvable detail")
                     .on_hover_text(
                         "The scheme does not dissipate at any wavelength, and the fastest \
@@ -2701,8 +2801,8 @@ impl Playground {
                          wall the field had a step across, or a source narrower than a few \
                          nodes - leaves a speckle that stays put for the rest of the run. \
                          This removes it, at a cost of well under a percent per half minute \
-                         to a wave resolved by the ten nodes per wavelength the mesh aims \
-                         for. Turn it off to see the untouched scheme.",
+                         to a wave resolved as finely as the adaptation above aims for. \
+                         Turn it off to see the untouched scheme.",
                     );
             });
     }
@@ -6862,7 +6962,7 @@ impl Playground {
                     return;
                 }
             };
-            let refine = result.report.refine_candidates >= 4;
+            let refine = adaptation_refines(&result.report, self.amr_target_accuracy());
             let coarsen = result.report.coarsen_candidates >= 4;
             self.amr_coarsen_streak = if coarsen {
                 self.amr_coarsen_streak.saturating_add(1)
@@ -6989,6 +7089,8 @@ impl Playground {
             SolutionIndicatorOptions {
                 minimum_edge_length: self.amr_minimum_edge,
                 maximum_edge_length: self.amr_maximum_edge,
+                relative_tolerance: self.amr_target_accuracy(),
+                elements_per_wavelength: self.amr_elements_per_wavelength,
                 forcing_frequency_hz: highest_forcing_frequency(
                     &active.bundle.authored,
                     active.point_source,
@@ -9401,9 +9503,30 @@ impl Playground {
                         report.maximum_target,
                     ));
                     ui.small(format!(
-                        "Refine candidates {} · coarsen candidates {} · {} work units",
-                        report.refine_candidates, report.coarsen_candidates, report.work_units,
+                        "Whole field {:.2}% · target {:.0}% · {}",
+                        100.0 * report.global_indicator,
+                        self.amr_accuracy_percent,
+                        if adaptation_refines(report, self.amr_target_accuracy()) {
+                            "refining"
+                        } else {
+                            "settled"
+                        },
                     ));
+                    ui.small(format!(
+                        "Refine candidates {} ({} error, {} limit) · coarsen candidates {} · \
+                         {} work units",
+                        report.refine_candidates,
+                        report.error_refine_candidates,
+                        report.limit_refine_candidates,
+                        report.coarsen_candidates,
+                        report.work_units,
+                    ));
+                    if report.smallest_wavelength_target.is_finite() {
+                        ui.small(format!(
+                            "Forced wavelength wants {:.4}",
+                            report.smallest_wavelength_target
+                        ));
+                    }
                 }
                 if let Some(report) = &self.amr_report {
                     ui.small(format!(
@@ -10420,6 +10543,27 @@ fn amr_target_color(fraction: f32, alpha: u8) -> Color32 {
         egui::lerp(fine[2]..=coarse[2], fraction) as u8,
         alpha,
     )
+}
+
+/// Whether an estimate is asking for a finer mesh.
+///
+/// A limit is a floor rather than a judgement: too few elements across a forced
+/// wavelength, or an element larger than the largest allowed, is wrong however
+/// small the error reads, so those refine on their own account. What the error
+/// estimate asks for answers to the accuracy target instead, and it answers to
+/// it for the field as a whole rather than element by element. Without that
+/// second clause anything the estimate cannot satisfy - a boundary the field
+/// disagrees with, the grid-scale leftovers of a wave that has passed - shrinks
+/// by the estimator's step every cycle until it reaches the smallest element
+/// allowed, and no accuracy setting reaches far enough to stop it: the step is
+/// clamped, so it is the same step whatever the target says.
+///
+/// The cost is that error concentrated in a small part of a domain the estimate
+/// is otherwise happy with stops being chased once the whole field is inside
+/// the target. That is the trade a single number for the whole field makes.
+fn adaptation_refines(report: &SolutionIndicatorReport, target_accuracy: f64) -> bool {
+    report.limit_refine_candidates >= 4
+        || (report.error_refine_candidates >= 4 && report.global_indicator > target_accuracy)
 }
 
 fn highest_forcing_frequency(scene: &TopologyScene, source: PointSource) -> f64 {
@@ -12382,6 +12526,79 @@ mod probe_interaction_tests {
             "status was {:?}",
             state.amr_status
         );
+    }
+
+    /// The estimate has no notion of enough on its own. Its step down is
+    /// clamped, so an element it cannot satisfy - a boundary the field
+    /// disagrees with, the grid-scale leftovers of a wave that has passed -
+    /// asks for the same refinement however loose the target is, and walks to
+    /// the smallest element allowed. The accuracy target is what answers that,
+    /// and it answers for the whole field at once; the floors it does not
+    /// answer for at all.
+    #[test]
+    fn the_accuracy_target_settles_error_driven_refinement_alone() {
+        let report = |error, limit, global| SolutionIndicatorReport {
+            refine_candidates: error + limit,
+            error_refine_candidates: error,
+            limit_refine_candidates: limit,
+            global_indicator: global,
+            ..Default::default()
+        };
+        assert!(adaptation_refines(&report(2000, 0, 0.2), 0.12));
+        assert!(!adaptation_refines(&report(2000, 0, 0.05), 0.12));
+        // The same estimate, asked for more: still running.
+        assert!(adaptation_refines(&report(2000, 0, 0.05), 0.04));
+        // A forced wavelength is carried whatever the error reads.
+        assert!(adaptation_refines(&report(0, 2000, 0.0), 0.12));
+        // A handful of elements is noise, as it always was.
+        assert!(!adaptation_refines(&report(3, 0, 0.9), 0.12));
+    }
+
+    #[test]
+    fn the_accuracy_control_starts_on_the_medium_preset() {
+        let state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        assert_eq!(
+            amr_accuracy_preset_name(state.amr_accuracy_percent),
+            "Medium"
+        );
+        assert!((state.amr_target_accuracy() - 0.12).abs() < 1.0e-12);
+        for (percent, name) in AMR_ACCURACY_PRESETS {
+            assert_eq!(amr_accuracy_preset_name(percent), name);
+        }
+        assert_eq!(amr_accuracy_preset_name(9.0), "Custom");
+    }
+
+    /// The size limits and the wavelength live in the fold at the bottom of the
+    /// panel now, which is drawn after the adaptation section rather than
+    /// inside it. Every one of them still has to drop an estimate in flight, or
+    /// a change there is not felt until the next estimate happens to start.
+    #[test]
+    fn every_adaptation_setting_drops_an_estimate_in_flight() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        const WATCHED: [&str; 5] = [
+            "adaptation itself",
+            "the accuracy target",
+            "elements per wavelength",
+            "the smallest element",
+            "the largest element",
+        ];
+        for (step, name) in WATCHED.into_iter().enumerate() {
+            let before = state.amr_settings();
+            match step {
+                0 => state.amr_enabled = !state.amr_enabled,
+                1 => state.amr_accuracy_percent = 24.0,
+                2 => state.amr_elements_per_wavelength = 9.0,
+                3 => state.amr_minimum_edge = 0.01,
+                _ => state.amr_maximum_edge = 0.2,
+            }
+            assert_ne!(state.amr_settings(), before, "{name} is not watched");
+        }
     }
 
     fn probe_upload(token: TopologyToken, generation: u64, revision: u64) -> ProbeUpload {

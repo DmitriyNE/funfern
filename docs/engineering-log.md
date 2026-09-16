@@ -150,6 +150,74 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The mesh had a step down and no idea of enough
+
+Adaptation drove the mesh to its smallest element and stayed there. The target
+that would have stopped it was not missing by design: `AmrQuality` - Fast,
+Balanced and Detailed, setting the error tolerance, elements per wavelength, the
+coarsening scale and the transaction budget - went out in `eddad77 Switch
+production app to unified topology` as collateral of the `ui.rs` rewrite, and
+nothing replaced it. `refresh_amr` has been building every estimate with
+`..Default::default()` since, so the tolerance has been a hidden 0.06, and the
+README went on promising the presets.
+
+Exposing that tolerance alone would have changed almost nothing, which is the
+part worth recording. The estimator turns an indicator into a size by
+`scale = sqrt(tolerance / indicator)`, clamped to [0.6, 2.2]. Once the indicator
+is above 2.78 times the tolerance the clamp binds, and from there the element
+shrinks by the same 40% every cycle whatever the tolerance says, with nothing
+checking whether the last refinement helped. Measured on a square carrying a
+smooth bump on one side and a grid-scale ripple at 1e-4 of its peak on the other
+- a wave that has passed, leaving speckle - sweeping the tolerance from 0.02 to
+0.5, a factor of 25, moved the quiet half's target not at all (0.042 throughout)
+and the loud half's by 44%. The ripple on its own had already taken the quiet
+half from a mean indicator of 0.006 and a target of 0.145 - coarsen me - to 10.2
+and 0.042, and the refine candidates from 1412 to 2516. Raising `amplitude_floor`
+five orders, to a tenth of the mean element energy, did not move that target
+either: the estimator is right that a grid-scale ripple is unresolved, and
+refining it only moves the ripple to the new grid scale.
+
+The estimator itself is in good order, which is what makes a target worth
+having. On a real instant of a real solution - a bump carrying the acceleration
+the wave equation asks of it, died away long before the wall - the relative error
+of the whole field in the energy norm falls second order under uniform
+refinement: 0.418, 0.110, 0.029, 0.0072 at h = 0.16, 0.08, 0.04, 0.02. Two things
+follow. The three accuracy presets land near the three resolution presets, and
+the hidden 6% was asking for finer than the default mesh at all times. And at
+h = 0.04 the whole field is inside 3% while 3582 elements individually still ask
+to be refined - which is exactly the disagreement a target has to settle.
+
+So `SolutionIndicatorReport` now carries `global_indicator`, that whole-field
+relative error, and splits `refine_candidates` into the ones the error estimate
+asked for and the ones a limit asked for: too coarse for a forced wavelength, or
+larger than the largest element allowed. Limits are floors rather than judgements
+about error, so they refine on their own account; error-driven refinement stops
+once the whole field is inside the target. The trade is explicit and worth
+stating - error concentrated in a small part of a field that is comfortably
+inside the target stops being chased. One number for the whole field buys the
+stop, and that is what it costs.
+
+The control is Coarse, Medium and Fine at 24%, 12% and 6% over a slider that
+reaches everything between, named and shaped like the mesh resolution presets
+above it because they answer the same question at either end of the loop.
+Elements per wavelength - six, which is twelve nodes quadratically, against a
+silent five - and the smallest and largest element moved into Advanced settings.
+That fold is drawn after the adaptation section, so the settings tuple that drops
+an estimate in flight is compared at the end of the panel rather than in the
+middle of it, and a test pins each of the five.
+
+One more thing, worth knowing because it has nothing to do with the error
+target: the wavelength rule caps every element at `c / (f * n)` wherever a source
+or a boundary signal forces a wave, whether or not the wave is anywhere near.
+With the default 2.5 Hz source and unit wave speed that pins the whole domain at
+0.067; past 8.3 Hz it asks for less than the 0.02 floor and the mesh sits at its
+smallest element with the accuracy target reading satisfied. The panel now says
+so when that happens.
+
+Checked: fmt, clippy -D warnings, workspace tests, release build. Three core
+tests and three app tests; each core test was run first against a deliberately
+broken implementation and all three failed.
+
 ## 2026-09-16 — A subdomain marker was standing where the triangles were
 
 The marker for a subdomain probe drifted on every remesh, and the guess in the
