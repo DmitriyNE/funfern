@@ -4209,22 +4209,27 @@ impl Playground {
                         painter.circle_stroke(badge, ring, Stroke::new(1.5, Color32::WHITE));
                     }
                     // A span's two traces lie on top of each other, so the
-                    // scene has to say which one is read. Both arrows leave one
-                    // corner on that side: the normal runs from there into the
-                    // badge, so the reading comes from the side the arrow sits
-                    // on and travels the way positive flux does, and the
-                    // tangent runs the way the arclength axis does.
+                    // scene has to say which one is read. A stem stands on that
+                    // side and runs into the badge, so the reading arrives from
+                    // the side the stem sits on, travelling the way positive
+                    // flux points; the arclength axis leaves the middle of that
+                    // stem, which keeps one mark rather than two that happen to
+                    // touch.
                     if let Some((point, outward, along)) =
                         boundary_probe_orientation(&path, target.side, target.reversed)
                     {
                         let reach = 18.0;
                         let normal = screen_direction(outward);
-                        // Landing the head on the ring keeps the corner tied to
-                        // the marker rather than floating beside the path.
-                        let corner = self.screen(point, r) - normal * (ring + reach);
+                        // Landing the head on the ring ties the stem to the
+                        // marker rather than leaving it beside the path.
+                        let tail = self.screen(point, r) - normal * (ring + reach);
                         let stroke = Stroke::new(if selected { 2.0 } else { 1.5 }, color);
-                        painter.arrow(corner, normal * reach, stroke);
-                        painter.arrow(corner, screen_direction(along) * reach, stroke);
+                        painter.arrow(tail, normal * reach, stroke);
+                        painter.arrow(
+                            tail + normal * (reach * 0.5),
+                            screen_direction(along) * reach,
+                            stroke,
+                        );
                     }
                 }
                 TopologyProbeTarget::AreaDisk { center, radius } => {

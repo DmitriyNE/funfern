@@ -332,9 +332,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   trace for material interfaces, walls, and baffles. Positive normal flux always
   points out of that trace; Flip direction reverses only the arclength axis. Because
   a span's two traces lie on top of each other, the scene says which one is read with
-  a pair of arrows sharing a corner on that side: one runs from there into the
-  probe's marker, so the reading arrives from the side the corner sits on and travels
-  the way positive flux points, and one runs the way the arclength axis does. Whole
+  a stem standing on that side and running into the probe's marker, so the reading
+  arrives from the side the stem sits on and travels the way positive flux points. A
+  second arrow leaves the middle of that stem the way the arclength axis runs. Whole
   closed curves use periodic sampling and integration without duplicating the seam.
 - **Area probes:** choose Disk for a two-click center/radius receiver - Shift puts
   the center on the grid and the radius on a multiple of it - or Subdomain

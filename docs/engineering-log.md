@@ -165,11 +165,13 @@ version had them too, just translated to the side nobody was asking about.
 
 With the arrow living on the side it reads, the offset band said the same thing
 a second time, so it is gone. The arclength arrow was 5 pixels tucked onto that
-band and easy to miss; it now shares the normal arrow's tail at full size, so
-the two read as the probe's local frame - tangent along the arclength axis,
-normal across it - at one anchor clear of the path. The normal's head lands on
-the badge ring rather than short of it, which ties the corner to the marker
-instead of leaving it floating beside the curve.
+band and easy to miss; it is now full size and leaves the middle of the normal
+arrow's stem, so the two read as the probe's local frame - tangent along the
+arclength axis, normal across it - clear of the path. Hung off the stem's tail
+instead, the pair read as two marks that happened to meet, and looked misplaced;
+from the middle it is one mark. The normal's head lands on the badge ring rather
+than short of it, which ties the stem to the marker instead of leaving it
+floating beside the curve.
 
 Anchoring everything at the midpoint removed the reason for
 `boundary_probe_orientation` to take a fraction, and with it the wrinkle that
