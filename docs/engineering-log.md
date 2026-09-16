@@ -150,6 +150,21 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The draw palette stays where it is put
+
+Picking a tool closed the Draw palette, so laying out several primitives meant a
+trip back to the toolbar between each one. It stays up now, and closes only when
+it is closed - from a title-bar button of its own or from the toolbar toggle. It
+is also no longer anchored, so it can be dragged out of the way and stays there.
+
+The palette is visible during a gesture as a result, which means picking another
+tool mid-draw restarts with that tool and drops the points already placed. That
+reads as switching tools rather than as a fault, so it is left as it is.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`.
+
 ## 2026-09-16 — Steps per second belongs to the solver, not to a generation
 
 The status bar's steps/s dropped to zero on every handover. The GPU's step

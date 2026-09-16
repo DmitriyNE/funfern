@@ -1014,7 +1014,6 @@ impl Playground {
             points: vec![],
             attachments: vec![],
         });
-        self.draw_open = false;
         self.selection = TopologySelection::None;
     }
     fn cancel_interaction(&mut self) {
@@ -1369,12 +1368,17 @@ impl Playground {
                 });
             });
         });
+        // The palette stays up across draws - one primitive after another is the
+        // usual way it is used - so it closes only from its own button or the
+        // toolbar toggle, and it floats where it was last dragged.
         if self.draw_open && !self.capturing() {
             let ctx = root.ctx().clone();
+            let mut open = true;
             egui::Window::new("Draw")
+                .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
-                .anchor(egui::Align2::LEFT_TOP, [300.0, 42.0])
+                .default_pos([300.0, 42.0])
                 .show(&ctx, |ui| {
                     ui.label("Closed curve");
                     ui.horizontal(|ui| {
@@ -1416,6 +1420,7 @@ impl Playground {
                         }
                     });
                 });
+            self.draw_open = open;
         }
     }
     fn side_panel(&mut self, root: &mut egui::Ui) {
@@ -10717,6 +10722,21 @@ mod tests {
             !state.diagnostics_warning(),
             "a rebuild that carried the edit through is not an error"
         );
+    }
+
+    /// Picking a tool starts the gesture and leaves the palette up, so one
+    /// primitive can follow another without a trip back to the toolbar.
+    #[test]
+    fn the_draw_palette_outlives_the_gesture_it_starts() {
+        let mut state = Playground {
+            draw_open: true,
+            ..Playground::default()
+        };
+        state.begin_draw(DrawTool::Circle);
+        assert!(state.draw.is_some());
+        assert!(state.draw_open, "the palette closes only when it is closed");
+        state.begin_draw(DrawTool::Polyline);
+        assert!(state.draw_open);
     }
 
     /// The solver's step counter restarts with every generation, so the rate

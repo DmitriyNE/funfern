@@ -175,8 +175,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   stay bounded. The change is undoable, reuses unchanged mesh geometry, and starts a
   fresh field so incompatible state is never transferred. TM/TE switches retain the
   same EM material law.
-- **Geometry role:** Draw contains closed and open curve tools. Closed curves start
-  as subdomains or holes. Open curves start as transmitting separators or
+- **Geometry role:** Draw contains closed and open curve tools. Its palette is a
+  floating window that can be dragged anywhere and stays up across draws, so one
+  primitive follows another; it closes from its own button or the toolbar toggle.
+  Closed curves start as subdomains or holes. Open curves start as transmitting separators or
   two-sided baffles, either of which may be left unattached. The material chosen
   for a separator applies only if it encloses a face as it is drawn; a face
   enclosed later, by attaching an end, inherits the material of the region it is
