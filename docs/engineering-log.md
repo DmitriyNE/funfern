@@ -7,11 +7,6 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-Open findings from the 2026-09-14 adversarial review. The bracketed score is how
-many of the two verifier lenses upheld the claim; treat it as a filter, not a
-ruling — the same detach bug scored 2/2 under one phrasing and 0/2 under another.
-
-
 Follow-ups from the welding work:
 
 - [ ] Offer the survivor picker for a weld that merges subdomains. Welding a
@@ -44,10 +39,14 @@ Carried over from the cutover follow-up work, not from the review:
   mixed selection lands as two undo steps: the curves that needed no question,
   then the one that did. Gathering every choice before removing anything would
   make it one, and needs a picker that can ask more than once.
-- [ ] Decide what to do with the pre-cutover `editor` module. Nothing in the app
-  uses it: `files.rs` takes one constant from `persistence`, and the module's only
-  other consumer is its own 54-test file. Either delete both, or keep them
-  deliberately as the migration path's regression suite and say so.
+- [ ] Retire the pre-cutover `editor` module. It is not dead code reachable only
+  from its own 54-test file, as this entry used to say: `topology_persistence`
+  imports sixteen shared scalar codecs from `persistence`, which takes its
+  document types from `editor`, so the live schema sits on top of both. Extracting
+  those codecs is the first step and is already named in
+  `topology_persistence.rs`'s own header; deleting the two modules and their tests
+  is the second. Or keep them deliberately as the migration path's regression
+  suite and say so.
 - [ ] Decide what "Flip direction" means for a line probe. The README describes it
   as reversing both the sampling order and the flux sign; segments currently only
   offer Swap ends, and boundary targets carry a separate `reversed` flag.
@@ -139,8 +138,6 @@ Longer-standing work:
   energy and keep established regions outside the transition band unchanged.
 - [ ] Run a longer browser soak with a representative multi-obstacle scene and
   record solver throughput and memory behavior over time.
-- [ ] Make operator assembly and transfer-map construction resumable if their
-  synchronous post-mesh tail becomes visible on larger discretizations.
 - [ ] Extend coordinate-edit local repair to closed walls if that legacy role
   remains worth supporting.
 - [ ] Extend region sources beyond the initial bias-plus-sinusoid time law. Candidate
