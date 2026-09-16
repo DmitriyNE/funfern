@@ -179,6 +179,10 @@ pub struct PresentationSettings {
     pub probe_labels: bool,
     pub field: bool,
     pub field_gain: f32,
+    /// Whether the field's colours are scaled from what is on screen. Off, the
+    /// intensity slider is the whole scale, as it was before the field measured
+    /// its own.
+    pub field_auto_exposure: bool,
     pub vector_overlay: VectorOverlay,
     pub vector_overlay_smoothed: bool,
     pub vector_overlay_density: f32,
@@ -224,6 +228,7 @@ impl Default for PresentationSettings {
             probe_labels: true,
             field: true,
             field_gain: 2.0,
+            field_auto_exposure: true,
             vector_overlay: VectorOverlay::Off,
             vector_overlay_smoothed: true,
             vector_overlay_density: 54.0,

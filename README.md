@@ -296,14 +296,20 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   simultaneous six-component field solve.
 - **Field exposure:** the scalar field and the vector overlay each set their own
   scale from what is on screen, so a scene whose amplitude is a hundredth of
-  another's reads the same. The scale is a high quantile of the current frame; it
+  another's reads the same. Auto exposure can be turned off, which puts the
+  intensity slider back in charge of the whole scale. The scale is a high quantile of the current frame; it
   rises the instant the field does, so a placed pulse is never clipped, and falls
   back over a second or so, so that pulse does not darken everything after it. It
   will not fall below a thousandth of the loudest level seen, which stops a field
   that has decayed into rounding noise from being magnified back into view. Field
   intensity and arrow gain trim that automatic scale rather than replacing it, and
   View prints the level the colours are relative to so a decaying field can be
-  told from a steady one.
+  told from a steady one. Each isolated subdomain is also drawn relative to its
+  own rigid offset, because a uniform displacement carries no energy and no
+  radiating wall can damp one, so left in it would become the scale and wash the
+  domain flat. Performance diagnostics reports what was removed per subdomain and
+  how fast it is moving, and the status marker asks for attention if one grows
+  past what single precision can carry alongside the wave.
 - **Region sources:** the selected subdomain can own one distributed source,
   independent of its reusable passive material. Its signed spatial profile uses the
   same region-local world-unit coordinates and its own named parameters, multiplied

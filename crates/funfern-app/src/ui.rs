@@ -832,6 +832,16 @@ pub struct Playground {
     /// The wave generation both exposures were measured against. A reset or a
     /// mesh handoff bumps it, and either can change the field's scale outright.
     exposure_generation: u64,
+    /// The operator's free-constant components, cached against the mesh they
+    /// were read from.
+    field_components: Option<(u64, ConstantModes)>,
+    /// The field with each free component's own offset taken out, which is what
+    /// the exposure measures and the viewport paints.
+    field_centred: Vec<f32>,
+    /// What was taken out, per component, for the diagnostics panel.
+    field_offsets: Vec<FieldOffset>,
+    /// Whether the drift warning has already been raised for this run.
+    field_offset_warned: bool,
     /// Reused by the field's quantile so a frame's sample costs no allocation.
     exposure_scratch: Vec<f64>,
     /// Wall-clock seconds since the previous frame, which is what the exposures
@@ -1011,6 +1021,10 @@ impl Default for Playground {
             vector_overlay_exposure: AutoExposure::default(),
             field_exposure: AutoExposure::default(),
             exposure_generation: 0,
+            field_components: None,
+            field_centred: Vec::new(),
+            field_offsets: Vec::new(),
+            field_offset_warned: false,
             exposure_scratch: Vec::new(),
             frame_delta: 0.0,
             material_overlay_job: None,
@@ -1155,6 +1169,7 @@ impl Playground {
         // says nothing about what counts as noise in this one.
         self.field_exposure.clear();
         self.vector_overlay_exposure.clear();
+        self.field_offset_warned = false;
         self.invalidate_samples();
         Ok(())
     }
@@ -2479,15 +2494,24 @@ impl Playground {
         ui.checkbox(&mut p.mesh_boundaries, "Mesh boundaries");
         ui.checkbox(&mut p.field, "Field");
         ui.add(egui::Slider::new(&mut p.field_gain, 0.25..=12.0).text("Field intensity"));
-        // The colours are relative, so the level they are relative to has to be
-        // readable somewhere or a decaying field looks like a steady one.
-        if p.field
-            && let Some(reference) = field_reference
-        {
-            ui.small(format!("Auto scale {reference:.2e}"));
+        if p.field {
+            ui.checkbox(&mut p.field_auto_exposure, "Auto exposure")
+                .on_hover_text(
+                    "Scale the field's colours from what is on screen, so a quiet scene reads \
+                     like a loud one. Off, the intensity slider is the whole scale.",
+                );
+            // The colours are relative, so the level they are relative to has to
+            // be readable somewhere or a decaying field looks like a steady one.
+            if p.field_auto_exposure
+                && let Some(reference) = field_reference
+            {
+                ui.small(format!("Auto scale {reference:.2e}"));
+            }
         }
         let physics = self.editor.document.model.draft.physics;
         p.vector_overlay = p.vector_overlay.resolved(physics);
+        ui.separator();
+        ui.label("Vector overlay");
         egui::ComboBox::from_id_salt("vector-overlay")
             .selected_text(p.vector_overlay.label(physics))
             .show_ui(ui, |ui| {
@@ -3852,6 +3876,63 @@ impl Playground {
     /// seconds wrong, which is what loading one example over another used to do
     /// to the arrows. How loud the run has been is kept, so a field decaying
     /// through an adaptation handoff is not renormalized back into view.
+    /// Fills `field_centred` with the field minus each free component's own
+    /// offset, and records what was removed.
+    fn centre_field(&mut self, active: &PreparedTopology, display: &WaveDisplay) {
+        let mesh_revision = active.mesh.mesh_revision;
+        if self
+            .field_components
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != mesh_revision)
+        {
+            self.field_components = Some((mesh_revision, ConstantModes::of(&active.operator)));
+        }
+        // Taken out so the labels and the scratch can be borrowed at once; the
+        // cache goes straight back.
+        let Some((cached, modes)) = self.field_components.take() else {
+            return;
+        };
+        self.field_offsets = centre_free_constants(
+            &modes,
+            active.operator.lumped_mass(),
+            &display.current,
+            &display.previous,
+            active.operator.recommended_time_step(),
+            &mut self.field_centred,
+        );
+        self.field_components = Some((cached, modes));
+        self.warn_about_field_offset();
+    }
+
+    /// Raises the status marker once when a subdomain's offset grows past what
+    /// `f32` can carry alongside the wave. Once per run: a drift that is going
+    /// to cross this will cross it every frame afterwards.
+    fn warn_about_field_offset(&mut self) {
+        if self.field_offset_warned {
+            return;
+        }
+        let Some(reference) = self.field_exposure.reference() else {
+            return;
+        };
+        let Some((index, worst)) = self
+            .field_offsets
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.offset.abs().total_cmp(&b.1.offset.abs()))
+        else {
+            return;
+        };
+        if worst.offset.abs() <= reference * FIELD_OFFSET_WARNING {
+            return;
+        }
+        self.field_offset_warned = true;
+        self.unseen_error = true;
+        self.notify(format!(
+            "Subdomain {index} has drifted to {:.0}× the field it carries; see Performance diagnostics",
+            worst.offset.abs() / reference
+        ));
+    }
+
     fn retune_exposures(&mut self, generation: u64) {
         if self.exposure_generation != generation {
             self.exposure_generation = generation;
@@ -3991,24 +4072,36 @@ impl Playground {
             && display.generation > 0
             && display.current.len() == active.operator.degrees_of_freedom()
         {
+            // A rigid offset is not part of the wave and no radiating wall can
+            // remove one, so it is taken out before the field is measured or
+            // painted; left in, it becomes the exposure's own reference and
+            // washes the domain flat.
+            self.centre_field(&active, display);
             let level = exposure_level(
-                &display.current,
+                &self.field_centred,
                 FIELD_EXPOSURE_QUANTILE,
                 &mut self.exposure_scratch,
             );
             let reference = self.field_exposure.update(level, self.frame_delta);
-            // Before anything has arrived there is no scale to paint against,
-            // and every node is zero anyway.
-            let scale = reference.map_or(0.0, |reference| 1.0 / reference);
+            let scale = field_scale(
+                presentation.field_gain,
+                reference,
+                presentation.field_auto_exposure,
+            );
             let mut field = egui::Mesh::default();
             field.reserve_vertices(active.operator.degrees_of_freedom());
             field.reserve_triangles(active.operator.element_nodes().len() * 6);
-            for (point, value) in active.operator.node_points().iter().zip(&display.current) {
-                let normalized = (f64::from(*value) * scale) as f32;
+            for (point, value) in active
+                .operator
+                .node_points()
+                .iter()
+                .zip(&self.field_centred)
+            {
+                let scaled = (f64::from(*value) * scale) as f32;
                 let color = if presentation.material_overlay == MaterialOverlay::Off {
-                    field_color(normalized, presentation.field_gain, Color32::TRANSPARENT)
+                    field_color(scaled, Color32::TRANSPARENT)
                 } else {
-                    field_color_over_overlay(normalized, presentation.field_gain)
+                    field_color_over_overlay(scaled)
                 };
                 field.colored_vertex(self.screen(*point, r), color);
             }
@@ -9430,6 +9523,7 @@ impl Playground {
                     ui.monospace(self.summary_line());
                     ui.separator();
                     self.frame_section(ui);
+                    self.field_offset_section(ui);
                     // Above the sections whose height follows whatever the
                     // last transaction did, so reading the log does not mean
                     // chasing it down the window.
@@ -9600,6 +9694,43 @@ impl Playground {
                 ui.small("A radial profile, for example: parameter R = 0.35 with stiffness 2 - clamp(0, 1, r / R)^2.");
             });
         self.formula_help_open = open;
+    }
+
+    /// The rigid offset the view takes out of each isolated subdomain.
+    ///
+    /// Taking it out is what keeps a decayed field from being renormalized into
+    /// a flat wash, but it also hides it, and an offset no wall can damp grows
+    /// until the wave loses the precision it is carried in. So it is reported
+    /// here, per subdomain, with the rate that says whether it will keep going.
+    fn field_offset_section(&self, ui: &mut egui::Ui) {
+        if self.field_offsets.is_empty() {
+            return;
+        }
+        egui::CollapsingHeader::new("Field offset")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.small(
+                    "A rigid displacement carries no energy and no radiating wall can damp it, \
+                     so a drifting figure here will keep growing.",
+                );
+                let reference = self.field_exposure.reference();
+                for (index, entry) in self.field_offsets.iter().enumerate() {
+                    let headroom = reference.map(|reference| entry.offset.abs() / reference);
+                    let text = format!(
+                        "Subdomain {index}: {:+.3e} · drift {:+.3e}/s{}",
+                        entry.offset,
+                        entry.drift,
+                        headroom.map_or_else(String::new, |headroom| format!(
+                            " · {headroom:.0}× the field"
+                        ))
+                    );
+                    if headroom.is_some_and(|headroom| headroom > FIELD_OFFSET_WARNING) {
+                        ui.colored_label(GOLD, text);
+                    } else {
+                        ui.small(text);
+                    }
+                }
+            });
     }
 
     fn frame_section(&self, ui: &mut egui::Ui) {
@@ -10659,6 +10790,78 @@ fn grid_lines(minimum: f64, maximum: f64, step: f64) -> Vec<f64> {
     lines
 }
 
+/// What the display took out of one isolated subdomain.
+///
+/// Recorded because taking it out makes it invisible, and a rigid offset that no
+/// wall can damp will keep growing until it eats the mantissa the wave is
+/// carried in. A number nobody can see is not a thing you find out about.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct FieldOffset {
+    /// Mass-weighted mean of the component. Weighted, because an unweighted node
+    /// average moves with mesh density rather than with the field.
+    offset: f64,
+    /// How fast that mean is moving. A domain with nothing to damp it drifts at
+    /// a constant rate, so this is what says an offset will keep growing rather
+    /// than settle.
+    drift: f64,
+}
+
+/// How many times the field's own scale an offset may reach before the status
+/// marker asks for attention. `f32` carries about seven digits, so three of them
+/// spent on an offset still leaves the wave legible; past that it will not.
+const FIELD_OFFSET_WARNING: f64 = 1.0e3;
+
+/// Removes each free component's own mass-weighted mean from `current` into
+/// `centred`, and answers with what was removed and how fast it is moving.
+///
+/// Per component rather than for the mesh as a whole: a reflecting separator
+/// leaves two halves whose constants drift independently, and a single global
+/// mean would only half-centre each of them. A component that a wall pins is
+/// left alone, because its offset is part of its solution rather than a free
+/// gauge.
+fn centre_free_constants(
+    modes: &ConstantModes,
+    mass: &[f64],
+    current: &[f32],
+    previous: &[f32],
+    time_step: f64,
+    centred: &mut Vec<f32>,
+) -> Vec<FieldOffset> {
+    let mut now = vec![0.0_f64; modes.count()];
+    let mut before = vec![0.0_f64; modes.count()];
+    for (node, label) in modes.labels().iter().enumerate() {
+        let slot = *label as usize;
+        let weight = mass.get(node).copied().unwrap_or_default();
+        now[slot] += weight * f64::from(current.get(node).copied().unwrap_or_default());
+        before[slot] += weight * f64::from(previous.get(node).copied().unwrap_or_default());
+    }
+    let offsets = (0..modes.count())
+        .map(|slot| {
+            let total = modes.mass()[slot];
+            if !modes.free()[slot] || total <= 0.0 {
+                return FieldOffset::default();
+            }
+            let offset = now[slot] / total;
+            let earlier = before[slot] / total;
+            FieldOffset {
+                offset,
+                drift: if time_step > 0.0 {
+                    (offset - earlier) / time_step
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    centred.clear();
+    centred.reserve(current.len());
+    centred.extend(current.iter().enumerate().map(|(node, value)| {
+        let slot = modes.labels().get(node).copied().unwrap_or_default() as usize;
+        (f64::from(*value) - offsets[slot].offset) as f32
+    }));
+    offsets
+}
+
 /// Whether the next preparation starts the field at zero instead of carrying
 /// the running one into it.
 ///
@@ -10769,10 +10972,27 @@ fn exposure_level(values: &[f32], quantile: f64, scratch: &mut Vec<f64>) -> f64 
         .1
 }
 
-/// `normalized` is the node's value over the exposure's reference level, so
-/// full colour means the same share of the field whatever the field's size.
-fn field_color(normalized: f32, gain: f32, under: Color32) -> Color32 {
-    let value = (normalized * gain * FIELD_EXPOSURE_GAIN).tanh();
+/// The factor a node's value is multiplied by before it becomes colour.
+///
+/// Automatic, the reference level lands on `tanh(gain * FIELD_EXPOSURE_GAIN)`,
+/// which at the default gain is about three quarters of full colour. Manual, the
+/// slider is the whole scale — `tanh(value * gain)`, exactly what the field was
+/// painted with before it measured its own. With nothing measured yet there is
+/// no scale, and every node is zero anyway.
+fn field_scale(gain: f32, reference: Option<f64>, automatic: bool) -> f64 {
+    if !automatic {
+        return f64::from(gain);
+    }
+    reference.map_or(0.0, |reference| {
+        f64::from(gain) * f64::from(FIELD_EXPOSURE_GAIN) / reference
+    })
+}
+
+/// `scaled` is the node's value already divided by whatever scale is in force —
+/// the exposure's reference when it is on, the intensity slider alone when it is
+/// not — so this only has to decide a colour.
+fn field_color(scaled: f32, under: Color32) -> Color32 {
+    let value = scaled.tanh();
     let target = if value >= 0.0 {
         Color32::from_rgb(244, 105, 122)
     } else {
@@ -10791,9 +11011,9 @@ fn field_color(normalized: f32, gain: f32, under: Color32) -> Color32 {
     )
 }
 
-fn field_color_over_overlay(normalized: f32, gain: f32) -> Color32 {
-    let value = if normalized.is_finite() {
-        (normalized * gain * FIELD_EXPOSURE_GAIN).tanh()
+fn field_color_over_overlay(scaled: f32) -> Color32 {
+    let value = if scaled.is_finite() {
+        scaled.tanh()
     } else {
         0.0
     };
@@ -11616,9 +11836,10 @@ mod tests {
     #[test]
     fn the_default_gain_paints_the_reference_level_in_the_readable_band() {
         let default = funfern_app::document::PresentationSettings::default().field_gain;
-        let base = field_color(0.0, default, Color32::TRANSPARENT);
-        let at_reference = field_color(1.0, default, Color32::TRANSPARENT);
-        let above = field_color(2.0, default, Color32::TRANSPARENT);
+        let scale = default * FIELD_EXPOSURE_GAIN;
+        let base = field_color(0.0, Color32::TRANSPARENT);
+        let at_reference = field_color(scale, Color32::TRANSPARENT);
+        let above = field_color(2.0 * scale, Color32::TRANSPARENT);
         let reach = |color: Color32| f32::from(color.r() - base.r()) / f32::from(244 - base.r());
         assert!(
             (0.7..0.85).contains(&reach(at_reference)),
@@ -11627,7 +11848,7 @@ mod tests {
         );
         assert!(reach(above) > reach(at_reference) + 0.1, "no room above");
         assert_eq!(
-            field_color_over_overlay(1.0, default).a(),
+            field_color_over_overlay(scale).a(),
             (0.761_594_f32 * 220.0).round() as u8
         );
     }
@@ -11663,6 +11884,240 @@ mod tests {
         let document = state.editor.document.clone();
         state.set_document(document, false, true).unwrap();
         assert_eq!(state.field_exposure.update(1.0e-9, 0.016), Some(1.0e-9));
+    }
+
+    /// Turning the automatic scale off has to put the field back exactly where it
+    /// was before there was one: the slider as the whole scale.
+    #[test]
+    fn turning_auto_exposure_off_restores_the_plain_gain() {
+        let default = funfern_app::document::PresentationSettings::default();
+        assert!(default.field_auto_exposure, "it should start on");
+        assert_eq!(field_scale(2.0, Some(0.02), false), 2.0);
+        assert_eq!(field_scale(0.25, None, false), 0.25);
+        // Automatic, the same field paints the same whatever its size.
+        let quiet = field_scale(2.0, Some(6.0e-3), true) * 6.0e-3;
+        let loud = field_scale(2.0, Some(7.1e-1), true) * 7.1e-1;
+        assert!((quiet - loud).abs() < 1.0e-12);
+        assert_eq!(field_scale(2.0, None, true), 0.0);
+    }
+
+    /// A vertical reflecting separator, so the operator has two components whose
+    /// constants are independent.
+    fn split_operator() -> QuadraticWaveOperator {
+        let ids = [TopologyVertexId(1), TopologyVertexId(2)];
+        let mut divider = TopologyCurve::new(
+            CurveId(1),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(1),
+                behavior: SpanBehavior::Separated {
+                    left: FaceBoundaryCondition::Reflecting,
+                    right: FaceBoundaryCondition::Reflecting,
+                    coupling: InternalBoundaryCoupling::Independent,
+                },
+            }],
+        )
+        .unwrap();
+        divider.nodes = vec![
+            CurveNode {
+                vertex: Some(ids[0]),
+            },
+            CurveNode {
+                vertex: Some(ids[1]),
+            },
+        ];
+        let geometry = TopologyGeometry {
+            curves: vec![divider],
+            vertices: vec![
+                TopologyVertex {
+                    id: ids[0],
+                    location: TopologyVertexLocation::Outer {
+                        side: OuterSide::Bottom,
+                        fraction: 0.5,
+                    },
+                },
+                TopologyVertex {
+                    id: ids[1],
+                    location: TopologyVertexLocation::Outer {
+                        side: OuterSide::Top,
+                        fraction: 0.5,
+                    },
+                },
+            ],
+            ..TopologyGeometry::default()
+        };
+        let snapshot = compile_topology(&geometry, 1).unwrap();
+        let assignments = snapshot
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(index, face)| FaceRegionAssignment {
+                face: face.id,
+                region: Some(RegionId(index as u64 + 1)),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&snapshot, &assignments).unwrap();
+        let mesh = mesh_topology_plan(
+            &plan,
+            2,
+            MeshingOptions {
+                target_edge_length: 0.25,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let mut scene = TopologyScene::default();
+        for assignment in &assignments {
+            if let Some(region) = assignment.region
+                && !scene.regions.iter().any(|existing| existing.id == region)
+            {
+                scene.regions.push(Region {
+                    id: region,
+                    material: DEFAULT_MATERIAL,
+                    frame: MaterialFrame::world(),
+                });
+            }
+        }
+        scene.materials = vec![Material::default_medium()];
+        QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &plan,
+            TopologyWaveModel::from_topology_scene(&scene),
+        )
+        .unwrap()
+    }
+
+    fn component_mean(modes: &ConstantModes, mass: &[f64], values: &[f32], slot: usize) -> f64 {
+        let mut weighted = 0.0;
+        for (node, label) in modes.labels().iter().enumerate() {
+            if *label as usize == slot {
+                weighted += mass[node] * f64::from(values[node]);
+            }
+        }
+        weighted / modes.mass()[slot]
+    }
+
+    /// Each half of a separated domain owns its constant, so each is centred on
+    /// its own. One global mean would leave both halves off by half their
+    /// difference — which is what the two assertions below would catch.
+    #[test]
+    fn each_isolated_subdomain_is_centred_on_its_own_offset() {
+        let operator = split_operator();
+        let modes = ConstantModes::of(&operator);
+        assert_eq!(modes.count(), 2, "the fixture did not split");
+        let mass = operator.lumped_mass();
+        let offsets = [0.4_f64, -0.9];
+        let drift = 0.25_f64;
+        let time_step = 0.01_f64;
+        let wave = |node: usize| (node as f64 * 0.7).sin() * 0.01;
+        let current = (0..operator.degrees_of_freedom())
+            .map(|node| (offsets[modes.labels()[node] as usize] + wave(node)) as f32)
+            .collect::<Vec<_>>();
+        let previous = (0..operator.degrees_of_freedom())
+            .map(|node| {
+                (offsets[modes.labels()[node] as usize] - drift * time_step + wave(node)) as f32
+            })
+            .collect::<Vec<_>>();
+        let mut centred = Vec::new();
+        let reported =
+            centre_free_constants(&modes, mass, &current, &previous, time_step, &mut centred);
+        assert_eq!(centred.len(), current.len());
+        for (slot, entry) in reported.iter().enumerate() {
+            let before = component_mean(&modes, mass, &current, slot);
+            let after = component_mean(&modes, mass, &centred, slot);
+            assert!(
+                (before - entry.offset).abs() < 1.0e-6,
+                "component {slot} reported {:e} against {before:e}",
+                entry.offset
+            );
+            assert!(after.abs() < 1.0e-6, "component {slot} left at {after:e}");
+            assert!(
+                (entry.drift - drift).abs() < 1.0e-3,
+                "component {slot} drift {:e}",
+                entry.drift
+            );
+        }
+        // Only a constant went: centring is a shift, so every difference within
+        // a component survives it untouched.
+        for node in 1..current.len() {
+            if modes.labels()[node] != modes.labels()[node - 1] {
+                continue;
+            }
+            let before = f64::from(current[node]) - f64::from(current[node - 1]);
+            let after = f64::from(centred[node]) - f64::from(centred[node - 1]);
+            assert!(
+                (before - after).abs() < 1.0e-6,
+                "node {node} moved relative to its neighbour"
+            );
+        }
+    }
+
+    /// A wall that prescribes a value gives its component a determinate offset,
+    /// which is part of the solution rather than a free gauge.
+    #[test]
+    fn a_pinned_subdomain_keeps_the_offset_it_is_held_at() {
+        let mesh = mesh_scene(
+            &Scene::default(),
+            5,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let operator = QuadraticWaveOperator::assemble_with_boundary(
+            &mesh,
+            WaveCoefficients::default(),
+            OuterBoundaryCondition::Dirichlet {
+                signal: TimeSignal::ZERO,
+            },
+        )
+        .unwrap();
+        let modes = ConstantModes::of(&operator);
+        let held = vec![0.5_f32; operator.degrees_of_freedom()];
+        let mut centred = Vec::new();
+        let reported = centre_free_constants(
+            &modes,
+            operator.lumped_mass(),
+            &held,
+            &held,
+            0.01,
+            &mut centred,
+        );
+        assert!(reported.iter().all(|entry| entry.offset == 0.0));
+        assert_eq!(centred, held, "a pinned component was centred anyway");
+    }
+
+    /// Taking the offset out of the view hides it, so a drift that will eat the
+    /// wave's precision has to announce itself exactly once.
+    #[test]
+    fn a_runaway_subdomain_offset_raises_the_marker_once() {
+        let mut state = Playground::default();
+        state.field_exposure.update(1.0e-2, 0.016);
+        state.field_offsets = vec![FieldOffset {
+            offset: 1.0e-2 * FIELD_OFFSET_WARNING * 2.0,
+            drift: 1.0,
+        }];
+        state.warn_about_field_offset();
+        assert!(state.unseen_error, "a runaway offset went unannounced");
+        assert!(state.message.contains("drifted"));
+
+        state.unseen_error = false;
+        state.warn_about_field_offset();
+        assert!(!state.unseen_error, "the warning repeated");
+
+        // An offset the field can carry says nothing.
+        let mut quiet = Playground::default();
+        quiet.field_exposure.update(1.0e-2, 0.016);
+        quiet.field_offsets = vec![FieldOffset {
+            offset: 1.0e-2,
+            drift: 0.0,
+        }];
+        quiet.warn_about_field_offset();
+        assert!(!quiet.unseen_error);
     }
 
     /// Loading a document used to raise `reset_requested`, which the GPU reset

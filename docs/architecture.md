@@ -379,6 +379,22 @@ exposure shares the automatic scale described below. Mechanical scenes retain th
 belonging to one scalar polarization and are not presented as a simultaneous
 full-vector Maxwell state.
 
+The field is drawn relative to each isolated subdomain's own rigid offset. The
+coupling graph of the operator's sparsity gives the components, and a component
+holding no prescribed node carries a free constant; that component's
+mass-weighted mean is removed for display, while a pinned one is left alone
+because its offset is part of its solution. Per component rather than globally,
+because a reflecting separator leaves halves whose constants drift
+independently. This is a display correction and not a projection of the solver's
+state: it is done once per rendered frame, which is also why it does not flicker
+against a domain whose offset is still ramping. Removing the ramp itself would
+mean removing momentum, which is real kinetic energy rather than a gauge choice;
+that is left to the reprojection work the engineering log carries. Because the
+correction hides what it removes, `Performance diagnostics` reports each
+subdomain's offset and drift rate, and the status marker is raised once when an
+offset passes `FIELD_OFFSET_WARNING` times the field's own scale — the point past
+which single precision stops carrying both.
+
 Every source in a scene is eased in by one shared smooth envelope spanning
 `SOURCE_RAMP_PERIODS` periods of the slowest oscillating source. A sine started
 from rest at a phase whose cosine is not zero injects a net impulse, and no outer
@@ -415,7 +431,9 @@ be renormalized. Loading another document clears both, because a different scene
 says nothing about what counts as noise in this one. Field intensity and arrow
 gain trim the automatic scale rather than replacing it, and their persisted
 ranges and defaults are unchanged; the intensity default of 2.0 places the
-reference level at `tanh(1.0)`. The View inspector prints the level the colours
+reference level at `tanh(1.0)`. `field_auto_exposure` turns the automatic scale
+off, which puts the intensity slider back in charge of the whole scale exactly as
+it was before; the subdomain centring above is a separate concern and stays on. The View inspector prints the level the colours
 are relative to, because relative colours otherwise make a decaying field
 indistinguishable from a steady one.
 

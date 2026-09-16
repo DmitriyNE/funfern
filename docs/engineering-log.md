@@ -148,6 +148,50 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The view stops being fooled by a rigid offset
+
+A field that has radiated away leaves a uniform offset behind, and because the
+exposure is relative that offset becomes the scale and paints the whole domain
+one flat colour. The offset is not part of the wave: a rigid displacement is in
+the stiffness operator's null space, carries exactly zero energy — a planted 0.37
+uniform field measures 5.0e-15 — and no radiating wall can damp it. So it is
+taken out before the field is measured or painted.
+
+Per isolated subdomain, not globally. The null space is spanned by the indicator
+of each connected component of the coupling graph that holds no prescribed node,
+so a reflecting separator leaves two constants that drift independently and one
+global mean would half-centre each. `ConstantModes` unions over the operator's
+own sparsity; the pattern is the coupling, because assembly emits no structural
+zeros — counted on a cavity at two resolutions, 7161 and 28817 entries, none of
+them zero. A component with a Dirichlet node is skipped: its offset is part of
+its solution.
+
+Once per rendered frame rather than on a solver cadence. That matters: subtracting
+a constant from both levels leaves velocity untouched by construction, so a
+cadenced projection cannot remove a drift and would re-accumulate between firings
+— a sawtooth at the cadence. Correcting every frame has no such problem, and it
+costs nothing because the frame already walks the field for the exposure's
+quantile.
+
+Because the correction hides what it removes, and an undamped offset grows until
+it eats the mantissa the wave is carried in, `Performance diagnostics` reports
+each subdomain's offset and its drift rate, and the status marker is raised once
+when one passes a thousand times the field's own scale. Single precision carries
+about seven digits; three spent on an offset still leaves the wave legible, past
+that it does not.
+
+Also here: `field_auto_exposure` brings the manual scale back — off, the
+intensity slider is the whole scale again, exactly `tanh(value * gain)` as it was
+before the field measured its own. The subdomain centring is a separate concern
+and stays on either way. And the vector overlay's mode combo had no label at all,
+which is a poor way to be discovered; it has one now, matching the Overlay combo
+below it.
+
+One test caught a mistake of mine rather than the code's: asserting that the wave
+survives centring untouched is wrong, because centring removes the component's
+whole mean, the wave's own share included. The property that actually holds is
+that centring is a shift, so every difference within a component survives it.
+
 ## 2026-09-16 — Sources stop kicking the domain on the way in
 
 A harmonic source started from rest at a phase whose cosine is not zero hands the

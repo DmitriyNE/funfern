@@ -1064,6 +1064,8 @@ struct StoredPresentation {
     probe_labels: bool,
     field: bool,
     field_gain: f32,
+    #[serde(default = "default_field_auto_exposure")]
+    field_auto_exposure: bool,
     #[serde(default)]
     vector_overlay: StoredVectorOverlay,
     #[serde(default = "default_vector_overlay_smoothed")]
@@ -1081,6 +1083,9 @@ struct StoredPresentation {
 }
 
 const fn default_probe_labels() -> bool {
+    true
+}
+const fn default_field_auto_exposure() -> bool {
     true
 }
 const fn default_vector_overlay_smoothed() -> bool {
@@ -1386,6 +1391,7 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
         probe_labels: settings.probe_labels,
         field: settings.field,
         field_gain: settings.field_gain,
+        field_auto_exposure: settings.field_auto_exposure,
         vector_overlay: match settings.vector_overlay {
             VectorOverlay::Off => StoredVectorOverlay::Off,
             VectorOverlay::ComplementaryField => StoredVectorOverlay::ComplementaryField,
@@ -1436,6 +1442,7 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
         probe_labels: stored.probe_labels,
         field: stored.field,
         field_gain: stored.field_gain,
+        field_auto_exposure: stored.field_auto_exposure,
         vector_overlay: match stored.vector_overlay {
             StoredVectorOverlay::Off => VectorOverlay::Off,
             StoredVectorOverlay::ComplementaryField => VectorOverlay::ComplementaryField,
@@ -1641,6 +1648,7 @@ mod tests {
         editor.document.model.far_field.inset = 0.18;
         editor.document.presentation.grid = false;
         editor.document.presentation.field_gain = 3.25;
+        editor.document.presentation.field_auto_exposure = false;
 
         let encoded = save(&editor.document).unwrap();
         assert_eq!(parse_document(encoded.as_bytes()).unwrap(), editor.document);
@@ -1827,6 +1835,7 @@ mod tests {
                 probe_labels: flag,
                 field: !flag,
                 field_gain: 3.25,
+                field_auto_exposure: !flag,
                 vector_overlay: vectors[index % vectors.len()],
                 vector_overlay_smoothed: flag,
                 vector_overlay_density: 71.5,
@@ -1870,6 +1879,7 @@ mod tests {
         for key in [
             "adaptation_target",
             "probe_labels",
+            "field_auto_exposure",
             "vector_overlay",
             "vector_overlay_smoothed",
             "vector_overlay_density",

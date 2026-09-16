@@ -751,6 +751,93 @@ impl QuadraticWaveOperator {
     }
 }
 
+/// The connected components of the operator's coupling graph, with the mass of
+/// each and whether anything pins it.
+///
+/// A constant is in the null space of the stiffness operator, so every component
+/// that holds no prescribed node carries its own free constant — one per
+/// component, not one for the mesh. A reflecting separator splits a domain into
+/// halves that drift independently, so nothing about that constant can be
+/// decided globally without being wrong the moment a scene has two of them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConstantModes {
+    labels: Vec<u32>,
+    mass: Vec<f64>,
+    free: Vec<bool>,
+}
+
+impl ConstantModes {
+    pub fn of(operator: &QuadraticWaveOperator) -> Self {
+        let count = operator.degrees_of_freedom();
+        let mut parent = (0..count).collect::<Vec<_>>();
+        fn find(parent: &mut [usize], mut node: usize) -> usize {
+            while parent[node] != node {
+                parent[node] = parent[parent[node]];
+                node = parent[node];
+            }
+            node
+        }
+        for row in 0..count {
+            let span =
+                operator.row_offsets()[row] as usize..operator.row_offsets()[row + 1] as usize;
+            // The sparsity pattern is the coupling: assembly emits no structural
+            // zeros, so an entry between two nodes always carries stiffness
+            // between them. Counted on a reflecting cavity at two resolutions —
+            // 7161 and 28817 entries, none of them zero.
+            for entry in span {
+                let (a, b) = (
+                    find(&mut parent, row),
+                    find(&mut parent, operator.columns()[entry] as usize),
+                );
+                if a != b {
+                    parent[a] = b;
+                }
+            }
+        }
+        let mut index = vec![u32::MAX; count];
+        let mut labels = vec![0_u32; count];
+        let mut mass = Vec::new();
+        let mut free = Vec::new();
+        for (node, slot_of_node) in labels.iter_mut().enumerate() {
+            let root = find(&mut parent, node);
+            if index[root] == u32::MAX {
+                index[root] = u32::try_from(mass.len()).unwrap_or(u32::MAX);
+                mass.push(0.0);
+                free.push(true);
+            }
+            *slot_of_node = index[root];
+            let slot = index[root] as usize;
+            mass[slot] += operator.lumped_mass()[node];
+            if operator.dirichlet_signals()[node].is_some() {
+                free[slot] = false;
+            }
+        }
+        Self { labels, mass, free }
+    }
+
+    /// Which component each degree of freedom belongs to.
+    pub fn labels(&self) -> &[u32] {
+        &self.labels
+    }
+
+    pub fn count(&self) -> usize {
+        self.mass.len()
+    }
+
+    /// Total lumped mass per component, which is what a mean has to weight by:
+    /// an unweighted node average moves with mesh density rather than with the
+    /// field.
+    pub fn mass(&self) -> &[f64] {
+        &self.mass
+    }
+
+    /// Whether each component's constant is free. A component holding a
+    /// prescribed node has a determinate offset that is part of its solution.
+    pub fn free(&self) -> &[bool] {
+        &self.free
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuadraticWaveState {
     current: Vec<f64>,
@@ -3853,6 +3940,98 @@ mod tests {
             }
         }
         (mean(state.current()) - early) / (state.time() - first)
+    }
+
+    /// A reflecting separator across the domain leaves two halves that drift
+    /// independently, which is the reason nothing about the free constant can be
+    /// decided for the mesh as a whole.
+    #[test]
+    fn a_reflecting_separator_leaves_two_free_constants() {
+        let ids = [TopologyVertexId(1), TopologyVertexId(2)];
+        let mut divider = TopologyCurve::new(
+            CurveId(1),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)])
+                    .unwrap(),
+            ),
+            vec![topology_span(
+                1,
+                SpanBehavior::Separated {
+                    left: FaceBoundaryCondition::Reflecting,
+                    right: FaceBoundaryCondition::Reflecting,
+                    coupling: InternalBoundaryCoupling::Independent,
+                },
+            )],
+        )
+        .unwrap();
+        divider.nodes = vec![
+            CurveNode {
+                vertex: Some(ids[0]),
+            },
+            CurveNode {
+                vertex: Some(ids[1]),
+            },
+        ];
+        let vertices = vec![
+            TopologyVertex {
+                id: ids[0],
+                location: TopologyVertexLocation::Outer {
+                    side: OuterSide::Bottom,
+                    fraction: 0.5,
+                },
+            },
+            TopologyVertex {
+                id: ids[1],
+                location: TopologyVertexLocation::Outer {
+                    side: OuterSide::Top,
+                    fraction: 0.5,
+                },
+            },
+        ];
+        let (plan, mesh, scene) = topology_fixture(vec![divider], vertices, 60);
+        let operator = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &plan,
+            TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        let modes = ConstantModes::of(&operator);
+        assert_eq!(modes.count(), 2, "the separator did not split the domain");
+        assert_eq!(modes.labels().len(), operator.degrees_of_freedom());
+        assert!(
+            modes
+                .labels()
+                .iter()
+                .all(|label| (*label as usize) < modes.count())
+        );
+        let total: f64 = operator.lumped_mass().iter().sum();
+        assert!((modes.mass().iter().sum::<f64>() - total).abs() < 1.0e-9);
+        assert!(
+            (modes.mass()[0] / modes.mass()[1] - 1.0).abs() < 0.1,
+            "the halves came out lopsided: {:?}",
+            modes.mass()
+        );
+    }
+
+    /// A wall that prescribes a value takes its component's constant out of the
+    /// null space, so that component has a determinate offset and centring it
+    /// would throw away part of the solution.
+    #[test]
+    fn a_pinned_component_has_no_free_constant() {
+        let free = ConstantModes::of(&cavity(0.2, OuterBoundaryCondition::Reflecting));
+        assert_eq!(free.count(), 1);
+        assert!(free.free()[0]);
+        let pinned = ConstantModes::of(&cavity(
+            0.2,
+            OuterBoundaryCondition::Dirichlet {
+                signal: TimeSignal::ZERO,
+            },
+        ));
+        assert_eq!(pinned.count(), 1);
+        assert!(
+            !pinned.free()[0],
+            "a prescribed wall left the constant free"
+        );
     }
 
     /// A sine started from rest at a phase whose cosine is not zero hands the
