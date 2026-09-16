@@ -96,8 +96,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   complete curve. Marquee direction follows CAD convention: left-to-right fully
   encloses spans, while right-to-left crosses them. Shift at release adds the hits.
   The outer rectangle participates in the same span selection model.
-- **Delete and transform:** Delete or Backspace removes every completely selected
-  curve. Drag one handle to reshape it, or drag a transformable span selection as a
+- **Delete and transform:** Delete or Backspace removes the selection: every
+  completely selected curve, and one curve selected in part cut down to that run. Drag one handle to reshape it, or drag a transformable span selection as a
   rigid piece. The Edit panel also applies numeric translation, rotation, and
   uniform scale around the selection centroid; the viewport ring and square grip
   provide direct rotation and scaling. A junction can move only with all
@@ -226,10 +226,16 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   the curve stays as open baffles with the default wall, because an open curve
   cannot keep a transmitting end at a free tip. A curve whose junction sat inside
   the deleted run is promoted the same way and named in the status line, and two
-  loose ends the deletion leaves alone at a junction fuse into one curve. When the
-  deletion merges several subdomains into one, the candidates light up in the
-  scene and a click picks the survivor; a deletion that would merge subdomains in
-  two separate places is refused.
+  loose ends the deletion leaves alone at a junction fuse into one curve.
+  One Delete is one deletion however much it names: any number of curves whole
+  and at most one of them cut down to a run, worked out together and applied as
+  one history entry, so one undo brings the whole gesture back. Two curves each
+  selected in part are two questions about where the pieces land, and are refused
+  rather than half answered. When the deletion merges several subdomains into
+  one, the candidates light up in the scene and a click picks the survivor; the
+  question covers the whole deletion, so subdomains merging across several of the
+  deleted curves are offered together. A deletion that would merge subdomains in
+  two separate places is refused before anything is removed.
 - **Materials:** create and name materials in the Library, edit the three base
   properties named by the active physics skin, and assign them under
   Subdomain assignment, which lists either Faces or Regions. Faces shows one row

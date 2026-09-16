@@ -22,9 +22,9 @@ use bevy_egui::{
 };
 use funfern_app::document::{ProbeId, ProbeSamplingPreset, VectorOverlay};
 use funfern_app::topology_editor::{
-    ClosedCurvePurpose, JoinRecord, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
-    TopologyBoundaryProbeTarget, TopologyCurveRemoval, TopologyDocument, TopologyEditor,
-    TopologyProbeDefinition, TopologyProbeTarget, TopologySpanRemoval,
+    ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
+    TopologyBoundaryProbeTarget, TopologyDocument, TopologyEditor, TopologyProbeDefinition,
+    TopologyProbeTarget, TopologyRemoval, TopologyRemovalTarget,
 };
 use funfern_app::topology_persistence::{self as persistence, TopologyLoadCandidate};
 use funfern_app::topology_runtime::{
@@ -255,20 +255,14 @@ enum DragGesture {
     },
 }
 
-/// A deletion waiting on the survivor choice, because it merges two subdomains
-/// carrying different materials.
+/// A deletion worked out as far as the survivor question, waiting for the click
+/// that answers it. It keeps the span selection rather than the target it was
+/// planned from, so the staleness guard has one thing to check and the target is
+/// rebuilt against whatever the document says when the answer arrives.
 #[derive(Clone, Debug)]
-enum PendingRemoval {
-    Curve(CurveId, Vec<RegionId>),
-    Spans(BTreeSet<CurveSpanId>, Vec<RegionId>),
-}
-
-impl PendingRemoval {
-    fn choices(&self) -> &[RegionId] {
-        match self {
-            Self::Curve(_, choices) | Self::Spans(_, choices) => choices,
-        }
-    }
+struct PendingRemoval {
+    spans: BTreeSet<CurveSpanId>,
+    choices: Vec<RegionId>,
 }
 
 /// The two grips of a region's material/source frame: its origin and the ring
@@ -1652,15 +1646,12 @@ impl Playground {
     fn prune_stale_pending_removal(&mut self) {
         if self.pending_removal.as_ref().is_some_and(|pending| {
             let geometry = &self.editor.document.model.draft.geometry;
-            match pending {
-                PendingRemoval::Curve(curve, _) => geometry.curve(*curve).is_none(),
-                PendingRemoval::Spans(spans, _) => !spans.iter().all(|span| {
-                    geometry
-                        .curves
-                        .iter()
-                        .any(|curve| curve.spans.iter().any(|candidate| candidate.id == *span))
-                }),
-            }
+            !pending.spans.iter().all(|span| {
+                geometry
+                    .curves
+                    .iter()
+                    .any(|curve| curve.spans.iter().any(|candidate| candidate.id == *span))
+            })
         }) {
             self.pending_removal = None;
         }
@@ -1697,7 +1688,7 @@ impl Playground {
         let Some(pending) = &self.pending_removal else {
             return;
         };
-        let candidates = pending.choices().iter().copied().collect::<BTreeSet<_>>();
+        let candidates = pending.choices.iter().copied().collect::<BTreeSet<_>>();
         let hovered = painter
             .ctx()
             .pointer_hover_pos()
@@ -1808,25 +1799,24 @@ impl Playground {
         };
         let Some(region) = self
             .draft_region_at(point)
-            .filter(|region| pending.choices().contains(region))
+            .filter(|region| pending.choices.contains(region))
         else {
             return;
         };
-        let outcome = match &pending {
-            PendingRemoval::Curve(curve, _) => self
-                .editor
-                .remove_curve(*curve, Some(region))
-                .map(|removal| self.report_curve_removal(&removal)),
-            PendingRemoval::Spans(spans, _) => self
-                .editor
-                .remove_spans(spans, Some(region))
-                .map(|removal| self.report_span_removal(&removal)),
-        };
+        let outcome = self
+            .editor
+            .removal_target(&pending.spans)
+            .and_then(|target| {
+                self.editor
+                    .remove(&target, Some(region))
+                    .map(|removal| (target, removal))
+            });
         match outcome {
-            Ok(()) => {
+            Ok((target, removal)) => {
                 self.pending_removal = None;
                 self.selection = TopologySelection::None;
                 self.invalidate_samples();
+                self.report_removal(&target, &removal);
             }
             Err(error) => self.message = error,
         }
@@ -5071,7 +5061,7 @@ impl Playground {
             // nothing and the cursor should not promise otherwise.
             return self
                 .draft_region_at(self.world(pos, r))
-                .filter(|region| pending.choices().contains(region))
+                .filter(|region| pending.choices.contains(region))
                 .map(|_| egui::CursorIcon::PointingHand);
         }
         (self.draw.is_some() || self.pulse_mode || self.probe_mode.is_some())
@@ -6080,83 +6070,6 @@ impl Playground {
             }
             return;
         }
-        let curves = match &self.selection {
-            TopologySelection::Spans(spans) => self
-                .editor
-                .document
-                .model
-                .draft
-                .geometry
-                .curves
-                .iter()
-                .filter(|curve| {
-                    curve
-                        .spans
-                        .iter()
-                        .all(|span| spans.contains(&TopologySpanTarget::Curve(span.id)))
-                })
-                .map(|curve| curve.id)
-                .collect::<Vec<_>>(),
-            _ => vec![],
-        };
-        if curves.is_empty() {
-            self.delete_span_selection();
-            return;
-        }
-        // One gesture, one history entry: the removals share a bracket, so undo
-        // takes the whole selection back rather than one curve at a time.
-        self.editor.begin();
-        for curve in curves {
-            // Every removal invalidates the compiled draft, and both the choice
-            // query and the command need it, so the next curve in a multi-curve
-            // selection has to wait for revalidation rather than fail.
-            self.settle_editor();
-            // Merging two assigned subdomains needs an explicit survivor, so
-            // hand the choice to the Edit panel instead of failing the gesture.
-            match self.editor.curve_removal_choices(curve) {
-                Ok(choices) if choices.len() > 1 => {
-                    // Close what is already done and let the question stand on
-                    // its own; answering it is a separate decision.
-                    self.editor.commit();
-                    self.pending_removal = Some(PendingRemoval::Curve(curve, choices));
-                    return;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    self.editor.cancel();
-                    self.message = error;
-                    return;
-                }
-            }
-            match self.editor.remove_curve_during_edit(curve, None) {
-                Ok(removal) => self.report_curve_removal(&removal),
-                Err(error) => {
-                    self.editor.cancel();
-                    self.message = error;
-                    return;
-                }
-            }
-        }
-        self.editor.commit();
-        self.selection = TopologySelection::None;
-        self.material_edit = None;
-        self.material_formula_edits.clear();
-        self.material_formula_errors.clear();
-        self.invalidate_samples();
-    }
-    /// Drives the editor's cooperative validation to a decision. Only a gesture
-    /// that must issue several dependent commands in one frame needs this; the
-    /// ordinary path validates across frames in `frame`.
-    fn settle_editor(&mut self) {
-        for _ in 0..4096 {
-            if self.editor.acceptance != TopologyAcceptance::Pending {
-                return;
-            }
-            self.editor.validate_frame(4096);
-        }
-    }
-    /// Deletes a partial span selection, splitting the curve and leaving baffles.
-    fn delete_span_selection(&mut self) {
         let TopologySelection::Spans(targets) = &self.selection else {
             return;
         };
@@ -6170,59 +6083,65 @@ impl Playground {
         if spans.is_empty() {
             return;
         }
-        let choices = match self.editor.span_removal_choices(&spans) {
+        // The whole selection is one removal, planned once. Which subdomains a
+        // deletion merges is a property of all of it together, so asking curve
+        // by curve asked the wrong question, closed the history entry to ask it,
+        // and left everything after the first question undeleted.
+        let target = match self.editor.removal_target(&spans) {
+            Ok(target) => target,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        let choices = match self.editor.removal_choices(&target) {
             Ok(choices) => choices,
             Err(error) => {
                 self.message = error;
                 return;
             }
         };
+        // Merging two assigned subdomains needs an explicit survivor, so hand
+        // the choice to the scene instead of failing the gesture.
         if choices.len() > 1 {
-            self.pending_removal = Some(PendingRemoval::Spans(spans, choices));
+            self.pending_removal = Some(PendingRemoval { spans, choices });
             return;
         }
-        match self.editor.remove_spans(&spans, choices.first().copied()) {
+        match self.editor.remove(&target, choices.first().copied()) {
             Ok(removal) => {
                 self.selection = TopologySelection::None;
+                self.material_edit = None;
+                self.material_formula_edits.clear();
+                self.material_formula_errors.clear();
                 self.invalidate_samples();
-                self.report_span_removal(&removal);
+                self.report_removal(&target, &removal);
             }
             Err(error) => self.message = error,
         }
     }
     /// Says what the deletion did beyond the selection: a curve promoted to a
     /// baffle or a probe dropped is not something to discover later.
-    fn report_span_removal(&mut self, removal: &TopologySpanRemoval) {
-        let lead = match removal.pieces.len() {
-            0 => "Curve deleted".to_owned(),
-            1 => "Deleted spans; the rest is a baffle".to_owned(),
-            count => format!("Deleted spans; split into {count} baffles"),
+    fn report_removal(&mut self, target: &TopologyRemovalTarget, removal: &TopologyRemoval) {
+        let curves = target.whole_curves();
+        let pieces = removal.pieces.len();
+        let lead = match (curves, pieces) {
+            (0 | 1, 0) => "Curve deleted".to_owned(),
+            (0, 1) => "Deleted spans; the rest is a baffle".to_owned(),
+            (0, pieces) => format!("Deleted spans; split into {pieces} baffles"),
+            (curves, 0) => format!("{curves} curves deleted"),
+            (curves, pieces) => format!(
+                "{curves} curve{} deleted and one cut, leaving {pieces} baffle{}",
+                if curves == 1 { "" } else { "s" },
+                if pieces == 1 { "" } else { "s" },
+            ),
         };
-        self.report_removal(
-            lead,
-            &removal.promoted,
-            &removal.joined,
-            &removal.removed_probes,
-            &removal.removed_regions,
-        );
-    }
-    fn report_curve_removal(&mut self, removal: &TopologyCurveRemoval) {
-        self.report_removal(
-            "Curve deleted".to_owned(),
-            &removal.promoted,
-            &removal.joined,
-            &removal.removed_probes,
-            &removal.removed_regions,
-        );
-    }
-    fn report_removal(
-        &mut self,
-        lead: String,
-        promoted: &[CurveId],
-        joined: &[JoinRecord],
-        removed_probes: &[ProbeId],
-        removed_regions: &[RegionId],
-    ) {
+        let TopologyRemoval {
+            promoted,
+            joined,
+            removed_probes,
+            removed_regions,
+            ..
+        } = removal;
         let mut parts = vec![lead];
         if !promoted.is_empty() {
             parts.push(format!(
@@ -12143,7 +12062,10 @@ mod probe_interaction_tests {
             Some(egui::CursorIcon::Crosshair)
         );
         state.pulse_mode = false;
-        state.pending_removal = Some(PendingRemoval::Curve(CurveId(99), vec![]));
+        state.pending_removal = Some(PendingRemoval {
+            spans: BTreeSet::from([CurveSpanId(99)]),
+            choices: vec![],
+        });
         assert_eq!(
             state.modal_cursor(centre, r),
             None,
@@ -12374,6 +12296,140 @@ mod probe_interaction_tests {
         };
         assert!((start - Point2::new(-0.4, -0.1)).norm() < 1.0e-12);
         assert!((end - Point2::new(0.6, -0.1)).norm() < 1.0e-12);
+    }
+
+    /// Two subdomains selected and deleted in one gesture. Asking curve by
+    /// curve asked about the first one only, closed the history entry to ask,
+    /// and then returned - so the rest of the selection was never deleted and
+    /// nothing said so. One question over the whole deletion, one entry.
+    #[test]
+    fn a_multi_curve_deletion_asks_once_and_takes_everything() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        for centre in [Point2::new(-0.4, 0.0), Point2::new(0.4, 0.0)] {
+            state
+                .editor
+                .create_closed_curve(
+                    PeriodicCubicSpline::rounded(centre, 0.25),
+                    ClosedCurvePurpose::Subdomain {
+                        material: DEFAULT_MATERIAL,
+                    },
+                )
+                .unwrap();
+            settle(&mut state.editor);
+        }
+        state.selection = TopologySelection::Spans(every_span(&state));
+        let history = state.editor.history_len();
+
+        state.delete_selection();
+        let pending = state.pending_removal.clone().expect("a survivor question");
+        assert_eq!(
+            pending.choices.len(),
+            3,
+            "both subdomains and the background meet in one face: {:?}",
+            pending.choices
+        );
+        assert_eq!(
+            state.editor.history_len(),
+            history,
+            "nothing is deleted until the question is answered"
+        );
+
+        state.pick_removal_survivor(Point2::new(0.0, 0.95));
+        settle(&mut state.editor);
+        assert!(state.pending_removal.is_none());
+        assert!(
+            state.editor.document.model.draft.geometry.curves.is_empty(),
+            "the whole selection goes, not the curve the question was about"
+        );
+        assert_eq!(
+            state.editor.history_len(),
+            (history.0 + 1, history.1),
+            "one gesture, one entry"
+        );
+        assert!(state.editor.undo());
+        settle(&mut state.editor);
+        assert_eq!(
+            state.editor.document.model.draft.geometry.curves.len(),
+            2,
+            "one undo brings the whole gesture back"
+        );
+    }
+
+    /// A selection covering one curve whole and part of another used to delete
+    /// the whole one and ignore the spans on the other without a word.
+    #[test]
+    fn a_deletion_of_one_whole_curve_and_part_of_another_takes_both() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let mut holes = vec![];
+        for centre in [Point2::new(-0.4, 0.0), Point2::new(0.4, 0.0)] {
+            holes.push(
+                state
+                    .editor
+                    .create_closed_curve(
+                        PeriodicCubicSpline::rounded(centre, 0.25),
+                        ClosedCurvePurpose::Hole,
+                    )
+                    .unwrap(),
+            );
+            settle(&mut state.editor);
+        }
+        let geometry = &state.editor.document.model.draft.geometry;
+        let whole = geometry.curve(holes[0]).unwrap();
+        let cut = geometry.curve(holes[1]).unwrap();
+        let spans = whole
+            .spans
+            .iter()
+            .map(|span| TopologySpanTarget::Curve(span.id))
+            .chain(
+                cut.spans
+                    .iter()
+                    .take(2)
+                    .map(|span| TopologySpanTarget::Curve(span.id)),
+            )
+            .collect::<BTreeSet<_>>();
+        let survivors = cut.spans.len() - 2;
+        state.selection = TopologySelection::Spans(spans);
+        let history = state.editor.history_len();
+
+        state.delete_selection();
+        settle(&mut state.editor);
+        assert!(state.pending_removal.is_none(), "{}", state.message);
+        let curves = &state.editor.document.model.draft.geometry.curves;
+        assert_eq!(curves.len(), 1, "one baffle is left, and only that");
+        assert_eq!(
+            curves[0].spans.len(),
+            survivors,
+            "the run went, the rest stayed"
+        );
+        assert_eq!(
+            state.editor.history_len(),
+            (history.0 + 1, history.1),
+            "one gesture, one entry"
+        );
+    }
+
+    fn every_span(state: &Playground) -> BTreeSet<TopologySpanTarget> {
+        state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .flat_map(|curve| {
+                curve
+                    .spans
+                    .iter()
+                    .map(|span| TopologySpanTarget::Curve(span.id))
+            })
+            .collect()
     }
 
     fn settle(editor: &mut TopologyEditor) {

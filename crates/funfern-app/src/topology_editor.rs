@@ -158,11 +158,13 @@ pub struct TopologyCurveEdit {
     pub span_splits: Vec<TopologySpanSplit>,
 }
 
-/// What a partial span deletion changed. `pieces` are the surviving curves in
-/// order, the first keeping the original identity; `promoted` names curves the
-/// deletion demoted to baffles because it freed one of their endpoints.
+/// What a deletion changed beyond the spans it named. `pieces` are the curves a
+/// partial cut left behind, in order, the first keeping the original identity;
+/// `promoted` names curves the deletion demoted to baffles because it freed one
+/// of their ends; `joined` records the pairs of loose ends it left at a two-arm
+/// junction and fused.
 #[derive(Clone, Debug, PartialEq)]
-pub struct TopologySpanRemoval {
+pub struct TopologyRemoval {
     pub pieces: Vec<CurveId>,
     pub promoted: Vec<CurveId>,
     pub joined: Vec<JoinRecord>,
@@ -171,17 +173,38 @@ pub struct TopologySpanRemoval {
     pub removed_probes: Vec<ProbeId>,
 }
 
-/// What removing a whole curve changed. `promoted` names curves demoted to
-/// baffles because the removal freed one of their ends; `joined` records the
-/// pairs of loose ends the removal left at a two-arm junction and fused.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TopologyCurveRemoval {
-    pub curve: CurveId,
-    pub promoted: Vec<CurveId>,
-    pub joined: Vec<JoinRecord>,
-    pub removed_regions: Vec<RegionId>,
-    pub region_remaps: Vec<(RegionId, RegionId)>,
-    pub removed_probes: Vec<ProbeId>,
+/// Everything one deletion gesture removes: whole curves, and at most one curve
+/// cut down to the spans outside a contiguous run.
+///
+/// It is one target rather than a list of them because which subdomains a
+/// deletion merges is a property of the whole of it - two curves that each
+/// merge nothing can merge two subdomains between them - and because one
+/// gesture is one history entry. Build it with
+/// [`TopologyEditor::removal_target`], which is where the one-partial-curve
+/// rule is enforced.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TopologyRemovalTarget {
+    curves: BTreeSet<CurveId>,
+    run: Option<(CurveId, Vec<usize>)>,
+}
+
+impl TopologyRemovalTarget {
+    pub fn curve(curve: CurveId) -> Self {
+        Self {
+            curves: BTreeSet::from([curve]),
+            run: None,
+        }
+    }
+
+    /// How many curves go whole. The rest of the deletion, if any, is the one
+    /// curve it cuts.
+    pub fn whole_curves(&self) -> usize {
+        self.curves.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.curves.is_empty() && self.run.is_none()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1222,16 +1245,22 @@ impl TopologyEditor {
         })
     }
 
-    /// Active regions a curve removal would merge into one. More than one means
-    /// removing the curve merges subdomains and the caller must say which
-    /// survives. The answer comes from compiling the removal, so it already
-    /// accounts for curves the removal promotes or welds.
-    pub fn curve_removal_choices(&self, curve: CurveId) -> Result<Vec<RegionId>, String> {
+    /// Active regions a removal would merge into one. More than one means the
+    /// deletion merges subdomains and the caller must say which survives; a
+    /// deletion that would merge subdomains in more than one place is refused
+    /// here rather than asked about. The answer comes from compiling the whole
+    /// removal, so it already accounts for curves it promotes or welds.
+    pub fn removal_choices(&self, target: &TopologyRemovalTarget) -> Result<Vec<RegionId>, String> {
         Ok(self
-            .plan_removal(RemovalTarget::Curve(curve))?
+            .plan_removal(target)?
             .merge
             .map(|merge| merge.regions.into_iter().collect())
             .unwrap_or_default())
+    }
+
+    /// `removal_choices` for one whole curve.
+    pub fn curve_removal_choices(&self, curve: CurveId) -> Result<Vec<RegionId>, String> {
+        self.removal_choices(&TopologyRemovalTarget::curve(curve))
     }
     /// The face a closed curve encloses, identified through the authored anchor
     /// that curve owns rather than through snapshot traversal order.
@@ -1380,79 +1409,68 @@ impl TopologyEditor {
         Ok(())
     }
 
-    /// The curve and contiguous run a span removal acts on. `whole` marks a
-    /// selection that covers the complete curve, which is ordinary curve removal.
-    fn span_removal_target(
+    /// What a span selection deletes, as one target.
+    ///
+    /// A curve every one of whose spans is selected goes whole. One curve may be
+    /// selected in part, and is cut down to the spans outside a contiguous run.
+    /// Two partly selected curves are refused: a cut is only defined against one
+    /// contiguous run, and two of them are two questions about where the pieces
+    /// land rather than one deletion.
+    pub fn removal_target(
         &self,
         selected: &BTreeSet<CurveSpanId>,
-    ) -> Result<(CurveId, Vec<usize>, bool), String> {
+    ) -> Result<TopologyRemovalTarget, String> {
         if selected.is_empty() {
             return Err("Select curve spans to delete".into());
         }
-        let mut touched = self
-            .document
-            .model
-            .draft
-            .geometry
-            .curves
-            .iter()
-            .filter(|curve| curve.spans.iter().any(|span| selected.contains(&span.id)));
-        let curve = touched.next().ok_or("Selected spans no longer exist")?;
-        if touched.next().is_some() {
-            return Err("Select one contiguous run of spans on one curve".into());
+        let mut target = TopologyRemovalTarget::default();
+        for curve in &self.document.model.draft.geometry.curves {
+            if !curve.spans.iter().any(|span| selected.contains(&span.id)) {
+                continue;
+            }
+            if curve.spans.iter().all(|span| selected.contains(&span.id)) {
+                target.curves.insert(curve.id);
+                continue;
+            }
+            if target.run.is_some() {
+                return Err(
+                    "Delete part of one curve at a time; whole curves may go together".into(),
+                );
+            }
+            let run = contiguous_run(curve, selected)?.ok_or("Selected spans no longer exist")?;
+            target.run = Some((curve.id, run));
         }
-        if curve.spans.iter().all(|span| selected.contains(&span.id)) {
-            return Ok((curve.id, (0..curve.spans.len()).collect(), true));
+        if target.is_empty() {
+            return Err("Selected spans no longer exist".into());
         }
-        let run = contiguous_run(curve, selected)?.ok_or("Selected spans no longer exist")?;
-        Ok((curve.id, run, false))
+        Ok(target)
     }
 
-    /// Active regions that a span removal would merge into one. More than one
-    /// means the caller must say which survives, exactly as for whole-curve
-    /// removal. The answer comes from compiling the removal, so it already
-    /// accounts for curves the deletion promotes or welds.
+    /// `removal_choices` for a span selection.
     pub fn span_removal_choices(
         &self,
         selected: &BTreeSet<CurveSpanId>,
     ) -> Result<Vec<RegionId>, String> {
-        let (curve, run, whole) = self.span_removal_target(selected)?;
-        if whole {
-            return self.curve_removal_choices(curve);
-        }
-        Ok(self
-            .plan_removal(RemovalTarget::Spans { curve, run })?
-            .merge
-            .map(|merge| merge.regions.into_iter().collect())
-            .unwrap_or_default())
+        self.removal_choices(&self.removal_target(selected)?)
     }
 
-    /// Deletes one contiguous run of spans, leaving the rest of the curve as open
-    /// pieces. Every surviving piece becomes a baffle with the default wall,
-    /// because an open curve that kept a transmitting end span with a free tip is
-    /// rejected by the arrangement compiler. Any curve the deletion frees from a
-    /// junction is promoted the same way, and two loose ends left at a junction
-    /// fuse into one curve.
-    pub fn remove_spans(
+    /// Deletes everything the target names as one history entry, resolving any
+    /// face merge with `keep_region`.
+    ///
+    /// A curve cut in part leaves the spans outside the run as open pieces, and
+    /// every surviving piece becomes a baffle with the default wall, because an
+    /// open curve that kept a transmitting end span with a free tip is rejected
+    /// by the arrangement compiler. Any curve the deletion frees from a junction
+    /// is promoted the same way, and two loose ends left at a junction fuse into
+    /// one curve.
+    pub fn remove(
         &mut self,
-        selected: &BTreeSet<CurveSpanId>,
+        target: &TopologyRemovalTarget,
         keep_region: Option<RegionId>,
-    ) -> Result<TopologySpanRemoval, String> {
-        let (curve, run, whole) = self.span_removal_target(selected)?;
-        if whole {
-            let removal = self.remove_curve(curve, keep_region)?;
-            return Ok(TopologySpanRemoval {
-                pieces: vec![],
-                promoted: removal.promoted,
-                joined: removal.joined,
-                removed_regions: removal.removed_regions,
-                region_remaps: removal.region_remaps,
-                removed_probes: removal.removed_probes,
-            });
-        }
-        let plan = self.plan_removal(RemovalTarget::Spans { curve, run })?;
+    ) -> Result<TopologyRemoval, String> {
+        let plan = self.plan_removal(target)?;
         let outcome = self.apply_removal(plan, keep_region)?;
-        Ok(TopologySpanRemoval {
+        Ok(TopologyRemoval {
             pieces: outcome.pieces,
             promoted: outcome.promoted,
             joined: outcome.joined,
@@ -1462,38 +1480,23 @@ impl TopologyEditor {
         })
     }
 
-    /// Removes a curve and deterministically resolves any face merge. When two
-    /// or more active regions meet across the removed curve, `keep_region` is
-    /// required. Curves the removal frees are promoted to baffles; two loose
-    /// ends left at a junction fuse into one curve.
+    /// `remove` for a span selection.
+    pub fn remove_spans(
+        &mut self,
+        selected: &BTreeSet<CurveSpanId>,
+        keep_region: Option<RegionId>,
+    ) -> Result<TopologyRemoval, String> {
+        let target = self.removal_target(selected)?;
+        self.remove(&target, keep_region)
+    }
+
+    /// `remove` for one whole curve.
     pub fn remove_curve(
         &mut self,
         curve: CurveId,
         keep_region: Option<RegionId>,
-    ) -> Result<TopologyCurveRemoval, String> {
-        let removal = self.remove_curve_during_edit(curve, keep_region)?;
-        self.commit();
-        Ok(removal)
-    }
-
-    /// The same removal without closing the history entry, so a gesture that
-    /// deletes several curves lands as one undo step. The caller commits, or
-    /// cancels to take back every removal it has made.
-    pub fn remove_curve_during_edit(
-        &mut self,
-        curve: CurveId,
-        keep_region: Option<RegionId>,
-    ) -> Result<TopologyCurveRemoval, String> {
-        let plan = self.plan_removal(RemovalTarget::Curve(curve))?;
-        let outcome = self.apply_removal_during_edit(plan, keep_region)?;
-        Ok(TopologyCurveRemoval {
-            curve,
-            promoted: outcome.promoted,
-            joined: outcome.joined,
-            removed_regions: outcome.removed_regions,
-            region_remaps: outcome.region_remaps,
-            removed_probes: outcome.removed_probes,
-        })
+    ) -> Result<TopologyRemoval, String> {
+        self.remove(&TopologyRemovalTarget::curve(curve), keep_region)
     }
 
     /// Works a removal out on a copy of the document: cuts or removes the
@@ -1501,161 +1504,149 @@ impl TopologyEditor {
     /// two-arm junction, compiles, and finds where every old face landed. The
     /// editor is untouched and no id is allocated — a second cut piece takes the
     /// next curve id provisionally and `apply_removal` claims it.
-    fn plan_removal(&self, target: RemovalTarget) -> Result<RemovalPlan, String> {
-        let compiled = self.compiled_draft.as_ref().ok_or(match target {
-            RemovalTarget::Curve(_) => "Resolve the invalid draft before removing a topology curve",
-            RemovalTarget::Spans { .. } => "Resolve the invalid draft before deleting spans",
-        })?;
+    fn plan_removal(&self, target: &TopologyRemovalTarget) -> Result<RemovalPlan, String> {
+        let compiled = self
+            .compiled_draft
+            .as_ref()
+            .ok_or("Resolve the invalid draft before deleting")?;
         let mut candidate = self.document.model.clone();
         let mut removed_probes = vec![];
         let mut pieces = vec![];
         let mut provisional_curve = false;
-        let (dead_spans, touched, mut reparameterised) = match &target {
-            RemovalTarget::Curve(curve_id) => {
-                let curve = candidate
-                    .draft
-                    .geometry
-                    .curve(*curve_id)
-                    .ok_or("Curve no longer exists")?
-                    .clone();
-                let touched = curve
-                    .nodes
-                    .iter()
-                    .filter_map(|node| node.vertex)
-                    .collect::<BTreeSet<_>>();
-                let dead = curve
+        let mut dead_spans = BTreeSet::new();
+        let mut touched = BTreeSet::new();
+        let mut reparameterised = BTreeSet::new();
+        // The curves that go whole first, so the cut below plans against the
+        // geometry the rest of the deletion leaves - a junction the other
+        // curves vacated is already gone by then.
+        for curve_id in &target.curves {
+            let curve = candidate
+                .draft
+                .geometry
+                .curve(*curve_id)
+                .ok_or("Curve no longer exists")?
+                .clone();
+            touched.extend(curve.nodes.iter().filter_map(|node| node.vertex));
+            dead_spans.extend(curve.spans.iter().map(|span| span.id));
+            candidate
+                .draft
+                .geometry
+                .curves
+                .retain(|candidate| candidate.id != *curve_id);
+            reparameterised.insert(*curve_id);
+        }
+        if !target.curves.is_empty() {
+            candidate.probes.retain(|probe| {
+                let gone = matches!(
+                    &probe.target,
+                    TopologyProbeTarget::Boundary(probed) if target.curves.contains(&probed.curve)
+                );
+                if gone {
+                    removed_probes.push(probe.id);
+                }
+                !gone
+            });
+        }
+        if let Some((curve_id, run)) = &target.run {
+            let curve = candidate
+                .draft
+                .geometry
+                .curve(*curve_id)
+                .ok_or("Curve no longer exists")?
+                .clone();
+            let cut = CurveCut::plan(&curve, run)?;
+            dead_spans.extend(run.iter().map(|index| curve.spans[*index].id));
+            touched.extend(curve.nodes.iter().filter_map(|node| node.vertex));
+            reparameterised.insert(curve.id);
+            let mut built = Vec::new();
+            let mut rebased = Vec::new();
+            for (index, piece) in cut.pieces.iter().enumerate() {
+                let id = if index == 0 {
+                    curve.id
+                } else {
+                    provisional_curve = true;
+                    CurveId(self.next_curve)
+                };
+                let spans = piece
                     .spans
                     .iter()
-                    .map(|span| span.id)
-                    .collect::<BTreeSet<_>>();
+                    .map(|span| CurveSpan {
+                        id: curve.spans[*span].id,
+                        behavior: SpanBehavior::REFLECTING,
+                    })
+                    .collect::<Vec<_>>();
+                let mut built_piece = TopologyCurve::new(id, piece.spline.clone(), spans)
+                    .map_err(|issue| issue.to_string())?;
+                for (node, original) in piece.nodes.iter().enumerate() {
+                    built_piece.nodes[node] = curve.nodes[*original];
+                }
+                for (position, span) in piece.spans.iter().enumerate() {
+                    let old = curve
+                        .spline
+                        .span_bounds(*span)
+                        .ok_or("Missing curve span")?;
+                    let new = built_piece
+                        .spline
+                        .span_bounds(position)
+                        .ok_or("Missing curve span")?;
+                    rebased.push((curve.spans[*span].id, id, old, new));
+                }
+                built.push(built_piece);
+            }
+            let position = candidate
+                .draft
+                .geometry
+                .curves
+                .iter()
+                .position(|candidate| candidate.id == curve.id)
+                .ok_or("Curve no longer exists")?;
+            candidate.draft.geometry.curves.remove(position);
+            for (offset, piece) in built.iter().enumerate() {
                 candidate
                     .draft
                     .geometry
                     .curves
-                    .retain(|candidate| candidate.id != *curve_id);
-                candidate.probes.retain(|probe| {
-                    let gone = matches!(
-                        &probe.target,
-                        TopologyProbeTarget::Boundary(target) if target.curve == *curve_id
-                    );
-                    if gone {
-                        removed_probes.push(probe.id);
-                    }
-                    !gone
-                });
-                (dead, touched, BTreeSet::from([*curve_id]))
+                    .insert(position + offset, piece.clone());
             }
-            RemovalTarget::Spans {
-                curve: curve_id,
-                run,
-            } => {
-                let curve = candidate
-                    .draft
-                    .geometry
-                    .curve(*curve_id)
-                    .ok_or("Curve no longer exists")?
-                    .clone();
-                let cut = CurveCut::plan(&curve, run)?;
-                let dead = run
-                    .iter()
-                    .map(|index| curve.spans[*index].id)
-                    .collect::<BTreeSet<_>>();
-                let touched = curve
-                    .nodes
-                    .iter()
-                    .filter_map(|node| node.vertex)
-                    .collect::<BTreeSet<_>>();
-                let mut built = Vec::new();
-                let mut rebased = Vec::new();
-                for (index, piece) in cut.pieces.iter().enumerate() {
-                    let id = if index == 0 {
-                        curve.id
-                    } else {
-                        provisional_curve = true;
-                        CurveId(self.next_curve)
-                    };
-                    let spans = piece
-                        .spans
-                        .iter()
-                        .map(|span| CurveSpan {
-                            id: curve.spans[*span].id,
-                            behavior: SpanBehavior::REFLECTING,
-                        })
-                        .collect::<Vec<_>>();
-                    let mut built_piece = TopologyCurve::new(id, piece.spline.clone(), spans)
-                        .map_err(|issue| issue.to_string())?;
-                    for (node, original) in piece.nodes.iter().enumerate() {
-                        built_piece.nodes[node] = curve.nodes[*original];
-                    }
-                    for (position, span) in piece.spans.iter().enumerate() {
-                        let old = curve
-                            .spline
-                            .span_bounds(*span)
-                            .ok_or("Missing curve span")?;
-                        let new = built_piece
-                            .spline
-                            .span_bounds(position)
-                            .ok_or("Missing curve span")?;
-                        rebased.push((curve.spans[*span].id, id, old, new));
-                    }
-                    built.push(built_piece);
+            // Anchors on kept spans follow their span onto its piece, with
+            // the parameter rebased into the piece's own domain.
+            for assignment in &mut candidate.draft.face_assignments {
+                let FaceAnchor::Curve {
+                    curve: anchor_curve,
+                    span,
+                    parameter,
+                    ..
+                } = &mut assignment.anchor
+                else {
+                    continue;
+                };
+                if *anchor_curve != curve.id {
+                    continue;
                 }
-                let position = candidate
-                    .draft
-                    .geometry
-                    .curves
+                let Some((_, piece, old, new)) = rebased
                     .iter()
-                    .position(|candidate| candidate.id == curve.id)
-                    .ok_or("Curve no longer exists")?;
-                candidate.draft.geometry.curves.remove(position);
-                for (offset, piece) in built.iter().enumerate() {
-                    candidate
-                        .draft
-                        .geometry
-                        .curves
-                        .insert(position + offset, piece.clone());
-                }
-                // Anchors on kept spans follow their span onto its piece, with
-                // the parameter rebased into the piece's own domain.
-                for assignment in &mut candidate.draft.face_assignments {
-                    let FaceAnchor::Curve {
-                        curve: anchor_curve,
-                        span,
-                        parameter,
-                        ..
-                    } = &mut assignment.anchor
-                    else {
-                        continue;
-                    };
-                    if *anchor_curve != curve.id {
-                        continue;
-                    }
-                    let Some((_, piece, old, new)) = rebased
-                        .iter()
-                        .find(|(candidate, _, _, _)| candidate == span)
-                    else {
-                        continue;
-                    };
-                    let width = old[1] - old[0];
-                    let fraction = if width.abs() > f64::MIN_POSITIVE {
-                        ((*parameter - old[0]) / width).clamp(0.0, 1.0)
-                    } else {
-                        0.5
-                    };
-                    *anchor_curve = *piece;
-                    *parameter = new[0] + (new[1] - new[0]) * fraction;
-                }
-                removed_probes.extend(remap_cut_boundary_probes(
-                    &mut candidate.probes,
-                    curve.id,
-                    &curve,
-                    &cut,
-                    &built,
-                ));
-                pieces = built.iter().map(|piece| piece.id).collect();
-                (dead, touched, BTreeSet::from([curve.id]))
+                    .find(|(candidate, _, _, _)| candidate == span)
+                else {
+                    continue;
+                };
+                let width = old[1] - old[0];
+                let fraction = if width.abs() > f64::MIN_POSITIVE {
+                    ((*parameter - old[0]) / width).clamp(0.0, 1.0)
+                } else {
+                    0.5
+                };
+                *anchor_curve = *piece;
+                *parameter = new[0] + (new[1] - new[0]) * fraction;
             }
-        };
+            removed_probes.extend(remap_cut_boundary_probes(
+                &mut candidate.probes,
+                curve.id,
+                &curve,
+                &cut,
+                &built,
+            ));
+            pieces = built.iter().map(|piece| piece.id).collect();
+        }
         prune_dangling_junctions(&mut candidate.draft.geometry);
         let mut promoted = promote_freed_curves(&mut candidate.draft.geometry);
         let joined = join_valence_two_ends(&mut candidate, &touched);
@@ -4496,11 +4487,6 @@ struct Merge {
     regions: BTreeSet<RegionId>,
 }
 
-enum RemovalTarget {
-    Curve(CurveId),
-    Spans { curve: CurveId, run: Vec<usize> },
-}
-
 /// A removal worked out to the point where only the survivor choice is missing.
 /// Nothing in it has touched the editor: `candidate` is the geometry after the
 /// cut, pruning, promotion, and welding, compiled into `topology`.
@@ -5669,6 +5655,171 @@ mod tests {
         assert_eq!(edit.span_splits.len(), 2);
         assert_eq!(editor.document.model.draft.regions.len(), 3);
         assert_eq!(editor.compiled_accepted.plan.domains.len(), 3);
+    }
+
+    /// Every span of the named curves, which is what a selection covering them
+    /// whole gives the editor.
+    fn all_spans(editor: &TopologyEditor, curves: &[CurveId]) -> BTreeSet<CurveSpanId> {
+        editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .filter(|curve| curves.contains(&curve.id))
+            .flat_map(|curve| curve.spans.iter().map(|span| span.id))
+            .collect()
+    }
+
+    /// A loop with a separator across it, both deleted in one gesture. Nothing
+    /// the deletion leaves behind is anchored on either curve, so where the
+    /// three faces landed has to be worked out from the faces themselves, and
+    /// all three regions become one question rather than none.
+    #[test]
+    fn a_loop_and_the_separator_across_it_delete_together() {
+        let mut editor = TopologyEditor::default();
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.55),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let (start_point, start) = span_anchor(&editor, loop_id, 0, false);
+        let (end_point, end) = span_anchor(&editor, loop_id, 4, false);
+        let separator = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![start_point, Point2::default(), end_point]).unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: DEFAULT_MATERIAL,
+                },
+                Some(start),
+                Some(end),
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        assert_eq!(editor.document.model.draft.regions.len(), 3);
+
+        let spans = all_spans(&editor, &[loop_id, separator]);
+        let target = editor.removal_target(&spans).unwrap();
+        assert_eq!(target.whole_curves(), 2);
+        let choices = editor.removal_choices(&target).unwrap();
+        assert_eq!(
+            choices.len(),
+            3,
+            "every region meets in one face: {choices:?}"
+        );
+        let history = editor.history_len();
+        editor.remove(&target, Some(BACKGROUND_REGION)).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(editor.document.model.draft.geometry.curves.is_empty());
+        assert_eq!(editor.document.model.draft.regions.len(), 1);
+        assert_eq!(
+            editor.history_len(),
+            (history.0 + 1, history.1),
+            "one gesture, one entry"
+        );
+    }
+
+    /// Two subdomains in two halves of a split domain. Either deleted alone is
+    /// an ordinary two-way question; the two together would merge subdomains in
+    /// two separate places, and there is no single answer to that.
+    #[test]
+    fn a_deletion_that_merges_subdomains_in_two_places_is_refused() {
+        let mut editor = TopologyEditor::default();
+        editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.0, -0.8),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.0, 0.8),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: DEFAULT_MATERIAL,
+                },
+                Some(outer(OuterSide::Bottom, 0.5)),
+                Some(outer(OuterSide::Top, 0.5)),
+            )
+            .unwrap();
+        settle(&mut editor);
+        let mut loops = vec![];
+        for x in [-0.5, 0.5] {
+            loops.push(
+                editor
+                    .create_closed_curve(
+                        PeriodicCubicSpline::rounded(Point2::new(x, 0.0), 0.2),
+                        ClosedCurvePurpose::Subdomain {
+                            material: DEFAULT_MATERIAL,
+                        },
+                    )
+                    .unwrap(),
+            );
+            settle(&mut editor);
+        }
+        assert_eq!(editor.document.model.draft.regions.len(), 4);
+
+        let target = editor.removal_target(&all_spans(&editor, &loops)).unwrap();
+        let before = editor.document.model.clone();
+        let history = editor.history_len();
+        let error = editor.removal_choices(&target).unwrap_err();
+        assert!(error.contains("more than one place"), "{error}");
+        assert!(editor.remove(&target, Some(BACKGROUND_REGION)).is_err());
+        assert_eq!(editor.document.model, before);
+        assert_eq!(editor.history_len(), history);
+        for curve in loops {
+            assert_eq!(editor.curve_removal_choices(curve).unwrap().len(), 2);
+        }
+    }
+
+    /// A selection may take any number of curves whole and cut one more. Two
+    /// curves cut in part are two questions about where the pieces land, and
+    /// the target says so rather than silently dropping one of them.
+    #[test]
+    fn a_removal_target_takes_whole_curves_and_at_most_one_cut() {
+        let mut editor = TopologyEditor::default();
+        let mut loops = vec![];
+        for x in [-0.5, 0.5] {
+            loops.push(
+                editor
+                    .create_closed_curve(
+                        PeriodicCubicSpline::rounded(Point2::new(x, 0.0), 0.2),
+                        ClosedCurvePurpose::Subdomain {
+                            material: DEFAULT_MATERIAL,
+                        },
+                    )
+                    .unwrap(),
+            );
+            settle(&mut editor);
+        }
+        let part = |editor: &TopologyEditor, curve: CurveId| {
+            editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(curve)
+                .unwrap()
+                .spans
+                .iter()
+                .take(2)
+                .map(|span| span.id)
+                .collect::<BTreeSet<_>>()
+        };
+        let mut mixed = all_spans(&editor, &loops[..1]);
+        mixed.extend(part(&editor, loops[1]));
+        let target = editor.removal_target(&mixed).unwrap();
+        assert_eq!(target.whole_curves(), 1);
+
+        let mut both_cut = part(&editor, loops[0]);
+        both_cut.extend(part(&editor, loops[1]));
+        let error = editor.removal_target(&both_cut).unwrap_err();
+        assert!(error.contains("one curve at a time"), "{error}");
     }
 
     /// An anchor on the middle of a span, naming the side whose face is - or is

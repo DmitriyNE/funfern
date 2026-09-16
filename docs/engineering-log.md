@@ -35,10 +35,6 @@ Low priority, correctness rather than anything that shows:
 
 Carried over from the cutover follow-up work, not from the review:
 
-- [ ] A deletion that needs a survivor closes the entry before asking, so a
-  mixed selection lands as two undo steps: the curves that needed no question,
-  then the one that did. Gathering every choice before removing anything would
-  make it one, and needs a picker that can ask more than once.
 - [ ] Retire the pre-cutover `editor` module. It is not dead code reachable only
   from its own 54-test file, as this entry used to say: `topology_persistence`
   imports sixteen shared scalar codecs from `persistence`, which takes its
@@ -146,6 +142,51 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-16 — One Delete is one deletion
+
+The log had this as a history-entry defect: a mixed selection lands as two undo
+steps, the curves that needed no question and then the one that did. Reproducing
+it found something worse. `delete_selection` looped curve by curve and `return`ed
+at the first one needing a survivor, so **everything after it in the selection
+was never deleted and nothing said so**. Two subdomains selected, Delete, answer
+the question: one goes, the other stays, no message. Had the question landed on
+the second curve instead, the first would already be gone in its own entry -
+which is the case the log recorded, and only half the story. The same function
+had a second silent skip: a selection covering one curve whole and part of
+another deleted the whole one and ignored the run.
+
+The rule the user asked for turned out to be the rule already written. Every
+merge a deletion makes is worked out from where the old faces land in the
+recompiled arrangement; one landing face collecting two or more regions is the
+question, two such faces are refused with "This deletion would merge subdomains
+in more than one place". It had simply never been shown more than one curve at a
+time. So no second picker and no gathering of several answers: `RemovalTarget`
+became `TopologyRemovalTarget`, which names any number of curves going whole plus
+at most one cut down to a contiguous run, and `plan_removal` takes them all
+before it prunes, promotes, fuses and compiles. Everything after that point was
+already written against the whole candidate and did not change.
+
+What falls out: the question is asked once, over the whole deletion, so two
+subdomains merging into the background across two deleted curves are offered
+together - three candidates where the old path offered two and then dropped the
+rest of the gesture. Many-to-many is refused before anything is touched. And the
+history entry is single by construction rather than by bracketing, so
+`remove_curve_during_edit` and the `settle_editor` that fed it are gone, along
+with `delete_span_selection`, `TopologyCurveRemoval`, `TopologySpanRemoval` and
+one of the two removal reporters.
+
+Two partly selected curves stay refused - a cut is defined against one contiguous
+run, and two of them are two questions about where the pieces land. The message
+now says what to do about it rather than naming a restriction that no longer
+holds for whole curves.
+
+Checked: fmt, clippy -D warnings, workspace tests, release build. Five tests: the
+two silent skips as gesture-level regressions with the undo entry asserted, a
+loop and the separator across it deleted together so every remaining face is dead
+and the merge has to come from where the faces landed, two subdomains in two
+halves refused together while either alone is an ordinary question, and the
+target's one-cut rule.
 
 ## 2026-09-16 — The accuracy reading was leaving the panel between estimates
 
