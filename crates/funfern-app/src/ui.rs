@@ -7788,6 +7788,35 @@ impl Playground {
     /// renderers already skip what is not finite. The second return is how much
     /// of the window the newest frame holds, for the readout to report while it
     /// is still filling.
+    /// The longest trailing window the trace can ever cover.
+    ///
+    /// The ring holds a fixed number of frames, so how much time it spans
+    /// depends on the interval between them - and that is not the preset's
+    /// nominal rate. The recorder strides the solver's own steps,
+    /// `round(1 / (rate * dt))` of them, so a coarse enough time step rounds
+    /// the stride down and oversamples: at the default mesh a 120 Hz preset
+    /// records every step, about 149 Hz, and 512 frames reach back 3.4 seconds
+    /// where the nominal rate promises 4.3.
+    ///
+    /// The interval is measured as the smallest gap in the trace. A dropped
+    /// readback inflates an average and would put the limit back out of reach,
+    /// while the smallest gap is still the true stride; if the time step
+    /// changed inside the ring it takes the shorter of the two, which errs
+    /// short. One interval is held back so the newest frame's window begins at
+    /// or before a frame the ring holds rather than exactly on one.
+    fn curve_mean_window_limit(frames: &[CurveProbeRecord], nominal: f64) -> f64 {
+        let interval = frames
+            .windows(2)
+            .map(|pair| pair[1].time - pair[0].time)
+            .filter(|gap| gap.is_finite() && *gap > 0.0)
+            .fold(f64::INFINITY, f64::min);
+        let interval = if interval.is_finite() {
+            interval
+        } else {
+            nominal
+        };
+        interval * (CURVE_TRACE_FRAMES - 2) as f64
+    }
     fn curve_probe_running_mean(
         frames: &[CurveProbeRecord],
         window: f64,
@@ -8390,7 +8419,10 @@ impl Playground {
                 _ => None,
             }
             .map_or(history, |preset| {
-                history.min(CURVE_TRACE_FRAMES as f64 / preset.sample_rate())
+                history.min(Self::curve_mean_window_limit(
+                    &curve_frames,
+                    1.0 / preset.sample_rate(),
+                ))
             })
             .max(0.2);
             let curve_times = curve_frames
@@ -8506,7 +8538,8 @@ impl Playground {
                                     .on_hover_text(
                                         "Seconds the averaged flux row looks back over. \
                                          Cover several periods of the flux, which swings at \
-                                         twice the driven frequency.",
+                                         twice the driven frequency. It stops at what the \
+                                         recorded trace can reach back over.",
                                     );
                                 });
                         } else if is_area {
@@ -12079,6 +12112,57 @@ mod probe_interaction_tests {
             LineProbeRepresentation::Integral
         ));
         assert_eq!(view.line_plots.iter().filter(|plot| **plot).count(), 5);
+    }
+
+    /// The window slider stopped at the preset's nominal rate, which the
+    /// recorder does not sample at: it strides the solver's steps, so a coarse
+    /// enough step rounds the stride down and the ring reaches back a quarter
+    /// less than the slider offered. The top of the slider filled nothing,
+    /// however long the run went on.
+    #[test]
+    fn the_mean_window_stops_at_what_the_trace_can_reach() {
+        // The default mesh's time step, which rounds a 120 Hz preset to every
+        // step: 149 Hz recorded, not 120.
+        let interval = 6.692_306e-3;
+        let nominal = 1.0 / 120.0;
+        let frames = flux_trace(CURVE_TRACE_FRAMES, interval, 4, |time, _| time as f32);
+
+        let old = CURVE_TRACE_FRAMES as f64 * nominal;
+        let (_, old_filled) = Playground::curve_probe_running_mean(&frames, old);
+        assert!(
+            old_filled < 1.0,
+            "the nominal ceiling used to fill: {old_filled}"
+        );
+
+        let limit = Playground::curve_mean_window_limit(&frames, nominal);
+        assert!(limit < old, "{limit} is not below the nominal {old}");
+        let (means, filled) = Playground::curve_probe_running_mean(&frames, limit);
+        assert_eq!(filled, 1.0, "the top of the slider never filled");
+        assert!(
+            means
+                .last()
+                .unwrap()
+                .normal_flux
+                .iter()
+                .all(|v| v.is_finite()),
+            "the newest frame is still waiting at the limit"
+        );
+
+        // A dropped readback leaves a gap. The smallest interval is still the
+        // stride, so the limit stays reachable rather than following the gap up.
+        let mut gapped = frames.clone();
+        gapped.remove(CURVE_TRACE_FRAMES / 2);
+        let gapped_limit = Playground::curve_mean_window_limit(&gapped, nominal);
+        assert!((gapped_limit - limit).abs() < 1.0e-9);
+        let (_, gapped_filled) = Playground::curve_probe_running_mean(&gapped, gapped_limit);
+        assert_eq!(gapped_filled, 1.0);
+
+        // Nothing recorded yet: the nominal rate is all there is to go on, and
+        // the slider still has a range.
+        assert_eq!(
+            Playground::curve_mean_window_limit(&[], nominal),
+            nominal * (CURVE_TRACE_FRAMES - 2) as f64
+        );
     }
 
     /// Frames of `points` samples at `dt`, each value from the frame's time and

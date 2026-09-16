@@ -150,6 +150,42 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The mean window stops where the trace does
+
+The averaged flux row's window slider went further than any run could fill. Its
+ceiling was the frame ring divided by the preset's nominal sample rate, and the
+recorder does not sample at that rate: it strides the solver's own steps,
+`round(1 / (rate * dt))` of them, so a coarse enough time step rounds the stride
+down and oversamples.
+
+Measured on a default scene, edge length 0.08, `dt` 6.69 ms:
+
+| preset | stride | interval | 512 frames reach | slider offered |
+| --- | --- | --- | --- | --- |
+| Low 30 Hz | 5 | 33.5 ms | 17.10 s | 17.07 s |
+| Medium 60 Hz | 2 | 13.4 ms | 6.84 s | 8.53 s |
+| High 120 Hz | 1 | 6.69 ms | 3.42 s | 4.27 s |
+
+At High the preset records every step - about 149 Hz, not 120 - and the top
+quarter of the slider could never fill. Low lands just right by coincidence,
+which is why it did not look systematic. The coverage rule adds one frame to
+that: the newest frame needs a frame at or before its window start, so a window
+equal to the whole span is marginal on float equality alone.
+
+The ceiling now comes from the trace. The interval is the smallest gap in it -
+a dropped readback inflates an average and would put the limit back out of
+reach, while the smallest gap is still the stride, and a time step that changed
+inside the ring gives the shorter of the two, which errs short - and the limit
+is that interval over all but two of the ring's frames. Before anything is
+recorded the nominal rate stands in, so the slider has a range from the start;
+the interval is constant, so the ceiling settles on the second frame.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. One new test over the limit and what it
+fills, including the dropped-frame case, checked to fail against the nominal
+ceiling.
+
 ## 2026-09-16 — A condition keeps the name it was chosen under
 
 The boundary picker listed "Driven Dirichlet" and then showed "Prescribed
