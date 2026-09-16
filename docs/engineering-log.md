@@ -150,6 +150,35 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — Shift reaches probe placement too
+
+The other half of the same omission. A probe already snapped to the grid when it
+was dragged, with a test to say so, but placing one read no modifier at all, so
+a probe could be dropped anywhere and would then jump onto the grid at the first
+nudge.
+
+Placement now follows the conventions dragging already set: a position goes onto
+the grid, and a disk's radius is itself a multiple of it rather than the distance
+to a snapped rim, which is what dragging a disk's edge handle does and what keeps
+the radius a round number. A region is picked by the face under the pointer, so
+the grid has nothing to say about it. The placement preview follows, ending where
+the click will land.
+
+The click body came out into `probe_placement_click` so it can be driven from a
+test. `snap_point` and `snap_scalar` now share one `SNAP_STEP` rather than
+declaring the same constant twice.
+
+Caught while writing the test: inserting it directly above an existing one put
+the new function between that test's `#[test]` and its `fn`, which silently
+disarmed `shift_snaps_the_probe_rather_than_the_cursor` and double-registered
+the new one. The listed test count is what showed it. Both are attributed
+properly now.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. One new test over all four placements,
+checked to fail without the snap.
+
 ## 2026-09-16 — The mean window stops where the trace does
 
 The averaged flux row's window slider went further than any run could fill. Its

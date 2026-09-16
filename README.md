@@ -293,7 +293,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   frequency, and phase are editable in Simulation. Point-source settings are included
   in scene files, shared links, examples, Undo/Redo, and autosave.
 - **Point probes:** add persistent point receivers from Probes, then click repeatedly
-  in the viewport. Markers can be selected, dragged, renamed, colored, disabled,
+  in the viewport, holding Shift to place each marker on the grid. Markers can be selected, dragged, renamed, colored, disabled,
   cleared, or deleted; double-clicking one opens its floating readout. Each readout
   contains primary field, transverse-field magnitude, Poynting magnitude, and local
   energy-density traces for EM scenes. Mechanical scenes expose displacement,
@@ -306,7 +306,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   which a remesh carries across, so adaptation leaves the recording continuous
   rather than stepping its time axis forward. Reset restarts that clock, and the
   traces with it.
-- **Line probes:** place an independent straight sampling segment with two clicks.
+- **Line probes:** place an independent straight sampling segment with two clicks,
+  which Shift snaps to the grid.
   Drag either endpoint to reshape it or drag its body as one rigid object. The arrow
   shows the positive left normal; Flip direction reverses both the sampling order
   and flux sign. Low, Medium, and High presets record 32/64/128 spatial samples at
@@ -331,7 +332,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   trace for material interfaces, walls, and baffles. Positive normal flux always
   points out of that trace; Flip direction reverses only the arclength axis. Whole
   closed curves use periodic sampling and integration without duplicating the seam.
-- **Area probes:** choose Disk for a two-click center/radius receiver, or Subdomain
+- **Area probes:** choose Disk for a two-click center/radius receiver - Shift puts
+  the center on the grid and the radius on a multiple of it - or Subdomain
   and click inside a material region. Drag a disk body to move it and its edge
   handle to resize it. In EM scenes the GPU recorder reports mean and RMS primary
   field, RMS transverse-field magnitude, mean energy density, total energy, and

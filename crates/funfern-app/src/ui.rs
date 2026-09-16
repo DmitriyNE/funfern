@@ -53,6 +53,8 @@ const FRAME_HISTORY: usize = 120;
 const EVENT_LOG_ENTRIES: usize = 200;
 /// Seconds of progress the steps-per-second readout averages over.
 const STEP_RATE_WINDOW: f64 = 0.5;
+/// The grid Shift snaps positions and radii to, wherever either is placed.
+const SNAP_STEP: f64 = 0.05;
 /// Frames one line or boundary probe keeps. With the sampling presets' rates
 /// this is 17, 8.5, or 4.3 seconds of path history, and it bounds how far back
 /// the averaged flux row can look.
@@ -2221,11 +2223,77 @@ impl Playground {
             .map(|(_, point)| *point)
             .or_else(|| self.selection_pivot(spans))
     }
+    /// One click while a probe is being placed. `raw` is where the pointer is;
+    /// `snap` puts it on the grid Shift snaps everything else to, with the same
+    /// conventions a probe already follows when it is dragged - a position goes
+    /// onto the grid, a radius is itself a multiple of it.
+    fn probe_placement_click(&mut self, raw: Point2, snap: bool) {
+        let Some(mode) = self.probe_mode else {
+            return;
+        };
+        let point = if snap { Self::snap_point(raw) } else { raw };
+        let target = match mode {
+            ProbePlacement::Point => Some(TopologyProbeTarget::Point(point)),
+            ProbePlacement::Segment { start: None } => {
+                self.probe_mode = Some(ProbePlacement::Segment { start: Some(point) });
+                self.notify("Choose the line end");
+                None
+            }
+            ProbePlacement::Segment { start: Some(start) } => {
+                self.probe_mode = Some(ProbePlacement::Segment { start: None });
+                Some(TopologyProbeTarget::Segment {
+                    start,
+                    end: point,
+                    preset: ProbeSamplingPreset::Medium,
+                })
+            }
+            ProbePlacement::Disk { center: None } => {
+                self.probe_mode = Some(ProbePlacement::Disk {
+                    center: Some(point),
+                });
+                self.notify("Choose the disk radius");
+                None
+            }
+            ProbePlacement::Disk {
+                center: Some(center),
+            } => {
+                self.probe_mode = Some(ProbePlacement::Disk { center: None });
+                Some(TopologyProbeTarget::AreaDisk {
+                    center,
+                    radius: Self::placed_disk_radius(center, raw, snap),
+                })
+            }
+            // A region is picked by the face under the pointer, which
+            // the grid has nothing to say about.
+            ProbePlacement::Region => self.runtime.active().and_then(|active| {
+                let face = active.bundle.snapshot.face_at(raw)?;
+                active
+                    .bundle
+                    .plan
+                    .domains
+                    .iter()
+                    .find(|domain| domain.face == face)
+                    .map(|domain| TopologyProbeTarget::AreaRegion(domain.region))
+            }),
+        };
+        if let Some(target) = target {
+            match self.editor.create_probe(
+                format!("Probe {}", self.editor.document.model.probes.len() + 1),
+                [91, 220, 194],
+                target,
+            ) {
+                Ok(id) => {
+                    self.probe_windows.insert(id);
+                    self.notify("Probe added");
+                }
+                Err(error) => self.notify(error),
+            }
+        }
+    }
     fn snap_point(point: Point2) -> Point2 {
-        const STEP: f64 = 0.05;
         Point2::new(
-            (point.x / STEP).round() * STEP,
-            (point.y / STEP).round() * STEP,
+            (point.x / SNAP_STEP).round() * SNAP_STEP,
+            (point.y / SNAP_STEP).round() * SNAP_STEP,
         )
     }
     fn scale_drag_distance(axis: GizmoScaleAxis, relative: Point2) -> f64 {
@@ -4451,16 +4519,23 @@ impl Playground {
         }
         if let Some(pointer) = painter.ctx().pointer_hover_pos() {
             let current = self.world(pointer, r);
+            // Where the click will land, not where the cursor is.
+            let snap = painter.ctx().input(|input| input.modifiers.shift);
             match self.probe_mode {
                 Some(ProbePlacement::Segment { start: Some(start) }) => {
-                    painter.line_segment([self.screen(start, r), pointer], Stroke::new(1.5, TEAL));
+                    let end = if snap {
+                        self.screen(Self::snap_point(current), r)
+                    } else {
+                        pointer
+                    };
+                    painter.line_segment([self.screen(start, r), end], Stroke::new(1.5, TEAL));
                 }
                 Some(ProbePlacement::Disk {
                     center: Some(center),
                 }) => {
                     painter.circle_stroke(
                         self.screen(center, r),
-                        ((current - center).norm() * self.scale) as f32,
+                        (Self::placed_disk_radius(center, current, snap) * self.scale) as f32,
                         Stroke::new(1.5, TEAL),
                     );
                 }
@@ -5119,66 +5194,12 @@ impl Playground {
             }
             return;
         }
-        if let Some(mode) = self.probe_mode
-            && response.clicked()
-        {
+        if self.probe_mode.is_some() && response.clicked() {
             if let Some(pos) = pointer {
-                let point = self.world(pos, r);
-                let target = match mode {
-                    ProbePlacement::Point => Some(TopologyProbeTarget::Point(point)),
-                    ProbePlacement::Segment { start: None } => {
-                        self.probe_mode = Some(ProbePlacement::Segment { start: Some(point) });
-                        self.notify("Choose the line end");
-                        None
-                    }
-                    ProbePlacement::Segment { start: Some(start) } => {
-                        self.probe_mode = Some(ProbePlacement::Segment { start: None });
-                        Some(TopologyProbeTarget::Segment {
-                            start,
-                            end: point,
-                            preset: ProbeSamplingPreset::Medium,
-                        })
-                    }
-                    ProbePlacement::Disk { center: None } => {
-                        self.probe_mode = Some(ProbePlacement::Disk {
-                            center: Some(point),
-                        });
-                        self.notify("Choose the disk radius");
-                        None
-                    }
-                    ProbePlacement::Disk {
-                        center: Some(center),
-                    } => {
-                        self.probe_mode = Some(ProbePlacement::Disk { center: None });
-                        Some(TopologyProbeTarget::AreaDisk {
-                            center,
-                            radius: (point - center).norm(),
-                        })
-                    }
-                    ProbePlacement::Region => self.runtime.active().and_then(|active| {
-                        let face = active.bundle.snapshot.face_at(point)?;
-                        active
-                            .bundle
-                            .plan
-                            .domains
-                            .iter()
-                            .find(|domain| domain.face == face)
-                            .map(|domain| TopologyProbeTarget::AreaRegion(domain.region))
-                    }),
-                };
-                if let Some(target) = target {
-                    match self.editor.create_probe(
-                        format!("Probe {}", self.editor.document.model.probes.len() + 1),
-                        [91, 220, 194],
-                        target,
-                    ) {
-                        Ok(id) => {
-                            self.probe_windows.insert(id);
-                            self.notify("Probe added");
-                        }
-                        Err(error) => self.notify(error),
-                    }
-                }
+                self.probe_placement_click(
+                    self.world(pos, r),
+                    ui.input(|input| input.modifiers.shift),
+                );
             }
             return;
         }
@@ -7447,9 +7468,21 @@ impl Playground {
     }
     /// Applies a probe drag to the target captured when the gesture started, so
     /// repeated updates stay exact instead of accumulating rounding.
+    /// The radius a second placement click asks for. Snapping puts the radius
+    /// itself on the grid rather than the point it was measured to, which is
+    /// what dragging a disk's rim already does - snapping the rim point would
+    /// leave a radius that is no multiple of anything.
+    fn placed_disk_radius(center: Point2, point: Point2, snap: bool) -> f64 {
+        let radius = (point - center).norm();
+        if snap {
+            // A click inside the first grid step would round the disk away.
+            Self::snap_scalar(radius).max(SNAP_STEP)
+        } else {
+            radius
+        }
+    }
     fn snap_scalar(value: f64) -> f64 {
-        const STEP: f64 = 0.05;
-        (value / STEP).round() * STEP
+        (value / SNAP_STEP).round() * SNAP_STEP
     }
 
     fn drag_probe(
@@ -11454,6 +11487,80 @@ mod probe_interaction_tests {
             subdomain_color(&scene, RegionId(99), 1.0),
             Color32::TRANSPARENT
         );
+    }
+
+    /// Placing a probe reads the same modifier dragging one already does, with
+    /// the same conventions: a position lands on the grid, and a disk's radius
+    /// is itself a multiple of it rather than the distance to a snapped rim.
+    #[test]
+    fn shift_places_a_probe_on_the_grid() {
+        let on_grid = |value: f64| {
+            let steps = value / SNAP_STEP;
+            (steps - steps.round()).abs() < 1.0e-9
+        };
+        let at = |point: Point2, x: f64, y: f64| {
+            assert!(
+                on_grid(point.x) && on_grid(point.y),
+                "{point:?} is off the grid"
+            );
+            assert!(
+                (point.x - x).abs() < 1.0e-9 && (point.y - y).abs() < 1.0e-9,
+                "{point:?} is not the nearest node to ({x}, {y})"
+            );
+        };
+        let mut state = Playground {
+            probe_mode: Some(ProbePlacement::Point),
+            ..Playground::default()
+        };
+        state.probe_placement_click(Point2::new(0.117, -0.233), true);
+        let TopologyProbeTarget::Point(placed) =
+            state.editor.document.model.probes.last().unwrap().target
+        else {
+            panic!("a point probe")
+        };
+        at(placed, 0.10, -0.25);
+
+        state.probe_mode = Some(ProbePlacement::Segment { start: None });
+        state.probe_placement_click(Point2::new(-0.312, 0.081), true);
+        state.probe_placement_click(Point2::new(0.446, -0.377), true);
+        let TopologyProbeTarget::Segment { start, end, .. } = state
+            .editor
+            .document
+            .model
+            .probes
+            .last()
+            .unwrap()
+            .target
+            .clone()
+        else {
+            panic!("a line probe")
+        };
+        at(start, -0.30, 0.10);
+        at(end, 0.45, -0.40);
+
+        // The rim click lands at a distance of 0.3111…, which is no multiple of
+        // the grid; snapping the point rather than the radius would keep it.
+        state.probe_mode = Some(ProbePlacement::Disk { center: None });
+        state.probe_placement_click(Point2::new(0.019, -0.022), true);
+        state.probe_placement_click(Point2::new(0.244, 0.193), true);
+        let TopologyProbeTarget::AreaDisk { center, radius } =
+            state.editor.document.model.probes.last().unwrap().target
+        else {
+            panic!("a disk probe")
+        };
+        at(center, 0.0, 0.0);
+        assert!(on_grid(radius), "radius {radius} is off the grid");
+        assert!(radius >= SNAP_STEP);
+
+        // Without the modifier nothing moves.
+        state.probe_mode = Some(ProbePlacement::Point);
+        state.probe_placement_click(Point2::new(0.117, -0.233), false);
+        let TopologyProbeTarget::Point(loose) =
+            state.editor.document.model.probes.last().unwrap().target
+        else {
+            panic!("a point probe")
+        };
+        assert_eq!(loose, Point2::new(0.117, -0.233));
     }
 
     #[test]
