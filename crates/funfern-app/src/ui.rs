@@ -39,7 +39,7 @@ use funfern_app::topology_viewport::{
 use funfern_core::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, Sender},
@@ -801,7 +801,7 @@ pub struct Playground {
     recording_dropped_frames: u64,
     recording_last_requested_slot: Option<u64>,
     #[cfg(not(target_arch = "wasm32"))]
-    recording_readback_in_flight: Arc<AtomicBool>,
+    recording_readback_in_flight: Arc<AtomicUsize>,
     startup_done: bool,
     autosave_observed: TopologyDocument,
     autosave_due: Option<Instant>,
@@ -977,7 +977,7 @@ impl Default for Playground {
             recording_dropped_frames: 0,
             recording_last_requested_slot: None,
             #[cfg(not(target_arch = "wasm32"))]
-            recording_readback_in_flight: Arc::new(AtomicBool::new(false)),
+            recording_readback_in_flight: Arc::new(AtomicUsize::new(0)),
             startup_done: false,
             autosave_observed: document,
             autosave_due: None,
@@ -1264,7 +1264,7 @@ impl Playground {
                         self.recording_last_requested_slot = None;
                         #[cfg(not(target_arch = "wasm32"))]
                         {
-                            self.recording_readback_in_flight = Arc::new(AtomicBool::new(false));
+                            self.recording_readback_in_flight = Arc::new(AtomicUsize::new(0));
                         }
                         self.recording_state = RecordingState::Recording;
                     }
@@ -1276,7 +1276,7 @@ impl Playground {
                     self.recording_last_requested_slot = None;
                     #[cfg(not(target_arch = "wasm32"))]
                     self.recording_readback_in_flight
-                        .store(false, Ordering::Release);
+                        .store(0, Ordering::Release);
                     self.notify(message);
                 }
                 RecordingEvent::Cancelled => self.recording_state = RecordingState::Idle,
@@ -1288,7 +1288,7 @@ impl Playground {
                     self.recording_last_requested_slot = None;
                     #[cfg(not(target_arch = "wasm32"))]
                     self.recording_readback_in_flight
-                        .store(false, Ordering::Release);
+                        .store(0, Ordering::Release);
                     self.notify(error);
                 }
             }
@@ -11298,13 +11298,17 @@ pub fn frame(
     {
         let slot = (started.elapsed().as_secs_f64() * recording::VIDEO_FPS as f64).floor() as u64;
         if state.recording_last_requested_slot != Some(slot)
-            && state
-                .recording_readback_in_flight
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
+            && state.recording_readback_in_flight.load(Ordering::Acquire)
+                < recording::MAX_READBACKS_IN_FLIGHT
             && let Some(target) = state.video_recorder.native_frame_target()
         {
             state.recording_last_requested_slot = Some(slot);
+            // The schedule is the only producer, so the load above and this
+            // increment cannot race each other; the capture observers only
+            // ever decrement.
+            state
+                .recording_readback_in_flight
+                .fetch_add(1, Ordering::AcqRel);
             let in_flight = state.recording_readback_in_flight.clone();
             commands.spawn(Screenshot::primary_window()).observe(
                 move |captured: On<ScreenshotCaptured>| {
@@ -11314,7 +11318,7 @@ pub fn frame(
                         logical_viewport,
                         slot,
                     );
-                    in_flight.store(false, Ordering::Release);
+                    in_flight.fetch_sub(1, Ordering::AcqRel);
                 },
             );
         }

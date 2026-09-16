@@ -404,12 +404,15 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   up, so the catalog can be clicked through. A thumbnail draws the scene's own
   faces in their material colours, its walls in their boundary-condition
   colours, and, for an example whose view preset names a material property, that
-  property across the face it varies over. Export can write a geometry SVG, a PNG snapshot, or a silent 30 FPS
+  property across the face it varies over. Export can write a geometry SVG, a PNG snapshot, or a silent 60 FPS
   recording of the current viewport at its physical pixel resolution. Captures
   follow the active View settings while omitting panels, floating readouts,
   selection emphasis, gizmos, marquees, and active-tool prompts. Recording leaves
   playback and viewport navigation live; its status-strip control shows elapsed
-  time and stops/finalizes the file. Documents autosave after edits and restore on
+  time and stops/finalizes the file. The file is paced by wall clock rather than
+  by the app's frame rate, so it stays the right length on a machine that cannot
+  feed every frame; a slot no frame arrived for holds the one before it, and the
+  status strip counts frames the encoder could not keep up with. Documents autosave after edits and restore on
   startup from browser local storage or the native per-user recovery file. Copy
   scene link embeds compressed, validated scene data in a `#scene=v1.…` URL
   fragment; while that fragment is active, later autosaves keep it current.

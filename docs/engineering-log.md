@@ -7,6 +7,17 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
+Found while verifying the overlay exposure, not yet diagnosed:
+
+- [ ] Loading a mechanical document over an electromagnetic one leaves the field
+  with a large uniform offset that a fresh load does not. Reproduced by opening
+  the Luneburg lens (EM, TE) and then the Phased array: the nodal magnitudes
+  collapse from a 26-fold spread onto a 4-fold one about 14 times above the floor
+  a fresh load gives, and every node reads mid-bright. Opening the Phased array
+  over either mechanical example, or on its own, is clean at the same simulated
+  times, so it is the physics change and not the elapsed time. Pre-existing; the
+  automatic exposure only made it legible.
+
 Follow-ups from the welding work:
 
 - [ ] `detach_endpoint` still leaves a two-arm vertex when the other two arms are
@@ -57,10 +68,9 @@ Longer-standing work:
   An outer wall is one atom per side today, so moving a curve's attachment along
   a wall rebuilds the whole wall band, and pieces longer than the target are
   what makes the two sides of a separated span subdivide independently.
-- [ ] Raise viewport video capture from the initial 30 FPS implementation to 60 FPS.
-  Measure browser encoding and native GPU-readback pressure first, retain bounded
-  native queues and wall-clock pacing, and report dropped frames rather than slowing
-  the simulation when capture cannot sustain the requested rate.
+- [x] Raise viewport video capture from the initial 30 FPS implementation to 60 FPS
+  (2026-09-16). Measured first: the rate was never the limit, the single readback
+  in flight was. Browser encoding is still unmeasured and needs a real browser.
 - [ ] Replace the vector overlay's run-peak exposure heuristic with a robust
   automatic scale that can recover after a legitimate transient spike such as
   **Place pulse**, while still refusing to magnify late numerical noise. Avoid
@@ -121,6 +131,42 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-16 — Capture was never limited by the rate it asked for
+
+The TODO said to measure before raising 30 FPS to 60, and the measurement is the
+whole story. Recording the Obstacle array for ten seconds on an M1 Max at 60,
+with nothing else changed, wrote 596 slots of which only 329 carried a new frame.
+The rest were the previous frame held. At 30 it was 282 of 297. So asking for 60
+bought 33 distinct frames a second against 28 — twice the file for almost nothing
+new.
+
+The limit was `recording_readback_in_flight`, a single `AtomicBool` that let one
+`Screenshot::primary_window()` be outstanding at a time. A readback's round trip
+is about 35 ms while the app renders a frame in 8 ms, so one in flight caps
+capture near 28 a second whatever rate the slots are cut at. Three in flight
+covers 565 to 577 of ~596 slots, and the app's frame time does not move: median
+8.3 ms idle, 8.3 ms capturing, at both depths. Depth 2 gets most of it and 4 a
+little more; 3 is where the curve flattens.
+
+Pipelining costs ordering. Readbacks do finish out of order — one in six hundred
+over several runs, always adjacent slots — and the old arithmetic would take
+`previous_slot` backwards and then over-insert held frames against it, drifting
+the file a frame per inversion. The written slot only moves forward now:
+`slot_action` skips a frame that arrives behind one already written, because the
+slot it belonged to was filled from the frame before it and writing it late would
+push everything after it late too. That skip is deliberately not counted as a
+dropped frame — no time is lost and nothing about the machine's throughput is in
+question, and the dropped count has to stay a signal that capture cannot keep up.
+
+The cap on a frozen run was `min(150)`, a frame count that quietly meant five
+seconds at 30 and would have meant two and a half at 60. It is `held_frames(fps)`
+now, off a `MAX_HELD_FRAME` duration.
+
+Browser capture is untouched and unmeasured: its `captureStream(fps)` cap rises
+to 60 with the constant and the `requestAnimationFrame` draw loop already runs at
+display rate, but what `MediaRecorder` does with twice the frames on a real
+browser needs a real browser.
 
 ## 2026-09-16 — The example gallery comes back, and a new scene has somewhere to start
 

@@ -4,8 +4,26 @@ use std::sync::{
     Mutex,
     mpsc::{self, Receiver, Sender},
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
-pub(crate) const VIDEO_FPS: u32 = 30;
+pub(crate) const VIDEO_FPS: u32 = 60;
+
+/// How many window readbacks may be outstanding at once while recording.
+///
+/// A readback's round trip is far longer than a rendered frame — measured at
+/// about 35 ms against 8 ms of frame time on an M1 Max — so gating on a single
+/// one in flight caps capture at roughly 28 distinct frames a second whatever
+/// rate is asked for. Three in flight covers 57 of every 60 slots on the same
+/// machine with no measurable change to frame time; the slots that still miss
+/// are filled from the previous frame, so the file stays wall-clock true.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const MAX_READBACKS_IN_FLIGHT: usize = 3;
+
+/// The longest run of missed slots the encoder fills from the previous frame,
+/// as a duration rather than a frame count so it means the same at any rate.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_HELD_FRAME: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub(crate) struct RecordingSpec {
@@ -227,7 +245,9 @@ mod backend {
                 .prepared
                 .take()
                 .ok_or_else(|| "Recording destination is not ready".to_owned())?;
-            let (frame_sender, frame_receiver) = mpsc::sync_channel(2);
+            // One slot per readback that can be in flight, plus room for the
+            // frame the encoder is busy converting.
+            let (frame_sender, frame_receiver) = mpsc::sync_channel(MAX_READBACKS_IN_FLIGHT + 2);
             let (stop_sender, stop_receiver) = mpsc::channel();
             let events = self.events.clone();
             thread::spawn(move || {
@@ -299,6 +319,38 @@ mod backend {
     fn has_encoder(list: &str, name: &str) -> bool {
         list.lines()
             .any(|line| line.split_whitespace().nth(1) == Some(name))
+    }
+
+    /// How many slots the encoder will fill from the previous frame before it
+    /// gives up on a stall, at `fps`. Derived from [`MAX_HELD_FRAME`] so the
+    /// limit means the same length of frozen video at any rate.
+    fn held_frames(fps: u32) -> u64 {
+        (MAX_HELD_FRAME.as_secs() * u64::from(fps.max(1))).max(1)
+    }
+
+    enum SlotAction {
+        /// The frame belongs behind one already written. Its slot was filled
+        /// from the frame before it, so writing it now would push every later
+        /// frame one slot late — and no time is lost by leaving it out, which
+        /// is why this is not counted as a dropped frame.
+        Skip,
+        Write {
+            /// Slots missed since the last write, to fill from the held frame.
+            duplicates: u64,
+        },
+    }
+
+    /// Several readbacks are in flight at once and they do not always finish in
+    /// the order they were asked for, so the written slot only ever moves
+    /// forward.
+    fn slot_action(written: Option<u64>, slot: u64, held: u64) -> SlotAction {
+        match written {
+            Some(written) if slot <= written => SlotAction::Skip,
+            Some(written) => SlotAction::Write {
+                duplicates: (slot - written - 1).min(held),
+            },
+            None => SlotAction::Write { duplicates: 0 },
+        }
     }
 
     fn encode_video(
@@ -379,13 +431,18 @@ mod backend {
         )));
 
         let mut previous: Option<Vec<u8>> = None;
-        let mut previous_slot = 0_u64;
+        let mut written: Option<u64> = None;
+        let held = held_frames(spec.fps);
         let result = 'encoding: loop {
             if stop.try_recv().is_ok() {
                 break Ok(());
             }
             match frames.recv_timeout(Duration::from_millis(20)) {
                 Ok(frame) => {
+                    let SlotAction::Write { duplicates } = slot_action(written, frame.slot, held)
+                    else {
+                        continue;
+                    };
                     let pixels = match crate::capture::viewport_rgba_frame(
                         frame.image,
                         frame.logical_canvas,
@@ -397,8 +454,7 @@ mod backend {
                         Err(error) => break Err(error),
                     };
                     if let Some(previous) = &previous {
-                        let missing = frame.slot.saturating_sub(previous_slot + 1).min(150);
-                        for _ in 0..missing {
+                        for _ in 0..duplicates {
                             if let Err(error) = stdin.write_all(previous) {
                                 break 'encoding Err(format!(
                                     "Could not write video frame: {error}"
@@ -410,7 +466,7 @@ mod backend {
                         break Err(format!("Could not write video frame: {error}"));
                     }
                     previous = Some(pixels);
-                    previous_slot = frame.slot;
+                    written = Some(frame.slot);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break Ok(()),
@@ -445,6 +501,45 @@ mod backend {
         use super::*;
         use image::{DynamicImage, Rgba, RgbaImage};
 
+        /// The cap on a frozen run is a duration, so it has to hold the same
+        /// length of video at any rate rather than the same frame count.
+        #[test]
+        fn a_held_run_is_the_same_length_of_video_at_any_rate() {
+            assert_eq!(held_frames(30), 150);
+            assert_eq!(held_frames(60), 300);
+            // A nonsense rate is read as one frame a second, not as none.
+            assert_eq!(held_frames(0), 5);
+        }
+
+        /// Readbacks finish out of order often enough to see in a ten-second
+        /// recording, and writing a late one would push every frame after it
+        /// one slot behind wall clock.
+        #[test]
+        fn a_frame_behind_the_written_slot_is_left_out() {
+            assert!(matches!(slot_action(Some(7), 6, 300), SlotAction::Skip));
+            assert!(matches!(slot_action(Some(7), 7, 300), SlotAction::Skip));
+            assert!(matches!(
+                slot_action(Some(7), 8, 300),
+                SlotAction::Write { duplicates: 0 }
+            ));
+        }
+
+        #[test]
+        fn missed_slots_are_filled_from_the_held_frame_and_capped() {
+            assert!(matches!(
+                slot_action(None, 5, 300),
+                SlotAction::Write { duplicates: 0 }
+            ));
+            assert!(matches!(
+                slot_action(Some(4), 9, 300),
+                SlotAction::Write { duplicates: 4 }
+            ));
+            assert!(matches!(
+                slot_action(Some(0), 10_000, 300),
+                SlotAction::Write { duplicates: 300 }
+            ));
+        }
+
         #[test]
         fn encoder_detection_matches_whole_names() {
             let encoders = " V....D libx264rgb RGB only\n V....D libvpx-vp9 VP9\n";
@@ -468,14 +563,16 @@ mod backend {
                 path: path.clone(),
                 encoder,
             };
-            let (frames_tx, frames_rx) = mpsc::sync_channel(2);
+            let (frames_tx, frames_rx) = mpsc::sync_channel(MAX_READBACKS_IN_FLIGHT + 2);
             let (stop_tx, stop_rx) = mpsc::channel();
             let (events_tx, events_rx) = mpsc::channel();
             let rect = Rect::from_min_max((0.0, 0.0).into(), (16.0, 8.0).into());
-            for (slot, color) in [[20, 80, 140, 255], [140, 80, 20, 255]]
-                .into_iter()
-                .enumerate()
-            {
+            // Slot 1 arrives after slot 2, as a pipelined readback can.
+            for (slot, color) in [
+                (0_u64, [20, 80, 140, 255]),
+                (2, [140, 80, 20, 255]),
+                (1, [80, 140, 20, 255]),
+            ] {
                 let pixels = RgbaImage::from_pixel(16, 8, Rgba(color));
                 let image =
                     Image::from_dynamic(DynamicImage::ImageRgba8(pixels), true, Default::default());
@@ -484,7 +581,7 @@ mod backend {
                         image,
                         logical_canvas: rect,
                         logical_viewport: rect,
-                        slot: slot as u64,
+                        slot,
                     })
                     .unwrap();
             }
