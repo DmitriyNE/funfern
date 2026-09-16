@@ -158,7 +158,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   A baffle span instead can use one conservative thin-gap law coupling both traces;
   applying a face condition converts it back to independent faces, and increasing
   gap stiffness can reduce the solver time step.
-  New scenes start with the second-order auxiliary condition on all four outer
+  New scenes start with the second-order outgoing condition on all four outer
   edges. View > Boundary conditions colors the assigned laws directly on the
   outer box, hole spans, and both baffle traces, each law on its own side of the
   span.
@@ -453,7 +453,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   nowhere to put one, so its level then rises for as long as the run lasts.
 - **Outer boundary:** select each box side independently and assign zero Neumann
   (reflecting), prescribed Neumann flux, prescribed Dirichlet displacement,
-  first-order outgoing, or second-order auxiliary behavior. Prescribed data uses
+  first-order outgoing, or second-order outgoing behavior. Prescribed data uses
   `offset + amplitude · sin(2π f t + phase)`; zero amplitude gives a constant.
   Adjacent Dirichlet sides must agree at their shared corner. The second-order
   Engquist-Majda condition adds tangential propagation and reduces oblique

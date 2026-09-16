@@ -150,6 +150,32 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — A condition keeps the name it was chosen under
+
+The boundary picker listed "Driven Dirichlet" and then showed "Prescribed
+Dirichlet" once it was chosen, because the list carried its own strings while
+the selected text came from the condition's own `label()`. Neumann did the same,
+and the outer domain had a third of its own: its second-order condition listed
+as "Second-order outgoing" and read back as "Second-order auxiliary", which no
+face condition ever called it.
+
+"Prescribed" is what both condition enums already said and what the docs use, so
+the list is what moved. The names now live once, on the picker's own
+`BoundaryKind`, and a test holds the three sources to them in both directions:
+every condition reads back as the kind that lists it, every kind is reachable
+from some condition, and no two kinds share a name. Drift is a test failure
+rather than something to notice in the interface.
+
+The outer label is now "Second-order outgoing" like the face one. The docs keep
+"second-order auxiliary" where they describe the auxiliary field the term
+carries, which is about the mechanism rather than the control; the two README
+lines that named it as something to pick follow the label.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. The new test was checked against the old
+names and fails on the first of them.
+
 ## 2026-09-16 — Shift reaches the drawing tools
 
 Shift snaps to a 0.05 grid everywhere something is dragged - controls,

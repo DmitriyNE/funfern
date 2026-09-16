@@ -385,7 +385,7 @@ impl OuterBoundaryCondition {
         match self {
             Self::Reflecting => "Reflecting",
             Self::FirstOrderOutgoing => "First-order outgoing",
-            Self::SecondOrderOutgoing => "Second-order auxiliary",
+            Self::SecondOrderOutgoing => "Second-order outgoing",
             Self::ElectricWall => "Electric wall",
             Self::MagneticWall => "Magnetic wall",
             Self::Neumann { .. } => "Prescribed Neumann",

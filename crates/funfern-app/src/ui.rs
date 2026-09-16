@@ -100,6 +100,33 @@ enum BoundaryKind {
     Neumann,
     Dirichlet,
 }
+
+impl BoundaryKind {
+    /// What a condition of this kind is called, wherever it is named. The
+    /// picker lists these and both condition enums answer with the same words,
+    /// which `boundary_names_agree_across_every_source` holds them to.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Reflecting => "Reflecting",
+            Self::FirstOrder => "First-order outgoing",
+            Self::SecondOrder => "Second-order outgoing",
+            Self::ElectricWall => "Electric wall",
+            Self::MagneticWall => "Magnetic wall",
+            Self::Neumann => "Prescribed Neumann",
+            Self::Dirichlet => "Prescribed Dirichlet",
+        }
+    }
+
+    const ALL: [Self; 7] = [
+        Self::Reflecting,
+        Self::FirstOrder,
+        Self::SecondOrder,
+        Self::ElectricWall,
+        Self::MagneticWall,
+        Self::Neumann,
+        Self::Dirichlet,
+    ];
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DrawTool {
     Circle,
@@ -9806,28 +9833,11 @@ fn edit_face_condition(ui: &mut egui::Ui, condition: &mut FaceBoundaryCondition)
 
 fn edit_outer_condition(ui: &mut egui::Ui, condition: &mut OuterBoundaryCondition) -> bool {
     let before = *condition;
-    let mut kind = match condition {
-        OuterBoundaryCondition::Reflecting => BoundaryKind::Reflecting,
-        OuterBoundaryCondition::FirstOrderOutgoing => BoundaryKind::FirstOrder,
-        OuterBoundaryCondition::SecondOrderOutgoing => BoundaryKind::SecondOrder,
-        OuterBoundaryCondition::ElectricWall => BoundaryKind::ElectricWall,
-        OuterBoundaryCondition::MagneticWall => BoundaryKind::MagneticWall,
-        OuterBoundaryCondition::Neumann { .. } => BoundaryKind::Neumann,
-        OuterBoundaryCondition::Dirichlet { .. } => BoundaryKind::Dirichlet,
-    };
+    let mut kind = outer_kind(*condition);
     egui::ComboBox::from_id_salt("outer-condition")
         .selected_text(condition.label())
         .show_ui(ui, |ui| boundary_kind_choices(ui, &mut kind));
-    let old_kind = match before {
-        OuterBoundaryCondition::Reflecting => BoundaryKind::Reflecting,
-        OuterBoundaryCondition::FirstOrderOutgoing => BoundaryKind::FirstOrder,
-        OuterBoundaryCondition::SecondOrderOutgoing => BoundaryKind::SecondOrder,
-        OuterBoundaryCondition::ElectricWall => BoundaryKind::ElectricWall,
-        OuterBoundaryCondition::MagneticWall => BoundaryKind::MagneticWall,
-        OuterBoundaryCondition::Neumann { .. } => BoundaryKind::Neumann,
-        OuterBoundaryCondition::Dirichlet { .. } => BoundaryKind::Dirichlet,
-    };
-    if kind != old_kind {
+    if kind != outer_kind(before) {
         *condition = match kind {
             BoundaryKind::Reflecting => OuterBoundaryCondition::Reflecting,
             BoundaryKind::FirstOrder => OuterBoundaryCondition::FirstOrderOutgoing,
@@ -9848,6 +9858,18 @@ fn edit_outer_condition(ui: &mut egui::Ui, condition: &mut OuterBoundaryConditio
         _ => {}
     }
     *condition != before
+}
+
+fn outer_kind(condition: OuterBoundaryCondition) -> BoundaryKind {
+    match condition {
+        OuterBoundaryCondition::Reflecting => BoundaryKind::Reflecting,
+        OuterBoundaryCondition::FirstOrderOutgoing => BoundaryKind::FirstOrder,
+        OuterBoundaryCondition::SecondOrderOutgoing => BoundaryKind::SecondOrder,
+        OuterBoundaryCondition::ElectricWall => BoundaryKind::ElectricWall,
+        OuterBoundaryCondition::MagneticWall => BoundaryKind::MagneticWall,
+        OuterBoundaryCondition::Neumann { .. } => BoundaryKind::Neumann,
+        OuterBoundaryCondition::Dirichlet { .. } => BoundaryKind::Dirichlet,
+    }
 }
 
 fn face_kind(condition: FaceBoundaryCondition) -> BoundaryKind {
@@ -9901,16 +9923,8 @@ fn outer_condition_color(condition: OuterBoundaryCondition) -> Color32 {
 }
 
 fn boundary_kind_choices(ui: &mut egui::Ui, kind: &mut BoundaryKind) {
-    for (value, label) in [
-        (BoundaryKind::Reflecting, "Reflecting"),
-        (BoundaryKind::FirstOrder, "First-order outgoing"),
-        (BoundaryKind::SecondOrder, "Second-order outgoing"),
-        (BoundaryKind::ElectricWall, "Electric wall"),
-        (BoundaryKind::MagneticWall, "Magnetic wall"),
-        (BoundaryKind::Neumann, "Driven Neumann"),
-        (BoundaryKind::Dirichlet, "Driven Dirichlet"),
-    ] {
-        ui.selectable_value(kind, value, label);
+    for value in BoundaryKind::ALL {
+        ui.selectable_value(kind, value, value.label());
     }
 }
 
@@ -10732,6 +10746,64 @@ mod tests {
         assert!(
             !state.diagnostics_warning(),
             "a rebuild that carried the edit through is not an error"
+        );
+    }
+
+    /// The picker lists one set of names and the two condition enums answer
+    /// with their own, so a condition used to rename itself the moment it was
+    /// chosen. They are held to the same words here, in both directions: every
+    /// kind is reachable and every condition reads back as the kind that lists
+    /// it.
+    #[test]
+    fn boundary_names_agree_across_every_source() {
+        let signal = TimeSignal::harmonic(0.0, 1.0, 1.0, 0.0);
+        let faces = [
+            FaceBoundaryCondition::Reflecting,
+            FaceBoundaryCondition::Impedance { ratio: 1.0 },
+            FaceBoundaryCondition::SecondOrderOutgoing,
+            FaceBoundaryCondition::ElectricWall,
+            FaceBoundaryCondition::MagneticWall,
+            FaceBoundaryCondition::Neumann { signal },
+            FaceBoundaryCondition::Dirichlet { signal },
+        ];
+        for condition in faces {
+            assert_eq!(
+                face_kind(condition).label(),
+                condition.label(),
+                "{condition:?} is listed under another name"
+            );
+        }
+        let outers = [
+            OuterBoundaryCondition::Reflecting,
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            OuterBoundaryCondition::ElectricWall,
+            OuterBoundaryCondition::MagneticWall,
+            OuterBoundaryCondition::Neumann { signal },
+            OuterBoundaryCondition::Dirichlet { signal },
+        ];
+        for condition in outers {
+            assert_eq!(
+                outer_kind(condition).label(),
+                condition.label(),
+                "{condition:?} is listed under another name"
+            );
+        }
+        // Each list covers every kind the picker offers, so nothing is
+        // unreachable and no two kinds share a name.
+        for kinds in [
+            faces.map(face_kind).to_vec(),
+            outers.map(outer_kind).to_vec(),
+        ] {
+            assert_eq!(kinds, BoundaryKind::ALL.to_vec());
+        }
+        assert_eq!(
+            BoundaryKind::ALL
+                .iter()
+                .map(|kind| kind.label())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            BoundaryKind::ALL.len()
         );
     }
 
