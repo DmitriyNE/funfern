@@ -7,16 +7,26 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 ## Current TODOs
 
-Found while verifying the overlay exposure, not yet diagnosed:
+The null mode nothing removes:
 
-- [ ] Loading a mechanical document over an electromagnetic one leaves the field
-  with a large uniform offset that a fresh load does not. Reproduced by opening
-  the Luneburg lens (EM, TE) and then the Phased array: the nodal magnitudes
-  collapse from a 26-fold spread onto a 4-fold one about 14 times above the floor
-  a fresh load gives, and every node reads mid-bright. Opening the Phased array
-  over either mechanical example, or on its own, is clean at the same simulated
-  times, so it is the physics change and not the elapsed time. Pre-existing; the
-  automatic exposure only made it legible.
+- [ ] Reproject the constant out of each isolated domain, every displayed frame.
+  A constant is in the stiffness operator's null space, and a radiating wall is a
+  dashpot with no restoring term, so no outer condition can remove one: a planted
+  0.37 offset is still 0.370000 after t = 11 under both reflecting and
+  first-order-outgoing walls, while one Dirichlet wall drains it to 9.3e-3. Only
+  a component with a pinned node has a determinate constant, so any global
+  correction is wrong the moment a reflecting separator splits the domain — it
+  has to be per isolated domain, over the coupling graph of the operator's own
+  sparsity. Two findings shape the work. Subtracting a constant from both levels
+  leaves velocity untouched by construction, so it cannot remove a *drift*: with
+  no damping anywhere the mean velocity held +1.211486e-2 to seven digits from
+  t = 5.5 to 38.8 while the offset ramped linearly and without bound, so a
+  cadenced projection would chase the ramp and flicker at its cadence. And
+  removing the drift means removing momentum, which is real kinetic energy and
+  not a gauge choice, so it needs deciding rather than doing. Mesh transfer is
+  the injector the source envelope cannot reach: interpolating between meshes
+  does not conserve the mass-weighted mean exactly, so every remesh can leave a
+  little behind.
 
 Follow-ups from the welding work:
 
@@ -129,6 +139,39 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-16 — A document load kept the field it was replacing
+
+Reported as a large uniform offset when switching examples, and logged yesterday
+as electromagnetic-to-mechanical. That was wrong. Mapping the transitions:
+Material lens (EM) to Phased array is clean, Obstacle array to Luneburg is clean,
+and Luneburg to *anything* is not — mean over standard deviation of +47, +35 and
+-15 into the Obstacle array, the Phased array and the Material lens. The trigger
+is the predecessor's amplitude, not its physics, and the Luneburg lens is the one
+example whose field is fifty times the rest.
+
+Tracing the uploads found only the first one of a session `fresh`. Every load
+after it took the transfer path, so the outgoing scene's field was carried into
+the incoming one. Its oscillation radiates out — standard deviation fell 0.486 to
+0.007 — and the constant left behind cannot be removed by any wall the scene has,
+so it stays as a flat wash.
+
+The cause is one flag doing two jobs. `set_document` raised `reset_requested`,
+which the GPU reset spends earlier in the same frame and against the topology
+still active — the scene being replaced. So a load reset the *outgoing* scene,
+which then ran on with its sources live for the seconds its replacement took to
+prepare, and handed over a full-amplitude field at the end of it. `fresh_requested`
+is now separate and is only spent by the preparation request.
+
+A forced GPU reset was tried first and changed nothing, which is what said the
+flag was not the lever: the upload that follows re-installs the field over the
+top whatever the reset did.
+
+| Load | before | after |
+| --- | --- | --- |
+| Luneburg to Obstacle array | +47.1 | +0.23 |
+| Luneburg to Phased array | +35.4 | +0.39 |
+| Luneburg to Material lens | -15.3 | +0.25 |
 
 ## 2026-09-16 — The field sets its own scale
 

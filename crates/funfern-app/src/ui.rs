@@ -750,6 +750,14 @@ pub struct Playground {
     wave_running: bool,
     wave_step: bool,
     reset_requested: bool,
+    /// Set when a whole document is replaced: the next preparation must start
+    /// the field from zero rather than transfer the outgoing scene's into it.
+    /// Separate from `reset_requested` because that one is spent by the GPU
+    /// reset below, which runs earlier in the frame and against the topology
+    /// still active — the scene being replaced. Sharing one flag let the load
+    /// reset the outgoing scene, which then ran on for the seconds its
+    /// replacement took to prepare and handed over a full-amplitude field.
+    fresh_requested: bool,
     accumulator: f64,
     sim_time_offset: f64,
     completed_steps: u64,
@@ -940,6 +948,7 @@ impl Default for Playground {
             wave_running: true,
             wave_step: false,
             reset_requested: false,
+            fresh_requested: false,
             accumulator: 0.0,
             sim_time_offset: 0.0,
             completed_steps: 0,
@@ -1141,7 +1150,7 @@ impl Playground {
         self.example_opened = None;
         self.pending_merge = None;
         self.requested_revision = None;
-        self.reset_requested = fresh;
+        self.fresh_requested = fresh;
         // A different scene is a different run, so how loud the last one got
         // says nothing about what counts as noise in this one.
         self.field_exposure.clear();
@@ -6398,7 +6407,11 @@ impl Playground {
         {
             return;
         }
-        let fresh = self.runtime.active().is_none() || self.reset_requested;
+        let fresh = starts_from_zero(
+            self.runtime.active().is_some(),
+            self.reset_requested,
+            self.fresh_requested,
+        );
         if std::mem::take(&mut self.remesh_requested) {
             self.runtime.request_full_rebuild();
         }
@@ -6414,6 +6427,7 @@ impl Playground {
                 self.requested_revision = Some(self.editor.revision);
                 self.requested_edge = self.mesh_edge;
                 self.reset_requested = false;
+                self.fresh_requested = false;
                 self.begin_handoff_timeline();
             }
             Err(error) => self.message = error,
@@ -10645,6 +10659,17 @@ fn grid_lines(minimum: f64, maximum: f64, step: f64) -> Vec<f64> {
     lines
 }
 
+/// Whether the next preparation starts the field at zero instead of carrying
+/// the running one into it.
+///
+/// `reset_requested` is spent earlier in the frame by the GPU reset, so a
+/// document load cannot rely on it and raises `fresh_requested` instead; this
+/// has to honour that even when a topology is already active and the reset flag
+/// has been cleared.
+const fn starts_from_zero(active: bool, reset_requested: bool, fresh_requested: bool) -> bool {
+    !active || reset_requested || fresh_requested
+}
+
 /// A display reference level for one measured quantity.
 ///
 /// Across the shipped examples the field's own amplitude spans a hundredfold,
@@ -11638,6 +11663,38 @@ mod tests {
         let document = state.editor.document.clone();
         state.set_document(document, false, true).unwrap();
         assert_eq!(state.field_exposure.update(1.0e-9, 0.016), Some(1.0e-9));
+    }
+
+    /// Loading a document used to raise `reset_requested`, which the GPU reset
+    /// spends earlier in the frame and against the topology still active — the
+    /// scene on its way out. That scene was zeroed and then ran on for the
+    /// seconds its replacement took to prepare, so by the time the new mesh was
+    /// ready the transfer carried a full-amplitude field into it. Only the
+    /// oscillation radiated away; the constant it left behind is in the
+    /// stiffness operator's null space and no outgoing wall can remove it, so
+    /// opening the Luneburg lens and then anything else washed the new scene
+    /// flat.
+    #[test]
+    fn loading_a_document_asks_for_a_field_that_starts_at_zero() {
+        let mut state = Playground::default();
+        let example = &funfern_app::topology_examples::catalog()[0];
+        state
+            .set_document(example.document.clone(), false, true)
+            .unwrap();
+        assert!(
+            state.fresh_requested,
+            "the load did not ask to start at zero"
+        );
+        assert!(
+            !state.reset_requested,
+            "the load armed the flag the GPU reset spends against the outgoing scene"
+        );
+        // The shape of the bug: a topology is already active and the GPU reset
+        // has taken its flag, and the load must still start the field at zero.
+        assert!(starts_from_zero(true, false, true));
+        assert!(starts_from_zero(true, true, false));
+        assert!(starts_from_zero(false, false, false));
+        assert!(!starts_from_zero(true, false, false));
     }
 
     /// A thumbnail is rasterized, not traced, so a face covers area rather than
