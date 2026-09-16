@@ -3525,10 +3525,10 @@ impl Playground {
         }
         self.refresh_samples(viewport);
         let transform = self.transform(viewport);
+        self.draw_solution(&painter, viewport, display);
         if self.editor.document.presentation.grid {
             self.draw_grid(&painter, viewport);
         }
-        self.draw_solution(&painter, viewport, display);
         if matches!(self.editor.acceptance, TopologyAcceptance::Invalid(_))
             && self.editor.document.presentation.accepted_reference
         {
@@ -3608,39 +3608,45 @@ impl Playground {
         self.handle_viewport_input(ui, &response, viewport);
         viewport
     }
+    /// Drawn over the field rather than under it. The field wash is opaque, so
+    /// a grid beneath it is only ever visible where nothing is meshed; these
+    /// lines tint instead, faint enough not to compete with the wave and light
+    /// enough to read on the dark base beside it.
+    /// The spacing and the world coordinates the grid draws at. Both axes walk
+    /// upwards from the lower corner of the view: `world` flips y, so the
+    /// bottom of the screen is the smaller world coordinate.
+    fn grid_axes(&self, r: Rect) -> (f64, Vec<f64>, Vec<f64>) {
+        let minimum = self.world(r.left_bottom(), r);
+        let maximum = self.world(r.right_top(), r);
+        let step = grid_step(self.scale);
+        (
+            step,
+            grid_lines(minimum.x, maximum.x, step),
+            grid_lines(minimum.y, maximum.y, step),
+        )
+    }
     fn draw_grid(&self, painter: &egui::Painter, r: Rect) {
-        let world_min = self.world(r.left_bottom(), r);
-        let world_max = self.world(r.right_top(), r);
-        let raw = 70.0 / self.scale;
-        let power = 10f64.powf(raw.log10().floor());
-        let step = [1.0, 2.0, 5.0, 10.0]
-            .into_iter()
-            .map(|v| v * power)
-            .find(|v| *v >= raw)
-            .unwrap();
-        let mut x = (world_min.x / step).floor() * step;
-        while x <= world_max.x {
+        let (step, columns, rows) = self.grid_axes(r);
+        let stroke = |value: f64| {
+            if value.abs() < step * 0.1 {
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(148, 163, 184, 90))
+            } else {
+                Stroke::new(0.5, Color32::from_rgba_unmultiplied(148, 163, 184, 45))
+            }
+        };
+        for x in columns {
             let sx = self.screen(Point2::new(x, 0.0), r).x;
             painter.line_segment(
                 [Pos2::new(sx, r.top()), Pos2::new(sx, r.bottom())],
-                Stroke::new(
-                    if x.abs() < step * 0.1 { 1.0 } else { 0.5 },
-                    Color32::from_gray(42),
-                ),
+                stroke(x),
             );
-            x += step;
         }
-        let mut y = (world_max.y / step).floor() * step;
-        while y <= world_min.y {
+        for y in rows {
             let sy = self.screen(Point2::new(0.0, y), r).y;
             painter.line_segment(
                 [Pos2::new(r.left(), sy), Pos2::new(r.right(), sy)],
-                Stroke::new(
-                    if y.abs() < step * 0.1 { 1.0 } else { 0.5 },
-                    Color32::from_gray(42),
-                ),
+                stroke(y),
             );
-            y += step;
         }
     }
     fn draw_solution(&mut self, painter: &egui::Painter, r: Rect, display: &WaveDisplay) {
@@ -10178,6 +10184,33 @@ fn closest_curve_parameter(
     }
     best.map(|(_, curve, parameter)| (curve, parameter))
 }
+/// The 1/2/5-per-decade spacing that keeps grid lines about 70 pixels apart.
+fn grid_step(scale: f64) -> f64 {
+    let raw = 70.0 / scale;
+    let power = 10f64.powf(raw.log10().floor());
+    [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .map(|value| value * power)
+        .find(|value| *value >= raw)
+        .unwrap_or(power * 10.0)
+}
+
+/// Every multiple of `step` inside `[minimum, maximum]`, lowest first. Both
+/// axes walk upwards from the lower bound; the vertical one used to start at
+/// the top of the view and test against the bottom, so it never drew a line.
+fn grid_lines(minimum: f64, maximum: f64, step: f64) -> Vec<f64> {
+    let mut lines = vec![];
+    if !minimum.is_finite() || !maximum.is_finite() || !step.is_finite() || step <= 0.0 {
+        return lines;
+    }
+    let mut value = (minimum / step).floor() * step;
+    while value <= maximum && lines.len() < 4096 {
+        lines.push(value);
+        value += step;
+    }
+    lines
+}
+
 fn field_color(value: f32, gain: f32, under: Color32) -> Color32 {
     let value = (value * gain).tanh();
     let target = if value >= 0.0 {
@@ -10871,6 +10904,47 @@ mod tests {
                 .len(),
             BoundaryKind::ALL.len()
         );
+    }
+
+    /// Both axes step upwards from the lower bound. The vertical one used to
+    /// start at the top of the view and test against the bottom, so the grid
+    /// had only ever been columns.
+    #[test]
+    fn the_grid_covers_both_axes_of_the_view() {
+        // An 800x600 view at 300 pixels per world unit, centred on the origin.
+        let state = Playground {
+            scale: 300.0,
+            center: Point2::default(),
+            ..Playground::default()
+        };
+        let (step, columns, rows) = state.grid_axes(Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(800.0, 600.0),
+        ));
+        assert_eq!(step, 0.5, "70 px at this zoom lands on the half-unit");
+        assert_eq!(columns, vec![-1.5, -1.0, -0.5, 0.0, 0.5, 1.0]);
+        assert_eq!(rows, vec![-1.0, -0.5, 0.0, 0.5, 1.0]);
+        assert!(
+            rows.iter().any(|y| y.abs() < step * 0.1),
+            "the horizontal axis is among them, and is the emphasised line"
+        );
+
+        // A bound the wrong way round draws nothing rather than looping.
+        assert!(grid_lines(1.0, -1.0, step).is_empty());
+        assert!(grid_lines(-1.0, 1.0, 0.0).is_empty());
+        assert!(grid_lines(f64::NAN, 1.0, step).is_empty());
+        // A degenerate zoom cannot hang the painter.
+        assert!(grid_lines(-1.0, 1.0, grid_step(0.0)).is_empty());
+        assert!(grid_lines(-1.0e9, 1.0e9, 1.0e-9).len() <= 4096);
+
+        // The spacing holds its decade: about 70 pixels apart at any zoom.
+        for scale in [12.0, 37.0, 300.0, 1_500.0, 9_000.0] {
+            let pixels = grid_step(scale) * scale;
+            assert!(
+                (35.0..=180.0).contains(&pixels),
+                "{scale} pixels per unit put lines {pixels} apart"
+            );
+        }
     }
 
     /// Shift places a point on the same 0.05 grid every drag snaps to. A

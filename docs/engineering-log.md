@@ -150,6 +150,43 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The grid had no rows, and was under the field anyway
+
+Two things, and together they made the toggle do nothing visible.
+
+`draw_grid` took its bounds from opposite corners of the viewport, and `world`
+flips y, so the bottom of the screen is the *smaller* world coordinate. The
+vertical loop started at the top and ran while the value was below the bottom,
+which is false on the first test: the grid had only ever drawn columns. At an
+800x600 view, 300 pixels per unit, the step is 0.5, `y` starts at 1.0 and the
+condition asks `1.0 <= -1.0`.
+
+What was left was painted before `draw_solution`, and the field wash is opaque -
+`field_color` lerps from a solid base when no overlay is under it - so the
+columns were covered across everything meshed, which is the whole domain. Only a
+scene with no mesh yet could show them.
+
+The grid now draws after the field and before the geometry, so it sits over the
+wave and under the curves and handles, and it tints rather than covers: a cool
+gray at low alpha, roughly double on the two axis lines. The old `from_gray(42)`
+was chosen to sit beneath the field and would have read as solid dark lines on
+top of it.
+
+Both loops now walk upwards from the lower bound through one `grid_lines`, which
+returns nothing for a reversed or degenerate range rather than looping, and the
+caller came out into `grid_axes` so the direction itself is what the test holds:
+swapping the two bounds back reproduces the empty row list.
+
+Not changed: the grid steps in 1/2/5 decades from the zoom while Shift snaps to
+a fixed 0.05, so at default zoom the lines are drawn at 0.5 and snapping lands
+between them. The grid does not show what it snaps to, which is worth deciding
+separately.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. One new test over the spacing and both
+axes, checked to fail on the old direction.
+
 ## 2026-09-16 — A hole absorbed is a face decided
 
 A contour in the autosave refused almost every span deletion with "Removal
