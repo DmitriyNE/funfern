@@ -23,12 +23,22 @@ Carried over from the cutover follow-up work, not from the review:
 
 - [ ] Retire the pre-cutover `editor` module. It is not dead code reachable only
   from its own 54-test file, as this entry used to say: `topology_persistence`
-  imports sixteen shared scalar codecs from `persistence`, which takes its
-  document types from `editor`, so the live schema sits on top of both. Extracting
-  those codecs is the first step and is already named in
+  imports the shared scalar codecs named at the top of it from `persistence`,
+  which takes its document types from `editor`, so the live schema sits on top of
+  both. Extracting those codecs is the first step and is already named in
   `topology_persistence.rs`'s own header; deleting the two modules and their tests
   is the second. Or keep them deliberately as the migration path's regression
   suite and say so.
+  Two things to know before starting. `persistence.rs` has no inline tests and
+  `topology_persistence.rs` has four, so `tests/editor.rs`'s 54 are the only
+  direct coverage the shared codecs have: the extraction has to bring round-trip
+  tests of its own or the deletion takes the coverage with it. And the codecs
+  carry migration variants — `StoredScalarFieldV14`, `StoredTimeSignalV17` —
+  that version 22 never reaches, so what moves is smaller than what is there.
+  `tests/examples.rs` and its two tests are current, not legacy: they parse the
+  shipped examples through `topology_persistence` and stay. Sizes at the time of
+  writing: `editor.rs` 4,003 lines, `persistence.rs` 1,868, plus
+  `tests/fixtures/eight-obstacles-v1.json`, which only `tests/editor.rs` reads.
 - [ ] Measure representative browser frame timing for the cooperative topology
   job. The cutover recorded that it advances in fixed 256-work-unit slices but
   never measured what that costs in a real browser frame.
