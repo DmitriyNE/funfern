@@ -426,12 +426,19 @@ recorded level series rather than by taste. The scale never falls below a
 thousandth of the loudest level the run has reached, which is the backstop that
 keeps a field decayed into rounding noise from being magnified back into view.
 
-The scale starts again only where the field is replaced with zeros: a reset, or
-another document. A handoff carries the field onto a new mesh — the same field,
-renumbered — so its scale carries across untouched. Keying that on the solver's
-generation instead is wrong, because adaptation bumps the generation every second
-or two and each bump would drop the scale onto the instantaneous level, which a
-decaying field shows as visible steps rather than a steady fall. Field intensity and arrow
+The scale starts again only when a field replaced with zeros actually arrives —
+the frame the upload commits — and never at the moment one is asked for. A reset
+or a document load zeroes the field on the GPU, but the outgoing scene stays on
+display until its replacement is ready, so a scale cleared at the request
+measures that residue and paints it at full brightness for as long as the gap
+lasts. Restarting keeps how loud the session has been, because the first frames
+of a new field are numerical dust and an instant attack onto a scale with nothing
+behind it latches onto that instead; the remembered peak holds the quiet floor
+above it. A handoff that carries the field onto a new mesh changes nothing — it
+is the same field, renumbered. Keying any of this on the solver's generation is
+wrong, because adaptation bumps the generation every second or two and each bump
+would drop the scale onto the instantaneous level, which a decaying field shows
+as visible steps rather than a steady fall. Field intensity and arrow
 gain trim the automatic scale rather than replacing it, and their persisted
 ranges and defaults are unchanged; the intensity default of 2.0 places the
 reference level at `tanh(1.0)`. `field_auto_exposure` turns the automatic scale

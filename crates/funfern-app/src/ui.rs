@@ -1161,10 +1161,11 @@ impl Playground {
         self.pending_merge = None;
         self.requested_revision = None;
         self.fresh_requested = fresh;
-        // A different scene is a different run, so how loud the last one got
-        // says nothing about what counts as noise in this one.
-        self.field_exposure.clear();
-        self.vector_overlay_exposure.clear();
+        // The scale is left alone here and started again when the new field
+        // actually arrives, for the reason the reset path gives: the outgoing
+        // scene is still on display until its replacement is prepared, and a
+        // scale cleared now would measure that — magnifying a residue for as
+        // long as the new mesh takes.
         self.field_offset_warned = false;
         self.invalidate_samples();
         Ok(())
@@ -3940,8 +3941,8 @@ impl Playground {
     /// of easing down at the release rate.
     fn restart_exposures_after_handoff(&mut self, fresh: bool) {
         if fresh {
-            self.field_exposure.clear();
-            self.vector_overlay_exposure.clear();
+            self.field_exposure.restart();
+            self.vector_overlay_exposure.restart();
         }
     }
 
@@ -4171,7 +4172,7 @@ impl Playground {
         if self.vector_overlay_mode != mode {
             self.vector_overlay_average.clear();
             self.vector_overlay_step = u64::MAX;
-            self.vector_overlay_exposure.clear();
+            self.vector_overlay_exposure.restart();
             self.vector_overlay_mode = mode;
         }
         if settings.vector_overlay_smoothed {
@@ -6769,10 +6770,14 @@ impl Playground {
                     self.reset_requested = false;
                     self.sim_time_offset = 0.0;
                     self.restart_probe_traces();
-                    // Reset zeroes the field in place without an upload, so the
-                    // scale starts over here too.
-                    self.field_exposure.clear();
-                    self.vector_overlay_exposure.clear();
+                    // The scale is deliberately left alone. Reset zeroes the
+                    // field on the GPU, but the readback still holds the old one
+                    // for a few frames, so a scale cleared here measures that
+                    // residue and paints it at full brightness until the zeros
+                    // arrive — a tenth of a second of magnified nothing.
+                    // Nothing has to be cleared: a zero field paints as the base
+                    // colour whatever the scale says, and the new run's field
+                    // takes the scale over as it grows.
                 }
             }
         }
@@ -10935,9 +10940,15 @@ impl AutoExposure {
     /// frame cannot drop the scale by an unbounded factor in one go.
     const MAX_STEP_SECONDS: f32 = 1.0;
 
-    /// Forgets the run, for a field that has nothing to do with the last one.
-    fn clear(&mut self) {
-        *self = Self::default();
+    /// Starts the scale again for a field that has been replaced with zeros.
+    ///
+    /// How loud the session has been is kept. The first frames of a new field
+    /// are numerical dust — measured at 3.5e-10 — and an instant attack onto a
+    /// scale with nothing behind it latches straight onto that and paints it at
+    /// full colour. The remembered peak holds the quiet floor above the dust
+    /// until the field is really there.
+    fn restart(&mut self) {
+        self.reference = 0.0;
     }
 
     fn reference(self) -> Option<f64> {
@@ -11920,16 +11931,54 @@ mod tests {
         assert_eq!(state.field_exposure.reference(), Some(0.71));
         assert_eq!(state.vector_overlay_exposure.reference(), Some(0.71));
 
-        // A field replaced with zeros is a different run.
+        // A field replaced with zeros starts the scale again.
         state.restart_exposures_after_handoff(true);
         assert_eq!(state.field_exposure.reference(), None);
         assert_eq!(state.vector_overlay_exposure.reference(), None);
+    }
 
-        // As is another document, which also forgets how loud the last one got.
-        state.field_exposure.update(0.71, 0.016);
+    /// Loading a document and pressing Reset both leave the scale alone. Each
+    /// zeroes the field on the GPU, but the outgoing scene stays on display
+    /// until the replacement arrives — a reset for a few frames, a load for as
+    /// long as the new mesh takes. A scale cleared at the request measures that
+    /// residue and paints it at full brightness: measured at 0.09 % before, 100 %
+    /// after, for a tenth of a second on a reset and four tenths on a load.
+    #[test]
+    fn asking_for_a_new_field_does_not_magnify_the_outgoing_one() {
+        let mut state = Playground::default();
+        state.field_exposure.update(3.0e-2, 0.016);
+        let residue = 3.8e-6;
+        let held = state.field_exposure.update(residue, 0.016).unwrap();
+        assert!(residue / held < 0.01, "the residue was not already dark");
+
+        state.reset_requested = true;
         let document = state.editor.document.clone();
         state.set_document(document, false, true).unwrap();
-        assert_eq!(state.field_exposure.update(1.0e-9, 0.016), Some(1.0e-9));
+        let after = state.field_exposure.update(residue, 0.016).unwrap();
+        assert!(
+            residue / after < 0.01,
+            "the outgoing field was magnified to {:.0}%",
+            100.0 * residue / after
+        );
+    }
+
+    /// The first frames of a replaced field are numerical dust, and an instant
+    /// attack onto a scale with nothing behind it paints that dust at full
+    /// colour. Measured at 3.5e-10 arriving one frame before the real field.
+    #[test]
+    fn a_restarted_scale_does_not_latch_onto_the_first_dust() {
+        let mut exposure = AutoExposure::default();
+        exposure.update(3.0e-2, 0.016);
+        exposure.restart();
+        let dust = 3.5e-10;
+        let reference = exposure.update(dust, 0.016).unwrap();
+        assert!(
+            dust / reference < 1.0e-4,
+            "dust painted at {:.0}%",
+            100.0 * dust / reference
+        );
+        // The real field, when it arrives, takes the scale straight over.
+        assert_eq!(exposure.update(2.0e-2, 0.016), Some(2.0e-2));
     }
 
     /// The symptom the handoff bug showed as: a scale that falls faster than the

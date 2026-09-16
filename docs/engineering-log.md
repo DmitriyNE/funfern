@@ -148,6 +148,38 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — Starting the scale again, at the right moment
+
+Reported: pressing Reset over a residual field flashes one frame of that residue
+at full brightness before everything goes black. Reproduced at 0.09 % before the
+press, 100 % for about six frames, then zero — the clear fires when the reset is
+*asked for*, but the GPU readback still holds the old field for a few frames, so
+the scale re-measures the residue and paints it whole.
+
+The same fault was in the document-load path and worse there, because the
+outgoing scene stays on display for as long as the new mesh takes to prepare:
+measured at four tenths of a second against the reset's one tenth, and it scales
+with the scene.
+
+Neither needs clearing at the request at all. A zero field paints as the base
+colour whatever the scale says, and the new field takes the scale over as it
+grows. So both were removed and the only restart left is the one at commit, where
+the readback already holds the new field.
+
+That exposed a third, smaller flash: the first frames after a commit are
+numerical dust — 1.5e-11 measured — and an instant attack onto a scale with
+nothing behind it latches straight onto that and paints dust at full colour.
+Restarting now keeps how loud the session has been, so the quiet floor sits above
+the dust: 0.30 % instead of 100 %, and the real field takes over a tenth of a
+second later. `clear` is gone and `restart` replaces it, which is the method this
+started with before the handoff rule was removed — it was right, it was being
+called in the wrong place.
+
+Both measurements were redone after the first pass used a scene with reflecting
+walls, where modes with nodes at the radiating walls are trapped and the field
+relaxes toward a standing mode instead of emptying. Every document a decay
+measurement touches now has all four walls radiating.
+
 ## 2026-09-16 — The scale stops falling off a cliff at every handoff
 
 Reported straight after the release retune: the scale jumps down sometimes
