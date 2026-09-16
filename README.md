@@ -394,11 +394,17 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **History:** Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z redoes outside text editing.
   Each drag, coordinate edit, insertion, removal, creation, or deletion is one
   action. History keeps up to 100 actions, including invalid drafts.
-- **Files:** Save scene downloads JSON in the browser or opens a native save
+- **Files:** New starts an empty scene: one background material, every wall
+  second-order outgoing, and the point source on, so it runs as soon as it
+  opens. Save scene downloads JSON in the browser or opens a native save
   dialog. Load scene uses file upload/native selection and validates before
   replacement. Successful loading clears history; malformed files leave the
-  current document intact. Examples opens a thumbnail gallery; opening one is
-  undoable. Export can write a geometry SVG, a PNG snapshot, or a silent 30 FPS
+  current document intact. Examples opens a thumbnail gallery with a
+  description beside each scene; opening one is undoable and leaves the gallery
+  up, so the catalog can be clicked through. A thumbnail draws the scene's own
+  faces in their material colours, its walls in their boundary-condition
+  colours, and, for an example whose view preset names a material property, that
+  property across the face it varies over. Export can write a geometry SVG, a PNG snapshot, or a silent 30 FPS
   recording of the current viewport at its physical pixel resolution. Captures
   follow the active View settings while omitting panels, floating readouts,
   selection emphasis, gizmos, marquees, and active-tool prompts. Recording leaves
@@ -411,8 +417,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   their drivers, probes, and wave-speed view presets. View toggles, field intensity,
   and material-overlay settings travel through files, links, recovery, and examples.
   Camera, selection, open panels, and floating-window layout are not saved. With no
-  shared scene or autosave to restore, startup opens the first
-  bundled example.
+  shared scene or autosave to restore, startup opens a bundled example at
+  random.
 - **Mesh:** enable Accepted triangle mesh under Display. The overlay shows the
   constrained mesh and its labeled outer, hole, interface, closed-wall, and baffle
   edges. Elements below 15° are

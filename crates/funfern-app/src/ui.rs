@@ -728,6 +728,14 @@ pub struct Playground {
     /// Whether the formula reference is showing. It is a window rather than a
     /// menu so it stays readable while a formula is being typed.
     formula_help_open: bool,
+    /// Whether the example gallery is showing. It stays open across a pick, so
+    /// the catalog can be clicked through.
+    examples_open: bool,
+    /// One thumbnail per catalog entry, built lazily and at most one per frame.
+    example_previews: Vec<Option<ExamplePreview>>,
+    /// The catalog entry the document came from, for the gallery's own marker.
+    /// Any other load clears it.
+    example_opened: Option<usize>,
     material_color_edit: Option<(MaterialId, [u8; 3])>,
     new_separator_material: MaterialId,
     mesh_edge: f64,
@@ -906,6 +914,12 @@ impl Default for Playground {
             material_formula_edits: BTreeMap::new(),
             material_formula_errors: BTreeMap::new(),
             formula_help_open: false,
+            examples_open: false,
+            example_previews: funfern_app::topology_examples::catalog()
+                .iter()
+                .map(|_| None)
+                .collect(),
+            example_opened: Some(0),
             material_color_edit: None,
             new_separator_material: DEFAULT_MATERIAL,
             mesh_edge: 0.08,
@@ -1111,6 +1125,7 @@ impl Playground {
         self.selection = TopologySelection::None;
         self.selected_probe = None;
         self.draw = None;
+        self.example_opened = None;
         self.pending_merge = None;
         self.requested_revision = None;
         self.reset_requested = fresh;
@@ -1312,6 +1327,15 @@ impl Playground {
                     self.invalidate_samples();
                 }
                 ui.menu_button("File", |ui| {
+                    if ui.button("New").clicked() {
+                        self.new_scene();
+                        ui.close();
+                    }
+                    if ui.button("Examples…").clicked() {
+                        self.examples_open = true;
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Open…").clicked() {
                         self.file_busy = true;
                         files::load(self.sender.clone());
@@ -1362,23 +1386,6 @@ impl Playground {
                         }
                         ui.close();
                     }
-                    ui.separator();
-                    ui.menu_button("Examples", |ui| {
-                        for example in funfern_app::topology_examples::catalog() {
-                            if ui
-                                .button(example.name)
-                                .on_hover_text(example.description)
-                                .clicked()
-                            {
-                                if let Err(error) =
-                                    self.set_document(example.document.clone(), true, true)
-                                {
-                                    self.notify(error);
-                                }
-                                ui.close();
-                            }
-                        }
-                    });
                 });
                 if ui.button("Fit view").clicked() {
                     self.fit = true;
@@ -9380,6 +9387,108 @@ impl Playground {
         }
     }
 
+    /// The example gallery. It is a window rather than a menu so the thumbnails
+    /// and descriptions have room, and it stays open across a pick so several
+    /// scenes can be tried one after another.
+    fn examples_window(&mut self, ctx: &egui::Context) {
+        if !self.examples_open {
+            return;
+        }
+        let catalog = funfern_app::topology_examples::catalog();
+        // At most one preview is built per frame. The largest example takes
+        // about twenty milliseconds to compile, so building all of them at once
+        // would drop a frame outright; this way a row shows its name and
+        // description immediately and its thumbnail a few frames later.
+        if let Some(index) = self.example_previews.iter().position(Option::is_none) {
+            self.example_previews[index] = Some(build_example_preview(&catalog[index]));
+        }
+        let previews = &self.example_previews;
+        let opened = self.example_opened;
+        let mut open = true;
+        let mut selected = None;
+        egui::Window::new("Examples")
+            .id(egui::Id::new("examples"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                ui.label("Choose a ready-to-run scene. Picking one leaves this open.");
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .max_height(540.0)
+                    .show(ui, |ui| {
+                        for (index, example) in catalog.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let thumbnail = paint_example_thumbnail(
+                                    ui,
+                                    example,
+                                    previews[index].as_ref(),
+                                    egui::vec2(144.0, 144.0),
+                                );
+                                ui.vertical(|ui| {
+                                    ui.heading(example.name);
+                                    ui.set_max_width(320.0);
+                                    ui.label(example.description);
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Open").clicked() || thumbnail.clicked() {
+                                            selected = Some(index);
+                                        }
+                                        if opened == Some(index) {
+                                            ui.weak("Opened");
+                                        }
+                                    });
+                                });
+                            });
+                            if index + 1 < catalog.len() {
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(8.0);
+                            }
+                        }
+                    });
+            });
+        self.examples_open = open;
+        if let Some(index) = selected {
+            self.open_example(index);
+        }
+    }
+
+    fn open_example(&mut self, index: usize) {
+        let catalog = funfern_app::topology_examples::catalog();
+        match self.set_document(catalog[index].document.clone(), true, true) {
+            Ok(()) => {
+                self.example_opened = Some(index);
+                self.notify(format!("Opened {}", catalog[index].name));
+            }
+            Err(error) => self.notify(error),
+        }
+    }
+
+    /// A scene to start from: nothing drawn, one background material, every wall
+    /// second-order outgoing, and the point source switched on, because an empty
+    /// scene that makes no wave is a still picture rather than a starting point.
+    fn new_scene(&mut self) {
+        let mut document = TopologyDocument::default();
+        document.model.source.enabled = true;
+        match self.set_document(document, true, true) {
+            Ok(()) => self.notify("New scene"),
+            Err(error) => self.notify(error),
+        }
+    }
+
+    /// Opens a catalog entry at random, for a launch with nothing to restore.
+    fn open_random_example(&mut self) {
+        let catalog = funfern_app::topology_examples::catalog();
+        let index = random_example_index(random_fraction(), catalog.len());
+        if let Err(error) = self.set_document(catalog[index].document.clone(), false, true) {
+            self.notify(error);
+        } else {
+            self.example_opened = Some(index);
+        }
+    }
+
     fn formula_help_window(&mut self, ctx: &egui::Context) {
         if !self.formula_help_open {
             return;
@@ -9875,6 +9984,7 @@ impl Playground {
             self.probe_windows(root.ctx());
             self.diagnostics_window(root.ctx());
             self.formula_help_window(root.ctx());
+            self.examples_window(root.ctx());
         }
         self.keyboard_focus_previous = root.ctx().egui_wants_keyboard_input();
         viewport
@@ -10570,6 +10680,265 @@ fn material_property_color(fraction: f32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(channel(0), channel(1), channel(2), alpha)
 }
 
+/// A fraction in `[0, 1)` without a random-number dependency: the wall clock's
+/// sub-second bits natively, and the platform's own generator in the browser,
+/// where `SystemTime::now` is not available.
+#[cfg(not(target_arch = "wasm32"))]
+fn random_fraction() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |since| f64::from(since.subsec_nanos()) / 1e9)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn random_fraction() -> f64 {
+    js_sys::Math::random()
+}
+
+/// The catalog entry a fraction picks. A fraction of exactly one is the reason
+/// for the clamp: it is outside the half-open range the callers promise, and a
+/// browser's generator is only documented to stay below it.
+fn random_example_index(fraction: f64, total: usize) -> usize {
+    ((fraction.clamp(0.0, 1.0) * total as f64) as usize).min(total.saturating_sub(1))
+}
+
+/// One example's thumbnail, built once from its compiled scene and then only
+/// painted. Faces are rasterized into scanline spans rather than triangulated:
+/// a face is an arbitrary polygon with holes, and a span is one quad when the
+/// face carries a flat colour and a row of small quads when the example asks
+/// for a material property, which is the only way a radial profile shows up at
+/// all.
+#[derive(Default)]
+struct ExamplePreview {
+    quads: Vec<PreviewQuad>,
+    /// Face outlines and the zero-area traces of baffles, stroked over the fill.
+    strokes: Vec<Vec<Point2>>,
+}
+
+struct PreviewQuad {
+    low: Point2,
+    high: Point2,
+    color: Color32,
+}
+
+/// Rows down the domain. A row is under three pixels of a thumbnail, and the
+/// stroked outlines cover the stair-stepping left at a face's edge. Going finer
+/// doubles the quads a shaded example costs and changes nothing that shows.
+const PREVIEW_ROWS: usize = 48;
+
+fn build_example_preview(
+    example: &funfern_app::topology_examples::TopologyExample,
+) -> ExamplePreview {
+    let scene = &example.document.model.accepted;
+    let Ok(compiled) = scene.compile(0) else {
+        return ExamplePreview::default();
+    };
+    let domain = scene.geometry.domain;
+    let property = match example.document.presentation.material_overlay {
+        MaterialOverlay::Property(property) => Some(property),
+        _ => None,
+    };
+    let mut faces = compiled.topology.faces.iter().collect::<Vec<_>>();
+    faces.sort_by(|a, b| b.area.total_cmp(&a.area));
+
+    let mut cells = Vec::new();
+    let (mut minimum, mut maximum) = (f64::INFINITY, f64::NEG_INFINITY);
+    for face in &faces {
+        let region = compiled
+            .assignments
+            .iter()
+            .find(|assignment| assignment.face == face.id)
+            .and_then(|assignment| assignment.region);
+        let flat = region
+            .and_then(|region| scene.region(region))
+            .and_then(|region| scene.material(region.material))
+            .map(|material| {
+                Color32::from_rgb(material.color[0], material.color[1], material.color[2])
+            })
+            // A face outside the simulation is a hole, and reads as one.
+            .unwrap_or(Color32::from_rgb(16, 23, 31));
+        let shaded = property.zip(region).filter(|_| face.area > 0.0);
+        let height = domain.height() / PREVIEW_ROWS as f64;
+        for row in 0..PREVIEW_ROWS {
+            let low_y = domain.min_y + height * row as f64;
+            for (start, end) in face_spans(&face.cycles, low_y + height * 0.5) {
+                match shaded {
+                    None => cells.push((
+                        Point2::new(start, low_y),
+                        Point2::new(end, low_y + height),
+                        None,
+                        flat,
+                    )),
+                    Some((property, region)) => {
+                        let steps = (((end - start) / height).ceil() as usize).max(1);
+                        let step = (end - start) / steps as f64;
+                        for index in 0..steps {
+                            let low_x = start + step * index as f64;
+                            let center = Point2::new(low_x + step * 0.5, low_y + height * 0.5);
+                            let value = crate::material_overlay::sample(scene, region, center)
+                                .value(property)
+                                .ok();
+                            if let Some(value) = value {
+                                minimum = minimum.min(value);
+                                maximum = maximum.max(value);
+                            }
+                            cells.push((
+                                Point2::new(low_x, low_y),
+                                Point2::new(low_x + step, low_y + height),
+                                value,
+                                flat,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let span = maximum - minimum;
+    let quads = cells
+        .into_iter()
+        .map(|(low, high, value, flat)| PreviewQuad {
+            low,
+            high,
+            color: match (value, property) {
+                (Some(value), Some(property)) => {
+                    let fraction = if span > 0.0 {
+                        ((value - minimum) / span).clamp(0.0, 1.0) as f32
+                    } else {
+                        0.5
+                    };
+                    overlay_property_color(property, fraction, 255)
+                }
+                _ => flat,
+            },
+        })
+        .collect();
+    let strokes = faces
+        .iter()
+        .flat_map(|face| &face.cycles)
+        .filter(|cycle| cycle.len() >= 2)
+        .cloned()
+        .collect();
+    ExamplePreview { quads, strokes }
+}
+
+/// Where one horizontal line enters and leaves a face. Every cycle is closed
+/// and thrown in together, so the even-odd pairing that falls out excludes the
+/// face's own holes without any extra bookkeeping.
+fn face_spans(cycles: &[Vec<Point2>], y: f64) -> Vec<(f64, f64)> {
+    let mut crossings = Vec::new();
+    for cycle in cycles {
+        for index in 0..cycle.len() {
+            let a = cycle[index];
+            let b = cycle[(index + 1) % cycle.len()];
+            if (a.y > y) != (b.y > y) {
+                crossings.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
+            }
+        }
+    }
+    crossings.sort_by(f64::total_cmp);
+    crossings
+        .chunks_exact(2)
+        .filter(|pair| pair[1] > pair[0])
+        .map(|pair| (pair[0], pair[1]))
+        .collect()
+}
+
+fn paint_example_thumbnail(
+    ui: &mut egui::Ui,
+    example: &funfern_app::topology_examples::TopologyExample,
+    preview: Option<&ExamplePreview>,
+    size: egui::Vec2,
+) -> egui::Response {
+    let scene = &example.document.model.accepted;
+    let domain = scene.geometry.domain;
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 5.0, Color32::from_rgb(24, 32, 39));
+    let inner = rect.shrink(7.0);
+    let project = |point: Point2| {
+        egui::pos2(
+            egui::lerp(
+                inner.left()..=inner.right(),
+                ((point.x - domain.min_x) / domain.width()) as f32,
+            ),
+            egui::lerp(
+                inner.bottom()..=inner.top(),
+                ((point.y - domain.min_y) / domain.height()) as f32,
+            ),
+        )
+    };
+    if let Some(preview) = preview {
+        let mut mesh = egui::Mesh::default();
+        mesh.reserve_vertices(preview.quads.len() * 4);
+        mesh.reserve_triangles(preview.quads.len() * 2);
+        for quad in &preview.quads {
+            let base = mesh.vertices.len() as u32;
+            let low = project(quad.low);
+            let high = project(quad.high);
+            for corner in [
+                egui::pos2(low.x, low.y),
+                egui::pos2(high.x, low.y),
+                egui::pos2(high.x, high.y),
+                egui::pos2(low.x, high.y),
+            ] {
+                mesh.colored_vertex(corner, quad.color);
+            }
+            mesh.add_triangle(base, base + 1, base + 2);
+            mesh.add_triangle(base, base + 2, base + 3);
+        }
+        painter.add(egui::Shape::mesh(mesh));
+        for stroke in &preview.strokes {
+            let mut points = stroke
+                .iter()
+                .map(|point| project(*point))
+                .collect::<Vec<_>>();
+            points.push(points[0]);
+            painter.add(egui::Shape::line(points, Stroke::new(1.0, TEAL)));
+        }
+    }
+    let corners = [
+        (inner.left_bottom(), inner.right_bottom()),
+        (inner.right_bottom(), inner.right_top()),
+        (inner.right_top(), inner.left_top()),
+        (inner.left_top(), inner.left_bottom()),
+    ];
+    for side in OuterSide::ALL {
+        let (start, end) = corners[side.index()];
+        let condition = scene.outer_boundaries.sides[side.index()];
+        painter.line_segment(
+            [start, end],
+            Stroke::new(2.5, outer_condition_color(condition)),
+        );
+        if condition
+            .signal()
+            .is_some_and(|signal| signal.characteristic_amplitude() != 0.0)
+        {
+            painter.circle_filled(start.lerp(end, 0.5), 3.5, GOLD);
+        }
+    }
+    if example.document.model.source.enabled {
+        let center = project(example.document.model.source.position);
+        painter.circle_stroke(center, 4.5, Stroke::new(1.6, GOLD));
+        painter.line_segment(
+            [center - egui::vec2(6.0, 0.0), center + egui::vec2(6.0, 0.0)],
+            Stroke::new(1.0, GOLD),
+        );
+        painter.line_segment(
+            [center - egui::vec2(0.0, 6.0), center + egui::vec2(0.0, 6.0)],
+            Stroke::new(1.0, GOLD),
+        );
+    }
+    painter.rect_stroke(
+        rect,
+        5.0,
+        Stroke::new(1.0, Color32::from_rgb(88, 104, 116)),
+        egui::StrokeKind::Inside,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn overlay_property_color(property: MaterialProperty, fraction: f32, alpha: u8) -> Color32 {
     if property != MaterialProperty::VolumeSource {
         return material_property_color(fraction, alpha);
@@ -10829,10 +11198,20 @@ pub fn frame(
                 }
                 Err(error) => state.message = error,
             }
-        } else if let Ok(Some(bytes)) = crate::recovery::load() {
-            if let Ok(candidate) = persistence::parse(&bytes) {
-                state.load = Some(candidate);
-                state.file_busy = true;
+        } else {
+            match crate::recovery::load()
+                .ok()
+                .flatten()
+                .and_then(|bytes| persistence::parse(&bytes).ok())
+            {
+                Some(candidate) => {
+                    state.load = Some(candidate);
+                    state.file_busy = true;
+                }
+                // A first run, or an autosave that went away or stopped
+                // parsing. Open a random example rather than the same one
+                // every time, so the app opens on something worth looking at.
+                None => state.open_random_example(),
             }
         }
     }
@@ -10948,6 +11327,183 @@ pub fn frame(
 mod tests {
     use super::*;
     use funfern_app::topology_viewport::screen_side;
+
+    /// A thumbnail is rasterized, not traced, so a face covers area rather than
+    /// only an outline, and every quad lands inside the scene it came from.
+    #[test]
+    fn a_thumbnail_fills_the_faces_of_the_scene_it_previews() {
+        let example = &funfern_app::topology_examples::catalog()[0];
+        let preview = build_example_preview(example);
+        let domain = example.document.model.accepted.geometry.domain;
+        assert!(preview.quads.len() > PREVIEW_ROWS, "a face was not filled");
+        assert!(!preview.strokes.is_empty(), "nothing was outlined");
+        for quad in &preview.quads {
+            assert!(quad.low.x < quad.high.x && quad.low.y < quad.high.y);
+            assert!(
+                quad.low.x >= domain.min_x - 1e-9
+                    && quad.high.x <= domain.max_x + 1e-9
+                    && quad.low.y >= domain.min_y - 1e-9
+                    && quad.high.y <= domain.max_y + 1e-9,
+                "a quad left the domain"
+            );
+        }
+        let colors = preview
+            .quads
+            .iter()
+            .map(|quad| quad.color.to_array())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            colors.len() > 1,
+            "the obstacle is the same colour as the background it sits in"
+        );
+    }
+
+    /// The reason a thumbnail samples cell centres rather than polygon corners:
+    /// every corner of a Luneburg lens sits on the same circle, so a profile
+    /// read at the corners alone is one flat colour.
+    #[test]
+    fn a_radial_material_profile_reaches_the_thumbnail() {
+        let example = funfern_app::topology_examples::catalog()
+            .iter()
+            .find(|example| example.name == "Luneburg lens")
+            .expect("the catalog still carries the Luneburg lens");
+        assert!(matches!(
+            example.document.presentation.material_overlay,
+            MaterialOverlay::Property(MaterialProperty::WaveSpeed)
+        ));
+        let preview = build_example_preview(example);
+        let shades = preview
+            .quads
+            .iter()
+            .map(|quad| quad.color.to_array())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            shades.len() > 8,
+            "the lens reads as {} colour(s), not a profile",
+            shades.len()
+        );
+    }
+
+    /// Even-odd pairing across every cycle at once is what keeps a face out of
+    /// its own holes, and a slit traced out and back contributes nothing.
+    #[test]
+    fn scanline_spans_skip_the_holes_in_a_face() {
+        let outer = vec![
+            Point2::new(-1.0, -1.0),
+            Point2::new(1.0, -1.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(-1.0, 1.0),
+        ];
+        let hole = vec![
+            Point2::new(-0.5, -0.5),
+            Point2::new(-0.5, 0.5),
+            Point2::new(0.5, 0.5),
+            Point2::new(0.5, -0.5),
+        ];
+        assert_eq!(
+            face_spans(std::slice::from_ref(&outer), 0.0),
+            vec![(-1.0, 1.0)]
+        );
+        assert_eq!(
+            face_spans(&[outer.clone(), hole], 0.0),
+            vec![(-1.0, -0.5), (0.5, 1.0)]
+        );
+        // A line above the face crosses nothing.
+        assert!(face_spans(&[outer], 2.0).is_empty());
+    }
+
+    /// New is a scene that can be run, not just an empty one.
+    #[test]
+    fn a_new_scene_is_empty_outgoing_and_driven() {
+        let mut state = Playground::default();
+        state.new_scene();
+        let scene = &state.editor.document.model.accepted;
+        assert!(scene.geometry.curves.is_empty());
+        assert_eq!(scene.regions.len(), 1);
+        for side in OuterSide::ALL {
+            assert_eq!(
+                scene.outer_boundaries.sides[side.index()],
+                OuterBoundaryCondition::SecondOrderOutgoing
+            );
+        }
+        assert!(state.editor.document.model.source.enabled);
+        assert_eq!(state.example_opened, None, "a new scene is not an example");
+        assert!(state.editor.undo(), "New is one undoable action");
+    }
+
+    /// The gallery survives a pick, and the pick is what changes the document.
+    #[test]
+    fn opening_an_example_leaves_the_gallery_open_and_marks_the_row() {
+        let mut state = Playground {
+            examples_open: true,
+            ..Playground::default()
+        };
+        let index = funfern_app::topology_examples::catalog()
+            .iter()
+            .position(|example| example.name == "Double slit")
+            .unwrap();
+        state.open_example(index);
+        assert!(state.examples_open, "the gallery closed on a pick");
+        assert_eq!(state.example_opened, Some(index));
+        assert_eq!(
+            state.editor.document.model,
+            funfern_app::topology_examples::catalog()[index]
+                .document
+                .model
+        );
+        state.new_scene();
+        assert_eq!(state.example_opened, None, "the marker outlived its scene");
+    }
+
+    /// Every catalog entry has to reach the gallery, and building them all is
+    /// spread over frames because the largest one costs a frame by itself.
+    #[test]
+    fn every_example_previews_and_the_cache_fills_one_per_frame() {
+        let mut state = Playground::default();
+        let total = funfern_app::topology_examples::catalog().len();
+        assert_eq!(state.example_previews.len(), total);
+        assert!(state.example_previews.iter().all(Option::is_none));
+        for filled in 1..=total {
+            let index = state
+                .example_previews
+                .iter()
+                .position(Option::is_none)
+                .expect("an unbuilt preview");
+            state.example_previews[index] = Some(build_example_preview(
+                &funfern_app::topology_examples::catalog()[index],
+            ));
+            assert_eq!(
+                state
+                    .example_previews
+                    .iter()
+                    .filter(|p| p.is_some())
+                    .count(),
+                filled
+            );
+        }
+        for (index, preview) in state.example_previews.iter().enumerate() {
+            let preview = preview.as_ref().unwrap();
+            assert!(
+                !preview.quads.is_empty(),
+                "{} previews as nothing",
+                funfern_app::topology_examples::catalog()[index].name
+            );
+        }
+    }
+
+    /// The random start has to land on every example and never off the end.
+    #[test]
+    fn the_random_start_stays_inside_the_catalog() {
+        let total = funfern_app::topology_examples::catalog().len();
+        let mut seen = BTreeSet::new();
+        for step in 0..=1000 {
+            let index = random_example_index(f64::from(step) / 1000.0, total);
+            assert!(index < total, "{step} lands past the catalog");
+            seen.insert(index);
+        }
+        assert_eq!(seen.len(), total, "some example can never open at startup");
+        assert!((0.0..1.0).contains(&random_fraction()));
+    }
 
     #[test]
     fn a_span_selection_reports_one_state_only_when_every_span_agrees() {

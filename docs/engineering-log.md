@@ -122,6 +122,69 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — The example gallery comes back, and a new scene has somewhere to start
+
+The cutover left Examples as a flat submenu of eight names with the description
+on hover. The gallery it replaced — own window, thumbnail, heading, description
+— could not be reverted: its painter walked `scene.obstacles` and
+`scene.internal_boundaries`, and the old catalog carried a cached
+`property_preview` triangle soup that the topology catalog does not have. So the
+window is restored and the painter is new.
+
+A thumbnail is built from the example's own compiled scene: `compile(0)` gives
+faces with their boundary cycles and an assignment from face to region, region
+gives material, material gives colour. Which property shades a spatial example
+needed no decision — the catalog already says. GRIN rod and Luneburg lens carry
+`Property(WaveSpeed)`, Anisotropic crystal `Property(Anisotropy)`, Phased array
+`Property(VolumeSource)`; the rest carry `Regions` and fill flat.
+
+Faces are rasterized by scanline rather than triangulated. A face is an
+arbitrary polygon with holes, so filling it needs either a triangulator or a
+rasterizer, and the rasterizer answers a second question at the same time:
+throwing every cycle of a face into one crossing list and pairing the crossings
+even-odd excludes the face's own holes with no extra bookkeeping. A flat face
+costs one quad per row; only a shaded face pays per cell.
+
+Sampling the property at cell centres rather than at polygon corners is the
+whole point, and there is a test named after why: every corner of a Luneburg
+lens sits on the same circle, so a profile read at the corners alone is one flat
+colour. The rendered preview shows the radial gradient it should.
+
+Cost decided the caching. Compiling the eight examples takes 0.03 to 19.5 ms
+each in release, 35 ms for all of them, so the window builds at most one preview
+per frame: a row shows its name and description at once and its thumbnail a few
+frames later. The grid is 48 rows down the domain, under three pixels a row;
+72 rows doubled the quads a shaded example costs and changed nothing visible.
+
+New starts `TopologyDocument::default()` — nothing drawn, one background
+material, every wall already second-order outgoing — with the point source
+switched on, because an empty scene that makes no wave is a still picture rather
+than a starting point.
+
+The gallery stays open across a pick, so the catalog can be clicked through, and
+the row the document came from is marked. Any other load clears that marker,
+which is why it is cleared in `set_document` and set again by the one path that
+knows better.
+
+Startup with nothing to restore used to open the first catalog entry every time;
+it now opens one at random. The pick lives in the startup block rather than in
+`Playground::default`, so the twenty-nine tests that build a default playground
+stay deterministic. Randomness without a dependency: the wall clock's sub-second
+bits natively, `Math::random` in the browser, where `SystemTime::now` is not
+available. A corrupt autosave counts as nothing to restore, which it did not
+before — the old branch fell through and kept the startup document.
+
+Seven tests, each run first against a deliberately broken implementation: a face
+filled rather than traced, the radial profile reaching the thumbnail, scanline
+spans skipping holes, a new scene being empty and outgoing and driven, the
+gallery surviving a pick and the marker not outliving its scene, every catalog
+entry previewing with the cache filling one per frame, and the random index
+staying inside the catalog at a fraction of exactly one.
+
+Checked: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+-- -D warnings`, `cargo test --workspace --locked`, `cargo build --release -p
+funfern-app --locked`.
+
 ## 2026-09-16 — The last schema with two owners
 
 The version-22 file was written by `topology_persistence` but its scalar values
