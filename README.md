@@ -139,7 +139,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   states ticks neither and is marked Mixed, and ticking a box puts every selected
   span in that state. A span excluded on both sides, one
   between two holes say, is marked Inactive, since nothing it carries reaches the
-  simulation. Outer edges support reflecting,
+  simulation, and a transmitting span excluded on just one side is marked Walled,
+  since it has nothing to transmit into and reflects until the far side carries a
+  material again. Outer edges support reflecting,
   prescribed
   time-varying Neumann and Dirichlet data, and first- or second-order outgoing
   conditions. Hole and baffle faces support the same choices, with an adjustable

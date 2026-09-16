@@ -190,10 +190,15 @@ vertices and returns `None` otherwise, which the runtime answers with
 `FullRebuild(TraceIdentityChanged)`. The reused mesh is now prepared alongside
 the action, because preparing it can fail.
 
+The Edit panel also says so now. Beside Inactive - a span excluded on both
+sides - a transmitting span excluded on just one side reads **Walled**, with
+the reason on hover. Its test asserts both halves of the claim: the span
+context the badge counts, and that the plan really does come out reflecting.
+
 Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
 --locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
---release -p funfern-app --locked`. Two new tests; the runtime one was checked
-to fail with the remap stubbed out, on exactly the id sets above.
+--release -p funfern-app --locked`. Three new tests; the runtime one was
+checked to fail with the remap stubbed out, on exactly the id sets above.
 
 ## 2026-09-16 — A slit is pulled out of the polygon, whichever way it transmits
 

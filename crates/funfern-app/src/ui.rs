@@ -1708,28 +1708,46 @@ impl Playground {
                 _ => None,
             })
             .collect::<BTreeSet<_>>();
-        // A span with an excluded face on both sides, two holes say, bounds
-        // nothing the simulation solves, so its boundary settings do nothing.
+        // Two states the boundary settings below do not describe. A span with
+        // an excluded face on both sides, two holes say, bounds nothing the
+        // simulation solves. A transmitting span with an excluded face on one
+        // side has nothing to transmit into, and the plan walls it.
         if let Some(compiled) = self.editor.compiled_draft.as_ref() {
-            let inactive = curve_spans
+            let contexts = curve_spans
                 .iter()
-                .filter(|span| {
-                    span_context(compiled, **span)
-                        .is_some_and(|context| !context.left.active && !context.right.active)
+                .filter_map(|span| span_context(compiled, *span))
+                .collect::<Vec<_>>();
+            let inactive = contexts
+                .iter()
+                .filter(|context| !context.left.active && !context.right.active)
+                .count();
+            let walled = contexts
+                .iter()
+                .filter(|context| {
+                    context.behavior == SpanBehavior::Transmitting
+                        && context.left.active != context.right.active
                 })
                 .count();
+            let badge = |count: usize, one: &str, many: &str| {
+                if count == curve_spans.len() && count == 1 {
+                    one.to_owned()
+                } else if count == curve_spans.len() {
+                    format!("All {many}")
+                } else {
+                    format!("{count} of {} {many}", curve_spans.len())
+                }
+            };
             if inactive > 0 {
-                ui.colored_label(
-                    GOLD,
-                    if inactive == curve_spans.len() && inactive == 1 {
-                        "Inactive".to_owned()
-                    } else if inactive == curve_spans.len() {
-                        "All inactive".to_owned()
-                    } else {
-                        format!("{inactive} of {} inactive", curve_spans.len())
-                    },
-                )
-                .on_hover_text("Excluded on both sides, so nothing here reaches the simulation");
+                ui.colored_label(GOLD, badge(inactive, "Inactive", "inactive"))
+                    .on_hover_text(
+                        "Excluded on both sides, so nothing here reaches the simulation",
+                    );
+            }
+            if walled > 0 {
+                ui.colored_label(GOLD, badge(walled, "Walled", "walled"))
+                    .on_hover_text(
+                        "Transmit meets an excluded face here, so the span reflects until the far side carries a material",
+                    );
             }
         }
         if !curve_spans.is_empty() {

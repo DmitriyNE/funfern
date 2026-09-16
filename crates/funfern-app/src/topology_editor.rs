@@ -7370,6 +7370,70 @@ mod tests {
         );
     }
 
+    /// A transmitting span with an excluded face on one side has nothing to
+    /// transmit into, so the plan walls it. The Edit panel calls that walled,
+    /// and reads the two halves of the claim - the authored behaviour and the
+    /// one live side - straight off the span context.
+    #[test]
+    fn a_transmitting_span_against_a_hole_reports_itself_walled() {
+        use crate::topology_viewport::span_context;
+        let mut editor = TopologyEditor::default();
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.4),
+                ClosedCurvePurpose::Hole,
+            )
+            .unwrap();
+        settle(&mut editor);
+        let spans = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(loop_id)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<BTreeSet<_>>();
+        let walled = |editor: &TopologyEditor| {
+            let compiled = editor.compiled_draft.as_ref().unwrap();
+            spans
+                .iter()
+                .filter(|span| {
+                    span_context(compiled, **span).is_some_and(|context| {
+                        context.behavior == SpanBehavior::Transmitting
+                            && context.left.active != context.right.active
+                    })
+                })
+                .count()
+        };
+        assert_eq!(
+            walled(&editor),
+            0,
+            "a hole's wall is authored as a boundary"
+        );
+
+        editor
+            .set_span_behavior(&spans, SpanBehavior::Transmitting)
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(walled(&editor), spans.len());
+        // What the badge claims: the plan reflects the whole curve back.
+        let plan = &editor.compiled_draft.as_ref().unwrap().plan;
+        assert!(
+            plan.boundaries
+                .iter()
+                .filter(|boundary| matches!(
+                    boundary.source,
+                    PlannedBoundarySource::Curve { curve, .. } if curve == loop_id
+                ))
+                .all(|boundary| boundary.behavior == Some(SpanBehavior::REFLECTING)),
+            "a walled span is planned reflecting on the side that is live"
+        );
+    }
+
     /// A span with an excluded face on either side bounds nothing the simulation
     /// solves, which is what the Edit panel calls inactive. Reachable now that a
     /// split subdomain's halves are emptied one at a time.
