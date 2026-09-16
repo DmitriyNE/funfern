@@ -4405,9 +4405,17 @@ impl Playground {
             }
             if let (Some(last), Some(pointer)) = (points.last(), painter.ctx().pointer_hover_pos())
             {
+                // Where the click will land, not where the cursor is.
                 let target = self
                     .draw_attachment_hit(ScreenPoint::new(pointer.x as f64, pointer.y as f64), r)
-                    .map_or(pointer, |hit| self.screen(hit.point, r));
+                    .map(|hit| self.screen(hit.point, r))
+                    .unwrap_or_else(|| {
+                        if painter.ctx().input(|input| input.modifiers.shift) {
+                            self.screen(Self::snap_point(self.world(pointer, r)), r)
+                        } else {
+                            pointer
+                        }
+                    });
                 painter.line_segment(
                     [*last, target],
                     Stroke::new(1.2, Color32::from_rgba_unmultiplied(248, 196, 112, 180)),
@@ -5062,6 +5070,7 @@ impl Playground {
                         self.world(pos, r),
                         ScreenPoint::new(pos.x as f64, pos.y as f64),
                         r,
+                        ui.input(|input| input.modifiers.shift),
                     );
                 }
             }
@@ -5694,11 +5703,21 @@ impl Playground {
             self.delete_selection();
         }
     }
-    fn draw_click(&mut self, mut point: Point2, screen: ScreenPoint, r: Rect) {
-        let snap = self.draw_attachment_hit(screen, r);
+    fn draw_click(&mut self, mut point: Point2, screen: ScreenPoint, r: Rect, snap_to_grid: bool) {
+        let hit = self.draw_attachment_hit(screen, r);
         let Some(mut gesture) = self.draw.take() else {
             return;
         };
+        let open = matches!(gesture.tool, DrawTool::Polyline | DrawTool::OpenSpline);
+        let mut attachment = None;
+        // An attachment is a snap of its own and outranks the grid: the point
+        // being welded to is where the curve has to land.
+        if open && let Some(hit) = hit {
+            point = hit.point;
+            attachment = Some(hit.attachment);
+        } else if snap_to_grid {
+            point = Self::snap_point(point);
+        }
         if gesture.tool == DrawTool::Circle {
             let spline = PeriodicCubicSpline::rounded(point, 0.15);
             let purpose = match self.closed_purpose {
@@ -5716,14 +5735,6 @@ impl Playground {
             }
             self.invalidate_samples();
             return;
-        }
-        let open = matches!(gesture.tool, DrawTool::Polyline | DrawTool::OpenSpline);
-        let mut attachment = None;
-        if open {
-            if let Some(hit) = snap {
-                point = hit.point;
-                attachment = Some(hit.attachment);
-            }
         }
         if gesture
             .points
@@ -10722,6 +10733,71 @@ mod tests {
             !state.diagnostics_warning(),
             "a rebuild that carried the edit through is not an error"
         );
+    }
+
+    /// Shift places a point on the same 0.05 grid every drag snaps to. A
+    /// default editor has compiled nothing, so no attachment can outrank it and
+    /// this is the grid path.
+    #[test]
+    fn shift_places_a_drawn_point_on_the_grid() {
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let mut state = Playground::default();
+        state.begin_draw(DrawTool::Polyline);
+        state.draw_click(
+            Point2::new(0.117, -0.233),
+            ScreenPoint::new(0.0, 0.0),
+            viewport,
+            true,
+        );
+        state.draw_click(
+            Point2::new(-0.481, 0.062),
+            ScreenPoint::new(0.0, 0.0),
+            viewport,
+            false,
+        );
+        let points = &state.draw.as_ref().unwrap().points;
+        assert_eq!(points[0], Point2::new(0.10, -0.25));
+        assert_eq!(
+            points[1],
+            Point2::new(-0.481, 0.062),
+            "without shift the point stays where it was put"
+        );
+
+        // Every tool goes through the same place, the two-click rectangle
+        // included. Clear of the default scene's loop, so it compiles.
+        let before = state.editor.document.model.draft.geometry.curves.len();
+        state.begin_draw(DrawTool::Rectangle);
+        for point in [Point2::new(0.537, 0.562), Point2::new(0.873, 0.818)] {
+            state.draw_click(point, ScreenPoint::new(0.0, 0.0), viewport, true);
+        }
+        assert_eq!(
+            state.editor.document.model.draft.geometry.curves.len(),
+            before + 1,
+            "the rectangle was refused: {}",
+            state.message
+        );
+        let rectangle = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .last()
+            .expect("the rectangle was created")
+            .spline
+            .clone();
+        assert_eq!(rectangle.node_count(), 4);
+        for index in 0..rectangle.node_count() {
+            let corner = rectangle.node_point(index).unwrap();
+            for value in [corner.x, corner.y] {
+                let steps = value / 0.05;
+                assert!(
+                    (steps - steps.round()).abs() < 1.0e-9,
+                    "corner off the grid at {value}"
+                );
+            }
+        }
     }
 
     /// Picking a tool starts the gesture and leaves the palette up, so one

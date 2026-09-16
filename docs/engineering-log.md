@@ -150,6 +150,30 @@ Longer-standing work:
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
 
+## 2026-09-16 — Shift reaches the drawing tools
+
+Shift snaps to a 0.05 grid everywhere something is dragged - controls,
+endpoints, spans, the gizmo, probes, the outer domain - but the drawing tools
+never read the modifier. `draw_click` was handed the raw pointer position, and
+the branch that handles a live gesture returns before any of the code that looks
+at modifiers, so the key did nothing at all while drawing.
+
+The point is snapped in one place now, ahead of the tool branches, so every tool
+gets it: a circle's centre, a rectangle's two corners, and each vertex of a
+polyline, polygon or spline. An attachment still wins where there is one - the
+point being welded to is where the curve has to land - and the grid applies
+everywhere else. The rubber band follows the same rule, so it ends where the
+click will land rather than at the cursor.
+
+Two consequences worth having: closing a polygon is easier, since a click near
+the first point snaps onto the same grid node, and a rectangle drawn with Shift
+comes out on the grid.
+
+Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+--locked -- -D warnings`, `cargo test --workspace --locked`, and `cargo build
+--release -p funfern-app --locked`. One new test, checked to fail without the
+snap on the first placed point.
+
 ## 2026-09-16 — The draw palette stays where it is put
 
 Picking a tool closed the Draw palette, so laying out several primitives meant a

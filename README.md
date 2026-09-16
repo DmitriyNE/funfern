@@ -178,6 +178,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
 - **Geometry role:** Draw contains closed and open curve tools. Its palette is a
   floating window that can be dragged anywhere and stays up across draws, so one
   primitive follows another; it closes from its own button or the toolbar toggle.
+  Holding Shift places each point on the same grid dragging snaps to, except
+  where the point attaches to existing geometry, which outranks it.
   Closed curves start as subdomains or holes. Open curves start as transmitting separators or
   two-sided baffles, either of which may be left unattached. The material chosen
   for a separator applies only if it encloses a face as it is drawn; a face
