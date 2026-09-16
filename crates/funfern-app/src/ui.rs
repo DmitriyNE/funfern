@@ -24,7 +24,7 @@ use funfern_app::document::{ProbeId, ProbeSamplingPreset, VectorOverlay};
 use funfern_app::topology_editor::{
     ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyEditor, TopologyProbeDefinition,
-    TopologyProbeTarget, TopologyRemoval, TopologyRemovalTarget,
+    TopologyProbeTarget, TopologyRemoval, TopologyRemovalTarget, TopologyWeldOutcome,
 };
 use funfern_app::topology_persistence::{self as persistence, TopologyLoadCandidate};
 use funfern_app::topology_runtime::{
@@ -255,14 +255,30 @@ enum DragGesture {
     },
 }
 
-/// A deletion worked out as far as the survivor question, waiting for the click
-/// that answers it. It keeps the span selection rather than the target it was
-/// planned from, so the staleness guard has one thing to check and the target is
-/// rebuilt against whatever the document says when the answer arrives.
+/// A change worked out as far as the survivor question, waiting for the click
+/// that answers it.
 #[derive(Clone, Debug)]
-struct PendingRemoval {
-    spans: BTreeSet<CurveSpanId>,
+struct PendingMerge {
+    action: MergeAction,
     choices: Vec<RegionId>,
+}
+
+/// What will be done once the question is answered. Both kinds fold two
+/// subdomains into one face - a deletion by removing the edge between them, a
+/// weld by moving an end until the circuit that separated them no longer
+/// closes - and neither says by itself which material survives.
+#[derive(Clone, Debug)]
+enum MergeAction {
+    /// The span selection the deletion named, rather than the target planned
+    /// from it, so the staleness guard has one thing to check and the target is
+    /// rebuilt against whatever the document says when the answer arrives.
+    Delete(BTreeSet<CurveSpanId>),
+    Weld {
+        curve: CurveId,
+        node: usize,
+        endpoint: usize,
+        target: TopologyAttachment,
+    },
 }
 
 /// The two grips of a region's material/source frame: its origin and the ring
@@ -696,7 +712,7 @@ pub struct Playground {
     transform_rotation_degrees: f64,
     transform_scale: f64,
     gizmo_pivot: Option<(BTreeSet<TopologySpanTarget>, Point2)>,
-    pending_removal: Option<PendingRemoval>,
+    pending_merge: Option<PendingMerge>,
     material_selection: MaterialId,
     region_selection: RegionId,
     /// Whether a widget held keyboard focus when the previous frame ended. egui
@@ -882,7 +898,7 @@ impl Default for Playground {
             transform_rotation_degrees: 0.0,
             transform_scale: 1.0,
             gizmo_pivot: None,
-            pending_removal: None,
+            pending_merge: None,
             material_selection: DEFAULT_MATERIAL,
             region_selection: BACKGROUND_REGION,
             keyboard_focus_previous: false,
@@ -1078,7 +1094,7 @@ impl Playground {
         }
         self.drag = None;
         self.draw = None;
-        self.pending_removal = None;
+        self.pending_merge = None;
         self.pulse_mode = false;
         self.probe_mode = None;
         self.invalidate_samples();
@@ -1097,7 +1113,7 @@ impl Playground {
         self.selection = TopologySelection::None;
         self.selected_probe = None;
         self.draw = None;
-        self.pending_removal = None;
+        self.pending_merge = None;
         self.requested_revision = None;
         self.reset_requested = fresh;
         self.invalidate_samples();
@@ -1643,17 +1659,20 @@ impl Playground {
     }
     /// Drops a staged survivor question when undo, a reload, or another edit
     /// moved the geometry out from under it, rather than act on something else.
-    fn prune_stale_pending_removal(&mut self) {
-        if self.pending_removal.as_ref().is_some_and(|pending| {
+    fn prune_stale_pending_merge(&mut self) {
+        if self.pending_merge.as_ref().is_some_and(|pending| {
             let geometry = &self.editor.document.model.draft.geometry;
-            !pending.spans.iter().all(|span| {
-                geometry
-                    .curves
-                    .iter()
-                    .any(|curve| curve.spans.iter().any(|candidate| candidate.id == *span))
-            })
+            match &pending.action {
+                MergeAction::Delete(spans) => !spans.iter().all(|span| {
+                    geometry
+                        .curves
+                        .iter()
+                        .any(|curve| curve.spans.iter().any(|candidate| candidate.id == *span))
+                }),
+                MergeAction::Weld { curve, .. } => geometry.curve(*curve).is_none(),
+            }
         }) {
-            self.pending_removal = None;
+            self.pending_merge = None;
         }
     }
     /// The region owning the draft face under a world point, from the editor's
@@ -1685,7 +1704,7 @@ impl Playground {
         if self.capturing() {
             return;
         }
-        let Some(pending) = &self.pending_removal else {
+        let Some(pending) = &self.pending_merge else {
             return;
         };
         let candidates = pending.choices.iter().copied().collect::<BTreeSet<_>>();
@@ -1767,7 +1786,7 @@ impl Playground {
     /// The question a staged deletion asks, anchored over the viewport so it is
     /// visible whatever panels are open.
     fn removal_prompt(&mut self, ctx: &egui::Context, viewport: Rect) {
-        if self.pending_removal.is_none() || self.capturing() {
+        if self.pending_merge.is_none() || self.capturing() {
             return;
         }
         let mut cancel = false;
@@ -1788,13 +1807,13 @@ impl Playground {
                 });
             });
         if cancel {
-            self.pending_removal = None;
+            self.pending_merge = None;
         }
     }
     /// Answers the staged deletion with the candidate under a click; a click
     /// anywhere else leaves the question open.
-    fn pick_removal_survivor(&mut self, point: Point2) {
-        let Some(pending) = self.pending_removal.clone() else {
+    fn pick_merge_survivor(&mut self, point: Point2) {
+        let Some(pending) = self.pending_merge.clone() else {
             return;
         };
         let Some(region) = self
@@ -1803,22 +1822,34 @@ impl Playground {
         else {
             return;
         };
-        let outcome = self
-            .editor
-            .removal_target(&pending.spans)
-            .and_then(|target| {
-                self.editor
-                    .remove(&target, Some(region))
-                    .map(|removal| (target, removal))
-            });
-        match outcome {
-            Ok((target, removal)) => {
-                self.pending_removal = None;
-                self.selection = TopologySelection::None;
-                self.invalidate_samples();
-                self.report_removal(&target, &removal);
+        match &pending.action {
+            MergeAction::Delete(spans) => {
+                let outcome = self.editor.removal_target(spans).and_then(|target| {
+                    self.editor
+                        .remove(&target, Some(region))
+                        .map(|removal| (target, removal))
+                });
+                match outcome {
+                    Ok((target, removal)) => {
+                        self.pending_merge = None;
+                        self.selection = TopologySelection::None;
+                        self.invalidate_samples();
+                        self.report_removal(&target, &removal);
+                    }
+                    Err(error) => self.message = error,
+                }
             }
-            Err(error) => self.message = error,
+            MergeAction::Weld {
+                curve,
+                node,
+                endpoint,
+                target,
+            } => {
+                let (curve, node, endpoint, target) = (*curve, *node, *endpoint, *target);
+                if self.weld(curve, node, endpoint, target, Some(region)) {
+                    self.pending_merge = None;
+                }
+            }
         }
     }
     /// The closed-curve Subdomain/Hole switch; acts on the complete curve
@@ -3673,7 +3704,7 @@ impl Playground {
         self.draw_markers(&painter, viewport);
         self.draw_material_frame(&painter, viewport);
         self.draw_transform_gizmo(&painter, viewport);
-        self.prune_stale_pending_removal();
+        self.prune_stale_pending_merge();
         self.draw_removal_candidates(&painter, viewport);
         let ctx = ui.ctx().clone();
         self.removal_prompt(&ctx, viewport);
@@ -4870,47 +4901,99 @@ impl Playground {
             return;
         };
         let endpoint = if node == 0 { 0 } else { 1 };
-        match self.editor.weld_endpoint(curve, endpoint, hit.attachment) {
-            Ok(weld) => {
-                self.selection = match weld.seam_control {
-                    Some(control) => TopologySelection::Handle(TopologyHandle::Control {
-                        curve: weld.curve,
-                        control,
-                    }),
-                    None => self.endpoint_control(curve, node).map_or(
-                        TopologySelection::None,
-                        |control| {
-                            TopologySelection::Handle(TopologyHandle::Control { curve, control })
-                        },
-                    ),
-                };
-                self.invalidate_samples();
-                let what = match hit.attachment {
-                    TopologyAttachment::LooseEnd { curve: other, .. } if other == curve => {
-                        "Closed into a loop"
-                    }
-                    TopologyAttachment::LooseEnd { .. } => "Welded into one curve",
-                    TopologyAttachment::Junction { .. } | TopologyAttachment::Breakpoint { .. } => {
-                        "Attached to junction"
-                    }
-                    TopologyAttachment::Boundary(FaceAnchor::Outer { .. }) => {
-                        "Attached to the outer boundary"
-                    }
-                    TopologyAttachment::Boundary(FaceAnchor::Curve { .. }) => {
-                        "Attached to the curve"
-                    }
-                };
-                let mut parts = vec![what.to_owned()];
-                if !weld.span_splits.is_empty() {
-                    parts.push("junction inserted".to_owned());
-                }
-                if weld.promoted {
-                    parts.push("curve promoted to a baffle".to_owned());
-                }
-                self.notify(parts.join(" · "));
+        self.weld(curve, node, endpoint, hit.attachment, None);
+    }
+
+    /// Welds, or stages the question first. A weld that would fold two
+    /// subdomains into one face reports the regions instead of performing it,
+    /// and the scene asks the same way a deletion does. Answers whether the
+    /// weld is settled, so a question that still stands is not cleared.
+    fn weld(
+        &mut self,
+        curve: CurveId,
+        node: usize,
+        endpoint: usize,
+        attachment: TopologyAttachment,
+        keep_region: Option<RegionId>,
+    ) -> bool {
+        let welded = match self
+            .editor
+            .weld_endpoint(curve, endpoint, attachment, keep_region)
+        {
+            Ok(TopologyWeldOutcome::Welded(weld)) => weld,
+            Ok(TopologyWeldOutcome::NeedsSurvivor(choices)) => {
+                self.pending_merge = Some(PendingMerge {
+                    action: MergeAction::Weld {
+                        curve,
+                        node,
+                        endpoint,
+                        target: attachment,
+                    },
+                    choices,
+                });
+                return false;
             }
-            Err(error) => self.message = error,
+            Err(error) => {
+                self.message = error;
+                return false;
+            }
+        };
+        self.selection = match welded.seam_control {
+            Some(control) => TopologySelection::Handle(TopologyHandle::Control {
+                curve: welded.curve,
+                control,
+            }),
+            None => self
+                .endpoint_control(curve, node)
+                .map_or(TopologySelection::None, |control| {
+                    TopologySelection::Handle(TopologyHandle::Control { curve, control })
+                }),
+        };
+        self.invalidate_samples();
+        let what = match attachment {
+            TopologyAttachment::LooseEnd { curve: other, .. } if other == curve => {
+                "Closed into a loop"
+            }
+            TopologyAttachment::LooseEnd { .. } => "Welded into one curve",
+            TopologyAttachment::Junction { .. } | TopologyAttachment::Breakpoint { .. } => {
+                "Attached to junction"
+            }
+            TopologyAttachment::Boundary(FaceAnchor::Outer { .. }) => {
+                "Attached to the outer boundary"
+            }
+            TopologyAttachment::Boundary(FaceAnchor::Curve { .. }) => "Attached to the curve",
+        };
+        let mut parts = vec![what.to_owned()];
+        if !welded.span_splits.is_empty() {
+            parts.push("junction inserted".to_owned());
         }
+        if welded.promoted {
+            parts.push("curve promoted to a baffle".to_owned());
+        }
+        if !welded.removed_regions.is_empty() {
+            parts.push(format!(
+                "{} subdomain{} merged away",
+                welded.removed_regions.len(),
+                if welded.removed_regions.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        if !welded.removed_probes.is_empty() {
+            parts.push(format!(
+                "{} probe{} dropped",
+                welded.removed_probes.len(),
+                if welded.removed_probes.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        self.notify(parts.join(" · "));
+        true
     }
     fn transform_gizmo(&self, r: Rect) -> Option<(Point2, Pos2, f32, f32, f32)> {
         if self.draw.is_some() || self.pulse_mode || self.probe_mode.is_some() {
@@ -5056,7 +5139,7 @@ impl Playground {
     /// A mode that owns the whole viewport says so with the cursor, since there
     /// is no handle anywhere to carry the meaning.
     fn modal_cursor(&self, pos: Pos2, r: Rect) -> Option<egui::CursorIcon> {
-        if let Some(pending) = &self.pending_removal {
+        if let Some(pending) = &self.pending_merge {
             // Only the candidates are clickable; everywhere else the click does
             // nothing and the cursor should not promise otherwise.
             return self
@@ -5249,13 +5332,13 @@ impl Playground {
             self.cancel_interaction();
             return;
         }
-        if self.pending_removal.is_some() {
+        if self.pending_merge.is_some() {
             // The survivor question owns the viewport until it is answered or
             // cancelled: a click picks, everything else waits.
             if response.clicked_by(egui::PointerButton::Primary)
                 && let Some(pos) = pointer
             {
-                self.pick_removal_survivor(self.world(pos, r));
+                self.pick_merge_survivor(self.world(pos, r));
             }
             return;
         }
@@ -6104,7 +6187,10 @@ impl Playground {
         // Merging two assigned subdomains needs an explicit survivor, so hand
         // the choice to the scene instead of failing the gesture.
         if choices.len() > 1 {
-            self.pending_removal = Some(PendingRemoval { spans, choices });
+            self.pending_merge = Some(PendingMerge {
+                action: MergeAction::Delete(spans),
+                choices,
+            });
             return;
         }
         match self.editor.remove(&target, choices.first().copied()) {
@@ -7299,7 +7385,7 @@ impl Playground {
     fn draw_domain_handles(&self, painter: &egui::Painter, r: Rect) {
         if self.capturing()
             || self.draw.is_some()
-            || self.pending_removal.is_some()
+            || self.pending_merge.is_some()
             || matches!(
                 self.drag,
                 Some(
@@ -12062,8 +12148,8 @@ mod probe_interaction_tests {
             Some(egui::CursorIcon::Crosshair)
         );
         state.pulse_mode = false;
-        state.pending_removal = Some(PendingRemoval {
-            spans: BTreeSet::from([CurveSpanId(99)]),
+        state.pending_merge = Some(PendingMerge {
+            action: MergeAction::Delete(BTreeSet::from([CurveSpanId(99)])),
             choices: vec![],
         });
         assert_eq!(
@@ -12324,7 +12410,7 @@ mod probe_interaction_tests {
         let history = state.editor.history_len();
 
         state.delete_selection();
-        let pending = state.pending_removal.clone().expect("a survivor question");
+        let pending = state.pending_merge.clone().expect("a survivor question");
         assert_eq!(
             pending.choices.len(),
             3,
@@ -12337,9 +12423,9 @@ mod probe_interaction_tests {
             "nothing is deleted until the question is answered"
         );
 
-        state.pick_removal_survivor(Point2::new(0.0, 0.95));
+        state.pick_merge_survivor(Point2::new(0.0, 0.95));
         settle(&mut state.editor);
-        assert!(state.pending_removal.is_none());
+        assert!(state.pending_merge.is_none());
         assert!(
             state.editor.document.model.draft.geometry.curves.is_empty(),
             "the whole selection goes, not the curve the question was about"
@@ -12399,7 +12485,7 @@ mod probe_interaction_tests {
 
         state.delete_selection();
         settle(&mut state.editor);
-        assert!(state.pending_removal.is_none(), "{}", state.message);
+        assert!(state.pending_merge.is_none(), "{}", state.message);
         let curves = &state.editor.document.model.draft.geometry.curves;
         assert_eq!(curves.len(), 1, "one baffle is left, and only that");
         assert_eq!(
@@ -12430,6 +12516,107 @@ mod probe_interaction_tests {
                     .map(|span| TopologySpanTarget::Curve(span.id))
             })
             .collect()
+    }
+
+    /// The scene asks for a weld the same way it asks for a deletion: the
+    /// question is staged, nothing is welded, and the click that names a
+    /// subdomain finishes the weld that raised it.
+    #[test]
+    fn a_weld_that_merges_subdomains_is_staged_for_the_picker() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let free = state
+            .editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.4, -0.3),
+                    Point2::new(0.4, 0.0),
+                    Point2::new(0.4, 0.3),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut state.editor);
+        let divider = state
+            .editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.0, -0.8),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.0, 0.8),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                    side: OuterSide::Bottom,
+                    fraction: 0.5,
+                })),
+                Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                    side: OuterSide::Top,
+                    fraction: 0.5,
+                })),
+            )
+            .unwrap()
+            .curve;
+        settle(&mut state.editor);
+        assert_eq!(state.editor.document.model.draft.regions.len(), 2);
+
+        // Anchor on the middle of the free baffle, whichever side resolves.
+        let compiled = &state.editor.compiled_accepted;
+        let owner = compiled.geometry.curve(free).unwrap();
+        let span = owner.spans[1].id;
+        let [a, b] = owner.spline.span_bounds(1).unwrap();
+        let parameter = (a + b) * 0.5;
+        let side = [CurveTraceSide::Left, CurveTraceSide::Right]
+            .into_iter()
+            .find(|side| {
+                FaceAnchor::Curve {
+                    curve: free,
+                    span,
+                    side: *side,
+                    parameter,
+                }
+                .resolve(&compiled.topology)
+                .is_ok()
+            })
+            .expect("a resolvable side");
+        let onto = TopologyAttachment::Boundary(FaceAnchor::Curve {
+            curve: free,
+            span,
+            side,
+            parameter,
+        });
+        state.editor.detach_endpoint(divider, 1).unwrap();
+        settle(&mut state.editor);
+        let node = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(divider)
+            .unwrap()
+            .nodes
+            .len()
+            - 1;
+
+        state.weld(divider, node, 1, onto, None);
+        let pending = state.pending_merge.clone().expect("a survivor question");
+        assert!(matches!(pending.action, MergeAction::Weld { .. }));
+        assert_eq!(pending.choices.len(), 2);
+        assert_eq!(state.editor.document.model.draft.regions.len(), 2);
+
+        state.pick_merge_survivor(Point2::new(-0.5, 0.0));
+        settle(&mut state.editor);
+        assert!(state.pending_merge.is_none(), "{}", state.message);
+        assert_eq!(state.editor.document.model.draft.regions.len(), 1);
+        assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
     }
 
     fn settle(editor: &mut TopologyEditor) {

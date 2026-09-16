@@ -142,6 +142,24 @@ pub struct TopologyWeld {
     pub seam_control: Option<usize>,
     pub promoted: bool,
     pub span_splits: Vec<TopologySpanSplit>,
+    pub removed_regions: Vec<RegionId>,
+    pub region_remaps: Vec<(RegionId, RegionId)>,
+    pub removed_probes: Vec<ProbeId>,
+}
+
+/// What a weld did, or what it needs before it can be done.
+///
+/// A weld never removes an edge, but it does move the end it welds, and a
+/// divider separates two faces only while its circuit closes. Welding a
+/// divider's loose end onto something that does not reach a wall opens that
+/// circuit, and the two regions it separated become one face with nothing to
+/// say which material survives.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TopologyWeldOutcome {
+    Welded(TopologyWeld),
+    /// The regions the weld would fold together. Ask, then weld again with the
+    /// answer.
+    NeedsSurvivor(Vec<RegionId>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1134,12 +1152,21 @@ impl TopologyEditor {
     /// curve); a junction, an outer side, a curve interior, or a vertex-less
     /// breakpoint gains an arm. The arrangement must compile afterwards or the
     /// weld is refused and only the drag remains.
+    ///
+    /// A weld that folds two subdomains into one face reports the regions
+    /// rather than performing it, so the caller can ask which material
+    /// survives and weld again with the answer.
     pub fn weld_endpoint(
         &mut self,
         curve: CurveId,
         endpoint: usize,
         target: TopologyAttachment,
-    ) -> Result<TopologyWeld, String> {
+        keep_region: Option<RegionId>,
+    ) -> Result<TopologyWeldOutcome, String> {
+        // A weld that turns out to need an answer must leave nothing behind,
+        // the id allocators included: the caller asks and welds again, and the
+        // ids the first attempt reserved would otherwise be spent twice.
+        let allocators = (self.next_curve, self.next_span, self.next_region);
         let compiled = self
             .compiled_draft
             .as_ref()
@@ -1229,6 +1256,23 @@ impl TopologyEditor {
             source_region,
             None,
         )?;
+        // Nothing is deleted by a weld, so every anchor still resolves; two of
+        // them resolving to one face is the whole question.
+        let landings = weld_landings(&candidate, &topology)?;
+        if landings.merges.len() > 1 {
+            return Err(
+                "This weld would merge subdomains in more than one place; weld a smaller part"
+                    .into(),
+            );
+        }
+        let settlement = match (landings.merge(), keep_region) {
+            (None, _) => MergeSettlement::default(),
+            (Some(_), None) => {
+                (self.next_curve, self.next_span, self.next_region) = allocators;
+                return Ok(TopologyWeldOutcome::NeedsSurvivor(landings.choices()));
+            }
+            (Some(_), Some(_)) => settle_merge(&mut candidate, &topology, &landings, keep_region)?,
+        };
         candidate
             .draft
             .compile(self.revision.wrapping_add(1))
@@ -1237,12 +1281,15 @@ impl TopologyEditor {
         self.document.model = candidate;
         self.changed();
         self.commit();
-        Ok(TopologyWeld {
+        Ok(TopologyWeldOutcome::Welded(TopologyWeld {
             curve: face_curve,
             seam_control,
             promoted,
             span_splits,
-        })
+            removed_regions: settlement.removed_regions,
+            region_remaps: settlement.region_remaps,
+            removed_probes: settlement.removed_probes,
+        }))
     }
 
     /// Active regions a removal would merge into one. More than one means the
@@ -1251,11 +1298,7 @@ impl TopologyEditor {
     /// here rather than asked about. The answer comes from compiling the whole
     /// removal, so it already accounts for curves it promotes or welds.
     pub fn removal_choices(&self, target: &TopologyRemovalTarget) -> Result<Vec<RegionId>, String> {
-        Ok(self
-            .plan_removal(target)?
-            .merge
-            .map(|merge| merge.regions.into_iter().collect())
-            .unwrap_or_default())
+        Ok(self.plan_removal(target)?.landings.choices())
     }
 
     /// `removal_choices` for one whole curve.
@@ -1724,17 +1767,8 @@ impl TopologyEditor {
                 live.push((new_face, *assignment));
             }
         }
-        let mut merges = landings
-            .iter()
-            .filter_map(|(face, landing)| {
-                let regions = landing.regions();
-                (regions.len() >= 2).then_some(Merge {
-                    face: *face,
-                    regions,
-                })
-            })
-            .collect::<Vec<_>>();
-        if merges.len() > 1 {
+        let landings = Landings::new(landings, live, vanishing);
+        if landings.merges.len() > 1 {
             return Err(
                 "This deletion would merge subdomains in more than one place; delete a smaller part"
                     .into(),
@@ -1743,10 +1777,7 @@ impl TopologyEditor {
         Ok(RemovalPlan {
             candidate,
             topology,
-            live,
             landings,
-            merge: merges.pop(),
-            vanishing,
             pieces,
             promoted,
             joined,
@@ -1775,114 +1806,19 @@ impl TopologyEditor {
         let RemovalPlan {
             mut candidate,
             topology,
-            live,
             landings,
-            merge,
-            vanishing,
             pieces,
             promoted,
             joined,
             mut removed_probes,
             provisional_curve,
         } = plan;
-        let choices = merge
-            .as_ref()
-            .map(|merge| merge.regions.clone())
-            .unwrap_or_default();
-        let (chosen_survivor, survivor) = resolve_survivor(&choices, keep_region)?;
-        let region_remaps = match (chosen_survivor, survivor) {
-            (Some(from), Some(to)) if from != to => vec![(from, to)],
-            _ => vec![],
-        };
-
-        // Faces whose region the removal decides: the merged face takes the
-        // survivor; a face that lost its only anchor but absorbed nothing keeps
-        // what it had under a fresh anchor.
-        let mut forced = BTreeMap::<FaceId, Option<RegionId>>::new();
-        let mut kept = BTreeSet::new();
-        for (face, landing) in &landings {
-            if merge.as_ref().is_some_and(|merge| merge.face == *face) {
-                forced.insert(*face, survivor);
-                continue;
-            }
-            if landing.live.is_empty() {
-                let mut regions = landing.dead_regions.iter().copied();
-                match (regions.next(), regions.next()) {
-                    (Some(region), None) => {
-                        forced.insert(*face, Some(region));
-                        kept.insert(region);
-                    }
-                    (None, None) if landing.dead_hole => {
-                        forced.insert(*face, None);
-                    }
-                    _ => {}
-                }
-            } else if landing.live.len() > 1 {
-                // Several anchors landed on one face naming at most one region
-                // between them - a hole absorbed into its neighbour, or two
-                // holes merging. Two or more would have been the merge face
-                // above. There is nothing to ask, since the face can only
-                // become that one region, but the rebuild still has to be told
-                // which of the anchors decides it.
-                forced.insert(*face, landing.regions().into_iter().next());
-            }
-        }
-        candidate.draft.face_assignments = rebuild_face_assignments(&live, &topology, &forced)?;
-
-        if let Some((from, to)) = region_remaps.first().copied() {
-            let replacement = candidate
-                .draft
-                .region(from)
-                .copied()
-                .ok_or("Selected surviving region no longer exists")?;
-            let exterior = candidate
-                .draft
-                .regions
-                .iter_mut()
-                .find(|region| region.id == to)
-                .ok_or("Exterior region no longer exists")?;
-            exterior.material = replacement.material;
-            exterior.frame = MaterialFrame::world();
-        }
-        // Regions leave the document relative to the surviving identity, but
-        // their dependents follow the user's choice: keeping the other material
-        // across an exterior merge moves its sources and probes onto region 1
-        // and drops region 1's own, whose material just got replaced.
-        let removed_regions = choices
-            .iter()
-            .chain(&vanishing)
-            .copied()
-            .filter(|region| Some(*region) != survivor && !kept.contains(region))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let dropped = choices
-            .iter()
-            .chain(&vanishing)
-            .copied()
-            .filter(|region| Some(*region) != chosen_survivor && !kept.contains(region))
-            .collect::<BTreeSet<_>>();
-        candidate
-            .draft
-            .regions
-            .retain(|region| !removed_regions.contains(&region.id));
-        candidate.draft.volume_sources.retain_mut(|source| {
-            if let Some((_, to)) = region_remaps
-                .iter()
-                .find(|(from, _)| source.region == *from)
-            {
-                source.region = *to;
-                true
-            } else {
-                !dropped.contains(&source.region)
-            }
-        });
-        retarget_point_source(&mut candidate, &region_remaps, &dropped, survivor);
-        removed_probes.extend(settle_region_probes(
-            &mut candidate.probes,
-            &region_remaps,
-            &dropped,
-        ));
+        let MergeSettlement {
+            removed_regions,
+            region_remaps,
+            removed_probes: mut merged_probes,
+        } = settle_merge(&mut candidate, &topology, &landings, keep_region)?;
+        removed_probes.append(&mut merged_probes);
         candidate
             .draft
             .compile(self.revision.wrapping_add(1))
@@ -4430,6 +4366,135 @@ fn settle_region_probes(
 /// names the faces whose region the removal decided — the merged face takes the
 /// survivor, a face that lost its only anchor keeps its region under a fresh
 /// one. Every other face must have inherited exactly one anchor.
+/// Where a weld's authored assignments land. A weld deletes nothing, so every
+/// anchor still resolves and there is nothing vanishing to account for.
+fn weld_landings(
+    candidate: &TopologyDocumentModel,
+    topology: &TopologySnapshot,
+) -> Result<Landings, String> {
+    let mut faces = BTreeMap::<FaceId, Landing>::new();
+    let mut live = vec![];
+    for assignment in &candidate.draft.face_assignments {
+        let face = assignment
+            .anchor
+            .resolve(topology)
+            .map_err(|issue| issue.to_string())?;
+        faces.entry(face).or_default().live.push(*assignment);
+        live.push((face, *assignment));
+    }
+    Ok(Landings::new(faces, live, BTreeSet::new()))
+}
+
+/// Settles a compiled change that may have folded regions together: which face
+/// keeps which region, and what becomes of the regions, sources and probes a
+/// merge leaves without one. Region 1 keeps the exterior identity, so an
+/// exterior merge takes the chosen region's material into it rather than the
+/// other way round.
+fn settle_merge(
+    candidate: &mut TopologyDocumentModel,
+    topology: &TopologySnapshot,
+    landings: &Landings,
+    keep_region: Option<RegionId>,
+) -> Result<MergeSettlement, String> {
+    let merge = landings.merge();
+    let choices = merge.map(|merge| merge.regions.clone()).unwrap_or_default();
+    let (chosen_survivor, survivor) = resolve_survivor(&choices, keep_region)?;
+    let region_remaps = match (chosen_survivor, survivor) {
+        (Some(from), Some(to)) if from != to => vec![(from, to)],
+        _ => vec![],
+    };
+
+    // Faces whose region the change decides: the merged face takes the
+    // survivor; a face that lost its only anchor but absorbed nothing keeps
+    // what it had under a fresh anchor.
+    let mut forced = BTreeMap::<FaceId, Option<RegionId>>::new();
+    let mut kept = BTreeSet::new();
+    for (face, landing) in &landings.faces {
+        if merge.is_some_and(|merge| merge.face == *face) {
+            forced.insert(*face, survivor);
+            continue;
+        }
+        if landing.live.is_empty() {
+            let mut regions = landing.dead_regions.iter().copied();
+            match (regions.next(), regions.next()) {
+                (Some(region), None) => {
+                    forced.insert(*face, Some(region));
+                    kept.insert(region);
+                }
+                (None, None) if landing.dead_hole => {
+                    forced.insert(*face, None);
+                }
+                _ => {}
+            }
+        } else if landing.live.len() > 1 {
+            // Several anchors landed on one face naming at most one region
+            // between them - a hole absorbed into its neighbour, or two
+            // holes merging. Two or more would have been the merge face
+            // above. There is nothing to ask, since the face can only
+            // become that one region, but the rebuild still has to be told
+            // which of the anchors decides it.
+            forced.insert(*face, landing.regions().into_iter().next());
+        }
+    }
+    candidate.draft.face_assignments = rebuild_face_assignments(&landings.live, topology, &forced)?;
+
+    if let Some((from, to)) = region_remaps.first().copied() {
+        let replacement = candidate
+            .draft
+            .region(from)
+            .copied()
+            .ok_or("Selected surviving region no longer exists")?;
+        let exterior = candidate
+            .draft
+            .regions
+            .iter_mut()
+            .find(|region| region.id == to)
+            .ok_or("Exterior region no longer exists")?;
+        exterior.material = replacement.material;
+        exterior.frame = MaterialFrame::world();
+    }
+    // Regions leave the document relative to the surviving identity, but
+    // their dependents follow the user's choice: keeping the other material
+    // across an exterior merge moves its sources and probes onto region 1
+    // and drops region 1's own, whose material just got replaced.
+    let removed_regions = choices
+        .iter()
+        .chain(&landings.vanishing)
+        .copied()
+        .filter(|region| Some(*region) != survivor && !kept.contains(region))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let dropped = choices
+        .iter()
+        .chain(&landings.vanishing)
+        .copied()
+        .filter(|region| Some(*region) != chosen_survivor && !kept.contains(region))
+        .collect::<BTreeSet<_>>();
+    candidate
+        .draft
+        .regions
+        .retain(|region| !removed_regions.contains(&region.id));
+    candidate.draft.volume_sources.retain_mut(|source| {
+        if let Some((_, to)) = region_remaps
+            .iter()
+            .find(|(from, _)| source.region == *from)
+        {
+            source.region = *to;
+            true
+        } else {
+            !dropped.contains(&source.region)
+        }
+    });
+    retarget_point_source(candidate, &region_remaps, &dropped, survivor);
+    let removed_probes = settle_region_probes(&mut candidate.probes, &region_remaps, &dropped);
+    Ok(MergeSettlement {
+        removed_regions,
+        region_remaps,
+        removed_probes,
+    })
+}
+
 fn rebuild_face_assignments(
     live: &[(FaceId, AuthoredFaceAssignment)],
     topology: &TopologySnapshot,
@@ -4481,10 +4546,77 @@ impl Landing {
     }
 }
 
-/// A face of the compiled removal that absorbed two or more active regions.
+/// A face of the recompiled arrangement that absorbed two or more active
+/// regions.
 struct Merge {
     face: FaceId,
     regions: BTreeSet<RegionId>,
+}
+
+/// Where every authored face assignment landed once a change was compiled, and
+/// what that says about regions folding together.
+///
+/// Deletion and welding arrive at the same question from opposite directions.
+/// One removes the edge that separated two faces; the other moves an endpoint
+/// until the circuit that separated them no longer closes. Either way two
+/// regions end up naming one face, and nothing in the document says which
+/// material survives.
+struct Landings {
+    faces: BTreeMap<FaceId, Landing>,
+    live: Vec<(FaceId, AuthoredFaceAssignment)>,
+    /// Faces two or more active regions landed on together. One is a survivor
+    /// question; more than one is more questions than a single answer settles,
+    /// and each caller refuses that in its own words.
+    merges: Vec<Merge>,
+    /// Regions whose only anchor did not survive the change.
+    vanishing: BTreeSet<RegionId>,
+}
+
+impl Landings {
+    fn new(
+        faces: BTreeMap<FaceId, Landing>,
+        live: Vec<(FaceId, AuthoredFaceAssignment)>,
+        vanishing: BTreeSet<RegionId>,
+    ) -> Self {
+        let merges = faces
+            .iter()
+            .filter_map(|(face, landing)| {
+                let regions = landing.regions();
+                (regions.len() >= 2).then_some(Merge {
+                    face: *face,
+                    regions,
+                })
+            })
+            .collect();
+        Self {
+            faces,
+            live,
+            merges,
+            vanishing,
+        }
+    }
+
+    fn merge(&self) -> Option<&Merge> {
+        match self.merges.as_slice() {
+            [merge] => Some(merge),
+            _ => None,
+        }
+    }
+
+    /// The regions a merge would fold together, for the caller to ask about.
+    fn choices(&self) -> Vec<RegionId> {
+        self.merge()
+            .map(|merge| merge.regions.iter().copied().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// What settling a merge did to the regions hanging off the folded faces.
+#[derive(Default)]
+struct MergeSettlement {
+    removed_regions: Vec<RegionId>,
+    region_remaps: Vec<(RegionId, RegionId)>,
+    removed_probes: Vec<ProbeId>,
 }
 
 /// A removal worked out to the point where only the survivor choice is missing.
@@ -4493,10 +4625,7 @@ struct Merge {
 struct RemovalPlan {
     candidate: TopologyDocumentModel,
     topology: TopologySnapshot,
-    live: Vec<(FaceId, AuthoredFaceAssignment)>,
-    landings: BTreeMap<FaceId, Landing>,
-    merge: Option<Merge>,
-    vanishing: BTreeSet<RegionId>,
+    landings: Landings,
     pieces: Vec<CurveId>,
     promoted: Vec<CurveId>,
     joined: Vec<JoinRecord>,
@@ -4868,6 +4997,33 @@ fn prune_vertices(
 
 #[cfg(test)]
 mod tests {
+    /// Welds with no survivor answer and insists the weld was possible, which
+    /// is what every test here but the merge ones expects.
+    trait WeldForTest {
+        fn weld_for_test(
+            &mut self,
+            curve: CurveId,
+            endpoint: usize,
+            target: TopologyAttachment,
+        ) -> Result<TopologyWeld, String>;
+    }
+
+    impl WeldForTest for TopologyEditor {
+        fn weld_for_test(
+            &mut self,
+            curve: CurveId,
+            endpoint: usize,
+            target: TopologyAttachment,
+        ) -> Result<TopologyWeld, String> {
+            match self.weld_endpoint(curve, endpoint, target, None)? {
+                TopologyWeldOutcome::Welded(weld) => Ok(weld),
+                TopologyWeldOutcome::NeedsSurvivor(choices) => {
+                    Err(format!("the weld needs a survivor from {choices:?}"))
+                }
+            }
+        }
+    }
+
     use super::*;
 
     fn settle(editor: &mut TopologyEditor) {
@@ -5820,6 +5976,117 @@ mod tests {
         both_cut.extend(part(&editor, loops[1]));
         let error = editor.removal_target(&both_cut).unwrap_err();
         assert!(error.contains("one curve at a time"), "{error}");
+    }
+
+    /// A weld never removes an edge, but it does move the end it welds, and a
+    /// divider separates two faces only while its circuit closes. Welding a
+    /// divider's loose end onto a baffle that reaches no wall opens that
+    /// circuit: the two regions become one face, and nothing says which
+    /// material survives. The weld reports that instead of performing it.
+    fn divider_welded_onto_a_free_baffle() -> (TopologyEditor, CurveId, TopologyAttachment) {
+        let mut editor = TopologyEditor::default();
+        let free = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.4, -0.3),
+                    Point2::new(0.4, 0.0),
+                    Point2::new(0.4, 0.3),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let divider = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.0, -0.8),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.0, 0.8),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(outer(OuterSide::Bottom, 0.5)),
+                Some(outer(OuterSide::Top, 0.5)),
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        assert_eq!(editor.document.model.draft.regions.len(), 2);
+        let (_, onto) = span_anchor(&editor, free, 1, true);
+        editor.detach_endpoint(divider, 1).unwrap();
+        settle(&mut editor);
+        (editor, divider, onto)
+    }
+
+    #[test]
+    fn a_weld_that_merges_subdomains_asks_before_it_welds() {
+        let (mut editor, divider, onto) = divider_welded_onto_a_free_baffle();
+        let before = editor.document.model.clone();
+        let allocators = (editor.next_curve, editor.next_span, editor.next_region);
+        let history = editor.history_len();
+
+        let outcome = editor.weld_endpoint(divider, 1, onto, None).unwrap();
+        let TopologyWeldOutcome::NeedsSurvivor(choices) = outcome else {
+            panic!("the weld went ahead: {outcome:?}");
+        };
+        assert_eq!(choices.len(), 2, "{choices:?}");
+        assert_eq!(
+            editor.document.model, before,
+            "nothing is welded until it is answered"
+        );
+        assert_eq!(
+            (editor.next_curve, editor.next_span, editor.next_region),
+            allocators,
+            "a question spends no ids"
+        );
+        assert_eq!(editor.history_len(), history);
+
+        let kept = choices[1];
+        let TopologyWeldOutcome::Welded(weld) =
+            editor.weld_endpoint(divider, 1, onto, Some(kept)).unwrap()
+        else {
+            panic!("the answered weld still asks");
+        };
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(editor.document.model.draft.regions.len(), 1);
+        assert_eq!(weld.removed_regions.len(), 1);
+        assert_eq!(editor.history_len(), (history.0 + 1, history.1));
+    }
+
+    /// The same weld, answered with the other candidate. Region 1 keeps the
+    /// exterior identity either way, so the answer decides the material rather
+    /// than the id.
+    #[test]
+    fn the_weld_survivor_decides_which_material_is_left() {
+        let (mut editor, divider, onto) = divider_welded_onto_a_free_baffle();
+        let TopologyWeldOutcome::NeedsSurvivor(choices) =
+            editor.weld_endpoint(divider, 1, onto, None).unwrap()
+        else {
+            panic!("the weld went ahead");
+        };
+        let materials = choices
+            .iter()
+            .map(|region| {
+                editor
+                    .document
+                    .model
+                    .draft
+                    .region(*region)
+                    .unwrap()
+                    .material
+            })
+            .collect::<Vec<_>>();
+        editor
+            .weld_endpoint(divider, 1, onto, Some(choices[1]))
+            .unwrap();
+        settle(&mut editor);
+        let left = editor.document.model.draft.regions[0];
+        assert_eq!(left.material, materials[1], "the chosen material survived");
     }
 
     /// An anchor on the middle of a span, naming the side whose face is - or is
@@ -8954,7 +9221,7 @@ mod tests {
             let b_spans = span_ids(&editor, b);
             let history = editor.history_len().0;
             let weld = editor
-                .weld_endpoint(
+                .weld_for_test(
                     a,
                     dragged,
                     TopologyAttachment::LooseEnd {
@@ -9041,7 +9308,7 @@ mod tests {
                 .curve;
             settle(&mut editor);
             editor
-                .weld_endpoint(
+                .weld_for_test(
                     curve,
                     1,
                     TopologyAttachment::LooseEnd { curve, endpoint: 0 },
@@ -9178,7 +9445,7 @@ mod tests {
             .curve;
         settle(&mut editor);
         editor
-            .weld_endpoint(
+            .weld_for_test(
                 ring,
                 1,
                 TopologyAttachment::LooseEnd {
@@ -9323,7 +9590,7 @@ mod tests {
         let spans = span_ids(&editor, curve);
         let history = editor.history_len().0;
         let weld = editor
-            .weld_endpoint(
+            .weld_for_test(
                 curve,
                 1,
                 TopologyAttachment::LooseEnd { curve, endpoint: 0 },
@@ -9375,7 +9642,7 @@ mod tests {
         let before = editor.document.model.clone();
         assert_eq!(
             editor
-                .weld_endpoint(
+                .weld_for_test(
                     single,
                     1,
                     TopologyAttachment::LooseEnd {
@@ -9393,7 +9660,7 @@ mod tests {
         // did, and the whole thing is still a single history entry.
         let history = editor.history_len().0;
         editor
-            .weld_endpoint(
+            .weld_for_test(
                 single,
                 1,
                 TopologyAttachment::LooseEnd {
@@ -9448,7 +9715,7 @@ mod tests {
             .traces[0]
             .face;
         let weld = editor
-            .weld_endpoint(free, 0, TopologyAttachment::Junction { vertex, face })
+            .weld_for_test(free, 0, TopologyAttachment::Junction { vertex, face })
             .unwrap();
         settle(&mut editor);
         assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
@@ -9464,7 +9731,7 @@ mod tests {
         let host_curve = geometry(&editor).curve(host).unwrap().clone();
         let [a, b] = host_curve.spline.span_bounds(1).unwrap();
         let weld = editor
-            .weld_endpoint(
+            .weld_for_test(
                 free,
                 0,
                 TopologyAttachment::Boundary(FaceAnchor::Curve {
@@ -9516,7 +9783,7 @@ mod tests {
             ],
         );
         editor
-            .weld_endpoint(
+            .weld_for_test(
                 first,
                 1,
                 TopologyAttachment::LooseEnd {
@@ -9533,7 +9800,7 @@ mod tests {
                 .is_none()
         );
         let weld = editor
-            .weld_endpoint(
+            .weld_for_test(
                 free,
                 0,
                 TopologyAttachment::Breakpoint {
@@ -9613,7 +9880,7 @@ mod tests {
             .len();
         let history = editor.history_len().0;
         editor
-            .weld_endpoint(
+            .weld_for_test(
                 id,
                 1,
                 TopologyAttachment::Breakpoint {
@@ -9662,7 +9929,7 @@ mod tests {
         let [a, b] = curve.spline.span_bounds(0).unwrap();
         let spans_before = curve.spans.len();
         editor
-            .weld_endpoint(
+            .weld_for_test(
                 id,
                 1,
                 TopologyAttachment::Boundary(FaceAnchor::Curve {
@@ -9779,7 +10046,7 @@ mod tests {
         let before = editor.document.model.clone();
         let history = editor.history_len();
         let error = editor
-            .weld_endpoint(
+            .weld_for_test(
                 a,
                 1,
                 TopologyAttachment::LooseEnd {

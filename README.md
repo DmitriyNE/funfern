@@ -137,7 +137,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   attachment uses a fixed screen-space snap radius, independent of zoom. Starting
   or finishing on a loose end welds the new curve into that curve.
   Removing a divider that merges several subdomains highlights the candidates in
-  the scene and takes a click as the survivor.
+  the scene and takes a click as the survivor, and so does a weld that merges
+  them. A weld removes no edge, but it moves the end it welds, and a divider
+  separates two faces only while its circuit closes: welding a divider's loose
+  end onto a baffle that reaches no wall opens that circuit and folds the two
+  subdomains into one face. The weld waits for the same click rather than being
+  refused.
 - **Boundaries:** one Boundary inspector applies conditions to every compatible
   selected span and reports mixed assignments. Transmit and Boundary are tick
   boxes reporting which state the selection is in: a separated span reads as a

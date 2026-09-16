@@ -9,10 +9,6 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 Follow-ups from the welding work:
 
-- [ ] Offer the survivor picker for a weld that merges subdomains. Welding a
-  detached separator's end onto a baffle folds its two regions into one face;
-  the weld is refused with the compiler's `DuplicateFace` message rather than
-  asking which region survives.
 - [ ] `detach_endpoint` still leaves a two-arm vertex when the other two arms are
   open ends, so a seam a manual detach produces stays a locked C0 corner until
   something touches that junction. Fold it into the deferred unweld/split work.
@@ -142,6 +138,51 @@ Longer-standing work:
   source/material laws.
 - [x] Implement topology-aware solution-driven AMR on immutable mesh plans as
   specified below.
+
+## 2026-09-16 — A weld asks the same question a deletion does
+
+The follow-up said a weld can merge subdomains, and the obvious objection is
+that welding only inserts: it joins two curves, or attaches an end, and never
+removes an edge. Both halves are true, and they are compatible, because
+separation is not a property of edges existing. It is a property of a circuit
+closing. A divider separates two faces only while its path runs wall to wall,
+closes into a loop, or reaches a wall through junctions.
+
+The demonstration is one line: a baffle from the bottom wall to the top gives
+two faces and two regions, and deleting its last span - which removes no edge
+between those two faces, only shortens the divider - makes
+`span_removal_choices` return both regions. The faces merged because the divider
+stopped short.
+
+A weld inserts, but it also moves the end it welds. So welding a divider's loose
+end onto a free-standing baffle reattaches it to something that reaches no wall:
+the circuit opens, you can walk around that baffle's tips, and the two regions
+land on one face. Reproduced as `Err("two anchors claim the same subdomain")` -
+the compiler's `DuplicateFace`, which is a true report of an unanswered question
+rather than of a broken document.
+
+So the weld now asks. `weld_endpoint` takes the survivor and returns
+`TopologyWeldOutcome`: welded, or the regions it would fold together. Deletion
+and welding share the settlement now - `Landings` records where every authored
+assignment landed and which face two regions landed on together, and
+`settle_merge` decides which face keeps which region and what becomes of the
+regions, sources and probes left without one. The removal plan holds a
+`Landings` where it held four fields.
+
+A question spends no ids: the weld snapshots the three allocators and restores
+them before reporting one, because the caller asks and welds again, and
+`refine_curve_to_spans` and `assign_new_faces` both reserve ids on the way
+through. A test holds that, along with the document being untouched.
+
+In the UI the staged question is now a `PendingMerge` over both kinds, and the
+scene picker does not care which it is answering. The weld reports whether it
+settled, so a question that still stands is not cleared by an answer that failed.
+
+Checked: fmt, clippy -D warnings, workspace tests, release build. Three tests:
+the question and the untouched document and allocators, the answer deciding
+which material is left, and the staging and picking through the UI. The existing
+weld suite went through a shim rather than being rewritten, so all nine of its
+cases still watch the same path.
 
 ## 2026-09-16 — One Delete is one deletion
 
