@@ -50,6 +50,7 @@ pub const FAR_FIELD_CONTOUR_POINTS: usize = 256;
 pub const FAR_FIELD_DIRECTIONS: usize = 96;
 const FAR_FIELD_RING_FRAMES: usize = 512;
 pub const FAR_FIELD_SAMPLE_RATE: f64 = 60.0;
+pub const MAX_VECTOR_OVERLAY_SAMPLES: usize = 16_384;
 const WAVE_STORAGE_BINDINGS: usize = 8;
 const TRANSFER_STORAGE_BINDINGS: usize = 8;
 const AREA_PROBE_STORAGE_BINDINGS: usize = 7;
@@ -185,6 +186,14 @@ pub(crate) struct FarFieldBufferHandles {
     pub(crate) canonical: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct VectorOverlayBufferHandles {
+    stencils: Handle<ShaderBuffer>,
+    control: Handle<ShaderBuffer>,
+    output: Handle<ShaderBuffer>,
+    pub(crate) sample_count: u32,
+}
+
 /// The part of a far-field recorder that the mesh does not name: where the
 /// contour is, how fast the exterior carries a wave, and the bucket the ring
 /// counts in. Two recorders that agree here record the same time series.
@@ -275,6 +284,12 @@ impl FarFieldBufferHandles {
     }
 }
 
+impl VectorOverlayBufferHandles {
+    fn all(&self) -> [&Handle<ShaderBuffer>; 3] {
+        [&self.stencils, &self.control, &self.output]
+    }
+}
+
 impl AreaProbeBufferHandles {
     fn all(&self) -> [&Handle<ShaderBuffer>; 5] {
         [
@@ -337,6 +352,9 @@ pub struct WaveGpuRequest {
     pub(crate) far_field: Option<FarFieldBufferHandles>,
     pub(crate) far_field_revision: u64,
     far_field_readback_entity: Option<Entity>,
+    pub(crate) vector_overlay: Option<VectorOverlayBufferHandles>,
+    pub(crate) vector_overlay_revision: u64,
+    vector_overlay_readback_entity: Option<Entity>,
     grid_scale_filter: bool,
 }
 
@@ -364,6 +382,9 @@ impl Default for WaveGpuRequest {
             far_field: None,
             far_field_revision: 0,
             far_field_readback_entity: None,
+            vector_overlay: None,
+            vector_overlay_revision: 0,
+            vector_overlay_readback_entity: None,
             grid_scale_filter: true,
         }
     }
@@ -414,6 +435,10 @@ impl WaveGpuRequest {
 
     pub fn far_field_revision(&self) -> u64 {
         self.far_field_revision
+    }
+
+    pub fn vector_overlay_revision(&self) -> u64 {
+        self.vector_overlay_revision
     }
 
     pub fn update_point_probes(
@@ -627,6 +652,85 @@ impl WaveGpuRequest {
             commands.entity(entity).despawn();
         }
         self.probe_revision = self.probe_revision.wrapping_add(1).max(1);
+    }
+
+    /// Installs the compact set of view-selected canonical stencils used by
+    /// the arrow overlay. The GPU samples both vector observables once per
+    /// rendered solver batch, so display-rate arrows do not require a
+    /// full-state readback or a CPU traversal of the whole mesh.
+    pub fn update_canonical_vector_overlay(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        operator: &CanonicalWaveOperator,
+        stencils: &[QuadraticPointStencil],
+    ) -> Result<(), String> {
+        if stencils.len() > MAX_VECTOR_OVERLAY_SAMPLES {
+            self.clear_vector_overlay(assets, commands);
+            return Err(format!(
+                "Vector overlay requests {} arrows; maximum is {MAX_VECTOR_OVERLAY_SAMPLES}",
+                stencils.len()
+            ));
+        }
+        if stencils.is_empty() {
+            self.clear_vector_overlay(assets, commands);
+            return Ok(());
+        }
+        let stencils = stencils
+            .iter()
+            .copied()
+            .map(|stencil| {
+                CanonicalPointStencil::from_quadratic(stencil, operator)
+                    .map(|stencil| gpu_canonical_point_stencil(Some(stencil)))
+                    .map_err(|error| format!("Canonical vector reconstruction failed: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.clear_vector_overlay(assets, commands);
+        let control = GpuProbeControl {
+            values: Vec4::new(0.0, 0.0, stencils.len() as f32, 0.0),
+        };
+        let output = vec![GpuVectorOverlaySample::default(); stencils.len()];
+        let handles = VectorOverlayBufferHandles {
+            sample_count: stencils.len() as u32,
+            stencils: assets.add(ShaderBuffer::from(stencils)),
+            control: assets.add(ShaderBuffer::from(control)),
+            output: assets.add(ShaderBuffer::from(output)),
+        };
+        self.vector_overlay_revision = self.vector_overlay_revision.wrapping_add(1).max(1);
+        self.vector_overlay_readback_entity = Some(
+            commands
+                .spawn((
+                    Readback::buffer(handles.output.clone()),
+                    VectorOverlayReadbackTag {
+                        generation: self.generation,
+                        revision: self.vector_overlay_revision,
+                        sample_count: handles.sample_count,
+                    },
+                ))
+                .id(),
+        );
+        self.vector_overlay = Some(handles);
+        Ok(())
+    }
+
+    pub fn clear_vector_overlay(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+    ) {
+        let had_overlay =
+            self.vector_overlay.is_some() || self.vector_overlay_readback_entity.is_some();
+        if let Some(handles) = self.vector_overlay.take() {
+            for handle in handles.all() {
+                assets.remove(handle.id());
+            }
+        }
+        if let Some(entity) = self.vector_overlay_readback_entity.take() {
+            commands.entity(entity).try_despawn();
+        }
+        if had_overlay {
+            self.vector_overlay_revision = self.vector_overlay_revision.wrapping_add(1).max(1);
+        }
     }
 
     pub fn update_curve_probes(
@@ -2610,6 +2714,13 @@ struct FarFieldReadbackTag {
     revision: u64,
 }
 
+#[derive(Component)]
+struct VectorOverlayReadbackTag {
+    generation: u64,
+    revision: u64,
+    sample_count: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PointProbeRecord {
     pub probe_id: u64,
@@ -2651,6 +2762,12 @@ pub struct FarFieldRecord {
     pub intensity: Vec<f32>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VectorOverlaySample {
+    pub complementary: Point2,
+    pub energy_flow: Point2,
+}
+
 #[derive(Resource, Default)]
 pub struct ProbeDisplay {
     pub generation: u64,
@@ -2680,6 +2797,15 @@ pub struct FarFieldDisplay {
     pub generation: u64,
     pub revision: u64,
     pub records: Vec<FarFieldRecord>,
+    pub readbacks: u64,
+}
+
+#[derive(Resource, Default)]
+pub struct VectorOverlayDisplay {
+    pub generation: u64,
+    pub revision: u64,
+    pub completed_steps: u64,
+    pub samples: Vec<VectorOverlaySample>,
     pub readbacks: u64,
 }
 
@@ -2784,6 +2910,12 @@ struct GpuProbeSample {
 struct GpuPointProbeSample {
     primary: Vec4,
     secondary: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuVectorOverlaySample {
+    vectors: Vec4,
+    metadata: UVec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -3222,6 +3354,42 @@ fn receive_probe_readback(
     display.readbacks = display.readbacks.saturating_add(1);
 }
 
+fn receive_vector_overlay_readback(
+    event: On<ReadbackComplete>,
+    tags: Query<&VectorOverlayReadbackTag>,
+    request: Res<WaveGpuRequest>,
+    mut display: ResMut<VectorOverlayDisplay>,
+) {
+    let Ok(tag) = tags.get(event.entity) else {
+        return;
+    };
+    if tag.generation != request.generation || tag.revision != request.vector_overlay_revision {
+        return;
+    }
+    let samples: Vec<GpuVectorOverlaySample> = event.to_shader_type();
+    if samples.len() != tag.sample_count as usize || samples.is_empty() {
+        return;
+    }
+    let completed_steps = samples[0].metadata.x as u64;
+    if samples
+        .iter()
+        .any(|sample| sample.metadata.y == 0 || sample.metadata.x as u64 != completed_steps)
+    {
+        return;
+    }
+    display.generation = tag.generation;
+    display.revision = tag.revision;
+    display.completed_steps = completed_steps;
+    display.samples.clear();
+    display
+        .samples
+        .extend(samples.into_iter().map(|sample| VectorOverlaySample {
+            complementary: Point2::new(sample.vectors.x as f64, sample.vectors.y as f64),
+            energy_flow: Point2::new(sample.vectors.z as f64, sample.vectors.w as f64),
+        }));
+    display.readbacks = display.readbacks.saturating_add(1);
+}
+
 fn receive_curve_probe_readback(
     event: On<ReadbackComplete>,
     tags: Query<&CurveProbeReadbackTag>,
@@ -3377,8 +3545,10 @@ impl Plugin for WaveGpuPlugin {
             .init_resource::<CurveProbeDisplay>()
             .init_resource::<AreaProbeDisplay>()
             .init_resource::<FarFieldDisplay>()
+            .init_resource::<VectorOverlayDisplay>()
             .add_observer(receive_readback)
             .add_observer(receive_probe_readback)
+            .add_observer(receive_vector_overlay_readback)
             .add_observer(receive_curve_probe_readback)
             .add_observer(receive_area_probe_readback)
             .add_observer(receive_far_field_readback)
@@ -3396,6 +3566,7 @@ impl Plugin for WaveGpuPlugin {
                     prepare_curve_probe_bind_group,
                     prepare_area_probe_bind_group,
                     prepare_far_field_bind_group,
+                    prepare_vector_overlay_bind_group,
                 )
                     .in_set(RenderSystems::PrepareBindGroups),
             )
@@ -3414,6 +3585,7 @@ pub(crate) struct WavePipeline {
     canonical_curve_probe_layout: BindGroupLayoutDescriptor,
     canonical_area_probe_layout: BindGroupLayoutDescriptor,
     canonical_far_field_layout: BindGroupLayoutDescriptor,
+    canonical_vector_overlay_layout: BindGroupLayoutDescriptor,
     transfer_old_layout: BindGroupLayoutDescriptor,
     transfer_new_layout: BindGroupLayoutDescriptor,
     step: CachedComputePipelineId,
@@ -3437,6 +3609,7 @@ pub(crate) struct WavePipeline {
     pub(crate) canonical_area_probe_reduce: CachedComputePipelineId,
     pub(crate) canonical_far_field_sample: CachedComputePipelineId,
     pub(crate) canonical_far_field_project: CachedComputePipelineId,
+    pub(crate) canonical_vector_overlay: CachedComputePipelineId,
 }
 
 fn init_pipeline(
@@ -3595,6 +3768,28 @@ fn init_pipeline(
         entry_point: Some(Cow::Borrowed("sample_probes")),
         ..default()
     });
+    let canonical_vector_overlay_layout = BindGroupLayoutDescriptor::new(
+        "canonical vector-overlay buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only::<GpuCanonicalControl>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalNode>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalPointStencil>>(false),
+                storage_buffer_read_only::<GpuProbeControl>(false),
+                storage_buffer::<Vec<GpuVectorOverlaySample>>(false),
+            ),
+        ),
+    );
+    let canonical_vector_overlay =
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some(Cow::Borrowed("canonical vector overlay")),
+            layout: vec![canonical_vector_overlay_layout.clone()],
+            shader: load_embedded_asset!(asset_server.as_ref(), "canonical_probe.wgsl"),
+            entry_point: Some(Cow::Borrowed("sample_vector_overlay")),
+            ..default()
+        });
     let canonical_curve_probe_layout = BindGroupLayoutDescriptor::new(
         "canonical line-probe buffers",
         &BindGroupLayoutEntries::sequential(
@@ -3761,6 +3956,7 @@ fn init_pipeline(
         canonical_curve_probe_layout,
         canonical_area_probe_layout,
         canonical_far_field_layout,
+        canonical_vector_overlay_layout,
         transfer_old_layout,
         transfer_new_layout,
         step,
@@ -3784,6 +3980,7 @@ fn init_pipeline(
         canonical_area_probe_reduce,
         canonical_far_field_sample,
         canonical_far_field_project,
+        canonical_vector_overlay,
     });
 }
 
@@ -3830,6 +4027,81 @@ pub(crate) struct FarFieldBindGroup {
     pub(crate) generation: u64,
     pub(crate) revision: u64,
     pub(crate) bind_group: BindGroup,
+}
+
+#[derive(Resource)]
+pub(crate) struct VectorOverlayBindGroup {
+    pub(crate) generation: u64,
+    pub(crate) revision: u64,
+    pub(crate) sampled: bool,
+    pub(crate) bind_group: BindGroup,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_vector_overlay_bind_group(
+    mut commands: Commands,
+    request: Option<Res<WaveGpuRequest>>,
+    canonical_request: Option<Res<CanonicalGpuRequest>>,
+    existing: Option<Res<VectorOverlayBindGroup>>,
+    pipeline: Res<WavePipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+) {
+    let Some(request) = request else { return };
+    let Some(overlay) = &request.vector_overlay else {
+        if existing.is_some() {
+            commands.remove_resource::<VectorOverlayBindGroup>();
+        }
+        return;
+    };
+    if existing.as_ref().is_some_and(|group| {
+        group.generation == request.generation && group.revision == request.vector_overlay_revision
+    }) {
+        return;
+    }
+    let Some(canonical) = canonical_request
+        .as_ref()
+        .and_then(|request| request.buffer_handles())
+    else {
+        return;
+    };
+    let (
+        Some(control),
+        Some(state),
+        Some(nodes),
+        Some(stencils),
+        Some(probe_control),
+        Some(output),
+    ) = (
+        gpu_buffers.get(&canonical.control),
+        gpu_buffers.get(&canonical.state),
+        gpu_buffers.get(&canonical.nodes),
+        gpu_buffers.get(&overlay.stencils),
+        gpu_buffers.get(&overlay.control),
+        gpu_buffers.get(&overlay.output),
+    )
+    else {
+        return;
+    };
+    let bind_group = render_device.create_bind_group(
+        Some("canonical vector-overlay bind group"),
+        &pipeline_cache.get_bind_group_layout(&pipeline.canonical_vector_overlay_layout),
+        &BindGroupEntries::sequential((
+            control.buffer.as_entire_buffer_binding(),
+            state.buffer.as_entire_buffer_binding(),
+            nodes.buffer.as_entire_buffer_binding(),
+            stencils.buffer.as_entire_buffer_binding(),
+            probe_control.buffer.as_entire_buffer_binding(),
+            output.buffer.as_entire_buffer_binding(),
+        )),
+    );
+    commands.insert_resource(VectorOverlayBindGroup {
+        generation: request.generation,
+        revision: request.vector_overlay_revision,
+        sampled: false,
+        bind_group,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5067,6 +5339,9 @@ mod tests {
         assert!(point.contains("return select(value.xy, value.zw"));
         assert!(point.contains("dot(flux, complement)"));
         assert!(point.contains("orientation.x * primary.x"));
+        assert!(point.contains("fn sample_vector_overlay"));
+        assert!(point.contains("output[sample].primary = vec4<f32>(complement, flow)"));
+        assert!(point.contains("vec4<u32>(control.clock_u32.w, 1u, 0u, 0u)"));
         assert!(!point.contains("indicator_potential"));
 
         let curve = include_str!("canonical_curve_probe.wgsl");

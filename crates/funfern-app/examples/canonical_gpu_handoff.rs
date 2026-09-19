@@ -23,6 +23,8 @@ use funfern_core::{
 
 const WARMUP_STEPS: u64 = 12;
 const MEASURED_STEPS: u64 = 24;
+const HANDOFF_STEPS: u64 = 8;
+const SETTLEMENT_STEPS: u64 = 8;
 
 #[derive(Resource)]
 struct Pending {
@@ -37,13 +39,17 @@ struct Expected {
     complementary: Vec<[f64; 2]>,
     auxiliary: Vec<f64>,
     time_step: f64,
+    handoff_steps: u64,
+    settlement_steps: u64,
     measured_steps: u64,
     source_bytes: usize,
     target_bytes: usize,
     transfer_bytes: usize,
     phase: Phase,
     started: Option<Instant>,
+    submitted: Option<Instant>,
     accepted_elapsed: Option<Duration>,
+    boundary_elapsed: Option<Duration>,
     settle_after: Option<u64>,
     failed: bool,
     inject_failure: bool,
@@ -65,6 +71,23 @@ fn main() {
     let same_mesh = std::env::args().any(|argument| argument == "--same-mesh");
     let thin_gap = std::env::args().any(|argument| argument == "--thin-gap");
     let inject_failure = std::env::args().any(|argument| argument == "--failure");
+    let advance_during_upload =
+        std::env::args().any(|argument| argument == "--advance-during-upload");
+    let handoff_steps = if advance_during_upload {
+        HANDOFF_STEPS
+    } else {
+        0
+    };
+    let settlement_steps =
+        if std::env::args().any(|argument| argument == "--continue-through-settlement") {
+            SETTLEMENT_STEPS
+        } else {
+            0
+        };
+    assert!(
+        !(inject_failure && (advance_during_upload || settlement_steps != 0)),
+        "--failure and continued evolution exercise different handoff contracts"
+    );
     let source_drive = std::env::args().any(|argument| argument == "--source");
     let measured_steps = std::env::args()
         .find_map(|argument| argument.strip_prefix("--steps=")?.parse::<u64>().ok())
@@ -330,6 +353,12 @@ fn main() {
             .step_with_forcing(&source_operator, &source_forcing)
             .expect("source oracle step");
     }
+    for _ in 0..handoff_steps {
+        oracle
+            .step_with_forcing(&source_operator, &source_forcing)
+            .expect("source oracle step during target upload");
+    }
+    let source_steps = WARMUP_STEPS + handoff_steps;
     let desired_totals = (0..target_operator.component_count())
         .map(|component| {
             (component < source_operator.component_count()).then(|| {
@@ -380,7 +409,7 @@ fn main() {
             offset,
             amplitude,
             frequency,
-            phase + std::f64::consts::TAU * frequency * WARMUP_STEPS as f64 * time_step,
+            phase + std::f64::consts::TAU * frequency * source_steps as f64 * time_step,
         );
         let mut signals = vec![None; target_operator.degrees_of_freedom()];
         signals[0] = Some(shifted);
@@ -394,7 +423,7 @@ fn main() {
             offset,
             amplitude,
             frequency,
-            phase + std::f64::consts::TAU * frequency * WARMUP_STEPS as f64 * time_step,
+            phase + std::f64::consts::TAU * frequency * source_steps as f64 * time_step,
         );
         target_oracle_forcing
             .push_source(
@@ -407,7 +436,7 @@ fn main() {
             )
             .expect("shifted target forcing");
     }
-    for _ in 0..measured_steps {
+    for _ in 0..settlement_steps + measured_steps {
         target_state
             .step_with_forcing(&target_operator, &target_oracle_forcing)
             .expect("target oracle step");
@@ -446,13 +475,17 @@ fn main() {
             _ => panic!("unsupported auxiliary variant"),
         },
         time_step,
+        handoff_steps,
+        settlement_steps,
         measured_steps,
         source_bytes: source_plan.manifest.bytes.steady_bytes(),
         target_bytes: target_plan.manifest.bytes.steady_bytes(),
         transfer_bytes: transfer_plan.manifest.bytes,
         phase: Phase::Warmup,
         started: None,
+        submitted: None,
         accepted_elapsed: None,
+        boundary_elapsed: None,
         settle_after: None,
         failed: false,
         inject_failure,
@@ -564,6 +597,13 @@ fn validate(
         return;
     }
     let Some(clock) = display.clock else { return };
+    if expected.phase == Phase::Handoff
+        && expected.submitted.is_none()
+        && request.handoff_submitted()
+    {
+        expected.submitted = Some(Instant::now());
+        request.request_steps(expected.settlement_steps);
+    }
     match expected.phase {
         Phase::Warmup if clock.accepted_steps >= WARMUP_STEPS as u32 => {
             expected.rollback_snapshot = Some(display.accepted_storage_bits());
@@ -582,6 +622,7 @@ fn validate(
                 upload_pack_started.elapsed().as_secs_f64() * 1_000.0,
             );
             expected.started = Some(Instant::now());
+            request.request_steps(expected.handoff_steps);
             expected.phase = Phase::Handoff;
         }
         Phase::Handoff => match request.handoff_outcome() {
@@ -592,7 +633,12 @@ fn validate(
                     expected.phase = Phase::Done;
                     return;
                 }
-                expected.accepted_elapsed = Some(expected.started.unwrap().elapsed());
+                let accepted = Instant::now();
+                expected.accepted_elapsed =
+                    Some(accepted.duration_since(expected.started.unwrap()));
+                expected.boundary_elapsed = expected
+                    .submitted
+                    .map(|submitted| accepted.duration_since(submitted));
                 request.request_steps(expected.measured_steps);
                 expected.phase = Phase::Evolution;
             }
@@ -617,7 +663,11 @@ fn validate(
             _ => {}
         },
         Phase::Evolution
-            if clock.accepted_steps >= (WARMUP_STEPS + expected.measured_steps) as u32
+            if clock.accepted_steps
+                >= (WARMUP_STEPS
+                    + expected.handoff_steps
+                    + expected.settlement_steps
+                    + expected.measured_steps) as u32
                 && display.primary_flux.len() == expected.primary.len() =>
         {
             if expected.settle_after.is_none() {
@@ -646,11 +696,18 @@ fn validate(
                 expected.auxiliary.iter().copied(),
             );
             let absolute_error = (clock.absolute_seconds
-                - (WARMUP_STEPS + expected.measured_steps) as f64 * expected.time_step)
+                - (WARMUP_STEPS
+                    + expected.handoff_steps
+                    + expected.settlement_steps
+                    + expected.measured_steps) as f64
+                    * expected.time_step)
                 .abs();
             println!(
-                "handoff committed in {:.2} ms; Q {:.3e}, b {:.3e}, auxiliary RMS {:.3e}, clock {:.3e} s",
+                "handoff committed in {:.2} ms (admission readback {:.2} ms, source live); Q {:.3e}, b {:.3e}, auxiliary RMS {:.3e}, clock {:.3e} s",
                 expected.accepted_elapsed.unwrap().as_secs_f64() * 1_000.0,
+                expected
+                    .boundary_elapsed
+                    .map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1_000.0),
                 q_error,
                 b_error,
                 auxiliary_error,

@@ -41,7 +41,8 @@ use funfern_core::{
 
 use crate::wave_gpu::{
     AreaProbeBindGroup, CurveProbeBindGroup, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS,
-    FarFieldBindGroup, ProbeBindGroup, WaveGpuRequest, WavePipeline, probe_sample_due,
+    FarFieldBindGroup, ProbeBindGroup, VectorOverlayBindGroup, WaveGpuRequest, WavePipeline,
+    probe_sample_due,
 };
 
 // `ShaderBuffer::from(T)` serializes into an owned byte vector and then copies
@@ -2070,8 +2071,11 @@ impl CanonicalGpuBufferHandles {
 
 #[derive(Default)]
 struct CanonicalGpuHandoffStats {
+    submitted: AtomicU32,
     completed: AtomicU32,
     failure: AtomicU32,
+    snapshot_step: AtomicU32,
+    snapshot_local_step: AtomicU32,
 }
 
 #[derive(Clone)]
@@ -2406,6 +2410,16 @@ impl CanonicalGpuRequest {
         self.handoff
             .as_ref()
             .map(|handoff| &handoff.transfer_manifest)
+    }
+
+    /// Whether the render graph has encoded the transfer from the accepted
+    /// generation. The source remains safe to advance for display continuity
+    /// afterwards too; those later absolute-step requests become target
+    /// catch-up work if admission succeeds.
+    pub fn handoff_submitted(&self) -> bool {
+        self.handoff
+            .as_ref()
+            .is_some_and(|handoff| handoff.stats.submitted.load(Ordering::Acquire) != 0)
     }
 
     pub fn queue_live_event(
@@ -2946,6 +2960,12 @@ fn receive_canonical_handoff_status(
     tag.stats
         .failure
         .store(value.words.x.max(value.words.y), Ordering::Relaxed);
+    tag.stats
+        .snapshot_step
+        .store(value.transaction.y, Ordering::Relaxed);
+    tag.stats
+        .snapshot_local_step
+        .store(value.transaction.z, Ordering::Relaxed);
     tag.stats.completed.store(1, Ordering::Release);
 }
 
@@ -2983,11 +3003,14 @@ fn settle_canonical_handoff(
         commands.entity(entity).despawn();
     }
     let generation = request.generation.wrapping_add(1).max(1);
-    let completed_steps = request.stats.completed_steps();
+    let completed_steps = handoff.stats.snapshot_step.load(Ordering::Relaxed) as u64;
+    let local_step = handoff.stats.snapshot_local_step.load(Ordering::Relaxed);
+    let desired_steps = request.desired_steps.max(completed_steps);
     let stats = Arc::new(CanonicalGpuStats::default());
     stats
         .completed_steps
         .store(completed_steps, Ordering::Relaxed);
+    stats.local_step.store(local_step, Ordering::Relaxed);
     stats.status.store(GPU_STATUS_READY, Ordering::Relaxed);
     let target = handoff.target;
     let state_entity = spawn_canonical_state_readback(
@@ -3016,7 +3039,10 @@ fn settle_canonical_handoff(
         .id();
     request.generation = generation;
     request.revision = request.revision.wrapping_add(1).max(1);
-    request.desired_steps = completed_steps;
+    // Requests published while the GPU validated the transfer belong to the
+    // target generation. The source remained live for display continuity;
+    // target evolution now consumes the same small absolute-step backlog.
+    request.desired_steps = desired_steps;
     request.buffers = Some(target);
     request.manifest = Some(handoff.manifest);
     request.stats = stats;
@@ -3078,8 +3104,8 @@ impl Plugin for CanonicalWaveGpuPlugin {
             .add_systems(
                 RenderGraph,
                 (
-                    compute_canonical_handoff,
-                    compute_canonical_wave.after(compute_canonical_handoff),
+                    compute_canonical_wave,
+                    compute_canonical_handoff.after(compute_canonical_wave),
                 )
                     .before(camera_driver),
             );
@@ -3652,6 +3678,7 @@ fn compute_canonical_wave(
     curve_probe_group: Option<Res<CurveProbeBindGroup>>,
     area_probe_group: Option<Res<AreaProbeBindGroup>>,
     far_field_group: Option<Res<FarFieldBindGroup>>,
+    mut vector_overlay_group: Option<ResMut<VectorOverlayBindGroup>>,
     consumer_pipeline: Option<Res<WavePipeline>>,
     pipeline: Res<CanonicalPipeline>,
     pipeline_cache: Res<PipelineCache>,
@@ -3665,9 +3692,6 @@ fn compute_canonical_wave(
     let Some(handles) = request.buffers.as_ref() else {
         return;
     };
-    if request.handoff.is_some() {
-        return;
-    }
     if group.generation != request.generation || group.revision != request.revision {
         return;
     }
@@ -3727,7 +3751,19 @@ fn compute_canonical_wave(
     });
     let has_pending_event =
         live_event.is_some() || (handles.event_kind != EVENT_NONE && !group.encoded_event);
-    if (pending == 0 && !has_pending_event) || request.stats.failure() != 0 {
+    let vector_overlay_pending = recorders.as_ref().is_some_and(|recorders| {
+        recorders.vector_overlay.as_ref().is_some_and(|overlay| {
+            vector_overlay_group.as_ref().is_some_and(|group| {
+                group.generation == request.generation
+                    && group.revision == recorders.vector_overlay_revision
+                    && (!group.sampled || pending != 0 || has_pending_event)
+                    && overlay.sample_count != 0
+            })
+        })
+    });
+    if (pending == 0 && !has_pending_event && !vector_overlay_pending)
+        || request.stats.failure() != 0
+    {
         return;
     }
     let workgroups = |count: u32| count.div_ceil(CANONICAL_GPU_WORKGROUP_SIZE).max(1);
@@ -3878,6 +3914,19 @@ fn compute_canonical_wave(
                 )
             })
     });
+    let vector_overlay = recorders.as_ref().and_then(|recorders| {
+        let consumer_pipeline = consumer_pipeline.as_ref()?;
+        let handles = recorders.vector_overlay.as_ref()?;
+        let bind_group = vector_overlay_group.as_ref()?;
+        (bind_group.generation == request.generation
+            && bind_group.revision == recorders.vector_overlay_revision)
+            .then(|| {
+                (
+                    handles.sample_count,
+                    pipeline_cache.get_compute_pipeline(consumer_pipeline.canonical_vector_overlay),
+                )
+            })
+    });
     let mut rebases = 0_u64;
     let mut resident_filters = 0_u64;
     for offset in 0..pending {
@@ -4018,6 +4067,17 @@ fn compute_canonical_wave(
         pass.set_pipeline(pipelines[12]);
         pass.dispatch_workgroups(1, 1, 1);
     }
+    let mut sampled_vector_overlay = false;
+    if vector_overlay_pending
+        && let Some((sample_count, Some(consumer))) = vector_overlay
+        && let Some(bind_group) = vector_overlay_group.as_deref_mut()
+    {
+        pass.set_bind_group(0, &bind_group.bind_group, &[]);
+        pass.set_pipeline(consumer);
+        pass.dispatch_workgroups(sample_count.div_ceil(64), 1, 1);
+        bind_group.sampled = true;
+        sampled_vector_overlay = true;
+    }
     drop(pass);
     group.encoded_steps += pending;
     request.stats.dispatches.fetch_add(
@@ -4030,7 +4090,8 @@ fn compute_canonical_wave(
                     * resident_filters
                     * u64::from(handles.needs_accounting),
             )
-            .saturating_add(u64::from(handles.needs_accounting && pending != 0)),
+            .saturating_add(u64::from(handles.needs_accounting && pending != 0))
+            .saturating_add(u64::from(sampled_vector_overlay)),
         Ordering::Relaxed,
     );
 }
@@ -4135,6 +4196,7 @@ fn compute_canonical_handoff(
     pass.dispatch_workgroups(1, 1, 1);
     drop(pass);
     groups.encoded = true;
+    handoff.stats.submitted.store(1, Ordering::Release);
     request
         .stats
         .dispatches

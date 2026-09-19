@@ -5,6 +5,38 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Continuous handoff display and compact vector overlay
+
+- The remaining handoff hitch had two distinct clocks. At 93,144 `Q` / 185,310
+  `b`, `begin_handoff` serialized its already-packed buffers in about 10–12 ms,
+  while target upload, transfer and the asynchronous admission readback took
+  about 75–80 ms. The accepted source had unnecessarily stopped for that whole
+  latter interval.
+- The source pass now precedes the one-shot transfer and remains live while the
+  target is uploaded and admitted. The transfer publishes its exact absolute
+  and epoch-local snapshot steps in the accepted status record. Requests made
+  during admission remain a small absolute-step backlog; after admission the
+  target consumes them from the transferred clock before its first new state
+  reaches the display. Rejection still retains the advancing source. A large
+  Metal fixture advanced eight steps before the snapshot and eight more during
+  admission, then matched the CPU target at `Q=2.95e-7`, `b=1.63e-6` relative
+  error. The passive second-order/history case also passes this live-source
+  path; injected failure retains byte-exact rollback when no later source work
+  was requested.
+- Vector arrows no longer force a full physical-state readback at 15 Hz and a
+  CPU traversal/reconstruction of every triangle. The UI selects at most one
+  representative stencil per visible screen bin when the view changes; one
+  compact GPU pass samples complementary field and energy flow after each
+  rendered solver batch, and only those arrow records are read back. Full state
+  remains on the 4 Hz AMR/energy cadence.
+- With 1,024 compact arrow samples, resident grid filtering and production
+  primary readback, the 93,144 / 185,310 fixture completed 512 measured steps in
+  386 ms (2.56 simulated seconds/wall second); vector error was `1.19e-6` and
+  the solver/energy gates retained their prior tolerances.
+- Formatting, all 643 workspace tests (plus the known ignored curved-boundary
+  reproducer), strict Clippy, shader validation, wasm32 checking and the release
+  app/examples build pass.
+
 ## 2026-09-20 — Resident canonical grid damping
 
 - Follow-up interactive testing isolated the roughly 220-step/s cap to “Damp

@@ -101,3 +101,27 @@ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
     output[index].primary = vec4<f32>(primary, energy, absolute_time());
     output[index].secondary = vec4<f32>(length(complement), length(flow), 0.0, 0.0);
 }
+
+// This entry point uses the same binding layout as point probes, with binding
+// 5 interpreted as a compact one-record-per-arrow buffer instead of a history
+// ring. It runs once after the frame's accepted solver batch.
+@compute @workgroup_size(64)
+fn sample_vector_overlay(@builtin(global_invocation_id) invocation: vec3<u32>) {
+    let sample = invocation.x;
+    let count = u32(probe_control.values.z);
+    if sample >= count { return; }
+    let stencil = stencils[sample];
+    if stencil.sample_valid.y == 0u {
+        output[sample].primary = vec4<f32>(0.0);
+        output[sample].secondary = bitcast<vec4<f32>>(
+            vec4<u32>(control.clock_u32.w, 0u, 0u, 0u));
+        return;
+    }
+    let primary = fields(stencil);
+    let flux = complementary_flux(stencil);
+    let complement = physical_complement(stencil, flux);
+    let flow = stencil.orientation.x * primary.x * vec2<f32>(-complement.y, complement.x);
+    output[sample].primary = vec4<f32>(complement, flow);
+    output[sample].secondary = bitcast<vec4<f32>>(
+        vec4<u32>(control.clock_u32.w, 1u, 0u, 0u));
+}

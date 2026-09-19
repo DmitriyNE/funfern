@@ -734,6 +734,8 @@ fn handoff_commit() {
     control.event.z = accepted_slot() ^ 1u;
     control.accepted_accounting_a = control.candidate_accounting_a;
     control.accepted_accounting_b = control.candidate_accounting_b;
+    atomicStore(&status.transaction_1, control.clock_u32.w);
+    atomicStore(&status.transaction_2, control.clock_u32.z);
     atomicStore(&status.handoff, 0u);
 }
 

@@ -14,7 +14,7 @@ use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, AreaProbeRecord, CurveProbeDisplay, CurveProbeInput,
     CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldDisplay, FarFieldHandoff, FarFieldInput,
     FarFieldRecord, MAX_STEPS_PER_FRAME, PointProbeRecord, ProbeDisplay, RecorderContext,
-    RecorderHistory, WaveDisplay, WaveGpuRequest,
+    RecorderHistory, VectorOverlayDisplay, WaveDisplay, WaveGpuRequest,
 };
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -676,6 +676,29 @@ struct PreparedGpuUpload {
     transfer: Option<CanonicalGpuTransferPlan>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct VectorOverlayLayoutKey {
+    topology: TopologyToken,
+    generation: u64,
+    center: Point2,
+    scale: f64,
+    viewport: Rect,
+    spacing: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct VectorOverlayLayoutPoint {
+    key: (i32, i32),
+    point: Point2,
+    stencil: QuadraticPointStencil,
+}
+
+struct VectorOverlayLayout {
+    key: VectorOverlayLayoutKey,
+    revision: u64,
+    points: Vec<VectorOverlayLayoutPoint>,
+}
+
 /// CPU packing for a candidate generation. The immutable topology owns every
 /// input, so native builds can prepare the 80+ MiB GPU layout off the UI thread
 /// while the accepted generation keeps running.
@@ -936,6 +959,8 @@ pub struct Playground {
     energy_readback: u64,
     energy_updated: Instant,
     full_snapshot_requested: Instant,
+    viewport_rect: Rect,
+    vector_overlay_layout: Option<VectorOverlayLayout>,
     vector_overlay_average: BTreeMap<(i32, i32), Point2>,
     vector_overlay_step: u64,
     vector_overlay_mode: VectorOverlay,
@@ -1126,6 +1151,8 @@ impl Default for Playground {
             energy_readback: 0,
             energy_updated: Instant::now(),
             full_snapshot_requested: Instant::now(),
+            viewport_rect: Rect::NOTHING,
+            vector_overlay_layout: None,
             vector_overlay_average: BTreeMap::new(),
             vector_overlay_step: u64::MAX,
             vector_overlay_mode: VectorOverlay::Off,
@@ -3879,16 +3906,22 @@ impl Playground {
             self.clear_probe_trace(id);
         }
     }
-    fn viewport(&mut self, ui: &mut egui::Ui, display: &WaveDisplay) -> Rect {
+    fn viewport(
+        &mut self,
+        ui: &mut egui::Ui,
+        display: &WaveDisplay,
+        vector_display: &VectorOverlayDisplay,
+    ) -> Rect {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
         let viewport = response.rect;
+        self.viewport_rect = viewport;
         if self.fit {
             self.fit_view(viewport);
         }
         self.refresh_samples(viewport);
         let transform = self.transform(viewport);
-        self.draw_solution(&painter, viewport, display);
+        self.draw_solution(&painter, viewport, display, vector_display);
         if self.editor.document.presentation.grid {
             self.draw_grid(&painter, viewport);
         }
@@ -4043,7 +4076,80 @@ impl Playground {
         }
     }
 
-    fn draw_solution(&mut self, painter: &egui::Painter, r: Rect, display: &WaveDisplay) {
+    fn refresh_vector_overlay(
+        &mut self,
+        recorders: &mut WaveGpuRequest,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        active: Option<&Arc<PreparedTopology>>,
+        generation: u64,
+    ) {
+        let mode = self
+            .editor
+            .document
+            .presentation
+            .vector_overlay
+            .resolved(self.editor.document.model.draft.physics);
+        let Some(active) = active.filter(|_| mode != VectorOverlay::Off) else {
+            if self.vector_overlay_layout.take().is_some() || recorders.vector_overlay.is_some() {
+                recorders.clear_vector_overlay(assets, commands);
+            }
+            return;
+        };
+        if generation == 0 || !self.viewport_rect.is_positive() {
+            return;
+        }
+        let key = VectorOverlayLayoutKey {
+            topology: active.bundle.token,
+            generation,
+            center: self.center,
+            scale: self.scale,
+            viewport: self.viewport_rect,
+            spacing: self.editor.document.presentation.vector_overlay_density,
+        };
+        if self
+            .vector_overlay_layout
+            .as_ref()
+            .is_some_and(|layout| layout.key == key)
+        {
+            return;
+        }
+        let points = vector_overlay_layout(
+            &active.bundle.authored,
+            &active.mesh,
+            &active.operator,
+            key.spacing,
+            (key.center, key.scale, key.viewport),
+        );
+        let stencils = points.iter().map(|point| point.stencil).collect::<Vec<_>>();
+        match recorders.update_canonical_vector_overlay(
+            assets,
+            commands,
+            &active.canonical_operator,
+            &stencils,
+        ) {
+            Ok(()) => {
+                self.vector_overlay_layout = Some(VectorOverlayLayout {
+                    key,
+                    revision: recorders.vector_overlay_revision(),
+                    points,
+                });
+            }
+            Err(error) => {
+                recorders.clear_vector_overlay(assets, commands);
+                self.vector_overlay_layout = None;
+                self.message = error;
+            }
+        }
+    }
+
+    fn draw_solution(
+        &mut self,
+        painter: &egui::Painter,
+        r: Rect,
+        display: &WaveDisplay,
+        vector_display: &VectorOverlayDisplay,
+    ) {
         let Some(active) = self.runtime.active().cloned() else {
             return;
         };
@@ -4234,17 +4340,32 @@ impl Playground {
             .vector_overlay
             .resolved(active.bundle.authored.physics);
         if mode != VectorOverlay::Off {
-            let samples = vector_overlay_samples(
-                &active.bundle.authored,
-                mesh,
-                &active.operator,
-                &active.canonical_operator,
-                display,
-                mode,
-                presentation.vector_overlay_density,
-                (self.center, self.scale, r),
-            );
-            self.draw_vector_overlay(painter, samples, display.snapshot_completed_steps);
+            let samples = self
+                .vector_overlay_layout
+                .as_ref()
+                .filter(|layout| {
+                    layout.key.topology == active.bundle.token
+                        && layout.key.generation == vector_display.generation
+                        && layout.revision == vector_display.revision
+                        && layout.points.len() == vector_display.samples.len()
+                })
+                .map(|layout| {
+                    layout
+                        .points
+                        .iter()
+                        .zip(&vector_display.samples)
+                        .map(|(point, sample)| {
+                            let value = match mode {
+                                VectorOverlay::ComplementaryField => sample.complementary,
+                                VectorOverlay::RelativeEnergyFlow => sample.energy_flow,
+                                VectorOverlay::Off => Point2::default(),
+                            };
+                            (point.key, self.screen(point.point, r), value)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            self.draw_vector_overlay(painter, samples, vector_display.completed_steps);
         } else {
             self.vector_overlay_average.clear();
             self.vector_overlay_step = u64::MAX;
@@ -6856,6 +6977,17 @@ impl Playground {
             }
         }
         recorders.adopt_canonical_generation(request.generation());
+        let overlay_active = self.runtime.active().cloned().filter(|active| {
+            display.generation == request.generation()
+                && display.primary_flux.len() == active.canonical_operator.degrees_of_freedom()
+        });
+        self.refresh_vector_overlay(
+            recorders,
+            assets,
+            commands,
+            overlay_active.as_ref(),
+            request.generation(),
+        );
         if self.uploading.is_none()
             && let Some(active) = self.runtime.active().cloned()
             && probes_need_upload(self.probe_upload, active.bundle.token, request.generation())
@@ -6907,8 +7039,19 @@ impl Playground {
                     Err(error) => self.message = error,
                 }
             }
-            let handoff_pending = self.runtime.ready().is_some() || self.uploading.is_some();
-            if !handoff_pending {
+            // Drain once the packed candidate is ready so begin_handoff gets a
+            // complete requested-step boundary. After that, keep advancing the
+            // accepted generation while the target assets upload; the render
+            // graph snapshots one complete boundary while later requests keep
+            // the source display live; the target consumes that short backlog
+            // after admission. Fresh installs have no outgoing generation.
+            let packed_candidate_waiting = self.uploading.is_none()
+                && self
+                    .gpu_upload_preparation
+                    .as_ref()
+                    .is_some_and(|job| job.result.is_some());
+            let fresh_upload = self.uploading.as_ref().is_some_and(|upload| upload.fresh);
+            if !canonical_steps_withheld(packed_candidate_waiting, fresh_upload) {
                 if self.wave_running {
                     let steps = steps_for_frame(
                         &mut self.accumulator,
@@ -6947,11 +7090,9 @@ impl Playground {
         self.step_backlog = request
             .requested_steps()
             .saturating_sub(self.completed_steps);
-        let full_snapshot_interval = if self.vector_overlay_mode == VectorOverlay::Off {
-            0.25
-        } else {
-            1.0 / 15.0
-        };
+        // Full physical snapshots are for AMR and energy diagnostics. The
+        // vector overlay has its own compact display-rate GPU sampler.
+        let full_snapshot_interval = 0.25;
         if self.full_snapshot_requested.elapsed().as_secs_f64() >= full_snapshot_interval
             && request.request_full_state_readback(commands)
         {
@@ -10393,7 +10534,12 @@ impl Playground {
                 });
             });
     }
-    fn show(&mut self, root: &mut egui::Ui, display: &WaveDisplay) -> Rect {
+    fn show(
+        &mut self,
+        root: &mut egui::Ui,
+        display: &WaveDisplay,
+        vector_display: &VectorOverlayDisplay,
+    ) -> Rect {
         if self.logo_texture.is_none() {
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [216, 88],
@@ -10412,7 +10558,7 @@ impl Playground {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(root, |ui| {
-                viewport = self.viewport(ui, display);
+                viewport = self.viewport(ui, display, vector_display);
             });
         if !self.capturing() {
             self.probe_windows(root.ctx());
@@ -11195,6 +11341,16 @@ fn paced_time_step(recommended: f64, speed: f64) -> f64 {
     recommended.min(PACING_FRAME_SECONDS * speed)
 }
 
+/// The two short boundaries at which it is unsafe to publish more work.
+/// Preparing and uploading a replacement generation are deliberately absent:
+/// the accepted generation can keep advancing through both. We drain just
+/// before `begin_handoff`. Once the transfer is encoded, later source steps
+/// remain visible while validation is in flight and are replayed by the target
+/// from its exact transferred clock before its first visible readback.
+fn canonical_steps_withheld(packed_candidate_waiting: bool, fresh_upload: bool) -> bool {
+    packed_candidate_waiting || fresh_upload
+}
+
 /// Steps to ask the solver for this frame, spending `accumulator` at
 /// `time_step` a step.
 ///
@@ -11704,40 +11860,17 @@ fn highest_forcing_frequency(scene: &TopologyScene, source: PointSource) -> f64 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn vector_overlay_samples(
+fn vector_overlay_layout(
     scene: &TopologyScene,
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
-    canonical: &CanonicalWaveOperator,
-    display: &WaveDisplay,
-    mode: VectorOverlay,
     spacing: f32,
     view: (Point2, f64, Rect),
-) -> Vec<((i32, i32), Pos2, Point2)> {
+) -> Vec<VectorOverlayLayoutPoint> {
     let (view_center, view_scale, viewport) = view;
-    if mesh.triangles.len() != operator.element_nodes().len()
-        || display.snapshot_current.len() != operator.degrees_of_freedom()
-        || display.snapshot_velocity.len() != operator.degrees_of_freedom()
-        || display.complementary_flux.len() != canonical.complementary_degrees_of_freedom()
-        || spacing <= 0.0
-    {
+    if mesh.triangles.len() != operator.element_nodes().len() || spacing <= 0.0 {
         return vec![];
     }
-    let primary = display
-        .snapshot_current
-        .iter()
-        .map(|value| f64::from(*value))
-        .collect::<Vec<_>>();
-    let rate = display
-        .snapshot_velocity
-        .iter()
-        .map(|value| f64::from(*value))
-        .collect::<Vec<_>>();
-    let flux = display
-        .complementary_flux
-        .iter()
-        .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
-        .collect::<Vec<_>>();
     let mut bins = BTreeMap::<(i32, i32), (usize, Pos2, Point2, f32)>::new();
     for (element, triangle) in mesh.triangles.iter().enumerate() {
         let points = triangle.vertices.map(|index| mesh.vertices[index].point);
@@ -11765,7 +11898,7 @@ fn vector_overlay_samples(
         }
     }
     bins.into_iter()
-        .filter_map(|(key, (element, screen, centroid, _))| {
+        .filter_map(|(key, (element, _screen, centroid, _))| {
             let triangle = &mesh.triangles[element];
             let region = scene.region(triangle.region)?;
             let material = scene.material(region.material)?;
@@ -11783,14 +11916,11 @@ fn vector_overlay_samples(
                 mass_density: coefficients.mass_density,
                 stiffness: coefficients.stiffness,
             };
-            let stencil = CanonicalPointStencil::from_quadratic(stencil, canonical).ok()?;
-            let sample = stencil.sample(&primary, &rate, &flux).ok()?;
-            let vector = match mode {
-                VectorOverlay::ComplementaryField => sample.complementary,
-                VectorOverlay::RelativeEnergyFlow => sample.energy_flow,
-                VectorOverlay::Off => return None,
-            };
-            vector.finite().then_some((key, screen, vector))
+            Some(VectorOverlayLayoutPoint {
+                key,
+                point: centroid,
+                stencil,
+            })
         })
         .collect()
 }
@@ -11931,6 +12061,7 @@ pub fn frame(
     curve_display: Res<CurveProbeDisplay>,
     area_display: Res<AreaProbeDisplay>,
     far_display: Res<FarFieldDisplay>,
+    vector_display: Res<VectorOverlayDisplay>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut commands: Commands,
 ) -> Result {
@@ -12011,7 +12142,7 @@ pub fn frame(
             .max_rect(ctx.viewport_rect()),
     );
     let logical_canvas = ctx.viewport_rect();
-    let logical_viewport = state.show(&mut root, &display);
+    let logical_viewport = state.show(&mut root, &display, &vector_display);
     if state.snapshot_state == SnapshotState::Armed {
         state.snapshot_state = SnapshotState::Capturing;
         let sender = state.sender.clone();
@@ -12106,6 +12237,19 @@ pub fn frame(
 mod tests {
     use super::*;
     use funfern_app::topology_viewport::screen_side;
+
+    #[test]
+    fn handoff_withholds_steps_only_when_the_source_cannot_advance() {
+        assert!(!canonical_steps_withheld(false, false));
+        // A packed candidate drains the requests already published before the
+        // UI calls begin_handoff.
+        assert!(canonical_steps_withheld(true, false));
+        // A fresh install has no accepted source generation to advance.
+        assert!(canonical_steps_withheld(false, true));
+        // Ordinary target upload and validation are not solver pauses. Later
+        // requests become a target catch-up backlog after admission.
+        assert!(!canonical_steps_withheld(false, false));
+    }
 
     /// The point of the whole mechanism: the catalog's quietest example and its
     /// loudest sit a hundredfold apart, and both must paint the same picture.
@@ -13270,6 +13414,38 @@ mod probe_interaction_tests {
 
     fn viewport() -> Rect {
         Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))
+    }
+
+    #[test]
+    fn vector_overlay_layout_selects_at_most_one_sample_per_screen_bin() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let active = activate_at(&mut state, 0.08);
+        let viewport = viewport();
+        let spacing = 28.0;
+        let points = vector_overlay_layout(
+            &active.bundle.authored,
+            &active.mesh,
+            &active.operator,
+            spacing,
+            (state.center, state.scale, viewport),
+        );
+        assert!(!points.is_empty());
+        let keys = points
+            .iter()
+            .map(|point| point.key)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(keys.len(), points.len());
+        let maximum_bins = (viewport.width() / spacing).ceil() as usize
+            * (viewport.height() / spacing).ceil() as usize;
+        assert!(points.len() <= maximum_bins);
+        assert!(points.iter().all(|point| {
+            point.point.x.is_finite()
+                && point.point.y.is_finite()
+                && point.stencil.element < active.mesh.triangles.len() as u32
+        }));
     }
 
     #[test]

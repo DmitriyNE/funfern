@@ -9,13 +9,14 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest,
     CanonicalWaveGpuPlugin,
 };
+use funfern_app::wave_gpu::{VectorOverlayDisplay, WaveGpuPlugin, WaveGpuRequest};
 use funfern_core::{
-    BACKGROUND_REGION, CanonicalAuxiliaryState, CanonicalForcing, CanonicalSource,
-    CanonicalWaveOperator, CanonicalWaveState, DampingLaw, GRID_SCALE_FILTER_CADENCE,
-    InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw,
-    LossChannel, MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline, OuterBoundaryCondition,
-    PeriodicCubicSpline, Point2, QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive,
-    TimeSignal, mesh_scene,
+    BACKGROUND_REGION, CanonicalAuxiliaryState, CanonicalForcing, CanonicalPointStencil,
+    CanonicalSource, CanonicalWaveOperator, CanonicalWaveState, DampingLaw,
+    GRID_SCALE_FILTER_CADENCE, InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId,
+    InternalBoundaryLaw, LossChannel, MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline,
+    OuterBoundaryCondition, PeriodicCubicSpline, Point2, QuadraticPointStencil,
+    QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
 };
 
 const DEFAULT_STEPS: u64 = 128;
@@ -41,6 +42,9 @@ struct Expected {
     failure_test: bool,
     primary_readback: bool,
     periodic_filter: bool,
+    overlay_operator: CanonicalWaveOperator,
+    overlay_stencils: Vec<QuadraticPointStencil>,
+    overlay_expected: Vec<(Point2, Point2)>,
     failure_snapshot: Option<FailureSnapshot>,
     recovering: bool,
     started: Option<Instant>,
@@ -87,6 +91,20 @@ fn main() {
     let failure_test = std::env::args().any(|argument| argument == "--failure");
     let primary_readback = std::env::args().any(|argument| argument == "--primary-readback");
     let periodic_filter = std::env::args().any(|argument| argument == "--periodic-filter");
+    let vector_overlay_samples = std::env::args()
+        .find_map(|argument| {
+            argument
+                .strip_prefix("--vector-overlay-samples=")?
+                .parse::<usize>()
+                .ok()
+        })
+        .or_else(|| {
+            std::env::args()
+                .any(|argument| argument == "--vector-overlay")
+                .then_some(3)
+        })
+        .unwrap_or(0);
+    assert!(vector_overlay_samples <= 16_384);
     let clock_rebase = std::env::args().any(|argument| argument == "--clock-rebase");
     let preparation = Instant::now();
     let mut scene = if thin_gap || obstacles {
@@ -182,6 +200,21 @@ fn main() {
     let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
         .expect("canonical operator");
     let canonical_elapsed = canonical_started.elapsed();
+    let overlay_stencils = if vector_overlay_samples > 0 {
+        (0..vector_overlay_samples)
+            .map(|sample| {
+                let element = (sample * mesh.triangles.len() / vector_overlay_samples)
+                    .min(mesh.triangles.len() - 1);
+                let triangle = &mesh.triangles[element];
+                let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+                let point = (a + b + c) / 3.0;
+                QuadraticPointStencil::build(&mesh, &scalar, &scalar_scene, point)
+                    .expect("vector-overlay stencil")
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let time_step = 0.9 * operator.maximum_time_step();
     let primary = operator
         .node_points()
@@ -312,6 +345,22 @@ fn main() {
                 .expect("CPU periodic grid filter");
         }
     }
+    let zero_rate = vec![0.0; operator.degrees_of_freedom()];
+    let overlay_expected = overlay_stencils
+        .iter()
+        .map(|stencil| {
+            let sample = CanonicalPointStencil::from_quadratic(*stencil, &operator)
+                .and_then(|stencil| {
+                    stencil.sample(
+                        oracle.primary_flux(),
+                        &zero_rate,
+                        oracle.complementary_flux(),
+                    )
+                })
+                .expect("CPU vector-overlay sample");
+            (sample.complementary, sample.energy_flow)
+        })
+        .collect();
     let expected = Expected {
         primary: oracle.primary_flux().to_vec(),
         complementary: oracle
@@ -366,6 +415,9 @@ fn main() {
         failure_test,
         primary_readback,
         periodic_filter,
+        overlay_operator: operator,
+        overlay_stencils,
+        overlay_expected,
         failure_snapshot: None,
         recovering: false,
         started: None,
@@ -410,6 +462,7 @@ fn main() {
         }),
         ..default()
     }))
+    .add_plugins(WaveGpuPlugin)
     .add_plugins(CanonicalWaveGpuPlugin)
     .insert_resource(PendingPlan(Some(plan)))
     .insert_resource(expected)
@@ -423,6 +476,7 @@ fn install(
     mut plans: ResMut<PendingPlan>,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut request: ResMut<CanonicalGpuRequest>,
+    mut recorders: ResMut<WaveGpuRequest>,
     expected: Res<Expected>,
 ) {
     if expected.finished {
@@ -439,6 +493,15 @@ fn install(
         &mut commands,
         plans.0.take().expect("one pending plan"),
     );
+    recorders.adopt_canonical_generation(request.generation());
+    recorders
+        .update_canonical_vector_overlay(
+            &mut assets,
+            &mut commands,
+            &expected.overlay_operator,
+            &expected.overlay_stencils,
+        )
+        .expect("install vector-overlay sampler");
     request.request_steps(expected.warmup_steps);
     commands.spawn(Camera2d);
 }
@@ -448,6 +511,7 @@ fn finish_when_ready(
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut request: ResMut<CanonicalGpuRequest>,
     display: Res<CanonicalGpuDisplay>,
+    vector_display: Res<VectorOverlayDisplay>,
     mut expected: ResMut<Expected>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -554,6 +618,14 @@ fn finish_when_ready(
     if display.readbacks < settle_after {
         return;
     }
+    if !expected.overlay_expected.is_empty()
+        && (vector_display.generation != request.generation()
+            || vector_display.samples.len() != expected.overlay_expected.len()
+            || vector_display.completed_steps
+                < expected.initial_step + expected.steps + expected.warmup_steps)
+    {
+        return;
+    }
     expected.finished = true;
     let q_error = relative_l2(
         display.primary_flux.iter().map(|value| *value as f64),
@@ -584,8 +656,22 @@ fn finish_when_ready(
     let dissipated = accounting[2] + accounting[3] + accounting[4] + accounting[5];
     let energy_residual = (final_energy - expected.initial_energy - external + dissipated).abs()
         / expected.initial_energy.abs().max(1.0);
+    let overlay_error = relative_l2(
+        vector_display.samples.iter().flat_map(|sample| {
+            [
+                sample.complementary.x,
+                sample.complementary.y,
+                sample.energy_flow.x,
+                sample.energy_flow.y,
+            ]
+        }),
+        expected
+            .overlay_expected
+            .iter()
+            .flat_map(|(complementary, flow)| [complementary.x, complementary.y, flow.x, flow.y]),
+    );
     println!(
-        "{} accepted steps in {:.2} ms: {:.2} simulated seconds/wall second; Q error {:.3e}, b error {:.3e}, auxiliary error {:.3e} relative/{:.3e} RMS, energy residual {:.3e}; {} dispatches",
+        "{} accepted steps in {:.2} ms: {:.2} simulated seconds/wall second; Q error {:.3e}, b error {:.3e}, auxiliary error {:.3e} relative/{:.3e} RMS, energy residual {:.3e}, vector-overlay error {:.3e}; {} dispatches",
         expected.steps,
         elapsed * 1_000.0,
         expected.time_step * expected.steps as f64 / elapsed,
@@ -594,12 +680,14 @@ fn finish_when_ready(
         auxiliary_error,
         auxiliary_absolute,
         energy_residual,
+        overlay_error,
         request.stats().dispatches(),
     );
     if q_error > 3.0e-5
         || b_error > 3.0e-5
         || auxiliary_absolute > 2.0e-5
         || energy_residual > 2.0e-4
+        || overlay_error > 3.0e-5
     {
         eprintln!("canonical GPU accuracy or energy gate was exceeded");
         expected.failed = true;

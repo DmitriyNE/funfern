@@ -55,8 +55,8 @@ are UI-only diagnostics in one draggable, scrollable window with Frame, Topology
 Mesh, Handoff, and Solver sections. It includes a rolling frame-time plot and
 aggregate frame statistics. The sections follow one transaction end to end: the
 accepted token and the live preparation breakdown, the committed mesh and its
-adaptation, the three handoff waits (CPU preparation, draining the solver's
-requested steps, GPU upload) with what each transaction reused, and the running
+adaptation, the handoff phases (CPU preparation, the short complete-step drain,
+GPU upload/admission) with what each transaction reused, and the running
 solver's throughput and outstanding step backlog. Preparation carries its own
 wall-clock buckets so the cooperative mesh, assembly, and transfer phases and the
 remaining synchronous probe and far-field tail are distinguishable. Preparation and
@@ -966,7 +966,11 @@ and candidate lanes for `Q`, `b`, physical auxiliaries, force caches, energy
 accounting and the bounded epoch clock. Every topology/material generation is
 prepared while the current one evolves, maps the latest accepted direct state and
 physical histories on GPU, validates the complete target, then switches all
-resources together. The [material-law Stage 4](funfern-material-laws-stage4-report.md),
+resources together. Upload and asynchronous admission do not freeze the source:
+the transfer records its exact absolute and epoch-local snapshot steps, subsequent
+requests keep the source display live, and the admitted target consumes that short
+step backlog from the transferred clock. A rejected target leaves the continuing
+source authoritative. The [material-law Stage 4](funfern-material-laws-stage4-report.md),
 [Stage 5](funfern-material-laws-stage5-report.md) and
 [Stage 6](funfern-material-laws-stage6-report.md) reports contain the equations,
 layouts, transfer contracts and measured acceptance results.
@@ -1015,9 +1019,12 @@ quadratically in time; Dirichlet walls pin that mode, which is why they seemed
 immune. A row-sum test covers every assembly path, and an f32 emulation of the
 kernel checks that a constant field is held bit for bit.
 The operator, state, sources, and controls use Bevy's render-world buffers and its
-existing wgpu device. State remains GPU-resident; asynchronous readback supplies
-the egui field colors, while lower-cadence full snapshots supply the canonical
-energy and AMR diagnostics. Each readback carries a GPU-written
+existing wgpu device. State remains GPU-resident; asynchronous primary readback
+supplies the egui field colors, while lower-cadence full snapshots supply the
+canonical energy and AMR diagnostics. Vector arrows use a separate compact
+display-rate consumer: the CPU rebuilds one stencil per visible screen bin only
+when the view changes, the GPU samples complementary field and energy flow after
+each rendered solver batch, and only the arrow records cross back. Each readback carries a GPU-written
 step marker so stale asynchronous results cannot be mistaken for a newer level.
 The wave layout already occupies WebGPU's portable eight-storage-binding budget.
 Volume-source weights therefore share the existing point/pulse forcing-weight
@@ -1352,8 +1359,8 @@ tagged GPU handoff. The target field is transient and is not serialized.
 
 For a static-linear generation, continuous synchronized canonical readback carries
 the primary state needed to render `u=Q/M`. A full primary/complementary/auxiliary
-snapshot is requested at the slower diagnostic/AMR cadence (and more frequently
-while the vector overlay is visible); AMR starts only from an aligned full
+snapshot is requested at the slower diagnostic/AMR cadence; the vector overlay's
+compact consumer is independent of it. AMR starts only from an aligned full
 snapshot. Accepted endpoint rate and acceleration are derived at that cadence,
 not on every painted frame. The established scalar
 spatial estimator retains recovered-flux, strong interior, interface-jump and

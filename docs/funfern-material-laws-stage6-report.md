@@ -129,18 +129,22 @@ gate did not expose:
 - The display mapped all primary, complementary and auxiliary state every frame,
   expanded it into fresh host vectors, recomputed total energy, and applied the
   scalar stiffness solely to prepare a possible AMR sample. The continuous stream
-  is now the primary state prefix. Full state is sampled at 4 Hz for energy/AMR
-  and at 15 Hz while a vector overlay is visible; AMR accepts only an aligned full
-  snapshot. Energy and acceleration run at their consumer cadence, and host
-  vectors retain their allocations.
+  is now the primary state prefix. Full state is sampled at 4 Hz for energy/AMR;
+  AMR accepts only an aligned full snapshot. The vector overlay independently
+  selects one stencil per visible screen bin and reads back compact GPU-sampled
+  complementary/flow records after rendered solver batches, rather than forcing
+  a 15 Hz full snapshot and whole-mesh CPU reconstruction. Energy and acceleration
+  run at their consumer cadence, and host vectors retain their allocations.
 - Preparing a 93,144-primary-DOF GPU generation took about 155 ms synchronously,
   followed by a redundant second copy while turning roughly 80.7 MiB of typed
   buffers into Bevy assets. Reusing the already validated scalar CSR reduces plan
   compilation to about 54 ms, compact adjacency reduces canonical assembly to
   about 73 ms, native builds perform plan/transfer packing on a background worker,
   and owned serialization removes the duplicate copy. The remaining measured
-  main-thread handoff call is 11.5 ms; the accepted generation continues while
-  CPU packing and GPU acceptance are pending.
+  main-thread handoff call is 11.5 ms. The accepted generation continues through
+  CPU packing, upload and admission: the transfer records the exact source clock,
+  and the admitted target consumes requests queued during the admission readback
+  from that transferred boundary.
 
 The full production render-graph harness at 93,144 `Q` plus 185,310 independent
 `b` samples sustains 1,025 steps/s with continuous full-state validation readback
@@ -153,6 +157,9 @@ host acknowledgement. The filter now runs as validated resident maintenance in
 the solver command stream. With it enabled, the same 93,144 / 185,310 fixture
 runs 512 measured steps in 521 ms (about 982 steps/s and 1.90 simulated
 seconds/wall second) while retaining the CPU-oracle and energy tolerances.
+With 1,024 compact vector samples enabled, a later run completed the same measured
+step count in 386 ms (2.56 simulated seconds/wall second) with `1.19e-6` vector
+error; this is the production solver/readback path, not an isolated sampler bench.
 
 ## Generation, events and source continuity
 
