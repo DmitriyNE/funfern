@@ -181,7 +181,7 @@ Keep synchronized primary/complementary/auxiliary samples for point, curve, area
 
 8. **No solver-level rejection exists yet.** `Material::evaluate` still reads only base coefficients. Valid authored laws can otherwise reach an old solver which ignores them. Scaffolding must not expose or silently accept enabled unsupported physics.
 
-### Actual verification status
+### Historical pre-implementation verification status
 
 Ran `cargo test -p funfern-core --lib --locked` without source edits. It failed to compile: `geometry.rs` does not import `CoefficientLaw`, `DampingLaw`, or `RestoringLaw`; the material literal in `mesh/amr.rs` is missing the new fields. No numerical tests ran.
 
@@ -189,9 +189,11 @@ Inspection also found incomplete app literals in the GRIN example and `topology_
 
 ## 5. Implementation stages
 
-The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. No production implementation stage has started. Each stage is a reviewable change with focused tests and an engineering-log entry.
+The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–1 are complete; the production solver remains unchanged and Stage 2 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
 
 ### Stage 0 — Close implementation contracts and establish acceptance cases
+
+Status: contracts frozen in the [Stage 0 implementation contracts](funfern-material-laws-stage0-contracts.md). Measurements for the new core remain stage outputs against those predeclared budgets.
 
 Scope: use specification sections 2–9 as the selected architecture, not a choice between potential and direct state. Inventory every state consumer, physical boundary history, serialized field whose meaning changes, and supported skin/material/boundary combination.
 
@@ -210,6 +212,10 @@ Acceptance inventory: free/prescribed modes; disconnected components; rotated an
 Exit: the initial linear work has equations, state ownership, code integration owners, reproducible fixtures and declared tolerances/budgets. Nonlinear/oscillator details may close in their dependent stages, but linear boundary/history/transfer work cannot be deferred until after cutover. No new broad spike is needed.
 
 ### Stage 1 — Finish safe, inert material authoring infrastructure
+
+Status: complete. The unfinished scaffold was coalesced where it matched the
+adopted design and superseded semantics were removed. Non-inert laws now persist
+and validate as authoring data but are rejected by the legacy solver.
 
 Scope: complete the existing types/imports/literals, parameter traversal, reciprocal identity normalization, analytic scalar validation and passive-rate checks. Fix drive convention, frame dependency and field-argument text. Compile physical electric/magnetic roles rather than treating authored rows as permanent primary/complementary roles.
 
@@ -332,6 +338,6 @@ Fix new-fixture thresholds and target-device budgets before judging results. Tra
 
 ## 7. Handoff status
 
-Planning and correctness spikes are complete enough to start staged implementation. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
+Planning, correctness spikes, Stage 0 contracts and Stage 1 inert authoring are complete. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
 
-Start with Stage 0's bounded contract/fixture work and Stage 1's inert baseline repair. Preserve the unfinished user changes and the concrete reusable-work audit in section 4. No production solver/editor migration has been performed by planning, and the last production build check was red for the recorded incomplete scaffolding. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use them as a current all-tests-pass claim.
+Start Stage 2 with the linear f64 direct `Q,b` core and retain the old solver for comparison. Stage 1's current green workspace checks establish only safe authoring, persistence and legacy rejection; they do not validate canonical evolution. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use them as a current solver all-tests-pass claim.

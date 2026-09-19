@@ -8,13 +8,13 @@ This specification defines a shared time-domain field solver, nonlinear and time
 
 **Status and terminology:** this is a design specification. Requirements state the intended behavior; passages marked recommended describe implementation choices. A **design gate** identifies a remaining derivation or engineering decision that must be completed before the dependent feature is enabled. The final phase completes the named oscillator and active-medium catalogue.
 
-**Adopted architecture — ready for staged implementation:** use integrated nodal primary flux `Q`, independent two-component complementary flux `b` at the six element quadrature points, and explicitly physical trace/oscillator memory. There is no production bulk potential, potential gauge rebasing, or seam-offset solve. Authoritative mechanical `s₀`, named electric/magnetic loss channels, analytic legacy-source migration, phase anchors, frozen-rate passive loss, value-continuous ramp reversal, and recoverable global acceptance are agreed. The [core spike](funfern-material-laws-spike-report.md) justifies direct state over potential-plus-loss memory. Production implementation has not started; existing unfinished material-law changes remain reusable authoring scaffolding, not a working nonlinear solver.
+**Adopted architecture — implementation in progress:** use integrated nodal primary flux `Q`, independent two-component complementary flux `b` at the six element quadrature points, and explicitly physical trace/oscillator memory. There is no production bulk potential, potential gauge rebasing, or seam-offset solve. Authoritative mechanical `s₀`, named electric/magnetic loss channels, analytic legacy-source migration, phase anchors, frozen-rate passive loss, value-continuous ramp reversal, and recoverable global acceptance are agreed. The [core spike](funfern-material-laws-spike-report.md) justifies direct state over potential-plus-loss memory. Stages 0–1 are complete: the operational contracts are frozen and the previously unfinished material-law work has been coalesced into safe, inert authoring infrastructure. The canonical production solver has not yet changed, and authored non-inert laws remain explicitly non-executable.
 
 **Adopted outgoing boundary:** retain first order and implement the passive three-state-per-mode rational candidate as the new second-order option. The [auxiliary report](funfern-boundary-auxiliary-spike.md) supplies its equations and energy proof. Its original boundary-only time split is superseded by the force-coupled kicks below. No blanket nonlinear-domain ban is adopted. The candidate is spatially nonlocal, not exact curved DtN; its accuracy/cost tradeoff is accepted for implementation, not a claim that production performance or all boundary geometries have passed.
 
 **Single-boundary scattering follow-up:** [248 checks now pass](funfern-boundary-scattering-spike.md), confirming the candidate's predicted planar reflection and grazing improvement over first order. Legacy second order remains more accurate in the isolated lossless planar comparison, but retains its known robustness failures. The follow-up exposed a fixed-CFL reflection floor in the previous separate boundary split (21 retained failures). Use the corrected **force-coupled boundary midpoint kicks**, with explicit interior drift, as the implementation reference. Do not copy the superseded split from the original auxiliary prototype. Production performance, f32, full nonlinear composition and boundary-history transfer remain implementation gates.
 
-This specification is authoritative for the selected design; the [review and detailed stages](funfern-material-laws-review.md) define work packages. Spike reports preserve historical findings, including failed alternatives, and do not override this consolidated decision. Start with Stage 0's remaining fixture/layout contracts, then Stage 1's inert build repair. No further broad spike is prerequisite; numerical gates close before their dependent feature is enabled, not after production cutover.
+This specification is authoritative for the selected design; the [review and detailed stages](funfern-material-laws-review.md) define work packages. Spike reports preserve historical findings, including failed alternatives, and do not override this consolidated decision. Stages 0–1 are complete; Stage 2 is the next implementation boundary. No further broad spike is prerequisite; numerical gates close before their dependent feature is enabled, not after production cutover.
 
 ## 1. Product contract
 
@@ -811,8 +811,8 @@ The [detailed stage plan](funfern-material-laws-review.md#5-implementation-stage
 
 | Stage | Deliverable | Enablement boundary |
 | --- | --- | --- |
-| 0 | Remaining source/history/fixture contracts, consumer inventory, baseline measurements and budget criteria | No production change; select concrete thresholds before judging new fixtures |
-| 1 | Restore inert authoring/build baseline, correct validation/traversal, versioned persistence and support checks | Unsupported physics stays unavailable |
+| 0 (complete) | Source/history/fixture contracts, consumer inventory, baseline measurements and budget criteria | No production change; concrete thresholds precede new fixture judgments |
+| 1 (complete) | Restore inert authoring/build baseline, correct validation/traversal, persistence and support checks | Unsupported physics stays unavailable |
 | 2 | Linear f64 Q,b core, physical maps/tensors, KDK, energy and compatibility initializer | Old production solver remains available for comparison |
 | 3 | CPU source/loss/boundary/filter composition and bounded scalar/vector/history remap | Close linear S/B/F/T equations and reference fixtures before their GPU port |
 | 4 | Production-intended GPU evolution, real layouts, clock, all-or-none acceptance | CPU/f32 parity, failure injection and measured steady cost |
@@ -826,13 +826,13 @@ The [detailed stage plan](funfern-material-laws-review.md#5-implementation-stage
 
 Performance is measured incrementally on the real solver path in Stages 2–6 and again for dynamic/nonlinear additions, not by a disposable isolated kernel benchmark and not only after the catalogue is finished. Include boundary preparation/solve, validation, peak memory and handoff; compare wall time per simulated second at matched accuracy.
 
-### Next-session starting point
+### Current implementation handoff
 
-Read this specification and the detailed stages; consult reports for derivations, not as competing live plans. Record baseline `beca47e` separately from the unfinished user authoring changes. The last inspected workspace did not compile because law imports/material literals were incomplete; Stage 1 repairs that deliberately. Do not discard existing material-law work, copy the spike Python into production, implement bulk gauge machinery, or claim the current branch is a verified baseline.
+Read this specification and the detailed stages; consult reports for derivations, not as competing live plans. Baseline `beca47e` remains the clean numerical reference. Stage 1 coalesced the useful unfinished authoring work, removed superseded semantics, restored all material literals/imports, and added explicit legacy-solver rejection for non-inert laws. Do not copy the spike Python into production, implement bulk gauge machinery, or interpret the green Stage 1 checks as validation of a canonical or nonlinear solver that does not exist yet.
 
-Stage 0 still needs concrete production source-edit anchors/normalization, legacy loss-channel migration, boundary/gap history mapping and initialization, irregular transfer thresholds, and target-device performance budgets. These are bounded implementation contracts, not a request for another architecture spike. Settle each before its dependent code; if evidence requires a material scope/accuracy change, report it explicitly.
+Stage 0's concrete production source-edit anchors/normalization, legacy loss-channel migration, boundary/gap history mapping and initialization, irregular transfer thresholds, event ownership and target-device performance budgets are fixed in the [Stage 0 implementation contracts](funfern-material-laws-stage0-contracts.md). If implementation evidence requires a material scope/accuracy change, report and amend it explicitly rather than weakening a fixture in place.
 
-Each stage produces a reviewable change with tests and an engineering-log entry. Keep implementation status distinct from planned behavior, and keep unsupported features unavailable rather than silently ignored.
+Stage 2 starts with the linear f64 direct `Q,b` core while retaining the old production solver as a comparison path. Each stage produces a reviewable change with tests and an engineering-log entry. Keep implementation status distinct from planned behavior, and keep unsupported features unavailable rather than silently ignored.
 
 ## 13. Verification and acceptance
 

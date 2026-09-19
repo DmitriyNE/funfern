@@ -201,6 +201,14 @@ impl PhysicsModel {
             return Ok(material.clone());
         }
 
+        // Physical nonlinear conversion needs field-role, scalar/vector and
+        // inverse-domain admission. Until that compiler is connected to the
+        // new core, refusing the conversion is safer than swapping authored
+        // rows and claiming equivalent physics.
+        if material.has_laws() {
+            return Err(MaterialError::UnsupportedMaterialLaw);
+        }
+
         let mut converted = material.clone();
         if crossing_to_em {
             converted.mass_density = material.stiffness.reciprocal()?;
@@ -211,6 +219,8 @@ impl PhysicsModel {
             converted.stiffness = material.mass_density.reciprocal()?;
             converted.damping = material.damping.multiply(&material.stiffness)?;
         }
+        converted.mass_law = converted.mass_law.normalized();
+        converted.stiffness_law = converted.stiffness_law.normalized();
         Ok(converted)
     }
 }
@@ -1347,6 +1357,21 @@ mod tests {
             initial_lengths
         );
         assert_eq!(cycled, mechanical.convert_material(tm, &material).unwrap());
+
+        let mut inert_reciprocal = material.clone();
+        inert_reciprocal.mass_law.inverted = true;
+        let converted = mechanical.convert_material(tm, &inert_reciprocal).unwrap();
+        assert_eq!(converted.mass_law, crate::CoefficientLaw::linear());
+
+        let mut nonlinear = material;
+        nonlinear.mass_law.field = crate::FieldLaw::Saturable {
+            chi: ScalarField::constant(0.2),
+            saturation: ScalarField::constant(1.0),
+        };
+        assert_eq!(
+            mechanical.convert_material(tm, &nonlinear),
+            Err(MaterialError::UnsupportedMaterialLaw)
+        );
     }
 
     #[test]

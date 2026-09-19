@@ -2173,6 +2173,7 @@ mod tests {
                     axis_ratio: crate::ScalarField::constant(1.0),
                     parameters: vec![],
                     color: [180, 90, 70],
+                    ..Material::default_medium()
                 },
             ],
             regions: vec![

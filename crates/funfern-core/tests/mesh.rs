@@ -757,6 +757,7 @@ fn medium(id: u64, name: &str, stiffness: f64, color: [u8; 3]) -> Material {
         axis_ratio: ScalarField::constant(1.0),
         parameters: vec![],
         color,
+        ..Material::default_medium()
     }
 }
 

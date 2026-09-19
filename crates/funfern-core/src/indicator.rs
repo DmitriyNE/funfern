@@ -2315,6 +2315,7 @@ mod tests {
             axis_ratio: crate::ScalarField::constant(1.0),
             parameters: vec![],
             color: [80, 120, 160],
+            ..Material::default_medium()
         });
         scene.regions.push(Region {
             id: interior,

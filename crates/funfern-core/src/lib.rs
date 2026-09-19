@@ -2,6 +2,7 @@
 mod geometry;
 mod indicator;
 mod material;
+mod material_law;
 mod mesh;
 mod predicates;
 mod probe;
@@ -15,6 +16,7 @@ mod wave_quadratic;
 pub use geometry::*;
 pub use indicator::*;
 pub use material::*;
+pub use material_law::*;
 pub use mesh::*;
 pub use predicates::*;
 pub use probe::*;

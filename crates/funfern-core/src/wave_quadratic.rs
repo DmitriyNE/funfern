@@ -2754,6 +2754,7 @@ mod tests {
                     axis_ratio: crate::ScalarField::constant(1.0),
                     parameters: vec![],
                     color: [1, 2, 3],
+                    ..Material::default_medium()
                 },
                 Material {
                     id: MaterialId(2),
@@ -2764,6 +2765,7 @@ mod tests {
                     axis_ratio: crate::ScalarField::constant(1.0),
                     parameters: vec![],
                     color: [4, 5, 6],
+                    ..Material::default_medium()
                 },
             ],
             regions: vec![

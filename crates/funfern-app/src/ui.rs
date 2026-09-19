@@ -3361,16 +3361,12 @@ impl Playground {
             );
             ui.collapsing("Parameters", |ui| {
                 let mut remove = None;
+                let referenced_names = material
+                    .parameter_names()
+                    .map(str::to_owned)
+                    .collect::<BTreeSet<_>>();
                 for (index, parameter) in material.parameters.iter_mut().enumerate() {
-                    let referenced = [
-                        &material.mass_density,
-                        &material.stiffness,
-                        &material.damping,
-                        &material.axis_ratio,
-                    ]
-                    .into_iter()
-                    .flat_map(ScalarField::parameter_names)
-                    .any(|name| name == parameter.name);
+                    let referenced = referenced_names.contains(&parameter.name);
                     ui.horizontal(|ui| {
                         ui.label(&parameter.name);
                         ui.add(
@@ -3392,7 +3388,7 @@ impl Playground {
                     });
                 }
                 if let Some(index) = remove {
-                    material.parameters.remove(index);
+                    debug_assert!(material.remove_parameter(index).is_ok());
                 }
                 if material.parameters.len() < MAX_MATERIAL_PARAMETERS
                     && ui.button("+ Parameter").clicked()

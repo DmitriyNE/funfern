@@ -1,8 +1,8 @@
 use crate::{
-    EvaluatedMaterial, MAX_MATERIAL_PARAMETERS, MaterialError, MaterialFrame,
-    MaterialFrameAttachment, MaterialParameter, OpenCubicSpline, OpenSampler, PeriodicCubicSpline,
-    Point2, Sample, Sampler, SamplingOptions, ScalarField, SplineError, TimeSignal,
-    point_segment_distance, reserved_identifier, valid_identifier,
+    CoefficientLaw, EvaluatedMaterial, LossChannel, MAX_MATERIAL_PARAMETERS, MaterialError,
+    MaterialFrame, MaterialFrameAttachment, MaterialParameter, OpenCubicSpline, OpenSampler,
+    PeriodicCubicSpline, Point2, RestoringLaw, Sample, Sampler, SamplingOptions, ScalarField,
+    SplineError, TimeSignal, point_segment_distance, reserved_identifier, valid_identifier,
 };
 use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_OBSTACLES: usize = 32;
@@ -117,6 +117,20 @@ pub struct Material {
     pub axis_ratio: ScalarField,
     pub parameters: Vec<MaterialParameter>,
     pub color: [u8; 3],
+    /// What the density row (ε in the EM skins) does beyond its base value.
+    pub mass_law: CoefficientLaw,
+    /// What the physical complementary coefficient does beyond its base value:
+    /// reciprocal stiffness s₀ in Mechanical, μ in the EM skins.
+    pub stiffness_law: CoefficientLaw,
+    /// Electric flux-rate loss, named by physical field rather than solver role.
+    pub electric_loss: Option<LossChannel>,
+    /// Magnetic flux-rate loss, named by physical field rather than solver role.
+    pub magnetic_loss: Option<LossChannel>,
+    /// An acceleration taken away at every node.
+    pub restoring: RestoringLaw,
+    /// Seconds a Switch takes to cross from the base factor to the alternate;
+    /// zero is a hard temporal interface.
+    pub switch_ramp: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -129,6 +143,10 @@ pub struct VolumeSource {
 }
 
 impl VolumeSource {
+    pub fn parameter_names(&self) -> impl Iterator<Item = &str> {
+        self.profile.parameter_names()
+    }
+
     pub fn valid(&self) -> bool {
         let unique_parameters = self.parameters.len() <= MAX_MATERIAL_PARAMETERS
             && self
@@ -141,7 +159,7 @@ impl VolumeSource {
                             .iter()
                             .any(|previous| previous.name == parameter.name)
                 });
-        let references_exist = self.profile.parameter_names().all(|name| {
+        let references_exist = self.parameter_names().all(|name| {
             self.parameters
                 .iter()
                 .any(|parameter| parameter.name == name)
@@ -182,6 +200,17 @@ impl VolumeSource {
         self.parameters[index].name = name;
         Ok(())
     }
+
+    pub fn remove_parameter(&mut self, index: usize) -> Result<MaterialParameter, MaterialError> {
+        let parameter = self
+            .parameters
+            .get(index)
+            .ok_or(MaterialError::InvalidValue)?;
+        if self.parameter_names().any(|name| name == parameter.name) {
+            return Err(MaterialError::InvalidValue);
+        }
+        Ok(self.parameters.remove(index))
+    }
 }
 
 impl Material {
@@ -197,7 +226,47 @@ impl Material {
             // Readable against the dark canvas at the overlay's default opacity
             // while staying calmer than any assigned material.
             color: [86, 116, 138],
+            mass_law: CoefficientLaw::linear(),
+            stiffness_law: CoefficientLaw::linear(),
+            electric_loss: None,
+            magnetic_loss: None,
+            restoring: RestoringLaw::None,
+            switch_ramp: 0.0,
         }
+    }
+
+    /// Every parameter any coefficient or law of the material refers to.
+    pub fn parameter_names(&self) -> impl Iterator<Item = &str> {
+        [
+            &self.mass_density,
+            &self.stiffness,
+            &self.damping,
+            &self.axis_ratio,
+        ]
+        .into_iter()
+        .flat_map(ScalarField::parameter_names)
+        .chain(self.mass_law.parameter_names())
+        .chain(self.stiffness_law.parameter_names())
+        .chain(
+            self.electric_loss
+                .iter()
+                .flat_map(LossChannel::parameter_names),
+        )
+        .chain(
+            self.magnetic_loss
+                .iter()
+                .flat_map(LossChannel::parameter_names),
+        )
+        .chain(self.restoring.parameter_names())
+    }
+
+    /// Whether any law changes what the material does beyond its base values.
+    pub fn has_laws(&self) -> bool {
+        !self.mass_law.is_linear()
+            || !self.stiffness_law.is_linear()
+            || self.electric_loss.is_some()
+            || self.magnetic_loss.is_some()
+            || !self.restoring.is_none()
     }
 
     pub fn valid(&self) -> bool {
@@ -212,15 +281,7 @@ impl Material {
                             .iter()
                             .any(|previous| previous.name == parameter.name)
                 });
-        let references_exist = [
-            &self.mass_density,
-            &self.stiffness,
-            &self.damping,
-            &self.axis_ratio,
-        ]
-        .into_iter()
-        .flat_map(ScalarField::parameter_names)
-        .all(|name| {
+        let references_exist = self.parameter_names().all(|name| {
             self.parameters
                 .iter()
                 .any(|parameter| parameter.name == name)
@@ -230,6 +291,19 @@ impl Material {
             && self.name.len() <= 64
             && unique_parameters
             && references_exist
+            && self.mass_law.valid(&self.parameters)
+            && self.stiffness_law.valid(&self.parameters)
+            && self
+                .electric_loss
+                .as_ref()
+                .is_none_or(|loss| loss.valid(&self.parameters))
+            && self
+                .magnetic_loss
+                .as_ref()
+                .is_none_or(|loss| loss.valid(&self.parameters))
+            && self.restoring.valid(&self.parameters)
+            && self.switch_ramp.is_finite()
+            && self.switch_ramp >= 0.0
             && self
                 .mass_density
                 .constant_value()
@@ -257,10 +331,32 @@ impl Material {
         ]
         .into_iter()
         .any(|field| field.constant_value().is_none())
+            || self.mass_law.varies_in_space()
+            || self.stiffness_law.varies_in_space()
+            || self
+                .electric_loss
+                .as_ref()
+                .is_some_and(LossChannel::varies_in_space)
+            || self
+                .magnetic_loss
+                .as_ref()
+                .is_some_and(LossChannel::varies_in_space)
+            || self.restoring.varies_in_space()
     }
 
     pub fn uses_frame(&self) -> bool {
-        self.varying() || self.axis_ratio.constant_value() != Some(1.0)
+        self.varying()
+            || self.axis_ratio.constant_value() != Some(1.0)
+            || self.mass_law.uses_frame()
+            || self.stiffness_law.uses_frame()
+            || self
+                .electric_loss
+                .as_ref()
+                .is_some_and(LossChannel::uses_frame)
+            || self
+                .magnetic_loss
+                .as_ref()
+                .is_some_and(LossChannel::uses_frame)
     }
 
     pub fn evaluate(
@@ -268,6 +364,9 @@ impl Material {
         frame: MaterialFrame,
         point: Point2,
     ) -> Result<EvaluatedMaterial, MaterialError> {
+        if self.has_laws() {
+            return Err(MaterialError::UnsupportedMaterialLaw);
+        }
         let coordinates = frame.coordinates(point);
         let values = EvaluatedMaterial {
             mass_density: self.mass_density.evaluate(coordinates, &self.parameters)?,
@@ -282,6 +381,9 @@ impl Material {
     }
 
     pub fn uniform(&self) -> Option<EvaluatedMaterial> {
+        if self.has_laws() {
+            return None;
+        }
         let values = EvaluatedMaterial {
             mass_density: self.mass_density.constant_value()?,
             stiffness: self.stiffness.constant_value()?,
@@ -308,12 +410,41 @@ impl Material {
         let stiffness = self.stiffness.rename_parameter(&old, &name)?;
         let damping = self.damping.rename_parameter(&old, &name)?;
         let axis_ratio = self.axis_ratio.rename_parameter(&old, &name)?;
+        let mass_law = self.mass_law.rename_parameter(&old, &name)?;
+        let stiffness_law = self.stiffness_law.rename_parameter(&old, &name)?;
+        let electric_loss = self
+            .electric_loss
+            .as_ref()
+            .map(|loss| loss.rename_parameter(&old, &name))
+            .transpose()?;
+        let magnetic_loss = self
+            .magnetic_loss
+            .as_ref()
+            .map(|loss| loss.rename_parameter(&old, &name))
+            .transpose()?;
+        let restoring = self.restoring.rename_parameter(&old, &name)?;
         self.mass_density = mass_density;
         self.stiffness = stiffness;
         self.damping = damping;
         self.axis_ratio = axis_ratio;
+        self.mass_law = mass_law;
+        self.stiffness_law = stiffness_law;
+        self.electric_loss = electric_loss;
+        self.magnetic_loss = magnetic_loss;
+        self.restoring = restoring;
         self.parameters[index].name = name;
         Ok(())
+    }
+
+    pub fn remove_parameter(&mut self, index: usize) -> Result<MaterialParameter, MaterialError> {
+        let parameter = self
+            .parameters
+            .get(index)
+            .ok_or(MaterialError::InvalidValue)?;
+        if self.parameter_names().any(|name| name == parameter.name) {
+            return Err(MaterialError::InvalidValue);
+        }
+        Ok(self.parameters.remove(index))
     }
 }
 

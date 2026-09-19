@@ -68,6 +68,18 @@ struct StoredMaterial {
     axis_ratio: StoredScalarField,
     parameters: Vec<StoredParameter>,
     color: [u8; 3],
+    #[serde(default = "stored_linear_coefficient_law")]
+    mass_law: StoredCoefficientLaw,
+    #[serde(default = "stored_linear_coefficient_law")]
+    stiffness_law: StoredCoefficientLaw,
+    #[serde(default)]
+    electric_loss: Option<StoredLossChannel>,
+    #[serde(default)]
+    magnetic_loss: Option<StoredLossChannel>,
+    #[serde(default = "stored_no_restoring_law")]
+    restoring: StoredRestoringLaw,
+    #[serde(default)]
+    switch_ramp: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -397,6 +409,12 @@ fn encode_scene(scene: &TopologyScene) -> StoredTopologyScene {
                 axis_ratio: encode_scalar_field(&material.axis_ratio),
                 parameters: encode_parameters(&material.parameters),
                 color: material.color,
+                mass_law: encode_coefficient_law(&material.mass_law),
+                stiffness_law: encode_coefficient_law(&material.stiffness_law),
+                electric_loss: material.electric_loss.as_ref().map(encode_loss_channel),
+                magnetic_loss: material.magnetic_loss.as_ref().map(encode_loss_channel),
+                restoring: encode_restoring_law(&material.restoring),
+                switch_ramp: material.switch_ramp,
             })
             .collect(),
         regions: scene
@@ -509,6 +527,18 @@ fn decode_scene(stored: StoredTopologyScene) -> Result<TopologyScene, String> {
                     axis_ratio: decode_scalar_field(material.axis_ratio)?,
                     parameters: decode_parameters(material.parameters),
                     color: material.color,
+                    mass_law: decode_coefficient_law(material.mass_law)?,
+                    stiffness_law: decode_coefficient_law(material.stiffness_law)?,
+                    electric_loss: material
+                        .electric_loss
+                        .map(decode_loss_channel)
+                        .transpose()?,
+                    magnetic_loss: material
+                        .magnetic_loss
+                        .map(decode_loss_channel)
+                        .transpose()?,
+                    restoring: decode_restoring_law(material.restoring)?,
+                    switch_ramp: material.switch_ramp,
                 })
             })
             .collect::<Result<_, String>>()?,
@@ -1165,6 +1195,119 @@ enum StoredScalarField {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCoefficientLaw {
+    field: StoredFieldLaw,
+    drive: StoredTimeDrive,
+    #[serde(default)]
+    alternate: Option<StoredScalarField>,
+    #[serde(default)]
+    inverted: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredFieldLaw {
+    Linear,
+    Polynomial {
+        chi1: StoredScalarField,
+        chi2: StoredScalarField,
+        #[serde(default)]
+        amplitude_bound: Option<StoredScalarField>,
+    },
+    Saturable {
+        chi: StoredScalarField,
+        saturation: StoredScalarField,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredTimeDrive {
+    None,
+    ParametricPump {
+        depth: StoredScalarField,
+        frequency_hz: StoredScalarField,
+        phase_radians: StoredScalarField,
+    },
+    TimeCrystal {
+        depth: StoredScalarField,
+        frequency_hz: StoredScalarField,
+        phase_radians: StoredScalarField,
+        sharpness: StoredScalarField,
+    },
+    TravellingModulation {
+        depth: StoredScalarField,
+        frequency_hz: StoredScalarField,
+        phase_radians: StoredScalarField,
+        wavenumber: StoredScalarField,
+        angle_radians: StoredScalarField,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDampingLaw {
+    rate: StoredRateLaw,
+    drive: StoredTimeDrive,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredLossChannel {
+    base_rate: StoredScalarField,
+    law: StoredDampingLaw,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredRateLaw {
+    Constant,
+    SaturableAbsorption {
+        saturation: StoredScalarField,
+    },
+    Polynomial {
+        beta1: StoredScalarField,
+        beta2: StoredScalarField,
+        #[serde(default)]
+        amplitude_bound: Option<StoredScalarField>,
+    },
+    VanDerPol {
+        threshold: StoredScalarField,
+        amplitude_bound: StoredScalarField,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StoredRestoringLaw {
+    None,
+    KleinGordon {
+        omega0: StoredScalarField,
+    },
+    SineGordon {
+        omega0: StoredScalarField,
+    },
+    Phi4 {
+        lambda: StoredScalarField,
+        amplitude_bound: StoredScalarField,
+    },
+}
+
+fn stored_linear_coefficient_law() -> StoredCoefficientLaw {
+    StoredCoefficientLaw {
+        field: StoredFieldLaw::Linear,
+        drive: StoredTimeDrive::None,
+        alternate: None,
+        inverted: false,
+    }
+}
+
+fn stored_no_restoring_law() -> StoredRestoringLaw {
+    StoredRestoringLaw::None
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StoredFaceCondition {
     Reflecting,
@@ -1239,6 +1382,241 @@ fn decode_scalar_field(field: StoredScalarField) -> Result<ScalarField, String> 
             ScalarField::formula(source).map_err(|error| error.to_string())
         }
     }
+}
+
+fn encode_coefficient_law(law: &CoefficientLaw) -> StoredCoefficientLaw {
+    StoredCoefficientLaw {
+        field: match &law.field {
+            FieldLaw::Linear => StoredFieldLaw::Linear,
+            FieldLaw::Polynomial {
+                chi1,
+                chi2,
+                amplitude_bound,
+            } => StoredFieldLaw::Polynomial {
+                chi1: encode_scalar_field(chi1),
+                chi2: encode_scalar_field(chi2),
+                amplitude_bound: amplitude_bound.as_ref().map(encode_scalar_field),
+            },
+            FieldLaw::Saturable { chi, saturation } => StoredFieldLaw::Saturable {
+                chi: encode_scalar_field(chi),
+                saturation: encode_scalar_field(saturation),
+            },
+        },
+        drive: encode_time_drive(&law.drive),
+        alternate: law.alternate.as_ref().map(encode_scalar_field),
+        inverted: law.inverted,
+    }
+}
+
+fn decode_coefficient_law(law: StoredCoefficientLaw) -> Result<CoefficientLaw, String> {
+    Ok(CoefficientLaw {
+        field: match law.field {
+            StoredFieldLaw::Linear => FieldLaw::Linear,
+            StoredFieldLaw::Polynomial {
+                chi1,
+                chi2,
+                amplitude_bound,
+            } => FieldLaw::Polynomial {
+                chi1: decode_scalar_field(chi1)?,
+                chi2: decode_scalar_field(chi2)?,
+                amplitude_bound: amplitude_bound.map(decode_scalar_field).transpose()?,
+            },
+            StoredFieldLaw::Saturable { chi, saturation } => FieldLaw::Saturable {
+                chi: decode_scalar_field(chi)?,
+                saturation: decode_scalar_field(saturation)?,
+            },
+        },
+        drive: decode_time_drive(law.drive)?,
+        alternate: law.alternate.map(decode_scalar_field).transpose()?,
+        inverted: law.inverted,
+    }
+    .normalized())
+}
+
+fn encode_time_drive(drive: &TimeDrive) -> StoredTimeDrive {
+    match drive {
+        TimeDrive::None => StoredTimeDrive::None,
+        TimeDrive::ParametricPump {
+            depth,
+            frequency_hz,
+            phase_radians,
+        } => StoredTimeDrive::ParametricPump {
+            depth: encode_scalar_field(depth),
+            frequency_hz: encode_scalar_field(frequency_hz),
+            phase_radians: encode_scalar_field(phase_radians),
+        },
+        TimeDrive::TimeCrystal {
+            depth,
+            frequency_hz,
+            phase_radians,
+            sharpness,
+        } => StoredTimeDrive::TimeCrystal {
+            depth: encode_scalar_field(depth),
+            frequency_hz: encode_scalar_field(frequency_hz),
+            phase_radians: encode_scalar_field(phase_radians),
+            sharpness: encode_scalar_field(sharpness),
+        },
+        TimeDrive::TravellingModulation {
+            depth,
+            frequency_hz,
+            phase_radians,
+            wavenumber,
+            angle_radians,
+        } => StoredTimeDrive::TravellingModulation {
+            depth: encode_scalar_field(depth),
+            frequency_hz: encode_scalar_field(frequency_hz),
+            phase_radians: encode_scalar_field(phase_radians),
+            wavenumber: encode_scalar_field(wavenumber),
+            angle_radians: encode_scalar_field(angle_radians),
+        },
+    }
+}
+
+fn decode_time_drive(drive: StoredTimeDrive) -> Result<TimeDrive, String> {
+    Ok(match drive {
+        StoredTimeDrive::None => TimeDrive::None,
+        StoredTimeDrive::ParametricPump {
+            depth,
+            frequency_hz,
+            phase_radians,
+        } => TimeDrive::ParametricPump {
+            depth: decode_scalar_field(depth)?,
+            frequency_hz: decode_scalar_field(frequency_hz)?,
+            phase_radians: decode_scalar_field(phase_radians)?,
+        },
+        StoredTimeDrive::TimeCrystal {
+            depth,
+            frequency_hz,
+            phase_radians,
+            sharpness,
+        } => TimeDrive::TimeCrystal {
+            depth: decode_scalar_field(depth)?,
+            frequency_hz: decode_scalar_field(frequency_hz)?,
+            phase_radians: decode_scalar_field(phase_radians)?,
+            sharpness: decode_scalar_field(sharpness)?,
+        },
+        StoredTimeDrive::TravellingModulation {
+            depth,
+            frequency_hz,
+            phase_radians,
+            wavenumber,
+            angle_radians,
+        } => TimeDrive::TravellingModulation {
+            depth: decode_scalar_field(depth)?,
+            frequency_hz: decode_scalar_field(frequency_hz)?,
+            phase_radians: decode_scalar_field(phase_radians)?,
+            wavenumber: decode_scalar_field(wavenumber)?,
+            angle_radians: decode_scalar_field(angle_radians)?,
+        },
+    })
+}
+
+fn encode_damping_law(law: &DampingLaw) -> StoredDampingLaw {
+    StoredDampingLaw {
+        rate: match &law.rate {
+            RateLaw::Constant => StoredRateLaw::Constant,
+            RateLaw::SaturableAbsorption { saturation } => StoredRateLaw::SaturableAbsorption {
+                saturation: encode_scalar_field(saturation),
+            },
+            RateLaw::Polynomial {
+                beta1,
+                beta2,
+                amplitude_bound,
+            } => StoredRateLaw::Polynomial {
+                beta1: encode_scalar_field(beta1),
+                beta2: encode_scalar_field(beta2),
+                amplitude_bound: amplitude_bound.as_ref().map(encode_scalar_field),
+            },
+            RateLaw::VanDerPol {
+                threshold,
+                amplitude_bound,
+            } => StoredRateLaw::VanDerPol {
+                threshold: encode_scalar_field(threshold),
+                amplitude_bound: encode_scalar_field(amplitude_bound),
+            },
+        },
+        drive: encode_time_drive(&law.drive),
+    }
+}
+
+fn encode_loss_channel(loss: &LossChannel) -> StoredLossChannel {
+    StoredLossChannel {
+        base_rate: encode_scalar_field(&loss.base_rate),
+        law: encode_damping_law(&loss.law),
+    }
+}
+
+fn decode_damping_law(law: StoredDampingLaw) -> Result<DampingLaw, String> {
+    Ok(DampingLaw {
+        rate: match law.rate {
+            StoredRateLaw::Constant => RateLaw::Constant,
+            StoredRateLaw::SaturableAbsorption { saturation } => RateLaw::SaturableAbsorption {
+                saturation: decode_scalar_field(saturation)?,
+            },
+            StoredRateLaw::Polynomial {
+                beta1,
+                beta2,
+                amplitude_bound,
+            } => RateLaw::Polynomial {
+                beta1: decode_scalar_field(beta1)?,
+                beta2: decode_scalar_field(beta2)?,
+                amplitude_bound: amplitude_bound.map(decode_scalar_field).transpose()?,
+            },
+            StoredRateLaw::VanDerPol {
+                threshold,
+                amplitude_bound,
+            } => RateLaw::VanDerPol {
+                threshold: decode_scalar_field(threshold)?,
+                amplitude_bound: decode_scalar_field(amplitude_bound)?,
+            },
+        },
+        drive: decode_time_drive(law.drive)?,
+    })
+}
+
+fn decode_loss_channel(loss: StoredLossChannel) -> Result<LossChannel, String> {
+    Ok(LossChannel {
+        base_rate: decode_scalar_field(loss.base_rate)?,
+        law: decode_damping_law(loss.law)?,
+    })
+}
+
+fn encode_restoring_law(law: &RestoringLaw) -> StoredRestoringLaw {
+    match law {
+        RestoringLaw::None => StoredRestoringLaw::None,
+        RestoringLaw::KleinGordon { omega0 } => StoredRestoringLaw::KleinGordon {
+            omega0: encode_scalar_field(omega0),
+        },
+        RestoringLaw::SineGordon { omega0 } => StoredRestoringLaw::SineGordon {
+            omega0: encode_scalar_field(omega0),
+        },
+        RestoringLaw::Phi4 {
+            lambda,
+            amplitude_bound,
+        } => StoredRestoringLaw::Phi4 {
+            lambda: encode_scalar_field(lambda),
+            amplitude_bound: encode_scalar_field(amplitude_bound),
+        },
+    }
+}
+
+fn decode_restoring_law(law: StoredRestoringLaw) -> Result<RestoringLaw, String> {
+    Ok(match law {
+        StoredRestoringLaw::None => RestoringLaw::None,
+        StoredRestoringLaw::KleinGordon { omega0 } => RestoringLaw::KleinGordon {
+            omega0: decode_scalar_field(omega0)?,
+        },
+        StoredRestoringLaw::SineGordon { omega0 } => RestoringLaw::SineGordon {
+            omega0: decode_scalar_field(omega0)?,
+        },
+        StoredRestoringLaw::Phi4 {
+            lambda,
+            amplitude_bound,
+        } => RestoringLaw::Phi4 {
+            lambda: decode_scalar_field(lambda)?,
+            amplitude_bound: decode_scalar_field(amplitude_bound)?,
+        },
+    })
 }
 
 fn encode_signal(signal: TimeSignal) -> StoredTimeSignal {
@@ -1561,6 +1939,107 @@ mod tests {
         assert_eq!(parse_document(pretty.as_bytes()).unwrap(), document);
         let compact = save_compact(&document).unwrap();
         assert_eq!(parse_document(&compact).unwrap(), document);
+    }
+
+    #[test]
+    fn authored_material_laws_round_trip_without_enabling_solver_behavior() {
+        let mut document = TopologyDocument::default();
+        for scene in [&mut document.model.draft, &mut document.model.accepted] {
+            let material = &mut scene.materials[0];
+            material.mass_law = CoefficientLaw {
+                field: FieldLaw::Polynomial {
+                    chi1: ScalarField::constant(0.1),
+                    chi2: ScalarField::constant(0.2),
+                    amplitude_bound: Some(ScalarField::constant(0.5)),
+                },
+                drive: TimeDrive::TravellingModulation {
+                    depth: ScalarField::constant(0.2),
+                    frequency_hz: ScalarField::constant(3.0),
+                    phase_radians: ScalarField::constant(0.4),
+                    wavenumber: ScalarField::constant(2.0),
+                    angle_radians: ScalarField::constant(0.3),
+                },
+                alternate: Some(ScalarField::constant(1.4)),
+                inverted: true,
+            };
+            material.stiffness_law = CoefficientLaw {
+                field: FieldLaw::Saturable {
+                    chi: ScalarField::constant(0.25),
+                    saturation: ScalarField::constant(1.5),
+                },
+                drive: TimeDrive::TimeCrystal {
+                    depth: ScalarField::constant(0.1),
+                    frequency_hz: ScalarField::constant(2.0),
+                    phase_radians: ScalarField::constant(0.2),
+                    sharpness: ScalarField::constant(4.0),
+                },
+                alternate: None,
+                inverted: false,
+            };
+            material.electric_loss = Some(LossChannel {
+                base_rate: ScalarField::formula("0.02 + 0*x").unwrap(),
+                law: DampingLaw {
+                    rate: RateLaw::Polynomial {
+                        beta1: ScalarField::constant(0.1),
+                        beta2: ScalarField::constant(0.2),
+                        amplitude_bound: None,
+                    },
+                    drive: TimeDrive::ParametricPump {
+                        depth: ScalarField::constant(0.1),
+                        frequency_hz: ScalarField::constant(1.0),
+                        phase_radians: ScalarField::constant(0.0),
+                    },
+                },
+            });
+            material.magnetic_loss = Some(LossChannel {
+                base_rate: ScalarField::constant(0.03),
+                law: DampingLaw {
+                    rate: RateLaw::SaturableAbsorption {
+                        saturation: ScalarField::constant(1.2),
+                    },
+                    drive: TimeDrive::None,
+                },
+            });
+            material.restoring = RestoringLaw::Phi4 {
+                lambda: ScalarField::constant(0.5),
+                amplitude_bound: ScalarField::constant(2.0),
+            };
+            material.switch_ramp = 0.25;
+        }
+
+        let encoded = save(&document).unwrap();
+        let decoded = parse_document(encoded.as_bytes()).unwrap();
+        assert_eq!(decoded, document);
+        assert_eq!(
+            decoded.model.accepted.materials[0].evaluate(MaterialFrame::world(), Point2::default()),
+            Err(MaterialError::UnsupportedMaterialLaw)
+        );
+    }
+
+    #[test]
+    fn earlier_version_22_materials_receive_inert_law_defaults() {
+        let document = TopologyDocument::default();
+        let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        for scene_name in ["draft", "accepted"] {
+            let materials = value["model"][scene_name]["materials"]
+                .as_array_mut()
+                .unwrap();
+            for material in materials {
+                let material = material.as_object_mut().unwrap();
+                for key in [
+                    "mass_law",
+                    "stiffness_law",
+                    "electric_loss",
+                    "magnetic_loss",
+                    "restoring",
+                    "switch_ramp",
+                ] {
+                    assert!(material.remove(key).is_some(), "{key} was not written");
+                }
+            }
+        }
+        let decoded = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+        assert_eq!(decoded, document);
     }
 
     #[test]

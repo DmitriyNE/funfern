@@ -15,6 +15,7 @@ pub enum MaterialError {
     InvalidArgumentCount(String),
     TooComplex,
     MissingParameter(String),
+    UnsupportedMaterialLaw,
     InvalidValue,
 }
 
@@ -30,6 +31,12 @@ impl std::fmt::Display for MaterialError {
             }
             Self::TooComplex => write!(f, "formula is too complex"),
             Self::MissingParameter(name) => write!(f, "missing parameter `{name}`"),
+            Self::UnsupportedMaterialLaw => {
+                write!(
+                    f,
+                    "material law is authored but not executable by the legacy solver"
+                )
+            }
             Self::InvalidValue => write!(f, "formula produced an invalid value"),
         }
     }
@@ -154,6 +161,36 @@ impl ScalarField {
 
     pub fn parameter_names(&self) -> impl Iterator<Item = &str> {
         self.formula_parameters().iter().map(String::as_str)
+    }
+
+    /// Whether the field is the same at every point: a constant, or a formula
+    /// that reads only parameters and constants.
+    pub fn spatially_constant(&self) -> bool {
+        match self {
+            Self::Constant(_) => true,
+            Self::Formula(formula) => formula.spatially_constant(),
+        }
+    }
+
+    /// Evaluates a field that does not vary in space, so the coordinates it is
+    /// given do not matter. A field that does vary is refused rather than
+    /// sampled somewhere arbitrary.
+    pub fn evaluate_constant(
+        &self,
+        parameters: &[MaterialParameter],
+    ) -> Result<f64, MaterialError> {
+        if !self.spatially_constant() {
+            return Err(MaterialError::InvalidValue);
+        }
+        self.evaluate(
+            MaterialCoordinates {
+                x: 0.0,
+                y: 0.0,
+                r: 0.0,
+                theta: 0.0,
+            },
+            parameters,
+        )
     }
 
     pub fn rename_parameter(&self, old: &str, new: &str) -> Result<Self, MaterialError> {
@@ -351,6 +388,16 @@ impl MaterialFormula {
             source,
             program,
             parameters,
+        })
+    }
+
+    /// Whether the program never reads a coordinate.
+    pub fn spatially_constant(&self) -> bool {
+        !self.program.iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::X | Instruction::Y | Instruction::R | Instruction::Theta
+            )
         })
     }
 

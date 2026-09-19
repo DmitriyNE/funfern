@@ -258,6 +258,7 @@ fn material_lens() -> TopologyDocument {
         axis_ratio: ScalarField::constant(1.0),
         parameters: vec![],
         color: [61, 116, 139],
+        ..Material::default_medium()
     });
     builder.subdomain(
         PeriodicCubicSpline::rounded(Point2::default(), 0.45),
@@ -293,6 +294,7 @@ fn grin_rod() -> TopologyDocument {
             },
         ],
         color: [46, 120, 139],
+        ..Material::default_medium()
     });
     let region = builder.subdomain(
         PeriodicCubicSpline::polygon(vec![
@@ -343,6 +345,7 @@ fn anisotropic_crystal() -> TopologyDocument {
         axis_ratio: ScalarField::constant(2.4),
         parameters: vec![],
         color: [54, 125, 126],
+        ..Material::default_medium()
     });
     builder.subdomain(
         PeriodicCubicSpline::rounded(center, 0.48),
@@ -385,6 +388,7 @@ fn luneburg_lens() -> TopologyDocument {
             value: radius,
         }],
         color: [66, 105, 151],
+        ..Material::default_medium()
     });
     let region = builder.subdomain(
         PeriodicCubicSpline::rounded(center, radius),

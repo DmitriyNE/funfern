@@ -5,6 +5,27 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-19 — Material-law Stages 0–1 complete
+
+- Froze the operational source, legacy-loss, trace/history, transfer, event,
+  failure, serialization, f32 and target-device contracts in the
+  [Stage 0 contract](funfern-material-laws-stage0-contracts.md). These are the
+  acceptance inputs for the direct-state implementation, not new solver behavior.
+- Coalesced the useful unfinished material-law scaffold into inert authoring
+  infrastructure. Added physical coefficient roles, independent electric and
+  magnetic loss channels, analytic tangent/passivity checks, reciprocal identity
+  normalization, corrected cosine drives/frame use, full parameter traversal,
+  and version-22-compatible persistence defaults. Reserved oscillator forms
+  remain Gate O data.
+- Dropped the superseded reciprocal-row swapping semantics. A non-inert authored
+  law now fails explicitly at the legacy evaluator and skin converter rather
+  than being silently ignored; the old production solver and legacy `damping`
+  field otherwise remain unchanged until their staged migration.
+- Verified formatting, Clippy with warnings denied, all workspace targets, an
+  optimized native app build, and the `wasm32-unknown-unknown` app check. The
+  workspace suite passed 558 tests; the one known curved second-order instability
+  reproducer remains ignored. Stage 2's linear f64 direct `Q,b` core is next.
+
 ## 2026-09-19 — Material-law architecture adopted and plan consolidated
 
 - Adopted direct integrated nodal Q plus independent quadrature b, with genuine

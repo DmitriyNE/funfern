@@ -40,6 +40,7 @@ fn main() {
                     axis_ratio: ScalarField::constant(1.0),
                     parameters: vec![],
                     color: [190, 110, 80],
+                    ..Material::default_medium()
                 },
             ],
             regions: vec![
