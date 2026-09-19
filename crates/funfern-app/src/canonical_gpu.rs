@@ -35,14 +35,26 @@ use funfern_core::{
     CanonicalAuxiliaryState, CanonicalForcing, CanonicalOutgoingHistoryTransferMap,
     CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
     CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferMap, CanonicalWaveOperator, CanonicalWaveState, Point2, TimeSignal,
-    WaveError,
+    CanonicalVectorTransferMap, CanonicalWaveOperator, CanonicalWaveState, Point2,
+    QuadraticWaveOperator, TimeSignal, WaveError,
 };
 
 use crate::wave_gpu::{
     AreaProbeBindGroup, CurveProbeBindGroup, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS,
     FarFieldBindGroup, ProbeBindGroup, WaveGpuRequest, WavePipeline, probe_sample_due,
 };
+
+// `ShaderBuffer::from(T)` serializes into an owned byte vector and then copies
+// that vector once more through `ShaderBuffer::new`. Canonical generations can
+// exceed 80 MiB, so doing that for every handoff creates a visible main-thread
+// pause. `set_data` keeps the serializer's owned vector directly.
+macro_rules! add_shader_buffer {
+    ($assets:expr, $value:expr) => {{
+        let mut buffer = ShaderBuffer::default();
+        buffer.set_data($value);
+        $assets.add(buffer)
+    }};
+}
 
 pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 2;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
@@ -609,6 +621,37 @@ impl CanonicalGpuPlan {
         forcing: &CanonicalForcing,
         clock: CanonicalGpuClock,
     ) -> Result<Self, CanonicalGpuBuildError> {
+        Self::compile_inner(operator, None, state, forcing, clock)
+    }
+
+    /// Production compilation reuses the already assembled scalar CSR for the
+    /// compatible stiffness cache. Reconstructing the same rows with millions
+    /// of `BTreeMap` insertions accounted for most of the final handoff pause.
+    pub fn compile_with_quadratic(
+        operator: &CanonicalWaveOperator,
+        quadratic: &QuadraticWaveOperator,
+        state: &CanonicalWaveState,
+        forcing: &CanonicalForcing,
+        clock: CanonicalGpuClock,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        if quadratic.degrees_of_freedom() != operator.degrees_of_freedom()
+            || quadratic.row_offsets().len() != operator.degrees_of_freedom() + 1
+            || quadratic.columns().len() != quadratic.stiffness_values().len()
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "the scalar and canonical operators do not share a CSR layout",
+            ));
+        }
+        Self::compile_inner(operator, Some(quadratic), state, forcing, clock)
+    }
+
+    fn compile_inner(
+        operator: &CanonicalWaveOperator,
+        quadratic: Option<&QuadraticWaveOperator>,
+        state: &CanonicalWaveState,
+        forcing: &CanonicalForcing,
+        clock: CanonicalGpuClock,
+    ) -> Result<Self, CanonicalGpuBuildError> {
         if clock.requires_rebase()
             || state.primary_flux().len() != operator.degrees_of_freedom()
             || state.complementary_flux().len() != operator.complementary_degrees_of_freedom()
@@ -666,7 +709,9 @@ impl CanonicalGpuPlan {
         }
 
         let mut force_by_node = vec![Vec::<GpuCanonicalTableWord>::new(); node_count];
-        let mut stiffness_by_node = vec![BTreeMap::<u32, f64>::new(); node_count];
+        let mut stiffness_by_node = quadratic
+            .is_none()
+            .then(|| vec![BTreeMap::<u32, f64>::new(); node_count]);
         for (sample_index, sample) in operator.constitutive_samples().iter().enumerate() {
             let tensor = sample.complementary_inverse;
             let nodes = operator.element_nodes()[sample.element as usize];
@@ -681,16 +726,18 @@ impl CanonicalGpuPlan {
                     finite_f32(y, "force coefficient")?,
                 ));
             }
-            for (row_node, row_curl) in nodes.into_iter().zip(sample.curls()) {
-                for (column_node, column_curl) in nodes.into_iter().zip(sample.curls()) {
-                    if row_node == column_node {
-                        continue;
+            if let Some(stiffness_by_node) = &mut stiffness_by_node {
+                for (row_node, row_curl) in nodes.into_iter().zip(sample.curls()) {
+                    for (column_node, column_curl) in nodes.into_iter().zip(sample.curls()) {
+                        if row_node == column_node {
+                            continue;
+                        }
+                        let coefficient = sample.integration_weight
+                            * row_curl.dot(sample.complementary_inverse.apply(*column_curl));
+                        *stiffness_by_node[row_node as usize]
+                            .entry(column_node)
+                            .or_default() += coefficient;
                     }
-                    let coefficient = sample.integration_weight
-                        * row_curl.dot(sample.complementary_inverse.apply(*column_curl));
-                    *stiffness_by_node[row_node as usize]
-                        .entry(column_node)
-                        .or_default() += coefficient;
                 }
             }
         }
@@ -754,12 +801,56 @@ impl CanonicalGpuPlan {
             });
         }
         let mut stiffness_ranges = vec![(0_u32, 0_u32); node_count];
-        for (node, row) in stiffness_by_node.into_iter().enumerate() {
-            stiffness_ranges[node] = (usize_u32(tables.len())?, usize_u32(row.len())?);
-            tables.extend(
-                row.into_iter()
-                    .map(|(column, coefficient)| table_word(column, 0, coefficient as f32, 0.0)),
-            );
+        if let Some(quadratic) = quadratic {
+            let mut gap_correction = BTreeMap::<(u32, u32), f64>::new();
+            for gap in operator.thin_gap_samples() {
+                *gap_correction
+                    .entry((gap.left_node, gap.right_node))
+                    .or_default() += gap.stiffness;
+                *gap_correction
+                    .entry((gap.right_node, gap.left_node))
+                    .or_default() += gap.stiffness;
+            }
+            for (node, range) in stiffness_ranges.iter_mut().enumerate() {
+                let start = quadratic.row_offsets()[node] as usize;
+                let end = quadratic.row_offsets()[node + 1] as usize;
+                let table_start = tables.len();
+                for entry in start..end {
+                    let column = quadratic.columns()[entry];
+                    if column as usize == node {
+                        continue;
+                    }
+                    let coefficient = quadratic.stiffness_values()[entry]
+                        + gap_correction
+                            .get(&(node as u32, column))
+                            .copied()
+                            .unwrap_or(0.0);
+                    if coefficient != 0.0 {
+                        tables.push(table_word(
+                            column,
+                            0,
+                            finite_f32(coefficient, "stiffness coefficient")?,
+                            0.0,
+                        ));
+                    }
+                }
+                *range = (
+                    usize_u32(table_start)?,
+                    usize_u32(tables.len() - table_start)?,
+                );
+            }
+        } else {
+            for (node, row) in stiffness_by_node.unwrap().into_iter().enumerate() {
+                stiffness_ranges[node] = (usize_u32(tables.len())?, usize_u32(row.len())?);
+                for (column, coefficient) in row {
+                    tables.push(table_word(
+                        column,
+                        0,
+                        finite_f32(coefficient, "stiffness coefficient")?,
+                        0.0,
+                    ));
+                }
+            }
         }
         if tables.is_empty() {
             tables.push(GpuCanonicalTableWord::default());
@@ -2018,6 +2109,8 @@ pub struct CanonicalGpuRequest {
     stats: Arc<CanonicalGpuStats>,
     readback_entities: Vec<Entity>,
     status_readback_entity: Option<Entity>,
+    full_state_readback_entity: Option<Entity>,
+    continuous_full_state_readback: bool,
     handoff: Option<CanonicalGpuHandoffHandles>,
     handoff_outcome: CanonicalGpuHandoffOutcome,
     live_event: Option<CanonicalGpuLiveEventHandles>,
@@ -2034,11 +2127,48 @@ impl Default for CanonicalGpuRequest {
             stats: Arc::new(CanonicalGpuStats::default()),
             readback_entities: Vec::new(),
             status_readback_entity: None,
+            full_state_readback_entity: None,
+            continuous_full_state_readback: false,
             handoff: None,
             handoff_outcome: CanonicalGpuHandoffOutcome::None,
             live_event: None,
         }
     }
+}
+
+fn spawn_canonical_state_readback(
+    commands: &mut Commands,
+    handles: &CanonicalGpuBufferHandles,
+    generation: u64,
+    full: bool,
+    one_shot: bool,
+) -> Entity {
+    let readback = if full {
+        Readback::buffer(handles.state.clone())
+    } else {
+        Readback::buffer_range(
+            handles.state.clone(),
+            0,
+            u64::from(handles.node_count) * size_of::<GpuCanonicalStateWord>() as u64,
+        )
+    };
+    commands
+        .spawn((
+            readback,
+            CanonicalStateReadback {
+                generation,
+                node_count: handles.node_count,
+                sample_count: handles.sample_count,
+                state_count: if full {
+                    handles.state_count
+                } else {
+                    handles.node_count
+                },
+                full,
+                one_shot,
+            },
+        ))
+        .id()
 }
 
 struct AddedCanonicalBuffers {
@@ -2068,14 +2198,14 @@ fn add_canonical_buffers(
     let accounting_item_count = node_count + sample_count + plan.control.counts_b.z;
     let dispatches_per_step = plan.manifest.dispatches_per_step as u64;
     let handles = CanonicalGpuBufferHandles {
-        control: assets.add(ShaderBuffer::from(plan.control)),
-        status: assets.add(ShaderBuffer::from(plan.status)),
-        state: assets.add(ShaderBuffer::from(plan.state)),
-        nodes: assets.add(ShaderBuffer::from(plan.nodes)),
-        samples: assets.add(ShaderBuffer::from(plan.samples)),
-        tables: assets.add(ShaderBuffer::from(plan.tables)),
-        scratch: assets.add(ShaderBuffer::from(plan.scratch)),
-        boundary: assets.add(ShaderBuffer::from(plan.boundary)),
+        control: add_shader_buffer!(assets, plan.control),
+        status: add_shader_buffer!(assets, plan.status),
+        state: add_shader_buffer!(assets, plan.state),
+        nodes: add_shader_buffer!(assets, plan.nodes),
+        samples: add_shader_buffer!(assets, plan.samples),
+        tables: add_shader_buffer!(assets, plan.tables),
+        scratch: add_shader_buffer!(assets, plan.scratch),
+        boundary: add_shader_buffer!(assets, plan.boundary),
         node_count,
         sample_count,
         gap_count,
@@ -2116,20 +2246,13 @@ impl CanonicalGpuRequest {
         self.stats = Arc::new(CanonicalGpuStats::default());
         let added = add_canonical_buffers(assets, plan);
         let handles = added.handles;
-        let node_count = handles.node_count;
-        let sample_count = handles.sample_count;
-        let state_count = handles.state_count;
-        let state_entity = commands
-            .spawn((
-                Readback::buffer(handles.state.clone()),
-                CanonicalStateReadback {
-                    generation,
-                    node_count,
-                    sample_count,
-                    state_count,
-                },
-            ))
-            .id();
+        let state_entity = spawn_canonical_state_readback(
+            commands,
+            &handles,
+            generation,
+            self.continuous_full_state_readback,
+            false,
+        );
         let control_entity = commands
             .spawn((
                 Readback::buffer(handles.control.clone()),
@@ -2161,6 +2284,7 @@ impl CanonicalGpuRequest {
         self.buffers = Some(handles);
         self.readback_entities = vec![state_entity, control_entity, status_entity];
         self.status_readback_entity = Some(status_entity);
+        self.full_state_readback_entity = None;
         self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
     }
 
@@ -2184,6 +2308,7 @@ impl CanonicalGpuRequest {
             commands.entity(entity).despawn();
         }
         self.status_readback_entity = None;
+        self.full_state_readback_entity = None;
         self.manifest = None;
         self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
     }
@@ -2222,6 +2347,35 @@ impl CanonicalGpuRequest {
 
     pub fn manifest(&self) -> Option<&CanonicalGpuLayoutManifest> {
         self.manifest.as_ref()
+    }
+
+    /// Validation harnesses need every physical lane on every readback. The
+    /// interactive app leaves this disabled and continuously reads only the
+    /// primary node prefix, requesting full snapshots at diagnostic cadence.
+    pub fn set_continuous_full_state_readback(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), &'static str> {
+        if self.buffers.is_some() || self.handoff.is_some() {
+            return Err("state readback mode must be selected before GPU installation");
+        }
+        self.continuous_full_state_readback = enabled;
+        Ok(())
+    }
+
+    /// Queues one full physical-state snapshot without changing the continuous
+    /// primary-only display stream. Returns whether a new request was queued.
+    pub fn request_full_state_readback(&mut self, commands: &mut Commands) -> bool {
+        if self.continuous_full_state_readback || self.full_state_readback_entity.is_some() {
+            return false;
+        }
+        let Some(handles) = self.buffers.as_ref() else {
+            return false;
+        };
+        let entity = spawn_canonical_state_readback(commands, handles, self.generation, true, true);
+        self.full_state_readback_entity = Some(entity);
+        self.readback_entities.push(entity);
+        true
     }
 
     pub fn stats(&self) -> &Arc<CanonicalGpuStats> {
@@ -2283,7 +2437,7 @@ impl CanonicalGpuRequest {
             return Err("source patch changes the compiled drive layout");
         }
         self.live_event = Some(CanonicalGpuLiveEventHandles {
-            upload: assets.add(ShaderBuffer::from(event.upload)),
+            upload: add_shader_buffer!(assets, event.upload),
             kind: event.kind,
             serial: event.serial,
             dispatches: event.dispatches,
@@ -2345,7 +2499,7 @@ impl CanonicalGpuRequest {
             .id();
         self.handoff = Some(CanonicalGpuHandoffHandles {
             target: added.handles,
-            transfer: assets.add(ShaderBuffer::from(transfer.words)),
+            transfer: add_shader_buffer!(assets, transfer.words),
             manifest: added.manifest,
             transfer_manifest: transfer.manifest,
             stats,
@@ -2411,7 +2565,7 @@ impl CanonicalGpuRequest {
         commands: &mut Commands,
         value: GpuCanonicalStatus,
     ) {
-        let replacement = assets.add(ShaderBuffer::from(value));
+        let replacement = add_shader_buffer!(assets, value);
         let handles = self.buffers.as_mut().expect("checked installed buffers");
         let old = std::mem::replace(&mut handles.status, replacement);
         assets.remove(old.id());
@@ -2449,12 +2603,20 @@ pub struct CanonicalGpuDisplay {
     pub clock: Option<CanonicalGpuDisplayClock>,
     pub accounting: [f32; 8],
     pub readbacks: u64,
+    pub full_readbacks: u64,
+    /// State-readback serial at which the latest full snapshot arrived. Equal
+    /// to `readbacks` only while the primary lanes still belong to that same
+    /// physical snapshot.
+    pub full_readback_at: u64,
     pub runtime_serials: [u32; 4],
     pub event_result: [u32; 4],
     raw_state: Vec<GpuCanonicalStateWord>,
+    raw_primary: Vec<GpuCanonicalStateWord>,
     node_count: usize,
     sample_count: usize,
     accepted_slot: u32,
+    raw_state_slot: u32,
+    raw_state_continuous: bool,
 }
 
 impl CanonicalGpuDisplay {
@@ -2510,6 +2672,8 @@ struct CanonicalStateReadback {
     node_count: u32,
     sample_count: u32,
     state_count: u32,
+    full: bool,
+    one_shot: bool,
 }
 
 #[derive(Component)]
@@ -2531,31 +2695,90 @@ struct CanonicalHandoffStatusReadback {
 fn receive_canonical_state(
     event: On<ReadbackComplete>,
     tags: Query<&CanonicalStateReadback>,
+    mut commands: Commands,
+    mut request: ResMut<CanonicalGpuRequest>,
     mut display: ResMut<CanonicalGpuDisplay>,
 ) {
     let Ok(tag) = tags.get(event.entity) else {
         return;
     };
+    if tag.one_shot {
+        // A readback component is continuous until its deferred despawn reaches
+        // the render world. Ignore duplicate completions after the first one;
+        // otherwise one requested snapshot can be counted and decoded more
+        // than once, and can queue several despawns for the same entity.
+        if request.full_state_readback_entity != Some(event.entity) {
+            return;
+        }
+        request
+            .readback_entities
+            .retain(|candidate| *candidate != event.entity);
+        request.full_state_readback_entity = None;
+        commands.entity(event.entity).try_despawn();
+    }
+    if tag.generation != request.generation {
+        return;
+    }
     let words: Vec<GpuCanonicalStateWord> = event.to_shader_type();
     if words.len() != tag.state_count as usize {
         return;
     }
-    display.generation = tag.generation;
+    begin_canonical_display_generation(&mut display, tag.generation);
     display.node_count = tag.node_count as usize;
     display.sample_count = tag.sample_count as usize;
-    display.raw_state = words;
+    if tag.full {
+        display.raw_state_slot = display.accepted_slot;
+        display.raw_state_continuous = !tag.one_shot;
+        display.raw_primary.clear();
+        display
+            .raw_primary
+            .extend(words.iter().take(tag.node_count as usize).copied());
+        display.raw_state = words;
+    } else {
+        display.raw_primary = words;
+    }
     refresh_canonical_display(&mut display);
     display.readbacks = display.readbacks.saturating_add(1);
+    if tag.full {
+        display.full_readbacks = display.full_readbacks.saturating_add(1);
+        display.full_readback_at = display.readbacks;
+    }
+}
+
+fn begin_canonical_display_generation(display: &mut CanonicalGpuDisplay, generation: u64) {
+    if display.generation == generation {
+        return;
+    }
+    display.generation = generation;
+    display.primary_flux.clear();
+    display.previous_primary_flux.clear();
+    display.constitutive_force.clear();
+    display.complementary_flux.clear();
+    display.previous_complementary_flux.clear();
+    display.auxiliary.clear();
+    display.previous_auxiliary.clear();
+    display.clock = None;
+    display.raw_primary.clear();
+    display.raw_state.clear();
+    display.node_count = 0;
+    display.sample_count = 0;
+    display.raw_state_slot = 0;
+    display.raw_state_continuous = false;
+    display.full_readback_at = u64::MAX;
 }
 
 fn receive_canonical_control(
     event: On<ReadbackComplete>,
     tags: Query<&CanonicalControlReadback>,
+    request: Res<CanonicalGpuRequest>,
     mut display: ResMut<CanonicalGpuDisplay>,
 ) {
     let Ok(tag) = tags.get(event.entity) else {
         return;
     };
+    if tag.generation != request.generation {
+        return;
+    }
     let values: Vec<GpuCanonicalControl> = event.to_shader_type();
     let Some(value) = values.first() else { return };
     let step = value.clock_u32.z;
@@ -2572,7 +2795,7 @@ fn receive_canonical_control(
     if tag.stats.failure() == 0 {
         tag.stats.status.store(GPU_STATUS_READY, Ordering::Relaxed);
     }
-    display.generation = tag.generation;
+    begin_canonical_display_generation(&mut display, tag.generation);
     display.clock = Some(CanonicalGpuDisplayClock {
         epoch: value.clock_u32.x as u64 | ((value.clock_u32.y as u64) << 32),
         epoch_origin_seconds: value.clock_origin.x as f64 + value.clock_origin.y as f64,
@@ -2596,50 +2819,82 @@ fn receive_canonical_control(
 fn refresh_canonical_display(display: &mut CanonicalGpuDisplay) {
     let nodes = display.node_count;
     let samples = display.sample_count;
-    if display.raw_state.len() < nodes + samples {
+    if display.raw_primary.len() != nodes {
         return;
     }
     let second = display.accepted_slot != 0;
-    display.primary_flux = display.raw_state[..nodes]
-        .iter()
-        .map(|word| if second { word.values.y } else { word.values.x })
-        .collect();
-    display.previous_primary_flux = display.raw_state[..nodes]
-        .iter()
-        .map(|word| if second { word.values.x } else { word.values.y })
-        .collect();
-    display.constitutive_force = display.raw_state[..nodes]
-        .iter()
-        .map(|word| if second { word.values.w } else { word.values.z })
-        .collect();
-    display.complementary_flux = display.raw_state[nodes..nodes + samples]
-        .iter()
-        .map(|word| {
-            if second {
-                [word.values.z, word.values.w]
+    display.primary_flux.clear();
+    display.primary_flux.extend(
+        display.raw_primary[..nodes]
+            .iter()
+            .map(|word| if second { word.values.y } else { word.values.x }),
+    );
+    display.previous_primary_flux.clear();
+    display.previous_primary_flux.extend(
+        display.raw_primary[..nodes]
+            .iter()
+            .map(|word| if second { word.values.x } else { word.values.y }),
+    );
+    display.constitutive_force.clear();
+    display.constitutive_force.extend(
+        display.raw_primary[..nodes]
+            .iter()
+            .map(|word| if second { word.values.w } else { word.values.z }),
+    );
+    if display.raw_state.len() < nodes + samples {
+        return;
+    }
+    let snapshot_second = if display.raw_state_continuous {
+        second
+    } else {
+        display.raw_state_slot != 0
+    };
+    display.complementary_flux.clear();
+    display
+        .complementary_flux
+        .extend(
+            display.raw_state[nodes..nodes + samples]
+                .iter()
+                .map(|word| {
+                    if snapshot_second {
+                        [word.values.z, word.values.w]
+                    } else {
+                        [word.values.x, word.values.y]
+                    }
+                }),
+        );
+    display.previous_complementary_flux.clear();
+    display.previous_complementary_flux.extend(
+        display.raw_state[nodes..nodes + samples]
+            .iter()
+            .map(|word| {
+                if snapshot_second {
+                    [word.values.x, word.values.y]
+                } else {
+                    [word.values.z, word.values.w]
+                }
+            }),
+    );
+    display.auxiliary.clear();
+    display
+        .auxiliary
+        .extend(display.raw_state[nodes + samples..].iter().map(|word| {
+            if snapshot_second {
+                word.values.y
             } else {
-                [word.values.x, word.values.y]
+                word.values.x
             }
-        })
-        .collect();
-    display.previous_complementary_flux = display.raw_state[nodes..nodes + samples]
-        .iter()
-        .map(|word| {
-            if second {
-                [word.values.x, word.values.y]
+        }));
+    display.previous_auxiliary.clear();
+    display
+        .previous_auxiliary
+        .extend(display.raw_state[nodes + samples..].iter().map(|word| {
+            if snapshot_second {
+                word.values.x
             } else {
-                [word.values.z, word.values.w]
+                word.values.y
             }
-        })
-        .collect();
-    display.auxiliary = display.raw_state[nodes + samples..]
-        .iter()
-        .map(|word| if second { word.values.y } else { word.values.x })
-        .collect();
-    display.previous_auxiliary = display.raw_state[nodes + samples..]
-        .iter()
-        .map(|word| if second { word.values.x } else { word.values.y })
-        .collect();
+        }));
 }
 
 fn receive_canonical_status(event: On<ReadbackComplete>, tags: Query<&CanonicalStatusReadback>) {
@@ -2719,17 +2974,13 @@ fn settle_canonical_handoff(
         .store(completed_steps, Ordering::Relaxed);
     stats.status.store(GPU_STATUS_READY, Ordering::Relaxed);
     let target = handoff.target;
-    let state_entity = commands
-        .spawn((
-            Readback::buffer(target.state.clone()),
-            CanonicalStateReadback {
-                generation,
-                node_count: target.node_count,
-                sample_count: target.sample_count,
-                state_count: target.state_count,
-            },
-        ))
-        .id();
+    let state_entity = spawn_canonical_state_readback(
+        &mut commands,
+        &target,
+        generation,
+        request.continuous_full_state_readback,
+        false,
+    );
     let control_entity = commands
         .spawn((
             Readback::buffer(target.control.clone()),
@@ -2755,6 +3006,7 @@ fn settle_canonical_handoff(
     request.stats = stats;
     request.readback_entities = vec![state_entity, control_entity, status_entity];
     request.status_readback_entity = Some(status_entity);
+    request.full_state_readback_entity = None;
     request.handoff_outcome = CanonicalGpuHandoffOutcome::Accepted;
 }
 

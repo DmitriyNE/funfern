@@ -2479,7 +2479,7 @@ pub struct CanonicalAssemblyJob {
     primary_loss_weighted: Vec<f64>,
     samples: Vec<LinearConstitutiveSample>,
     complementary_loss_rate: Vec<f64>,
-    interior_columns: Vec<BTreeSet<u32>>,
+    interior_columns: Vec<Vec<u32>>,
     outgoing_job: Option<CanonicalOutgoingBoundaryJob>,
     outgoing_boundary: Option<CanonicalOutgoingBoundary>,
 }
@@ -2511,6 +2511,13 @@ impl CanonicalAssemblyJob {
             ));
         }
         let generation = CanonicalGenerationTag::from_mesh(&mesh, constitutive_revision);
+        let mut interior_columns = vec![Vec::new(); quadratic.degrees_of_freedom()];
+        for sample in quadratic.thin_gap_samples() {
+            interior_columns[sample.left_node as usize]
+                .extend([sample.left_node, sample.right_node]);
+            interior_columns[sample.right_node as usize]
+                .extend([sample.left_node, sample.right_node]);
+        }
         Ok(Self {
             mesh,
             geometric_support: vec![0.0; quadratic.degrees_of_freedom()],
@@ -2523,7 +2530,7 @@ impl CanonicalAssemblyJob {
             complementary_loss_rate: Vec::with_capacity(
                 quadratic.element_nodes().len() * QUADRATURE_SAMPLES,
             ),
-            interior_columns: vec![BTreeSet::new(); quadratic.degrees_of_freedom()],
+            interior_columns,
             quadratic,
             model: model.to_owned(),
             generation,
@@ -2589,26 +2596,23 @@ impl CanonicalAssemblyJob {
                         self.phase = CanonicalAssemblyPhase::Outgoing;
                         continue;
                     }
-                    let mut expected = self.interior_columns[row].clone();
-                    for sample in self.quadratic.thin_gap_samples() {
-                        if sample.left_node as usize == row || sample.right_node as usize == row {
-                            expected.insert(sample.left_node);
-                            expected.insert(sample.right_node);
-                        }
-                    }
+                    let expected = &mut self.interior_columns[row];
+                    expected.sort_unstable();
+                    expected.dedup();
                     let start = self.quadratic.row_offsets()[row] as usize;
                     let end = self.quadratic.row_offsets()[row + 1] as usize;
                     if expected.len() != end - start
                         || self.quadratic.columns()[start..end]
                             .iter()
-                            .any(|column| !expected.contains(column))
+                            .zip(expected.iter())
+                            .any(|(actual, expected)| actual != expected)
                     {
                         self.phase = CanonicalAssemblyPhase::Done;
                         return Some(Err(WaveError::InvalidMesh(
                             "the scalar operator contains an unsupported stiffness coupling",
                         )));
                     }
-                    // Release per-row tree storage cooperatively too. Dropping
+                    // Release per-row adjacency storage cooperatively too. Dropping
                     // every row with the finished job made the otherwise small
                     // final work unit grow with the whole adapted mesh.
                     self.interior_columns[row].clear();

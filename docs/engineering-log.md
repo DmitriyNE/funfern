@@ -5,6 +5,39 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-19 — Stage 6 interactive-performance correction
+
+- Traced the apparent 220-step/s regression at roughly 100k primary DOFs to the
+  interactive consumer path rather than the canonical evolution kernels. The
+  production harness sustains 1,025 steps/s with continuous full readback and
+  1,164 steps/s with the production primary-only stream on a 93,144 `Q` /
+  185,310 `b` reflecting fixture (about 2.04× and 2.25× real time).
+- Fixed step-rate accounting after Stage 5 made accepted-step totals continuous
+  across generations. A handoff now establishes the new observation baseline
+  instead of crediting the entire run again, so the speed-shortfall notice can
+  no longer remain falsely satisfied.
+- Replaced complementary handoff's target-sample/all-source-triangle scan with a
+  cooperative uniform locator and recognize identical discretizations across
+  transaction revisions. On the standard 8,938-DOF handoff, vector transfer fell
+  from 102.0 ms to 1.3 ms; the full transfer-map preparation fell from 109.9 ms
+  to 5.7 ms. Different-mesh and thin-gap handoff fixtures retain their accuracy.
+- Continuous display readback now maps only the primary state prefix. Full
+  complementary/auxiliary snapshots are requested at 4 Hz for AMR and energy,
+  or 15 Hz while a vector overlay is visible. Sparse acceleration assembly moved
+  from every display frame to the AMR snapshot cadence, and display vectors reuse
+  their allocations.
+- GPU plan construction reuses the validated scalar CSR instead of rebuilding
+  the compatible stiffness with millions of tree insertions. Canonical assembly
+  likewise uses compact sort/deduplicate adjacency. At 93,144 DOFs canonical
+  assembly measured 73 ms and GPU-plan compilation 54 ms. The latter and the
+  transfer-plan packing now run on a native background worker while the accepted
+  solver continues. Upload serialization keeps the encoder's owned bytes rather
+  than copying an 80.7 MiB generation twice; the measured main-thread handoff
+  call is 11.5 ms at that size.
+- Extended the terminating timing/handoff harnesses with large-mesh controls,
+  phase timings, byte breakdown and primary-readback validation. No persistent
+  application process is used by these checks.
+
 ## 2026-09-19 — Stage 6 acceptance: AMR liveness and preparation latency
 
 - Native acceptance found that AMR completed its first handoff and then discarded

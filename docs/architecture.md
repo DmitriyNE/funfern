@@ -77,7 +77,9 @@ distance and derives its contour from the outer domain. Point readouts share one
 pan/zoom time window across their independently hideable observable sections; Live
 mode follows the newest solver-clock sample. Probe timestamps come
 directly from the solver's transferred absolute clock. The host handoff offset is
-only used to report progress since the generation-local step counter restarts.
+only used to map the continuous accepted-step total across timestep changes; a
+fresh install establishes a new rate baseline instead of treating its absolute
+counter value as progress.
 
 Control handles are exclusive selections. Boundary spans support click, Shift
 toggle, Command/Ctrl whole-curve selection, and marquee selection with optional
@@ -1013,7 +1015,8 @@ immune. A row-sum test covers every assembly path, and an f32 emulation of the
 kernel checks that a constant field is held bit for bit.
 The operator, state, sources, and controls use Bevy's render-world buffers and its
 existing wgpu device. State remains GPU-resident; asynchronous readback supplies
-the egui field colors and energy diagnostic. Each readback carries a GPU-written
+the egui field colors, while lower-cadence full snapshots supply the canonical
+energy and AMR diagnostics. Each readback carries a GPU-written
 step marker so stale asynchronous results cannot be mistaken for a newer level.
 The wave layout already occupies WebGPU's portable eight-storage-binding budget.
 Volume-source weights therefore share the existing point/pulse forcing-weight
@@ -1204,6 +1207,10 @@ candidate, and the latest requested geometry revision.
 Candidate mesh construction, scalar/canonical operator assembly, and scalar/vector/
 physical-history transfer maps are resumable and yield under the frame's work
 budget. Probe and far-field compilation remain bounded generation work. The
+native application packs the immutable GPU plan and transfer tables on a worker;
+the accepted generation keeps running while that result is pending. GPU asset
+serialization adopts the encoder's owned byte vectors rather than duplicating a
+whole generation on the UI thread. The
 accepted canonical generation continues until all previously requested steps have
 been encoded. The application then pauses scheduling, dispatches transfer and
 validation, and waits for one global accepted-generation commit before switching
@@ -1214,7 +1221,8 @@ The source mesh/operators remain fixed during candidate preparation; only their
 state evolves. Transfer maps target that discretization, not a captured field
 snapshot. Primary `Q` uses support-aware conservative seven-node interpolation and
 bounded component correction. Complementary `b` reconstructs six physical-coordinate
-samples locally. Thin-gap and outgoing maps transfer physical jump/trace histories,
+samples locally through a uniform source-element index rather than scanning the
+source mesh per sample. Thin-gap and outgoing maps transfer physical jump/trace histories,
 not modal indices. The CPU locator uses a uniform spatial bin index rather than
 testing every source triangle for every target node.
 
@@ -1341,8 +1349,12 @@ canonical generation from the still-running source mesh and commits mesh,
 operators, direct state, physical history, timestep and lineage together after the
 tagged GPU handoff. The target field is transient and is not serialized.
 
-For a static-linear generation, synchronized canonical readback supplies `u=Q/M`,
-accepted endpoint rate, acceleration and independent `b`. The established scalar
+For a static-linear generation, continuous synchronized canonical readback carries
+the primary state needed to render `u=Q/M`. A full primary/complementary/auxiliary
+snapshot is requested at the slower diagnostic/AMR cadence (and more frequently
+while the vector overlay is visible); AMR starts only from an aligned full
+snapshot. Accepted endpoint rate and acceleration are derived at that cadence,
+not on every painted frame. The established scalar
 spatial estimator retains recovered-flux, strong interior, interface-jump and
 ordinary boundary terms, with primary loss included in the acceleration adapter.
 A canonical supplement adds direct primary/complementary energy normalization,

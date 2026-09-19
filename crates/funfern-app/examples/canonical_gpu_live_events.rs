@@ -101,8 +101,9 @@ fn main() {
             .unwrap(),
         )
         .unwrap();
-    let plan = CanonicalGpuPlan::compile(
+    let plan = CanonicalGpuPlan::compile_with_quadratic(
         &operator,
+        &scalar,
         &initial,
         &old_forcing,
         CanonicalGpuClock::initial(time_step).unwrap(),
@@ -221,6 +222,9 @@ fn install(
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut request: ResMut<CanonicalGpuRequest>,
 ) {
+    request
+        .set_continuous_full_state_readback(true)
+        .expect("select validation readback mode");
     request.install(
         &mut assets,
         &mut commands,

@@ -368,6 +368,7 @@ pub struct CanonicalVectorTransferMap {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CanonicalVectorTransferPhase {
     Validate,
+    Bins(usize),
     Locate(usize),
     PrepareExtension,
     Extend(usize),
@@ -378,6 +379,7 @@ impl CanonicalVectorTransferPhase {
     const fn label(self) -> &'static str {
         match self {
             Self::Validate => "Checking complementary transfer",
+            Self::Bins(_) => "Indexing complementary transfer",
             Self::Locate(_) => "Locating complementary samples",
             Self::PrepareExtension => "Indexing complementary extension",
             Self::Extend(_) => "Extending complementary samples",
@@ -386,9 +388,134 @@ impl CanonicalVectorTransferPhase {
     }
 }
 
+/// Uniform source-element grid for complementary sample transfer. Canonical
+/// samples are much more numerous than scalar nodes, so scanning every source
+/// triangle for every target sample made an adaptive handoff quadratic in mesh
+/// size. The grid is constructed cooperatively, one triangle per work unit,
+/// and keeps the existing region-side restriction at lookup time.
+struct CanonicalSourceBins {
+    minimum: Point2,
+    maximum: Point2,
+    cell: Point2,
+    dimension: usize,
+    bins: Vec<Vec<u32>>,
+}
+
+impl CanonicalSourceBins {
+    fn new(source: &TriMesh) -> Result<Self, WaveError> {
+        let mut minimum = Point2::new(f64::INFINITY, f64::INFINITY);
+        let mut maximum = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for vertex in &source.vertices {
+            minimum.x = minimum.x.min(vertex.point.x);
+            minimum.y = minimum.y.min(vertex.point.y);
+            maximum.x = maximum.x.max(vertex.point.x);
+            maximum.y = maximum.y.max(vertex.point.y);
+        }
+        let extent = Point2::new(maximum.x - minimum.x, maximum.y - minimum.y);
+        if !(extent.x > 0.0 && extent.y > 0.0) {
+            return Err(WaveError::InvalidMesh(
+                "the complementary transfer source has no extent",
+            ));
+        }
+        let dimension = (source.triangles.len() as f64)
+            .sqrt()
+            .ceil()
+            .clamp(8.0, 512.0) as usize;
+        Ok(Self {
+            minimum,
+            maximum,
+            cell: Point2::new(extent.x / dimension as f64, extent.y / dimension as f64),
+            dimension,
+            bins: vec![Vec::new(); dimension * dimension],
+        })
+    }
+
+    fn insert(&mut self, source: &TriMesh, element: usize) -> Result<(), WaveError> {
+        let triangle = source.triangles[element];
+        let points = triangle
+            .vertices
+            .map(|vertex| source.vertices.get(vertex).map(|vertex| vertex.point));
+        let [Some(a), Some(b), Some(c)] = points else {
+            return Err(WaveError::InvalidMesh(
+                "the complementary transfer source has invalid triangles",
+            ));
+        };
+        let points = [a, b, c];
+        let lo = Point2::new(
+            points
+                .iter()
+                .map(|point| point.x)
+                .fold(f64::INFINITY, f64::min),
+            points
+                .iter()
+                .map(|point| point.y)
+                .fold(f64::INFINITY, f64::min),
+        );
+        let hi = Point2::new(
+            points
+                .iter()
+                .map(|point| point.x)
+                .fold(f64::NEG_INFINITY, f64::max),
+            points
+                .iter()
+                .map(|point| point.y)
+                .fold(f64::NEG_INFINITY, f64::max),
+        );
+        let [x0, y0] = self.bin_index(lo);
+        let [x1, y1] = self.bin_index(hi);
+        let element = u32::try_from(element)
+            .map_err(|_| WaveError::InvalidMesh("too many complementary donor elements"))?;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                self.bins[y * self.dimension + x].push(element);
+            }
+        }
+        Ok(())
+    }
+
+    fn locate(
+        &self,
+        source: &TriMesh,
+        point: Point2,
+        region: crate::RegionId,
+    ) -> Option<(usize, [f64; 3])> {
+        if point.x < self.minimum.x
+            || point.x > self.maximum.x
+            || point.y < self.minimum.y
+            || point.y > self.maximum.y
+        {
+            return None;
+        }
+        let [x, y] = self.bin_index(point);
+        self.bins[y * self.dimension + x]
+            .iter()
+            .find_map(|element| {
+                let triangle = source.triangles[*element as usize];
+                if triangle.region != region {
+                    return None;
+                }
+                barycentric(source, triangle.vertices, point)
+                    .filter(|weights| weights.iter().all(|weight| *weight >= -2.0e-11))
+                    .map(|weights| (*element as usize, weights))
+            })
+    }
+
+    fn bin_index(&self, point: Point2) -> [usize; 2] {
+        let index = |value: f64, minimum: f64, width: f64| {
+            (((value - minimum) / width).floor() as isize).clamp(0, self.dimension as isize - 1)
+                as usize
+        };
+        [
+            index(point.x, self.minimum.x, self.cell.x),
+            index(point.y, self.minimum.y, self.cell.y),
+        ]
+    }
+}
+
 struct CanonicalVectorTransferWork {
     phase: CanonicalVectorTransferPhase,
     identity: bool,
+    bins: Option<CanonicalSourceBins>,
     targets: Vec<VectorTarget>,
     distance: Vec<usize>,
 }
@@ -398,6 +525,7 @@ impl CanonicalVectorTransferWork {
         Self {
             phase: CanonicalVectorTransferPhase::Validate,
             identity: false,
+            bins: None,
             targets: Vec::new(),
             distance: Vec::new(),
         }
@@ -421,13 +549,28 @@ impl CanonicalVectorTransferWork {
                         "the vector transfer generations have inconsistent sample layouts",
                     ));
                 }
-                self.identity = source.generation().geometry_revision
-                    == target.generation().geometry_revision
-                    && source.generation().mesh_revision == target.generation().mesh_revision
+                // Revisions identify transactions, not discretizations. A
+                // law-only rebuild commonly republishes an identical mesh
+                // under a new revision; its quadrature carriers still copy
+                // one-for-one and must not fall through to spatial search.
+                self.identity = source_mesh.vertices == target_mesh.vertices
                     && source_mesh.triangles == target_mesh.triangles
                     && source.constitutive_samples().len() == target.constitutive_samples().len();
                 self.targets = Vec::with_capacity(target.complementary_degrees_of_freedom());
-                self.phase = CanonicalVectorTransferPhase::Locate(0);
+                if self.identity {
+                    self.phase = CanonicalVectorTransferPhase::Locate(0);
+                } else {
+                    self.bins = Some(CanonicalSourceBins::new(source_mesh)?);
+                    self.phase = CanonicalVectorTransferPhase::Bins(0);
+                }
+            }
+            CanonicalVectorTransferPhase::Bins(index) => {
+                if index == source_mesh.triangles.len() {
+                    self.phase = CanonicalVectorTransferPhase::Locate(0);
+                } else {
+                    self.bins.as_mut().unwrap().insert(source_mesh, index)?;
+                    self.phase = CanonicalVectorTransferPhase::Bins(index + 1);
+                }
             }
             CanonicalVectorTransferPhase::Locate(target_index) => {
                 let samples = target.constitutive_samples();
@@ -443,16 +586,10 @@ impl CanonicalVectorTransferWork {
                     self.targets.push(VectorTarget::Exact(target_index));
                 } else {
                     let target_region = target_mesh.triangles[sample.element as usize].region;
-                    let donor = source_mesh
-                        .triangles
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, triangle)| triangle.region == target_region)
-                        .find_map(|(element, triangle)| {
-                            barycentric(source_mesh, triangle.vertices, sample.point)
-                                .filter(|weights| weights.iter().all(|weight| *weight >= -2.0e-11))
-                                .map(|weights| (element, weights))
-                        });
+                    let donor = self
+                        .bins
+                        .as_ref()
+                        .and_then(|bins| bins.locate(source_mesh, sample.point, target_region));
                     if let Some((source_element, source_barycentric)) = donor {
                         self.targets.push(VectorTarget::Reconstruct {
                             source_element: source_element as u32,
@@ -1739,6 +1876,36 @@ mod tests {
         let (copied, report) = vector.transfer(&b).unwrap();
         assert_eq!(copied, b);
         assert_eq!(report.exposed_values, 0);
+
+        let mut republished = mesh.clone();
+        republished.geometry_revision += 1;
+        republished.mesh_revision += 1;
+        let (_, republished_canonical) = compile(&republished);
+        let vector = CanonicalVectorTransferMap::prepare(
+            &mesh,
+            &canonical,
+            &republished,
+            &republished_canonical,
+        )
+        .unwrap();
+        assert_eq!(
+            vector.exact_samples(),
+            canonical.complementary_degrees_of_freedom(),
+            "transaction revisions do not make an unchanged discretization non-identity",
+        );
+
+        let mut moved = mesh.clone();
+        moved.mesh_revision = 3;
+        moved.vertices[2].point = Point2::new(0.9, 0.9);
+        let (_, moved_canonical) = compile(&moved);
+        let vector =
+            CanonicalVectorTransferMap::prepare(&mesh, &canonical, &moved, &moved_canonical)
+                .unwrap();
+        assert_eq!(
+            vector.exact_samples(),
+            0,
+            "equal connectivity is not an identity transfer after coordinates move",
+        );
     }
 
     #[test]

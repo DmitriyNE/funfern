@@ -38,6 +38,7 @@ struct Expected {
     event_serial: u32,
     initial_step: u64,
     failure_test: bool,
+    primary_readback: bool,
     failure_snapshot: Option<FailureSnapshot>,
     recovering: bool,
     started: Option<Instant>,
@@ -67,6 +68,9 @@ fn main() {
     let warmup_steps = std::env::args()
         .find_map(|argument| argument.strip_prefix("--warmup=")?.parse::<u64>().ok())
         .unwrap_or(DEFAULT_WARMUP_STEPS);
+    let edge = std::env::args()
+        .find_map(|argument| argument.strip_prefix("--edge=")?.parse::<f64>().ok())
+        .unwrap_or(0.08);
     let event = if std::env::args().any(|argument| argument == "--pulse") {
         "pulse"
     } else if std::env::args().any(|argument| argument == "--filter") {
@@ -79,6 +83,7 @@ fn main() {
         "none"
     };
     let failure_test = std::env::args().any(|argument| argument == "--failure");
+    let primary_readback = std::env::args().any(|argument| argument == "--primary-readback");
     let clock_rebase = std::env::args().any(|argument| argument == "--clock-rebase");
     let preparation = Instant::now();
     let mut scene = if thin_gap || obstacles {
@@ -142,15 +147,20 @@ fn main() {
             },
         });
     }
+    let mesh_started = Instant::now();
     let mesh = mesh_scene(
         &scene,
         1,
         MeshingOptions {
-            target_edge_length: 0.08,
+            target_edge_length: edge,
+            max_vertices: 100_000,
+            max_triangles: 200_000,
+            max_refinement_steps: 100_000,
             ..MeshingOptions::default()
         },
     )
     .expect("standard timing mesh");
+    let mesh_elapsed = mesh_started.elapsed();
     let boundary = if second_order {
         OuterBoundaryCondition::SecondOrderOutgoing
     } else if first_order {
@@ -161,10 +171,14 @@ fn main() {
     let mut scalar_scene = scene.clone();
     scalar_scene.materials[0].electric_loss = None;
     scalar_scene.materials[0].magnetic_loss = None;
+    let scalar_started = Instant::now();
     let scalar = QuadraticWaveOperator::assemble_scene(&mesh, &scalar_scene, boundary)
         .expect("quadratic comparison operator");
+    let scalar_elapsed = scalar_started.elapsed();
+    let canonical_started = Instant::now();
     let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
         .expect("canonical operator");
+    let canonical_elapsed = canonical_started.elapsed();
     let time_step = 0.9 * operator.maximum_time_step();
     let primary = operator
         .node_points()
@@ -228,8 +242,11 @@ fn main() {
         CanonicalGpuClock::initial(time_step).unwrap()
     };
     let initial_step = clock.step_in_epoch as u64;
-    let mut plan = CanonicalGpuPlan::compile(&operator, &initial, &forcing, clock)
-        .expect("canonical GPU plan");
+    let gpu_plan_started = Instant::now();
+    let mut plan =
+        CanonicalGpuPlan::compile_with_quadratic(&operator, &scalar, &initial, &forcing, clock)
+            .expect("canonical GPU plan");
+    let gpu_plan_elapsed = gpu_plan_started.elapsed();
     let mut oracle = initial;
     let event_serial = u32::from(event != "none");
     match event {
@@ -337,6 +354,7 @@ fn main() {
         event_serial,
         initial_step,
         failure_test,
+        primary_readback,
         failure_snapshot: None,
         recovering: false,
         started: None,
@@ -347,16 +365,28 @@ fn main() {
         deadline: Instant::now() + Duration::from_secs(90),
     };
     println!(
-        "prepared {} Q, {} b, {} auxiliary values in {:.2} ms; {:.2} MiB steady ({:.2} MiB boundary factors), {:.2} MiB accepted physical state, {} dispatches/step, {} event dispatches ({event})",
+        "prepared {} Q, {} b, {} auxiliary values in {:.2} ms; {:.2} MiB steady (state {:.2}, nodes {:.2}, samples {:.2}, tables {:.2}, scratch {:.2}, boundary {:.2}), {:.2} MiB accepted physical state, {} dispatches/step, {} event dispatches ({event})",
         plan.node_count,
         plan.sample_count,
         plan.auxiliary_count,
         preparation_time.as_secs_f64() * 1_000.0,
         manifest.bytes.steady_bytes() as f64 / (1024.0 * 1024.0),
+        manifest.bytes.state as f64 / (1024.0 * 1024.0),
+        manifest.bytes.nodes as f64 / (1024.0 * 1024.0),
+        manifest.bytes.samples as f64 / (1024.0 * 1024.0),
+        manifest.bytes.tables as f64 / (1024.0 * 1024.0),
+        manifest.bytes.scratch as f64 / (1024.0 * 1024.0),
         manifest.bytes.boundary as f64 / (1024.0 * 1024.0),
         manifest.bytes.accepted_state_bytes(&plan) as f64 / (1024.0 * 1024.0),
         manifest.dispatches_per_step,
         manifest.event_dispatches,
+    );
+    println!(
+        "CPU preparation: mesh {:.2} ms, scalar assembly {:.2}, canonical assembly {:.2}, GPU plan {:.2}",
+        mesh_elapsed.as_secs_f64() * 1_000.0,
+        scalar_elapsed.as_secs_f64() * 1_000.0,
+        canonical_elapsed.as_secs_f64() * 1_000.0,
+        gpu_plan_elapsed.as_secs_f64() * 1_000.0,
     );
 
     let mut app = App::new();
@@ -386,6 +416,11 @@ fn install(
 ) {
     if expected.finished {
         return;
+    }
+    if !expected.primary_readback {
+        request
+            .set_continuous_full_state_readback(true)
+            .expect("select validation readback mode");
     }
     request.install(
         &mut assets,
@@ -490,12 +525,17 @@ fn finish_when_ready(
     if clock.accepted_steps
         < (expected.initial_step + expected.steps + expected.warmup_steps) as u32
         || display.primary_flux.len() != expected.primary.len()
-        || display.complementary_flux.len() != expected.complementary.len()
     {
         return;
     }
-    if expected.settle_after.is_none() {
+    if expected.completed_elapsed.is_none() {
         expected.completed_elapsed = Some(expected.started.unwrap().elapsed());
+    }
+    if display.complementary_flux.len() != expected.complementary.len() {
+        request.request_full_state_readback(&mut commands);
+        return;
+    }
+    if expected.settle_after.is_none() {
         expected.settle_after = Some(display.readbacks.saturating_add(2));
     }
     let settle_after = expected.settle_after.unwrap();

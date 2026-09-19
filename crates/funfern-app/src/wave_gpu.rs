@@ -2523,6 +2523,14 @@ pub struct WaveDisplay {
     /// Canonical six-sample complementary flux read directly by vector and AMR
     /// consumers. Empty on the optional scalar comparison path.
     pub complementary_flux: Vec<[f32; 2]>,
+    /// Primary endpoint pair captured with `complementary_flux` by the latest
+    /// aligned full canonical snapshot. Vector and AMR consumers use these
+    /// rather than mixing a lower-cadence complementary field with the live
+    /// primary display stream.
+    pub snapshot_current: Vec<f32>,
+    pub snapshot_previous: Vec<f32>,
+    pub snapshot_velocity: Vec<f32>,
+    pub snapshot_completed_steps: u64,
     pub completed_steps: u64,
     pub readbacks: u64,
 }

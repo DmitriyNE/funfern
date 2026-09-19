@@ -112,6 +112,45 @@ next phase starts. The application lends preparation 4 ms per frame. Total
 second-order preparation can still span many frames, but the accepted solver is
 scheduled throughout it rather than waiting behind a monolithic CPU tail.
 
+### Interactive-performance correction
+
+A second production run separated four effects that the original long-batch GPU
+gate did not expose:
+
+- Stage 5 preserves the absolute accepted-step count at handoff, but the UI rate
+  accumulator still treated every generation as a counter reset. It therefore
+  counted the complete run again and could suppress a real speed-shortfall notice
+  for many seconds. A generation's first observation is now only its baseline.
+- Complementary transfer located each of six target quadrature samples by scanning
+  every source triangle. It now builds a cooperative uniform source index and
+  recognizes an identical mesh even when its transaction revision changed. The
+  standard 8,938-DOF handoff's vector-map time fell from 102.0 ms to 1.3 ms, and
+  total transfer preparation from 109.9 ms to 5.7 ms.
+- The display mapped all primary, complementary and auxiliary state every frame,
+  expanded it into fresh host vectors, recomputed total energy, and applied the
+  scalar stiffness solely to prepare a possible AMR sample. The continuous stream
+  is now the primary state prefix. Full state is sampled at 4 Hz for energy/AMR
+  and at 15 Hz while a vector overlay is visible; AMR accepts only an aligned full
+  snapshot. Energy and acceleration run at their consumer cadence, and host
+  vectors retain their allocations.
+- Preparing a 93,144-primary-DOF GPU generation took about 155 ms synchronously,
+  followed by a redundant second copy while turning roughly 80.7 MiB of typed
+  buffers into Bevy assets. Reusing the already validated scalar CSR reduces plan
+  compilation to about 54 ms, compact adjacency reduces canonical assembly to
+  about 73 ms, native builds perform plan/transfer packing on a background worker,
+  and owned serialization removes the duplicate copy. The remaining measured
+  main-thread handoff call is 11.5 ms; the accepted generation continues while
+  CPU packing and GPU acceptance are pending.
+
+The full production render-graph harness at 93,144 `Q` plus 185,310 independent
+`b` samples sustains 1,025 steps/s with continuous full-state validation readback
+and 1,164 steps/s with the production primary-only stream. Those runs correspond
+to 2.04 and 2.25 simulated seconds per wall second on the M1 Max fixture. Thus
+the reported ~220-step/s behavior was an interactive scheduling/readback problem,
+not the steady canonical arithmetic kernel. The terminating harness requests one
+full snapshot after the primary-only timing interval and still meets the original
+state and energy tolerances.
+
 ## Generation, events and source continuity
 
 Every topology candidate now compiles the canonical operator, forcing and

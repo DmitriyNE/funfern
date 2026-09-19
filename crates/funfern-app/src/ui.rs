@@ -671,6 +671,75 @@ struct Uploading {
     degrees_of_freedom: usize,
 }
 
+struct PreparedGpuUpload {
+    plan: CanonicalGpuPlan,
+    transfer: Option<CanonicalGpuTransferPlan>,
+}
+
+/// CPU packing for a candidate generation. The immutable topology owns every
+/// input, so native builds can prepare the 80+ MiB GPU layout off the UI thread
+/// while the accepted generation keeps running.
+struct GpuUploadPreparation {
+    token: TopologyToken,
+    time_step: f64,
+    receiver: Mutex<Receiver<Result<PreparedGpuUpload, String>>>,
+    result: Option<Result<PreparedGpuUpload, String>>,
+}
+
+fn compile_gpu_upload(
+    candidate: PreparedTopology,
+    active: Option<Arc<PreparedTopology>>,
+    time_step: f64,
+    runtime_serials: [u32; 4],
+) -> Result<PreparedGpuUpload, String> {
+    let state = CanonicalWaveState::zero(&candidate.canonical_operator, time_step)
+        .map_err(|error| error.to_string())?;
+    let plan = CanonicalGpuPlan::compile_with_quadratic(
+        &candidate.canonical_operator,
+        &candidate.operator,
+        &state,
+        &candidate.canonical_forcing,
+        CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    if candidate.fresh || active.is_none() {
+        return Ok(PreparedGpuUpload {
+            plan,
+            transfer: None,
+        });
+    }
+    let active = active.unwrap();
+    let transfer = candidate
+        .canonical_transfer
+        .as_ref()
+        .ok_or_else(|| "Canonical handoff maps are not prepared".to_owned())?;
+    let runtime = CanonicalGpuRuntimeTransfer::from_primary_transfer(
+        &active.canonical_operator,
+        &candidate.canonical_operator,
+        &active.canonical_forcing,
+        &candidate.canonical_forcing,
+        &transfer.primary,
+        runtime_serials,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let gpu_transfer = CanonicalGpuTransferPlan::compile_prepared(
+        &active.canonical_operator,
+        &candidate.canonical_operator,
+        &active.canonical_forcing,
+        &candidate.canonical_forcing,
+        &transfer.primary,
+        &transfer.complementary,
+        &transfer.thin_gap,
+        &transfer.outgoing,
+        &runtime,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    Ok(PreparedGpuUpload {
+        plan,
+        transfer: Some(gpu_transfer),
+    })
+}
+
 /// What the probe buffers on the GPU were last built for. The topology names
 /// the stencils, but the wave buffers own the probes: every path that replaces
 /// them drops each probe's buffers and readback, and a reset or a rolled-back
@@ -769,6 +838,7 @@ pub struct Playground {
     requested_edge: f64,
     requested_revision: Option<u64>,
     uploading: Option<Uploading>,
+    gpu_upload_preparation: Option<GpuUploadPreparation>,
     wave_running: bool,
     wave_step: bool,
     reset_requested: bool,
@@ -792,9 +862,9 @@ pub struct Playground {
     /// recommendation: the speed ceiling can ask for a smaller one, and between
     /// a speed change and the republish that carries it the two differ.
     uploaded_time_step: f64,
-    /// The solver's step counter as of the previous frame. It is
-    /// generation-local, so a handover restarts it and the rate follows what it
-    /// advanced between frames rather than differencing it across the window.
+    /// The accepted-step total at the previous observation. Ordinary handovers
+    /// preserve it; a fresh install may reset it, so every new generation first
+    /// establishes a baseline before its increments are counted.
     rate_steps: u64,
     /// The generation `rate_steps` was read from.
     rate_generation: u64,
@@ -861,6 +931,12 @@ pub struct Playground {
     far_field_recording_from: Option<f64>,
     frame_ms: f32,
     wave_energy: Option<f64>,
+    /// Full-state energy is a diagnostic, not a render input. Recomputing it
+    /// over every canonical node and sample at display rate made large meshes
+    /// consume a main-thread core even when the diagnostics window was closed.
+    energy_readback: u64,
+    energy_updated: Instant,
+    full_snapshot_requested: Instant,
     vector_overlay_average: BTreeMap<(i32, i32), Point2>,
     vector_overlay_step: u64,
     vector_overlay_mode: VectorOverlay,
@@ -982,6 +1058,7 @@ impl Default for Playground {
             requested_edge: f64::NAN,
             requested_revision: None,
             uploading: None,
+            gpu_upload_preparation: None,
             wave_running: true,
             wave_step: false,
             reset_requested: false,
@@ -1048,6 +1125,9 @@ impl Default for Playground {
             far_field_recording_from: None,
             frame_ms: 16.0,
             wave_energy: None,
+            energy_readback: 0,
+            energy_updated: Instant::now(),
+            full_snapshot_requested: Instant::now(),
             vector_overlay_average: BTreeMap::new(),
             vector_overlay_step: u64::MAX,
             vector_overlay_mode: VectorOverlay::Off,
@@ -4166,7 +4246,7 @@ impl Playground {
                 presentation.vector_overlay_density,
                 (self.center, self.scale, r),
             );
-            self.draw_vector_overlay(painter, samples, display.completed_steps);
+            self.draw_vector_overlay(painter, samples, display.snapshot_completed_steps);
         } else {
             self.vector_overlay_average.clear();
             self.vector_overlay_step = u64::MAX;
@@ -6597,73 +6677,93 @@ impl Playground {
         // Starting another preparation mid-upload clears `runtime.ready`, and
         // would make the accepted GPU generation impossible to publish under
         // its immutable topology token. A later frame picks the edit up.
-        if self.uploading.is_none() {
+        if self.uploading.is_none() && self.gpu_upload_preparation.is_none() {
             self.retime_for_speed();
             self.request_runtime();
         }
         if let Some(Ok(_)) = self.runtime.advance_for(Self::PREPARATION_FRAME_BUDGET) {
             self.handoff_ready = Some(Instant::now());
         }
-        if self.uploading.is_none() && self.runtime.ready().is_some() && request.caught_up() {
-            let candidate = self.runtime.ready().unwrap().clone();
+        if self.gpu_upload_preparation.as_ref().is_some_and(|job| {
+            self.runtime
+                .ready()
+                .is_none_or(|candidate| candidate.bundle.token != job.token)
+        }) {
+            self.gpu_upload_preparation = None;
+        }
+        if self.uploading.is_none()
+            && self.gpu_upload_preparation.is_none()
+            && let Some(candidate) = self.runtime.ready().cloned()
+        {
             let dt = paced_time_step(
                 candidate.canonical_operator.recommended_time_step(),
                 self.editor.document.presentation.simulation_speed,
             );
-            let placeholder = CanonicalWaveState::zero(&candidate.canonical_operator, dt);
-            let upload = placeholder
-                .map_err(|error| error.to_string())
-                .and_then(|state| {
-                    CanonicalGpuPlan::compile(
-                        &candidate.canonical_operator,
-                        &state,
-                        &candidate.canonical_forcing,
-                        CanonicalGpuClock::initial(dt).map_err(|error| format!("{error:?}"))?,
-                    )
-                    .map_err(|error| format!("{error:?}"))
-                })
-                .and_then(|plan| {
-                    if candidate.fresh || self.runtime.active().is_none() {
-                        request.install(assets, commands, plan);
-                        Ok(())
-                    } else {
-                        let active = self.runtime.active().unwrap();
-                        let transfer = candidate
-                            .canonical_transfer
-                            .as_ref()
-                            .ok_or_else(|| "Canonical handoff maps are not prepared".to_owned())?;
-                        let runtime = CanonicalGpuRuntimeTransfer::from_primary_transfer(
-                            &active.canonical_operator,
-                            &candidate.canonical_operator,
-                            &active.canonical_forcing,
-                            &candidate.canonical_forcing,
-                            &transfer.primary,
-                            display.runtime_serials,
-                        )
-                        .map_err(|error| format!("{error:?}"))?;
-                        let gpu_transfer = CanonicalGpuTransferPlan::compile_prepared(
-                            &active.canonical_operator,
-                            &candidate.canonical_operator,
-                            &active.canonical_forcing,
-                            &candidate.canonical_forcing,
-                            &transfer.primary,
-                            &transfer.complementary,
-                            &transfer.thin_gap,
-                            &transfer.outgoing,
-                            &runtime,
-                        )
-                        .map_err(|error| format!("{error:?}"))?;
-                        request
-                            .begin_handoff(assets, commands, plan, gpu_transfer)
-                            .map_err(str::to_owned)
-                    }
+            let token = candidate.bundle.token;
+            let active = self.runtime.active().cloned();
+            let runtime_serials = display.runtime_serials;
+            let (sender, receiver) = mpsc::channel();
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = std::thread::Builder::new()
+                .name("funfern-gpu-pack".into())
+                .spawn(move || {
+                    let _ = sender.send(compile_gpu_upload(candidate, active, dt, runtime_serials));
                 });
+            #[cfg(target_arch = "wasm32")]
+            let _ = sender.send(compile_gpu_upload(candidate, active, dt, runtime_serials));
+            self.gpu_upload_preparation = Some(GpuUploadPreparation {
+                token,
+                time_step: dt,
+                receiver: Mutex::new(receiver),
+                result: None,
+            });
+        }
+        if let Some(job) = &mut self.gpu_upload_preparation
+            && job.result.is_none()
+        {
+            let received = job.receiver.lock().unwrap().try_recv();
+            match received {
+                Ok(result) => job.result = Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    job.result = Some(Err("Canonical GPU packing worker stopped".into()));
+                }
+            }
+        }
+        if self.uploading.is_none()
+            && request.caught_up()
+            && self
+                .gpu_upload_preparation
+                .as_ref()
+                .is_some_and(|job| job.result.is_some())
+        {
+            let mut job = self.gpu_upload_preparation.take().unwrap();
+            let token = job.token;
+            let dt = job.time_step;
+            let Some(candidate) = self
+                .runtime
+                .ready()
+                .filter(|candidate| candidate.bundle.token == token)
+                .cloned()
+            else {
+                return;
+            };
+            let upload = job.result.take().unwrap().and_then(|prepared| {
+                if let Some(transfer) = prepared.transfer {
+                    request
+                        .begin_handoff(assets, commands, prepared.plan, transfer)
+                        .map_err(str::to_owned)
+                } else {
+                    request.install(assets, commands, prepared.plan);
+                    Ok(())
+                }
+            });
             match upload {
                 Ok(()) => {
                     self.uploaded_time_step = dt;
                     self.handoff_upload = Some(Instant::now());
                     self.uploading = Some(Uploading {
-                        token: candidate.bundle.token,
+                        token,
                         generation: if candidate.fresh {
                             request.generation()
                         } else {
@@ -6674,7 +6774,6 @@ impl Playground {
                     });
                 }
                 Err(error) => {
-                    let token = candidate.bundle.token;
                     self.runtime.reject_ready(token, error.clone());
                     self.message = error;
                 }
@@ -6738,8 +6837,9 @@ impl Playground {
                 let reset = CanonicalWaveState::zero(&active.canonical_operator, dt)
                     .map_err(|error| error.to_string())
                     .and_then(|state| {
-                        CanonicalGpuPlan::compile(
+                        CanonicalGpuPlan::compile_with_quadratic(
                             &active.canonical_operator,
+                            &active.operator,
                             &state,
                             &active.canonical_forcing,
                             CanonicalGpuClock::initial(dt).map_err(|error| format!("{error:?}"))?,
@@ -6884,33 +6984,50 @@ impl Playground {
         self.step_backlog = request
             .requested_steps()
             .saturating_sub(self.completed_steps);
+        let full_snapshot_interval = if self.vector_overlay_mode == VectorOverlay::Off {
+            0.25
+        } else {
+            1.0 / 15.0
+        };
+        if self.full_snapshot_requested.elapsed().as_secs_f64() >= full_snapshot_interval
+            && request.request_full_state_readback(commands)
+        {
+            self.full_snapshot_requested = Instant::now();
+        }
         if let Some(active) = self.runtime.active()
             && display.generation == request.generation()
             && display.primary_flux.len() == active.canonical_operator.degrees_of_freedom()
         {
-            let primary = display
-                .primary_flux
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect::<Vec<_>>();
-            let complementary = display
-                .complementary_flux
-                .iter()
-                .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
-                .collect::<Vec<_>>();
-            let auxiliary = display
-                .auxiliary
-                .iter()
-                .map(|value| f64::from(*value))
-                .collect::<Vec<_>>();
-            self.wave_energy = canonical_energy_breakdown(
-                &active.canonical_operator,
-                &primary,
-                &complementary,
-                &auxiliary,
-            )
-            .ok()
-            .map(CanonicalEnergyBreakdown::total);
+            if display.full_readbacks != self.energy_readback
+                && display.full_readback_at == display.readbacks
+                && self.energy_updated.elapsed().as_secs_f64() >= 0.25
+            {
+                let primary = display
+                    .primary_flux
+                    .iter()
+                    .map(|value| f64::from(*value))
+                    .collect::<Vec<_>>();
+                let complementary = display
+                    .complementary_flux
+                    .iter()
+                    .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
+                    .collect::<Vec<_>>();
+                let auxiliary = display
+                    .auxiliary
+                    .iter()
+                    .map(|value| f64::from(*value))
+                    .collect::<Vec<_>>();
+                self.wave_energy = canonical_energy_breakdown(
+                    &active.canonical_operator,
+                    &primary,
+                    &complementary,
+                    &auxiliary,
+                )
+                .ok()
+                .map(CanonicalEnergyBreakdown::total);
+                self.energy_readback = display.full_readbacks;
+                self.energy_updated = Instant::now();
+            }
             if let Some(clock) = display.clock {
                 self.sim_time_offset = clock.absolute_seconds
                     - self.completed_steps as f64 * f64::from(clock.time_step);
@@ -6925,19 +7042,19 @@ impl Playground {
     /// Banks the progress the solver made since the previous frame and closes
     /// the averaging window when it is full.
     ///
-    /// The step counter belongs to the generation that produced it and
-    /// restarts at zero with every handover, so differencing it across the
-    /// window read a commit as a window with no progress in it at all and
-    /// dropped the readout to zero for half a second. Keying the restart on the
-    /// generation rather than on the counter going backwards keeps the first
-    /// frame of a new generation exact even when it passes the old total.
+    /// Accepted-step totals survive a handover, while a fresh install/reset may
+    /// start a new generation at zero. The first observation of any generation
+    /// is therefore a baseline, not progress: counting its absolute total
+    /// credited the whole run again after every adaptive handover and could
+    /// leave the reported real-time rate falsely high for many seconds.
     fn accumulate_step_rate(&mut self, generation: u64, completed: u64, elapsed: f64) {
         if self.rate_generation != generation {
             self.rate_generation = generation;
-            self.rate_steps = 0;
+            self.rate_steps = completed;
+        } else {
+            self.rate_window_steps += completed.saturating_sub(self.rate_steps);
+            self.rate_steps = completed;
         }
-        self.rate_window_steps += completed.saturating_sub(self.rate_steps);
-        self.rate_steps = completed;
         if elapsed >= STEP_RATE_WINDOW {
             self.steps_per_second = self.rate_window_steps as f64 / elapsed;
             self.rate_window_steps = 0;
@@ -7360,20 +7477,20 @@ impl Playground {
         let dofs = active.operator.degrees_of_freedom();
         if !request.ready()
             || display.generation != request.generation()
-            || display.current.len() != dofs
+            || display.snapshot_current.len() != dofs
+            || display.snapshot_previous.len() != dofs
             || display.auxiliary.len() != dofs
-            || display.indicator_displacement.len() != dofs
-            || display.indicator_velocity.len() != dofs
-            || display.indicator_acceleration.len() != dofs
+            || display.snapshot_velocity.len() != dofs
             || canonical.previous_primary_flux.len() != dofs
             || canonical.previous_complementary_flux.len()
                 != active.canonical_operator.complementary_degrees_of_freedom()
             || canonical.previous_auxiliary.len() != canonical.auxiliary.len()
+            || canonical.full_readback_at != canonical.readbacks
         {
             self.amr_status = "waiting for aligned readback".into();
             return;
         }
-        let step = display.completed_steps;
+        let step = display.snapshot_completed_steps;
         if self
             .amr_last_analyzed_step
             .is_some_and(|previous| step < previous.saturating_add(8))
@@ -7388,7 +7505,35 @@ impl Playground {
         let time = canonical
             .clock
             .map_or(self.simulated_time(), |clock| clock.absolute_seconds);
+        let displacement = display
+            .snapshot_current
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect::<Vec<_>>();
+        let velocity = display
+            .snapshot_velocity
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect::<Vec<_>>();
+        let stiffness = match active.operator.apply_stiffness(&displacement) {
+            Ok(stiffness) => stiffness,
+            Err(error) => {
+                self.amr_status = "canonical estimate failed".into();
+                self.amr_error = Some(error.to_string());
+                return;
+            }
+        };
         let volume_acceleration = active.volume_sources.acceleration(time);
+        let acceleration = stiffness
+            .iter()
+            .zip(active.operator.lumped_mass())
+            .zip(active.canonical_operator.primary_loss_rate())
+            .zip(&velocity)
+            .zip(&volume_acceleration)
+            .map(|((((force, mass), loss), velocity), source)| {
+                source - force / mass - loss * velocity
+            })
+            .collect::<Vec<_>>();
         let Some(auxiliary) = aligned_indicator_auxiliary(display, &active.operator, dt, step)
         else {
             self.amr_status = "waiting for aligned readback".into();
@@ -7396,21 +7541,9 @@ impl Playground {
         };
         let snapshot = QuadraticSolutionSnapshot {
             mesh_revision: active.mesh.mesh_revision,
-            displacement: display
-                .indicator_displacement
-                .iter()
-                .map(|value| *value as f64)
-                .collect(),
-            velocity: display
-                .indicator_velocity
-                .iter()
-                .map(|value| *value as f64)
-                .collect(),
-            acceleration: display
-                .indicator_acceleration
-                .iter()
-                .map(|value| *value as f64)
-                .collect(),
+            displacement,
+            velocity,
+            acceleration,
             auxiliary,
             volume_acceleration,
             time,
@@ -10040,6 +10173,17 @@ impl Playground {
             .show(ui, |ui| {
                 if self.uploading.is_some() {
                     ui.label("Uploading the candidate to the GPU");
+                } else if self
+                    .gpu_upload_preparation
+                    .as_ref()
+                    .is_some_and(|job| job.result.is_none())
+                {
+                    ui.label("Packing candidate GPU buffers in the background");
+                } else if self.gpu_upload_preparation.is_some() {
+                    ui.label(format!(
+                        "GPU buffers ready · draining {} requested steps",
+                        self.step_backlog
+                    ));
                 } else if self.runtime.ready().is_some() {
                     ui.label(format!(
                         "Candidate ready · draining {} requested steps",
@@ -11609,20 +11753,20 @@ fn vector_overlay_samples(
 ) -> Vec<((i32, i32), Pos2, Point2)> {
     let (view_center, view_scale, viewport) = view;
     if mesh.triangles.len() != operator.element_nodes().len()
-        || display.indicator_displacement.len() != operator.degrees_of_freedom()
-        || display.indicator_velocity.len() != operator.degrees_of_freedom()
+        || display.snapshot_current.len() != operator.degrees_of_freedom()
+        || display.snapshot_velocity.len() != operator.degrees_of_freedom()
         || display.complementary_flux.len() != canonical.complementary_degrees_of_freedom()
         || spacing <= 0.0
     {
         return vec![];
     }
     let primary = display
-        .indicator_displacement
+        .snapshot_current
         .iter()
         .map(|value| f64::from(*value))
         .collect::<Vec<_>>();
     let rate = display
-        .indicator_velocity
+        .snapshot_velocity
         .iter()
         .map(|value| f64::from(*value))
         .collect::<Vec<_>>();
@@ -11697,9 +11841,8 @@ fn aligned_indicator_auxiliary(
     let count = operator.degrees_of_freedom();
     if !time_step.is_finite()
         || time_step <= 0.0
-        || display.current.len() != count
+        || display.snapshot_current.len() != count
         || display.auxiliary.len() != count
-        || display.indicator_displacement.len() != count
     {
         return None;
     }
@@ -11715,8 +11858,8 @@ fn aligned_indicator_auxiliary(
                     display.auxiliary[node] as f64
                         - 0.5
                             * time_step
-                            * (display.indicator_displacement[node] as f64
-                                + display.current[node] as f64)
+                            * (display.snapshot_current[node] as f64
+                                + display.snapshot_current[node] as f64)
                 }
             })
             .collect(),
@@ -11738,6 +11881,16 @@ fn refresh_canonical_wave_display(
     {
         return;
     }
+    if display.generation == canonical.generation && display.readbacks == canonical.readbacks {
+        return;
+    }
+    if display.generation != canonical.generation {
+        display.complementary_flux.clear();
+        display.snapshot_current.clear();
+        display.snapshot_previous.clear();
+        display.snapshot_velocity.clear();
+        display.snapshot_completed_steps = 0;
+    }
     let dt = canonical
         .clock
         .map_or(operator.recommended_time_step(), |clock| {
@@ -11745,49 +11898,60 @@ fn refresh_canonical_wave_display(
         });
     display.generation = canonical.generation;
     display.completed_steps = request.stats().completed_steps();
-    display.current = canonical
-        .primary_flux
-        .iter()
-        .zip(operator.primary_mass())
-        .map(|(flux, mass)| (f64::from(*flux) / mass) as f32)
-        .collect();
-    display.previous = canonical
-        .previous_primary_flux
-        .iter()
-        .zip(operator.primary_mass())
-        .map(|(flux, mass)| (f64::from(*flux) / mass) as f32)
-        .collect();
-    display.indicator_velocity = display
-        .current
-        .iter()
-        .zip(&display.previous)
-        .map(|(current, previous)| (*current - *previous) / dt as f32)
-        .collect();
-    display.indicator_displacement = display.current.clone();
-    let displacement = display
+    display.current.clear();
+    display.current.extend(
+        canonical
+            .primary_flux
+            .iter()
+            .zip(operator.primary_mass())
+            .map(|(flux, mass)| (f64::from(*flux) / mass) as f32),
+    );
+    display.previous.clear();
+    display.previous.extend(
+        canonical
+            .previous_primary_flux
+            .iter()
+            .zip(operator.primary_mass())
+            .map(|(flux, mass)| (f64::from(*flux) / mass) as f32),
+    );
+    display.indicator_velocity.clear();
+    display.indicator_velocity.extend(
+        display
+            .current
+            .iter()
+            .zip(&display.previous)
+            .map(|(current, previous)| (*current - *previous) / dt as f32),
+    );
+    display.indicator_displacement.clear();
+    display
         .indicator_displacement
-        .iter()
-        .map(|value| f64::from(*value))
-        .collect::<Vec<_>>();
-    let stiffness = active
-        .operator
-        .apply_stiffness(&displacement)
-        .unwrap_or_else(|_| vec![0.0; displacement.len()]);
-    let time = canonical.clock.map_or(0.0, |clock| clock.absolute_seconds);
-    let volume = active.volume_sources.acceleration(time);
-    display.indicator_acceleration = stiffness
-        .iter()
-        .zip(active.operator.lumped_mass())
-        .zip(operator.primary_loss_rate())
-        .zip(&display.indicator_velocity)
-        .zip(volume)
-        .map(|((((force, mass), loss), velocity), source)| {
-            (source - force / mass - loss * f64::from(*velocity)) as f32
-        })
-        .collect();
-    display.auxiliary = vec![0.0; operator.degrees_of_freedom()];
+        .extend(display.current.iter().copied());
+    // Acceleration needs a sparse stiffness application and is consumed only
+    // by the AMR snapshot. Build it at the 0.75 s AMR cadence instead of on
+    // every visual readback.
+    display.indicator_acceleration.clear();
+    display.auxiliary.clear();
+    display.auxiliary.resize(operator.degrees_of_freedom(), 0.0);
     display.indicator_potential.clear();
-    display.complementary_flux = canonical.complementary_flux.clone();
+    if canonical.full_readback_at == canonical.readbacks {
+        display.snapshot_current.clear();
+        display
+            .snapshot_current
+            .extend(display.current.iter().copied());
+        display.snapshot_previous.clear();
+        display
+            .snapshot_previous
+            .extend(display.previous.iter().copied());
+        display.snapshot_velocity.clear();
+        display
+            .snapshot_velocity
+            .extend(display.indicator_velocity.iter().copied());
+        display.snapshot_completed_steps = display.completed_steps;
+        display.complementary_flux.clear();
+        display
+            .complementary_flux
+            .extend(canonical.complementary_flux.iter().copied());
+    }
     display.readbacks = canonical.readbacks;
 }
 
@@ -13002,41 +13166,46 @@ mod tests {
         assert!(state.draw_open);
     }
 
-    /// The solver's step counter restarts with every generation, so the rate
-    /// has to follow what it advanced between frames. Differencing the counter
-    /// across the window - what this replaced - read a handover as half a
-    /// second of no progress at all.
+    /// Handover generations preserve the accepted-step total. Their first
+    /// observation establishes a baseline instead of re-crediting the run;
+    /// genuinely new steps on either side remain in the same rate window.
     #[test]
     fn the_step_rate_survives_a_handover() {
         let mut state = Playground::default();
         // Four frames of a settled generation, then the window closes.
+        state.accumulate_step_rate(7, 0, 0.0);
         for (frame, completed) in [(1, 300_u64), (2, 600), (3, 900), (4, 1200)] {
             state.accumulate_step_rate(7, completed, if frame == 4 { 0.5 } else { 0.1 });
         }
         assert_eq!(state.steps_per_second, 2400.0);
         assert_eq!(state.rate_window_steps, 0, "a closed window starts empty");
 
-        // A handover mid-window: the generation restarts its counter far below
-        // where the last one left off, and the steps already banked stay.
+        // A handover mid-window preserves its total, and the steps already
+        // banked stay without the preserved total being counted a second time.
         state.accumulate_step_rate(7, 1500, 0.1);
         assert_eq!(state.rate_window_steps, 300);
-        state.accumulate_step_rate(8, 3, 0.1);
+        state.accumulate_step_rate(8, 1500, 0.1);
         assert_eq!(
-            state.rate_window_steps, 303,
-            "the new generation's own steps count, and the old ones are kept"
+            state.rate_window_steps, 300,
+            "the preserved total is a baseline and the old progress is kept"
         );
-        state.accumulate_step_rate(8, 200, 0.5);
+        state.accumulate_step_rate(8, 1700, 0.5);
         assert_eq!(state.steps_per_second, 1000.0);
 
-        // The shape that used to read zero: a window holding nothing but the
-        // frames either side of a handover.
+        // A window holding only the frames either side of another handover.
         state.accumulate_step_rate(8, 5000, 0.1);
-        state.accumulate_step_rate(9, 400, 0.5);
-        assert_eq!(state.steps_per_second, (4800.0 + 400.0) / 0.5);
+        state.accumulate_step_rate(9, 5000, 0.5);
+        assert_eq!(state.steps_per_second, 3300.0 / 0.5);
         assert!(
             state.steps_per_second > 0.0,
             "a handover is not a stall in the solver"
         );
+
+        // A fresh install may reset the counter; its first observation is also
+        // only a baseline, and subsequent progress is measured normally.
+        state.accumulate_step_rate(10, 0, 0.1);
+        state.accumulate_step_rate(10, 250, 0.5);
+        assert_eq!(state.steps_per_second, 500.0);
     }
 
     /// The ring drops its oldest rather than growing without bound.

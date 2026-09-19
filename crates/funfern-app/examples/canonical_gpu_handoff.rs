@@ -71,8 +71,10 @@ fn main() {
         .unwrap_or(MEASURED_STEPS);
     let prescribed = std::env::args().any(|argument| argument == "--prescribed");
     let standard = std::env::args().any(|argument| argument == "--standard");
-    let source_edge = if standard { 0.08 } else { 0.16 };
-    let target_edge = if standard { 0.08 } else { 0.12 };
+    let requested_edge =
+        std::env::args().find_map(|argument| argument.strip_prefix("--edge=")?.parse::<f64>().ok());
+    let source_edge = requested_edge.unwrap_or(if standard { 0.08 } else { 0.16 });
+    let target_edge = requested_edge.unwrap_or(if standard { 0.08 } else { 0.12 });
     let mut scene = if thin_gap {
         Scene::default()
     } else {
@@ -103,6 +105,9 @@ fn main() {
             11,
             MeshingOptions {
                 target_edge_length: source_edge,
+                max_vertices: 100_000,
+                max_triangles: 200_000,
+                max_refinement_steps: 100_000,
                 ..MeshingOptions::default()
             },
         )
@@ -117,6 +122,9 @@ fn main() {
                 12,
                 MeshingOptions {
                     target_edge_length: target_edge,
+                    max_vertices: 100_000,
+                    max_triangles: 200_000,
+                    max_refinement_steps: 100_000,
                     ..MeshingOptions::default()
                 },
             )
@@ -207,8 +215,9 @@ fn main() {
             )
             .expect("target generation forcing");
     }
-    let source_plan = CanonicalGpuPlan::compile(
+    let source_plan = CanonicalGpuPlan::compile_with_quadratic(
         &source_operator,
+        &source_scalar,
         &initial,
         &source_forcing,
         CanonicalGpuClock::initial(time_step).unwrap(),
@@ -404,13 +413,16 @@ fn main() {
             .expect("target oracle step");
     }
     let target_placeholder = CanonicalWaveState::zero(&target_operator, time_step).unwrap();
-    let mut target_plan = CanonicalGpuPlan::compile(
+    let target_plan_started = Instant::now();
+    let mut target_plan = CanonicalGpuPlan::compile_with_quadratic(
         &target_operator,
+        &target_scalar,
         &target_placeholder,
         &target_forcing,
         CanonicalGpuClock::initial(time_step).unwrap(),
     )
     .expect("target GPU plan");
+    let target_plan_elapsed = target_plan_started.elapsed();
     if inject_failure {
         target_plan
             .stage_failure_injection(funfern_app::canonical_gpu::CANONICAL_FAILURE_NON_FINITE, 0)
@@ -471,6 +483,10 @@ fn main() {
             / (1024.0 * 1024.0),
     );
     println!(
+        "target GPU plan packed in {:.2} ms",
+        target_plan_elapsed.as_secs_f64() * 1_000.0,
+    );
+    println!(
         "transfer preparation {:.2} ms: interpolation {:.2}, primary {:.2}, vector {:.2} (max slice {:.2}), histories {:.2}, outgoing bases {:.2} (max slice {:.2}), GPU packing {:.2}",
         transfer_preparation_elapsed.as_secs_f64() * 1_000.0,
         interpolation_elapsed.as_secs_f64() * 1_000.0,
@@ -511,6 +527,9 @@ fn install(
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut request: ResMut<CanonicalGpuRequest>,
 ) {
+    request
+        .set_continuous_full_state_readback(true)
+        .expect("select validation readback mode");
     request.install(
         &mut assets,
         &mut commands,
@@ -549,6 +568,7 @@ fn validate(
         Phase::Warmup if clock.accepted_steps >= WARMUP_STEPS as u32 => {
             expected.rollback_snapshot = Some(display.accepted_storage_bits());
             expected.source_generation = display.generation;
+            let upload_pack_started = Instant::now();
             request
                 .begin_handoff(
                     &mut assets,
@@ -557,6 +577,10 @@ fn validate(
                     pending.transfer.take().expect("transfer plan"),
                 )
                 .expect("begin GPU handoff");
+            println!(
+                "main-thread handoff buffer serialization took {:.2} ms",
+                upload_pack_started.elapsed().as_secs_f64() * 1_000.0,
+            );
             expected.started = Some(Instant::now());
             expected.phase = Phase::Handoff;
         }
