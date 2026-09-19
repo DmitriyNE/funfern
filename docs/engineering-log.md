@@ -5,6 +5,40 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-19 — Linear f32 GPU core (material-law Stage 4)
+
+- Added a dormant production-intended canonical WebGPU path beside the connected
+  scalar solver. One shared Rust/WGSL manifest uses eight storage bindings and
+  integer metadata lanes; accepted/candidate `Q,b`, physical auxiliaries, force
+  caches, clock, accounting and event serials commit through one global boundary.
+  The old application evolution path is unchanged pending transfer and consumers.
+- Ported reflecting, first-order, thin-gap, fixed two-sided loss, direct/legacy/
+  prescribed forcing and the passive three-state second-order boundary. The
+  latter exports the CPU reduced solve as a dense parallel inverse plus physical
+  trace transforms; prescribed intersections use a cached constrained factor.
+  Parallel trace preparation/reduction/solve/recovery avoids a serial shader LU.
+- Added staged pulse, paired-filter, fixed-law-patch and maintenance writers,
+  bounded epoch rebasing, priority failure latching, exact accepted-state rollback
+  and recovery. A real Bevy render-graph harness checks the same buffers, shader,
+  dispatch sequence, readback and commit path; injected failure leaves physical
+  state, accounting and clock bit-exact before a successful resumed step.
+- Apple M1 Max / Metal, standard h=.08 case, 1,000 steps: reflecting 18.46,
+  first-order 18.50, two-sided loss 16.51 and second-order 10.18 simulated
+  seconds/wall second. Worst standard `Q,b` parity was 1.88e-5, auxiliary RMS
+  6.14e-8 and energy residual 9.02e-6. Prescribed second-order ran at 9.73 with
+  1.46e-5/1.30e-5 parity; the shipped eight-obstacle geometry ran first order at
+  10.35 with 1.65e-6/3.55e-6 parity. Standard steady allocation is 7.64 MiB and
+  accepted physical state 0.17 MiB; second-order adds 0.93 MiB boundary factors.
+- Standard second-order CPU/operator/factor/packing preparation measured
+  302–311 ms, while a 128-step GPU request completed in 50.2 ms and sustained
+  6.29 simulated seconds/wall second. The preparation cost is reported separately
+  and remains a Stage 5 cooperative-preparation concern, not folded into steady
+  throughput. See the [full Stage 4 report](funfern-material-laws-stage4-report.md).
+- Formatting, strict workspace Clippy, wasm32 application check and all 598
+  workspace tests pass; the one pre-existing curved-boundary reproducer remains
+  ignored. Stage 5 is latest-state GPU transfer, physical-history handoff and
+  genuinely live/paused event integration.
+
 ## 2026-09-19 — Linear CPU composition and transfer (material-law Stage 3)
 
 - Extended the direct f64 reference with integrated point/volume/weak-boundary

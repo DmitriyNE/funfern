@@ -189,7 +189,7 @@ Inspection also found incomplete app literals in the GRIN example and `topology_
 
 ## 5. Implementation stages
 
-The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–3 are complete; the production solver remains unchanged and Stage 4 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
+The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–4 are complete; the old production solver remains connected and Stage 5 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
 
 ### Stage 0 — Close implementation contracts and establish acceptance cases
 
@@ -262,6 +262,12 @@ Preserve old boundary semantics by derivation, not raw memory copying. Test basi
 Exit: linear S/B/F/T equations and fixtures pass before their GPU implementation; reflection/passivity/fixed-CFL regressions include the corrected scheme. Structured spike remaps are reproduced and production irregular/one-sided/repeated-transfer tests meet predeclared thresholds. Record nonlocal preparation/solve cost. Nonlinear boundary composition is still gated at Stage 8, not claimed by the standalone Kerr auxiliary test.
 
 ### Stage 4 — GPU linear evolution, clock and atomic acceptance
+
+Status: complete. The dormant production-intended path, its CPU/GPU and
+target-device harness, and the complete acceptance evidence are recorded in the
+[Stage 4 report](funfern-material-laws-stage4-report.md). It is deliberately not
+connected to application evolution before Stage 5 transfer and Stage 6 consumer
+migration.
 
 Write the shared buffer/layout manifest before shaders: accepted/candidate Q,b, physical auxiliaries, scratch/caches, constitutive and incidence tables, source/runtime records, clock, event serials, status and accounting. Include dense boundary transforms/factors and peak allocations; the core spike's main-state ratio excludes these.
 
@@ -347,6 +353,6 @@ Fix new-fixture thresholds and target-device budgets before judging results. Tra
 
 ## 7. Handoff status
 
-Planning, correctness spikes, Stage 0 contracts, Stage 1 inert authoring, the Stage 2 linear CPU core and Stage 3 linear composition/reference transfer are complete. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
+Planning, correctness spikes, Stage 0 contracts, Stage 1 inert authoring, the Stage 2 linear CPU core, Stage 3 linear composition/reference transfer and the [Stage 4 f32 GPU core](funfern-material-laws-stage4-report.md) are complete. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
 
-Start Stage 4 with the production-intended f32 GPU state/layout manifest, evolution kernels and global accepted/candidate transaction boundary. Port the Stage 3 CPU equations rather than reconnecting the legacy scalar state. Retain the old solver for comparison and do not connect the reference core to application evolution before the GPU, transfer and consumer gates close. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use them as a claim that the remaining compositions already pass.
+Start Stage 5 from the accepted/candidate layout and global commit boundary, extending `QuadraticTransferJob` and the GPU map data rather than adding a CPU field round trip. Transfer the latest accepted `Q,b`, thin-gap jump and normalized outgoing histories; preserve exact unchanged values, bounded corrections, clock/phase/event serials and rollback. Retain the old solver for comparison and do not connect the canonical core to application evolution before transfer and consumer gates close. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use them as a claim that the remaining compositions already pass.

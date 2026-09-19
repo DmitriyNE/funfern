@@ -999,12 +999,125 @@ pub struct CanonicalOutgoingMidpointFactor {
     eliminated: Vec<CachedAuxiliaryElimination>,
 }
 
+/// Backend-neutral data needed to apply the reduced outgoing midpoint solve.
+/// The CPU factor keeps its pivoted LU representation; GPU backends consume
+/// this dense inverse so each trace row can be evaluated deterministically in
+/// parallel without porting a serial pivoting algorithm into a shader.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalOutgoingFactorExport {
+    pub duration: f64,
+    pub trace_count: usize,
+    pub energy_transform: [[f64; 3]; 3],
+    pub inverse_energy_transform: [[f64; 3]; 3],
+    pub inverse_schur: Vec<f64>,
+    pub eliminated: Vec<CanonicalOutgoingEliminationExport>,
+    pub prescribed_trace: Vec<bool>,
+}
+
+impl CanonicalOutgoingFactorExport {
+    fn solve(
+        &self,
+        operator: &CanonicalWaveOperator,
+        boundary: &CanonicalOutgoingBoundary,
+        right: &[f64],
+    ) -> Result<Vec<f64>, WaveError> {
+        let dimension = self.trace_count
+            + self
+                .eliminated
+                .iter()
+                .map(|mode| mode.offset + 3)
+                .max()
+                .unwrap_or(0);
+        if right.len() != dimension
+            || boundary.trace_nodes.len() != self.trace_count
+            || self.inverse_schur.len() != self.trace_count * self.trace_count
+            || self.prescribed_trace.len() != self.trace_count
+        {
+            return Err(WaveError::InvalidState);
+        }
+        let mut reduced = right[..self.trace_count].to_vec();
+        let mut solved_right = Vec::with_capacity(self.eliminated.len());
+        for mode in &self.eliminated {
+            let boundary_mode = boundary
+                .modes
+                .get(mode.mode_index)
+                .ok_or(WaveError::InvalidState)?;
+            if boundary_mode.auxiliary_offset != Some(mode.offset) {
+                return Err(WaveError::InvalidState);
+            }
+            let input = [
+                right[self.trace_count + mode.offset],
+                right[self.trace_count + mode.offset + 1],
+                right[self.trace_count + mode.offset + 2],
+            ];
+            let solved: [f64; 3] = std::array::from_fn(|row| {
+                (0..3)
+                    .map(|column| mode.inverse[row][column] * input[column])
+                    .sum()
+            });
+            let coupling = mode
+                .aqz_coefficient
+                .iter()
+                .zip(solved)
+                .map(|(left, right)| left * right)
+                .sum::<f64>();
+            for (row, (reduced_value, trace)) in
+                reduced.iter_mut().zip(&boundary_mode.trace).enumerate()
+            {
+                if !self.prescribed_trace[row] {
+                    *reduced_value -= trace * coupling;
+                }
+            }
+            solved_right.push(solved);
+        }
+        let trace = (0..self.trace_count)
+            .map(|row| {
+                self.inverse_schur[row * self.trace_count..(row + 1) * self.trace_count]
+                    .iter()
+                    .zip(&reduced)
+                    .map(|(coefficient, value)| coefficient * value)
+                    .sum::<f64>()
+            })
+            .collect::<Vec<_>>();
+        let mut solution = vec![0.0; dimension];
+        solution[..self.trace_count].copy_from_slice(&trace);
+        for (mode, mut auxiliary) in self.eliminated.iter().zip(solved_right) {
+            let boundary_mode = &boundary.modes[mode.mode_index];
+            let modal_trace = trace
+                .iter()
+                .zip(&boundary_mode.trace)
+                .zip(&boundary.trace_nodes)
+                .map(|((value, coefficient), node)| {
+                    value * coefficient / operator.primary_mass[*node as usize]
+                })
+                .sum::<f64>();
+            for (value, coefficient) in auxiliary.iter_mut().zip(mode.solved_column_coefficient) {
+                *value -= coefficient * modal_trace;
+            }
+            solution[self.trace_count + mode.offset..self.trace_count + mode.offset + 3]
+                .copy_from_slice(&auxiliary);
+        }
+        finite_values(&solution)?;
+        Ok(solution)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalOutgoingEliminationExport {
+    pub mode_index: usize,
+    pub offset: usize,
+    pub inverse: [[f64; 3]; 3],
+    pub aqz_coefficient: [f64; 3],
+    pub solved_column_coefficient: [f64; 3],
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalWaveState {
     primary_flux: Vec<f64>,
     complementary_flux: Vec<Point2>,
     auxiliaries: CanonicalAuxiliaryState,
     boundary_cache: Option<Arc<CanonicalOutgoingMidpointFactor>>,
+    boundary_prescribed_cache: Option<(Vec<bool>, Arc<CanonicalOutgoingFactorExport>)>,
     time_step: f64,
     steps: u64,
 }
@@ -1043,6 +1156,7 @@ impl CanonicalWaveState {
             complementary_flux,
             auxiliaries,
             boundary_cache,
+            boundary_prescribed_cache: None,
             time_step,
             steps: 0,
         })
@@ -1758,6 +1872,10 @@ impl CanonicalWaveState {
         let has_prescribed_trace = trace_position
             .iter()
             .any(|(node, _)| forcing.prescribed[*node].is_some());
+        let prescribed_trace = trace_position
+            .iter()
+            .map(|(node, _)| forcing.prescribed[*node].is_some())
+            .collect::<Vec<_>>();
         for &(node, position) in &trace_position {
             right[position] += duration * (source[node] - force[node]);
         }
@@ -1771,22 +1889,28 @@ impl CanonicalWaveState {
             }
             cache.solve(operator, boundary, &right)?
         } else {
-            let generator = outgoing_generator(operator, boundary)?;
-            let mut matrix = vec![0.0; dimension * dimension];
-            for row in 0..dimension {
-                for column in 0..dimension {
-                    matrix[row * dimension + column] = f64::from(row == column)
-                        - 0.5 * duration * generator[row * dimension + column];
-                }
-            }
             for &(node, position) in &trace_position {
                 if let Some(signal) = forcing.prescribed[node] {
-                    matrix[position * dimension..(position + 1) * dimension].fill(0.0);
-                    matrix[position * dimension + position] = 1.0;
                     right[position] = operator.primary_mass[node] * signal.value(target_time);
                 }
             }
-            solve_outgoing_reduced(matrix, right, trace_count, boundary)?
+            let rebuild = self
+                .boundary_prescribed_cache
+                .as_ref()
+                .is_none_or(|(pattern, _)| pattern != &prescribed_trace);
+            if rebuild {
+                let factor = self
+                    .boundary_cache
+                    .as_ref()
+                    .ok_or(WaveError::InvalidState)?
+                    .export_with_prescribed(&prescribed_trace)?;
+                self.boundary_prescribed_cache = Some((prescribed_trace.clone(), Arc::new(factor)));
+            }
+            self.boundary_prescribed_cache
+                .as_ref()
+                .ok_or(WaveError::InvalidState)?
+                .1
+                .solve(operator, boundary, &right)?
         };
         for &(node, position) in &trace_position {
             self.primary_flux[node] = new[position];
@@ -2105,6 +2229,91 @@ impl CanonicalOutgoingMidpointFactor {
                 .iter()
                 .map(|_| std::mem::size_of::<CachedAuxiliaryElimination>())
                 .sum::<usize>()
+    }
+
+    /// Exports a backend-neutral parallel-solve representation. Preparation is
+    /// event work; evolution never reconstructs or refactors this matrix.
+    pub fn export(&self) -> Result<CanonicalOutgoingFactorExport, WaveError> {
+        let (energy_transform, inverse_energy_transform) = pole_energy_transform()?;
+        let mut inverse_schur = vec![0.0; self.trace_count * self.trace_count];
+        for column in 0..self.trace_count {
+            let mut basis = vec![0.0; self.trace_count];
+            basis[column] = 1.0;
+            let solved = self.schur.solve(&basis)?;
+            for row in 0..self.trace_count {
+                inverse_schur[row * self.trace_count + column] = solved[row];
+            }
+        }
+        finite_values(&inverse_schur)?;
+        Ok(CanonicalOutgoingFactorExport {
+            duration: self.duration,
+            trace_count: self.trace_count,
+            energy_transform,
+            inverse_energy_transform,
+            inverse_schur,
+            eliminated: self
+                .eliminated
+                .iter()
+                .map(|mode| CanonicalOutgoingEliminationExport {
+                    mode_index: mode.mode_index,
+                    offset: mode.offset,
+                    inverse: mode.inverse,
+                    aqz_coefficient: mode.aqz_coefficient,
+                    solved_column_coefficient: mode.solved_column_coefficient,
+                })
+                .collect(),
+            prescribed_trace: vec![false; self.trace_count],
+        })
+    }
+
+    /// Exports the same reduced factor with prescribed trace rows replaced by
+    /// exact ownership equations. The pattern is generation/runtime metadata;
+    /// changing it prepares another immutable factor before acceptance.
+    pub fn export_with_prescribed(
+        &self,
+        prescribed_trace: &[bool],
+    ) -> Result<CanonicalOutgoingFactorExport, WaveError> {
+        if prescribed_trace.len() != self.trace_count {
+            return Err(WaveError::SizeMismatch {
+                expected: self.trace_count,
+                actual: prescribed_trace.len(),
+            });
+        }
+        let mut export = self.export()?;
+        if prescribed_trace.iter().all(|value| !value) {
+            return Ok(export);
+        }
+        // Recover the unfactored Schur matrix from its prepared inverse. This
+        // is one-time event work, not evolution work, and avoids retaining a
+        // second dense Nb² f64 matrix in every CPU reference state.
+        let mut schur = vec![0.0; self.trace_count * self.trace_count];
+        let inverse_factor = DenseLu::factor(export.inverse_schur.clone(), self.trace_count)?;
+        for column in 0..self.trace_count {
+            let mut basis = vec![0.0; self.trace_count];
+            basis[column] = 1.0;
+            let solved = inverse_factor.solve(&basis)?;
+            for (row, value) in solved.into_iter().enumerate() {
+                schur[row * self.trace_count + column] = value;
+            }
+        }
+        for (row, prescribed) in prescribed_trace.iter().copied().enumerate() {
+            if prescribed {
+                schur[row * self.trace_count..(row + 1) * self.trace_count].fill(0.0);
+                schur[row * self.trace_count + row] = 1.0;
+            }
+        }
+        export.prescribed_trace.copy_from_slice(prescribed_trace);
+        let constrained_factor = DenseLu::factor(schur, self.trace_count)?;
+        for column in 0..self.trace_count {
+            let mut basis = vec![0.0; self.trace_count];
+            basis[column] = 1.0;
+            let solved = constrained_factor.solve(&basis)?;
+            for (row, value) in solved.into_iter().enumerate() {
+                export.inverse_schur[row * self.trace_count + column] = value;
+            }
+        }
+        finite_values(&export.inverse_schur)?;
+        Ok(export)
     }
 }
 
@@ -2672,6 +2881,7 @@ fn compile_outgoing_boundary(
     }))
 }
 
+#[cfg(test)]
 fn outgoing_generator(
     operator: &CanonicalWaveOperator,
     boundary: &CanonicalOutgoingBoundary,
@@ -2983,98 +3193,6 @@ fn solve_dense(
                 .map(|column| matrix[row * count + column] * solution[column])
                 .sum::<f64>();
         solution[row] = residual / matrix[row * count + row];
-    }
-    finite_values(&solution)?;
-    Ok(solution)
-}
-
-fn solve_outgoing_reduced(
-    matrix: Vec<f64>,
-    right: Vec<f64>,
-    trace_count: usize,
-    boundary: &CanonicalOutgoingBoundary,
-) -> Result<Vec<f64>, WaveError> {
-    let dimension = trace_count + boundary.auxiliary_count;
-    if matrix.len() != dimension * dimension || right.len() != dimension {
-        return Err(WaveError::InvalidState);
-    }
-    if boundary.auxiliary_count == 0 {
-        return solve_dense(matrix, right, dimension);
-    }
-    let mut schur = vec![0.0; trace_count * trace_count];
-    let mut reduced_right = right[..trace_count].to_vec();
-    for row in 0..trace_count {
-        for column in 0..trace_count {
-            schur[row * trace_count + column] = matrix[row * dimension + column];
-        }
-    }
-    struct EliminatedMode {
-        offset: usize,
-        solved_right: [f64; 3],
-        solved_columns: Vec<[f64; 3]>,
-    }
-    let mut eliminated = Vec::new();
-    for mode in &boundary.modes {
-        let Some(offset) = mode.auxiliary_offset else {
-            continue;
-        };
-        let base = trace_count + offset;
-        let mut block = Vec::with_capacity(9);
-        for row in 0..3 {
-            for column in 0..3 {
-                block.push(matrix[(base + row) * dimension + base + column]);
-            }
-        }
-        let solve_block = |values: [f64; 3]| -> Result<[f64; 3], WaveError> {
-            let solved = solve_dense(block.clone(), values.to_vec(), 3)?;
-            Ok([solved[0], solved[1], solved[2]])
-        };
-        let solved_right = solve_block([right[base], right[base + 1], right[base + 2]])?;
-        let mut solved_columns = Vec::with_capacity(trace_count);
-        for column in 0..trace_count {
-            solved_columns.push(solve_block([
-                matrix[base * dimension + column],
-                matrix[(base + 1) * dimension + column],
-                matrix[(base + 2) * dimension + column],
-            ])?);
-        }
-        for row in 0..trace_count {
-            let coupling = [
-                matrix[row * dimension + base],
-                matrix[row * dimension + base + 1],
-                matrix[row * dimension + base + 2],
-            ];
-            reduced_right[row] -= coupling
-                .iter()
-                .zip(solved_right)
-                .map(|(left, right)| left * right)
-                .sum::<f64>();
-            for column in 0..trace_count {
-                schur[row * trace_count + column] -= coupling
-                    .iter()
-                    .zip(solved_columns[column])
-                    .map(|(left, right)| left * right)
-                    .sum::<f64>();
-            }
-        }
-        eliminated.push(EliminatedMode {
-            offset,
-            solved_right,
-            solved_columns,
-        });
-    }
-    let trace = solve_dense(schur, reduced_right, trace_count)?;
-    let mut solution = vec![0.0; dimension];
-    solution[..trace_count].copy_from_slice(&trace);
-    for mode in eliminated {
-        let mut auxiliary = mode.solved_right;
-        for (column, value) in trace.iter().enumerate() {
-            for (row, auxiliary_value) in auxiliary.iter_mut().enumerate() {
-                *auxiliary_value -= mode.solved_columns[column][row] * value;
-            }
-        }
-        solution[trace_count + mode.offset..trace_count + mode.offset + 3]
-            .copy_from_slice(&auxiliary);
     }
     finite_values(&solution)?;
     Ok(solution)
@@ -3915,6 +4033,27 @@ mod tests {
         let cached = cache.solve(&operator, boundary, &probe).unwrap();
         let oracle = solve_dense(midpoint_matrix, probe.clone(), dimension).unwrap();
         assert!(maximum_difference(&cached, &oracle) < 2.0e-11);
+
+        let prescribed_position = 0;
+        let mut constrained_matrix = vec![0.0; dimension * dimension];
+        for row in 0..dimension {
+            for column in 0..dimension {
+                constrained_matrix[row * dimension + column] =
+                    f64::from(row == column) - 0.5 * kick * dense[row * dimension + column];
+            }
+        }
+        constrained_matrix[prescribed_position * dimension..(prescribed_position + 1) * dimension]
+            .fill(0.0);
+        constrained_matrix[prescribed_position * dimension + prescribed_position] = 1.0;
+        let constrained_oracle = solve_dense(constrained_matrix, probe.clone(), dimension).unwrap();
+        let mut prescribed_pattern = vec![false; boundary.trace_nodes().len()];
+        prescribed_pattern[prescribed_position] = true;
+        let constrained_export = cache
+            .export_with_prescribed(&prescribed_pattern)
+            .unwrap()
+            .solve(&operator, boundary, &probe)
+            .unwrap();
+        assert!(maximum_difference(&constrained_export, &constrained_oracle) < 2.0e-11);
 
         let prescribed_node = boundary.trace_nodes()[0] as usize;
         let prescribed_signal = TimeSignal::harmonic(0.23, 0.0, 1.0, 0.0);

@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod canonical_gpu;
 mod capture;
 #[allow(dead_code)]
 mod files;
@@ -25,6 +27,7 @@ fn main() {
     }))
     .add_plugins(EguiPlugin::default())
     .add_plugins(wave_gpu::WaveGpuPlugin)
+    .add_plugins(canonical_gpu::CanonicalWaveGpuPlugin)
     .init_resource::<ui::Playground>()
     .add_systems(Startup, |mut commands: Commands| {
         commands.spawn(Camera2d);
