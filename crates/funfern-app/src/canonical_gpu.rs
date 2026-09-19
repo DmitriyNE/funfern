@@ -35,11 +35,14 @@ use bevy::{
     },
 };
 use funfern_core::{
-    CanonicalAuxiliaryState, CanonicalForcing, CanonicalOutgoingMidpointFactor, CanonicalRateDrive,
-    CanonicalWaveOperator, CanonicalWaveState, Point2, TimeSignal, WaveError,
+    CanonicalAuxiliaryState, CanonicalForcing, CanonicalOutgoingHistoryTransferMap,
+    CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
+    CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalThinGapHistoryTransferMap,
+    CanonicalVectorTransferMap, CanonicalWaveOperator, CanonicalWaveState, Point2, TimeSignal,
+    WaveError,
 };
 
-pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 1;
+pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 2;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
 pub const CANONICAL_GPU_WORKGROUP_SIZE: u32 = 128;
 pub const CANONICAL_GPU_MAX_TRACE: usize = 1024;
@@ -51,6 +54,9 @@ const EVENT_PRIMARY_PULSE: u32 = 1;
 const EVENT_GRID_FILTER: u32 = 2;
 const EVENT_LINEAR_LAW_PATCH: u32 = 3;
 const EVENT_MAINTENANCE: u32 = 4;
+const EVENT_SOURCE_PATCH: u32 = 5;
+const TRANSFER_LAYOUT_VERSION: u32 = 1;
+const TRANSFER_HEADER_WORDS: usize = 8;
 
 const _: () = assert!(CANONICAL_GPU_STORAGE_BINDINGS <= 8);
 
@@ -137,8 +143,16 @@ pub(crate) struct GpuCanonicalControl {
     pub clock_u32: UVec4,
     /// dt, accepted local seconds, candidate local seconds and maximum admitted dt.
     pub clock_f32: Vec4,
+    /// Accepted and candidate epoch origins as compensated f32 high/low pairs.
+    pub clock_origin: Vec4,
     /// Accepted event serial, candidate event serial, operation and flags.
     pub event: UVec4,
+    /// Last processed event serial/kind, accepted flag and rejection reason.
+    pub event_result: UVec4,
+    /// Source, law, pulse and maintenance runtime serials.
+    pub runtime_serials: UVec4,
+    /// Independent accepted slots for source and future material runtime tables.
+    pub runtime_slots: UVec4,
     /// Accepted source/prescribed work, primary loss and complementary loss.
     pub accepted_accounting_a: Vec4,
     /// Accepted boundary loss, filter removal, maintenance and edit exchange.
@@ -155,6 +169,8 @@ pub(crate) struct GpuCanonicalControl {
 pub(crate) struct GpuCanonicalStatus {
     /// WGSL declares these four lanes as separate atomic<u32> values.
     pub words: UVec4,
+    /// Handoff completion marker followed by reserved transaction lanes.
+    pub transaction: UVec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -203,6 +219,233 @@ pub(crate) struct GpuCanonicalTableWord {
 #[derive(Clone, Copy, Default, ShaderType)]
 pub(crate) struct GpuCanonicalScratchWord {
     pub values: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+pub(crate) struct GpuCanonicalTransferWord {
+    pub data: UVec4,
+}
+
+/// One target connected component's retained share of source-component
+/// integrated flux. An empty row deliberately disables total correction.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CanonicalComponentTransfer {
+    pub sources: Vec<(u32, f64)>,
+}
+
+/// Stable runtime correspondences prepared by the topology transaction.
+/// `None` denotes a genuinely new prescribed carrier or source drive.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CanonicalGpuRuntimeTransfer {
+    pub components: Vec<CanonicalComponentTransfer>,
+    pub prescribed_sources: Vec<Option<u32>>,
+    pub drive_sources: Vec<Option<u32>>,
+    pub runtime_serials: [u32; 4],
+}
+
+impl CanonicalGpuRuntimeTransfer {
+    pub fn identity(
+        source: &CanonicalWaveOperator,
+        target: &CanonicalWaveOperator,
+        source_forcing: &CanonicalForcing,
+        target_forcing: &CanonicalForcing,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        if source.component_count() != target.component_count()
+            || source.degrees_of_freedom() != target.degrees_of_freedom()
+            || source_forcing.sources().len() != target_forcing.sources().len()
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "identity runtime transfer requires matching stable layouts",
+            ));
+        }
+        Ok(Self {
+            components: (0..target.component_count())
+                .map(|component| CanonicalComponentTransfer {
+                    sources: vec![(component as u32, 1.0)],
+                })
+                .collect(),
+            prescribed_sources: source_forcing
+                .prescribed()
+                .iter()
+                .zip(target_forcing.prescribed())
+                .enumerate()
+                .map(|(node, (source, target))| {
+                    (source.is_some() && target.is_some()).then_some(node as u32)
+                })
+                .collect(),
+            drive_sources: (0..target_forcing.sources().len())
+                .map(|drive| Some(drive as u32))
+                .collect(),
+            runtime_serials: [0; 4],
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalGpuTransferManifest {
+    pub layout_version: u32,
+    pub word_count: usize,
+    pub bytes: usize,
+    pub dispatches: usize,
+    pub exact_primary: usize,
+    pub exact_complementary: usize,
+    pub target_components: usize,
+}
+
+#[derive(Clone)]
+pub struct CanonicalGpuTransferPlan {
+    pub manifest: CanonicalGpuTransferManifest,
+    source_node_count: usize,
+    source_sample_count: usize,
+    source_gap_count: usize,
+    source_outgoing_count: usize,
+    target_node_count: usize,
+    target_sample_count: usize,
+    target_gap_count: usize,
+    target_outgoing_count: usize,
+    target_component_count: usize,
+    source_drive_count: usize,
+    target_drive_count: usize,
+    words: Vec<GpuCanonicalTransferWord>,
+}
+
+#[derive(Clone)]
+pub struct CanonicalGpuLiveEvent {
+    kind: u32,
+    serial: u32,
+    dispatches: u64,
+    upload: Vec<GpuCanonicalTableWord>,
+}
+
+impl CanonicalGpuLiveEvent {
+    pub fn primary_pulse(
+        operator: &CanonicalWaveOperator,
+        field_increment: &[f64],
+        serial: u32,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        if field_increment.len() != operator.degrees_of_freedom() {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a live pulse must cover every primary node",
+            ));
+        }
+        let values = field_increment
+            .iter()
+            .zip(operator.primary_mass())
+            .map(|(increment, mass)| finite_f32(increment * mass, "live primary pulse"))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::scalar_payload(EVENT_PRIMARY_PULSE, serial, 5, &values, 0)
+    }
+
+    pub fn maintenance(
+        integrated_correction: &[f64],
+        serial: u32,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        let values = integrated_correction
+            .iter()
+            .copied()
+            .map(|value| finite_f32(value, "live maintenance correction"))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::scalar_payload(EVENT_MAINTENANCE, serial, 5, &values, 0)
+    }
+
+    pub fn grid_filter(strength: f64, serial: u32) -> Result<Self, CanonicalGpuBuildError> {
+        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "grid-filter strength must be in [0, 1]",
+            ));
+        }
+        Self::scalar_payload(
+            EVENT_GRID_FILTER,
+            serial,
+            7,
+            &[],
+            finite_f32(strength, "grid-filter strength")?.to_bits(),
+        )
+    }
+
+    pub fn linear_loss_patch(
+        time_step: f64,
+        primary_rates: &[f64],
+        complementary_rates: &[f64],
+        serial: u32,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        let values = primary_rates
+            .iter()
+            .chain(complementary_rates)
+            .map(|rate| loss_fraction(*rate, 0.5 * time_step, "live linear loss"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let has_loss = values.iter().any(|value| *value != 0.0);
+        let complementary_zero = values[primary_rates.len()..]
+            .iter()
+            .all(|value| *value == 0.0);
+        let event = Self::scalar_payload(
+            EVENT_LINEAR_LAW_PATCH,
+            serial,
+            5,
+            &values,
+            u32::from(has_loss) | (u32::from(complementary_zero) << 2),
+        )?;
+        Ok(event)
+    }
+
+    pub fn source_patch(
+        forcing: &CanonicalForcing,
+        time_step: f64,
+        serial: u32,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        Self::validate_serial(serial)?;
+        let clock = CanonicalGpuClock::initial(time_step)?;
+        let mut upload = vec![GpuCanonicalTableWord {
+            data: UVec4::new(
+                EVENT_SOURCE_PATCH,
+                serial,
+                usize_u32(forcing.sources().len())?,
+                0,
+            ),
+        }];
+        for source in forcing.sources() {
+            upload.extend(gpu_drive(source.drive(), clock)?);
+        }
+        Ok(Self {
+            kind: EVENT_SOURCE_PATCH,
+            serial,
+            dispatches: 5,
+            upload,
+        })
+    }
+
+    fn scalar_payload(
+        kind: u32,
+        serial: u32,
+        dispatches: u64,
+        values: &[f32],
+        flags: u32,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        Self::validate_serial(serial)?;
+        let mut upload = Vec::with_capacity(values.len() + 1);
+        upload.push(GpuCanonicalTableWord {
+            data: UVec4::new(kind, serial, usize_u32(values.len())?, flags),
+        });
+        upload.extend(values.iter().map(|value| GpuCanonicalTableWord {
+            data: UVec4::new(value.to_bits(), 0, 0, 0),
+        }));
+        Ok(Self {
+            kind,
+            serial,
+            dispatches,
+            upload,
+        })
+    }
+
+    fn validate_serial(serial: u32) -> Result<(), CanonicalGpuBuildError> {
+        if serial == 0 {
+            Err(CanonicalGpuBuildError::InvalidLayout(
+                "live canonical events require a nonzero serial",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -616,7 +859,14 @@ impl CanonicalGpuPlan {
                 finite_f32(clock.local_seconds(), "local clock")?,
                 maximum_dt,
             ),
+            clock_origin: {
+                let [high, low] = split_f64(clock.epoch_origin_seconds)?;
+                Vec4::new(high, low, high, low)
+            },
             event: UVec4::ZERO,
+            event_result: UVec4::ZERO,
+            runtime_serials: UVec4::ZERO,
+            runtime_slots: UVec4::ZERO,
             accepted_accounting_a: Vec4::ZERO,
             accepted_accounting_b: Vec4::ZERO,
             candidate_accounting_a: Vec4::ZERO,
@@ -827,6 +1077,403 @@ impl CanonicalGpuPlan {
         self.manifest.event_dispatches = dispatches;
         Ok(())
     }
+
+    pub fn stage_failure_injection(
+        &mut self,
+        reason: u32,
+        state_word: u32,
+    ) -> Result<(), CanonicalGpuBuildError> {
+        if !(CANONICAL_FAILURE_LAYOUT..=CANONICAL_FAILURE_NON_FINITE).contains(&reason)
+            || state_word as usize >= self.state.len()
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "failure injection must name a valid state word and reason",
+            ));
+        }
+        self.status.words.z = reason;
+        self.status.words.w = state_word;
+        Ok(())
+    }
+}
+
+impl CanonicalGpuTransferPlan {
+    #[allow(clippy::too_many_arguments)]
+    pub fn compile(
+        source: &CanonicalWaveOperator,
+        target: &CanonicalWaveOperator,
+        source_forcing: &CanonicalForcing,
+        target_forcing: &CanonicalForcing,
+        primary: &CanonicalPrimaryTransferMap,
+        complementary: &CanonicalVectorTransferMap,
+        thin_gap: &CanonicalThinGapHistoryTransferMap,
+        outgoing: &CanonicalOutgoingHistoryTransferMap,
+        runtime: &CanonicalGpuRuntimeTransfer,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        let outgoing = outgoing.normalized_matrix(source, target)?;
+        Self::compile_prepared(
+            source,
+            target,
+            source_forcing,
+            target_forcing,
+            primary,
+            complementary,
+            thin_gap,
+            &outgoing,
+            runtime,
+        )
+    }
+
+    /// Packs geometry-prepared transfer data without repeating the potentially
+    /// nonlocal outgoing-basis composition on the UI thread.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compile_prepared(
+        source: &CanonicalWaveOperator,
+        target: &CanonicalWaveOperator,
+        source_forcing: &CanonicalForcing,
+        target_forcing: &CanonicalForcing,
+        primary: &CanonicalPrimaryTransferMap,
+        complementary: &CanonicalVectorTransferMap,
+        thin_gap: &CanonicalThinGapHistoryTransferMap,
+        outgoing: &CanonicalOutgoingNormalizedTransfer,
+        runtime: &CanonicalGpuRuntimeTransfer,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        let primary_targets = primary.targets();
+        let vector_targets = complementary.targets();
+        let gap_targets = thin_gap.targets();
+        let source_gap_count = source.thin_gap_samples().len();
+        let target_gap_count = target.thin_gap_samples().len();
+        let source_outgoing_count = source
+            .outgoing_boundary()
+            .map_or(0, |boundary| boundary.auxiliary_count());
+        let target_outgoing_count = target
+            .outgoing_boundary()
+            .map_or(0, |boundary| boundary.auxiliary_count());
+        if primary.source_support().len() != source.degrees_of_freedom()
+            || primary_targets.len() != target.degrees_of_freedom()
+            || complementary.source_sample_count() != source.complementary_degrees_of_freedom()
+            || vector_targets.len() != target.complementary_degrees_of_freedom()
+            || gap_targets.len() != target_gap_count
+            || thin_gap.source_energy_weights().len() != source_gap_count
+            || outgoing.source_count != source_outgoing_count
+            || outgoing.target_count != target_outgoing_count
+            || runtime.components.len() != target.component_count()
+            || runtime.prescribed_sources.len() != target.degrees_of_freedom()
+            || runtime.drive_sources.len() != target_forcing.sources().len()
+            || source_forcing.prescribed().len() != source.degrees_of_freedom()
+            || target_forcing.prescribed().len() != target.degrees_of_freedom()
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "canonical transfer maps do not describe the source and target generations",
+            ));
+        }
+        let mut retained = vec![0.0; source.component_count()];
+        for component in &runtime.components {
+            for (source_component, share) in &component.sources {
+                if *source_component as usize >= source.component_count()
+                    || !share.is_finite()
+                    || *share < 0.0
+                    || *share > 1.0
+                {
+                    return Err(CanonicalGpuBuildError::InvalidLayout(
+                        "component retained shares must be finite and lie in [0, 1]",
+                    ));
+                }
+                retained[*source_component as usize] += share;
+            }
+        }
+        if retained.iter().any(|share| *share > 1.0 + 2.0e-12) {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "component split shares exceed the available source total",
+            ));
+        }
+        for (target_node, source_node) in runtime.prescribed_sources.iter().enumerate() {
+            if source_node
+                .is_some_and(|source_node| source_node as usize >= source.degrees_of_freedom())
+                || source_node.is_some()
+                    && (source_forcing.prescribed()[source_node.unwrap() as usize].is_none()
+                        || target_forcing.prescribed()[target_node].is_none())
+            {
+                return Err(CanonicalGpuBuildError::InvalidLayout(
+                    "prescribed runtime correspondence is not a prescribed node",
+                ));
+            }
+        }
+        if runtime
+            .drive_sources
+            .iter()
+            .flatten()
+            .any(|drive| *drive as usize >= source_forcing.sources().len())
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "source-drive runtime correspondence is out of range",
+            ));
+        }
+
+        let mut words = vec![GpuCanonicalTransferWord::default(); TRANSFER_HEADER_WORDS];
+        let primary_identity = source.degrees_of_freedom() == target.degrees_of_freedom()
+            && primary_targets
+                .iter()
+                .enumerate()
+                .all(|(index, target)| target.exact && target.source_nodes[0] == index as u32);
+        let vector_identity = source.complementary_degrees_of_freedom()
+            == target.complementary_degrees_of_freedom()
+            && vector_targets.iter().enumerate().all(|(index, target)| {
+                target.exact
+                    && target.source_count == 1
+                    && target.source_samples[0] == index as u32
+                    && target.weights[0] == 1.0
+            });
+        let primary_offset = words.len();
+        for target in primary_targets.iter().filter(|_| !primary_identity) {
+            words.extend([
+                transfer_word(
+                    target.source_nodes[0],
+                    target.source_nodes[1],
+                    target.source_nodes[2],
+                    target.source_nodes[3],
+                ),
+                transfer_float_word([
+                    target.coefficients[0],
+                    target.coefficients[1],
+                    target.coefficients[2],
+                    target.coefficients[3],
+                ])?,
+                transfer_word(
+                    target.source_nodes[4],
+                    target.source_nodes[5],
+                    target.source_nodes[6],
+                    u32::from(target.source_count)
+                        | (u32::from(target.exact) << 8)
+                        | (target.target_component << 9),
+                ),
+                transfer_float_word([
+                    target.coefficients[4],
+                    target.coefficients[5],
+                    target.coefficients[6],
+                    target.target_support,
+                ])?,
+            ]);
+        }
+        let vector_offset = words.len();
+        for target in vector_targets.iter().filter(|_| !vector_identity) {
+            words.extend([
+                transfer_word(
+                    target.source_samples[0],
+                    target.source_samples[1],
+                    target.source_samples[2],
+                    target.source_samples[3],
+                ),
+                transfer_float_word([
+                    target.weights[0],
+                    target.weights[1],
+                    target.weights[2],
+                    target.weights[3],
+                ])?,
+                transfer_word(
+                    target.source_samples[4],
+                    target.source_samples[5],
+                    0,
+                    u32::from(target.source_count) | (u32::from(target.exact) << 8),
+                ),
+                transfer_float_word([target.weights[4], target.weights[5], 0.0, 0.0])?,
+            ]);
+        }
+        let gap_offset = words.len();
+        let target_gap_energy = thin_gap.target_energy_weights();
+        for (target, energy_weight) in gap_targets.iter().zip(target_gap_energy) {
+            if target.donors.len() > 3 {
+                return Err(CanonicalGpuBuildError::InvalidLayout(
+                    "thin-gap GPU history transfer supports at most three local donors",
+                ));
+            }
+            let mut indices = [0_u32; 3];
+            let mut weights = [0.0; 3];
+            for (slot, (index, weight)) in target.donors.iter().enumerate() {
+                if *index as usize >= source_gap_count {
+                    return Err(CanonicalGpuBuildError::InvalidLayout(
+                        "thin-gap history donor is out of range",
+                    ));
+                }
+                indices[slot] = *index;
+                weights[slot] = *weight;
+            }
+            words.extend([
+                transfer_word(
+                    indices[0],
+                    indices[1],
+                    indices[2],
+                    target.donors.len() as u32 | (u32::from(target.exact) << 8),
+                ),
+                transfer_float_word([weights[0], weights[1], weights[2], 0.0])?,
+                transfer_float_word([energy_weight, 0.0, 0.0, 0.0])?,
+            ]);
+        }
+        let outgoing_offset = words.len();
+        if outgoing.source_count != 0 && !outgoing.identity {
+            for row in outgoing.values.chunks_exact(outgoing.source_count) {
+                pack_transfer_scalars(&mut words, row)?;
+            }
+        }
+        let source_inverse_support_offset = words.len();
+        if !primary_identity {
+            pack_transfer_scalars(
+                &mut words,
+                &primary
+                    .source_support()
+                    .iter()
+                    .map(|support| support.recip())
+                    .collect::<Vec<_>>(),
+            )?;
+        }
+        let source_label_offset = words.len();
+        if !primary_identity {
+            for labels in source.component_labels().chunks(4) {
+                let mut packed = [0_u32; 4];
+                packed[..labels.len()].copy_from_slice(labels);
+                words.push(transfer_word(packed[0], packed[1], packed[2], packed[3]));
+            }
+        }
+        let component_offset = words.len();
+        let component_stride = 1 + source.component_count().div_ceil(4);
+        if !primary_identity {
+            for target_component in &runtime.components {
+                words.push(transfer_word(
+                    u32::from(!target_component.sources.is_empty()),
+                    0,
+                    0,
+                    0,
+                ));
+                let mut coefficients = vec![0.0; source.component_count()];
+                for (source_component, share) in &target_component.sources {
+                    coefficients[*source_component as usize] += *share;
+                }
+                pack_transfer_scalars(&mut words, &coefficients)?;
+            }
+        }
+        let prescribed_offset = words.len();
+        if target_forcing.prescribed().iter().any(Option::is_some) {
+            for mappings in runtime.prescribed_sources.chunks(4) {
+                let mut packed = [NO_INDEX; 4];
+                for (slot, mapping) in mappings.iter().enumerate() {
+                    packed[slot] = mapping.unwrap_or(NO_INDEX);
+                }
+                words.push(transfer_word(packed[0], packed[1], packed[2], packed[3]));
+            }
+        }
+        let drive_offset = words.len();
+        for mappings in runtime.drive_sources.chunks(4) {
+            let mut packed = [NO_INDEX; 4];
+            for (slot, mapping) in mappings.iter().enumerate() {
+                packed[slot] = mapping.unwrap_or(NO_INDEX);
+            }
+            words.push(transfer_word(packed[0], packed[1], packed[2], packed[3]));
+        }
+        let source_gap_energy_offset = words.len();
+        pack_transfer_scalars(&mut words, &thin_gap.source_energy_weights())?;
+        let word_count = words.len();
+        words[0] = transfer_word(
+            TRANSFER_LAYOUT_VERSION,
+            usize_u32(source.degrees_of_freedom())?,
+            usize_u32(source.complementary_degrees_of_freedom())?,
+            usize_u32(source_gap_count)?,
+        );
+        words[1] = transfer_word(
+            usize_u32(source_outgoing_count)?,
+            usize_u32(target.degrees_of_freedom())?,
+            usize_u32(target.complementary_degrees_of_freedom())?,
+            usize_u32(target_gap_count)?,
+        );
+        words[2] = transfer_word(
+            usize_u32(target_outgoing_count)?,
+            usize_u32(target.component_count())?,
+            usize_u32(source.component_count())?,
+            usize_u32(primary_offset)?,
+        );
+        words[3] = transfer_word(
+            usize_u32(vector_offset)?,
+            usize_u32(gap_offset)?,
+            usize_u32(outgoing_offset)?,
+            usize_u32(source_inverse_support_offset)?,
+        );
+        words[4] = transfer_word(
+            usize_u32(source_label_offset)?,
+            usize_u32(component_offset)?,
+            usize_u32(prescribed_offset)?,
+            usize_u32(drive_offset)?,
+        );
+        words[5] = transfer_word(
+            usize_u32(source_gap_energy_offset)?,
+            usize_u32(word_count)?,
+            usize_u32(source_forcing.sources().len())?,
+            usize_u32(target_forcing.sources().len())?,
+        );
+        words[6] = transfer_word(
+            runtime.runtime_serials[0],
+            runtime.runtime_serials[1],
+            runtime.runtime_serials[2],
+            runtime.runtime_serials[3],
+        );
+        words[7] = transfer_word(
+            usize_u32(component_stride)?,
+            u32::from(primary_identity),
+            u32::from(vector_identity),
+            u32::from(outgoing.identity),
+        );
+        Ok(Self {
+            manifest: CanonicalGpuTransferManifest {
+                layout_version: TRANSFER_LAYOUT_VERSION,
+                word_count,
+                bytes: word_count * size_of::<GpuCanonicalTransferWord>(),
+                // Runtime, four state maps, reduction/correction, auxiliary
+                // energy, two main-energy reductions, finalization and commit.
+                dispatches: 14,
+                exact_primary: primary.exact_nodes(),
+                exact_complementary: complementary.exact_samples(),
+                target_components: target.component_count(),
+            },
+            source_node_count: source.degrees_of_freedom(),
+            source_sample_count: source.complementary_degrees_of_freedom(),
+            source_gap_count,
+            source_outgoing_count,
+            target_node_count: target.degrees_of_freedom(),
+            target_sample_count: target.complementary_degrees_of_freedom(),
+            target_gap_count,
+            target_outgoing_count,
+            target_component_count: target.component_count(),
+            source_drive_count: source_forcing.sources().len(),
+            target_drive_count: target_forcing.sources().len(),
+            words,
+        })
+    }
+}
+
+fn transfer_word(x: u32, y: u32, z: u32, w: u32) -> GpuCanonicalTransferWord {
+    GpuCanonicalTransferWord {
+        data: UVec4::new(x, y, z, w),
+    }
+}
+
+fn transfer_float_word(
+    values: [f64; 4],
+) -> Result<GpuCanonicalTransferWord, CanonicalGpuBuildError> {
+    Ok(transfer_word(
+        finite_f32(values[0], "transfer coefficient")?.to_bits(),
+        finite_f32(values[1], "transfer coefficient")?.to_bits(),
+        finite_f32(values[2], "transfer coefficient")?.to_bits(),
+        finite_f32(values[3], "transfer coefficient")?.to_bits(),
+    ))
+}
+
+fn pack_transfer_scalars(
+    words: &mut Vec<GpuCanonicalTransferWord>,
+    values: &[f64],
+) -> Result<(), CanonicalGpuBuildError> {
+    for values in values.chunks(4) {
+        let mut packed = [0.0; 4];
+        packed[..values.len()].copy_from_slice(values);
+        words.push(transfer_float_word(packed)?);
+    }
+    Ok(())
 }
 
 struct CompiledBoundary {
@@ -1106,6 +1753,12 @@ fn finite_f32(value: f64, name: &'static str) -> Result<f32, CanonicalGpuBuildEr
     }
 }
 
+fn split_f64(value: f64) -> Result<[f32; 2], CanonicalGpuBuildError> {
+    let high = finite_f32(value, "clock epoch origin")?;
+    let low = finite_f32(value - high as f64, "clock epoch origin residual")?;
+    Ok([high, low])
+}
+
 fn loss_fraction(
     rate: f64,
     duration: f64,
@@ -1134,6 +1787,7 @@ fn reduced_phase(value: f64) -> f64 {
 
 const GPU_STATUS_READY: u32 = 1;
 const GPU_STATUS_FAILED: u32 = 2;
+const GPU_HANDOFF_PENDING: u32 = u32::MAX;
 pub const CANONICAL_FAILURE_LAYOUT: u32 = 1;
 pub const CANONICAL_FAILURE_TIMESTEP: u32 = 2;
 pub const CANONICAL_FAILURE_INVERSE_DOMAIN: u32 = 3;
@@ -1149,6 +1803,8 @@ pub struct CanonicalGpuStats {
     dispatches: AtomicU64,
     status: AtomicU32,
     failure: AtomicU32,
+    processed_event: AtomicU32,
+    event_rejection: AtomicU32,
 }
 
 impl CanonicalGpuStats {
@@ -1175,6 +1831,14 @@ impl CanonicalGpuStats {
             _ => "loading",
         }
     }
+
+    pub fn processed_event(&self) -> u32 {
+        self.processed_event.load(Ordering::Relaxed)
+    }
+
+    pub fn event_rejection(&self) -> u32 {
+        self.event_rejection.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone)]
@@ -1200,6 +1864,7 @@ struct CanonicalGpuBufferHandles {
     needs_loss_stages: bool,
     needs_accounting: bool,
     event_kind: u32,
+    event_serial: u32,
     event_dispatches: u64,
 }
 
@@ -1218,6 +1883,39 @@ impl CanonicalGpuBufferHandles {
     }
 }
 
+#[derive(Default)]
+struct CanonicalGpuHandoffStats {
+    completed: AtomicU32,
+    failure: AtomicU32,
+}
+
+#[derive(Clone)]
+struct CanonicalGpuHandoffHandles {
+    target: CanonicalGpuBufferHandles,
+    transfer: Handle<ShaderBuffer>,
+    manifest: CanonicalGpuLayoutManifest,
+    transfer_manifest: CanonicalGpuTransferManifest,
+    stats: Arc<CanonicalGpuHandoffStats>,
+    status_entity: Entity,
+}
+
+#[derive(Clone)]
+struct CanonicalGpuLiveEventHandles {
+    upload: Handle<ShaderBuffer>,
+    kind: u32,
+    serial: u32,
+    dispatches: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CanonicalGpuHandoffOutcome {
+    #[default]
+    None,
+    Pending,
+    Accepted,
+    Rejected(u32),
+}
+
 #[derive(Resource, Clone, ExtractResource)]
 pub struct CanonicalGpuRequest {
     generation: u64,
@@ -1228,6 +1926,9 @@ pub struct CanonicalGpuRequest {
     stats: Arc<CanonicalGpuStats>,
     readback_entities: Vec<Entity>,
     status_readback_entity: Option<Entity>,
+    handoff: Option<CanonicalGpuHandoffHandles>,
+    handoff_outcome: CanonicalGpuHandoffOutcome,
+    live_event: Option<CanonicalGpuLiveEventHandles>,
 }
 
 impl Default for CanonicalGpuRequest {
@@ -1241,7 +1942,69 @@ impl Default for CanonicalGpuRequest {
             stats: Arc::new(CanonicalGpuStats::default()),
             readback_entities: Vec::new(),
             status_readback_entity: None,
+            handoff: None,
+            handoff_outcome: CanonicalGpuHandoffOutcome::None,
+            live_event: None,
         }
+    }
+}
+
+struct AddedCanonicalBuffers {
+    handles: CanonicalGpuBufferHandles,
+    manifest: CanonicalGpuLayoutManifest,
+    initial_step: u64,
+    local_step: u32,
+}
+
+fn add_canonical_buffers(
+    assets: &mut Assets<ShaderBuffer>,
+    plan: CanonicalGpuPlan,
+) -> AddedCanonicalBuffers {
+    let initial_step = plan.control.clock_u32.w as u64;
+    let local_step = plan.control.clock_u32.z;
+    let node_count = plan.control.counts_a.x;
+    let sample_count = plan.control.counts_a.y;
+    let gap_count = plan.control.counts_b.x;
+    let state_count = plan.control.counts_a.w;
+    let trace_count = plan.control.counts_b.y;
+    let drive_count = plan.control.counts_c.z;
+    let time_limit = (256.0 / plan.control.clock_f32.x as f64)
+        .ceil()
+        .clamp(1.0, u32::MAX as f64) as u32;
+    let rebase_step_limit = time_limit.min(1 << 16);
+    let scratch_count = plan.scratch.len() as u32;
+    let accounting_item_count = node_count + sample_count + plan.control.counts_b.z;
+    let dispatches_per_step = plan.manifest.dispatches_per_step as u64;
+    let handles = CanonicalGpuBufferHandles {
+        control: assets.add(ShaderBuffer::from(plan.control)),
+        status: assets.add(ShaderBuffer::from(plan.status)),
+        state: assets.add(ShaderBuffer::from(plan.state)),
+        nodes: assets.add(ShaderBuffer::from(plan.nodes)),
+        samples: assets.add(ShaderBuffer::from(plan.samples)),
+        tables: assets.add(ShaderBuffer::from(plan.tables)),
+        scratch: assets.add(ShaderBuffer::from(plan.scratch)),
+        boundary: assets.add(ShaderBuffer::from(plan.boundary)),
+        node_count,
+        sample_count,
+        gap_count,
+        state_count,
+        scratch_count,
+        accounting_item_count,
+        trace_count,
+        drive_count,
+        rebase_step_limit,
+        dispatches_per_step,
+        needs_loss_stages: plan.needs_loss_stages,
+        needs_accounting: plan.needs_accounting,
+        event_kind: plan.event_kind,
+        event_serial: plan.control.event.y,
+        event_dispatches: plan.manifest.event_dispatches as u64,
+    };
+    AddedCanonicalBuffers {
+        handles,
+        manifest: plan.manifest,
+        initial_step,
+        local_step,
     }
 }
 
@@ -1255,52 +2018,11 @@ impl CanonicalGpuRequest {
         self.clear(assets, commands);
         let generation = self.generation.wrapping_add(1).max(1);
         self.stats = Arc::new(CanonicalGpuStats::default());
-        let initial_step = plan.control.clock_u32.w as u64;
-        let node_count = plan.control.counts_a.x;
-        let sample_count = plan.control.counts_a.y;
-        let gap_count = plan.control.counts_b.x;
-        let state_count = plan.control.counts_a.w;
-        let trace_count = plan.control.counts_b.y;
-        let drive_count = plan.control.counts_c.z;
-        let time_limit = (256.0 / plan.control.clock_f32.x as f64)
-            .ceil()
-            .clamp(1.0, u32::MAX as f64) as u32;
-        let rebase_step_limit = time_limit.min(1 << 16);
-        let scratch_count = plan.scratch.len() as u32;
-        let accounting_item_count = node_count + sample_count + plan.control.counts_b.z;
-        let dispatches_per_step = plan.manifest.dispatches_per_step as u64;
-        let control = assets.add(ShaderBuffer::from(plan.control));
-        let status = assets.add(ShaderBuffer::from(plan.status));
-        let state = assets.add(ShaderBuffer::from(plan.state));
-        let nodes = assets.add(ShaderBuffer::from(plan.nodes));
-        let samples = assets.add(ShaderBuffer::from(plan.samples));
-        let tables = assets.add(ShaderBuffer::from(plan.tables));
-        let scratch = assets.add(ShaderBuffer::from(plan.scratch));
-        let boundary = assets.add(ShaderBuffer::from(plan.boundary));
-        let handles = CanonicalGpuBufferHandles {
-            control,
-            status,
-            state,
-            nodes,
-            samples,
-            tables,
-            scratch,
-            boundary,
-            node_count,
-            sample_count,
-            gap_count,
-            state_count,
-            scratch_count,
-            accounting_item_count,
-            trace_count,
-            drive_count,
-            rebase_step_limit,
-            dispatches_per_step,
-            needs_loss_stages: plan.needs_loss_stages,
-            needs_accounting: plan.needs_accounting,
-            event_kind: plan.event_kind,
-            event_dispatches: plan.manifest.event_dispatches as u64,
-        };
+        let added = add_canonical_buffers(assets, plan);
+        let handles = added.handles;
+        let node_count = handles.node_count;
+        let sample_count = handles.sample_count;
+        let state_count = handles.state_count;
         let state_entity = commands
             .spawn((
                 Readback::buffer(handles.state.clone()),
@@ -1331,20 +2053,32 @@ impl CanonicalGpuRequest {
             .id();
         self.generation = generation;
         self.revision = self.revision.wrapping_add(1).max(1);
+        let initial_step = added.initial_step;
         self.desired_steps = initial_step;
         self.stats
             .completed_steps
             .store(initial_step, Ordering::Relaxed);
         self.stats
             .local_step
-            .store(plan.control.clock_u32.z, Ordering::Relaxed);
-        self.manifest = Some(plan.manifest);
+            .store(added.local_step, Ordering::Relaxed);
+        self.manifest = Some(added.manifest);
         self.buffers = Some(handles);
         self.readback_entities = vec![state_entity, control_entity, status_entity];
         self.status_readback_entity = Some(status_entity);
+        self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
     }
 
     pub fn clear(&mut self, assets: &mut Assets<ShaderBuffer>, commands: &mut Commands) {
+        if let Some(handoff) = self.handoff.take() {
+            for handle in handoff.target.all() {
+                assets.remove(handle.id());
+            }
+            assets.remove(handoff.transfer.id());
+            commands.entity(handoff.status_entity).despawn();
+        }
+        if let Some(event) = self.live_event.take() {
+            assets.remove(event.upload.id());
+        }
         if let Some(handles) = self.buffers.take() {
             for handle in handles.all() {
                 assets.remove(handle.id());
@@ -1355,6 +2089,7 @@ impl CanonicalGpuRequest {
         }
         self.status_readback_entity = None;
         self.manifest = None;
+        self.handoff_outcome = CanonicalGpuHandoffOutcome::None;
     }
 
     pub fn request_steps(&mut self, count: u64) {
@@ -1379,6 +2114,134 @@ impl CanonicalGpuRequest {
 
     pub fn stats(&self) -> &Arc<CanonicalGpuStats> {
         &self.stats
+    }
+
+    pub fn handoff_outcome(&self) -> CanonicalGpuHandoffOutcome {
+        self.handoff_outcome
+    }
+
+    pub fn handoff_manifest(&self) -> Option<&CanonicalGpuTransferManifest> {
+        self.handoff
+            .as_ref()
+            .map(|handoff| &handoff.transfer_manifest)
+    }
+
+    pub fn queue_live_event(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        event: CanonicalGpuLiveEvent,
+    ) -> Result<(), &'static str> {
+        if self.buffers.is_none() {
+            return Err("canonical GPU is not installed");
+        }
+        if self.handoff.is_some() || self.live_event.is_some() {
+            return Err("another canonical transaction is pending");
+        }
+        if self.stats.failure() != 0 || event.serial <= self.stats.processed_event() {
+            return Err("live canonical event serial is stale or the solver has failed");
+        }
+        let handles = self.buffers.as_ref().expect("checked installed buffers");
+        let payload_valid = match event.kind {
+            EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE => {
+                event.upload.len() == handles.node_count as usize + 1
+            }
+            EVENT_GRID_FILTER => event.upload.len() == 1,
+            EVENT_LINEAR_LAW_PATCH => {
+                event.upload.len()
+                    == handles.node_count as usize + handles.sample_count as usize + 1
+            }
+            EVENT_SOURCE_PATCH => event.upload.len() == handles.drive_count as usize * 4 + 1,
+            _ => false,
+        };
+        if !payload_valid {
+            return Err("live canonical event does not match the active generation");
+        }
+        if event.kind == EVENT_LINEAR_LAW_PATCH {
+            let handles = self.buffers.as_mut().expect("checked installed buffers");
+            // Conservative host scheduling: extra loss/accounting dispatches
+            // are harmless if a later valid patch disables every rate.
+            handles.needs_loss_stages = true;
+            handles.needs_accounting = true;
+        }
+        if event.kind == EVENT_SOURCE_PATCH
+            && self.buffers.as_ref().is_some_and(|handles| {
+                handles.drive_count as usize != event.upload[0].data.z as usize
+            })
+        {
+            return Err("source patch changes the compiled drive layout");
+        }
+        self.live_event = Some(CanonicalGpuLiveEventHandles {
+            upload: assets.add(ShaderBuffer::from(event.upload)),
+            kind: event.kind,
+            serial: event.serial,
+            dispatches: event.dispatches,
+        });
+        self.revision = self.revision.wrapping_add(1).max(1);
+        Ok(())
+    }
+
+    /// Begins an all-or-none latest-state GPU generation handoff.
+    pub fn begin_handoff(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        mut target: CanonicalGpuPlan,
+        transfer: CanonicalGpuTransferPlan,
+    ) -> Result<(), &'static str> {
+        if self.handoff.is_some() {
+            return Err("a canonical GPU handoff is already pending");
+        }
+        if !self.caught_up() || self.stats.failure() != 0 {
+            return Err("canonical GPU handoff requires a healthy complete-step boundary");
+        }
+        let source = self
+            .buffers
+            .as_ref()
+            .ok_or("canonical GPU is not installed")?;
+        if source.event_kind != EVENT_NONE && self.stats.processed_event() < source.event_serial {
+            return Err("canonical GPU handoff is waiting for the staged event boundary");
+        }
+        if source.node_count as usize != transfer.source_node_count
+            || source.sample_count as usize != transfer.source_sample_count
+            || source.gap_count as usize != transfer.source_gap_count
+            || source.state_count as usize
+                != transfer.source_node_count
+                    + transfer.source_sample_count
+                    + transfer.source_gap_count
+                    + transfer.source_outgoing_count
+            || source.drive_count as usize != transfer.source_drive_count
+            || target.node_count != transfer.target_node_count
+            || target.sample_count != transfer.target_sample_count
+            || target.control.counts_b.x as usize != transfer.target_gap_count
+            || target.auxiliary_count != transfer.target_gap_count + transfer.target_outgoing_count
+            || target.control.counts_c.w as usize != transfer.target_component_count
+            || target.control.counts_c.z as usize != transfer.target_drive_count
+            || target.event_kind != EVENT_NONE
+        {
+            return Err("canonical GPU handoff layouts do not match");
+        }
+        target.status.transaction.x = GPU_HANDOFF_PENDING;
+        let added = add_canonical_buffers(assets, target);
+        let stats = Arc::new(CanonicalGpuHandoffStats::default());
+        let status_entity = commands
+            .spawn((
+                Readback::buffer(added.handles.status.clone()),
+                CanonicalHandoffStatusReadback {
+                    stats: stats.clone(),
+                },
+            ))
+            .id();
+        self.handoff = Some(CanonicalGpuHandoffHandles {
+            target: added.handles,
+            transfer: assets.add(ShaderBuffer::from(transfer.words)),
+            manifest: added.manifest,
+            transfer_manifest: transfer.manifest,
+            stats,
+            status_entity,
+        });
+        self.handoff_outcome = CanonicalGpuHandoffOutcome::Pending;
+        self.revision = self.revision.wrapping_add(1).max(1);
+        Ok(())
     }
 
     /// Installs a deterministic failure at final validation of the selected
@@ -1406,6 +2269,7 @@ impl CanonicalGpuRequest {
             commands,
             GpuCanonicalStatus {
                 words: UVec4::new(0, 0, reason, state_word),
+                transaction: UVec4::ZERO,
             },
         );
         Ok(())
@@ -1467,6 +2331,8 @@ pub struct CanonicalGpuDisplay {
     pub clock: Option<CanonicalGpuDisplayClock>,
     pub accounting: [f32; 8],
     pub readbacks: u64,
+    pub runtime_serials: [u32; 4],
+    pub event_result: [u32; 4],
     raw_state: Vec<GpuCanonicalStateWord>,
     node_count: usize,
     sample_count: usize,
@@ -1511,6 +2377,8 @@ impl CanonicalGpuDisplay {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CanonicalGpuDisplayClock {
     pub epoch: u64,
+    pub epoch_origin_seconds: f64,
+    pub absolute_seconds: f64,
     pub step_in_epoch: u32,
     pub accepted_steps: u32,
     pub local_seconds: f32,
@@ -1535,6 +2403,11 @@ struct CanonicalControlReadback {
 #[derive(Component)]
 struct CanonicalStatusReadback {
     stats: Arc<CanonicalGpuStats>,
+}
+
+#[derive(Component)]
+struct CanonicalHandoffStatusReadback {
+    stats: Arc<CanonicalGpuHandoffStats>,
 }
 
 fn receive_canonical_state(
@@ -1572,12 +2445,22 @@ fn receive_canonical_control(
         .completed_steps
         .store(value.clock_u32.w as u64, Ordering::Relaxed);
     tag.stats.local_step.store(step, Ordering::Relaxed);
+    tag.stats
+        .processed_event
+        .store(value.event_result.z, Ordering::Relaxed);
+    tag.stats
+        .event_rejection
+        .store(value.event_result.w, Ordering::Relaxed);
     if tag.stats.failure() == 0 {
         tag.stats.status.store(GPU_STATUS_READY, Ordering::Relaxed);
     }
     display.generation = tag.generation;
     display.clock = Some(CanonicalGpuDisplayClock {
         epoch: value.clock_u32.x as u64 | ((value.clock_u32.y as u64) << 32),
+        epoch_origin_seconds: value.clock_origin.x as f64 + value.clock_origin.y as f64,
+        absolute_seconds: value.clock_origin.x as f64
+            + value.clock_origin.y as f64
+            + value.clock_f32.y as f64,
         step_in_epoch: step,
         accepted_steps: value.clock_u32.w,
         local_seconds: value.clock_f32.y,
@@ -1586,6 +2469,8 @@ fn receive_canonical_control(
     });
     display.accounting[..4].copy_from_slice(&value.accepted_accounting_a.to_array());
     display.accounting[4..].copy_from_slice(&value.accepted_accounting_b.to_array());
+    display.runtime_serials = value.runtime_serials.to_array();
+    display.event_result = value.event_result.to_array();
     display.accepted_slot = value.event.z & 1;
     refresh_canonical_display(&mut display);
 }
@@ -1635,16 +2520,138 @@ fn receive_canonical_status(event: On<ReadbackComplete>, tags: Query<&CanonicalS
     );
 }
 
+fn receive_canonical_handoff_status(
+    event: On<ReadbackComplete>,
+    tags: Query<&CanonicalHandoffStatusReadback>,
+) {
+    let Ok(tag) = tags.get(event.entity) else {
+        return;
+    };
+    let values: Vec<GpuCanonicalStatus> = event.to_shader_type();
+    let Some(value) = values.first() else { return };
+    if value.transaction.x == GPU_HANDOFF_PENDING {
+        return;
+    }
+    tag.stats
+        .failure
+        .store(value.words.x.max(value.words.y), Ordering::Relaxed);
+    tag.stats.completed.store(1, Ordering::Release);
+}
+
+fn settle_canonical_handoff(
+    mut commands: Commands,
+    mut assets: ResMut<Assets<ShaderBuffer>>,
+    mut request: ResMut<CanonicalGpuRequest>,
+) {
+    let completed = request
+        .handoff
+        .as_ref()
+        .is_some_and(|handoff| handoff.stats.completed.load(Ordering::Acquire) != 0);
+    if !completed {
+        return;
+    }
+    let handoff = request.handoff.take().expect("checked pending handoff");
+    commands.entity(handoff.status_entity).despawn();
+    assets.remove(handoff.transfer.id());
+    let failure = handoff.stats.failure.load(Ordering::Relaxed);
+    if failure != 0 {
+        for handle in handoff.target.all() {
+            assets.remove(handle.id());
+        }
+        request.handoff_outcome = CanonicalGpuHandoffOutcome::Rejected(failure);
+        request.revision = request.revision.wrapping_add(1).max(1);
+        return;
+    }
+
+    if let Some(old) = request.buffers.take() {
+        for handle in old.all() {
+            assets.remove(handle.id());
+        }
+    }
+    for entity in request.readback_entities.drain(..) {
+        commands.entity(entity).despawn();
+    }
+    let generation = request.generation.wrapping_add(1).max(1);
+    let completed_steps = request.stats.completed_steps();
+    let stats = Arc::new(CanonicalGpuStats::default());
+    stats
+        .completed_steps
+        .store(completed_steps, Ordering::Relaxed);
+    stats.status.store(GPU_STATUS_READY, Ordering::Relaxed);
+    let target = handoff.target;
+    let state_entity = commands
+        .spawn((
+            Readback::buffer(target.state.clone()),
+            CanonicalStateReadback {
+                generation,
+                node_count: target.node_count,
+                sample_count: target.sample_count,
+                state_count: target.state_count,
+            },
+        ))
+        .id();
+    let control_entity = commands
+        .spawn((
+            Readback::buffer(target.control.clone()),
+            CanonicalControlReadback {
+                generation,
+                stats: stats.clone(),
+            },
+        ))
+        .id();
+    let status_entity = commands
+        .spawn((
+            Readback::buffer(target.status.clone()),
+            CanonicalStatusReadback {
+                stats: stats.clone(),
+            },
+        ))
+        .id();
+    request.generation = generation;
+    request.revision = request.revision.wrapping_add(1).max(1);
+    request.desired_steps = completed_steps;
+    request.buffers = Some(target);
+    request.manifest = Some(handoff.manifest);
+    request.stats = stats;
+    request.readback_entities = vec![state_entity, control_entity, status_entity];
+    request.status_readback_entity = Some(status_entity);
+    request.handoff_outcome = CanonicalGpuHandoffOutcome::Accepted;
+}
+
+fn settle_canonical_live_event(
+    mut assets: ResMut<Assets<ShaderBuffer>>,
+    mut request: ResMut<CanonicalGpuRequest>,
+) {
+    let completed = request
+        .live_event
+        .as_ref()
+        .is_some_and(|event| request.stats.processed_event() == event.serial);
+    if !completed {
+        return;
+    }
+    let event = request.live_event.take().expect("checked live event");
+    assets.remove(event.upload.id());
+    request.revision = request.revision.wrapping_add(1).max(1);
+}
+
 pub struct CanonicalWaveGpuPlugin;
 
 impl Plugin for CanonicalWaveGpuPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "canonical_wave.wgsl");
+        embedded_asset!(app, "canonical_transfer.wgsl");
+        embedded_asset!(app, "canonical_transfer_runtime.wgsl");
+        embedded_asset!(app, "canonical_transfer_energy.wgsl");
         app.init_resource::<CanonicalGpuRequest>()
             .init_resource::<CanonicalGpuDisplay>()
             .add_observer(receive_canonical_state)
             .add_observer(receive_canonical_control)
             .add_observer(receive_canonical_status)
+            .add_observer(receive_canonical_handoff_status)
+            .add_systems(
+                Update,
+                (settle_canonical_handoff, settle_canonical_live_event),
+            )
             .add_plugins(ExtractResourcePlugin::<CanonicalGpuRequest>::default());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -1653,9 +2660,21 @@ impl Plugin for CanonicalWaveGpuPlugin {
             .add_systems(RenderStartup, init_canonical_pipeline)
             .add_systems(
                 Render,
-                prepare_canonical_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                (
+                    prepare_canonical_bind_group,
+                    prepare_canonical_handoff_bind_groups,
+                    prepare_canonical_live_event_bind_group,
+                )
+                    .in_set(RenderSystems::PrepareBindGroups),
             )
-            .add_systems(RenderGraph, compute_canonical_wave.before(camera_driver));
+            .add_systems(
+                RenderGraph,
+                (
+                    compute_canonical_handoff,
+                    compute_canonical_wave.after(compute_canonical_handoff),
+                )
+                    .before(camera_driver),
+            );
     }
 }
 
@@ -1687,6 +2706,28 @@ struct CanonicalPipeline {
     commit_event: CachedComputePipelineId,
     rebase_clock_records: CachedComputePipelineId,
     commit_clock_rebase: CachedComputePipelineId,
+    handoff_finalize: CachedComputePipelineId,
+    handoff_reduce_prescribed: CachedComputePipelineId,
+    handoff_clear_scratch: CachedComputePipelineId,
+    handoff_commit: CachedComputePipelineId,
+    live_event_stage: CachedComputePipelineId,
+}
+
+#[derive(Resource)]
+struct CanonicalTransferPipeline {
+    map_layout: BindGroupLayoutDescriptor,
+    runtime_layout: BindGroupLayoutDescriptor,
+    energy_layout: BindGroupLayoutDescriptor,
+    transfer_runtime: CachedComputePipelineId,
+    transfer_primary: CachedComputePipelineId,
+    transfer_vector: CachedComputePipelineId,
+    transfer_gap: CachedComputePipelineId,
+    transfer_outgoing: CachedComputePipelineId,
+    reduce_density: CachedComputePipelineId,
+    reduce_components: CachedComputePipelineId,
+    correct_primary: CachedComputePipelineId,
+    reduce_auxiliary_energy: CachedComputePipelineId,
+    account_handoff: CachedComputePipelineId,
 }
 
 fn init_canonical_pipeline(
@@ -1745,6 +2786,11 @@ fn init_canonical_pipeline(
     let commit_event = queue("commit_event");
     let rebase_clock_records = queue("rebase_clock_records");
     let commit_clock_rebase = queue("commit_clock_rebase");
+    let handoff_finalize = queue("handoff_finalize");
+    let handoff_reduce_prescribed = queue("handoff_reduce_prescribed");
+    let handoff_clear_scratch = queue("handoff_clear_scratch");
+    let handoff_commit = queue("handoff_commit");
+    let live_event_stage = queue("live_event_stage");
     commands.insert_resource(CanonicalPipeline {
         layout,
         start_loss,
@@ -1772,6 +2818,142 @@ fn init_canonical_pipeline(
         commit_event,
         rebase_clock_records,
         commit_clock_rebase,
+        handoff_finalize,
+        handoff_reduce_prescribed,
+        handoff_clear_scratch,
+        handoff_commit,
+        live_event_stage,
+    });
+
+    let map_layout = BindGroupLayoutDescriptor::new(
+        "canonical latest-state transfer buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer::<GpuCanonicalControl>(false),
+                storage_buffer::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer::<GpuCanonicalControl>(false),
+                storage_buffer::<GpuCanonicalStatus>(false),
+                storage_buffer::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer::<Vec<GpuCanonicalNode>>(false),
+                storage_buffer::<Vec<GpuCanonicalTransferWord>>(false),
+                storage_buffer::<Vec<GpuCanonicalScratchWord>>(false),
+            ),
+        ),
+    );
+    let runtime_layout = BindGroupLayoutDescriptor::new(
+        "canonical runtime transfer buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer::<GpuCanonicalControl>(false),
+                storage_buffer::<Vec<GpuCanonicalNode>>(false),
+                storage_buffer::<Vec<GpuCanonicalTableWord>>(false),
+                storage_buffer::<GpuCanonicalControl>(false),
+                storage_buffer::<GpuCanonicalStatus>(false),
+                storage_buffer::<Vec<GpuCanonicalNode>>(false),
+                storage_buffer::<Vec<GpuCanonicalTableWord>>(false),
+                storage_buffer::<Vec<GpuCanonicalTransferWord>>(false),
+            ),
+        ),
+    );
+    let energy_layout = BindGroupLayoutDescriptor::new(
+        "canonical handoff energy buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer::<GpuCanonicalControl>(false),
+                storage_buffer::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer::<Vec<GpuCanonicalNode>>(false),
+                storage_buffer::<Vec<GpuCanonicalSample>>(false),
+                storage_buffer::<GpuCanonicalControl>(false),
+                storage_buffer::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer::<Vec<GpuCanonicalNode>>(false),
+                storage_buffer::<Vec<GpuCanonicalSample>>(false),
+            ),
+        ),
+    );
+    let transfer_shader = load_embedded_asset!(asset_server.as_ref(), "canonical_transfer.wgsl");
+    let runtime_shader =
+        load_embedded_asset!(asset_server.as_ref(), "canonical_transfer_runtime.wgsl");
+    let energy_shader =
+        load_embedded_asset!(asset_server.as_ref(), "canonical_transfer_energy.wgsl");
+    let queue_transfer = |label: &'static str,
+                          entry: &'static str,
+                          layout: BindGroupLayoutDescriptor,
+                          shader: Handle<Shader>| {
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some(Cow::Borrowed(label)),
+            layout: vec![layout],
+            shader,
+            entry_point: Some(Cow::Borrowed(entry)),
+            ..default()
+        })
+    };
+    commands.insert_resource(CanonicalTransferPipeline {
+        map_layout: map_layout.clone(),
+        runtime_layout: runtime_layout.clone(),
+        energy_layout: energy_layout.clone(),
+        transfer_runtime: queue_transfer(
+            "canonical transfer runtime",
+            "transfer_runtime",
+            runtime_layout,
+            runtime_shader,
+        ),
+        transfer_primary: queue_transfer(
+            "canonical transfer Q",
+            "transfer_primary",
+            map_layout.clone(),
+            transfer_shader.clone(),
+        ),
+        transfer_vector: queue_transfer(
+            "canonical transfer b",
+            "transfer_vector",
+            map_layout.clone(),
+            transfer_shader.clone(),
+        ),
+        transfer_gap: queue_transfer(
+            "canonical transfer gap history",
+            "transfer_gap",
+            map_layout.clone(),
+            transfer_shader.clone(),
+        ),
+        transfer_outgoing: queue_transfer(
+            "canonical transfer outgoing history",
+            "transfer_outgoing",
+            map_layout.clone(),
+            transfer_shader.clone(),
+        ),
+        reduce_density: queue_transfer(
+            "canonical transfer density reduction",
+            "reduce_density",
+            map_layout.clone(),
+            transfer_shader.clone(),
+        ),
+        reduce_components: queue_transfer(
+            "canonical transfer component reduction",
+            "reduce_components",
+            map_layout.clone(),
+            transfer_shader.clone(),
+        ),
+        correct_primary: queue_transfer(
+            "canonical transfer Q correction",
+            "correct_primary",
+            map_layout.clone(),
+            transfer_shader.clone(),
+        ),
+        reduce_auxiliary_energy: queue_transfer(
+            "canonical transfer auxiliary energy",
+            "reduce_auxiliary_energy",
+            map_layout,
+            transfer_shader,
+        ),
+        account_handoff: queue_transfer(
+            "canonical transfer energy accounting",
+            "account_handoff",
+            energy_layout,
+            energy_shader,
+        ),
     });
 }
 
@@ -1782,6 +2964,23 @@ struct CanonicalBindGroup {
     encoded_steps: u64,
     encoded_local_step: u32,
     encoded_event: bool,
+    encoded_live_event: u32,
+    bind_group: BindGroup,
+}
+
+#[derive(Resource)]
+struct CanonicalHandoffBindGroups {
+    revision: u64,
+    encoded: bool,
+    map: BindGroup,
+    runtime: BindGroup,
+    energy: BindGroup,
+    target: BindGroup,
+}
+
+#[derive(Resource)]
+struct CanonicalLiveEventBindGroup {
+    revision: u64,
     bind_group: BindGroup,
 }
 
@@ -1824,13 +3023,206 @@ fn prepare_canonical_bind_group(
             buffers[7].buffer.as_entire_buffer_binding(),
         )),
     );
-    let encoded_steps = request.stats.completed_steps();
+    let (encoded_steps, encoded_local_step, encoded_event, encoded_live_event) = existing
+        .as_ref()
+        .filter(|group| group.generation == request.generation)
+        .map_or(
+            (
+                request.stats.completed_steps(),
+                request.stats.local_step(),
+                false,
+                request.stats.processed_event(),
+            ),
+            |group| {
+                (
+                    group.encoded_steps,
+                    group.encoded_local_step,
+                    group.encoded_event,
+                    group.encoded_live_event,
+                )
+            },
+        );
     commands.insert_resource(CanonicalBindGroup {
         generation: request.generation,
         revision: request.revision,
         encoded_steps,
-        encoded_local_step: request.stats.local_step(),
-        encoded_event: false,
+        encoded_local_step,
+        encoded_event,
+        encoded_live_event,
+        bind_group,
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_canonical_handoff_bind_groups(
+    mut commands: Commands,
+    request: Option<Res<CanonicalGpuRequest>>,
+    existing: Option<Res<CanonicalHandoffBindGroups>>,
+    canonical_pipeline: Res<CanonicalPipeline>,
+    transfer_pipeline: Res<CanonicalTransferPipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+) {
+    let Some(request) = request else { return };
+    let (Some(source), Some(handoff)) = (request.buffers.as_ref(), request.handoff.as_ref()) else {
+        commands.remove_resource::<CanonicalHandoffBindGroups>();
+        return;
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|groups| groups.revision == request.revision)
+    {
+        return;
+    }
+    let target = &handoff.target;
+    let get = |handle: &Handle<ShaderBuffer>| gpu_buffers.get(handle);
+    let (
+        Some(old_control),
+        Some(old_state),
+        Some(old_nodes),
+        Some(old_samples),
+        Some(old_tables),
+        Some(new_control),
+        Some(new_status),
+        Some(new_state),
+        Some(new_nodes),
+        Some(new_samples),
+        Some(new_tables),
+        Some(new_scratch),
+        Some(new_boundary),
+        Some(transfer),
+    ) = (
+        get(&source.control),
+        get(&source.state),
+        get(&source.nodes),
+        get(&source.samples),
+        get(&source.tables),
+        get(&target.control),
+        get(&target.status),
+        get(&target.state),
+        get(&target.nodes),
+        get(&target.samples),
+        get(&target.tables),
+        get(&target.scratch),
+        get(&target.boundary),
+        get(&handoff.transfer),
+    )
+    else {
+        return;
+    };
+    let map = render_device.create_bind_group(
+        Some("canonical latest-state transfer bind group"),
+        &pipeline_cache.get_bind_group_layout(&transfer_pipeline.map_layout),
+        &BindGroupEntries::sequential((
+            old_control.buffer.as_entire_buffer_binding(),
+            old_state.buffer.as_entire_buffer_binding(),
+            new_control.buffer.as_entire_buffer_binding(),
+            new_status.buffer.as_entire_buffer_binding(),
+            new_state.buffer.as_entire_buffer_binding(),
+            new_nodes.buffer.as_entire_buffer_binding(),
+            transfer.buffer.as_entire_buffer_binding(),
+            new_scratch.buffer.as_entire_buffer_binding(),
+        )),
+    );
+    let runtime = render_device.create_bind_group(
+        Some("canonical runtime transfer bind group"),
+        &pipeline_cache.get_bind_group_layout(&transfer_pipeline.runtime_layout),
+        &BindGroupEntries::sequential((
+            old_control.buffer.as_entire_buffer_binding(),
+            old_nodes.buffer.as_entire_buffer_binding(),
+            old_tables.buffer.as_entire_buffer_binding(),
+            new_control.buffer.as_entire_buffer_binding(),
+            new_status.buffer.as_entire_buffer_binding(),
+            new_nodes.buffer.as_entire_buffer_binding(),
+            new_tables.buffer.as_entire_buffer_binding(),
+            transfer.buffer.as_entire_buffer_binding(),
+        )),
+    );
+    let energy = render_device.create_bind_group(
+        Some("canonical handoff energy bind group"),
+        &pipeline_cache.get_bind_group_layout(&transfer_pipeline.energy_layout),
+        &BindGroupEntries::sequential((
+            old_control.buffer.as_entire_buffer_binding(),
+            old_state.buffer.as_entire_buffer_binding(),
+            old_nodes.buffer.as_entire_buffer_binding(),
+            old_samples.buffer.as_entire_buffer_binding(),
+            new_control.buffer.as_entire_buffer_binding(),
+            new_state.buffer.as_entire_buffer_binding(),
+            new_nodes.buffer.as_entire_buffer_binding(),
+            new_samples.buffer.as_entire_buffer_binding(),
+        )),
+    );
+    let target_group = render_device.create_bind_group(
+        Some("canonical handoff target bind group"),
+        &pipeline_cache.get_bind_group_layout(&canonical_pipeline.layout),
+        &BindGroupEntries::sequential((
+            new_control.buffer.as_entire_buffer_binding(),
+            new_status.buffer.as_entire_buffer_binding(),
+            new_state.buffer.as_entire_buffer_binding(),
+            new_nodes.buffer.as_entire_buffer_binding(),
+            new_samples.buffer.as_entire_buffer_binding(),
+            new_tables.buffer.as_entire_buffer_binding(),
+            new_scratch.buffer.as_entire_buffer_binding(),
+            new_boundary.buffer.as_entire_buffer_binding(),
+        )),
+    );
+    commands.insert_resource(CanonicalHandoffBindGroups {
+        revision: request.revision,
+        encoded: false,
+        map,
+        runtime,
+        energy,
+        target: target_group,
+    });
+}
+
+fn prepare_canonical_live_event_bind_group(
+    mut commands: Commands,
+    request: Option<Res<CanonicalGpuRequest>>,
+    existing: Option<Res<CanonicalLiveEventBindGroup>>,
+    pipeline: Res<CanonicalPipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+) {
+    let Some(request) = request else { return };
+    let (Some(handles), Some(event)) = (request.buffers.as_ref(), request.live_event.as_ref())
+    else {
+        commands.remove_resource::<CanonicalLiveEventBindGroup>();
+        return;
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|group| group.revision == request.revision)
+    {
+        return;
+    }
+    let canonical = handles
+        .all()
+        .into_iter()
+        .take(7)
+        .map(|handle| gpu_buffers.get(handle))
+        .collect::<Option<Vec<_>>>();
+    let (Some(canonical), Some(upload)) = (canonical, gpu_buffers.get(&event.upload)) else {
+        return;
+    };
+    let bind_group = render_device.create_bind_group(
+        Some("canonical live event bind group"),
+        &pipeline_cache.get_bind_group_layout(&pipeline.layout),
+        &BindGroupEntries::sequential((
+            canonical[0].buffer.as_entire_buffer_binding(),
+            canonical[1].buffer.as_entire_buffer_binding(),
+            canonical[2].buffer.as_entire_buffer_binding(),
+            canonical[3].buffer.as_entire_buffer_binding(),
+            canonical[4].buffer.as_entire_buffer_binding(),
+            canonical[5].buffer.as_entire_buffer_binding(),
+            canonical[6].buffer.as_entire_buffer_binding(),
+            upload.buffer.as_entire_buffer_binding(),
+        )),
+    );
+    commands.insert_resource(CanonicalLiveEventBindGroup {
+        revision: request.revision,
         bind_group,
     });
 }
@@ -1839,6 +3231,7 @@ fn compute_canonical_wave(
     mut render_context: RenderContext,
     request: Option<Res<CanonicalGpuRequest>>,
     group: Option<ResMut<CanonicalBindGroup>>,
+    live_group: Option<Res<CanonicalLiveEventBindGroup>>,
     pipeline: Res<CanonicalPipeline>,
     pipeline_cache: Res<PipelineCache>,
 ) {
@@ -1851,6 +3244,9 @@ fn compute_canonical_wave(
     let Some(handles) = request.buffers.as_ref() else {
         return;
     };
+    if request.handoff.is_some() {
+        return;
+    }
     if group.generation != request.generation || group.revision != request.revision {
         return;
     }
@@ -1880,6 +3276,7 @@ fn compute_canonical_wave(
         pipeline.rebase_clock_records,
         pipeline.commit_clock_rebase,
         pipeline.stage_accounting,
+        pipeline.live_event_stage,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -1899,7 +3296,14 @@ fn compute_canonical_wave(
         .desired_steps
         .saturating_sub(group.encoded_steps)
         .min(MAX_STEPS_PER_FRAME);
-    let has_pending_event = handles.event_kind != EVENT_NONE && !group.encoded_event;
+    let live_event = request.live_event.as_ref().filter(|event| {
+        event.serial != group.encoded_live_event
+            && live_group
+                .as_ref()
+                .is_some_and(|group| group.revision == request.revision)
+    });
+    let has_pending_event =
+        live_event.is_some() || (handles.event_kind != EVENT_NONE && !group.encoded_event);
     if (pending == 0 && !has_pending_event) || request.stats.failure() != 0 {
         return;
     }
@@ -1912,9 +3316,29 @@ fn compute_canonical_wave(
         });
     pass.set_bind_group(0, &group.bind_group, &[]);
     if has_pending_event {
+        let (event_kind, event_dispatches, is_live) = if let Some(event) = live_event {
+            pass.set_bind_group(
+                0,
+                &live_group.as_ref().expect("filtered live group").bind_group,
+                &[],
+            );
+            pass.set_pipeline(pipelines[25]);
+            pass.dispatch_workgroups(
+                workgroups(handles.state_count.max(handles.drive_count)),
+                1,
+                1,
+            );
+            (event.kind, event.dispatches, true)
+        } else {
+            (handles.event_kind, handles.event_dispatches, false)
+        };
         pass.set_pipeline(pipelines[14]);
-        pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
-        match handles.event_kind {
+        pass.dispatch_workgroups(
+            workgroups(handles.state_count.max(handles.drive_count)),
+            1,
+            1,
+        );
+        match event_kind {
             EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE => {
                 pass.set_pipeline(pipelines[15]);
                 pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
@@ -1941,15 +3365,24 @@ fn compute_canonical_wave(
                     1,
                 );
             }
+            EVENT_SOURCE_PATCH => {
+                pass.set_pipeline(pipelines[19]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
             _ => unreachable!("validated canonical GPU event kind"),
         }
         pass.set_pipeline(pipelines[21]);
         pass.dispatch_workgroups(1, 1, 1);
-        group.encoded_event = true;
+        if is_live {
+            group.encoded_live_event = live_event.expect("selected live event").serial;
+        } else {
+            group.encoded_event = true;
+        }
         request
             .stats
             .dispatches
-            .fetch_add(handles.event_dispatches, Ordering::Relaxed);
+            .fetch_add(event_dispatches, Ordering::Relaxed);
+        pass.set_bind_group(0, &group.bind_group, &[]);
     }
     let mut rebases = 0_u64;
     for _ in 0..pending {
@@ -2026,12 +3459,118 @@ fn compute_canonical_wave(
     );
 }
 
+fn compute_canonical_handoff(
+    mut render_context: RenderContext,
+    request: Option<Res<CanonicalGpuRequest>>,
+    groups: Option<ResMut<CanonicalHandoffBindGroups>>,
+    canonical: Res<CanonicalPipeline>,
+    transfer: Res<CanonicalTransferPipeline>,
+    pipeline_cache: Res<PipelineCache>,
+) {
+    let Some(request) = request else { return };
+    let Some(mut groups) = groups else { return };
+    let Some(handoff) = request.handoff.as_ref() else {
+        return;
+    };
+    if groups.encoded || groups.revision != request.revision {
+        return;
+    }
+    let ids = [
+        transfer.transfer_runtime,
+        transfer.transfer_primary,
+        transfer.transfer_vector,
+        transfer.transfer_gap,
+        transfer.transfer_outgoing,
+        transfer.reduce_density,
+        transfer.reduce_components,
+        transfer.correct_primary,
+        transfer.reduce_auxiliary_energy,
+        canonical.handoff_finalize,
+        canonical.handoff_reduce_prescribed,
+        transfer.account_handoff,
+        canonical.handoff_clear_scratch,
+        canonical.handoff_commit,
+    ];
+    if ids.iter().any(|id| {
+        matches!(
+            pipeline_cache.get_compute_pipeline_state(*id),
+            CachedPipelineState::Err(_)
+        )
+    }) {
+        return;
+    }
+    let pipelines = ids
+        .iter()
+        .map(|id| pipeline_cache.get_compute_pipeline(*id))
+        .collect::<Option<Vec<_>>>();
+    let Some(pipelines) = pipelines else { return };
+    let target = &handoff.target;
+    let workgroups = |count: u32| count.div_ceil(CANONICAL_GPU_WORKGROUP_SIZE).max(1);
+    let mut pass = render_context
+        .command_encoder()
+        .begin_compute_pass(&ComputePassDescriptor {
+            label: Some("canonical generation handoff"),
+            ..default()
+        });
+    pass.set_bind_group(0, &groups.runtime, &[]);
+    pass.set_pipeline(pipelines[0]);
+    pass.dispatch_workgroups(workgroups(target.node_count.max(target.drive_count)), 1, 1);
+
+    pass.set_bind_group(0, &groups.map, &[]);
+    pass.set_pipeline(pipelines[1]);
+    pass.dispatch_workgroups(workgroups(target.node_count), 1, 1);
+    pass.set_pipeline(pipelines[2]);
+    pass.dispatch_workgroups(workgroups(target.sample_count), 1, 1);
+    pass.set_pipeline(pipelines[3]);
+    pass.dispatch_workgroups(workgroups(target.gap_count), 1, 1);
+    pass.set_pipeline(pipelines[4]);
+    pass.dispatch_workgroups(
+        workgroups(target.state_count - target.node_count - target.sample_count - target.gap_count),
+        1,
+        1,
+    );
+    pass.set_pipeline(pipelines[5]);
+    pass.dispatch_workgroups(1, 1, 1);
+    pass.set_pipeline(pipelines[6]);
+    pass.dispatch_workgroups(
+        handoff.transfer_manifest.target_components.max(1) as u32,
+        1,
+        1,
+    );
+    pass.set_pipeline(pipelines[7]);
+    pass.dispatch_workgroups(workgroups(target.node_count), 1, 1);
+    pass.set_pipeline(pipelines[8]);
+    pass.dispatch_workgroups(1, 1, 1);
+
+    pass.set_bind_group(0, &groups.target, &[]);
+    pass.set_pipeline(pipelines[9]);
+    pass.dispatch_workgroups(workgroups(target.state_count), 1, 1);
+    pass.set_pipeline(pipelines[10]);
+    pass.dispatch_workgroups(1, 1, 1);
+
+    pass.set_bind_group(0, &groups.energy, &[]);
+    pass.set_pipeline(pipelines[11]);
+    pass.dispatch_workgroups(1, 1, 1);
+
+    pass.set_bind_group(0, &groups.target, &[]);
+    pass.set_pipeline(pipelines[12]);
+    pass.dispatch_workgroups(workgroups(target.scratch_count), 1, 1);
+    pass.set_pipeline(pipelines[13]);
+    pass.dispatch_workgroups(1, 1, 1);
+    drop(pass);
+    groups.encoded = true;
+    request
+        .stats
+        .dispatches
+        .fetch_add(ids.len() as u64, Ordering::Relaxed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use funfern_core::{
-        CanonicalSource, MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, Scene,
-        mesh_scene,
+        CanonicalSource, MeshingOptions, OuterBoundaryCondition, QuadraticTransferMap,
+        QuadraticWaveOperator, Scene, mesh_scene,
     };
 
     fn plan(boundary: OuterBoundaryCondition) -> CanonicalGpuPlan {
@@ -2086,7 +3625,7 @@ mod tests {
     fn rust_and_wgsl_layout_manifests_match_exactly() {
         let shader = include_str!("canonical_wave.wgsl");
         for declaration in [
-            "const LAYOUT_VERSION: u32 = 1u;",
+            "const LAYOUT_VERSION: u32 = 2u;",
             "const STATE_WORD_STRIDE: u32 = 16u;",
             "const NODE_STRIDE: u32 = 96u;",
             "const SAMPLE_STRIDE: u32 = 112u;",
@@ -2099,8 +3638,8 @@ mod tests {
         assert_eq!(GpuCanonicalNode::min_size().get() as usize, 96);
         assert_eq!(GpuCanonicalSample::min_size().get() as usize, 112);
         assert_eq!(GpuCanonicalTableWord::min_size().get() as usize, 16);
-        assert_eq!(size_of::<GpuCanonicalControl>(), 208);
-        assert_eq!(GpuCanonicalControl::min_size().get() as usize, 208);
+        assert_eq!(size_of::<GpuCanonicalControl>(), 272);
+        assert_eq!(GpuCanonicalControl::min_size().get() as usize, 272);
     }
 
     #[test]
@@ -2187,5 +3726,74 @@ mod tests {
             .stage_maintenance(&vec![0.0; maintenance.node_count], 4)
             .unwrap();
         assert_eq!(maintenance.manifest.event_dispatches, 4);
+    }
+
+    #[test]
+    fn latest_state_transfer_plan_packs_every_physical_state_class() {
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            9,
+            MeshingOptions {
+                target_edge_length: 0.25,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 9).unwrap();
+        let interpolation =
+            QuadraticTransferMap::identity_on_mesh(&mesh, &scalar, &scalar).unwrap();
+        let primary =
+            CanonicalPrimaryTransferMap::prepare(&interpolation, &operator, &operator).unwrap();
+        let vector =
+            CanonicalVectorTransferMap::prepare(&mesh, &operator, &mesh, &operator).unwrap();
+        let gap = CanonicalThinGapHistoryTransferMap::prepare(
+            operator.thin_gap_samples(),
+            operator.thin_gap_samples(),
+        )
+        .unwrap();
+        let outgoing =
+            CanonicalOutgoingHistoryTransferMap::prepare(&interpolation, &operator, &operator)
+                .unwrap();
+        let forcing = CanonicalForcing::none(&operator);
+        let runtime =
+            CanonicalGpuRuntimeTransfer::identity(&operator, &operator, &forcing, &forcing)
+                .unwrap();
+        let transfer = CanonicalGpuTransferPlan::compile(
+            &operator, &operator, &forcing, &forcing, &primary, &vector, &gap, &outgoing, &runtime,
+        )
+        .unwrap();
+        assert_eq!(transfer.manifest.layout_version, TRANSFER_LAYOUT_VERSION);
+        assert_eq!(
+            transfer.manifest.exact_primary,
+            operator.degrees_of_freedom()
+        );
+        assert_eq!(
+            transfer.manifest.exact_complementary,
+            operator.complementary_degrees_of_freedom()
+        );
+        assert_eq!(transfer.manifest.dispatches, 14);
+        assert_eq!(transfer.manifest.word_count, TRANSFER_HEADER_WORDS);
+        assert_eq!(transfer.words[7].data.y, 1);
+        assert_eq!(transfer.words[7].data.z, 1);
+        assert_eq!(transfer.words[7].data.w, 1);
+    }
+
+    #[test]
+    fn live_event_payloads_are_zero_duration_and_revision_ordered() {
+        let base = plan(OuterBoundaryCondition::Reflecting);
+        let operator_nodes = base.node_count;
+        let pulse = CanonicalGpuLiveEvent::maintenance(&vec![0.0; operator_nodes], 7).unwrap();
+        assert_eq!(pulse.serial, 7);
+        assert_eq!(pulse.kind, EVENT_MAINTENANCE);
+        assert_eq!(pulse.upload.len(), operator_nodes + 1);
+        assert!(CanonicalGpuLiveEvent::grid_filter(1.1, 8).is_err());
+        assert!(CanonicalGpuLiveEvent::maintenance(&[], 0).is_err());
     }
 }

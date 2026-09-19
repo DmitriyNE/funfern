@@ -4,12 +4,15 @@
 //! prepares every stencil; later GPU stages apply the same maps to the latest
 //! accepted state.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crate::{
-    CanonicalOutgoingPhysicalMemory, CanonicalThinGapMemory, CanonicalWaveOperator, Point2,
-    QuadraticTransferMap, QuadraticTransferSample, ThinGapSample, ThinGapTraceKey, TriMesh,
-    WaveError,
+    CanonicalOutgoingBoundary, CanonicalOutgoingPhysicalMemory, CanonicalThinGapMemory,
+    CanonicalWaveOperator, Point2, QuadraticTransferMap, QuadraticTransferSample, ThinGapSample,
+    ThinGapTraceKey, TriMesh, WaveError,
 };
 
 const QUADRATURE_SAMPLES: usize = 6;
@@ -20,6 +23,19 @@ pub struct CanonicalTransferReport {
     pub maximum_correction_ratio: f64,
     pub exposed_values: usize,
     pub extended_values: usize,
+}
+
+/// Backend-neutral scalar-transfer row. Coefficients already include the
+/// source and target geometric supports, so applying a row directly to
+/// integrated source `Q` produces integrated target `Q`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalPrimaryTransferTarget {
+    pub source_nodes: [u32; 7],
+    pub coefficients: [f64; 7],
+    pub source_count: u8,
+    pub target_component: u32,
+    pub target_support: f64,
+    pub exact: bool,
 }
 
 /// Support-aware scalar map. Desired component totals are supplied by the
@@ -147,6 +163,58 @@ impl CanonicalPrimaryTransferMap {
 
     pub fn exact_nodes(&self) -> usize {
         self.exact.iter().filter(|exact| **exact).count()
+    }
+
+    pub fn source_support(&self) -> &[f64] {
+        &self.source_support
+    }
+
+    pub fn target_component_count(&self) -> usize {
+        self.component_count
+    }
+
+    /// Exports the prepared density interpolation/extension without exposing
+    /// the quadratic mesher's internal sample representation.
+    pub fn targets(&self) -> Vec<CanonicalPrimaryTransferTarget> {
+        self.samples
+            .iter()
+            .enumerate()
+            .map(|(target, sample)| {
+                let mut source_nodes = [0_u32; 7];
+                let mut coefficients = [0.0; 7];
+                let source_count = match sample {
+                    Some(sample) => {
+                        source_nodes = sample.nodes;
+                        for (slot, (source, weight)) in
+                            sample.nodes.iter().zip(sample.weights).enumerate()
+                        {
+                            coefficients[slot] = weight * self.target_support[target]
+                                / self.source_support[*source as usize];
+                        }
+                        7
+                    }
+                    None => match self.extensions[target] {
+                        Some(nodes) => {
+                            source_nodes = nodes;
+                            for (slot, source) in nodes.iter().enumerate() {
+                                coefficients[slot] = self.target_support[target]
+                                    / (nodes.len() as f64 * self.source_support[*source as usize]);
+                            }
+                            7
+                        }
+                        None => 0,
+                    },
+                };
+                CanonicalPrimaryTransferTarget {
+                    source_nodes,
+                    coefficients,
+                    source_count,
+                    target_component: self.target_components[target],
+                    target_support: self.target_support[target],
+                    exact: self.exact[target],
+                }
+            })
+            .collect()
     }
 
     pub fn transfer(
@@ -281,12 +349,233 @@ enum VectorTarget {
     Exposed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalVectorTransferTarget {
+    pub source_samples: [u32; QUADRATURE_SAMPLES],
+    pub weights: [f64; QUADRATURE_SAMPLES],
+    pub source_count: u8,
+    pub exact: bool,
+}
+
 /// Quadratic physical-coordinate reconstruction for the six independent
 /// complementary samples in each old element.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalVectorTransferMap {
     source_samples: usize,
     targets: Vec<VectorTarget>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanonicalVectorTransferPhase {
+    Validate,
+    Locate(usize),
+    PrepareExtension,
+    Extend(usize),
+    Done,
+}
+
+impl CanonicalVectorTransferPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Validate => "Checking complementary transfer",
+            Self::Locate(_) => "Locating complementary samples",
+            Self::PrepareExtension => "Indexing complementary extension",
+            Self::Extend(_) => "Extending complementary samples",
+            Self::Done => "Finished",
+        }
+    }
+}
+
+struct CanonicalVectorTransferWork {
+    phase: CanonicalVectorTransferPhase,
+    identity: bool,
+    targets: Vec<VectorTarget>,
+    distance: Vec<usize>,
+}
+
+impl CanonicalVectorTransferWork {
+    fn new() -> Self {
+        Self {
+            phase: CanonicalVectorTransferPhase::Validate,
+            identity: false,
+            targets: Vec::new(),
+            distance: Vec::new(),
+        }
+    }
+
+    fn step(
+        &mut self,
+        source_mesh: &TriMesh,
+        source: &CanonicalWaveOperator,
+        target_mesh: &TriMesh,
+        target: &CanonicalWaveOperator,
+    ) -> Result<Option<CanonicalVectorTransferMap>, WaveError> {
+        match self.phase {
+            CanonicalVectorTransferPhase::Validate => {
+                if source_mesh.triangles.len() * QUADRATURE_SAMPLES
+                    != source.complementary_degrees_of_freedom()
+                    || target_mesh.triangles.len() * QUADRATURE_SAMPLES
+                        != target.complementary_degrees_of_freedom()
+                {
+                    return Err(WaveError::InvalidMesh(
+                        "the vector transfer generations have inconsistent sample layouts",
+                    ));
+                }
+                self.identity = source.generation().geometry_revision
+                    == target.generation().geometry_revision
+                    && source.generation().mesh_revision == target.generation().mesh_revision
+                    && source_mesh.triangles == target_mesh.triangles
+                    && source.constitutive_samples().len() == target.constitutive_samples().len();
+                self.targets = Vec::with_capacity(target.complementary_degrees_of_freedom());
+                self.phase = CanonicalVectorTransferPhase::Locate(0);
+            }
+            CanonicalVectorTransferPhase::Locate(target_index) => {
+                let samples = target.constitutive_samples();
+                if target_index == samples.len() {
+                    self.phase = CanonicalVectorTransferPhase::PrepareExtension;
+                    return Ok(None);
+                }
+                let sample = &samples[target_index];
+                if self.identity
+                    && source.constitutive_samples()[target_index].point == sample.point
+                    && source.constitutive_samples()[target_index].barycentric == sample.barycentric
+                {
+                    self.targets.push(VectorTarget::Exact(target_index));
+                } else {
+                    let target_region = target_mesh.triangles[sample.element as usize].region;
+                    let donor = source_mesh
+                        .triangles
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, triangle)| triangle.region == target_region)
+                        .find_map(|(element, triangle)| {
+                            barycentric(source_mesh, triangle.vertices, sample.point)
+                                .filter(|weights| weights.iter().all(|weight| *weight >= -2.0e-11))
+                                .map(|weights| (element, weights))
+                        });
+                    if let Some((source_element, source_barycentric)) = donor {
+                        self.targets.push(VectorTarget::Reconstruct {
+                            source_element: source_element as u32,
+                            weights: quadratic_sample_weights(
+                                &source.constitutive_samples()[source_element * QUADRATURE_SAMPLES
+                                    ..(source_element + 1) * QUADRATURE_SAMPLES],
+                                source_barycentric,
+                            )?,
+                        });
+                    } else {
+                        self.targets.push(VectorTarget::Exposed);
+                    }
+                }
+                self.phase = CanonicalVectorTransferPhase::Locate(target_index + 1);
+            }
+            CanonicalVectorTransferPhase::PrepareExtension => {
+                self.distance = vec![usize::MAX; target_mesh.triangles.len()];
+                for (sample_index, target_sample) in self.targets.iter().enumerate() {
+                    if !matches!(target_sample, VectorTarget::Exposed) {
+                        self.distance[sample_index / QUADRATURE_SAMPLES] = 0;
+                    }
+                }
+                extend_element_distances(target_mesh, &mut self.distance, 2);
+                self.phase = CanonicalVectorTransferPhase::Extend(0);
+            }
+            CanonicalVectorTransferPhase::Extend(target_index) => {
+                if target_index == self.targets.len() {
+                    self.phase = CanonicalVectorTransferPhase::Done;
+                    return Ok(Some(CanonicalVectorTransferMap {
+                        source_samples: source.complementary_degrees_of_freedom(),
+                        targets: std::mem::take(&mut self.targets),
+                    }));
+                }
+                let entry = &mut self.targets[target_index];
+                if matches!(entry, VectorTarget::Exposed)
+                    && self.distance[target_index / QUADRATURE_SAMPLES] <= 2
+                {
+                    let sample = &target.constitutive_samples()[target_index];
+                    let target_region = target_mesh.triangles[sample.element as usize].region;
+                    let donor = source_mesh
+                        .triangles
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, triangle)| triangle.region == target_region)
+                        .min_by(|(_, left), (_, right)| {
+                            let left = triangle_centroid(source_mesh, left.vertices) - sample.point;
+                            let right =
+                                triangle_centroid(source_mesh, right.vertices) - sample.point;
+                            left.dot(left).total_cmp(&right.dot(right))
+                        })
+                        .map(|(element, _)| element as u32);
+                    if let Some(source_element) = donor {
+                        *entry = VectorTarget::ExtendConstant { source_element };
+                    }
+                }
+                self.phase = CanonicalVectorTransferPhase::Extend(target_index + 1);
+            }
+            CanonicalVectorTransferPhase::Done => {}
+        }
+        Ok(None)
+    }
+}
+
+/// Resumable construction of the local physical-coordinate complementary map.
+/// It owns both generations so a UI preparation can yield without borrowing
+/// mutable application state.
+pub struct CanonicalVectorTransferJob {
+    source_mesh: Arc<TriMesh>,
+    source: Arc<CanonicalWaveOperator>,
+    target_mesh: Arc<TriMesh>,
+    target: Arc<CanonicalWaveOperator>,
+    work: CanonicalVectorTransferWork,
+    done: bool,
+}
+
+impl CanonicalVectorTransferJob {
+    pub fn new(
+        source_mesh: Arc<TriMesh>,
+        source: Arc<CanonicalWaveOperator>,
+        target_mesh: Arc<TriMesh>,
+        target: Arc<CanonicalWaveOperator>,
+    ) -> Self {
+        Self {
+            source_mesh,
+            source,
+            target_mesh,
+            target,
+            work: CanonicalVectorTransferWork::new(),
+            done: false,
+        }
+    }
+
+    pub fn phase(&self) -> &'static str {
+        self.work.phase.label()
+    }
+
+    pub fn advance(
+        &mut self,
+        budget: usize,
+    ) -> Option<Result<CanonicalVectorTransferMap, WaveError>> {
+        for _ in 0..budget {
+            if self.done {
+                return None;
+            }
+            match self.work.step(
+                &self.source_mesh,
+                &self.source,
+                &self.target_mesh,
+                &self.target,
+            ) {
+                Ok(Some(map)) => {
+                    self.done = true;
+                    return Some(Ok(map));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.done = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+        None
+    }
 }
 
 impl CanonicalVectorTransferMap {
@@ -296,87 +585,12 @@ impl CanonicalVectorTransferMap {
         target_mesh: &TriMesh,
         target: &CanonicalWaveOperator,
     ) -> Result<Self, WaveError> {
-        if source_mesh.triangles.len() * QUADRATURE_SAMPLES
-            != source.complementary_degrees_of_freedom()
-            || target_mesh.triangles.len() * QUADRATURE_SAMPLES
-                != target.complementary_degrees_of_freedom()
-        {
-            return Err(WaveError::InvalidMesh(
-                "the vector transfer generations have inconsistent sample layouts",
-            ));
-        }
-        let identity = source.generation().geometry_revision
-            == target.generation().geometry_revision
-            && source.generation().mesh_revision == target.generation().mesh_revision
-            && source_mesh.triangles == target_mesh.triangles
-            && source.constitutive_samples().len() == target.constitutive_samples().len();
-        let mut targets = Vec::with_capacity(target.complementary_degrees_of_freedom());
-        for (target_index, sample) in target.constitutive_samples().iter().enumerate() {
-            if identity
-                && source.constitutive_samples()[target_index].point == sample.point
-                && source.constitutive_samples()[target_index].barycentric == sample.barycentric
-            {
-                targets.push(VectorTarget::Exact(target_index));
-                continue;
-            }
-            let target_region = target_mesh.triangles[sample.element as usize].region;
-            let donor = source_mesh
-                .triangles
-                .iter()
-                .enumerate()
-                .filter(|(_, triangle)| triangle.region == target_region)
-                .find_map(|(element, triangle)| {
-                    barycentric(source_mesh, triangle.vertices, sample.point)
-                        .filter(|weights| weights.iter().all(|weight| *weight >= -2.0e-11))
-                        .map(|weights| (element, weights))
-                });
-            let Some((source_element, source_barycentric)) = donor else {
-                targets.push(VectorTarget::Exposed);
-                continue;
-            };
-            targets.push(VectorTarget::Reconstruct {
-                source_element: source_element as u32,
-                weights: quadratic_sample_weights(
-                    &source.constitutive_samples()[source_element * QUADRATURE_SAMPLES
-                        ..(source_element + 1) * QUADRATURE_SAMPLES],
-                    source_barycentric,
-                )?,
-            });
-        }
-        let mut distance = vec![usize::MAX; target_mesh.triangles.len()];
-        for (sample_index, target_sample) in targets.iter().enumerate() {
-            if !matches!(target_sample, VectorTarget::Exposed) {
-                distance[sample_index / QUADRATURE_SAMPLES] = 0;
+        let mut work = CanonicalVectorTransferWork::new();
+        loop {
+            if let Some(map) = work.step(source_mesh, source, target_mesh, target)? {
+                return Ok(map);
             }
         }
-        extend_element_distances(target_mesh, &mut distance, 2);
-        for (target_index, entry) in targets.iter_mut().enumerate() {
-            if !matches!(entry, VectorTarget::Exposed)
-                || distance[target_index / QUADRATURE_SAMPLES] > 2
-            {
-                continue;
-            }
-            let sample = &target.constitutive_samples()[target_index];
-            let target_region = target_mesh.triangles[sample.element as usize].region;
-            let donor = source_mesh
-                .triangles
-                .iter()
-                .enumerate()
-                .filter(|(_, triangle)| triangle.region == target_region)
-                .min_by(|(_, left), (_, right)| {
-                    let left = triangle_centroid(source_mesh, left.vertices) - sample.point;
-                    let right = triangle_centroid(source_mesh, right.vertices) - sample.point;
-                    left.dot(left).total_cmp(&right.dot(right))
-                })
-                .map(|(element, _)| element as u32);
-            if let Some(source_element) = donor {
-                *entry = VectorTarget::ExtendConstant { source_element };
-            }
-        }
-        Ok(Self {
-            source_samples: source.complementary_degrees_of_freedom(),
-            targets,
-        })
     }
 
     pub fn exact_samples(&self) -> usize {
@@ -384,6 +598,57 @@ impl CanonicalVectorTransferMap {
             .iter()
             .filter(|target| matches!(target, VectorTarget::Exact(_)))
             .count()
+    }
+
+    pub fn source_sample_count(&self) -> usize {
+        self.source_samples
+    }
+
+    pub fn targets(&self) -> Vec<CanonicalVectorTransferTarget> {
+        self.targets
+            .iter()
+            .map(|target| {
+                let mut source_samples = [0_u32; QUADRATURE_SAMPLES];
+                let mut weights = [0.0; QUADRATURE_SAMPLES];
+                let (source_count, exact) = match target {
+                    VectorTarget::Exact(index) => {
+                        source_samples[0] = *index as u32;
+                        weights[0] = 1.0;
+                        (1, true)
+                    }
+                    VectorTarget::Reconstruct {
+                        source_element,
+                        weights: prepared,
+                    } => {
+                        for (local, source_sample) in source_samples.iter_mut().enumerate() {
+                            *source_sample =
+                                *source_element * QUADRATURE_SAMPLES as u32 + local as u32;
+                        }
+                        weights = *prepared;
+                        (QUADRATURE_SAMPLES as u8, false)
+                    }
+                    VectorTarget::ExtendConstant { source_element } => {
+                        for (local, (source_sample, weight)) in source_samples
+                            .iter_mut()
+                            .zip(weights.iter_mut())
+                            .enumerate()
+                        {
+                            *source_sample =
+                                *source_element * QUADRATURE_SAMPLES as u32 + local as u32;
+                            *weight = 1.0 / QUADRATURE_SAMPLES as f64;
+                        }
+                        (QUADRATURE_SAMPLES as u8, false)
+                    }
+                    VectorTarget::Exposed => (0, false),
+                };
+                CanonicalVectorTransferTarget {
+                    source_samples,
+                    weights,
+                    source_count,
+                    exact,
+                }
+            })
+            .collect()
     }
 
     pub fn transfer(
@@ -466,6 +731,12 @@ enum GapTarget {
         orientation: f64,
     },
     New,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalThinGapTransferTarget {
+    pub donors: Vec<(u32, f64)>,
+    pub exact: bool,
 }
 
 /// Prepared transfer of the physical thin-gap jump, independent of Q and b.
@@ -673,6 +944,46 @@ impl CanonicalThinGapHistoryTransferMap {
             },
         ))
     }
+
+    pub fn targets(&self) -> Vec<CanonicalThinGapTransferTarget> {
+        self.targets
+            .iter()
+            .map(|target| match target {
+                GapTarget::Exact(index) => CanonicalThinGapTransferTarget {
+                    donors: vec![(*index as u32, 1.0)],
+                    exact: true,
+                },
+                GapTarget::Interpolate {
+                    donors,
+                    orientation,
+                } => CanonicalThinGapTransferTarget {
+                    donors: donors
+                        .iter()
+                        .map(|(index, weight)| (*index as u32, *weight * *orientation))
+                        .collect(),
+                    exact: false,
+                },
+                GapTarget::New => CanonicalThinGapTransferTarget {
+                    donors: Vec::new(),
+                    exact: false,
+                },
+            })
+            .collect()
+    }
+
+    pub fn source_energy_weights(&self) -> Vec<f64> {
+        self.source_samples
+            .iter()
+            .map(|sample| sample.stiffness)
+            .collect()
+    }
+
+    pub fn target_energy_weights(&self) -> Vec<f64> {
+        self.target_samples
+            .iter()
+            .map(|sample| sample.stiffness)
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -836,6 +1147,267 @@ impl CanonicalOutgoingHistoryTransferMap {
                 deleted_samples: self.deleted_samples,
             },
         ))
+    }
+
+    /// Composes physical-trace interpolation with the source and target
+    /// energy-normalized modal bases. The returned row-major matrix maps the
+    /// source normalized auxiliary vector directly to the target vector while
+    /// remaining invariant to modal signs, ordering, and degenerate rotations.
+    pub fn normalized_matrix(
+        &self,
+        source_operator: &CanonicalWaveOperator,
+        target_operator: &CanonicalWaveOperator,
+    ) -> Result<CanonicalOutgoingNormalizedTransfer, WaveError> {
+        let mut work = CanonicalOutgoingNormalizedTransferWork::new();
+        loop {
+            if let Some(map) = work.step(self, source_operator, target_operator)? {
+                return Ok(map);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalOutgoingNormalizedTransfer {
+    pub source_count: usize,
+    pub target_count: usize,
+    pub identity: bool,
+    pub values: Vec<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanonicalOutgoingNormalizedTransferPhase {
+    Validate,
+    Pair(usize),
+    Done,
+}
+
+impl CanonicalOutgoingNormalizedTransferPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Validate => "Checking outgoing-history transfer",
+            Self::Pair(_) => "Composing outgoing-history bases",
+            Self::Done => "Finished",
+        }
+    }
+}
+
+struct CanonicalOutgoingNormalizedTransferWork {
+    phase: CanonicalOutgoingNormalizedTransferPhase,
+    source_count: usize,
+    target_count: usize,
+    source_damping: Vec<f64>,
+    target_damping: Vec<f64>,
+    pole_transform: [[f64; 3]; 3],
+    values: Vec<f64>,
+}
+
+impl CanonicalOutgoingNormalizedTransferWork {
+    fn new() -> Self {
+        Self {
+            phase: CanonicalOutgoingNormalizedTransferPhase::Validate,
+            source_count: 0,
+            target_count: 0,
+            source_damping: Vec::new(),
+            target_damping: Vec::new(),
+            pole_transform: [[0.0; 3]; 3],
+            values: Vec::new(),
+        }
+    }
+
+    fn step(
+        &mut self,
+        map: &CanonicalOutgoingHistoryTransferMap,
+        source_operator: &CanonicalWaveOperator,
+        target_operator: &CanonicalWaveOperator,
+    ) -> Result<Option<CanonicalOutgoingNormalizedTransfer>, WaveError> {
+        match self.phase {
+            CanonicalOutgoingNormalizedTransferPhase::Validate => {
+                self.source_count = source_operator
+                    .outgoing_boundary()
+                    .map_or(0, CanonicalOutgoingBoundary::auxiliary_count);
+                self.target_count = target_operator
+                    .outgoing_boundary()
+                    .map_or(0, CanonicalOutgoingBoundary::auxiliary_count);
+                let (Some(source), Some(target)) = (
+                    source_operator.outgoing_boundary(),
+                    target_operator.outgoing_boundary(),
+                ) else {
+                    self.phase = CanonicalOutgoingNormalizedTransferPhase::Done;
+                    return Ok(Some(CanonicalOutgoingNormalizedTransfer {
+                        source_count: self.source_count,
+                        target_count: self.target_count,
+                        identity: self.source_count == 0 && self.target_count == 0,
+                        values: Vec::new(),
+                    }));
+                };
+                if map.source_trace_count != source.trace_nodes().len()
+                    || map.targets.len() != target.trace_nodes().len()
+                {
+                    return Err(WaveError::InvalidState);
+                }
+                let identity = self.source_count == self.target_count
+                    && source == target
+                    && map.targets.iter().enumerate().all(|(index, target)| {
+                        matches!(target, TraceTarget::Map(donors) if donors.as_slice() == [(index, 1.0)])
+                    });
+                if identity {
+                    self.phase = CanonicalOutgoingNormalizedTransferPhase::Done;
+                    return Ok(Some(CanonicalOutgoingNormalizedTransfer {
+                        source_count: self.source_count,
+                        target_count: self.target_count,
+                        identity: true,
+                        values: Vec::new(),
+                    }));
+                }
+                self.values = vec![0.0; self.source_count * self.target_count];
+                let (energy, inverse_energy) = crate::canonical_wave::pole_energy_transform()?;
+                self.pole_transform = std::array::from_fn(|row| {
+                    std::array::from_fn(|column| {
+                        (0..3)
+                            .map(|index| energy[row][index] * inverse_energy[index][column])
+                            .sum()
+                    })
+                });
+                self.source_damping = (0..source.trace_nodes().len())
+                    .map(|trace| {
+                        source
+                            .modes()
+                            .iter()
+                            .map(|mode| mode.trace()[trace].powi(2))
+                            .sum::<f64>()
+                    })
+                    .collect();
+                self.target_damping = (0..target.trace_nodes().len())
+                    .map(|trace| {
+                        target
+                            .modes()
+                            .iter()
+                            .map(|mode| mode.trace()[trace].powi(2))
+                            .sum::<f64>()
+                    })
+                    .collect();
+                self.phase = CanonicalOutgoingNormalizedTransferPhase::Pair(0);
+            }
+            CanonicalOutgoingNormalizedTransferPhase::Pair(pair) => {
+                let source = source_operator
+                    .outgoing_boundary()
+                    .ok_or(WaveError::InvalidState)?;
+                let target = target_operator
+                    .outgoing_boundary()
+                    .ok_or(WaveError::InvalidState)?;
+                let pair_count = source.modes().len() * target.modes().len();
+                if pair == pair_count {
+                    if self.values.iter().any(|value| !value.is_finite()) {
+                        return Err(WaveError::InvalidState);
+                    }
+                    self.phase = CanonicalOutgoingNormalizedTransferPhase::Done;
+                    return Ok(Some(CanonicalOutgoingNormalizedTransfer {
+                        source_count: self.source_count,
+                        target_count: self.target_count,
+                        identity: false,
+                        values: std::mem::take(&mut self.values),
+                    }));
+                }
+                let source_modes = source.modes().len();
+                let target_mode = &target.modes()[pair / source_modes];
+                let source_mode = &source.modes()[pair % source_modes];
+                if let (Some(target_offset), Some(source_offset)) = (
+                    target_mode.auxiliary_offset(),
+                    source_mode.auxiliary_offset(),
+                ) {
+                    let mut overlap = 0.0;
+                    for (target_trace, mapping) in map.targets.iter().enumerate() {
+                        let target_weight = if self.target_damping[target_trace] > 0.0 {
+                            target_mode.trace()[target_trace]
+                                / self.target_damping[target_trace].sqrt()
+                        } else {
+                            0.0
+                        };
+                        let source_weight = match mapping {
+                            TraceTarget::Map(donors) => donors
+                                .iter()
+                                .map(|(source_trace, weight)| {
+                                    if self.source_damping[*source_trace] > 0.0 {
+                                        weight * source_mode.trace()[*source_trace]
+                                            / self.source_damping[*source_trace].sqrt()
+                                    } else {
+                                        0.0
+                                    }
+                                })
+                                .sum::<f64>(),
+                            TraceTarget::New => 0.0,
+                        };
+                        overlap += target_weight * source_weight;
+                    }
+                    let spatial = overlap * (source_mode.decay / target_mode.decay).sqrt();
+                    for target_row in 0..3 {
+                        for source_column in 0..3 {
+                            self.values[(target_offset + target_row) * self.source_count
+                                + source_offset
+                                + source_column] +=
+                                spatial * self.pole_transform[target_row][source_column];
+                        }
+                    }
+                }
+                self.phase = CanonicalOutgoingNormalizedTransferPhase::Pair(pair + 1);
+            }
+            CanonicalOutgoingNormalizedTransferPhase::Done => {}
+        }
+        Ok(None)
+    }
+}
+
+/// Resumable composition of physical outgoing-trace correspondence with the
+/// source and target energy-normalized modal bases.
+pub struct CanonicalOutgoingNormalizedTransferJob {
+    map: Arc<CanonicalOutgoingHistoryTransferMap>,
+    source: Arc<CanonicalWaveOperator>,
+    target: Arc<CanonicalWaveOperator>,
+    work: CanonicalOutgoingNormalizedTransferWork,
+    done: bool,
+}
+
+impl CanonicalOutgoingNormalizedTransferJob {
+    pub fn new(
+        map: Arc<CanonicalOutgoingHistoryTransferMap>,
+        source: Arc<CanonicalWaveOperator>,
+        target: Arc<CanonicalWaveOperator>,
+    ) -> Self {
+        Self {
+            map,
+            source,
+            target,
+            work: CanonicalOutgoingNormalizedTransferWork::new(),
+            done: false,
+        }
+    }
+
+    pub fn phase(&self) -> &'static str {
+        self.work.phase.label()
+    }
+
+    pub fn advance(
+        &mut self,
+        budget: usize,
+    ) -> Option<Result<CanonicalOutgoingNormalizedTransfer, WaveError>> {
+        for _ in 0..budget {
+            if self.done {
+                return None;
+            }
+            match self.work.step(&self.map, &self.source, &self.target) {
+                Ok(Some(map)) => {
+                    self.done = true;
+                    return Some(Ok(map));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.done = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+        None
     }
 }
 
@@ -1183,6 +1755,21 @@ mod tests {
             .map(|sample| polynomial(sample.point))
             .collect::<Vec<_>>();
         let map = CanonicalVectorTransferMap::prepare(&coarse, &source, &fine, &target).unwrap();
+        let mut job = CanonicalVectorTransferJob::new(
+            Arc::new(coarse.clone()),
+            Arc::new(source.clone()),
+            Arc::new(fine.clone()),
+            Arc::new(target.clone()),
+        );
+        let mut slices = 0;
+        let prepared = loop {
+            slices += 1;
+            if let Some(result) = job.advance(3) {
+                break result.unwrap();
+            }
+        };
+        assert!(slices > 1);
+        assert_eq!(prepared, map);
         let (new, report) = map.transfer(&old).unwrap();
         assert_eq!(report.exposed_values, 0);
         let error = new
@@ -1588,6 +2175,15 @@ mod tests {
         let physical = boundary.physical_memory(&normalized).unwrap();
         let map =
             CanonicalOutgoingHistoryTransferMap::prepare(&identity, &second, &second).unwrap();
+        let normalized_map = map.normalized_matrix(&second, &second).unwrap();
+        assert!(normalized_map.identity);
+        let mapped = normalized.clone();
+        assert!(
+            mapped
+                .iter()
+                .zip(&normalized)
+                .all(|(actual, expected)| (actual - expected).abs() < 3.0e-12)
+        );
         let (copied, report) = map.transfer(&second, &second, Some(&physical)).unwrap();
         assert_eq!(copied.unwrap(), physical);
         assert!(report.physical_residual_norm < 2.0e-10);
@@ -1611,6 +2207,26 @@ mod tests {
         let changed_map =
             CanonicalOutgoingHistoryTransferMap::prepare(&changed_identity, &second, &changed)
                 .unwrap();
+        let changed_normalized = changed_map.normalized_matrix(&second, &changed).unwrap();
+        assert!(!changed_normalized.identity);
+        assert_eq!(
+            changed_normalized.values.len(),
+            changed_normalized.source_count * changed_normalized.target_count
+        );
+        let mut normalized_job = CanonicalOutgoingNormalizedTransferJob::new(
+            Arc::new(changed_map.clone()),
+            Arc::new(second.clone()),
+            Arc::new(changed.clone()),
+        );
+        let mut slices = 0;
+        let prepared_normalized = loop {
+            slices += 1;
+            if let Some(result) = normalized_job.advance(7) {
+                break result.unwrap();
+            }
+        };
+        assert!(slices > 1);
+        assert_eq!(prepared_normalized, changed_normalized);
         let (changed_physical, report) = changed_map
             .transfer(&second, &changed, Some(&physical))
             .unwrap();

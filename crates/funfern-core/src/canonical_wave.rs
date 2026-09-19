@@ -3101,7 +3101,7 @@ fn symmetric_eigen(mut matrix: Vec<f64>, count: usize) -> Result<(Vec<f64>, Vec<
 /// square root and is cheaper to reproduce exactly on CPU/GPU.
 type Matrix3 = [[f64; 3]; 3];
 
-fn pole_energy_transform() -> Result<(Matrix3, Matrix3), WaveError> {
+pub(crate) fn pole_energy_transform() -> Result<(Matrix3, Matrix3), WaveError> {
     let b = (31.0_f64 / 7.0).sqrt();
     let ell = [0.0, 1.0 - b, 2.0 * b - 4.0];
     let mut h = [[0.0; 3]; 3];

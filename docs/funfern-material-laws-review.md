@@ -189,7 +189,7 @@ Inspection also found incomplete app literals in the GRIN example and `topology_
 
 ## 5. Implementation stages
 
-The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–4 are complete; the old production solver remains connected and Stage 5 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
+The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–5 are complete; the old production solver remains connected and Stage 6 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
 
 ### Stage 0 — Close implementation contracts and establish acceptance cases
 
@@ -281,6 +281,12 @@ Exit: f64/f32 agreement at declared tolerances; native/WASM checks; cross-file l
 
 ### Stage 5 — GPU transfer, physical histories and live events
 
+Status: complete. Latest-state transfer, cooperative physical-history mapping,
+runtime/clock handoff, paused events, target-device measurements and exact
+rejection rollback are recorded in the
+[Stage 5 report](funfern-material-laws-stage5-report.md). The path remains dormant
+until Stage 6 ports its consumers.
+
 Extend `QuadraticTransferJob` and map data with geometric support shares, local vector stencils, trace-side correspondence, bounded extension and affected correction support. Reuse valid exact-copy and baffle restrictions.
 
 GPU order is specification section 8.5: latest-state local Q,b transfer; total reduction and bounded correction; prescribed exchange; physical history/runtime mapping; derived-state validation; atomic generation acceptance. No seam potential, gauge reduction or offset solve.
@@ -292,6 +298,8 @@ Primary files: `transfer.rs`, both transfer shaders, `wave_gpu.rs`, UI/topology 
 Exit: latest-state transfer, exact unchanged support/samples, bounded conservative AMR, constant-preserving extension, multiway order independence, physical-history continuity/admitted exchange and rollback. No added live CPU field-calculation round trip. Measure preparation slices, GPU commit duration, validation latency and peak old/new memory.
 
 ### Stage 6 — Port all consumers and switch production skins
+
+Status: next implementation boundary.
 
 Port scalar/vector rendering, point/curve/area probes, discrete bulk-plus-boundary energy and flow, far-field eligibility/sampling, readback adapters and static-linear AMR. Derive synchronized scalar-equivalent estimator inputs and include thin-gap/outgoing/interface terms. Revalidate error normalization. Segment or convert probe history explicitly when its physical meaning changes.
 
@@ -353,6 +361,6 @@ Fix new-fixture thresholds and target-device budgets before judging results. Tra
 
 ## 7. Handoff status
 
-Planning, correctness spikes, Stage 0 contracts, Stage 1 inert authoring, the Stage 2 linear CPU core, Stage 3 linear composition/reference transfer and the [Stage 4 f32 GPU core](funfern-material-laws-stage4-report.md) are complete. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
+Planning, correctness spikes, Stage 0 contracts, Stage 1 inert authoring, the Stage 2 linear CPU core, Stage 3 linear composition/reference transfer, the [Stage 4 f32 GPU core](funfern-material-laws-stage4-report.md) and the [Stage 5 latest-state handoff](funfern-material-laws-stage5-report.md) are complete. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
 
-Start Stage 5 from the accepted/candidate layout and global commit boundary, extending `QuadraticTransferJob` and the GPU map data rather than adding a CPU field round trip. Transfer the latest accepted `Q,b`, thin-gap jump and normalized outgoing histories; preserve exact unchanged values, bounded corrections, clock/phase/event serials and rollback. Retain the old solver for comparison and do not connect the canonical core to application evolution before transfer and consumer gates close. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use them as a claim that the remaining compositions already pass.
+Start Stage 6 from the accepted Stage 5 generation/readback ownership rather than reconstructing scalar state or adding a second field transfer. Port rendering, probes, energy/flow/far-field, thin-gap diagnostics and static-linear AMR to synchronized `Q,b` plus physical histories, then cut all three skins over together only when their fixtures pass. Retain the old solver for comparison until that consumer boundary closes. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use the linear handoff result as a claim that curved radiation or nonlinear compositions already pass.

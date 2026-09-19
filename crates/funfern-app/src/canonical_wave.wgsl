@@ -1,5 +1,5 @@
-// Canonical direct-state f32 solver. Rust layout version 1.
-const LAYOUT_VERSION: u32 = 1u;
+// Canonical direct-state f32 solver. Rust layout version 2.
+const LAYOUT_VERSION: u32 = 2u;
 const STATE_WORD_STRIDE: u32 = 16u;
 const NODE_STRIDE: u32 = 96u;
 const SAMPLE_STRIDE: u32 = 112u;
@@ -24,7 +24,11 @@ struct Control {
     boundary_offsets: vec4<u32>,
     clock_u32: vec4<u32>,
     clock_f32: vec4<f32>,
+    clock_origin: vec4<f32>,
     event: vec4<u32>,
+    event_result: vec4<u32>,
+    runtime_serials: vec4<u32>,
+    runtime_slots: vec4<u32>,
     accepted_accounting_a: vec4<f32>,
     accepted_accounting_b: vec4<f32>,
     candidate_accounting_a: vec4<f32>,
@@ -37,6 +41,10 @@ struct Status {
     latch: atomic<u32>,
     injection: atomic<u32>,
     injection_index: atomic<u32>,
+    handoff: atomic<u32>,
+    transaction_1: atomic<u32>,
+    transaction_2: atomic<u32>,
+    transaction_3: atomic<u32>,
 }
 
 struct StateWord { values: vec4<f32> }
@@ -120,6 +128,7 @@ fn use_force_cache() -> bool { return (control.boundary_offsets.w & 4u) != 0u; }
 fn has_prescribed_trace() -> bool { return (control.boundary_offsets.w & 8u) != 0u; }
 fn accepted_slot() -> u32 { return control.event.z & 1u; }
 fn event_operation() -> u32 { return control.event.z >> 8u; }
+fn live_event() -> bool { return (control.event.z & 2u) != 0u; }
 
 fn inject_at(state_word: u32) {
     let injection = atomicLoad(&status.injection);
@@ -200,6 +209,13 @@ fn reduced_phase(value: f32) -> f32 {
     return atan2(sin(value), cos(value));
 }
 
+fn add_compensated(high: f32, low: f32, increment: f32) -> vec2<f32> {
+    let sum = high + increment;
+    let residual = (high - sum) + increment + low;
+    let next_high = sum + residual;
+    return vec2<f32>(next_high, (sum - next_high) + residual);
+}
+
 fn table_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(tables[word].data[lane]);
 }
@@ -213,7 +229,7 @@ fn packed_boundary_scalar(word_offset: u32, scalar_index: u32) -> f32 {
 }
 
 fn source_drive(drive: u32, local_time: f32) -> f32 {
-    let base = control.table_offsets.y + 4u * drive;
+    let base = control.table_offsets.y + 4u * drive + 2u * (control.runtime_slots.x & 1u);
     let signal = vec4<f32>(
         table_float(base, 0u), table_float(base, 1u),
         table_float(base, 2u), table_float(base, 3u));
@@ -306,6 +322,20 @@ fn constitutive_force(node: u32) -> f32 {
     return result;
 }
 
+fn candidate_constitutive_force(node: u32) -> f32 {
+    let range = nodes[node].ranges.xy;
+    var result = 0.0;
+    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+        if tables[entry].data.y != FORCE_KIND_GAP {
+            let sample = tables[entry].data.x;
+            let coefficient = vec2<f32>(
+                table_float(entry, 2u), table_float(entry, 3u));
+            result += dot(coefficient, candidate_b(sample));
+        }
+    }
+    return result;
+}
+
 fn stiffness_of_scratch(node: u32, lane: u32) -> f32 {
     let range = nodes[node].stiffness.xy;
     let row_field = scratch[node].values[lane] * nodes[node].mass_loss.y;
@@ -343,6 +373,66 @@ fn sample_curl(sample: Sample, local: u32) -> vec2<f32> {
     }
 }
 
+// In this entry point binding 7 is the transient upload buffer rather than
+// the immutable outgoing-boundary table. Subsequent event stages do not read
+// boundary data, so the same eight-binding layout remains portable.
+@compute @workgroup_size(128)
+fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if stopped() { return; }
+    let upload = boundary[0u].data;
+    let operation = upload.x;
+    if i == 0u {
+        control.event.y = upload.y;
+        control.event.z = accepted_slot() | 2u | (operation << 8u);
+        control.event.w = upload.w;
+    }
+    if operation == 1u || operation == 4u {
+        if i < control.counts_a.x && i < upload.z {
+            scratch[i].values.x = bitcast<f32>(boundary[1u + i].data.x);
+        }
+        return;
+    }
+    if operation == 3u {
+        if i < control.counts_a.x {
+            nodes[i].mass_loss.w = bitcast<f32>(boundary[1u + i].data.x);
+        } else if i < control.counts_a.x + control.counts_a.y {
+            let sample = i - control.counts_a.x;
+            samples[sample].curl_6_loss.w = bitcast<f32>(
+                boundary[1u + control.counts_a.x + sample].data.x);
+        }
+        return;
+    }
+    if operation == 5u && i < control.counts_c.z {
+        let source_slot = control.runtime_slots.x & 1u;
+        let accepted_base = control.table_offsets.y + 4u * i + 2u * source_slot;
+        let candidate_base = control.table_offsets.y + 4u * i
+            + 2u * (source_slot ^ 1u);
+        let upload_base = 1u + 4u * i;
+        var parameters = bitcast<vec4<f32>>(boundary[upload_base].data);
+        var runtime = boundary[upload_base + 1u].data;
+        let old_parameters = vec4<f32>(
+            table_float(accepted_base, 0u), table_float(accepted_base, 1u),
+            table_float(accepted_base, 2u), table_float(accepted_base, 3u));
+        let current_phase = reduced_phase(
+            old_parameters.w + old_parameters.z * control.clock_f32.y);
+        parameters.w = reduced_phase(
+            current_phase - parameters.z * control.clock_f32.y);
+        if runtime.x != 0u {
+            let elapsed = control.clock_f32.y;
+            let half_phase = 0.5 * parameters.z * elapsed;
+            let new_integral = parameters.x * elapsed
+                + parameters.y * elapsed * sinc(half_phase)
+                    * sin(parameters.w + half_phase);
+            runtime.y = bitcast<u32>(
+                source_drive(i, control.clock_f32.y) - new_integral);
+        }
+        tables[candidate_base].data = bitcast<vec4<u32>>(parameters);
+        tables[candidate_base + 1u].data = runtime;
+        if !finite_vector(parameters) { reject(STATUS_NON_FINITE); }
+    }
+}
+
 @compute @workgroup_size(128)
 fn event_begin(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
@@ -360,6 +450,14 @@ fn event_begin(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         let auxiliary = i - auxiliary_offset();
         set_candidate_auxiliary(auxiliary, accepted_auxiliary(auxiliary));
+    }
+    if i < control.counts_c.z && event_operation() != 5u {
+        let source_slot = control.runtime_slots.x & 1u;
+        let accepted_base = control.table_offsets.y + 4u * i + 2u * source_slot;
+        let candidate_base = control.table_offsets.y + 4u * i
+            + 2u * (source_slot ^ 1u);
+        tables[candidate_base].data = tables[accepted_base].data;
+        tables[candidate_base + 1u].data = tables[accepted_base + 1u].data;
     }
     inject_at(i);
 }
@@ -496,13 +594,116 @@ fn event_accept_tables(@builtin(global_invocation_id) id: vec3<u32>) {
 fn commit_event() {
     let failure = atomicLoad(&status.candidate);
     if failure != 0u {
-        atomicMax(&status.latch, failure);
+        if live_event() {
+            control.event_result = vec4<u32>(
+                control.event.y, event_operation(), control.event.y, failure);
+            control.event.z = accepted_slot();
+            atomicStore(&status.candidate, 0u);
+        } else {
+            atomicMax(&status.latch, failure);
+        }
         return;
     }
+    let operation = event_operation();
     control.event.z = accepted_slot() ^ 1u;
     control.event.x = control.event.y;
     control.accepted_accounting_a = control.candidate_accounting_a;
     control.accepted_accounting_b = control.candidate_accounting_b;
+    if operation == 3u {
+        var flags = control.boundary_offsets.w & 8u;
+        flags |= control.event.w & 1u;
+        flags |= 2u;
+        flags |= control.event.w & 4u;
+        control.boundary_offsets.w = flags;
+        control.runtime_serials.y = control.event.y;
+    } else if operation == 1u {
+        control.runtime_serials.z = control.event.y;
+    } else if operation == 4u {
+        control.runtime_serials.w = control.event.y;
+    } else if operation == 5u {
+        control.runtime_serials.x = control.event.y;
+        control.runtime_slots.x ^= 1u;
+    }
+    control.event_result = vec4<u32>(
+        control.event.y, operation, control.event.y, 0u);
+}
+
+@compute @workgroup_size(128)
+fn handoff_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if stopped() { return; }
+    if i < control.counts_a.x {
+        let before = candidate_q(i);
+        var next = before;
+        var exchange = 0.0;
+        if nodes[i].boundary.z != 0u {
+            next = nodes[i].mass_loss.x * harmonic_value(nodes[i].prescribed, 0.0);
+            exchange = 0.5 * (next * next - before * before) * nodes[i].mass_loss.y;
+            set_candidate_q(i, next);
+        }
+        let next_force = candidate_constitutive_force(i);
+        set_candidate_force(i, next_force);
+        scratch[i].values.y = exchange;
+        if !finite_scalar(next) || !finite_scalar(next_force) {
+            reject(STATUS_NON_FINITE);
+        }
+        inject_at(i);
+        return;
+    }
+    if i < control.counts_a.x + control.counts_a.y {
+        let sample = i - control.counts_a.x;
+        let value = candidate_b(sample);
+        if !all(value >= vec2<f32>(-MAX_FINITE))
+            || !all(value <= vec2<f32>(MAX_FINITE)) {
+            reject(STATUS_NON_FINITE);
+        }
+        inject_at(i);
+        return;
+    }
+    if i < control.counts_a.w {
+        let auxiliary = i - auxiliary_offset();
+        if !finite_scalar(candidate_auxiliary(auxiliary)) {
+            reject(STATUS_NON_FINITE);
+        }
+        inject_at(i);
+    }
+}
+
+@compute @workgroup_size(128)
+fn handoff_reduce_prescribed(@builtin(local_invocation_id) id: vec3<u32>) {
+    let local = id.x;
+    if stopped() { return; }
+    var exchange = 0.0;
+    for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
+        exchange += scratch[node].values.y;
+    }
+    let total = reduce_boundary_scalar(local, exchange);
+    if local == 0u {
+        control.candidate_accounting_a.y += total;
+    }
+}
+
+@compute @workgroup_size(128)
+fn handoff_clear_scratch(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x < arrayLength(&scratch) { scratch[id.x].values = vec4<f32>(0.0); }
+}
+
+@compute @workgroup_size(1)
+fn handoff_commit() {
+    var failure = atomicLoad(&status.candidate);
+    if !finite_vector(control.candidate_accounting_a)
+        || !finite_vector(control.candidate_accounting_b) {
+        failure = max(failure, STATUS_NON_FINITE);
+    }
+    if failure != 0u {
+        atomicMax(&status.latch, failure);
+        atomicStore(&status.handoff, 0u);
+        return;
+    }
+    control.event.z = accepted_slot() ^ 1u;
+    control.accepted_accounting_a = control.candidate_accounting_a;
+    control.accepted_accounting_b = control.candidate_accounting_b;
+    atomicStore(&status.handoff, 0u);
 }
 
 @compute @workgroup_size(128)
@@ -515,7 +716,8 @@ fn rebase_clock_records(@builtin(global_invocation_id) id: vec3<u32>) {
             nodes[i].prescribed.w + nodes[i].prescribed.z * elapsed);
     }
     if i < control.counts_c.z {
-        let base = control.table_offsets.y + 4u * i;
+        let root = control.table_offsets.y + 4u * i;
+        let base = root + 2u * (control.runtime_slots.x & 1u);
         let kind = tables[base + 1u].data.x;
         var next_anchor = 0.0;
         if kind != 0u {
@@ -523,11 +725,15 @@ fn rebase_clock_records(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         let phase = reduced_phase(
             table_float(base, 3u) + table_float(base, 2u) * elapsed);
-        tables[base].data.w = bitcast<u32>(phase);
-        tables[base + 2u].data.w = bitcast<u32>(phase);
+        tables[root].data = tables[base].data;
+        tables[root + 2u].data = tables[base].data;
+        tables[root].data.w = bitcast<u32>(phase);
+        tables[root + 2u].data.w = bitcast<u32>(phase);
         if kind != 0u {
-            tables[base + 1u].data.y = bitcast<u32>(next_anchor);
-            tables[base + 3u].data.y = bitcast<u32>(next_anchor);
+            tables[root + 1u].data = tables[base + 1u].data;
+            tables[root + 3u].data = tables[base + 1u].data;
+            tables[root + 1u].data.y = bitcast<u32>(next_anchor);
+            tables[root + 3u].data.y = bitcast<u32>(next_anchor);
         }
     }
 }
@@ -535,10 +741,13 @@ fn rebase_clock_records(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(1)
 fn commit_clock_rebase() {
     if stopped() { return; }
+    let origin = add_compensated(
+        control.clock_origin.x, control.clock_origin.y, control.clock_f32.y);
     let low = control.clock_u32.x + 1u;
     if low == 0u { control.clock_u32.y += 1u; }
     control.clock_u32.x = low;
     control.clock_u32.z = 0u;
+    control.clock_origin = vec4<f32>(origin, origin);
     control.clock_f32.y = 0.0;
     control.clock_f32.z = 0.0;
 }

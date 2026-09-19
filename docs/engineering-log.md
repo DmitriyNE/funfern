@@ -5,6 +5,37 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-19 — Latest-state GPU handoff (material-law Stage 5)
+
+- Added the dormant canonical generation transaction: packed local `Q,b` maps,
+  bounded component correction, prescribed exchange, thin-gap and basis-invariant
+  outgoing histories, clock/source/runtime records, cache rebuild, energy
+  accounting, validation and one global generation commit. No live CPU field
+  readback/calculation/upload was introduced; the old accepted GPU generation
+  stays installed until target acceptance and rejected targets are discarded.
+- Made physical-coordinate complementary preparation and changed outgoing modal-
+  basis composition resumable. Exact same-index primary/vector maps and unchanged
+  outgoing operators use verified compact identities. On irregular first/second-
+  order fixtures the jobs take 14.45/17.43 ms total but their largest measured
+  slices are 1.19/0.19 ms; final GPU packing is at most 0.80 ms. The standard
+  same-mesh total preparation is 9.42 ms.
+- Added genuinely live zero-duration source, fixed-law, pulse, paired-filter and
+  maintenance events. Five paused events committed in 217.00 ms total (32.91 ms
+  maximum), preserved the clock and runtime serial ownership, and resumed within
+  `3.03e-7/1.10e-6` Q/b parity. Source frequency edits preserve instantaneous
+  phase through an independent accepted runtime slot.
+- Apple M1 Max / Metal: the standard 8,938-Q/17,472-b same-mesh first-order
+  handoff is 32.82 ms request-to-visible with `2.13e-7/1.20e-6` parity. Full old/
+  new resource overlap is 15.28 MiB (7.64 MiB each) with an eight-word map; the
+  two packed main-state buffers are about 0.806 MiB. Changed second-order history,
+  thin-gap, prescribed and mapped-source fixtures pass; injected failure rejects
+  in 35.62 ms with byte-exact source rollback. See the
+  [full Stage 5 report](funfern-material-laws-stage5-report.md).
+- Formatting, strict workspace Clippy, wasm32 application check and all 602
+  workspace tests pass; the one pre-existing curved-boundary reproducer remains
+  ignored. Stage 6 is consumer migration, static-linear AMR/diagnostics and the
+  shared-skin production cutover; the connected scalar solver is unchanged.
+
 ## 2026-09-19 — Linear f32 GPU core (material-law Stage 4)
 
 - Added a dormant production-intended canonical WebGPU path beside the connected
