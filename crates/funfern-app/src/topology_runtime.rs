@@ -562,23 +562,22 @@ impl TopologyPreparationJob {
         self.finish_slice(started, outcome)
     }
 
-    /// Runs slices of `steps` until the job finishes or `budget` of wall time
-    /// has passed, and counts the whole call as one slice. The cooperative
-    /// jobs step at very fine granularity, so a fixed step count per frame
-    /// stretched a 60 ms rebuild across hundreds of frames; a time budget
-    /// spends the frame's headroom instead.
+    /// Runs indivisible work units until the job finishes or `budget` of wall
+    /// time has passed, and counts the whole call as one slice. Checking the
+    /// deadline after every unit matters: formula evaluation makes a canonical
+    /// element much more expensive than the other phases' usual units, so a
+    /// batch here would turn a time budget back into a frame-sized stall.
     pub fn advance_for(
         &mut self,
         budget: Duration,
-        steps: usize,
     ) -> Option<Result<PreparedTopology, TopologyPreparationError>> {
-        if self.done || steps == 0 {
+        if self.done {
             return None;
         }
         let started = Instant::now();
         let mut outcome = None;
         while outcome.is_none() && !self.done {
-            outcome = self.advance_slice(steps);
+            outcome = self.advance_slice(1);
             if started.elapsed() >= budget {
                 break;
             }
@@ -635,6 +634,7 @@ impl TopologyPreparationJob {
                     self.phase = TopologyPreparationPhase::Meshing;
                 }
             }
+            return None;
         }
         if let Some(job) = &mut self.mesh_job {
             let started = Instant::now();
@@ -649,6 +649,7 @@ impl TopologyPreparationJob {
                 }
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             }
+            return None;
         }
         // Assembly and the transfer map used to run to completion inside the
         // slice that finished meshing, which cost every handover two to three
@@ -680,6 +681,7 @@ impl TopologyPreparationJob {
                 Err(error) => return Some(Err(self.fail(error))),
             }
             self.operator = Some(operator);
+            return None;
         } else if self.transfer_job.is_none()
             && let Err(error) = self
                 .validate_point_source(self.mesh.as_ref().unwrap(), self.operator.as_ref().unwrap())
@@ -715,6 +717,7 @@ impl TopologyPreparationJob {
                 Ok(operator) => self.canonical_operator = Some(Arc::new(operator)),
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             }
+            return None;
         }
 
         if !self.fresh
@@ -741,6 +744,7 @@ impl TopologyPreparationJob {
                 Ok(transfer) => self.transfer = Some(Arc::new(transfer)),
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             }
+            return None;
         }
 
         if self.volume_sources.is_none() && self.source_job.is_none() {
@@ -760,6 +764,7 @@ impl TopologyPreparationJob {
                 Ok(sources) => self.volume_sources = Some(Arc::new(sources)),
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             }
+            return None;
         }
 
         if self.canonical_forcing.is_none() {
@@ -775,6 +780,7 @@ impl TopologyPreparationJob {
                 Err(error) => return Some(Err(self.fail(error))),
             };
             self.canonical_forcing = Some(Arc::new(forcing));
+            return None;
         }
 
         if !self.fresh && self.canonical_transfer.is_none() {
@@ -832,6 +838,7 @@ impl TopologyPreparationJob {
                     previous.canonical_operator.clone(),
                     self.canonical_operator.as_ref().unwrap().clone(),
                 ));
+                return None;
             }
             if let Some(job) = &mut self.canonical_vector_job {
                 let started = Instant::now();
@@ -844,6 +851,7 @@ impl TopologyPreparationJob {
                         Err(error) => return Some(Err(self.fail(error.to_string()))),
                     }
                 }
+                return None;
             }
             if let Some(job) = &mut self.canonical_outgoing_job {
                 let started = Instant::now();
@@ -856,6 +864,7 @@ impl TopologyPreparationJob {
                         Err(error) => return Some(Err(self.fail(error.to_string()))),
                     }
                 }
+                return None;
             }
             if let (Some(primary), Some(complementary), Some(thin_gap), Some(outgoing)) = (
                 self.canonical_primary_transfer.clone(),
@@ -869,6 +878,7 @@ impl TopologyPreparationJob {
                     thin_gap,
                     outgoing,
                 }));
+                return None;
             } else {
                 return None;
             }
@@ -1129,9 +1139,8 @@ impl TopologyRuntime {
     pub fn advance_for(
         &mut self,
         budget: Duration,
-        steps: usize,
     ) -> Option<Result<TopologyToken, TopologyPreparationError>> {
-        let result = self.preparing.as_mut()?.advance_for(budget, steps)?;
+        let result = self.preparing.as_mut()?.advance_for(budget)?;
         self.preparing = None;
         self.settle(result)
     }
@@ -1548,7 +1557,7 @@ mod tests {
         let mut unbounded = TopologyRuntime::default();
         let token = request(&mut unbounded);
         let finished = unbounded
-            .advance_for(Duration::from_secs(600), 256)
+            .advance_for(Duration::from_secs(600))
             .expect("one unbounded call finishes the preparation")
             .unwrap();
         assert_eq!(finished, token);
@@ -1566,7 +1575,7 @@ mod tests {
         let mut calls = 0u32;
         let finished = loop {
             calls += 1;
-            if let Some(result) = bounded.advance_for(Duration::ZERO, 256) {
+            if let Some(result) = bounded.advance_for(Duration::ZERO) {
                 break result.unwrap();
             }
             assert!(calls < 1_000_000, "preparation did not finish");

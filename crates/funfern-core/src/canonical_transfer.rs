@@ -1179,6 +1179,7 @@ pub struct CanonicalOutgoingNormalizedTransfer {
 enum CanonicalOutgoingNormalizedTransferPhase {
     Validate,
     Pair(usize),
+    ValidateValues(usize),
     Done,
 }
 
@@ -1187,6 +1188,7 @@ impl CanonicalOutgoingNormalizedTransferPhase {
         match self {
             Self::Validate => "Checking outgoing-history transfer",
             Self::Pair(_) => "Composing outgoing-history bases",
+            Self::ValidateValues(_) => "Validating outgoing-history transfer",
             Self::Done => "Finished",
         }
     }
@@ -1298,16 +1300,8 @@ impl CanonicalOutgoingNormalizedTransferWork {
                     .ok_or(WaveError::InvalidState)?;
                 let pair_count = source.modes().len() * target.modes().len();
                 if pair == pair_count {
-                    if self.values.iter().any(|value| !value.is_finite()) {
-                        return Err(WaveError::InvalidState);
-                    }
-                    self.phase = CanonicalOutgoingNormalizedTransferPhase::Done;
-                    return Ok(Some(CanonicalOutgoingNormalizedTransfer {
-                        source_count: self.source_count,
-                        target_count: self.target_count,
-                        identity: false,
-                        values: std::mem::take(&mut self.values),
-                    }));
+                    self.phase = CanonicalOutgoingNormalizedTransferPhase::ValidateValues(0);
+                    return Ok(None);
                 }
                 let source_modes = source.modes().len();
                 let target_mode = &target.modes()[pair / source_modes];
@@ -1351,6 +1345,27 @@ impl CanonicalOutgoingNormalizedTransferWork {
                     }
                 }
                 self.phase = CanonicalOutgoingNormalizedTransferPhase::Pair(pair + 1);
+            }
+            CanonicalOutgoingNormalizedTransferPhase::ValidateValues(start) => {
+                const VALIDATION_BLOCK: usize = 4096;
+                let end = (start + VALIDATION_BLOCK).min(self.values.len());
+                if self.values[start..end]
+                    .iter()
+                    .any(|value| !value.is_finite())
+                {
+                    return Err(WaveError::InvalidState);
+                }
+                if end < self.values.len() {
+                    self.phase = CanonicalOutgoingNormalizedTransferPhase::ValidateValues(end);
+                } else {
+                    self.phase = CanonicalOutgoingNormalizedTransferPhase::Done;
+                    return Ok(Some(CanonicalOutgoingNormalizedTransfer {
+                        source_count: self.source_count,
+                        target_count: self.target_count,
+                        identity: false,
+                        values: std::mem::take(&mut self.values),
+                    }));
+                }
             }
             CanonicalOutgoingNormalizedTransferPhase::Done => {}
         }
@@ -1455,20 +1470,36 @@ fn triangle_centroid(mesh: &TriMesh, vertices: [usize; 3]) -> Point2 {
 }
 
 fn extend_element_distances(mesh: &TriMesh, distance: &mut [usize], rings: usize) {
+    let mut sides = BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (triangle, element) in mesh.triangles.iter().enumerate() {
+        for [left, right] in [
+            [element.vertices[0], element.vertices[1]],
+            [element.vertices[1], element.vertices[2]],
+            [element.vertices[2], element.vertices[0]],
+        ] {
+            sides
+                .entry((left.min(right), left.max(right)))
+                .or_default()
+                .push(triangle);
+        }
+    }
+    let mut adjacent = vec![Vec::new(); mesh.triangles.len()];
+    for triangles in sides.values() {
+        for &left in triangles {
+            for &right in triangles {
+                if left != right {
+                    adjacent[left].push(right);
+                }
+            }
+        }
+    }
     for ring in 0..rings {
         for left in 0..mesh.triangles.len() {
             if distance[left] != ring {
                 continue;
             }
-            for (right, right_triangle) in mesh.triangles.iter().enumerate() {
-                if distance[right] > ring + 1
-                    && mesh.triangles[left]
-                        .vertices
-                        .iter()
-                        .filter(|vertex| right_triangle.vertices.contains(vertex))
-                        .count()
-                        >= 2
-                {
+            for &right in &adjacent[left] {
+                if distance[right] > ring + 1 {
                     distance[right] = ring + 1;
                 }
             }

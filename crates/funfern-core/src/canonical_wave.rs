@@ -2472,7 +2472,7 @@ pub struct CanonicalAssemblyJob {
     quadratic: Arc<QuadraticWaveOperator>,
     model: OwnedTopologyWaveModel,
     generation: CanonicalGenerationTag,
-    next_element: usize,
+    phase: CanonicalAssemblyPhase,
     primary_contributions: Vec<LinearPrimaryContribution>,
     geometric_support: Vec<f64>,
     primary_mass: Vec<f64>,
@@ -2480,7 +2480,18 @@ pub struct CanonicalAssemblyJob {
     samples: Vec<LinearConstitutiveSample>,
     complementary_loss_rate: Vec<f64>,
     interior_columns: Vec<BTreeSet<u32>>,
-    done: bool,
+    outgoing_job: Option<CanonicalOutgoingBoundaryJob>,
+    outgoing_boundary: Option<CanonicalOutgoingBoundary>,
+}
+
+#[derive(Clone, Copy)]
+enum CanonicalAssemblyPhase {
+    Elements(usize),
+    ValidateMass(usize),
+    ValidateInterior(usize),
+    Outgoing,
+    Finish,
+    Done,
 }
 
 impl CanonicalAssemblyJob {
@@ -2516,34 +2527,126 @@ impl CanonicalAssemblyJob {
             quadratic,
             model: model.to_owned(),
             generation,
-            next_element: 0,
-            done: false,
+            phase: CanonicalAssemblyPhase::Elements(0),
+            outgoing_job: None,
+            outgoing_boundary: None,
         })
     }
 
     pub fn phase(&self) -> &'static str {
-        if self.next_element < self.mesh.triangles.len() {
-            "Compiling canonical constitutive samples"
-        } else {
-            "Finishing canonical operator"
+        match self.phase {
+            CanonicalAssemblyPhase::Elements(_) => "Compiling canonical constitutive samples",
+            CanonicalAssemblyPhase::ValidateMass(_)
+            | CanonicalAssemblyPhase::ValidateInterior(_) => "Validating canonical operator",
+            CanonicalAssemblyPhase::Outgoing => "Compiling outgoing boundary modes",
+            CanonicalAssemblyPhase::Finish => "Finishing canonical operator",
+            CanonicalAssemblyPhase::Done => "Canonical operator ready",
         }
     }
 
-    /// Runs up to `budget` element/finish work units.
+    /// Runs up to `budget` bounded work units. An element, a validation row, or
+    /// a small block of outgoing-boundary rotations is one unit, so even the
+    /// dense non-local boundary eigensolve remains cooperative.
     pub fn advance(&mut self, budget: usize) -> Option<Result<CanonicalWaveOperator, WaveError>> {
         for _ in 0..budget {
-            if self.done {
-                return None;
-            }
-            if self.next_element < self.mesh.triangles.len() {
-                if let Err(error) = self.compile_element(self.next_element) {
-                    self.done = true;
-                    return Some(Err(error));
+            match self.phase {
+                CanonicalAssemblyPhase::Elements(index) => {
+                    if index < self.mesh.triangles.len() {
+                        if let Err(error) = self.compile_element(index) {
+                            self.phase = CanonicalAssemblyPhase::Done;
+                            return Some(Err(error));
+                        }
+                        self.phase = CanonicalAssemblyPhase::Elements(index + 1);
+                    } else if self.samples.len() != self.mesh.triangles.len() * QUADRATURE_SAMPLES {
+                        self.phase = CanonicalAssemblyPhase::Done;
+                        return Some(Err(WaveError::InvalidCoefficients));
+                    } else {
+                        self.phase = CanonicalAssemblyPhase::ValidateMass(0);
+                    }
                 }
-                self.next_element += 1;
-            } else {
-                self.done = true;
-                return Some(self.finish());
+                CanonicalAssemblyPhase::ValidateMass(index) => {
+                    if index == self.primary_mass.len() {
+                        self.phase = CanonicalAssemblyPhase::ValidateInterior(0);
+                        continue;
+                    }
+                    let canonical = self.primary_mass[index];
+                    let legacy = self.quadratic.lumped_mass()[index];
+                    if !canonical.is_finite() || canonical <= 0.0 {
+                        self.phase = CanonicalAssemblyPhase::Done;
+                        return Some(Err(WaveError::InvalidCoefficients));
+                    }
+                    let tolerance = 2.0e-12 * canonical.abs().max(legacy.abs()).max(1.0);
+                    if (canonical - legacy).abs() > tolerance {
+                        self.phase = CanonicalAssemblyPhase::Done;
+                        return Some(Err(WaveError::InvalidMesh(
+                            "canonical and scalar nodal constitutive maps disagree",
+                        )));
+                    }
+                    self.phase = CanonicalAssemblyPhase::ValidateMass(index + 1);
+                }
+                CanonicalAssemblyPhase::ValidateInterior(row) => {
+                    if row == self.interior_columns.len() {
+                        self.phase = CanonicalAssemblyPhase::Outgoing;
+                        continue;
+                    }
+                    let mut expected = self.interior_columns[row].clone();
+                    for sample in self.quadratic.thin_gap_samples() {
+                        if sample.left_node as usize == row || sample.right_node as usize == row {
+                            expected.insert(sample.left_node);
+                            expected.insert(sample.right_node);
+                        }
+                    }
+                    let start = self.quadratic.row_offsets()[row] as usize;
+                    let end = self.quadratic.row_offsets()[row + 1] as usize;
+                    if expected.len() != end - start
+                        || self.quadratic.columns()[start..end]
+                            .iter()
+                            .any(|column| !expected.contains(column))
+                    {
+                        self.phase = CanonicalAssemblyPhase::Done;
+                        return Some(Err(WaveError::InvalidMesh(
+                            "the scalar operator contains an unsupported stiffness coupling",
+                        )));
+                    }
+                    // Release per-row tree storage cooperatively too. Dropping
+                    // every row with the finished job made the otherwise small
+                    // final work unit grow with the whole adapted mesh.
+                    self.interior_columns[row].clear();
+                    self.phase = CanonicalAssemblyPhase::ValidateInterior(row + 1);
+                }
+                CanonicalAssemblyPhase::Outgoing => {
+                    if self.outgoing_job.is_none() {
+                        match CanonicalOutgoingBoundaryJob::new(&self.quadratic) {
+                            Ok(Some(job)) => self.outgoing_job = Some(job),
+                            Ok(None) => {
+                                self.phase = CanonicalAssemblyPhase::Finish;
+                                continue;
+                            }
+                            Err(error) => {
+                                self.phase = CanonicalAssemblyPhase::Done;
+                                return Some(Err(error));
+                            }
+                        }
+                    }
+                    let result = self.outgoing_job.as_mut().unwrap().advance(32);
+                    let Some(result) = result else { continue };
+                    self.outgoing_job = None;
+                    match result {
+                        Ok(boundary) => {
+                            self.outgoing_boundary = Some(boundary);
+                            self.phase = CanonicalAssemblyPhase::Finish;
+                        }
+                        Err(error) => {
+                            self.phase = CanonicalAssemblyPhase::Done;
+                            return Some(Err(error));
+                        }
+                    }
+                }
+                CanonicalAssemblyPhase::Finish => {
+                    self.phase = CanonicalAssemblyPhase::Done;
+                    return Some(self.finish());
+                }
+                CanonicalAssemblyPhase::Done => return None,
             }
         }
         None
@@ -2611,66 +2714,30 @@ impl CanonicalAssemblyJob {
         Ok(())
     }
 
-    fn finish(&self) -> Result<CanonicalWaveOperator, WaveError> {
-        if self
-            .primary_mass
-            .iter()
-            .any(|mass| !mass.is_finite() || *mass <= 0.0)
-            || self.samples.len() != self.mesh.triangles.len() * QUADRATURE_SAMPLES
-        {
-            return Err(WaveError::InvalidCoefficients);
-        }
-        for (canonical, legacy) in self.primary_mass.iter().zip(self.quadratic.lumped_mass()) {
-            let tolerance = 2.0e-12 * canonical.abs().max(legacy.abs()).max(1.0);
-            if (canonical - legacy).abs() > tolerance {
-                return Err(WaveError::InvalidMesh(
-                    "canonical and scalar nodal constitutive maps disagree",
-                ));
-            }
-        }
-        for (row, expected) in self.interior_columns.iter().enumerate() {
-            let mut expected = expected.clone();
-            for sample in self.quadratic.thin_gap_samples() {
-                if sample.left_node as usize == row || sample.right_node as usize == row {
-                    expected.insert(sample.left_node);
-                    expected.insert(sample.right_node);
-                }
-            }
-            let start = self.quadratic.row_offsets()[row] as usize;
-            let end = self.quadratic.row_offsets()[row + 1] as usize;
-            if expected.len() != end - start
-                || self.quadratic.columns()[start..end]
-                    .iter()
-                    .any(|column| !expected.contains(column))
-            {
-                return Err(WaveError::InvalidMesh(
-                    "the scalar operator contains an unsupported stiffness coupling",
-                ));
-            }
-        }
+    fn finish(&mut self) -> Result<CanonicalWaveOperator, WaveError> {
         let (component_labels, component_count) = connected_components(
             self.quadratic.degrees_of_freedom(),
             self.quadratic.element_nodes(),
             self.quadratic.thin_gap_samples(),
         );
-        let outgoing_boundary = compile_outgoing_boundary(&self.quadratic)?;
+        let primary_loss_rate = self
+            .primary_loss_weighted
+            .iter()
+            .zip(&self.primary_mass)
+            .map(|(weighted, mass)| weighted / mass)
+            .collect();
         let operator = CanonicalWaveOperator {
             generation: self.generation,
             physics: self.model.physics,
             orientation: orientation(self.model.physics),
             node_points: self.quadratic.node_points().to_vec(),
             element_nodes: self.quadratic.element_nodes().to_vec(),
-            primary_contributions: self.primary_contributions.clone(),
-            geometric_support: self.geometric_support.clone(),
-            primary_mass: self.primary_mass.clone(),
-            primary_loss_rate: self
-                .primary_loss_weighted
-                .iter()
-                .zip(&self.primary_mass)
-                .map(|(weighted, mass)| weighted / mass)
-                .collect(),
-            samples: self.samples.clone(),
-            complementary_loss_rate: self.complementary_loss_rate.clone(),
+            primary_contributions: std::mem::take(&mut self.primary_contributions),
+            geometric_support: std::mem::take(&mut self.geometric_support),
+            primary_mass: std::mem::take(&mut self.primary_mass),
+            primary_loss_rate,
+            samples: std::mem::take(&mut self.samples),
+            complementary_loss_rate: std::mem::take(&mut self.complementary_loss_rate),
             thin_gap_samples: self.quadratic.thin_gap_samples().to_vec(),
             first_order_boundary_damping: self
                 .quadratic
@@ -2679,7 +2746,7 @@ impl CanonicalAssemblyJob {
                 .zip(self.quadratic.dirichlet_signals())
                 .map(|(damping, prescribed)| if prescribed.is_some() { 0.0 } else { *damping })
                 .collect(),
-            outgoing_boundary,
+            outgoing_boundary: self.outgoing_boundary.take(),
             component_labels,
             component_count,
             maximum_time_step: self.quadratic.maximum_time_step(),
@@ -2840,112 +2907,160 @@ fn linear_loss_rate(
     }
 }
 
-fn compile_outgoing_boundary(
-    quadratic: &QuadraticWaveOperator,
-) -> Result<Option<CanonicalOutgoingBoundary>, WaveError> {
-    let trace_nodes = quadratic
-        .second_order_boundary_damping()
-        .iter()
-        .enumerate()
-        .filter_map(|(node, damping)| (*damping > 0.0).then_some(node as u32))
-        .collect::<Vec<_>>();
-    if trace_nodes.is_empty() {
-        if quadratic
-            .auxiliary_stiffness_values()
+/// Cooperative compiler for the dense non-local outgoing boundary. The trace
+/// eigensolve used to run inside the canonical assembly's final work unit; its
+/// cubic cost made that single supposedly time-budgeted unit hundreds of
+/// milliseconds on an adapted mesh.
+struct CanonicalOutgoingBoundaryJob {
+    trace_nodes: Vec<u32>,
+    damping: Vec<f64>,
+    eigen: Option<SymmetricEigenJob>,
+    eigenvalues: Vec<f64>,
+    eigenvectors: Vec<f64>,
+    largest: f64,
+    next_mode: usize,
+    modes: Vec<CanonicalOutgoingMode>,
+    auxiliary_count: usize,
+}
+
+impl CanonicalOutgoingBoundaryJob {
+    fn new(quadratic: &QuadraticWaveOperator) -> Result<Option<Self>, WaveError> {
+        let trace_nodes = quadratic
+            .second_order_boundary_damping()
             .iter()
-            .any(|value| value.abs() > 1.0e-14)
-        {
-            return Err(WaveError::InvalidMesh(
-                "an outgoing tangential operator has no positive trace impedance",
-            ));
+            .enumerate()
+            .filter_map(|(node, damping)| (*damping > 0.0).then_some(node as u32))
+            .collect::<Vec<_>>();
+        if trace_nodes.is_empty() {
+            if quadratic
+                .auxiliary_stiffness_values()
+                .iter()
+                .any(|value| value.abs() > 1.0e-14)
+            {
+                return Err(WaveError::InvalidMesh(
+                    "an outgoing tangential operator has no positive trace impedance",
+                ));
+            }
+            return Ok(None);
         }
-        return Ok(None);
-    }
-    let count = trace_nodes.len();
-    let mut trace_position = vec![usize::MAX; quadratic.degrees_of_freedom()];
-    for (position, node) in trace_nodes.iter().enumerate() {
-        trace_position[*node as usize] = position;
-    }
-    let damping = trace_nodes
-        .iter()
-        .map(|node| quadratic.second_order_boundary_damping()[*node as usize])
-        .collect::<Vec<_>>();
-    let mut normalized = vec![0.0; count * count];
-    for (trace_row, &node) in trace_nodes.iter().enumerate() {
-        let row = node as usize;
-        for entry in
-            quadratic.row_offsets()[row] as usize..quadratic.row_offsets()[row + 1] as usize
-        {
-            let column = quadratic.columns()[entry] as usize;
-            let trace_column = trace_position[column];
-            let value = quadratic.auxiliary_stiffness_values()[entry];
-            if trace_column == usize::MAX {
-                if value.abs() > 2.0e-12 {
+        let count = trace_nodes.len();
+        let mut trace_position = vec![usize::MAX; quadratic.degrees_of_freedom()];
+        for (position, node) in trace_nodes.iter().enumerate() {
+            trace_position[*node as usize] = position;
+        }
+        let damping = trace_nodes
+            .iter()
+            .map(|node| quadratic.second_order_boundary_damping()[*node as usize])
+            .collect::<Vec<_>>();
+        let mut normalized = vec![0.0; count * count];
+        for (trace_row, &node) in trace_nodes.iter().enumerate() {
+            let row = node as usize;
+            for entry in
+                quadratic.row_offsets()[row] as usize..quadratic.row_offsets()[row + 1] as usize
+            {
+                let column = quadratic.columns()[entry] as usize;
+                let trace_column = trace_position[column];
+                let value = quadratic.auxiliary_stiffness_values()[entry];
+                if trace_column == usize::MAX {
+                    if value.abs() > 2.0e-12 {
+                        return Err(WaveError::InvalidMesh(
+                            "the outgoing tangential operator leaves its physical trace",
+                        ));
+                    }
+                    continue;
+                }
+                normalized[trace_row * count + trace_column] =
+                    value / (damping[trace_row] * damping[trace_column]).sqrt();
+            }
+        }
+        let matrix_scale = normalized
+            .iter()
+            .map(|value| value.abs())
+            .sum::<f64>()
+            .max(1.0);
+        for row in 0..count {
+            for column in 0..row {
+                if (normalized[row * count + column] - normalized[column * count + row]).abs()
+                    > 2.0e-11 * matrix_scale
+                {
                     return Err(WaveError::InvalidMesh(
-                        "the outgoing tangential operator leaves its physical trace",
+                        "the outgoing normalized trace operator is not symmetric",
                     ));
+                }
+            }
+        }
+        Ok(Some(Self {
+            trace_nodes,
+            damping,
+            eigen: Some(SymmetricEigenJob::new(normalized, count)?),
+            eigenvalues: Vec::new(),
+            eigenvectors: Vec::new(),
+            largest: 1.0,
+            next_mode: 0,
+            modes: Vec::with_capacity(count),
+            auxiliary_count: 0,
+        }))
+    }
+
+    fn advance(&mut self, budget: usize) -> Option<Result<CanonicalOutgoingBoundary, WaveError>> {
+        for _ in 0..budget {
+            if let Some(eigen) = &mut self.eigen {
+                let Some(result) = eigen.advance(1) else {
+                    continue;
+                };
+                match result {
+                    Ok((values, vectors)) => {
+                        self.largest = values.last().copied().unwrap_or(0.0).max(1.0);
+                        self.eigenvalues = values;
+                        self.eigenvectors = vectors;
+                        self.eigen = None;
+                    }
+                    Err(error) => return Some(Err(error)),
                 }
                 continue;
             }
-            normalized[trace_row * count + trace_column] =
-                value / (damping[trace_row] * damping[trace_column]).sqrt();
-        }
-    }
-    let matrix_scale = normalized
-        .iter()
-        .map(|value| value.abs())
-        .sum::<f64>()
-        .max(1.0);
-    for row in 0..count {
-        for column in 0..row {
-            if (normalized[row * count + column] - normalized[column * count + row]).abs()
-                > 2.0e-11 * matrix_scale
-            {
-                return Err(WaveError::InvalidMesh(
-                    "the outgoing normalized trace operator is not symmetric",
-                ));
+            if self.next_mode < self.trace_nodes.len() {
+                let mode = self.next_mode;
+                let eigenvalue = if self.eigenvalues[mode].abs() <= 2.0e-11 * self.largest {
+                    0.0
+                } else if self.eigenvalues[mode] > 0.0 {
+                    self.eigenvalues[mode]
+                } else {
+                    return Some(Err(WaveError::InvalidMesh(
+                        "the outgoing tangential operator is not positive semidefinite",
+                    )));
+                };
+                let decay = (7.0 * eigenvalue / 4.0).sqrt();
+                let trace = (0..self.trace_nodes.len())
+                    .map(|trace_node| {
+                        self.eigenvectors[trace_node * self.trace_nodes.len() + mode]
+                            * self.damping[trace_node].sqrt()
+                    })
+                    .collect();
+                let auxiliary_offset = if decay > 2.0e-12 * self.largest.sqrt() {
+                    let offset = self.auxiliary_count;
+                    self.auxiliary_count += 3;
+                    Some(offset)
+                } else {
+                    None
+                };
+                self.modes.push(CanonicalOutgoingMode {
+                    eigenvalue,
+                    decay,
+                    trace,
+                    auxiliary_offset,
+                });
+                self.next_mode += 1;
+                continue;
             }
+            return Some(Ok(CanonicalOutgoingBoundary {
+                trace_nodes: std::mem::take(&mut self.trace_nodes),
+                modes: std::mem::take(&mut self.modes),
+                auxiliary_count: self.auxiliary_count,
+            }));
         }
+        None
     }
-    let (eigenvalues, eigenvectors) = symmetric_eigen(normalized, count)?;
-    let largest = eigenvalues.last().copied().unwrap_or(0.0).max(1.0);
-    let mut auxiliary_count = 0;
-    let mut modes = Vec::with_capacity(count);
-    for mode in 0..count {
-        let eigenvalue = if eigenvalues[mode].abs() <= 2.0e-11 * largest {
-            0.0
-        } else if eigenvalues[mode] > 0.0 {
-            eigenvalues[mode]
-        } else {
-            return Err(WaveError::InvalidMesh(
-                "the outgoing tangential operator is not positive semidefinite",
-            ));
-        };
-        let decay = (7.0 * eigenvalue / 4.0).sqrt();
-        let mut trace = vec![0.0; count];
-        for trace_node in 0..count {
-            trace[trace_node] =
-                eigenvectors[trace_node * count + mode] * damping[trace_node].sqrt();
-        }
-        let auxiliary_offset = if decay > 2.0e-12 * largest.sqrt() {
-            let offset = auxiliary_count;
-            auxiliary_count += 3;
-            Some(offset)
-        } else {
-            None
-        };
-        modes.push(CanonicalOutgoingMode {
-            eigenvalue,
-            decay,
-            trace,
-            auxiliary_offset,
-        });
-    }
-    Ok(Some(CanonicalOutgoingBoundary {
-        trace_nodes,
-        modes,
-        auxiliary_count,
-    }))
 }
 
 #[cfg(test)]
@@ -3085,82 +3200,135 @@ fn apply_outgoing_generator(
     Ok(derivative)
 }
 
-/// Dependency-free Jacobi diagonalization for the symmetric trace oracle.
-/// Eigenvectors are returned as columns and eigenpairs are sorted ascending.
-fn symmetric_eigen(mut matrix: Vec<f64>, count: usize) -> Result<(Vec<f64>, Vec<f64>), WaveError> {
-    if matrix.len() != count * count || matrix.iter().any(|value| !value.is_finite()) {
-        return Err(WaveError::InvalidMesh(
-            "the outgoing trace matrix is invalid",
-        ));
+/// Dependency-free, cooperative Jacobi diagonalization for the symmetric trace
+/// oracle. One work unit applies at most one plane rotation, whose cost is
+/// linear in the trace size. Eigenvectors are returned as columns and
+/// eigenpairs are sorted ascending.
+struct SymmetricEigenJob {
+    matrix: Vec<f64>,
+    vectors: Vec<f64>,
+    count: usize,
+    tolerance: f64,
+    sweep: usize,
+    p: usize,
+    q: usize,
+    largest: f64,
+    done: bool,
+}
+
+type SymmetricEigenResult = (Vec<f64>, Vec<f64>);
+
+impl SymmetricEigenJob {
+    fn new(matrix: Vec<f64>, count: usize) -> Result<Self, WaveError> {
+        if matrix.len() != count * count || matrix.iter().any(|value| !value.is_finite()) {
+            return Err(WaveError::InvalidMesh(
+                "the outgoing trace matrix is invalid",
+            ));
+        }
+        let scale = matrix.iter().map(|value| value.abs()).sum::<f64>().max(1.0);
+        let mut vectors = vec![0.0; count * count];
+        for index in 0..count {
+            vectors[index * count + index] = 1.0;
+        }
+        Ok(Self {
+            matrix,
+            vectors,
+            count,
+            tolerance: 4.0e-14 * scale,
+            sweep: 0,
+            p: 0,
+            q: 1,
+            largest: 0.0,
+            done: false,
+        })
     }
-    let mut vectors = vec![0.0; count * count];
-    for index in 0..count {
-        vectors[index * count + index] = 1.0;
-    }
-    let scale = matrix.iter().map(|value| value.abs()).sum::<f64>().max(1.0);
-    let tolerance = 4.0e-14 * scale;
-    let maximum_sweeps = 80;
-    for _ in 0..maximum_sweeps {
-        let mut largest: f64 = 0.0;
-        for p in 0..count {
-            for q in p + 1..count {
-                let apq = matrix[p * count + q];
-                largest = largest.max(apq.abs());
-                if apq.abs() <= tolerance {
-                    continue;
+
+    fn advance(&mut self, budget: usize) -> Option<Result<SymmetricEigenResult, WaveError>> {
+        const MAXIMUM_SWEEPS: usize = 80;
+        for _ in 0..budget {
+            if self.done {
+                return None;
+            }
+            if self.count < 2 || self.p + 1 >= self.count {
+                if self.largest <= self.tolerance {
+                    self.done = true;
+                    return Some(Ok(self.sorted()));
                 }
-                let app = matrix[p * count + p];
-                let aqq = matrix[q * count + q];
+                self.sweep += 1;
+                if self.sweep == MAXIMUM_SWEEPS {
+                    self.done = true;
+                    return Some(Err(WaveError::InvalidMesh(
+                        "the outgoing trace eigensolve did not converge",
+                    )));
+                }
+                self.p = 0;
+                self.q = 1;
+                self.largest = 0.0;
+                continue;
+            }
+
+            let p = self.p;
+            let q = self.q;
+            let apq = self.matrix[p * self.count + q];
+            self.largest = self.largest.max(apq.abs());
+            if apq.abs() > self.tolerance {
+                let app = self.matrix[p * self.count + p];
+                let aqq = self.matrix[q * self.count + q];
                 let angle = 0.5 * (2.0 * apq).atan2(aqq - app);
                 let (sine, cosine) = angle.sin_cos();
-                for row in 0..count {
+                for row in 0..self.count {
                     if row == p || row == q {
                         continue;
                     }
-                    let arp = matrix[row * count + p];
-                    let arq = matrix[row * count + q];
+                    let arp = self.matrix[row * self.count + p];
+                    let arq = self.matrix[row * self.count + q];
                     let next_p = cosine * arp - sine * arq;
                     let next_q = sine * arp + cosine * arq;
-                    matrix[row * count + p] = next_p;
-                    matrix[p * count + row] = next_p;
-                    matrix[row * count + q] = next_q;
-                    matrix[q * count + row] = next_q;
+                    self.matrix[row * self.count + p] = next_p;
+                    self.matrix[p * self.count + row] = next_p;
+                    self.matrix[row * self.count + q] = next_q;
+                    self.matrix[q * self.count + row] = next_q;
                 }
-                matrix[p * count + p] =
+                self.matrix[p * self.count + p] =
                     cosine * cosine * app - 2.0 * sine * cosine * apq + sine * sine * aqq;
-                matrix[q * count + q] =
+                self.matrix[q * self.count + q] =
                     sine * sine * app + 2.0 * sine * cosine * apq + cosine * cosine * aqq;
-                matrix[p * count + q] = 0.0;
-                matrix[q * count + p] = 0.0;
-                for row in 0..count {
-                    let vrp = vectors[row * count + p];
-                    let vrq = vectors[row * count + q];
-                    vectors[row * count + p] = cosine * vrp - sine * vrq;
-                    vectors[row * count + q] = sine * vrp + cosine * vrq;
+                self.matrix[p * self.count + q] = 0.0;
+                self.matrix[q * self.count + p] = 0.0;
+                for row in 0..self.count {
+                    let vrp = self.vectors[row * self.count + p];
+                    let vrq = self.vectors[row * self.count + q];
+                    self.vectors[row * self.count + p] = cosine * vrp - sine * vrq;
+                    self.vectors[row * self.count + q] = sine * vrp + cosine * vrq;
                 }
             }
-        }
-        if largest <= tolerance {
-            let mut order = (0..count).collect::<Vec<_>>();
-            order.sort_by(|left, right| {
-                matrix[*left * count + *left].total_cmp(&matrix[*right * count + *right])
-            });
-            let values = order
-                .iter()
-                .map(|index| matrix[*index * count + *index])
-                .collect::<Vec<_>>();
-            let mut sorted = vec![0.0; count * count];
-            for (new_column, old_column) in order.into_iter().enumerate() {
-                for row in 0..count {
-                    sorted[row * count + new_column] = vectors[row * count + old_column];
-                }
+            self.q += 1;
+            if self.q == self.count {
+                self.p += 1;
+                self.q = self.p + 1;
             }
-            return Ok((values, sorted));
         }
+        None
     }
-    Err(WaveError::InvalidMesh(
-        "the outgoing trace eigensolve did not converge",
-    ))
+
+    fn sorted(&mut self) -> (Vec<f64>, Vec<f64>) {
+        let mut order = (0..self.count).collect::<Vec<_>>();
+        order.sort_by(|left, right| {
+            self.matrix[*left * self.count + *left]
+                .total_cmp(&self.matrix[*right * self.count + *right])
+        });
+        let values = order
+            .iter()
+            .map(|index| self.matrix[*index * self.count + *index])
+            .collect::<Vec<_>>();
+        let mut sorted = vec![0.0; self.count * self.count];
+        for (new_column, old_column) in order.into_iter().enumerate() {
+            for row in 0..self.count {
+                sorted[row * self.count + new_column] = self.vectors[row * self.count + old_column];
+            }
+        }
+        (values, sorted)
+    }
 }
 
 /// Returns `S=L^T` and `S^-1` for `H=L L^T`, so `z=Sx` and
@@ -3631,6 +3799,30 @@ mod tests {
         assert_eq!(actual.generation().geometry_revision, 17);
         assert_eq!(actual.generation().mesh_revision, 23);
         assert_eq!(actual.generation().constitutive_revision, 43);
+    }
+
+    #[test]
+    fn outgoing_trace_eigensolve_yields_between_rotation_blocks() {
+        let count = 32;
+        let mut matrix = vec![0.0; count * count];
+        for row in 0..count {
+            matrix[row * count + row] = 2.0;
+            if row + 1 < count {
+                matrix[row * count + row + 1] = -1.0;
+                matrix[(row + 1) * count + row] = -1.0;
+            }
+        }
+        let mut job = SymmetricEigenJob::new(matrix, count).unwrap();
+        assert!(job.advance(1).is_none());
+        let (values, vectors) = loop {
+            if let Some(result) = job.advance(32) {
+                break result.unwrap();
+            }
+        };
+        assert_eq!(values.len(), count);
+        assert_eq!(vectors.len(), count * count);
+        assert!(values.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(values[0] > 0.0);
     }
 
     #[test]

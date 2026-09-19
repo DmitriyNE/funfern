@@ -315,10 +315,11 @@ pub struct SolutionIndicatorReport {
     /// Of `refine_candidates`, the ones the error estimate itself asks for.
     /// These are the ones an accuracy target has authority over.
     pub error_refine_candidates: usize,
-    /// Of `refine_candidates`, the ones a limit asks for while the error
-    /// estimate is content: too coarse to carry the forced wavelength, or
-    /// larger than the largest element allowed. No accuracy target answers for
-    /// these.
+    /// Of `refine_candidates`, the ones an unconditional constraint asks for:
+    /// too coarse to carry the forced wavelength or larger than the largest
+    /// element allowed. The constraint owns an element when it and the error
+    /// estimate both bind; no accuracy target answers for these. This bucket
+    /// also retains targets introduced only by mesh grading.
     pub limit_refine_candidates: usize,
     pub coarsen_candidates: usize,
     pub recovery_contribution: f64,
@@ -624,6 +625,11 @@ pub struct SolutionIndicatorJob {
     /// largest element allowed - is a limit rather than a judgement about
     /// error, and only this tells the two apart.
     error_bound: Vec<bool>,
+    /// Whether an unconditional wavelength or maximum-edge limit wants the
+    /// element finer. This is kept independently because both the estimator
+    /// and a limit can bind at once; the limit must win that classification or
+    /// a satisfied global accuracy target can suppress a mandatory refinement.
+    limit_bound: Vec<bool>,
     total_energy: f64,
     total_area: f64,
     report: SolutionIndicatorReport,
@@ -702,6 +708,7 @@ impl SolutionIndicatorJob {
             indicators: vec![0.0; count],
             targets: vec![0.0; count],
             error_bound: vec![false; count],
+            limit_bound: vec![false; count],
             total_energy: 0.0,
             total_area: 0.0,
             report: SolutionIndicatorReport::default(),
@@ -1607,14 +1614,19 @@ impl SolutionIndicatorJob {
             self.report.smallest_wavelength_target =
                 self.report.smallest_wavelength_target.min(wavelength);
         }
-        let error_target = estimate.edge * scale;
-        self.error_bound[index] = estimate.edge > 1.05 * error_target;
-        let target = error_target
-            .min(wavelength_target.unwrap_or(self.options.maximum_edge_length))
+        let error_target = (estimate.edge * scale).clamp(
+            self.options.minimum_edge_length,
+            self.options.maximum_edge_length,
+        );
+        let limit_target = wavelength_target
+            .unwrap_or(self.options.maximum_edge_length)
             .clamp(
                 self.options.minimum_edge_length,
                 self.options.maximum_edge_length,
             );
+        self.error_bound[index] = estimate.edge > 1.05 * error_target;
+        self.limit_bound[index] = estimate.edge > 1.05 * limit_target;
+        let target = error_target.min(limit_target);
         self.indicators[index] = indicator;
         self.targets[index] = target;
         self.report.minimum_indicator = self.report.minimum_indicator.min(indicator);
@@ -1697,7 +1709,7 @@ impl SolutionIndicatorJob {
             ];
             if lengths.iter().copied().fold(0.0, f64::max) > 1.05 * target {
                 self.report.refine_candidates += 1;
-                if self.error_bound[index] {
+                if self.error_bound[index] && !self.limit_bound[index] {
                     self.report.error_refine_candidates += 1;
                 } else {
                     self.report.limit_refine_candidates += 1;
@@ -2911,6 +2923,36 @@ mod tests {
         )
         .unwrap();
         assert!((result.report.smallest_wavelength_target - 0.02).abs() < 1.0e-12);
+        assert_eq!(result.report.refine_candidates, 2);
+        assert_eq!(result.report.limit_refine_candidates, 2);
+        assert_eq!(result.report.error_refine_candidates, 0);
+    }
+
+    /// A wavelength remains an unconditional resolution floor when the error
+    /// estimator asks for the same element too. Classifying this overlap as
+    /// error-only lets the global accuracy gate discard the wavelength request.
+    #[test]
+    fn a_forced_wavelength_wins_when_error_and_limit_both_bind() {
+        let (mesh, operator, scene) = setup();
+        let state = snapshot(&mesh, &operator, |point| point.x.powi(3));
+        let result = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions {
+                    minimum_edge_length: 0.005,
+                    maximum_edge_length: 2.0,
+                    relative_tolerance: 1.0e-6,
+                    forcing_frequency_hz: 10.0,
+                    elements_per_wavelength: 5.0,
+                    ..Default::default()
+                },
+            ),
+            100,
+        )
+        .unwrap();
         assert_eq!(result.report.refine_candidates, 2);
         assert_eq!(result.report.limit_refine_candidates, 2);
         assert_eq!(result.report.error_refine_candidates, 0);

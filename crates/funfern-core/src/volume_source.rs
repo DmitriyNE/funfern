@@ -360,10 +360,10 @@ impl VolumeSourceCompileJob {
         Ok(())
     }
 
-    fn result(&self) -> CompiledVolumeSources {
+    fn result(&mut self) -> CompiledVolumeSources {
         CompiledVolumeSources {
             signals: self.sources.iter().map(|source| source.signal).collect(),
-            nodes: self.nodes.clone(),
+            nodes: std::mem::take(&mut self.nodes),
         }
     }
 }

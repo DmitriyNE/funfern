@@ -690,6 +690,23 @@ fn probes_need_upload(upload: Option<ProbeUpload>, token: TopologyToken, generat
     upload.is_none_or(|upload| upload.token != token || upload.generation != generation)
 }
 
+/// Ownership of an AMR estimate's immutable snapshot. Live GPU events replace
+/// command buffers and advance the request revision, but do not change the
+/// topology or invalidate a snapshot already copied to the CPU. A generation
+/// handoff does both and therefore is part of the ownership key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AmrIndicatorSource {
+    topology: TopologyToken,
+    gpu_generation: u64,
+    accepted_step: u64,
+}
+
+impl AmrIndicatorSource {
+    fn is_current(self, topology: TopologyToken, gpu_generation: u64) -> bool {
+        self.topology == topology && self.gpu_generation == gpu_generation
+    }
+}
+
 #[derive(Resource)]
 pub struct Playground {
     editor: TopologyEditor,
@@ -874,7 +891,7 @@ pub struct Playground {
     amr_last_analyzed_step: Option<u64>,
     amr_coarsen_streak: u8,
     amr_indicator_job: Option<SolutionIndicatorJob>,
-    amr_indicator_source: Option<(TopologyToken, u64, u64, u64)>,
+    amr_indicator_source: Option<AmrIndicatorSource>,
     amr_indicator_result: Option<SolutionIndicatorResult>,
     amr_adaptation_job: Option<MeshAdaptationJob>,
     /// Revision of the active mesh the running adaptation started from. The
@@ -6474,10 +6491,11 @@ impl Playground {
         self.pending_pulse = Some((point, region));
         self.message = format!("Pulse queued in region {}", region.0);
     }
-    /// Wall time a frame lends to topology preparation. The cooperative jobs
-    /// step at very fine granularity, so the earlier fixed 256 steps per frame
-    /// stretched a 60 ms rebuild across hundreds of frames.
-    const PREPARATION_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
+    /// Wall time a frame lends to topology preparation. The runtime checks the
+    /// deadline between individual work units, including each formula-heavy
+    /// canonical element, so this remains a latency bound rather than only an
+    /// average throughput target.
+    const PREPARATION_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 
     fn request_runtime(&mut self) {
         if self.editor.acceptance != TopologyAcceptance::Valid
@@ -6583,10 +6601,7 @@ impl Playground {
             self.retime_for_speed();
             self.request_runtime();
         }
-        if let Some(Ok(_)) = self
-            .runtime
-            .advance_for(Self::PREPARATION_FRAME_BUDGET, 256)
-        {
+        if let Some(Ok(_)) = self.runtime.advance_for(Self::PREPARATION_FRAME_BUDGET) {
             self.handoff_ready = Some(Instant::now());
         }
         if self.uploading.is_none() && self.runtime.ready().is_some() && request.caught_up() {
@@ -7260,21 +7275,18 @@ impl Playground {
             let Some(result) = result else { return };
             let source = self.amr_indicator_source.take();
             self.amr_indicator_job = None;
-            let Some((token, generation, buffer_revision, step)) = source else {
+            let Some(source) = source else {
                 self.amr_status = "discarded stale estimate".into();
                 return;
             };
             let Some(active) = self.runtime.active().cloned() else {
                 return;
             };
-            if active.bundle.token != token
-                || request.generation() != generation
-                || request.revision() != buffer_revision
-            {
+            if !source.is_current(active.bundle.token, request.generation()) {
                 self.amr_status = "discarded stale estimate".into();
                 return;
             }
-            self.amr_last_analyzed_step = Some(step);
+            self.amr_last_analyzed_step = Some(source.accepted_step);
             let result = match result {
                 Ok(result) => result,
                 Err(error) => {
@@ -7473,12 +7485,11 @@ impl Playground {
             )
             .with_canonical_supplement(supplement),
         );
-        self.amr_indicator_source = Some((
-            active.bundle.token,
-            request.generation(),
-            request.revision(),
-            step,
-        ));
+        self.amr_indicator_source = Some(AmrIndicatorSource {
+            topology: active.bundle.token,
+            gpu_generation: request.generation(),
+            accepted_step: step,
+        });
         self.amr_last_started = Some(Instant::now());
         self.amr_status = "preparing estimate".into();
     }
@@ -14535,6 +14546,32 @@ mod probe_interaction_tests {
         assert!(adaptation_refines(&report(0, 2000, 0.0), 0.12));
         // A handful of elements is noise, as it always was.
         assert!(!adaptation_refines(&report(3, 0, 0.9), 0.12));
+    }
+
+    /// An estimate owns a copied solution snapshot. Periodic grid filtering is
+    /// a live event and may replace GPU command buffers while the CPU walks
+    /// that snapshot; only a topology/generation handoff makes it stale.
+    #[test]
+    fn a_live_gpu_event_does_not_disown_an_amr_snapshot() {
+        let token = TopologyToken {
+            document_revision: 4,
+            topology_revision: 3,
+            mesh_generation: 2,
+        };
+        let source = AmrIndicatorSource {
+            topology: token,
+            gpu_generation: 7,
+            accepted_step: 120,
+        };
+        assert!(source.is_current(token, 7));
+        assert!(!source.is_current(token, 8));
+        assert!(!source.is_current(
+            TopologyToken {
+                mesh_generation: 3,
+                ..token
+            },
+            7
+        ));
     }
 
     #[test]

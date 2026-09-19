@@ -80,6 +80,38 @@ The supplement reports ordinary drift, thin-gap and outgoing contributions
 separately. Dynamic and nonlinear material AMR stays gated: this adapter is not
 being renamed into a general nonlinear residual.
 
+### Post-cutover AMR and preparation correction
+
+The first production acceptance run exposed two integration defects that the
+isolated Stage 6 fixtures did not exercise.
+
+- An AMR estimate was owned by the canonical request's mutable buffer revision.
+  The periodic paired grid filter legitimately advances that revision, so after
+  the first adaptive handoff every later CPU estimate was discarded as stale.
+  Estimate ownership now consists of the immutable topology token, canonical GPU
+  generation and sampled accepted step. Live events may run while the owned CPU
+  snapshot is evaluated; a generation handoff still invalidates it. A native
+  Metal trace then completed repeated adaptive handoffs from 9,653 to 12,669 and
+  15,683 degrees of freedom.
+- A wavelength or maximum-edge floor that bound the same element as the error
+  target was classified as error-only. A satisfied global accuracy target could
+  therefore suppress a mandatory resolution floor. Error and limit binding are
+  now tracked independently, with the limit taking precedence when both apply.
+
+The same run showed that preparation was resumable in name but not yet in frame
+latency. The wall-time loop checked its deadline only after batches of 256
+canonical elements, and the outgoing-boundary Jacobi eigensolve still occupied
+one final work unit. On successively adapted second-order meshes the longest
+observed slices were 222.5, 364.7 and 630.7 ms. Preparation now checks its
+deadline after every indivisible unit, and the trace eigensolve yields between
+small rotation blocks. Per-row validation releases its trees incrementally;
+volume-source results move rather than deep-clone; complementary extension uses
+an edge index instead of an all-triangle-pairs search; outgoing-history result
+validation is blockwise; and completing one preparation phase yields before the
+next phase starts. The application lends preparation 4 ms per frame. Total
+second-order preparation can still span many frames, but the accepted solver is
+scheduled throughout it rather than waiting behind a monolithic CPU tail.
+
 ## Generation, events and source continuity
 
 Every topology candidate now compiles the canonical operator, forcing and
@@ -119,7 +151,7 @@ target/release/examples/canonical_gpu_timing [reflecting/first/second-order]
 target/release/funfern-app
 ```
 
-The workspace suite completes with 636 passes; one historical legacy
+The workspace suite completes with 639 passes; one historical legacy
 curved-second-order reproducer remains ignored. The shader suite parses and validates the four new
 consumer shaders as well as the evolution and transfer shaders. Strict Clippy,
 all-target native checks and the wasm32 application check pass. A release native

@@ -5,6 +5,33 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-19 — Stage 6 acceptance: AMR liveness and preparation latency
+
+- Native acceptance found that AMR completed its first handoff and then discarded
+  every estimate as stale: periodic grid filtering changes the GPU buffer
+  revision, which is not snapshot ownership. AMR now keys an estimate to the
+  topology token and canonical generation, retaining the sampled accepted step
+  only for cadence. A Metal run completed repeated 9,653 → 12,669 → 15,683 DOF
+  adaptive handoffs. Mandatory wavelength/max-edge limits also win when the
+  error target binds the same element, rather than being suppressed by the
+  global accuracy gate.
+- Preparation's wall-time budget was checked after 256-element batches, and the
+  dense outgoing-boundary eigensolve still hid in one final unit. The trace saw
+  222–631 ms worst slices as AMR grew the mesh. Deadlines are now checked after
+  every canonical element/validation unit and the Jacobi solve yields in small
+  rotation blocks. Phase completion yields before the next job starts.
+- Removed the remaining avoidable tails: source compilation moves its finished
+  node table instead of deep-cloning it, complementary extension uses an edge
+  adjacency index rather than all triangle pairs, and outgoing-history transfer
+  validates its dense result in blocks. The app now grants preparation 4 ms of
+  each frame; total second-order preparation remains visible but no longer owns
+  one monolithic solver-blocking slice. Regression coverage exercises live-event
+  AMR ownership, overlapping hard/error limits and cooperative eigensolving.
+- Details and the acceptance rationale are folded into the
+  [Stage 6 report](funfern-material-laws-stage6-report.md).
+- Formatting, the 639-pass workspace suite (plus the one historical ignored
+  reproducer), strict workspace Clippy, wasm32 checking and a release build pass.
+
 ## 2026-09-19 — Canonical production cutover (material-law Stage 6)
 
 - Connected the accepted canonical `Q,b` generation to application evolution for
@@ -33,7 +60,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   8.62 MiB including 0.93 MiB boundary data. See the
   [full Stage 6 report](funfern-material-laws-stage6-report.md).
 - Formatting, strict workspace Clippy, all-target native checks, wasm32 checking,
-  release build and a native app smoke test pass; the workspace suite has 636
+  release build and a native app smoke test pass; the workspace suite has 639
   passes and one historical ignored legacy curved-second-order reproducer. Stage 7 is
   time-driven media/runtime switching; authored non-inert laws remain unavailable.
 
