@@ -1,0 +1,6388 @@
+{
+  "baseline": "beca47e0d05c9b24945ef632b00c5cc16f80c8a0",
+  "scheme": "coupled-kick",
+  "summary": {
+    "passed": 248,
+    "failed": 0,
+    "failed_cases": [],
+    "seconds": 2.6732123750261962
+  },
+  "results": [
+    {
+      "name": "local FEM assembly parity",
+      "value": 8.83968663926406e-17,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "boundary line assembly parity",
+      "value": 0.0,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "boundary damping assembly parity",
+      "value": 0.0,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "original split negative control",
+      "observation": {
+        "errors": [
+          0.0007657958205341356,
+          0.0005314010451460308,
+          0.0005160870838301049
+        ],
+        "reduction": 1.4838500023113046,
+        "original_required_reduction": 2.0,
+        "rejected": true,
+        "note": "Boundary-only midpoint split has a nonvanishing fixed-CFL reflection floor. Full original sweep is retained separately."
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=0.75 angle=0",
+      "value": 1.1226728202504402e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=0.75 angle=0",
+      "value": 2.5747014460868626e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=0.75 angle=0",
+      "value": 4.0203781487644956e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=0.75 angle=0",
+      "value": 1.1259432903922936e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=0.75 angle=0",
+      "value": 2.76998457549921e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=0.75 angle=0",
+      "value": 4.019254678517558e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=0.75 angle=0",
+      "value": 1.124121284122463e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=0.75 angle=0",
+      "value": 2.6145405697756064e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=0.75 angle=0",
+      "value": 1.7255877105779877e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=0.75 angle=0",
+      "value": 19.847536959156404,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=0.75 angle=0",
+      "value": 20.08863659144607,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=0.75 angle=0",
+      "value": 20.03258628265384,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "normal first-order reflection wavelength=0.75",
+      "value": 1.1226728202504402e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=0.75 angle=0",
+      "observation": {
+        "first": 1.1226728202504402e-05,
+        "legacy": 1.1259432903922936e-05,
+        "passive": 1.124121284122463e-05
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=0.75 angle=30",
+      "value": 1.122529383685027e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=0.75 angle=30",
+      "value": 3.194048191121389e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=0.75 angle=30",
+      "value": 4.519866327363962e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=0.75 angle=30",
+      "value": 9.80595073766577e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=0.75 angle=30",
+      "value": 2.7357595073963782e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=0.75 angle=30",
+      "value": 6.2074929476478405e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=0.75 angle=30",
+      "value": 9.896275566112946e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=0.75 angle=30",
+      "value": 3.130532423508368e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=0.75 angle=30",
+      "value": 1.9576456193200695e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=0.75 angle=30",
+      "value": 24.53629244860068,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=0.75 angle=30",
+      "value": 9.830004087164186,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=0.75 angle=30",
+      "value": 11.642021242639295,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=0.75 angle=30",
+      "observation": {
+        "first": 0.07179510300222844,
+        "legacy": 0.005153997528728468,
+        "passive": 0.019596449098584934
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=0.75 angle=60",
+      "value": 1.0492623505639662e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=0.75 angle=60",
+      "value": 8.200269307181003e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=0.75 angle=60",
+      "value": 5.861736966428123e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=0.75 angle=60",
+      "value": 6.935223819232451e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=0.75 angle=60",
+      "value": 8.384545919269308e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=0.75 angle=60",
+      "value": 1.35309859933727e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=0.75 angle=60",
+      "value": 9.18654539967394e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=0.75 angle=60",
+      "value": 9.220252993893675e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=0.75 angle=60",
+      "value": 4.027444373753673e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=0.75 angle=60",
+      "value": 70.19336948252734,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=0.75 angle=60",
+      "value": 25.423097026743026,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=0.75 angle=60",
+      "value": 55.15297369307812,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "grazing improvement wavelength=0.75 angle=60",
+      "value": 0.213873993230405,
+      "limit": 0.3333298899752554,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=0.75 angle=60",
+      "observation": {
+        "first": 0.3333298899752554,
+        "legacy": 0.11111037558652298,
+        "passive": 0.213873993230405
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=0.75 angle=75",
+      "value": 7.81959688828079e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=0.75 angle=75",
+      "value": 2.609164740042235e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=0.75 angle=75",
+      "value": 4.866599893940463e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=0.75 angle=75",
+      "value": 5.298184050926356e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=0.75 angle=75",
+      "value": 2.489929432955921e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=0.75 angle=75",
+      "value": 4.940913162274513e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=0.75 angle=75",
+      "value": 7.473396371370225e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=0.75 angle=75",
+      "value": 2.365287482422165e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=0.75 angle=75",
+      "value": 2.590424864245628e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=0.75 angle=75",
+      "value": 115.1362194458166,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=0.75 angle=75",
+      "value": 105.47158617718628,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=0.75 angle=75",
+      "value": 107.04456496697664,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "grazing improvement wavelength=0.75 angle=75",
+      "value": 0.4798699573676648,
+      "limit": 0.5887878475113907,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=0.75 angle=75",
+      "observation": {
+        "first": 0.5887878475113907,
+        "legacy": 0.3466737398433464,
+        "passive": 0.4798699573676648
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=0.75 angle=85",
+      "value": 3.3099577991468564e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=0.75 angle=85",
+      "value": 2.171788436043528e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=0.75 angle=85",
+      "value": 6.59882275665142e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=0.75 angle=85",
+      "value": 3.759819883218744e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=0.75 angle=85",
+      "value": 2.1605450782615025e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=0.75 angle=85",
+      "value": 1.3482653211453978e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=0.75 angle=85",
+      "value": 4.76492045641873e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=0.75 angle=85",
+      "value": 2.1683217095908694e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=0.75 angle=85",
+      "value": 8.924585710271596e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=0.75 angle=85",
+      "value": 423.47465985655344,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=0.75 angle=85",
+      "value": 533.976119639284,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=0.75 angle=85",
+      "value": 378.81819218347783,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "grazing improvement wavelength=0.75 angle=85",
+      "value": 0.7855574378460023,
+      "limit": 0.8396632263206204,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=0.75 angle=85",
+      "observation": {
+        "first": 0.8396632263206204,
+        "legacy": 0.70503612658898,
+        "passive": 0.7855574378460023
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=1.0 angle=0",
+      "value": 1.1316856791059107e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=1.0 angle=0",
+      "value": 5.5055519989238624e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=1.0 angle=0",
+      "value": 6.856446710448203e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=1.0 angle=0",
+      "value": 1.1350699438239562e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=1.0 angle=0",
+      "value": 5.451872391691679e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=1.0 angle=0",
+      "value": 2.72046160053139e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=1.0 angle=0",
+      "value": 1.1331846969534706e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=1.0 angle=0",
+      "value": 5.49981353330115e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=1.0 angle=0",
+      "value": 1.3652886364852346e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=1.0 angle=0",
+      "value": 22.246566950576995,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=1.0 angle=0",
+      "value": 22.482307976593393,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=1.0 angle=0",
+      "value": 22.444064444075178,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "normal first-order reflection wavelength=1.0",
+      "value": 1.1316856791059107e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=1.0 angle=0",
+      "observation": {
+        "first": 1.1316856791059107e-05,
+        "legacy": 1.1350699438239562e-05,
+        "passive": 1.1331846969534706e-05
+      }
+    },
+    {
+      "name": "Bloch FEM Hermitian residual",
+      "value": 1.2771911246764558e-17,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error first wavelength=1.0 angle=30",
+      "value": 1.1317689958815745e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=1.0 angle=30",
+      "value": 1.9680492903202508e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=1.0 angle=30",
+      "value": 5.896194617892628e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=1.0 angle=30",
+      "value": 9.883610043771046e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=1.0 angle=30",
+      "value": 2.1929476903420574e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=1.0 angle=30",
+      "value": 3.7264752416583906e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=1.0 angle=30",
+      "value": 9.980080812287659e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=1.0 angle=30",
+      "value": 1.7847209652594198e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=1.0 angle=30",
+      "value": 5.157647101859229e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=1.0 angle=30",
+      "value": 27.345582147931594,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=1.0 angle=30",
+      "value": 10.855914457372473,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=1.0 angle=30",
+      "value": 12.731163550875104,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=1.0 angle=30",
+      "observation": {
+        "first": 0.0717950578853259,
+        "legacy": 0.005153979903326109,
+        "passive": 0.019596367518475245
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=1.0 angle=60",
+      "value": 1.0601361940320153e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=1.0 angle=60",
+      "value": 2.7538300414414734e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=1.0 angle=60",
+      "value": 6.383104887115483e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=1.0 angle=60",
+      "value": 6.9915406957452634e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=1.0 angle=60",
+      "value": 3.662903696916116e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=1.0 angle=60",
+      "value": 1.1060201402054762e-14,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=1.0 angle=60",
+      "value": 9.298605681149572e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=1.0 angle=60",
+      "value": 3.396098055447415e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=1.0 angle=60",
+      "value": 3.3017902505035133e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=1.0 angle=60",
+      "value": 78.10677032055366,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=1.0 angle=60",
+      "value": 28.281696094946216,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=1.0 angle=60",
+      "value": 61.09918617998267,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "grazing improvement wavelength=1.0 angle=60",
+      "value": 0.21387389338008408,
+      "limit": 0.33332978146042463,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=1.0 angle=60",
+      "observation": {
+        "first": 0.33332978146042463,
+        "legacy": 0.11111035075699437,
+        "passive": 0.21387389338008408
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=1.0 angle=75",
+      "value": 7.912899749098802e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=1.0 angle=75",
+      "value": 1.1968908484986273e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=1.0 angle=75",
+      "value": 5.144402478355943e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=1.0 angle=75",
+      "value": 5.3466067650516915e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=1.0 angle=75",
+      "value": 1.1639858550097891e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=1.0 angle=75",
+      "value": 2.980557747212475e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=1.0 angle=75",
+      "value": 7.564993326361725e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=1.0 angle=75",
+      "value": 1.1965530834831428e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=1.0 angle=75",
+      "value": 2.4946119360635653e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=1.0 angle=75",
+      "value": 128.4457384844047,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=1.0 angle=75",
+      "value": 118.28230121308394,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=1.0 angle=75",
+      "value": 119.44922970744766,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "grazing improvement wavelength=1.0 angle=75",
+      "value": 0.4798698576279902,
+      "limit": 0.5887877371129087,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=1.0 angle=75",
+      "observation": {
+        "first": 0.5887877371129087,
+        "legacy": 0.3466736866115392,
+        "passive": 0.4798698576279902
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=1.0 angle=85",
+      "value": 3.3250660865057364e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=1.0 angle=85",
+      "value": 2.279288239647083e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=1.0 angle=85",
+      "value": 7.518202273022635e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=1.0 angle=85",
+      "value": 3.708219493328404e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=1.0 angle=85",
+      "value": 2.281364710546049e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=1.0 angle=85",
+      "value": 1.725316784113854e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=1.0 angle=85",
+      "value": 4.745673545096696e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=1.0 angle=85",
+      "value": 2.296982970325369e-13,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=1.0 angle=85",
+      "value": 2.015222853876567e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=1.0 angle=85",
+      "value": 479.5269682393947,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=1.0 angle=85",
+      "value": 616.7797314903326,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=1.0 angle=85",
+      "value": 433.1844528921315,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "grazing improvement wavelength=1.0 angle=85",
+      "value": 0.7855573331315984,
+      "limit": 0.8396631322317428,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=1.0 angle=85",
+      "observation": {
+        "first": 0.8396631322317428,
+        "legacy": 0.7050360210260819,
+        "passive": 0.7855573331315984
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=1.5 angle=0",
+      "value": 1.1226728167018916e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=1.5 angle=0",
+      "value": 2.455633247128473e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=1.5 angle=0",
+      "value": 6.148708131075346e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=1.5 angle=0",
+      "value": 1.1259432872145524e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=1.5 angle=0",
+      "value": 1.5439462202678038e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=1.5 angle=0",
+      "value": 3.944715928074372e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=1.5 angle=0",
+      "value": 1.1241212810019775e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=1.5 angle=0",
+      "value": 1.72764429363405e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=1.5 angle=0",
+      "value": 1.180618600073082e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=1.5 angle=0",
+      "value": 19.862761438354063,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=1.5 angle=0",
+      "value": 20.08717900819633,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=1.5 angle=0",
+      "value": 20.04086330120332,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "normal first-order reflection wavelength=1.5",
+      "value": 1.1226728167018916e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=1.5 angle=0",
+      "observation": {
+        "first": 1.1226728167018916e-05,
+        "legacy": 1.1259432872145524e-05,
+        "passive": 1.1241212810019775e-05
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=1.5 angle=30",
+      "value": 1.1225293826169259e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=1.5 angle=30",
+      "value": 4.657325473305229e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=1.5 angle=30",
+      "value": 5.544021015287082e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=1.5 angle=30",
+      "value": 9.805950706125463e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=1.5 angle=30",
+      "value": 2.0378717696414474e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=1.5 angle=30",
+      "value": 4.8319002403550555e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=1.5 angle=30",
+      "value": 9.896275517166151e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=1.5 angle=30",
+      "value": 3.027473734230533e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=1.5 angle=30",
+      "value": 4.673836721385721e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=1.5 angle=30",
+      "value": 24.5757256325344,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=1.5 angle=30",
+      "value": 9.827501214559199,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=1.5 angle=30",
+      "value": 11.665622011653484,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=1.5 angle=30",
+      "observation": {
+        "first": 0.07179510300224348,
+        "legacy": 0.0051539975287456016,
+        "passive": 0.019596449098635314
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=1.5 angle=60",
+      "value": 1.0492623415149916e-05,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=1.5 angle=60",
+      "value": 4.653589771877709e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=1.5 angle=60",
+      "value": 4.701334503197497e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=1.5 angle=60",
+      "value": 6.935223806563052e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=1.5 angle=60",
+      "value": 3.8298164537316684e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=1.5 angle=60",
+      "value": 5.7337984152864595e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=1.5 angle=60",
+      "value": 9.186545350002976e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=1.5 angle=60",
+      "value": 3.760134393881488e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=1.5 angle=60",
+      "value": 4.814591317953797e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=1.5 angle=60",
+      "value": 70.15810726767799,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=1.5 angle=60",
+      "value": 25.417106140180216,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=1.5 angle=60",
+      "value": 55.15456780681913,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "grazing improvement wavelength=1.5 angle=60",
+      "value": 0.21387399323039216,
+      "limit": 0.3333298899752611,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=1.5 angle=60",
+      "observation": {
+        "first": 0.3333298899752611,
+        "legacy": 0.11111037558653217,
+        "passive": 0.21387399323039216
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=1.5 angle=75",
+      "value": 7.819598189900469e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=1.5 angle=75",
+      "value": 4.210710423388307e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=1.5 angle=75",
+      "value": 4.667252589831461e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=1.5 angle=75",
+      "value": 5.298184979318078e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=1.5 angle=75",
+      "value": 3.907384756733436e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=1.5 angle=75",
+      "value": 3.687400372819964e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=1.5 angle=75",
+      "value": 7.473397436295272e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=1.5 angle=75",
+      "value": 4.124593529240056e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=1.5 angle=75",
+      "value": 4.573236405153153e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=1.5 angle=75",
+      "value": 115.04537128049317,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=1.5 angle=75",
+      "value": 105.47122474595605,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=1.5 angle=75",
+      "value": 106.98728552172463,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "grazing improvement wavelength=1.5 angle=75",
+      "value": 0.479869957367669,
+      "limit": 0.5887878475115198,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=1.5 angle=75",
+      "observation": {
+        "first": 0.5887878475115198,
+        "legacy": 0.34667373984351035,
+        "passive": 0.479869957367669
+      }
+    },
+    {
+      "name": "finest complex reflection error first wavelength=1.5 angle=85",
+      "value": 3.309958803930442e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit first wavelength=1.5 angle=85",
+      "value": 6.313165231016198e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency first wavelength=1.5 angle=85",
+      "value": 1.0794616142766446e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error legacy wavelength=1.5 angle=85",
+      "value": 3.7598207519489513e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit legacy wavelength=1.5 angle=85",
+      "value": 6.216484049598824e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency legacy wavelength=1.5 angle=85",
+      "value": 4.305348047282298e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest complex reflection error passive wavelength=1.5 angle=85",
+      "value": 4.764921577935985e-06,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest modal fit passive wavelength=1.5 angle=85",
+      "value": 6.338771182750336e-14,
+      "limit": 1e-05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "KDK stage consistency passive wavelength=1.5 angle=85",
+      "value": 4.830391781546856e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction first wavelength=1.5 angle=85",
+      "value": 423.3606371428897,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction legacy wavelength=1.5 angle=85",
+      "value": 533.9828821548037,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mesh error reduction passive wavelength=1.5 angle=85",
+      "value": 378.7688836208703,
+      "limit": 2.0,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "grazing improvement wavelength=1.5 angle=85",
+      "value": 0.7855574378462438,
+      "limit": 0.839663226320795,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "finest amplitudes wavelength=1.5 angle=85",
+      "observation": {
+        "first": 0.839663226320795,
+        "legacy": 0.7050361265893458,
+        "passive": 0.7855574378462438
+      }
+    },
+    {
+      "name": "time error reduction first angle=30 pair=0",
+      "value": 4.000276481676168,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction first angle=30 pair=1",
+      "value": 4.00006995400705,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction first angle=30 pair=2",
+      "value": 4.000017538561125,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error sequence first angle=30",
+      "observation": {
+        "errors": [
+          0.0014375507371313428,
+          0.00035936284497240314,
+          8.983914009114095e-05,
+          2.2459686545138905e-05
+        ]
+      }
+    },
+    {
+      "name": "time error reduction legacy angle=30 pair=0",
+      "value": 4.011409300743061,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction legacy angle=30 pair=1",
+      "value": 4.002789650278037,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction legacy angle=30 pair=2",
+      "value": 4.000693583128085,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error sequence legacy angle=30",
+      "observation": {
+        "errors": [
+          0.001273545390371248,
+          0.0003174807891419458,
+          7.93148820897679e-05,
+          1.9825282902009386e-05
+        ]
+      }
+    },
+    {
+      "name": "time error reduction passive angle=30 pair=0",
+      "value": 4.005271716912486,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction passive angle=30 pair=1",
+      "value": 4.001305807192554,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction passive angle=30 pair=2",
+      "value": 4.000325703790607,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error sequence passive angle=30",
+      "observation": {
+        "errors": [
+          0.0012500124697428173,
+          0.0003120918025272965,
+          7.799748821154718e-05,
+          1.949778442731269e-05
+        ]
+      }
+    },
+    {
+      "name": "time error reduction first angle=75 pair=0",
+      "value": 4.001588127756717,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction first angle=75 pair=1",
+      "value": 4.000398484294494,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction first angle=75 pair=2",
+      "value": 4.000099774885513,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error sequence first angle=75",
+      "observation": {
+        "errors": [
+          0.0009974181438525888,
+          0.0002492555735394336,
+          6.230768622626154e-05,
+          1.55765330198657e-05
+        ]
+      }
+    },
+    {
+      "name": "time error reduction legacy angle=75 pair=0",
+      "value": 4.014088968147556,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction legacy angle=75 pair=1",
+      "value": 4.003459253773144,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction legacy angle=75 pair=2",
+      "value": 4.000861037873127,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error sequence legacy angle=75",
+      "observation": {
+        "errors": [
+          0.0008347615999167562,
+          0.00020795792184496263,
+          5.1944558109082376e-05,
+          1.2983344739385473e-05
+        ]
+      }
+    },
+    {
+      "name": "time error reduction passive angle=75 pair=0",
+      "value": 4.006459045537277,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction passive angle=75 pair=1",
+      "value": 4.001604897215364,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "time error reduction passive angle=75 pair=2",
+      "value": 4.000400678964562,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "temporal error sequence passive angle=75",
+      "observation": {
+        "errors": [
+          0.0010664502330095889,
+          0.0002661827366480855,
+          6.651899512451034e-05,
+          1.6628083150342755e-05
+        ]
+      }
+    },
+    {
+      "name": "strip length invariance first angle=0",
+      "value": 4.606337950883054e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fitting window invariance first angle=0",
+      "value": 4.126759354314163e-15,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "strip length invariance legacy angle=0",
+      "value": 3.9868981514904285e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fitting window invariance legacy angle=0",
+      "value": 4.129856825281979e-15,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "strip length invariance passive angle=0",
+      "value": 4.077865809644181e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fitting window invariance passive angle=0",
+      "value": 3.534764742415581e-15,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "strip length invariance first angle=60",
+      "value": 4.8163216805705346e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fitting window invariance first angle=60",
+      "value": 1.0548499950859038e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "strip length invariance legacy angle=60",
+      "value": 3.3319163922657435e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fitting window invariance legacy angle=60",
+      "value": 1.2088746751868687e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "strip length invariance passive angle=60",
+      "value": 3.133790092310136e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fitting window invariance passive angle=60",
+      "value": 1.2857573806684285e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "strip length invariance first angle=85",
+      "value": 2.5686086924437398e-12,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fitting window invariance first angle=85",
+      "value": 1.8596257398234317e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "strip length invariance legacy angle=85",
+      "value": 2.2896448615802413e-12,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fitting window invariance legacy angle=85",
+      "value": 1.8626810255207363e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "strip length invariance passive angle=85",
+      "value": 2.8064169435617697e-12,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fitting window invariance passive angle=85",
+      "value": 1.625695621921444e-14,
+      "limit": 0.0001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core spectral excess lossless CFL=0.2",
+      "value": 4.218847493575595e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core spectral excess lossless CFL=0.7",
+      "value": 7.993605777301127e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core spectral excess lossless CFL=0.95",
+      "value": 5.10702591327572e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core long-run peak lossless",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core long run lossless",
+      "observation": {
+        "time": 100.0,
+        "steps": 1691,
+        "final_energy_fraction": 0.001145031803408241
+      }
+    },
+    {
+      "name": "corrected full-core spectral excess both loss CFL=0.2",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core spectral excess both loss CFL=0.7",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core spectral excess both loss CFL=0.95",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core long-run peak both loss",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core long run both loss",
+      "observation": {
+        "time": 100.0,
+        "steps": 1691,
+        "final_energy_fraction": 1.1912397226152118e-28
+      }
+    },
+    {
+      "name": "corrected full-core spectral excess old loss counterexample CFL=0.2",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core spectral excess old loss counterexample CFL=0.7",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core spectral excess old loss counterexample CFL=0.95",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core long-run peak old loss counterexample",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core long run old loss counterexample",
+      "observation": {
+        "time": 100.0,
+        "steps": 1691,
+        "final_energy_fraction": 2.3547598885907434e-29
+      }
+    },
+    {
+      "name": "corrected full-core spectral excess spatial loss CFL=0.2",
+      "value": 1.2212453270876722e-14,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core spectral excess spatial loss CFL=0.7",
+      "value": 5.995204332975845e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core spectral excess spatial loss CFL=0.95",
+      "value": 8.881784197001252e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core long-run peak spatial loss",
+      "value": 1.0,
+      "limit": 1.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "corrected full-core long run spatial loss",
+      "observation": {
+        "time": 100.0,
+        "steps": 1691,
+        "final_energy_fraction": 0.000574042149320629
+      }
+    }
+  ],
+  "measurements": [
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 8,
+      "kind": "first",
+      "dt_over_h": 0.015,
+      "series": "original-split",
+      "reflection": {
+        "real": 0.0007653553941981924,
+        "imag": -2.5968429280176513e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.0007657958205341356,
+      "fit": 1.755497771869511e-07,
+      "stage_error": 2.454078403477167e-16,
+      "condition": 1.1180849862837337,
+      "normal_phase": [
+        6.283590873302413,
+        -6.2835908733024075
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 16,
+      "kind": "first",
+      "dt_over_h": 0.015,
+      "series": "original-split",
+      "reflection": {
+        "real": 0.0005314001058863865,
+        "imag": -9.991227307278838e-07
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.0005314010451460308,
+      "fit": 1.990658744128387e-11,
+      "stage_error": 2.446747780368562e-16,
+      "condition": 1.136274763133598,
+      "normal_phase": [
+        6.283202601658034,
+        -6.283202601658034
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 32,
+      "kind": "first",
+      "dt_over_h": 0.015,
+      "series": "original-split",
+      "reflection": {
+        "real": 0.0005160870809422603,
+        "imag": -5.459632349424156e-08
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.0005160870838301049,
+      "fit": 5.5183692864223485e-14,
+      "stage_error": 4.220832906936407e-16,
+      "condition": 1.1384040667401487,
+      "normal_phase": [
+        6.283184664465287,
+        -6.283184664465288
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 0,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.00022167682461999932,
+        "imag": 2.2570589189747005e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.00022282290292960968,
+      "fit": 1.4414733726452976e-08,
+      "stage_error": 4.620126186548017e-16,
+      "condition": 1.052508391782489,
+      "normal_phase": [
+        8.378054018285674,
+        -8.378054018285667
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 0,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.00022187118612108884,
+        "imag": 4.3972491923833026e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.00022618665583267817,
+      "fit": 3.536364712723954e-09,
+      "stage_error": 4.622926738787516e-16,
+      "condition": 1.052508391782489,
+      "normal_phase": [
+        8.378054018285674,
+        -8.378054018285667
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 0,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.00022289797337676429,
+        "imag": 3.205128006137795e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.0002251905661635087,
+      "fit": 8.434943285641102e-09,
+      "stage_error": 1.1088151786476948e-15,
+      "condition": 1.052508391782489,
+      "normal_phase": [
+        8.378054018285674,
+        -8.378054018285667
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 0,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.6289955394621285e-05,
+        "imag": 2.1553981348715345e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 2.7017341814832934e-05,
+      "fit": 1.8073972076664034e-13,
+      "stage_error": 2.8607759511231436e-16,
+      "condition": 1.0680195851589214,
+      "normal_phase": [
+        8.37760256937865,
+        -8.377602569378649
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 0,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.6294615938408123e-05,
+        "imag": 2.2387490887444745e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 2.768960557349356e-05,
+      "fit": 2.748735432327895e-14,
+      "stage_error": 7.917350265857774e-16,
+      "condition": 1.0680195851589214,
+      "normal_phase": [
+        8.37760256937865,
+        -8.377602569378649
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 0,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.6314906585991845e-05,
+        "imag": 2.1921906129934275e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 2.7326656313557465e-05,
+      "fit": 9.979749598052133e-14,
+      "stage_error": 7.093908317277344e-16,
+      "condition": 1.0680195851589214,
+      "normal_phase": [
+        8.37760256937865,
+        -8.377602569378649
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 0,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.4115984898842597e-06,
+        "imag": 1.1137630620390687e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 1.1226728202504402e-05,
+      "fit": 2.5747014460868626e-14,
+      "stage_error": 4.0203781487644956e-16,
+      "condition": 1.0508607635394154,
+      "normal_phase": [
+        8.377579532707035,
+        -8.377579532707035
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 0,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.4112951973997064e-06,
+        "imag": 1.117063450228943e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 1.1259432903922936e-05,
+      "fit": 2.76998457549921e-14,
+      "stage_error": 4.019254678517558e-15,
+      "condition": 1.0508607635394154,
+      "normal_phase": [
+        8.377579532707035,
+        -8.377579532707035
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 0,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.4119194605374181e-06,
+        "imag": 1.11521903489256e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 1.124121284122463e-05,
+      "fit": 2.6145405697756064e-14,
+      "stage_error": 1.7255877105779877e-15,
+      "condition": 1.0508607635394154,
+      "normal_phase": [
+        8.377579532707035,
+        -8.377579532707035
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 30,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.07152447997269164,
+        "imag": 4.1453278451895965e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 0.000275427092402433,
+      "fit": 2.4947388087702628e-08,
+      "stage_error": 3.800129432561133e-16,
+      "condition": 1.0993348846526831,
+      "normal_phase": [
+        7.25403131158239,
+        -7.255372316534297
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 30,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.005066390642895141,
+        "imag": 3.8464585759118696e-05
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 9.639253582978519e-05,
+      "fit": 9.627728353714283e-09,
+      "stage_error": 7.335536115999418e-16,
+      "condition": 1.0993348846526831,
+      "normal_phase": [
+        7.25403131158239,
+        -7.255372316534297
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 30,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.0022863382767142277,
+        "imag": -0.01938709482829745
+      },
+      "analytic": {
+        "real": 0.002218623304119841,
+        "imag": -0.01948030768841004
+      },
+      "error": 0.00011521265036369913,
+      "fit": 1.6068007872717773e-08,
+      "stage_error": 3.313460904592516e-16,
+      "condition": 1.0993348846526831,
+      "normal_phase": [
+        7.25403131158239,
+        -7.255372316534297
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 30,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.07177597449893806,
+        "imag": 2.2102046335101333e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 3.034702387365221e-05,
+      "fit": 3.258190146562492e-13,
+      "stage_error": 2.9437826798666415e-16,
+      "condition": 1.0730704151449608,
+      "normal_phase": [
+        7.255092144514549,
+        -7.255199167590591
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 30,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.005147523881661794,
+        "imag": 1.958722405259913e-05
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 2.0886709619777964e-05,
+      "fit": 6.984460637084385e-14,
+      "stage_error": 1.906746695456032e-15,
+      "condition": 1.0730704151449608,
+      "normal_phase": [
+        7.255092144514549,
+        -7.255199167590591
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 30,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.0022236748692035587,
+        "imag": -0.01945697762724643
+      },
+      "analytic": {
+        "real": 0.002218623304119841,
+        "imag": -0.01948030768841004
+      },
+      "error": 2.387069466297237e-05,
+      "fit": 1.8991285644754756e-13,
+      "stage_error": 3.1075997369035674e-16,
+      "condition": 1.0730704151449608,
+      "normal_phase": [
+        7.255092144514549,
+        -7.255199167590591
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 30,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.07179510214404736,
+        "imag": 1.1100738587512297e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 1.122529383685027e-05,
+      "fit": 3.194048191121389e-14,
+      "stage_error": 4.519866327363962e-16,
+      "condition": 1.0893302287476432,
+      "normal_phase": [
+        7.255188006469434,
+        -7.255194980377705
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 30,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.0051539882605830395,
+        "imag": 9.774247355628684e-06
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 9.80595073766577e-06,
+      "fit": 2.7357595073963782e-14,
+      "stage_error": 6.2074929476478405e-15,
+      "condition": 1.0893302287476432,
+      "normal_phase": [
+        7.255188006469434,
+        -7.255194980377705
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 30,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.0022189408065209494,
+        "imag": -0.01947041650737309
+      },
+      "analytic": {
+        "real": 0.002218623304119841,
+        "imag": -0.01948030768841004
+      },
+      "error": 9.896275566112946e-06,
+      "fit": 3.130532423508368e-14,
+      "stage_error": 1.9576456193200695e-15,
+      "condition": 1.0893302287476432,
+      "normal_phase": [
+        7.255188006469434,
+        -7.255194980377705
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 60,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.33259768317147576,
+        "imag": 3.5632109324614954e-05
+      },
+      "analytic": {
+        "real": -0.33333333333333326,
+        "imag": 0.0
+      },
+      "error": 0.0007365125985724162,
+      "fit": 1.5588609397388087e-08,
+      "stage_error": 5.535687111186574e-16,
+      "condition": 1.22631711948665,
+      "normal_phase": [
+        4.186772420194776,
+        -4.189093074805329
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 60,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.11093686393352069,
+        "imag": 2.6923109038573983e-05
+      },
+      "analytic": {
+        "real": -0.11111111111111101,
+        "imag": 0.0
+      },
+      "error": 0.00017631486805852592,
+      "fit": 6.919910595453417e-09,
+      "stage_error": 7.779667917909247e-16,
+      "condition": 1.22631711948665,
+      "normal_phase": [
+        4.186772420194776,
+        -4.189093074805329
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 60,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.15589710563310621,
+        "imag": -0.14569725655876595
+      },
+      "analytic": {
+        "real": -0.1561996779388083,
+        "imag": -0.14610365503657005
+      },
+      "error": 0.0005066652967584846,
+      "fit": 1.0970786566264229e-08,
+      "stage_error": 3.1788509242660716e-16,
+      "condition": 1.22631711948665,
+      "normal_phase": [
+        4.186772420194776,
+        -4.189093074805329
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 60,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.33327929102049336,
+        "imag": 1.9568119977939164e-05
+      },
+      "analytic": {
+        "real": -0.33333333333333326,
+        "imag": 0.0
+      },
+      "error": 5.747593319430594e-05,
+      "fit": 2.1896833525051087e-13,
+      "stage_error": 8.275635110987981e-16,
+      "condition": 1.2075898075334974,
+      "normal_phase": [
+        4.188607811670479,
+        -4.188793167732839
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 60,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.11109839697462871,
+        "imag": 1.3821326040326868e-05
+      },
+      "analytic": {
+        "real": -0.11111111111111101,
+        "imag": 0.0
+      },
+      "error": 1.8779731627566843e-05,
+      "fit": 5.592894261441416e-14,
+      "stage_error": 1.0346943768802256e-15,
+      "condition": 1.2075898075334974,
+      "normal_phase": [
+        4.188607811670479,
+        -4.188793167732839
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 60,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.1561807941019943,
+        "imag": -0.14606119571438117
+      },
+      "analytic": {
+        "real": -0.1561996779388083,
+        "imag": -0.14610365503657005
+      },
+      "error": 4.6469273004385705e-05,
+      "fit": 1.383011455669749e-13,
+      "stage_error": 2.38394992035796e-15,
+      "condition": 1.2075898075334974,
+      "normal_phase": [
+        4.188607811670479,
+        -4.188793167732839
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 60,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.3333298898278978,
+        "imag": 9.91147912004247e-06
+      },
+      "analytic": {
+        "real": -0.33333333333333326,
+        "imag": 0.0
+      },
+      "error": 1.0492623505639662e-05,
+      "fit": 8.200269307181003e-14,
+      "stage_error": 5.861736966428123e-16,
+      "condition": 1.2184506958170025,
+      "normal_phase": [
+        4.1887738361676705,
+        -4.18878591525816
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 60,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.11111037537251948,
+        "imag": 6.896087162137157e-06
+      },
+      "analytic": {
+        "real": -0.11111111111111101,
+        "imag": 0.0
+      },
+      "error": 6.935223819232451e-06,
+      "fit": 8.384545919269308e-14,
+      "stage_error": 1.35309859933727e-15,
+      "condition": 1.2184506958170025,
+      "normal_phase": [
+        4.1887738361676705,
+        -4.18878591525816
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 60,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.15620015259671974,
+        "imag": -0.14609448076187134
+      },
+      "analytic": {
+        "real": -0.1561996779388083,
+        "imag": -0.14610365503657005
+      },
+      "error": 9.18654539967394e-06,
+      "fit": 9.220252993893675e-14,
+      "stage_error": 4.027444373753673e-15,
+      "condition": 1.2184506958170025,
+      "normal_phase": [
+        4.1887738361676705,
+        -4.18878591525816
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 75,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.5878906537760561,
+        "imag": 2.188863105835569e-05
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 0.0009003188233069217,
+      "fit": 7.110353517820324e-09,
+      "stage_error": 5.024051506184362e-16,
+      "condition": 1.2436187999194042,
+      "normal_phase": [
+        2.1686176682568723,
+        -2.169247305140058
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 75,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.3461160834015287,
+        "imag": 2.101354617614452e-05
+      },
+      "analytic": {
+        "real": -0.3466744960382343,
+        "imag": 0.0
+      },
+      "error": 0.000558807875709873,
+      "fit": 2.988506892268984e-09,
+      "stage_error": 2.3012810518317893e-16,
+      "condition": 1.2436187999194042,
+      "normal_phase": [
+        2.1686176682568723,
+        -2.169247305140058
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 75,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.44717083179062406,
+        "imag": -0.1718998486134004
+      },
+      "analytic": {
+        "real": -0.44792565896560094,
+        "imag": -0.17216482838156816
+      },
+      "error": 0.0007999864633991075,
+      "fit": 5.0621010125398025e-09,
+      "stage_error": 4.0475548147328113e-16,
+      "condition": 1.2436187999194042,
+      "normal_phase": [
+        2.1686176682568723,
+        -2.169247305140058
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 75,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.5887304113980519,
+        "imag": 1.4183890665012014e-05
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 6.194093772015544e-05,
+      "fit": 1.0480121221681583e-13,
+      "stage_error": 2.730490837510301e-16,
+      "condition": 1.2116387598044633,
+      "normal_phase": [
+        2.1682442291380943,
+        -2.1683086253404844
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 75,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.3466405619919814,
+        "imag": 1.0518382773553176e-05
+      },
+      "analytic": {
+        "real": -0.3466744960382343,
+        "imag": 0.0
+      },
+      "error": 3.5526833116183935e-05,
+      "fit": 3.2627123284396735e-14,
+      "stage_error": 1.2098432811113878e-15,
+      "condition": 1.2116387598044633,
+      "normal_phase": [
+        2.1682442291380943,
+        -2.1683086253404844
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 75,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.44787970110974196,
+        "imag": -0.1721341729680621
+      },
+      "analytic": {
+        "real": -0.44792565896560094,
+        "imag": -0.17216482838156816
+      },
+      "error": 5.524381315932048e-05,
+      "fit": 7.0376866227999e-14,
+      "stage_error": 6.402715718640452e-16,
+      "condition": 1.2116387598044633,
+      "normal_phase": [
+        2.1682442291380943,
+        -2.1683086253404844
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 75,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.5887878474664067,
+        "imag": 7.278195643891024e-06
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 7.81959688828079e-06,
+      "fit": 2.609164740042235e-13,
+      "stage_error": 4.866599893940463e-16,
+      "condition": 1.2374697664009777,
+      "normal_phase": [
+        2.168266238559521,
+        -2.1682706573024757
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 75,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.3466737398036854,
+        "imag": 5.243935882950932e-06
+      },
+      "analytic": {
+        "real": -0.3466744960382343,
+        "imag": 0.0
+      },
+      "error": 5.298184050926356e-06,
+      "fit": 2.489929432955921e-13,
+      "stage_error": 4.940913162274513e-15,
+      "condition": 1.2374697664009777,
+      "normal_phase": [
+        2.168266238559521,
+        -2.1682706573024757
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 75,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.4479252359297541,
+        "imag": -0.1721573669678954
+      },
+      "analytic": {
+        "real": -0.44792565896560094,
+        "imag": -0.17216482838156816
+      },
+      "error": 7.473396371370225e-06,
+      "fit": 2.365287482422165e-13,
+      "stage_error": 2.590424864245628e-15,
+      "condition": 1.2374697664009777,
+      "normal_phase": [
+        2.168266238559521,
+        -2.1682706573024757
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 85,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.8382611677861004,
+        "imag": 9.256273118267994e-06
+      },
+      "analytic": {
+        "real": -0.8396628204761496,
+        "imag": 0.0
+      },
+      "error": 0.0014016832531332612,
+      "fit": 2.576331183548183e-09,
+      "stage_error": 4.75359146763127e-16,
+      "condition": 3.9496156461511025,
+      "normal_phase": [
+        0.7352621916268566,
+        -0.7350244141933642
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 85,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7030260311971134,
+        "imag": 1.1535247433383512e-05
+      },
+      "analytic": {
+        "real": -0.7050336520899625,
+        "imag": 0.0
+      },
+      "error": 0.0020076540317837707,
+      "fit": 1.138303318788268e-09,
+      "stage_error": 3.811063479877463e-16,
+      "condition": 3.9496156461511025,
+      "normal_phase": [
+        0.7352621916268566,
+        -0.7350244141933642
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 85,
+      "ppw": 8,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7780157410630868,
+        "imag": -0.09561615770600912
+      },
+      "analytic": {
+        "real": -0.7797684287573226,
+        "imag": -0.09518459076449494
+      },
+      "error": 0.0018050385531986155,
+      "fit": 1.7277033616542864e-09,
+      "stage_error": 1.6376932141569234e-16,
+      "condition": 3.9496156461511025,
+      "normal_phase": [
+        0.7352621916268566,
+        -0.7350244141933642
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 85,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.8395883802809809,
+        "imag": 6.3758539882146015e-06
+      },
+      "analytic": {
+        "real": -0.8396628204761496,
+        "imag": 0.0
+      },
+      "error": 7.471274436686426e-05,
+      "fit": 4.664552816031709e-14,
+      "stage_error": 4.139603497350191e-16,
+      "condition": 3.8750644695394243,
+      "normal_phase": [
+        0.730376469722569,
+        -0.7303783423247754
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 85,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7049339256981303,
+        "imag": 5.681339052182872e-06
+      },
+      "analytic": {
+        "real": -0.7050336520899625,
+        "imag": 0.0
+      },
+      "error": 9.988809158901448e-05,
+      "fit": 2.8405750459390893e-14,
+      "stage_error": 5.445193169056805e-16,
+      "condition": 3.8750644695394243,
+      "normal_phase": [
+        0.730376469722569,
+        -0.7303783423247754
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 85,
+      "ppw": 16,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7796787142272494,
+        "imag": -0.09519719636430564
+      },
+      "analytic": {
+        "real": -0.7797684287573226,
+        "imag": -0.09518459076449494
+      },
+      "error": 9.059579489594084e-05,
+      "fit": 3.594570898836068e-14,
+      "stage_error": 9.915023346443336e-16,
+      "condition": 3.8750644695394243,
+      "normal_phase": [
+        0.730376469722569,
+        -0.7303783423247754
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 85,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.8396632263141945,
+        "imag": 3.2849834266562126e-06
+      },
+      "analytic": {
+        "real": -0.8396628204761496,
+        "imag": 0.0
+      },
+      "error": 3.3099577991468564e-06,
+      "fit": 2.171788436043528e-13,
+      "stage_error": 6.59882275665142e-16,
+      "condition": 3.952132887055903,
+      "normal_phase": [
+        0.7301419763421163,
+        -0.7301424279744827
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 85,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7050361265832972,
+        "imag": 2.8307469492814888e-06
+      },
+      "analytic": {
+        "real": -0.7050336520899625,
+        "imag": 0.0
+      },
+      "error": 3.759819883218744e-06,
+      "fit": 2.1605450782615025e-13,
+      "stage_error": 1.3482653211453978e-15,
+      "condition": 3.952132887055903,
+      "normal_phase": [
+        0.7301419763421163,
+        -0.7301424279744827
+      ]
+    },
+    {
+      "wavelength": 0.75,
+      "angle": 85,
+      "ppw": 32,
+      "cells": 86,
+      "h": 0.023255813953488372,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7797699909423621,
+        "imag": -0.09518008920422563
+      },
+      "analytic": {
+        "real": -0.7797684287573226,
+        "imag": -0.09518459076449494
+      },
+      "error": 4.76492045641873e-06,
+      "fit": 2.1683217095908694e-13,
+      "stage_error": 8.924585710271596e-16,
+      "condition": 3.952132887055903,
+      "normal_phase": [
+        0.7301419763421163,
+        -0.7301424279744827
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.0002509255939257954,
+        "imag": 2.049522670890482e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.00025176121227238834,
+      "fit": 1.7077298671714782e-07,
+      "stage_error": 3.1512658405421196e-16,
+      "condition": 1.1180849862837337,
+      "normal_phase": [
+        6.283590873302413,
+        -6.2835908733024075
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.0002511280594170104,
+        "imag": 4.534967815295619e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.00025518992052024744,
+      "fit": 4.316405033021147e-08,
+      "stage_error": 1.3303711783993e-16,
+      "condition": 1.1180849862837337,
+      "normal_phase": [
+        6.283590873302413,
+        -6.2835908733024075
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.00025237322204726747,
+        "imag": 3.151001335697883e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.00025433270365463496,
+      "fit": 1.003963884760376e-07,
+      "stage_error": 6.13019710479886e-16,
+      "condition": 1.1180849862837337,
+      "normal_phase": [
+        6.283590873302413,
+        -6.2835908733024075
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.6773424968848228e-05,
+        "imag": 2.1698037888075474e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 2.742540124369997e-05,
+      "fit": 1.7844333047358895e-11,
+      "stage_error": 4.2058534993831305e-16,
+      "condition": 1.136274763133598,
+      "normal_phase": [
+        6.283202601658034,
+        -6.283202601658034
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.6778390342126766e-05,
+        "imag": 2.2563328633090065e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 2.8117933449625967e-05,
+      "fit": 2.4655866365930682e-12,
+      "stage_error": 6.995626169712926e-16,
+      "condition": 1.136274763133598,
+      "normal_phase": [
+        6.283202601658034,
+        -6.283202601658034
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.6799567756627587e-05,
+        "imag": 2.2079996571218296e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 2.774439989249241e-05,
+      "fit": 9.838113958896526e-12,
+      "stage_error": 1.852301802076984e-15,
+      "condition": 1.136274763133598,
+      "normal_phase": [
+        6.283202601658034,
+        -6.283202601658034
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.447763532329695e-06,
+        "imag": 1.1223868690598481e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 1.1316856791059107e-05,
+      "fit": 5.5055519989238624e-14,
+      "stage_error": 6.856446710448203e-16,
+      "condition": 1.1384040667401487,
+      "normal_phase": [
+        6.283184664465287,
+        -6.283184664465288
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.4474553003654062e-06,
+        "imag": 1.1258030506740332e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 1.1350699438239562e-05,
+      "fit": 5.451872391691679e-14,
+      "stage_error": 2.72046160053139e-15,
+      "condition": 1.1384040667401487,
+      "normal_phase": [
+        6.283184664465287,
+        -6.283184664465288
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 0,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.4481019392278166e-06,
+        "imag": 1.123893929668443e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 1.1331846969534706e-05,
+      "fit": 5.49981353330115e-14,
+      "stage_error": 1.3652886364852346e-15,
+      "condition": 1.1384040667401487,
+      "normal_phase": [
+        6.283184664465287,
+        -6.283184664465288
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.07149022459207847,
+        "imag": 4.258417317315926e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 0.0003094888204936165,
+      "fit": 2.977050451114287e-07,
+      "stage_error": 4.1208839698537367e-16,
+      "condition": 1.0290206821896926,
+      "normal_phase": [
+        5.440426213731829,
+        -5.441549194588803
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.005055091122835737,
+        "imag": 3.9689393546088376e-05
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 0.00010729562516520588,
+      "fit": 1.1713800297825715e-07,
+      "stage_error": 2.761866909656254e-16,
+      "condition": 1.0290206821896926,
+      "normal_phase": [
+        5.440426213731829,
+        -5.441549194588803
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.002295249571757103,
+        "imag": -0.01937895601891674
+      },
+      "analytic": {
+        "real": 0.00221862330411984,
+        "imag": -0.01948030768841006
+      },
+      "error": 0.00012705804107218465,
+      "fit": 1.9224770993323474e-07,
+      "stage_error": 3.568710705758451e-16,
+      "condition": 1.0290206821896926,
+      "normal_phase": [
+        5.440426213731829,
+        -5.441549194588803
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.07177535175861761,
+        "imag": 2.2271567359158817e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 3.089906106629085e-05,
+      "fit": 3.251286025469819e-11,
+      "stage_error": 2.9333783223739486e-16,
+      "condition": 1.0284076505109048,
+      "normal_phase": [
+        5.441316847763075,
+        -5.441399581231827
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.005147322476409369,
+        "imag": 1.9740997085336457e-05
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 2.1101282180293617e-05,
+      "fit": 7.0555487840975855e-12,
+      "stage_error": 2.3009368841582764e-15,
+      "condition": 1.0284076505109048,
+      "normal_phase": [
+        5.441316847763075,
+        -5.441399581231827
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.0022238255896782195,
+        "imag": -0.01945670035266434
+      },
+      "analytic": {
+        "real": 0.00221862330411984,
+        "imag": -0.01948030768841006
+      },
+      "error": 2.41737476623327e-05,
+      "fit": 1.8921670751095964e-11,
+      "stage_error": 2.767553568371651e-16,
+      "condition": 1.0284076505109048,
+      "normal_phase": [
+        5.441316847763075,
+        -5.441399581231827
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.07179505701370095,
+        "imag": 1.1187346770089351e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 1.1317689958815745e-05,
+      "fit": 1.9680492903202508e-14,
+      "stage_error": 5.896194617892628e-16,
+      "condition": 1.0531550382003412,
+      "normal_phase": [
+        5.44139082307258,
+        -5.441396217695402
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.005153970489556491,
+        "imag": 9.850719274921081e-06
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 9.883610043771046e-06,
+      "fit": 2.1929476903420574e-14,
+      "stage_error": 3.7264752416583906e-15,
+      "condition": 1.0531550382003412,
+      "normal_phase": [
+        5.44139082307258,
+        -5.441396217695402
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.002218952691529665,
+        "imag": -0.019470333044709454
+      },
+      "analytic": {
+        "real": 0.00221862330411984,
+        "imag": -0.01948030768841006
+      },
+      "error": 9.980080812287659e-06,
+      "fit": 1.7847209652594198e-14,
+      "stage_error": 5.157647101859229e-16,
+      "condition": 1.0531550382003412,
+      "normal_phase": [
+        5.44139082307258,
+        -5.441396217695402
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 60,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.33250611003642416,
+        "imag": 3.672576641446311e-05
+      },
+      "analytic": {
+        "real": -0.33333333333333326,
+        "imag": 0.0
+      },
+      "error": 0.0008280381421576454,
+      "fit": 1.7988147751965006e-07,
+      "stage_error": 3.0935263566361125e-16,
+      "condition": 1.1178366768783428,
+      "normal_phase": [
+        3.1399112205319657,
+        -3.1418543737740143
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 60,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.11091533002982713,
+        "imag": 2.7712106717138834e-05
+      },
+      "analytic": {
+        "real": -0.11111111111111101,
+        "imag": 0.0
+      },
+      "error": 0.00019773262919251636,
+      "fit": 8.487087683530883e-08,
+      "stage_error": 3.8771480536488344e-16,
+      "condition": 1.1178366768783428,
+      "normal_phase": [
+        3.1399112205319657,
+        -3.1418543737740143
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 60,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.15585883004861698,
+        "imag": -0.14564911940659533
+      },
+      "analytic": {
+        "real": -0.15619967793880815,
+        "imag": -0.14610365503657016
+      },
+      "error": 0.0005681372397268022,
+      "fit": 1.2722135307590184e-07,
+      "stage_error": 3.289649624893183e-16,
+      "condition": 1.1178366768783428,
+      "normal_phase": [
+        3.1399112205319657,
+        -3.1418543737740143
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 60,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.33327760464358414,
+        "imag": 1.97133406100479e-05
+      },
+      "analytic": {
+        "real": -0.33333333333333326,
+        "imag": 0.0
+      },
+      "error": 5.911262690121174e-05,
+      "fit": 2.0623600005325656e-11,
+      "stage_error": 3.4926829727794385e-16,
+      "condition": 1.1630017076991563,
+      "normal_phase": [
+        3.141451943850888,
+        -3.141595231804521
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 60,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.1110979950845174,
+        "imag": 1.3929831449978106e-05
+      },
+      "analytic": {
+        "real": -0.11111111111111101,
+        "imag": 0.0
+      },
+      "error": 1.9132965212665757e-05,
+      "fit": 5.517311797720455e-12,
+      "stage_error": 3.2165421901508483e-15,
+      "condition": 1.1630017076991563,
+      "normal_phase": [
+        3.141451943850888,
+        -3.141595231804521
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 60,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.1561801133870597,
+        "imag": -0.146060218471877
+      },
+      "analytic": {
+        "real": -0.15619967793880815,
+        "imag": -0.14610365503657016
+      },
+      "error": 4.76393412786222e-05,
+      "fit": 1.3165863165257209e-11,
+      "stage_error": 3.6582673515574315e-16,
+      "condition": 1.1630017076991563,
+      "normal_phase": [
+        3.141451943850888,
+        -3.141595231804521
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 60,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.333329781310765,
+        "imag": 9.988594028408717e-06
+      },
+      "analytic": {
+        "real": -0.33333333333333326,
+        "imag": 0.0
+      },
+      "error": 1.0601361940320153e-05,
+      "fit": 2.7538300414414734e-14,
+      "stage_error": 6.383104887115483e-16,
+      "condition": 1.1823491426294532,
+      "normal_phase": [
+        3.141580062277351,
+        -3.141589405980241
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 60,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.1111103505396286,
+        "imag": 6.9500483682067765e-06
+      },
+      "analytic": {
+        "real": -0.11111111111111101,
+        "imag": 0.0
+      },
+      "error": 6.9915406957452634e-06,
+      "fit": 3.662903696916116e-14,
+      "stage_error": 1.1060201402054762e-14,
+      "condition": 1.1823491426294532,
+      "normal_phase": [
+        3.141580062277351,
+        -3.141589405980241
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 60,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.15620012223247906,
+        "imag": -0.14609436705128015
+      },
+      "analytic": {
+        "real": -0.15619967793880815,
+        "imag": -0.14610365503657016
+      },
+      "error": 9.298605681149572e-06,
+      "fit": 3.396098055447415e-14,
+      "stage_error": 3.3017902505035133e-15,
+      "condition": 1.1823491426294532,
+      "normal_phase": [
+        3.141580062277351,
+        -3.141589405980241
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.5877745685707336,
+        "imag": 2.2101999498994482e-05
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 0.0010163782518260564,
+      "fit": 7.626079635113405e-08,
+      "stage_error": 2.367404179121455e-16,
+      "condition": 1.808765244939981,
+      "normal_phase": [
+        1.626527471275859,
+        -1.6270409349238233
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.3460424604198727,
+        "imag": 2.172693039243612e-05
+      },
+      "analytic": {
+        "real": -0.34667449603823447,
+        "imag": 0.0
+      },
+      "error": 0.0006324089518517565,
+      "fit": 3.707349657320029e-08,
+      "stage_error": 2.851824242815427e-16,
+      "condition": 1.808765244939981,
+      "normal_phase": [
+        1.626527471275859,
+        -1.6270409349238233
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.44707180178106726,
+        "imag": -0.1718690584871814
+      },
+      "analytic": {
+        "real": -0.4479256589656009,
+        "imag": -0.17216482838156805
+      },
+      "error": 0.0009036326255758902,
+      "fit": 5.5986370172067816e-08,
+      "stage_error": 3.4846731624510015e-16,
+      "condition": 1.808765244939981,
+      "normal_phase": [
+        1.626527471275859,
+        -1.6270409349238233
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.5887284387110178,
+        "imag": 1.4283049707308558e-05
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 6.388490174136939e-05,
+      "fit": 9.058697368831586e-12,
+      "stage_error": 3.5284670279850083e-16,
+      "condition": 1.6990072814032111,
+      "normal_phase": [
+        1.6261830413509315,
+        -1.6262327660107845
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.3466393784344991,
+        "imag": 1.0601317085059907e-05
+      },
+      "analytic": {
+        "real": -0.34667449603823447,
+        "imag": 0.0
+      },
+      "error": 3.668288451106791e-05,
+      "fit": 2.483648176897463e-12,
+      "stage_error": 2.310319381912993e-15,
+      "condition": 1.6990072814032111,
+      "normal_phase": [
+        1.6261830413509315,
+        -1.6262327660107845
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.44787808498566073,
+        "imag": -0.17213352012161917
+      },
+      "analytic": {
+        "real": -0.4479256589656009,
+        "imag": -0.17216482838156805
+      },
+      "error": 5.695165237613704e-05,
+      "fit": 6.02074701744367e-12,
+      "stage_error": 2.6964261280183643e-16,
+      "condition": 1.6990072814032111,
+      "normal_phase": [
+        1.6261830413509315,
+        -1.6262327660107845
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.5887877370672244,
+        "imag": 7.334614173853551e-06
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 7.912899749098802e-06,
+      "fit": 1.1968908484986273e-13,
+      "stage_error": 5.144402478355943e-16,
+      "condition": 1.6499669036672255,
+      "normal_phase": [
+        1.626199554492756,
+        -1.6262029717022408
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.34667368657125497,
+        "imag": 5.2849756015703455e-06
+      },
+      "analytic": {
+        "real": -0.34667449603823447,
+        "imag": 0.0
+      },
+      "error": 5.3466067650516915e-06,
+      "fit": 1.1639858550097891e-13,
+      "stage_error": 2.980557747212475e-15,
+      "condition": 1.6499669036672255,
+      "normal_phase": [
+        1.626199554492756,
+        -1.6262029717022408
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.4479251626222503,
+        "imag": -0.17215727968848207
+      },
+      "analytic": {
+        "real": -0.4479256589656009,
+        "imag": -0.17216482838156805
+      },
+      "error": 7.564993326361725e-06,
+      "fit": 1.1965530834831428e-13,
+      "stage_error": 2.4946119360635653e-15,
+      "condition": 1.6499669036672255,
+      "normal_phase": [
+        1.626199554492756,
+        -1.6262029717022408
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 85,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.8380683884412744,
+        "imag": 9.248854240620533e-06
+      },
+      "analytic": {
+        "real": -0.8396628204761496,
+        "imag": 0.0
+      },
+      "error": 0.0015944588596577248,
+      "fit": 3.942676846148239e-08,
+      "stage_error": 3.1706043314023975e-16,
+      "condition": 5.578024060121935,
+      "normal_phase": [
+        0.552000388264389,
+        -0.5517809881578418
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 85,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.702746528670295,
+        "imag": 1.1947156916300472e-05
+      },
+      "analytic": {
+        "real": -0.7050336520899626,
+        "imag": 0.0
+      },
+      "error": 0.0022871546234023103,
+      "fit": 1.755351345044046e-08,
+      "stage_error": 1.4072468231373608e-16,
+      "condition": 5.578024060121935,
+      "normal_phase": [
+        0.552000388264389,
+        -0.5517809881578418
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 85,
+      "ppw": 8,
+      "cells": 16,
+      "h": 0.125,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7777730528311958,
+        "imag": -0.09567915238016145
+      },
+      "analytic": {
+        "real": -0.7797684287573226,
+        "imag": -0.09518459076449484
+      },
+      "error": 0.0020557519982373745,
+      "fit": 2.5713342234879182e-08,
+      "stage_error": 4.846247274418696e-16,
+      "condition": 5.578024060121935,
+      "normal_phase": [
+        0.552000388264389,
+        -0.5517809881578418
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 85,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.839585588249785,
+        "imag": 6.4195595703885476e-06
+      },
+      "analytic": {
+        "real": -0.8396628204761496,
+        "imag": 0.0
+      },
+      "error": 7.749856472417366e-05,
+      "fit": 4.699473378554097e-12,
+      "stage_error": 3.1585394255607053e-16,
+      "condition": 5.295456943078241,
+      "normal_phase": [
+        0.5477893836303015,
+        -0.5477907478065555
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 85,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7049300140439122,
+        "imag": 5.7262749345151464e-06
+      },
+      "analytic": {
+        "real": -0.7050336520899626,
+        "imag": 0.0
+      },
+      "error": 0.00010379612138115302,
+      "fit": 1.2514662975314111e-12,
+      "stage_error": 6.649686222910096e-16,
+      "condition": 5.295456943078241,
+      "normal_phase": [
+        0.5477893836303015,
+        -0.5477907478065555
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 85,
+      "ppw": 16,
+      "cells": 32,
+      "h": 0.0625,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7796752630702156,
+        "imag": -0.0951979700792648
+      },
+      "analytic": {
+        "real": -0.7797684287573226,
+        "imag": -0.09518459076449484
+      },
+      "error": 9.412147107764766e-05,
+      "fit": 2.8365414196289547e-12,
+      "stage_error": 2.9002381716968785e-16,
+      "condition": 5.295456943078241,
+      "normal_phase": [
+        0.5477893836303015,
+        -0.5477907478065555
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 85,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.839663132225217,
+        "imag": 3.3104194596115392e-06
+      },
+      "analytic": {
+        "real": -0.8396628204761496,
+        "imag": 0.0
+      },
+      "error": 3.3250660865057364e-06,
+      "fit": 2.279288239647083e-13,
+      "stage_error": 7.518202273022635e-16,
+      "condition": 5.154151743062641,
+      "normal_phase": [
+        0.5476066021786693,
+        -0.5476069502288907
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 85,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7050360210203098,
+        "imag": 2.852903927707327e-06
+      },
+      "analytic": {
+        "real": -0.7050336520899626,
+        "imag": 0.0
+      },
+      "error": 3.708219493328404e-06,
+      "fit": 2.281364710546049e-13,
+      "stage_error": 1.725316784113854e-15,
+      "condition": 5.154151743062641,
+      "normal_phase": [
+        0.5476066021786693,
+        -0.5476069502288907
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 85,
+      "ppw": 32,
+      "cells": 64,
+      "h": 0.03125,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7797698872141855,
+        "imag": -0.09518007475730092
+      },
+      "analytic": {
+        "real": -0.7797684287573226,
+        "imag": -0.09518459076449484
+      },
+      "error": 4.745673545096696e-06,
+      "fit": 2.296982970325369e-13,
+      "stage_error": 2.015222853876567e-15,
+      "condition": 5.154151743062641,
+      "normal_phase": [
+        0.5476066021786693,
+        -0.5476069502288907
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 0,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.00022186405978436426,
+        "imag": 2.2418390052109546e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.00022299382331474673,
+      "fit": 1.786966118668004e-06,
+      "stage_error": 4.933140425063364e-16,
+      "condition": 1.1985983982908985,
+      "normal_phase": [
+        4.189027009142837,
+        -4.189027009142833
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 0,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.00022185606678769306,
+        "imag": 4.396435754969385e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.00022617024363355727,
+      "fit": 1.4040294800833754e-07,
+      "stage_error": 1.401868890014531e-16,
+      "condition": 1.1985983982908985,
+      "normal_phase": [
+        4.189027009142837,
+        -4.189027009142833
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 0,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.00022300311005583778,
+        "imag": 3.1973700271366305e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 0.00022528360926534196,
+      "fit": 9.90236124590477e-07,
+      "stage_error": 4.45440636835851e-16,
+      "condition": 1.1985983982908985,
+      "normal_phase": [
+        4.189027009142837,
+        -4.189027009142833
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 0,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.4944453212404439e-05,
+        "imag": 2.1129726935501876e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 2.5880534039826514e-05,
+      "fit": 1.6199292401485082e-09,
+      "stage_error": 4.622158079183804e-16,
+      "condition": 1.2261941803914944,
+      "normal_phase": [
+        4.1888000441172295,
+        -4.188800044117235
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 0,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.4948128881133259e-05,
+        "imag": 2.187608277639914e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 2.649546290757792e-05,
+      "fit": 2.1863020446202834e-10,
+      "stage_error": 3.09580825811729e-15,
+      "condition": 1.2261941803914944,
+      "normal_phase": [
+        4.1888000441172295,
+        -4.188800044117235
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 0,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.4966113638034824e-05,
+        "imag": 2.1459172592432966e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 2.616258102287307e-05,
+      "fit": 8.906232431592188e-10,
+      "stage_error": 7.543690222023109e-16,
+      "condition": 1.2261941803914944,
+      "normal_phase": [
+        4.1888000441172295,
+        -4.188800044117235
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 0,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.411598471953199e-06,
+        "imag": 1.1137630586893932e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 1.1226728167018916e-05,
+      "fit": 2.455633247128473e-14,
+      "stage_error": 6.148708131075346e-16,
+      "condition": 1.207575570832514,
+      "normal_phase": [
+        4.188789766353517,
+        -4.188789766353517
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 0,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.4112951855093973e-06,
+        "imag": 1.117063447176163e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 1.1259432872145524e-05,
+      "fit": 1.5439462202678038e-14,
+      "stage_error": 3.944715928074372e-15,
+      "condition": 1.207575570832514,
+      "normal_phase": [
+        4.188789766353517,
+        -4.188789766353517
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 0,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 1.4119194441508587e-06,
+        "imag": 1.1152190319546265e-05
+      },
+      "analytic": {
+        "real": 0.0,
+        "imag": 0.0
+      },
+      "error": 1.1241212810019775e-05,
+      "fit": 1.72764429363405e-14,
+      "stage_error": 1.180618600073082e-15,
+      "condition": 1.207575570832514,
+      "normal_phase": [
+        4.188789766353517,
+        -4.188789766353517
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 30,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.07152404954055278,
+        "imag": 4.156699882936276e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 0.000275869741216518,
+      "fit": 3.0160119547846273e-06,
+      "stage_error": 3.335812305363931e-16,
+      "condition": 1.052108420428863,
+      "normal_phase": [
+        3.627015655791195,
+        -3.6276861582671485
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 30,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.005066434588144501,
+        "imag": 3.850402163344979e-05
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 9.636799247435562e-05,
+      "fit": 3.089736897268447e-07,
+      "stage_error": 1.8778622545768285e-16,
+      "condition": 1.052108420428863,
+      "normal_phase": [
+        3.627015655791195,
+        -3.6276861582671485
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 30,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.002286562470935946,
+        "imag": -0.019386969074204886
+      },
+      "analytic": {
+        "real": 0.002218623304119841,
+        "imag": -0.01948030768841004
+      },
+      "error": 0.00011544620950644093,
+      "fit": 1.7102942084855253e-06,
+      "stage_error": 1.5140429424358699e-16,
+      "condition": 1.052108420428863,
+      "normal_phase": [
+        3.627015655791195,
+        -3.6276861582671485
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 30,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.07177770840751577,
+        "imag": 2.1608476099339715e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 2.8814233360586137e-05,
+      "fit": 2.961325090578503e-09,
+      "stage_error": 4.522351883211929e-16,
+      "condition": 1.2458983640541637,
+      "normal_phase": [
+        3.6275502808128812,
+        -3.6275992124219383
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 30,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.0051480858180027005,
+        "imag": 1.9140020273145162e-05
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 2.0275621393852692e-05,
+      "fit": 6.291320020959424e-10,
+      "stage_error": 1.8052568117208183e-15,
+      "condition": 1.2458983640541637,
+      "normal_phase": [
+        3.6275502808128812,
+        -3.6275992124219383
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 30,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.002223254874235913,
+        "imag": -0.019457767965780786
+      },
+      "analytic": {
+        "real": 0.002218623304119841,
+        "imag": -0.01948030768841004
+      },
+      "error": 2.3010661397356074e-05,
+      "fit": 1.7395336475434963e-09,
+      "stage_error": 2.7865852782871385e-16,
+      "condition": 1.2458983640541637,
+      "normal_phase": [
+        3.6275502808128812,
+        -3.6275992124219383
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 30,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.0717951021440624,
+        "imag": 1.1100738578971317e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 1.1225293826169259e-05,
+      "fit": 4.657325473305229e-14,
+      "stage_error": 5.544021015287082e-16,
+      "condition": 1.2467200216891505,
+      "normal_phase": [
+        3.627594003234717,
+        -3.6275974901888524
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 30,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.005153988260600231,
+        "imag": 9.774247325371815e-06
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 9.805950706125463e-06,
+      "fit": 2.0378717696414474e-14,
+      "stage_error": 4.8319002403550555e-15,
+      "condition": 1.2467200216891505,
+      "normal_phase": [
+        3.627594003234717,
+        -3.6275974901888524
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 30,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": 0.002218940806532815,
+        "imag": -0.01947041650742244
+      },
+      "analytic": {
+        "real": 0.002218623304119841,
+        "imag": -0.01948030768841004
+      },
+      "error": 9.896275517166151e-06,
+      "fit": 3.027473734230533e-14,
+      "stage_error": 4.673836721385721e-16,
+      "condition": 1.2467200216891505,
+      "normal_phase": [
+        3.627594003234717,
+        -3.6275974901888524
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 60,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.33259807115360596,
+        "imag": 3.599240533897283e-05
+      },
+      "analytic": {
+        "real": -0.33333333333333326,
+        "imag": 0.0
+      },
+      "error": 0.0007361425990794376,
+      "fit": 1.7030999116041279e-06,
+      "stage_error": 3.7993299439752666e-16,
+      "condition": 1.7523681492082075,
+      "normal_phase": [
+        2.093386210097388,
+        -2.0945465374026644
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 60,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.1109368983493869,
+        "imag": 2.6873720514984774e-05
+      },
+      "analytic": {
+        "real": -0.11111111111111101,
+        "imag": 0.0
+      },
+      "error": 0.00017627331959731775,
+      "fit": 3.407268923501891e-07,
+      "stage_error": 2.2034943472540366e-16,
+      "condition": 1.7523681492082075,
+      "normal_phase": [
+        2.093386210097388,
+        -2.0945465374026644
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 60,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.1558972995059947,
+        "imag": -0.14569709404069905
+      },
+      "analytic": {
+        "real": -0.1561996779388083,
+        "imag": -0.14610365503657005
+      },
+      "error": 0.0005066799384171581,
+      "fit": 1.1353036053483478e-06,
+      "stage_error": 2.1958774985258147e-16,
+      "condition": 1.7523681492082075,
+      "normal_phase": [
+        2.093386210097388,
+        -2.0945465374026644
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 60,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.3332839824221665,
+        "imag": 1.914457537958141e-05
+      },
+      "analytic": {
+        "real": -0.33333333333333326,
+        "imag": 0.0
+      },
+      "error": 5.293417798977885e-05,
+      "fit": 1.9207723403208636e-09,
+      "stage_error": 4.761413849426304e-16,
+      "condition": 1.2927555595634923,
+      "normal_phase": [
+        2.094311194194884,
+        -2.094395940627161
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 60,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.11109951475864502,
+        "imag": 1.3505759908256858e-05
+      },
+      "analytic": {
+        "real": -0.11111111111111101,
+        "imag": 0.0
+      },
+      "error": 1.780114999697886e-05,
+      "fit": 4.982128382629565e-10,
+      "stage_error": 2.5435432340795576e-15,
+      "condition": 1.2927555595634923,
+      "normal_phase": [
+        2.094311194194884,
+        -2.094395940627161
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 60,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.1561826837329609,
+        "imag": -0.14606392884892877
+      },
+      "analytic": {
+        "real": -0.1561996779388083,
+        "imag": -0.14610365503657005
+      },
+      "error": 4.3208483158908265e-05,
+      "fit": 1.2522718650699183e-09,
+      "stage_error": 6.579822029894883e-16,
+      "condition": 1.2927555595634923,
+      "normal_phase": [
+        2.094311194194884,
+        -2.094395940627161
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 60,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.33332988982790346,
+        "imag": 9.911479026214171e-06
+      },
+      "analytic": {
+        "real": -0.33333333333333326,
+        "imag": 0.0
+      },
+      "error": 1.0492623415149916e-05,
+      "fit": 4.653589771877709e-14,
+      "stage_error": 4.701334503197497e-16,
+      "condition": 1.258783333152954,
+      "normal_phase": [
+        2.0943869180838353,
+        -2.09439295762908
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 60,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.11111037537252867,
+        "imag": 6.896087150376023e-06
+      },
+      "analytic": {
+        "real": -0.11111111111111101,
+        "imag": 0.0
+      },
+      "error": 6.935223806563052e-06,
+      "fit": 3.8298164537316684e-14,
+      "stage_error": 5.7337984152864595e-15,
+      "condition": 1.258783333152954,
+      "normal_phase": [
+        2.0943869180838353,
+        -2.09439295762908
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 60,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.1562001525966586,
+        "imag": -0.14609448076191792
+      },
+      "analytic": {
+        "real": -0.1561996779388083,
+        "imag": -0.14610365503657005
+      },
+      "error": 9.186545350002976e-06,
+      "fit": 3.760134393881488e-14,
+      "stage_error": 4.814591317953797e-16,
+      "condition": 1.258783333152954,
+      "normal_phase": [
+        2.0943869180838353,
+        -2.09439295762908
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 75,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.5878913657969803,
+        "imag": 2.195281674223226e-05
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 0.0008996085770213717,
+      "fit": 8.448835096401448e-07,
+      "stage_error": 4.1676577567950535e-16,
+      "condition": 3.5272199742175667,
+      "normal_phase": [
+        1.0843088341284361,
+        -1.084623652570029
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 75,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.3461160815326069,
+        "imag": 2.0915332748489118e-05
+      },
+      "analytic": {
+        "real": -0.3466744960382343,
+        "imag": 0.0
+      },
+      "error": 0.0005588060586993055,
+      "fit": 1.744127586472708e-07,
+      "stage_error": 4.59850922613078e-16,
+      "condition": 3.5272199742175667,
+      "normal_phase": [
+        1.0843088341284361,
+        -1.084623652570029
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 75,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.44717125715607137,
+        "imag": -0.17189992894172193
+      },
+      "analytic": {
+        "real": -0.44792565896560094,
+        "imag": -0.17216482838156816
+      },
+      "error": 0.0007995585053342471,
+      "fit": 5.01537168526948e-07,
+      "stage_error": 4.972715501901564e-16,
+      "condition": 3.5272199742175667,
+      "normal_phase": [
+        1.0843088341284361,
+        -1.084623652570029
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 75,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.5887358899750479,
+        "imag": 1.3893335566076166e-05
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 5.654974874379207e-05,
+      "fit": 8.562989809713584e-10,
+      "stage_error": 5.333282650662207e-16,
+      "condition": 2.6409850926677954,
+      "normal_phase": [
+        1.0841224042709419,
+        -1.0841519419994508
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 75,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.34664384249970775,
+        "imag": 1.0277201921509114e-05
+      },
+      "analytic": {
+        "real": -0.3466744960382343,
+        "imag": 0.0
+      },
+      "error": 3.233048566808192e-05,
+      "fit": 2.1487346929334578e-10,
+      "stage_error": 1.694435825187261e-15,
+      "condition": 2.6409850926677954,
+      "normal_phase": [
+        1.0841224042709419,
+        -1.0841519419994508
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 75,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.44788418256917745,
+        "imag": -0.17213600285787378
+      },
+      "analytic": {
+        "real": -0.44792565896560094,
+        "imag": -0.17216482838156816
+      },
+      "error": 5.050942760053316e-05,
+      "fit": 5.268562620444823e-10,
+      "stage_error": 5.147274504930436e-16,
+      "condition": 2.6409850926677954,
+      "normal_phase": [
+        1.0841224042709419,
+        -1.0841519419994508
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 75,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.5887878474665358,
+        "imag": 7.278197093054308e-06
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 7.819598189900469e-06,
+      "fit": 4.210710423388307e-14,
+      "stage_error": 4.667252589831461e-16,
+      "condition": 2.5726106165155924,
+      "normal_phase": [
+        1.0841331192797605,
+        -1.0841353286512379
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 75,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.3466737398038493,
+        "imag": 5.243936844586543e-06
+      },
+      "analytic": {
+        "real": -0.3466744960382343,
+        "imag": 0.0
+      },
+      "error": 5.298184979318078e-06,
+      "fit": 3.907384756733436e-14,
+      "stage_error": 3.687400372819964e-15,
+      "condition": 2.5726106165155924,
+      "normal_phase": [
+        1.0841331192797605,
+        -1.0841353286512379
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 75,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.44792523593017775,
+        "imag": -0.17215736696680475
+      },
+      "analytic": {
+        "real": -0.44792565896560094,
+        "imag": -0.17216482838156816
+      },
+      "error": 7.473397436295272e-06,
+      "fit": 4.124593529240056e-14,
+      "stage_error": 4.573236405153153e-16,
+      "condition": 2.5726106165155924,
+      "normal_phase": [
+        1.0841331192797605,
+        -1.0841353286512379
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 85,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.8382615445764885,
+        "imag": 9.22551797069377e-06
+      },
+      "analytic": {
+        "real": -0.8396628204761496,
+        "imag": 0.0
+      },
+      "error": 0.001401306268148709,
+      "fit": 6.569113397418506e-07,
+      "stage_error": 4.4029301232869895e-16,
+      "condition": 10.560049831303642,
+      "normal_phase": [
+        0.3676310958134283,
+        -0.3675122070966821
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 85,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7030260048900641,
+        "imag": 1.146245955160254e-05
+      },
+      "analytic": {
+        "real": -0.7050336520899625,
+        "imag": 0.0
+      },
+      "error": 0.0020076799215111426,
+      "fit": 1.2474766167759016e-07,
+      "stage_error": 1.509200193119259e-16,
+      "condition": 10.560049831303642,
+      "normal_phase": [
+        0.3676310958134283,
+        -0.3675122070966821
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 85,
+      "ppw": 8,
+      "cells": 11,
+      "h": 0.18181818181818182,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7780159996239138,
+        "imag": -0.09561622684601359
+      },
+      "analytic": {
+        "real": -0.7797684287573226,
+        "imag": -0.09518459076449494
+      },
+      "error": 0.0018048040266158089,
+      "fit": 3.6150648489902183e-07,
+      "stage_error": 1.7317473451305455e-16,
+      "condition": 10.560049831303642,
+      "normal_phase": [
+        0.3676310958134283,
+        -0.3675122070966821
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 85,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.8395960996810831,
+        "imag": 6.247545550701467e-06
+      },
+      "analytic": {
+        "real": -0.8396628204761496,
+        "imag": 0.0
+      },
+      "error": 6.701265790668467e-05,
+      "fit": 6.254639750200634e-10,
+      "stage_error": 2.993209725308973e-16,
+      "condition": 8.025572571956264,
+      "normal_phase": [
+        0.3651753224075776,
+        -0.36517631970624537
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 85,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7049447267135237,
+        "imag": 5.550666609256707e-06
+      },
+      "analytic": {
+        "real": -0.7050336520899625,
+        "imag": 0.0
+      },
+      "error": 8.909844260472236e-05,
+      "fit": 1.5300805489139252e-10,
+      "stage_error": 1.377240158311597e-15,
+      "condition": 8.025572571956264,
+      "normal_phase": [
+        0.3651753224075776,
+        -0.36517631970624537
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 85,
+      "ppw": 16,
+      "cells": 22,
+      "h": 0.09090909090909091,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7796882496236348,
+        "imag": -0.09519507373607927
+      },
+      "analytic": {
+        "real": -0.7797684287573226,
+        "imag": -0.09518459076449494
+      },
+      "error": 8.086152467122168e-05,
+      "fit": 3.5682103192788426e-10,
+      "stage_error": 3.5030699224160074e-16,
+      "condition": 8.025572571956264,
+      "normal_phase": [
+        0.3651753224075776,
+        -0.36517631970624537
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 85,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "first",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.8396632263143692,
+        "imag": 3.2849844175033684e-06
+      },
+      "analytic": {
+        "real": -0.8396628204761496,
+        "imag": 0.0
+      },
+      "error": 3.309958803930442e-06,
+      "fit": 6.313165231016198e-14,
+      "stage_error": 1.0794616142766446e-15,
+      "condition": 7.826960031001619,
+      "normal_phase": [
+        0.36507098817105815,
+        -0.36507121398724135
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 85,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "legacy",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.705036126583663,
+        "imag": 2.8307477833559237e-06
+      },
+      "analytic": {
+        "real": -0.7050336520899625,
+        "imag": 0.0
+      },
+      "error": 3.7598207519489513e-06,
+      "fit": 6.216484049598824e-14,
+      "stage_error": 4.305348047282298e-15,
+      "condition": 7.826960031001619,
+      "normal_phase": [
+        0.36507098817105815,
+        -0.36507121398724135
+      ]
+    },
+    {
+      "wavelength": 1.5,
+      "angle": 85,
+      "ppw": 32,
+      "cells": 43,
+      "h": 0.046511627906976744,
+      "dt_over_h": 0.015,
+      "kind": "passive",
+      "scheme": "coupled-kick",
+      "reflection": {
+        "real": -0.7797699909427344,
+        "imag": -0.09518008920316769
+      },
+      "analytic": {
+        "real": -0.7797684287573226,
+        "imag": -0.09518459076449494
+      },
+      "error": 4.764921577935985e-06,
+      "fit": 6.338771182750336e-14,
+      "stage_error": 4.830391781546856e-16,
+      "condition": 7.826960031001619,
+      "normal_phase": [
+        0.36507098817105815,
+        -0.36507121398724135
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "first",
+      "dt_over_h": 0.12,
+      "series": "time",
+      "reflection": {
+        "real": -0.07165644221941689,
+        "imag": 0.0014323578333821226
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 0.0014392153318844947,
+      "fit": 3.265915668218043e-11,
+      "stage_error": 3.0786326978205083e-15,
+      "condition": 1.028285592965438,
+      "normal_phase": [
+        5.440656053893439,
+        -5.440738768448615
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "first",
+      "dt_over_h": 0.06,
+      "series": "time",
+      "reflection": {
+        "real": -0.07174665289862141,
+        "imag": 0.000357950155671704
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 0.0003614415722915944,
+      "fit": 3.252275576182466e-11,
+      "stage_error": 9.859039427538714e-16,
+      "condition": 1.028378591719931,
+      "normal_phase": [
+        5.441159514433766,
+        -5.44124224339911
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "first",
+      "dt_over_h": 0.03,
+      "series": "time",
+      "reflection": {
+        "real": -0.07176959263914148,
+        "imag": 8.940444539667645e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 9.344382710897069e-05,
+      "fit": 3.2510911151777414e-11,
+      "stage_error": 5.101938876140765e-16,
+      "condition": 1.0284018388792753,
+      "normal_phase": [
+        5.441285381024371,
+        -5.44136811359244
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "first",
+      "dt_over_h": 0.015,
+      "series": "time",
+      "reflection": {
+        "real": -0.07177535175861761,
+        "imag": 2.2271567359158817e-05
+      },
+      "analytic": {
+        "real": -0.0717967697244908,
+        "imag": 0.0
+      },
+      "error": 3.089906106629085e-05,
+      "fit": 3.251286025469819e-11,
+      "stage_error": 2.9333783223739486e-16,
+      "condition": 1.0284076505109048,
+      "normal_phase": [
+        5.441316847763075,
+        -5.441399581231827
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "legacy",
+      "dt_over_h": 0.12,
+      "series": "time",
+      "reflection": {
+        "real": -0.005035483335584753,
+        "imag": 0.001268462873333334
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 0.0012740599808860715,
+      "fit": 4.102473479736197e-11,
+      "stage_error": 2.1761687275984454e-15,
+      "condition": 1.028285592965438,
+      "normal_phase": [
+        5.440656053893439,
+        -5.440738768448615
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "legacy",
+      "dt_over_h": 0.06,
+      "series": "time",
+      "reflection": {
+        "real": -0.0051201154053653235,
+        "imag": 0.00031615047491954695
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 0.0003180447916824438,
+      "fit": 1.213537627179508e-11,
+      "stage_error": 2.3529998854856e-15,
+      "condition": 1.028378591719931,
+      "normal_phase": [
+        5.441159514433766,
+        -5.44124224339911
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "legacy",
+      "dt_over_h": 0.03,
+      "series": "time",
+      "reflection": {
+        "real": -0.005141852815036956,
+        "imag": 7.897861388786188e-05
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 8.002895634686101e-05,
+      "fit": 7.447253672366395e-12,
+      "stage_error": 1.5305730348689286e-15,
+      "condition": 1.0284018388792753,
+      "normal_phase": [
+        5.441285381024371,
+        -5.44136811359244
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "legacy",
+      "dt_over_h": 0.015,
+      "series": "time",
+      "reflection": {
+        "real": -0.005147322476409369,
+        "imag": 1.9740997085336457e-05
+      },
+      "analytic": {
+        "real": -0.005154776142871528,
+        "imag": 0.0
+      },
+      "error": 2.1101282180293617e-05,
+      "fit": 7.0555487840975855e-12,
+      "stage_error": 2.3009368841582764e-15,
+      "condition": 1.0284076505109048,
+      "normal_phase": [
+        5.441316847763075,
+        -5.441399581231827
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "passive",
+      "dt_over_h": 0.12,
+      "series": "time",
+      "reflection": {
+        "real": 0.002288511234363697,
+        "imag": -0.018227886998083465
+      },
+      "analytic": {
+        "real": 0.00221862330411984,
+        "imag": -0.01948030768841006
+      },
+      "error": 0.0012543691276302664,
+      "fit": 7.317149061793965e-12,
+      "stage_error": 2.2120259200677704e-15,
+      "condition": 1.028285592965438,
+      "normal_phase": [
+        5.440656053893439,
+        -5.440738768448615
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "passive",
+      "dt_over_h": 0.06,
+      "series": "time",
+      "reflection": {
+        "real": 0.002239663230427916,
+        "imag": -0.019164535279463157
+      },
+      "analytic": {
+        "real": 0.00221862330411984,
+        "imag": -0.01948030768841006
+      },
+      "error": 0.0003164725781978265,
+      "fit": 1.5276373490799908e-11,
+      "stage_error": 4.5483222928244046e-15,
+      "condition": 1.028378591719931,
+      "normal_phase": [
+        5.441159514433766,
+        -5.44124224339911
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "passive",
+      "dt_over_h": 0.03,
+      "series": "time",
+      "reflection": {
+        "real": 0.0022270147863208715,
+        "imag": -0.019398287645297392
+      },
+      "analytic": {
+        "real": 0.00221862330411984,
+        "imag": -0.01948030768841006
+      },
+      "error": 8.244819249525243e-05,
+      "fit": 1.8178892731832585e-11,
+      "stage_error": 4.993299867973371e-15,
+      "condition": 1.0284018388792753,
+      "normal_phase": [
+        5.441285381024371,
+        -5.44136811359244
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 30,
+      "ppw": 16,
+      "kind": "passive",
+      "dt_over_h": 0.015,
+      "series": "time",
+      "reflection": {
+        "real": 0.0022238255896782195,
+        "imag": -0.01945670035266434
+      },
+      "analytic": {
+        "real": 0.00221862330411984,
+        "imag": -0.01948030768841006
+      },
+      "error": 2.41737476623327e-05,
+      "fit": 1.8921670751095964e-11,
+      "stage_error": 2.767553568371651e-16,
+      "condition": 1.0284076505109048,
+      "normal_phase": [
+        5.441316847763075,
+        -5.441399581231827
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "first",
+      "dt_over_h": 0.12,
+      "series": "time",
+      "reflection": {
+        "real": -0.5890560009453497,
+        "imag": 0.0009398726102218727
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 0.0009765969876731626,
+      "fit": 9.09649600869478e-12,
+      "stage_error": 1.963591272685857e-15,
+      "condition": 1.7015414949642071,
+      "normal_phase": [
+        1.6239707785721162,
+        -1.6240203566717137
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "first",
+      "dt_over_h": 0.06,
+      "series": "time",
+      "reflection": {
+        "real": -0.5888059661309839,
+        "imag": 0.0002347266810316496
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 0.00023522217520873865,
+      "fit": 9.060919771658274e-12,
+      "stage_error": 1.3958367190452916e-15,
+      "condition": 1.6996097627407658,
+      "normal_phase": [
+        1.6256565559681668,
+        -1.625706245730996
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "first",
+      "dt_over_h": 0.03,
+      "series": "time",
+      "reflection": {
+        "real": -0.5887439210218499,
+        "imag": 5.837498486433284e-05
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 7.480987924749108e-05,
+      "fit": 9.059116959595447e-12,
+      "stage_error": 4.802880546112318e-16,
+      "condition": 1.69912773262114,
+      "normal_phase": [
+        1.6260777564510271,
+        -1.6261274741313845
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "first",
+      "dt_over_h": 0.015,
+      "series": "time",
+      "reflection": {
+        "real": -0.5887284387110178,
+        "imag": 1.4283049707308558e-05
+      },
+      "analytic": {
+        "real": -0.5887907064808635,
+        "imag": 0.0
+      },
+      "error": 6.388490174136939e-05,
+      "fit": 9.058697368831586e-12,
+      "stage_error": 3.5284670279850083e-16,
+      "condition": 1.6990072814032111,
+      "normal_phase": [
+        1.6261830413509315,
+        -1.6262327660107845
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "legacy",
+      "dt_over_h": 0.12,
+      "series": "time",
+      "reflection": {
+        "real": -0.3471150581533931,
+        "imag": 0.0006807119924912287
+      },
+      "analytic": {
+        "real": -0.34667449603823447,
+        "imag": 0.0
+      },
+      "error": 0.0008108414111492035,
+      "fit": 1.2709862179809581e-11,
+      "stage_error": 2.5257051829259607e-15,
+      "condition": 1.7015414949642071,
+      "normal_phase": [
+        1.6239707785721162,
+        -1.6240203566717137
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "legacy",
+      "dt_over_h": 0.06,
+      "series": "time",
+      "reflection": {
+        "real": -0.3467521125888805,
+        "imag": 0.00016968021674276036
+      },
+      "analytic": {
+        "real": -0.34667449603823447,
+        "imag": 0.0
+      },
+      "error": 0.00018658966983211607,
+      "fit": 3.938580344070209e-12,
+      "stage_error": 1.8525241275472394e-15,
+      "condition": 1.6996097627407658,
+      "normal_phase": [
+        1.6256565559681668,
+        -1.625706245730996
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "legacy",
+      "dt_over_h": 0.03,
+      "series": "time",
+      "reflection": {
+        "real": -0.3466618995317127,
+        "imag": 4.2394025827159334e-05
+      },
+      "analytic": {
+        "real": -0.34667449603823447,
+        "imag": 0.0
+      },
+      "error": 4.422584541177492e-05,
+      "fit": 2.5939806269595398e-12,
+      "stage_error": 3.274031485787951e-15,
+      "condition": 1.69912773262114,
+      "normal_phase": [
+        1.6260777564510271,
+        -1.6261274741313845
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "legacy",
+      "dt_over_h": 0.015,
+      "series": "time",
+      "reflection": {
+        "real": -0.3466393784344991,
+        "imag": 1.0601317085059907e-05
+      },
+      "analytic": {
+        "real": -0.34667449603823447,
+        "imag": 0.0
+      },
+      "error": 3.668288451106791e-05,
+      "fit": 2.483648176897463e-12,
+      "stage_error": 2.310319381912993e-15,
+      "condition": 1.6990072814032111,
+      "normal_phase": [
+        1.6261830413509315,
+        -1.6262327660107845
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "passive",
+      "dt_over_h": 0.12,
+      "series": "time",
+      "reflection": {
+        "real": -0.4484772549419152,
+        "imag": -0.17127147490710895
+      },
+      "analytic": {
+        "real": -0.4479256589656009,
+        "imag": -0.17216482838156805
+      },
+      "error": 0.0010499231169063242,
+      "fit": 2.1498384674954673e-12,
+      "stage_error": 2.016867802056319e-15,
+      "condition": 1.7015414949642071,
+      "normal_phase": [
+        1.6239707785721162,
+        -1.6240203566717137
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "passive",
+      "dt_over_h": 0.06,
+      "series": "time",
+      "reflection": {
+        "real": -0.44802027394845173,
+        "imag": -0.17192843520131867
+      },
+      "analytic": {
+        "real": -0.4479256589656009,
+        "imag": -0.17216482838156805
+      },
+      "error": 0.0002546246858579873,
+      "fit": 4.850206603871149e-12,
+      "stage_error": 9.302804229354511e-16,
+      "condition": 1.6996097627407658,
+      "normal_phase": [
+        1.6256565559681668,
+        -1.625706245730996
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "passive",
+      "dt_over_h": 0.03,
+      "series": "time",
+      "reflection": {
+        "real": -0.44790649937478055,
+        "imag": -0.17209251127386077
+      },
+      "analytic": {
+        "real": -0.4479256589656009,
+        "imag": -0.17216482838156805
+      },
+      "error": 7.481212460255453e-05,
+      "fit": 5.784124458861924e-12,
+      "stage_error": 2.007071875933716e-15,
+      "condition": 1.69912773262114,
+      "normal_phase": [
+        1.6260777564510271,
+        -1.6261274741313845
+      ]
+    },
+    {
+      "wavelength": 1.0,
+      "angle": 75,
+      "ppw": 16,
+      "kind": "passive",
+      "dt_over_h": 0.015,
+      "series": "time",
+      "reflection": {
+        "real": -0.44787808498566073,
+        "imag": -0.17213352012161917
+      },
+      "analytic": {
+        "real": -0.4479256589656009,
+        "imag": -0.17216482838156805
+      },
+      "error": 5.695165237613704e-05,
+      "fit": 6.02074701744367e-12,
+      "stage_error": 2.6964261280183643e-16,
+      "condition": 1.6990072814032111,
+      "normal_phase": [
+        1.6261830413509315,
+        -1.6262327660107845
+      ]
+    }
+  ]
+}

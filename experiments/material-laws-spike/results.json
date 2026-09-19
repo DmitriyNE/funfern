@@ -1,0 +1,1282 @@
+{
+  "baseline": "beca47e0d05c9b24945ef632b00c5cc16f80c8a0",
+  "summary": {
+    "passed": 113,
+    "failed": 6,
+    "failed_cases": [
+      "direct second-order boundary growth gp=0.0 gc=0.0",
+      "direct second-order boundary growth gp=0.4 gc=0.9",
+      "direct second-order boundary growth gp=0.0 gc=4.0",
+      "factored second-order boundary growth gp=0.0 gc=4.0",
+      "transfer identity smooth vector RMS",
+      "transfer refine smooth vector RMS"
+    ]
+  },
+  "results": [
+    {
+      "name": "baseline stiffness equals C^T W C",
+      "value": 2.7678122630432565e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "positive mass integrates area",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "constant primary exact gradient",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "potential/direct equivalence sign 1",
+      "value": 9.037916270858176e-14,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "integrated Q conservation sign 1",
+      "value": 8.326672684688674e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "potential/direct equivalence sign -1",
+      "value": 9.037916270858176e-14,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "integrated Q conservation sign -1",
+      "value": 8.326672684688674e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "rotated anisotropic energy/operator identity",
+      "value": 2.656158372864771e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "conservative energy excursion 80",
+      "value": 3.748117311741517e-05,
+      "limit": 0.005,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "conservative energy excursion 160",
+      "value": 9.369899476530108e-06,
+      "limit": 0.005,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "conservative energy excursion 320",
+      "value": 2.3424502577640283e-06,
+      "limit": 0.005,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "conservative temporal error ratio",
+      "value": 4.000017695898936,
+      "limit": 3.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "extra vector null mode force",
+      "value": 5.233302714648886e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "state dimensions",
+      "observation": {
+        "nodes": 113,
+        "vector_dofs": 384,
+        "gradient_rank": 112,
+        "extra_stationary_dofs": 272
+      }
+    },
+    {
+      "name": "spatial loss leaves potential image",
+      "observation": {
+        "weighted_relative_nonpotential_flux": 0.03598907082136401
+      }
+    },
+    {
+      "name": "kerr scalar inverse",
+      "value": 3.5694227001073967e-16,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kerr vector inverse",
+      "value": 3.5366771599092536e-16,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kerr passive loss energy increment",
+      "value": 0.0,
+      "limit": 1e-12,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kerr both-side nonlinear energy sign 1",
+      "value": 1.7555229401056138e-05,
+      "limit": 0.005,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "kerr both-side nonlinear energy sign -1",
+      "value": 1.7555229401056138e-05,
+      "limit": 0.005,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "sat scalar inverse",
+      "value": 1.0823067525055518e-16,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "sat vector inverse",
+      "value": 1.8094319130163194e-16,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "sat passive loss energy increment",
+      "value": 0.0,
+      "limit": 1e-12,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "sat both-side nonlinear energy sign 1",
+      "value": 1.7240360357551054e-05,
+      "limit": 0.005,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "sat both-side nonlinear energy sign -1",
+      "value": 1.7240360357551054e-05,
+      "limit": 0.005,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mixed nonlinear frozen loss relative error",
+      "value": 0.0009388725465157062,
+      "limit": 0.02,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "mixed nonlinear frozen loss convergence ratio",
+      "value": 2.0525876246886794,
+      "limit": 1.7,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "nonlinear mixed effective rates",
+      "observation": {
+        "at_small_field": 0.20952380952380956,
+        "at_large_field": 0.8423791821561337
+      }
+    },
+    {
+      "name": "electric/magnetic swapped duality",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "passive two-channel final energy 0.6,0.0",
+      "value": 0.29344564325247885,
+      "limit": 1.0,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "passive two-channel final energy 0.0,0.6",
+      "value": 0.2987993987384543,
+      "limit": 1.0,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "passive two-channel final energy 0.6,0.9",
+      "value": 0.0480095172752901,
+      "limit": 1.0,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "filter resolved frequency fraction",
+      "value": 0.08523848820006738,
+      "limit": 0.1,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "filter resolved attenuation",
+      "value": 4.2231153184123036e-05,
+      "limit": 0.001,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "filter Q total resolved",
+      "value": 3.2959746043559335e-17,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "filter ceiling attenuation",
+      "value": 0.7999999999999997,
+      "limit": 0.5,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "filter Q total ceiling",
+      "value": 1.5287250632045613e-17,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "filter constant primary identity",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "filter limitation",
+      "observation": {
+        "policy": "Preserves ker(C^T W) vector state. It filters coupled waves, not arbitrary charge/static modes; material edits and remap must not inject unresolved null-space artifacts."
+      }
+    },
+    {
+      "name": "first-order outgoing spectral growth",
+      "value": -6.999935732760917e-15,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "original second-order outgoing spectral growth",
+      "value": 2.301886867035198e-15,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "second-order outgoing modes",
+      "observation": {
+        "unstable_count": 0,
+        "max_growth": 2.301886867035198e-15,
+        "max_frequency": 18.28634688502773
+      }
+    },
+    {
+      "name": "outgoing auxiliary scalar/canonical derivative",
+      "value": 2.3620683162137483e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "boundary tangential operator PSD",
+      "value": 3.837891642047992e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "second-order admittance limitation",
+      "observation": {
+        "equation": "Y(s)=D+A/s^2; Y(i omega)=D-A/omega^2 can be negative. Energy of bulk alone need not decrease; spectrum/reflection must gate use."
+      }
+    },
+    {
+      "name": "direct second-order boundary growth gp=0.0 gc=0.0",
+      "value": 7.897601073114657e-08,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": false,
+      "note": ""
+    },
+    {
+      "name": "boundary eigenmode diagnostic",
+      "observation": {
+        "gp": 0.0,
+        "gc": 0.0,
+        "real": 7.897601073114657e-08,
+        "imag": 0.0,
+        "normalized_residual": 1.414393048221976e-16,
+        "note": "Near-zero roots can split numerically around redundant/Jordan memory modes; a tiny real root alone is not evidence of exponential instability."
+      }
+    },
+    {
+      "name": "direct first-order boundary growth gp=0.0 gc=0.0",
+      "value": 8.418080331278848e-15,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "factored second-order boundary growth gp=0.0 gc=0.0",
+      "value": 1.3406755213919404e-14,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "direct second-order boundary growth gp=0.4 gc=0.9",
+      "value": 9.382464211734292e-08,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": false,
+      "note": ""
+    },
+    {
+      "name": "boundary eigenmode diagnostic",
+      "observation": {
+        "gp": 0.4,
+        "gc": 0.9,
+        "real": 9.382464211734292e-08,
+        "imag": 0.0,
+        "normalized_residual": 9.933703415660887e-17,
+        "note": "Near-zero roots can split numerically around redundant/Jordan memory modes; a tiny real root alone is not evidence of exponential instability."
+      }
+    },
+    {
+      "name": "direct first-order boundary growth gp=0.4 gc=0.9",
+      "value": -0.6602069832846382,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "factored second-order boundary growth gp=0.4 gc=0.9",
+      "value": -0.028919647633184886,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "direct second-order boundary growth gp=0.0 gc=4.0",
+      "value": 0.04618251029402739,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": false,
+      "note": ""
+    },
+    {
+      "name": "boundary eigenmode diagnostic",
+      "observation": {
+        "gp": 0.0,
+        "gc": 4.0,
+        "real": 0.04618251029402739,
+        "imag": 0.9812896152860032,
+        "normalized_residual": 8.452242516329707e-17,
+        "note": "Near-zero roots can split numerically around redundant/Jordan memory modes; a tiny real root alone is not evidence of exponential instability."
+      }
+    },
+    {
+      "name": "unstable eigenmode lifts to potential plus loss memory",
+      "value": 4.604553958863639e-13,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "boundary failure representation independence",
+      "observation": {
+        "gp": 0.0,
+        "gc": 4.0,
+        "growth": 0.04618251029402739,
+        "reason": "b=C psi+z, psi_dot=M^-1 Q, z_dot=-gc b yields identical b_dot. Retaining the same outgoing histories cannot remove this instability by changing representation."
+      }
+    },
+    {
+      "name": "direct first-order boundary growth gp=0.0 gc=4.0",
+      "value": -0.9371624529768746,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "factored second-order boundary growth gp=0.0 gc=4.0",
+      "value": 0.046182510294037145,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": false,
+      "note": ""
+    },
+    {
+      "name": "thin-gap paired force total",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "thin-gap energy derivative balance",
+      "value": 2.220446049250313e-16,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "thin-gap direct/reference evolution",
+      "value": 3.27539277806654e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "thin-gap required state",
+      "observation": {
+        "trace_dofs": 9,
+        "equations": "z_dot=T u; Q_dot includes -T^T k z; energy += z^T k z/2. z is physical jump memory and transfers independently of bulk b."
+      }
+    },
+    {
+      "name": "material interface weak equilibrium",
+      "value": 6.175615574477433e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "heterogeneous material energy exchange cancellation",
+      "value": 1.7763568394002505e-15,
+      "limit": 1e-09,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "heterogeneous nodal mass integrates both materials",
+      "value": 6.217248937900877e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "equal eps/mu temporal reflection",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "eps-only temporal reflection nonzero",
+      "value": 0.10355339059327379,
+      "limit": 0.01,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "region-frame contribution distinction",
+      "value": 0.015435000000000088,
+      "limit": 0.001,
+      "comparison": ">=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer identity integrated Q",
+      "value": 0.0,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer identity primary smooth error",
+      "value": 8.103995530115607e-17,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer identity affine scalar",
+      "value": 2.736647580668363e-17,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer identity constant vector",
+      "value": 3.861814517066991e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer identity affine vector",
+      "value": 1.1578001974116393e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer identity smooth vector RMS",
+      "value": 0.05816893925398543,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": false,
+      "note": "Total error versus analytic field includes source-mesh differentiation error; identity failure diagnoses input under-resolution, not failed identity transfer."
+    },
+    {
+      "name": "transfer identity stationary energy fraction",
+      "value": 1.4909412847202295e-29,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer identity details",
+      "observation": {
+        "relative_total_correction": 0.0,
+        "interior_divergence_rms": 2.7306263878520282e-15,
+        "stationary_measure": "weighted orthogonal projection",
+        "note": "Full remesh: all support is affected. Identity is exact-copy production path; these interpolate checks expose roundoff. Interior divergence excludes face jumps. No f32 GPU transfer claimed."
+      }
+    },
+    {
+      "name": "transfer refine integrated Q",
+      "value": 0.0,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer refine primary smooth error",
+      "value": 0.0025972403053182297,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer refine affine scalar",
+      "value": 1.0448296389497012e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer refine constant vector",
+      "value": 3.849005810083387e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer refine affine vector",
+      "value": 1.0325038456979646e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer refine smooth vector RMS",
+      "value": 0.05814256450136801,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": false,
+      "note": "Total error versus analytic field includes source-mesh differentiation error; identity failure diagnoses input under-resolution, not failed identity transfer."
+    },
+    {
+      "name": "transfer refine stationary energy fraction",
+      "value": 2.0720534312568643e-28,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer refine details",
+      "observation": {
+        "relative_total_correction": 0.0,
+        "interior_divergence_rms": 3.768718933447196e-15,
+        "stationary_measure": "weighted orthogonal projection",
+        "note": "Full remesh: all support is affected. Identity is exact-copy production path; these interpolate checks expose roundoff. Interior divergence excludes face jumps. No f32 GPU transfer claimed."
+      }
+    },
+    {
+      "name": "transfer coarsen integrated Q",
+      "value": 4.440892098500626e-16,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer coarsen primary smooth error",
+      "value": 9.683113318918289e-05,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer coarsen affine scalar",
+      "value": 3.729422010946277e-17,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer coarsen constant vector",
+      "value": 5.946267608019854e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer coarsen affine vector",
+      "value": 1.2220396175372428e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer coarsen smooth vector RMS",
+      "value": 0.015227045180560974,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": true,
+      "note": "Total error versus analytic field includes source-mesh differentiation error; identity failure diagnoses input under-resolution, not failed identity transfer."
+    },
+    {
+      "name": "transfer coarsen stationary energy fraction",
+      "value": 0.002920944250093639,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer coarsen details",
+      "observation": {
+        "relative_total_correction": 9.820191152651732e-05,
+        "interior_divergence_rms": 0.016056895431315468,
+        "stationary_measure": "weighted orthogonal projection",
+        "note": "Full remesh: all support is affected. Identity is exact-copy production path; these interpolate checks expose roundoff. Interior divergence excludes face jumps. No f32 GPU transfer claimed."
+      }
+    },
+    {
+      "name": "transfer resolved refine integrated Q",
+      "value": 0.0,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved refine primary smooth error",
+      "value": 0.00033185016936605505,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved refine affine scalar",
+      "value": 1.0661313952158087e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved refine constant vector",
+      "value": 6.10606488751745e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved refine affine vector",
+      "value": 1.26771639819481e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved refine smooth vector RMS",
+      "value": 0.01485434269664673,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": true,
+      "note": "Total error versus analytic field includes source-mesh differentiation error; identity failure diagnoses input under-resolution, not failed identity transfer."
+    },
+    {
+      "name": "transfer resolved refine stationary energy fraction",
+      "value": 1.1044091659826249e-29,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved refine details",
+      "observation": {
+        "relative_total_correction": 0.0,
+        "interior_divergence_rms": 7.970960551567882e-15,
+        "stationary_measure": "upper bound from interpolated potential",
+        "note": "Full remesh: all support is affected. Identity is exact-copy production path; these interpolate checks expose roundoff. Interior divergence excludes face jumps. No f32 GPU transfer claimed."
+      }
+    },
+    {
+      "name": "transfer resolved coarsen integrated Q",
+      "value": 0.0,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved coarsen primary smooth error",
+      "value": 5.961417299465305e-06,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved coarsen affine scalar",
+      "value": 4.173757251198539e-17,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved coarsen constant vector",
+      "value": 4.274534250902117e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved coarsen affine vector",
+      "value": 1.0471483555930526e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved coarsen smooth vector RMS",
+      "value": 0.0038286417830630678,
+      "limit": 0.05,
+      "comparison": "<=",
+      "passed": true,
+      "note": "Total error versus analytic field includes source-mesh differentiation error; identity failure diagnoses input under-resolution, not failed identity transfer."
+    },
+    {
+      "name": "transfer resolved coarsen stationary energy fraction",
+      "value": 0.00022173865615871351,
+      "limit": 0.01,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "transfer resolved coarsen details",
+      "observation": {
+        "relative_total_correction": 6.045403233309927e-06,
+        "interior_divergence_rms": 0.007562133534119571,
+        "stationary_measure": "weighted orthogonal projection",
+        "note": "Full remesh: all support is affected. Identity is exact-copy production path; these interpolate checks expose roundoff. Interior divergence excludes face jumps. No f32 GPU transfer claimed."
+      }
+    },
+    {
+      "name": "split component shares add to old Q",
+      "value": 4.440892098500626e-16,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "merge summed supports recovers Q",
+      "value": 5.4790776640980105e-17,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "split/merge vector constant-gauge independence",
+      "value": 2.589782281929867e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "split/merge no spurious first-step transient",
+      "value": 2.525580185820988e-15,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "fallback remap comparison",
+      "observation": {
+        "direct_stationary_fraction": 0.013066241256883404,
+        "potential_plus_memory_stationary_fraction": 0.010444820922855829,
+        "relative_flux_disagreement": 0.07366294760937901,
+        "note": "Physical nonpotential loss state is retained by both; this comparison is not a zero-charge projection."
+      }
+    },
+    {
+      "name": "twelve remesh cycles",
+      "observation": {
+        "relative_vector_error": 0.021862844521579314,
+        "stationary_energy_fraction": 0.00029542900125351644
+      }
+    },
+    {
+      "name": "fallback f32 cancellation example",
+      "observation": {
+        "epoch": 67108864.0,
+        "exact_flux": 0.25,
+        "reconstructed_flux": 0.0,
+        "direct_stored_flux": 0.25,
+        "note": "Algebraic long-clock counterexample, not a long-running GPU integration; potential+memory would need coordinated rebasing."
+      }
+    },
+    {
+      "name": "prescribed material event primary continuity",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "prescribed material event boundary exchange",
+      "value": 1.1102230246251565e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "prescribed material event free Q unchanged",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "migrated source derivative omega=0.0",
+      "value": 9.921508059562711e-13,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "migrated source derivative omega=1e-14",
+      "value": 3.773037438037363e-12,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "migrated source derivative omega=1e-05",
+      "value": 3.4413027982793665e-12,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "migrated source derivative omega=3.7",
+      "value": 4.577116463622133e-11,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "migrated source exact zero limit",
+      "value": 1.1102230246251565e-16,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "frequency edit preserves phase anchor",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "frequency edit subsequent phase",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "epoch absolute-time separation",
+      "value": 4.0531158464196526e-10,
+      "limit": 1e-08,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "ramp reversal value continuity",
+      "value": 0.0,
+      "limit": 1e-10,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "edited ramp envelope",
+      "observation": {
+        "current": 1.4703387499999998,
+        "new_target": 1.2,
+        "required_upper": 1.4703387499999998,
+        "derivative_continuity_promised": false
+      }
+    },
+    {
+      "name": "near-threshold saturable inverse residual",
+      "value": 0.0,
+      "limit": 1e-11,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "rejected inverse preserves accepted state",
+      "value": 0.0,
+      "limit": 0,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "rejected force preserves accepted state",
+      "value": 0.0,
+      "limit": 0,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "rejected pulse preserves accepted state",
+      "value": 0.0,
+      "limit": 0,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "rejected law_patch preserves accepted state",
+      "value": 0.0,
+      "limit": 0,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "bounded reciprocal rejects out-of-domain request",
+      "value": 0.0,
+      "limit": 0,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "runtime scope",
+      "observation": {
+        "coverage": "CPU ownership/phase/analytic waveform fixtures only. GPU synchronization, source-buffer replacement races, and device f32 shader behavior require implementation checks."
+      }
+    },
+    {
+      "name": "resource bytes ratio coarse",
+      "value": 1.0217164532954006,
+      "limit": 2.0,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "resource accounting coarse",
+      "observation": {
+        "nodes": 113,
+        "elements": 32,
+        "nonzeros": 1217,
+        "baseline_main_bytes": 42180,
+        "candidate_main_bytes": 43096,
+        "old_core_estimator": 27716,
+        "transfer_stencil_bytes": 16992,
+        "transfer_reduction_scratch_bytes": 1808,
+        "candidate_note": "Provisional linear layout with constitutive table indices, not a compiled shader. Common source/material/recorder/display storage excluded from both. Law catalogue payloads require their own capacity budget. Transfer peak includes both generations plus stencils/scratch."
+      }
+    },
+    {
+      "name": "numpy CPU timing coarse",
+      "observation": {
+        "csr_force_us": 7.400553052624067,
+        "element_gather_us": 16.09166618436575,
+        "direct_step_us": 54.56861418982347,
+        "note": "Python/NumPy sparse-gather prototype; not GPU or optimized Rust throughput."
+      }
+    },
+    {
+      "name": "resource bytes ratio packet",
+      "value": 1.0286543202648817,
+      "limit": 2.0,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "resource accounting packet",
+      "observation": {
+        "nodes": 1601,
+        "elements": 512,
+        "nonzeros": 18689,
+        "baseline_main_bytes": 614916,
+        "candidate_main_bytes": 632536,
+        "old_core_estimator": 409988,
+        "transfer_stencil_bytes": 252000,
+        "transfer_reduction_scratch_bytes": 25616,
+        "candidate_note": "Provisional linear layout with constitutive table indices, not a compiled shader. Common source/material/recorder/display storage excluded from both. Law catalogue payloads require their own capacity budget. Transfer peak includes both generations plus stencils/scratch."
+      }
+    },
+    {
+      "name": "numpy CPU timing packet",
+      "observation": {
+        "csr_force_us": 104.21916687240203,
+        "element_gather_us": 248.47110733389854,
+        "direct_step_us": 705.138606329759,
+        "note": "Python/NumPy sparse-gather prototype; not GPU or optimized Rust throughput."
+      }
+    },
+    {
+      "name": "binding/dispatch design",
+      "observation": {
+        "bindings": [
+          "control/status/clock",
+          "nodal metadata and contribution tables",
+          "element geometry/connectivity/quad laws",
+          "node incidence",
+          "accepted+candidate nodal state",
+          "accepted+candidate vector state",
+          "local-force scratch",
+          "sources/events/runtime laws"
+        ],
+        "max_storage_bindings": 8,
+        "lossless_field_dispatches": 3,
+        "commit_dispatches": 1,
+        "loss_path_extra_element_dispatches": "1-2 depending on stage fusion",
+        "force_strategy": "Element-local seven-node forces + deterministic node gather, no float atomics. Direct flux does not automatically retain a one-CSR-evaluation fast path."
+      }
+    },
+    {
+      "name": "packet angle=0.0 outgoing=0",
+      "observation": {
+        "energy_ratio": 0.9999989160968381,
+        "steps": 560,
+        "finite": true
+      }
+    },
+    {
+      "name": "packet angle=0.0 outgoing=1",
+      "observation": {
+        "energy_ratio": 0.0006488559630174135,
+        "steps": 560,
+        "finite": true
+      }
+    },
+    {
+      "name": "packet angle=0.0 outgoing=2",
+      "observation": {
+        "energy_ratio": 0.0011076300299710878,
+        "steps": 560,
+        "finite": true
+      }
+    },
+    {
+      "name": "first-order normal packet reflection proxy",
+      "value": 0.025472665080733224,
+      "limit": 0.15,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "packet reflections angle=0.0",
+      "observation": {
+        "first": 0.025472665080733224,
+        "second": 0.033281094190787675,
+        "meaning": "Residual bulk-energy amplitude proxy, includes discretization/other box sides; not pure one-plane reflection."
+      }
+    },
+    {
+      "name": "packet angle=30.0 outgoing=0",
+      "observation": {
+        "energy_ratio": 0.9999968687708944,
+        "steps": 560,
+        "finite": true
+      }
+    },
+    {
+      "name": "packet angle=30.0 outgoing=1",
+      "observation": {
+        "energy_ratio": 0.002737649099856109,
+        "steps": 560,
+        "finite": true
+      }
+    },
+    {
+      "name": "packet angle=30.0 outgoing=2",
+      "observation": {
+        "energy_ratio": 0.003967162024583533,
+        "steps": 560,
+        "finite": true
+      }
+    },
+    {
+      "name": "second-order oblique packet excess reflection",
+      "value": 0.010662879223261673,
+      "limit": 0.02,
+      "comparison": "<=",
+      "passed": true,
+      "note": ""
+    },
+    {
+      "name": "packet reflections angle=30.0",
+      "observation": {
+        "first": 0.05232263059221595,
+        "second": 0.06298550981547762,
+        "meaning": "Residual bulk-energy amplitude proxy, includes discretization/other box sides; not pure one-plane reflection."
+      }
+    },
+    {
+      "name": "elapsed",
+      "observation": {
+        "seconds": 10.266372374957427
+      }
+    }
+  ]
+}

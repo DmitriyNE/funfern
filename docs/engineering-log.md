@@ -5,6 +5,60 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-19 — Material-law architecture adopted and plan consolidated
+
+- Adopted direct integrated nodal Q plus independent quadrature b, with genuine
+  thin-gap/outgoing/oscillator history. Adopted the passive three-state outgoing
+  law with force-coupled midpoint kicks; retain both outgoing orders. No blanket
+  nonlinear-domain ban, legacy unstable auxiliary port, or separate-boundary split.
+- Reconciled the [specification](funfern-material-laws-plan.md) and
+  [detailed stages](funfern-material-laws-review.md): removed production bulk
+  potential/gauge/seam-offset obligations and the assumed one-CSR fast path;
+  added direct-state energy/filter/remap and physical-history contracts.
+- Linked all three spike reports and preserved their reproducible artifacts,
+  measured limitations and expected failures. Boundary history, nonlinear full
+  composition, irregular remap, f32/atomic acceptance, curved radiation and real
+  core performance remain explicit gates before dependent enablement/cutover.
+- Ready for Stage 0's bounded contract/fixture work and Stage 1's inert build
+  repair. No production source changed; existing unfinished authoring changes
+  remain outside this planning/evidence commit. No new numerical result or
+  successful production build is claimed by this documentation consolidation.
+
+## 2026-09-19 — Isolated single-boundary scattering follow-up
+
+- Added a Bloch-periodic enriched-FEM strip that separates incident/reflected
+  discrete modes at one flat face, removing packet/corner ambiguity. The passive
+  candidate converges to its analytic reflection, including grazing improvement
+  over first order; legacy second order remains better on this ideal planar test.
+- Found a fixed-CFL reflection floor in the earlier boundary-only Strang split:
+  21 refinement failures remain recorded. Coupling the held interior force into
+  each boundary-aware midpoint kick removes the floor without making the bulk
+  implicit. All 248 corrected checks pass, including full coarse-2D loss/stability
+  regressions. See [derivation and results](funfern-boundary-scattering-spike.md).
+- This supersedes the prior timestep recommendation, not its passive auxiliary
+  law. Production source and unfinished NL work are unchanged. Performance,
+  f32, nonlinear full-system composition and history handoff are to be validated
+  in the real solver core; no further broad spike or GPU benchmark was added.
+
+## 2026-09-19 — Isolated nonlinear-core boundary follow-up
+
+- Added a reproducible boundary correctness experiment on clean `beca47e` FEM
+  data; production and unfinished material-law source changes are untouched.
+- Derived a passive three-state rational boundary response. It retains the
+  quadratic tangential expansion and quartic small-angle reflection order,
+  while removing the previous linear complementary-loss instability in the
+  tested continuous and split-step systems. It is a nonlocal candidate, not
+  a claimed CRBC implementation or exact curved DtN.
+- All 64 follow-up checks pass: energy identities, spectral/long-time tests,
+  second-order stepping, packets/corners, annular energy decay, nonlinear Kerr
+  boundary substeps, and reduced trace-solve parity. Original spike failures
+  remain recorded separately. See [derivation/results](funfern-boundary-auxiliary-spike.md).
+- Remaining: review the reflection/nonlocal-cost tradeoff; implement and measure
+  the actual solver core, including f32, boundary-history transfer and rollback.
+  Curved radiation accuracy and the original ignored topology reproducer remain
+  gated. No blanket nonlinear-material ban or first-order-only downgrade was
+  adopted. No production implementation or performance claim was made.
+
 ## Current TODOs
 
 Found while pacing the solver, not yet diagnosed:
