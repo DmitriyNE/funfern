@@ -38,6 +38,33 @@ pub struct BoundaryLoad {
     pub normalized_weight: f64,
 }
 
+/// Stable physical identity of one mass-lumped thin-gap trace sample. The
+/// stored orientation is always authored left minus right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ThinGapTraceKey {
+    Legacy {
+        boundary: crate::InternalBoundaryId,
+        start_bits: u64,
+        end_bits: u64,
+        local: u8,
+    },
+    Topology {
+        curve: crate::CurveId,
+        span: crate::CurveSpanId,
+        start_bits: u64,
+        end_bits: u64,
+        local: u8,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThinGapSample {
+    pub key: ThinGapTraceKey,
+    pub left_node: u32,
+    pub right_node: u32,
+    pub stiffness: f64,
+}
+
 /// Material and presentation-independent physics data used by a compiled
 /// topology. It borrows the document libraries without depending on legacy
 /// obstacle, divider, or baffle collections.
@@ -182,6 +209,9 @@ pub struct QuadraticWaveOperator {
     face_neumann_loads: Vec<[BoundaryLoad; 2]>,
     lumped_mass: Vec<f64>,
     lumped_damping: Vec<f64>,
+    first_order_boundary_damping: Vec<f64>,
+    second_order_boundary_damping: Vec<f64>,
+    thin_gap_samples: Vec<ThinGapSample>,
     maximum_eigenvalue_bound: f64,
     maximum_time_step: f64,
 }
@@ -450,6 +480,24 @@ impl QuadraticWaveOperator {
 
     pub fn lumped_damping(&self) -> &[f64] {
         &self.lumped_damping
+    }
+
+    /// Integrated trace impedance belonging to local first-order/impedance
+    /// conditions. Kept separate from material loss so the direct-state core
+    /// can compose its force-coupled boundary kick without reverse-engineering
+    /// the legacy lumped damping array.
+    pub fn first_order_boundary_damping(&self) -> &[f64] {
+        &self.first_order_boundary_damping
+    }
+
+    /// Integrated trace impedance belonging to the passive second-order trace.
+    /// Its auxiliary tangential operator is [`Self::auxiliary_stiffness_values`].
+    pub fn second_order_boundary_damping(&self) -> &[f64] {
+        &self.second_order_boundary_damping
+    }
+
+    pub fn thin_gap_samples(&self) -> &[ThinGapSample] {
+        &self.thin_gap_samples
     }
 
     pub fn maximum_eigenvalue_bound(&self) -> f64 {
@@ -1173,6 +1221,9 @@ struct BoundaryAssembly<'a> {
     dirichlet_signals: &'a mut [Option<TimeSignal>],
     face_neumann_loads: &'a mut [[BoundaryLoad; 2]],
     damping: &'a mut [f64],
+    first_order_boundary_damping: &'a mut [f64],
+    second_order_boundary_damping: &'a mut [f64],
+    thin_gap_samples: &'a mut Vec<ThinGapSample>,
 }
 
 fn assemble_hole_boundary_conditions(
@@ -1375,10 +1426,11 @@ fn assemble_internal_boundary_laws(
             * coefficients
                 .at(boundary.region, point)?
                 .geometric_mean_stiffness();
-        for ((left_node, right_node), weight) in
-            left.into_iter()
-                .zip(right)
-                .zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
+        for (local, ((left_node, right_node), weight)) in left
+            .into_iter()
+            .zip(right)
+            .zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
+            .enumerate()
         {
             if left_node == right_node {
                 continue;
@@ -1388,6 +1440,17 @@ fn assemble_internal_boundary_laws(
             *assembly.rows[left_node].entry(right_node).or_default() -= scale;
             *assembly.rows[right_node].entry(left_node).or_default() -= scale;
             *assembly.rows[right_node].entry(right_node).or_default() += scale;
+            assembly.thin_gap_samples.push(ThinGapSample {
+                key: ThinGapTraceKey::Legacy {
+                    boundary: id,
+                    start_bits: start,
+                    end_bits: end,
+                    local: local as u8,
+                },
+                left_node: left_node as u32,
+                right_node: right_node as u32,
+                stiffness: scale,
+            });
         }
     }
     Ok(())
@@ -1571,7 +1634,7 @@ fn assemble_topology_boundary_laws(
         }
     }
 
-    for (_, pair) in pairs {
+    for ((curve, span, start_bits, end_bits), pair) in pairs {
         let [
             Some(((left, left_length), left_region)),
             Some(((right, right_length), right_region)),
@@ -1593,10 +1656,11 @@ fn assemble_topology_boundary_laws(
             .at(right_region, pair.point)?
             .geometric_mean_stiffness();
         let spring = pair.stiffness_ratio * (left_stiffness * right_stiffness).sqrt();
-        for ((left_node, right_node), weight) in
-            left.into_iter()
-                .zip(right)
-                .zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
+        for (local, ((left_node, right_node), weight)) in left
+            .into_iter()
+            .zip(right)
+            .zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
+            .enumerate()
         {
             if left_node == right_node {
                 continue;
@@ -1606,6 +1670,18 @@ fn assemble_topology_boundary_laws(
             *assembly.rows[left_node].entry(right_node).or_default() -= scale;
             *assembly.rows[right_node].entry(left_node).or_default() -= scale;
             *assembly.rows[right_node].entry(right_node).or_default() += scale;
+            assembly.thin_gap_samples.push(ThinGapSample {
+                key: ThinGapTraceKey::Topology {
+                    curve,
+                    span,
+                    start_bits,
+                    end_bits,
+                    local: local as u8,
+                },
+                left_node: left_node as u32,
+                right_node: right_node as u32,
+                stiffness: scale,
+            });
         }
     }
     Ok(())
@@ -1629,7 +1705,9 @@ fn assemble_face_condition(
                 .zip(coefficients.iter().copied())
             {
                 let impedance = ratio * coefficients.normal_impedance(normal);
-                assembly.damping[node] += impedance * length * weight;
+                let contribution = impedance * length * weight;
+                assembly.damping[node] += contribution;
+                assembly.first_order_boundary_damping[node] += contribution;
             }
         }
         FaceBoundaryCondition::SecondOrderOutgoing => {
@@ -1639,7 +1717,9 @@ fn assemble_face_condition(
                 .zip(coefficients.iter().copied())
             {
                 let impedance = coefficients.normal_impedance(normal);
-                assembly.damping[node] += impedance * length * weight;
+                let contribution = impedance * length * weight;
+                assembly.damping[node] += contribution;
+                assembly.second_order_boundary_damping[node] += contribution;
             }
             let coefficients = coefficients[1];
             assemble_auxiliary_line(
@@ -1729,6 +1809,9 @@ struct QuadraticAssemblyWork {
     face_neumann_loads: Vec<[BoundaryLoad; 2]>,
     mass: Vec<f64>,
     damping: Vec<f64>,
+    first_order_boundary_damping: Vec<f64>,
+    second_order_boundary_damping: Vec<f64>,
+    thin_gap_samples: Vec<ThinGapSample>,
     maximum_wave_speed: f64,
     row_offsets: Vec<u32>,
     columns: Vec<u32>,
@@ -1764,6 +1847,9 @@ impl QuadraticAssemblyWork {
             face_neumann_loads: Vec::new(),
             mass: Vec::new(),
             damping: Vec::new(),
+            first_order_boundary_damping: Vec::new(),
+            second_order_boundary_damping: Vec::new(),
+            thin_gap_samples: Vec::new(),
             maximum_wave_speed: 0.0,
             row_offsets: Vec::new(),
             columns: Vec::new(),
@@ -1823,6 +1909,8 @@ impl QuadraticAssemblyWork {
             self.face_neumann_loads = vec![[BoundaryLoad::default(); 2]; count];
             self.mass = vec![0.0; count];
             self.damping = vec![0.0; count];
+            self.first_order_boundary_damping = vec![0.0; count];
+            self.second_order_boundary_damping = vec![0.0; count];
             self.phase = AssemblyPhase::Elements(0);
             return Ok(());
         }
@@ -2009,7 +2097,13 @@ impl QuadraticAssemblyWork {
                         nodes.into_iter().zip(line_weights).zip(node_coefficients)
                     {
                         let impedance = values.normal_impedance(normal);
-                        self.damping[node] += impedance * weight;
+                        let contribution = impedance * weight;
+                        self.damping[node] += contribution;
+                        if condition == OuterBoundaryCondition::SecondOrderOutgoing {
+                            self.second_order_boundary_damping[node] += contribution;
+                        } else {
+                            self.first_order_boundary_damping[node] += contribution;
+                        }
                     }
                 }
                 OuterBoundaryCondition::ElectricWall | OuterBoundaryCondition::MagneticWall => {
@@ -2039,6 +2133,9 @@ impl QuadraticAssemblyWork {
                 dirichlet_signals: &mut self.dirichlet_signals,
                 face_neumann_loads: &mut self.face_neumann_loads,
                 damping: &mut self.damping,
+                first_order_boundary_damping: &mut self.first_order_boundary_damping,
+                second_order_boundary_damping: &mut self.second_order_boundary_damping,
+                thin_gap_samples: &mut self.thin_gap_samples,
             };
             assemble_hole_boundary_conditions(mesh, scene, coefficients, &mut assembly)?;
             assemble_internal_boundary_laws(mesh, scene, coefficients, &mut assembly)?;
@@ -2052,6 +2149,9 @@ impl QuadraticAssemblyWork {
                 dirichlet_signals: &mut self.dirichlet_signals,
                 face_neumann_loads: &mut self.face_neumann_loads,
                 damping: &mut self.damping,
+                first_order_boundary_damping: &mut self.first_order_boundary_damping,
+                second_order_boundary_damping: &mut self.second_order_boundary_damping,
+                thin_gap_samples: &mut self.thin_gap_samples,
             };
             assemble_topology_boundary_laws(mesh, plan, physics, coefficients, &mut assembly)?;
         }
@@ -2178,6 +2278,9 @@ impl QuadraticAssemblyWork {
             face_neumann_loads: std::mem::take(&mut self.face_neumann_loads),
             lumped_mass: std::mem::take(&mut self.mass),
             lumped_damping: std::mem::take(&mut self.damping),
+            first_order_boundary_damping: std::mem::take(&mut self.first_order_boundary_damping),
+            second_order_boundary_damping: std::mem::take(&mut self.second_order_boundary_damping),
+            thin_gap_samples: std::mem::take(&mut self.thin_gap_samples),
             maximum_eigenvalue_bound: self.maximum_eigenvalue_bound,
             maximum_time_step,
         })
@@ -2423,12 +2526,13 @@ pub(crate) fn stiffness_quadrature() -> [([f64; 3], f64); 6] {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, BoundaryEdge, CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline,
-        FaceRegionAssignment, InternalBoundary, InternalBoundaryLaw, Material, MaterialId,
-        MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, Obstacle, ObstacleId,
-        OpenCubicSpline, OuterSide, PeriodicCubicSpline, Region, SOURCE_RAMP_PERIODS,
-        TopologyCurve, TopologyGeometry, TopologyVertex, TopologyVertexId, TopologyVertexLocation,
-        compile_topology, mesh_scene, mesh_topology_plan, source_envelope, source_ramp_seconds,
+        BACKGROUND_REGION, BoundaryEdge, CanonicalWaveOperator, CanonicalWaveState, CurveId,
+        CurveNode, CurveSpan, CurveSpanId, CurveSpline, FaceRegionAssignment, InternalBoundary,
+        InternalBoundaryLaw, Material, MaterialId, MeshQuality, MeshTriangle, MeshVertex,
+        MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline, OuterSide, PeriodicCubicSpline,
+        Region, SOURCE_RAMP_PERIODS, TopologyCurve, TopologyGeometry, TopologyVertex,
+        TopologyVertexId, TopologyVertexLocation, compile_topology, mesh_scene, mesh_topology_plan,
+        source_envelope, source_ramp_seconds,
     };
 
     fn topology_span(id: u64, behavior: SpanBehavior) -> CurveSpan {
@@ -2727,6 +2831,7 @@ mod tests {
         assert!(added_left > 0.0);
         assert!((added_left + added_right).abs() < 1.0e-11);
         assert!(gap.maximum_time_step() < reflecting.maximum_time_step());
+        assert!(!gap.thin_gap_samples().is_empty());
     }
 
     fn two_material_scene() -> Scene {
@@ -3699,6 +3804,54 @@ mod tests {
         }
         let drift = (state.energy(&gap).unwrap() - initial_energy).abs() / initial_energy;
         assert!(drift < 1.0e-10, "energy drift {drift:e}");
+
+        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &gap, &gap_scene, 91).unwrap();
+        assert_eq!(canonical.thin_gap_samples(), gap.thin_gap_samples());
+        let initial = canonical
+            .node_points()
+            .iter()
+            .map(|point| (1.7 * point.x).sin() + 0.2 * point.y)
+            .collect::<Vec<_>>();
+        let dt = 0.2 * canonical.maximum_time_step();
+        let mut direct = CanonicalWaveState::from_primary_velocity(
+            &canonical,
+            dt,
+            &initial,
+            &vec![0.0; canonical.degrees_of_freedom()],
+        )
+        .unwrap();
+        let mut scalar =
+            QuadraticWaveState::new(&gap, dt, initial, vec![0.0; canonical.degrees_of_freedom()])
+                .unwrap();
+        for _ in 0..40 {
+            direct.step(&canonical).unwrap();
+            scalar.step(&gap, &[]).unwrap();
+        }
+        let difference = direct
+            .primary_field(&canonical)
+            .unwrap()
+            .iter()
+            .zip(scalar.current())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            difference < 5.0e-9,
+            "thin-gap direct mismatch {difference:e}"
+        );
+        let memory = direct.thin_gap_memory(&canonical).unwrap();
+        assert!(memory.iter().any(|entry| entry.jump != 0.0));
+        let mut reversed = CanonicalWaveState::zero(&canonical, dt).unwrap();
+        reversed
+            .set_thin_gap_memory(&canonical, &memory, -1.0)
+            .unwrap();
+        assert!(
+            reversed
+                .thin_gap_memory(&canonical)
+                .unwrap()
+                .iter()
+                .zip(memory)
+                .all(|(actual, original)| actual.jump == -original.jump)
+        );
     }
 
     #[test]

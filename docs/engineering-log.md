@@ -5,6 +5,47 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-19 — Linear CPU composition and transfer (material-law Stage 3)
+
+- Extended the direct f64 reference with integrated point/volume/weak-boundary
+  sources, analytic version-22 acceleration-to-rate conversion (including zero
+  frequency and edit anchors), field-valued prescribed ownership and pulse
+  exchange. Added the pure legacy-loss migration that moves the full symbolic
+  rate to exactly one named physical channel; persisted version-22 data is not
+  rewritten while the legacy solver remains the production path.
+- Added independent fixed-linear electric/magnetic losses across Mechanical,
+  TM and TE; physical thin-gap jump state; first-order outgoing impedance; and
+  the adopted passive three-pole second-order trace with force-coupled midpoint
+  kicks, reduced trace elimination, prescribed intersections and complete
+  source/boundary/loss/edit energy accounting. Dense and matrix-free generators
+  and cached-vs-oracle solves agree in tests. Immutable factors are shared rather
+  than counted as accepted physical state.
+- Added the paired Q,b grid filter with constrained-node exchange, component-
+  scoped roundoff maintenance, support-aware conservative Q remap, six-sample
+  physical-coordinate b reconstruction, and bounded two-ring extension. Separate
+  thin-gap and outgoing maps transfer physical histories, account changed/new/
+  deleted energy, and are invariant to modal signs, order and degenerate rotations.
+  Irregular production meshes pass the declared 3% one-handoff and 5% twelve-cycle
+  bounds; unchanged data is bit-exact and disconnected new islands stay zero.
+- Re-ran the [corrected scattering fixture](funfern-boundary-scattering-spike.md):
+  all 248 reflection, passivity, temporal and fixed-CFL checks pass; the rejected
+  separate split remains its negative control. The core suite passes 268 tests
+  with the one pre-existing ignored legacy curved-boundary reproducer. The full
+  workspace passes 586 tests plus that ignored reproducer; strict workspace
+  Clippy, native build, wasm32 check and isolated release Trunk package pass.
+- Standard h=.08 CPU-oracle timings (8,938 Q DOFs, 17,472 b samples): reflecting
+  compile/preparation 8–10/0.07 ms and about 5.2 simulated seconds per wall second.
+  Second order has Nb=276 and 825 auxiliary scalars: typical compile/factor
+  preparation 206/21 ms, 0.58 MiB modal rows, 0.62 MiB immutable rank-one factor,
+  about 0.15 ms per reduced solve, and 1.89 simulated seconds per wall second.
+  One repeated eigensolve was 266 ms, so preparation can still cross 250 ms.
+- The CPU correctness oracle therefore does not satisfy the Stage 4 production
+  second-order throughput target (5 simulated seconds per wall second), and its
+  preparation typically clears but has exceeded the 250 ms review point. This is
+  recorded rather than relaxed or hidden. Stage 4 must close f32/GPU throughput,
+  portable layout, failure injection and global accepted/candidate atomicity;
+  the old production solver remains connected until those and later consumers pass.
+
 ## 2026-09-19 — Linear direct-state CPU core (material-law Stage 2)
 
 - Added a separate f64 reference core with synchronized integrated nodal `Q`

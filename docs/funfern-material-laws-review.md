@@ -189,7 +189,7 @@ Inspection also found incomplete app literals in the GRIN example and `topology_
 
 ## 5. Implementation stages
 
-The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–2 are complete; the production solver remains unchanged and Stage 3 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
+The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–3 are complete; the production solver remains unchanged and Stage 4 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
 
 ### Stage 0 — Close implementation contracts and establish acceptance cases
 
@@ -243,12 +243,15 @@ Primary files: `wave_quadratic.rs`, `wave.rs`, a focused canonical-state/constit
 
 Exit: compatible linear force matches existing K; both signs and tensor rotations pass; second-order conservative time convergence, uniform primary field, extra stationary modes and scoped initial-velocity compatibility are verified. Begin actual-core timing here; do not interpret NumPy timings as production predictions.
 
-### Stage 3 — CPU sources, boundaries, losses, filter and reference remapping
+### Stage 3 — CPU sources, boundaries, losses, filter and reference remapping (complete)
 
 Implement specification S/B/F/T against the CPU reference:
 
 - Direct point/volume/weak-boundary drives, converted legacy waveform, pulse delta updates and prescribed-primary exchange.
-- Independent physical loss channels using constitutively weighted frozen rates; second-order conservative evolution and the documented first-order varying-loss approximation.
+- Independent physical loss channels using the fixed-linear specialization of
+  constitutively weighted frozen rates, with second-order conservative
+  evolution. Field/time-varying evaluation and its documented first-order
+  approximation remain with the Stage 7–8 laws that supply those rates.
 - Physical thin-gap memory, both outgoing orders, energy/power accounting and stage-time source/prescribed handling.
 - Passive auxiliary boundary using the [force-coupled midpoint kicks](funfern-boundary-scattering-spike.md#4-corrected-boundary-aware-kicks); eliminate auxiliaries to a trace solve. Do not use the rejected standalone boundary split.
 - Linear paired filter on Q,b, spectral/invariant tests, and explicit stationary-mode limitations.
@@ -344,6 +347,6 @@ Fix new-fixture thresholds and target-device budgets before judging results. Tra
 
 ## 7. Handoff status
 
-Planning, correctness spikes, Stage 0 contracts, Stage 1 inert authoring and the Stage 2 linear CPU core are complete. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
+Planning, correctness spikes, Stage 0 contracts, Stage 1 inert authoring, the Stage 2 linear CPU core and Stage 3 linear composition/reference transfer are complete. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
 
-Start Stage 3 with CPU source, boundary, loss, paired-filter and physical-transfer composition. Retain the old solver for comparison and do not connect the reference core to application evolution before the GPU, transfer and consumer gates close. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use them as a claim that the remaining compositions already pass.
+Start Stage 4 with the production-intended f32 GPU state/layout manifest, evolution kernels and global accepted/candidate transaction boundary. Port the Stage 3 CPU equations rather than reconnecting the legacy scalar state. Retain the old solver for comparison and do not connect the reference core to application evolution before the GPU, transfer and consumer gates close. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use them as a claim that the remaining compositions already pass.
