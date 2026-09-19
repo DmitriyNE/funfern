@@ -5,6 +5,31 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-19 — Linear direct-state CPU core (material-law Stage 2)
+
+- Added a separate f64 reference core with synchronized integrated nodal `Q`
+  and six independent two-component `b` samples per enriched-quadratic element.
+  It retains per-element nodal material contributions, immutable direct and
+  inverse quadrature tensors, generation tags, and an explicit empty physical-
+  auxiliary slot. The old scalar solver remains unchanged and in production.
+- Implemented deterministic direct incidence/gather, endpoint KDK, constitutive
+  energy, compatible potential/velocity initialization per free component, and
+  resumable compilation from owned mesh/material snapshots. Constant primary
+  fields are stationary without a bulk potential; nonpotential complementary
+  flux remains present instead of being projected away.
+- Fixtures verify exact compatible-force parity with the existing stiffness
+  matrix for Mechanical/TM/TE, both orientation signs, rotated anisotropy,
+  scalar-recurrence parity, second-order endpoint/energy defects, connected-
+  component compatibility and stationary extra modes.
+- A release run of the real CPU path on the current arm64 machine compiled the
+  standard h=.08 scene (8,938 DOFs, 2,912 elements, 17,472 vector samples) in
+  5.56 ms. Its operator/state estimates were 4.54/0.33 MiB; 128 KDK steps took
+  49.31 ms, or 6.41 simulated seconds per wall second. This is a CPU-reference
+  baseline, not a GPU prediction or satisfaction of the later production gate.
+- Core tests pass (250 plus one known ignored curved-boundary reproducer).
+  Stage 3 is the source/boundary/loss/filter/transfer composition on this CPU
+  oracle; none of those paths or the application have been cut over yet.
+
 ## 2026-09-19 — Material-law Stages 0–1 complete
 
 - Froze the operational source, legacy-loss, trace/history, transfer, event,

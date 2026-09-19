@@ -189,7 +189,7 @@ Inspection also found incomplete app literals in the GRIN example and `topology_
 
 ## 5. Implementation stages
 
-The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–1 are complete; the production solver remains unchanged and Stage 2 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
+The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–2 are complete; the production solver remains unchanged and Stage 3 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
 
 ### Stage 0 — Close implementation contracts and establish acceptance cases
 
@@ -226,6 +226,12 @@ Primary files: `material_law.rs`, `material.rs`, `geometry.rs`, `wave.rs`, mesh/
 Exit: workspace builds/tests pass; old scenes retain inert behavior; supported authored data round-trips; all section 4 inspection defects have regression tests; no nonlinear production behavior is enabled yet.
 
 ### Stage 2 — Compile constitutive data and implement the linear CPU core
+
+Status: complete. The f64 CPU reference owns integrated nodal `Q` and six
+independent two-component `b` samples per element, retains distinct nodal
+material contributions and direct/inverse quadrature tensors, and advances them
+with endpoint KDK. The existing scalar solver remains the production path and a
+comparison oracle.
 
 Scope: separate geometric lumping weights, material-instance/frame contributions and immutable reference coefficients. Add synchronized owned `Q,b`, derived primary/complementary observables, cache generation tags, and extensible physical auxiliary state. Use six two-component quadrature samples per element and seven-node nodal assembly.
 
@@ -338,6 +344,6 @@ Fix new-fixture thresholds and target-device budgets before judging results. Tra
 
 ## 7. Handoff status
 
-Planning, correctness spikes, Stage 0 contracts and Stage 1 inert authoring are complete. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
+Planning, correctness spikes, Stage 0 contracts, Stage 1 inert authoring and the Stage 2 linear CPU core are complete. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
 
-Start Stage 2 with the linear f64 direct `Q,b` core and retain the old solver for comparison. Stage 1's current green workspace checks establish only safe authoring, persistence and legacy rejection; they do not validate canonical evolution. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use them as a current solver all-tests-pass claim.
+Start Stage 3 with CPU source, boundary, loss, paired-filter and physical-transfer composition. Retain the old solver for comparison and do not connect the reference core to application evolution before the GPU, transfer and consumer gates close. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use them as a claim that the remaining compositions already pass.

@@ -2402,7 +2402,7 @@ pub fn enriched_quadratic_basis([l0, l1, l2]: [f64; 3]) -> [f64; 7] {
     ]
 }
 
-fn stiffness_quadrature() -> [([f64; 3], f64); 6] {
+pub(crate) fn stiffness_quadrature() -> [([f64; 3], f64); 6] {
     const A: f64 = 0.445_948_490_915_965;
     const B: f64 = 0.108_103_018_168_070;
     const C: f64 = 0.091_576_213_509_771;

@@ -1,4 +1,5 @@
 //! Dependency-free f64 geometry for the funfern editor.
+mod canonical_wave;
 mod geometry;
 mod indicator;
 mod material;
@@ -13,6 +14,7 @@ mod transfer;
 mod volume_source;
 mod wave;
 mod wave_quadratic;
+pub use canonical_wave::*;
 pub use geometry::*;
 pub use indicator::*;
 pub use material::*;
