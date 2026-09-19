@@ -5,6 +5,38 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-19 — Canonical production cutover (material-law Stage 6)
+
+- Connected the accepted canonical `Q,b` generation to application evolution for
+  Mechanical, TM and TE. Rendering and vector overlays now read direct physical
+  state; the inverse-derivative reconstruction and display mean subtraction are
+  gone. The old scalar GPU code remains only as optional comparison/recorder
+  infrastructure, not as a skin-specific production formulation.
+- Added shared f64/GPU point and area consumer contracts plus canonical point,
+  line, area and far-field shaders. Probes expose accepted rate, complementary
+  field, canonical energy and directed flow; histories survive mesh handoff only
+  when their physical meaning is unchanged. Total diagnostics include thin-gap
+  and outgoing physical storage.
+- Ported static-linear AMR through a synchronized canonical supplement: direct
+  energy normalization, primary loss, complementary endpoint defect, gap and
+  outgoing residual/storage distribution, while retaining interface jumps.
+  Dynamic/nonlinear AMR remains gated for its own derivation.
+- Made every topology candidate prepare canonical operator/forcing/transfer,
+  retained cooperative assembly, and switched run/reset/step/pulse/filter/live
+  edits to global accepted-state ownership. Fixed edited-source handoff so target
+  parameters replace the old authored values while old instantaneous runtime
+  anchors remain continuous; disabled volume slots no longer shift ownership.
+- Apple M1 Max / Metal steady 5,000-step rates are 16.13 reflecting, 13.74 first
+  order and 8.71 second order simulated seconds/wall second, above the declared
+  12.48/12.48/5.0 targets. Standard 1,000-step `Q,b`, auxiliary and energy
+  accuracy fixtures pass. The standard core remains 7.64 MiB; second order is
+  8.62 MiB including 0.93 MiB boundary data. See the
+  [full Stage 6 report](funfern-material-laws-stage6-report.md).
+- Formatting, strict workspace Clippy, all-target native checks, wasm32 checking,
+  release build and a native app smoke test pass; the workspace suite has 636
+  passes and one historical ignored legacy curved-second-order reproducer. Stage 7 is
+  time-driven media/runtime switching; authored non-inert laws remain unavailable.
+
 ## 2026-09-19 — Latest-state GPU handoff (material-law Stage 5)
 
 - Added the dormant canonical generation transaction: packed local `Q,b` maps,

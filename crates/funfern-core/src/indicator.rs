@@ -1,11 +1,12 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    BoundaryLabel, BoundarySide, DirectionalWaveCoefficients, FaceBoundaryCondition,
-    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField,
-    OuterBoundaryCondition, OwnedTopologyWaveModel, PlannedBoundarySource, Point2,
-    QuadraticWaveOperator, RegionId, Scene, SpanBehavior, TopologyMeshPlan, TopologyWaveModel,
-    TriMesh, enriched_quadratic_basis, enriched_quadratic_basis_gradients,
+    BoundaryLabel, BoundarySide, CanonicalForcing, CanonicalWaveOperator,
+    DirectionalWaveCoefficients, FaceBoundaryCondition, InternalBoundaryCoupling,
+    InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField, OuterBoundaryCondition,
+    OwnedTopologyWaveModel, PlannedBoundarySource, Point2, QuadraticWaveOperator, RegionId, Scene,
+    SpanBehavior, TopologyMeshPlan, TopologyWaveModel, TriMesh, WaveError,
+    enriched_quadratic_basis, enriched_quadratic_basis_gradients,
     enriched_quadratic_basis_hessians,
 };
 
@@ -20,6 +21,254 @@ pub struct QuadraticSolutionSnapshot {
     pub volume_acceleration: Vec<f64>,
     pub time: f64,
     pub time_step: f64,
+}
+
+/// Two accepted direct-state endpoints used by the static-linear estimator.
+/// Differences are evaluated in stored `Q,b` coordinates before converting to
+/// scalar-equivalent fields, so gap and outgoing histories retain their own
+/// physical contracts.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalIndicatorSnapshot {
+    pub mesh_revision: u64,
+    pub primary_flux: Vec<f64>,
+    pub previous_primary_flux: Vec<f64>,
+    pub complementary_flux: Vec<Point2>,
+    pub previous_complementary_flux: Vec<Point2>,
+    pub auxiliary: Vec<f64>,
+    pub previous_auxiliary: Vec<f64>,
+    pub time: f64,
+    pub time_step: f64,
+}
+
+/// Direct-state defect terms added to the scalar-equivalent spatial estimate.
+/// Interface jumps remain in the scalar estimator; these arrays own the
+/// complementary drift, thin-gap history and nonlocal outgoing-state defects.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalIndicatorSupplement {
+    pub mesh_revision: u64,
+    pub element_cell_residual: Vec<f64>,
+    pub element_boundary_residual: Vec<f64>,
+    pub element_energy: Vec<f64>,
+    pub drift_contribution: f64,
+    pub thin_gap_contribution: f64,
+    pub outgoing_contribution: f64,
+}
+
+pub fn canonical_indicator_supplement(
+    mesh: &TriMesh,
+    operator: &CanonicalWaveOperator,
+    forcing: &CanonicalForcing,
+    snapshot: &CanonicalIndicatorSnapshot,
+) -> Result<CanonicalIndicatorSupplement, WaveError> {
+    let node_count = operator.degrees_of_freedom();
+    let sample_count = operator.complementary_degrees_of_freedom();
+    let gap_count = operator.thin_gap_samples().len();
+    let outgoing_count = operator
+        .outgoing_boundary()
+        .map_or(0, |boundary| boundary.auxiliary_count());
+    if snapshot.mesh_revision != mesh.mesh_revision
+        || operator.generation().mesh_revision != mesh.mesh_revision
+        || operator.element_nodes().len() != mesh.triangles.len()
+        || snapshot.primary_flux.len() != node_count
+        || snapshot.previous_primary_flux.len() != node_count
+        || snapshot.complementary_flux.len() != sample_count
+        || snapshot.previous_complementary_flux.len() != sample_count
+        || snapshot.auxiliary.len() != gap_count + outgoing_count
+        || snapshot.previous_auxiliary.len() != gap_count + outgoing_count
+        || !snapshot.time.is_finite()
+        || !snapshot.time_step.is_finite()
+        || snapshot.time_step <= 0.0
+    {
+        return Err(WaveError::InvalidState);
+    }
+    let current_field = operator.primary_field(&snapshot.primary_flux)?;
+    let previous_field = operator.primary_field(&snapshot.previous_primary_flux)?;
+    let midpoint_field = current_field
+        .iter()
+        .zip(&previous_field)
+        .map(|(current, previous)| 0.5 * (current + previous))
+        .collect::<Vec<_>>();
+    let element_count = mesh.triangles.len();
+    let mut element_cell_residual = vec![0.0; element_count];
+    let mut element_boundary_residual = vec![0.0; element_count];
+    let mut element_energy = vec![0.0; element_count];
+
+    for contribution in operator.primary_contributions() {
+        let node = contribution.node as usize;
+        let mass_share = contribution.geometric_weight * contribution.reference_coefficient;
+        element_energy[contribution.element as usize] +=
+            0.5 * snapshot.primary_flux[node] * snapshot.primary_flux[node]
+                / operator.primary_mass()[node]
+                * mass_share
+                / operator.primary_mass()[node];
+    }
+    for (sample_index, sample) in operator.constitutive_samples().iter().enumerate() {
+        let element = sample.element as usize;
+        let current = snapshot.complementary_flux[sample_index];
+        let previous = snapshot.previous_complementary_flux[sample_index];
+        element_energy[element] += 0.5
+            * sample.integration_weight
+            * current.dot(sample.complementary_inverse.apply(current));
+        let nodes = operator.element_nodes()[element];
+        let reference = midpoint_field[nodes[0] as usize];
+        let mut curl = Point2::default();
+        for local in 1..nodes.len() {
+            curl =
+                curl + sample.curls()[local] * (midpoint_field[nodes[local] as usize] - reference);
+        }
+        // The accepted endpoints straddle two exact half-loss stages:
+        // b[n+1] = exp(-gamma dt) b[n]
+        //          + exp(-gamma dt/2) dt C u[n+1/2].
+        // Removing that known physical contraction leaves only constitutive
+        // compatibility/integration drift for the estimator.
+        let rate = operator.complementary_loss_rate()[sample_index];
+        let full_loss = (-rate * snapshot.time_step).exp();
+        let half_loss = (-0.5 * rate * snapshot.time_step).exp();
+        let expected =
+            previous * full_loss + curl * (operator.orientation() * snapshot.time_step * half_loss);
+        let defect = current - expected;
+        element_cell_residual[element] += 0.5
+            * sample.integration_weight
+            * defect.dot(sample.complementary_inverse.apply(defect));
+    }
+    let drift_contribution = element_cell_residual.iter().sum();
+
+    let mut node_elements = vec![Vec::<usize>::new(); node_count];
+    for (element, nodes) in operator.element_nodes().iter().enumerate() {
+        for node in nodes {
+            if !node_elements[*node as usize].contains(&element) {
+                node_elements[*node as usize].push(element);
+            }
+        }
+    }
+    let mut thin_gap_contribution = 0.0;
+    for (index, gap) in operator.thin_gap_samples().iter().enumerate() {
+        let left = gap.left_node as usize;
+        let right = gap.right_node as usize;
+        let expected = snapshot.time_step
+            * 0.5
+            * ((current_field[left] - current_field[right])
+                + (previous_field[left] - previous_field[right]));
+        let defect = snapshot.auxiliary[index] - snapshot.previous_auxiliary[index] - expected;
+        let residual = 0.5 * gap.stiffness * defect * defect;
+        thin_gap_contribution += residual;
+        let mut owners = node_elements[left].clone();
+        for element in &node_elements[right] {
+            if !owners.contains(element) {
+                owners.push(*element);
+            }
+        }
+        let share = residual / owners.len().max(1) as f64;
+        let energy_share =
+            0.5 * gap.stiffness * snapshot.auxiliary[index].powi(2) / owners.len().max(1) as f64;
+        for element in owners {
+            element_boundary_residual[element] += share;
+            element_energy[element] += energy_share;
+        }
+    }
+
+    let mut outgoing_contribution = 0.0;
+    if let Some(boundary) = operator.outgoing_boundary() {
+        let current_z = &snapshot.auxiliary[gap_count..];
+        let previous_z = &snapshot.previous_auxiliary[gap_count..];
+        let current_trace = boundary
+            .trace_nodes()
+            .iter()
+            .map(|node| snapshot.primary_flux[*node as usize])
+            .collect::<Vec<_>>();
+        let previous_trace = boundary
+            .trace_nodes()
+            .iter()
+            .map(|node| snapshot.previous_primary_flux[*node as usize])
+            .collect::<Vec<_>>();
+        let midpoint_trace = current_trace
+            .iter()
+            .zip(&previous_trace)
+            .map(|(current, previous)| 0.5 * (current + previous))
+            .collect::<Vec<_>>();
+        let midpoint_z = current_z
+            .iter()
+            .zip(previous_z)
+            .map(|(current, previous)| 0.5 * (current + previous))
+            .collect::<Vec<_>>();
+        let mut derivative =
+            boundary.diagnostic_derivative(operator, &midpoint_trace, &midpoint_z)?;
+        let current_force =
+            force_with_gaps(operator, &snapshot.complementary_flux, &snapshot.auxiliary)?;
+        let previous_force = force_with_gaps(
+            operator,
+            &snapshot.previous_complementary_flux,
+            &snapshot.previous_auxiliary,
+        )?;
+        let current_source = forcing.integrated_rate(snapshot.time)?;
+        let previous_source = forcing.integrated_rate(snapshot.time - snapshot.time_step)?;
+        for (trace, node) in boundary.trace_nodes().iter().enumerate() {
+            if forcing.prescribed()[*node as usize].is_none() {
+                derivative[trace] += 0.5
+                    * (current_source[*node as usize] + previous_source[*node as usize]
+                        - current_force[*node as usize]
+                        - previous_force[*node as usize]);
+            }
+        }
+        let mut residual = 0.0;
+        for (trace, node) in boundary.trace_nodes().iter().enumerate() {
+            if forcing.prescribed()[*node as usize].is_some() {
+                continue;
+            }
+            let defect = current_trace[trace]
+                - previous_trace[trace]
+                - snapshot.time_step * derivative[trace];
+            residual += 0.5 * defect * defect / operator.primary_mass()[*node as usize];
+        }
+        for auxiliary in 0..outgoing_count {
+            let defect = current_z[auxiliary]
+                - previous_z[auxiliary]
+                - snapshot.time_step * derivative[boundary.trace_nodes().len() + auxiliary];
+            residual += 0.5 * defect * defect;
+        }
+        outgoing_contribution = residual;
+        let mut owners = boundary
+            .trace_nodes()
+            .iter()
+            .flat_map(|node| node_elements[*node as usize].iter().copied())
+            .collect::<Vec<_>>();
+        owners.sort_unstable();
+        owners.dedup();
+        let share = residual / owners.len().max(1) as f64;
+        let energy_share = current_z
+            .iter()
+            .map(|value| 0.5 * value * value)
+            .sum::<f64>()
+            / owners.len().max(1) as f64;
+        for element in owners {
+            element_boundary_residual[element] += share;
+            element_energy[element] += energy_share;
+        }
+    }
+
+    Ok(CanonicalIndicatorSupplement {
+        mesh_revision: mesh.mesh_revision,
+        element_cell_residual,
+        element_boundary_residual,
+        element_energy,
+        drift_contribution,
+        thin_gap_contribution,
+        outgoing_contribution,
+    })
+}
+
+fn force_with_gaps(
+    operator: &CanonicalWaveOperator,
+    complementary: &[Point2],
+    auxiliary: &[f64],
+) -> Result<Vec<f64>, WaveError> {
+    let mut force = operator.force(complementary)?;
+    for (gap, jump) in operator.thin_gap_samples().iter().zip(auxiliary) {
+        let value = gap.stiffness * jump;
+        force[gap.left_node as usize] += value;
+        force[gap.right_node as usize] -= value;
+    }
+    Ok(force)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,6 +325,9 @@ pub struct SolutionIndicatorReport {
     pub cell_residual_contribution: f64,
     pub interior_jump_contribution: f64,
     pub boundary_residual_contribution: f64,
+    pub canonical_drift_contribution: f64,
+    pub thin_gap_history_contribution: f64,
+    pub outgoing_history_contribution: f64,
     pub boundary_edges_evaluated: usize,
     pub maximum_dirichlet_mismatch: f64,
     /// Energy of the whole field, the denominator `global_indicator` is taken
@@ -109,6 +361,9 @@ impl Default for SolutionIndicatorReport {
             cell_residual_contribution: 0.0,
             interior_jump_contribution: 0.0,
             boundary_residual_contribution: 0.0,
+            canonical_drift_contribution: 0.0,
+            thin_gap_history_contribution: 0.0,
+            outgoing_history_contribution: 0.0,
             boundary_edges_evaluated: 0,
             maximum_dirichlet_mismatch: 0.0,
             total_energy: 0.0,
@@ -372,6 +627,7 @@ pub struct SolutionIndicatorJob {
     total_energy: f64,
     total_area: f64,
     report: SolutionIndicatorReport,
+    canonical: Option<CanonicalIndicatorSupplement>,
 }
 
 enum IndicatorInput {
@@ -449,7 +705,15 @@ impl SolutionIndicatorJob {
             total_energy: 0.0,
             total_area: 0.0,
             report: SolutionIndicatorReport::default(),
+            canonical: None,
         }
+    }
+
+    /// Adds direct-state consistency terms to the scalar-equivalent spatial
+    /// estimator. The caller must provide the same accepted mesh generation.
+    pub fn with_canonical_supplement(mut self, supplement: CanonicalIndicatorSupplement) -> Self {
+        self.canonical = Some(supplement);
+        self
     }
 
     pub fn phase(&self) -> &'static str {
@@ -619,6 +883,20 @@ impl SolutionIndicatorJob {
                 .chain(&self.snapshot.volume_acceleration)
                 .any(|value| !value.is_finite())
         {
+            return Err(SolutionIndicatorError::InvalidSnapshot);
+        }
+        if self.canonical.as_ref().is_some_and(|supplement| {
+            supplement.mesh_revision != self.mesh.mesh_revision
+                || supplement.element_cell_residual.len() != self.mesh.triangles.len()
+                || supplement.element_boundary_residual.len() != self.mesh.triangles.len()
+                || supplement.element_energy.len() != self.mesh.triangles.len()
+                || supplement
+                    .element_cell_residual
+                    .iter()
+                    .chain(&supplement.element_boundary_residual)
+                    .chain(&supplement.element_energy)
+                    .any(|value| !value.is_finite() || *value < 0.0)
+        }) {
             return Err(SolutionIndicatorError::InvalidSnapshot);
         }
         Ok(())
@@ -1123,6 +1401,12 @@ impl SolutionIndicatorJob {
         }
         self.total_energy += estimate.energy;
         self.total_area += estimate.area;
+        if let Some(canonical) = &self.canonical {
+            estimate.cell_residual += canonical.element_cell_residual[index];
+            estimate.boundary_residual += canonical.element_boundary_residual[index];
+            estimate.energy += canonical.element_energy[index];
+            self.total_energy += canonical.element_energy[index];
+        }
         self.estimates[index] = estimate;
         self.phase = IndicatorPhase::Estimate(index + 1);
         Ok(())
@@ -1183,6 +1467,17 @@ impl SolutionIndicatorJob {
             return Ok(());
         }
         let record = self.boundary_records[index];
+        if self.canonical.is_some()
+            && (record.pair.is_some()
+                || matches!(record.condition, FaceBoundaryCondition::SecondOrderOutgoing))
+        {
+            // Direct gap and nonlocal outgoing states are assessed from their
+            // accepted endpoint equations, not reinterpreted as the retired
+            // scalar auxiliary potential.
+            self.report.boundary_edges_evaluated += 1;
+            self.phase = IndicatorPhase::Boundary(index + 1);
+            return Ok(());
+        }
         let triangle = self.mesh.triangles[record.triangle];
         let geometry = element_geometry(&self.mesh, triangle.vertices)?;
         let edge_points = [
@@ -1378,6 +1673,11 @@ impl SolutionIndicatorJob {
             + self.report.cell_residual_contribution
             + self.report.interior_jump_contribution
             + self.report.boundary_residual_contribution;
+        if let Some(canonical) = &self.canonical {
+            self.report.canonical_drift_contribution = canonical.drift_contribution;
+            self.report.thin_gap_history_contribution = canonical.thin_gap_contribution;
+            self.report.outgoing_history_contribution = canonical.outgoing_contribution;
+        }
         // A field with no energy has no error to speak of, whatever the
         // residuals of its numerical dust add up to.
         self.report.global_indicator = if self.total_energy > 0.0 {
@@ -2984,6 +3284,61 @@ mod tests {
                 point: Point2::new(0.0, 0.0),
                 reason: "formula produced an invalid value".into(),
             }
+        );
+    }
+
+    #[test]
+    fn canonical_supplement_is_zero_for_stationary_state_and_detects_drift_defect() {
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            91,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1).unwrap();
+        let forcing = CanonicalForcing::none(&canonical);
+        let snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            primary_flux: vec![0.0; canonical.degrees_of_freedom()],
+            previous_primary_flux: vec![0.0; canonical.degrees_of_freedom()],
+            complementary_flux: vec![
+                Point2::default();
+                canonical.complementary_degrees_of_freedom()
+            ],
+            previous_complementary_flux: vec![
+                Point2::default();
+                canonical.complementary_degrees_of_freedom()
+            ],
+            auxiliary: vec![],
+            previous_auxiliary: vec![],
+            time: 0.01,
+            time_step: 0.01,
+        };
+        let quiet = canonical_indicator_supplement(&mesh, &canonical, &forcing, &snapshot).unwrap();
+        assert_eq!(quiet.drift_contribution, 0.0);
+        assert_eq!(quiet.thin_gap_contribution, 0.0);
+        assert_eq!(quiet.outgoing_contribution, 0.0);
+
+        let mut broken = snapshot;
+        broken.complementary_flux[0] = Point2::new(0.1, -0.2);
+        let detected =
+            canonical_indicator_supplement(&mesh, &canonical, &forcing, &broken).unwrap();
+        assert!(detected.drift_contribution > 0.0);
+        assert!(
+            detected
+                .element_cell_residual
+                .iter()
+                .any(|value| *value > 0.0)
         );
     }
 }

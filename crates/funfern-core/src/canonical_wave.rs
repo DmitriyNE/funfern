@@ -1,9 +1,8 @@
 //! Linear CPU reference for the direct canonical `(Q, b)` formulation.
 //!
-//! This module deliberately does not replace the production scalar solver yet.
 //! It keeps each nodal constitutive contribution and each quadrature vector
-//! sample explicit, providing an oracle for the later source, boundary,
-//! transfer, and GPU stages.
+//! sample explicit. The f64 implementation remains the numerical oracle for
+//! the production f32 GPU path and its source, boundary and transfer stages.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -11,7 +10,7 @@ use crate::{
     CompiledVolumeSources, DirectionalWaveCoefficients, ElectromagneticPolarization, Material,
     MaterialFrame, OuterBoundaryCondition, OuterSide, OwnedTopologyWaveModel, PhysicsModel, Point2,
     PointSource, QuadraticWaveOperator, Scene, SymmetricTensor2, ThinGapSample, TimeSignal,
-    TopologyWaveModel, TriMesh, WaveError, enriched_quadratic_basis_gradients,
+    TopologyWaveModel, TriMesh, VolumeSource, WaveError, enriched_quadratic_basis_gradients,
 };
 
 const LOCAL_NODES: usize = 7;
@@ -229,6 +228,50 @@ impl CanonicalForcing {
         Ok(())
     }
 
+    /// Compiles every authored topology volume-source slot, including disabled
+    /// slots with zero carrier weights. Keeping the slots stable prevents a
+    /// later channel from inheriting another source's runtime phase merely
+    /// because an earlier region was toggled off.
+    pub fn extend_legacy_volume_slots(
+        &mut self,
+        operator: &CanonicalWaveOperator,
+        volume: &CompiledVolumeSources,
+        authored: &[VolumeSource],
+        anchor_time: f64,
+    ) -> Result<(), WaveError> {
+        if volume.nodes.len() != operator.degrees_of_freedom() {
+            return Err(WaveError::SizeMismatch {
+                expected: operator.degrees_of_freedom(),
+                actual: volume.nodes.len(),
+            });
+        }
+        if authored.iter().filter(|source| source.enabled).count() != volume.signals.len() {
+            return Err(WaveError::InvalidState);
+        }
+        let mut enabled_channel = 0_usize;
+        for source in authored {
+            let channel = source.enabled.then_some(enabled_channel);
+            enabled_channel += usize::from(source.enabled);
+            let mut weights = vec![0.0; operator.degrees_of_freedom()];
+            if let Some(channel) = channel {
+                for (node, entry) in volume.nodes.iter().enumerate() {
+                    for contribution in &entry.contributions {
+                        if contribution.channel as usize == channel {
+                            weights[node] += operator.primary_mass[node] * contribution.weight;
+                        }
+                    }
+                }
+            }
+            self.push_source(CanonicalSource::legacy(
+                operator,
+                weights,
+                source.signal,
+                anchor_time,
+            )?)?;
+        }
+        Ok(())
+    }
+
     /// Compiles the old weak boundary acceleration storage into edge-integrated
     /// source weights. Prescribed signals are copied as field-valued ownership.
     pub fn from_legacy_boundaries(
@@ -308,7 +351,7 @@ impl CanonicalForcing {
             .zip(operator.primary_mass())
             .zip(membership)
             .map(|((point, mass), included)| {
-                if *included {
+                if *included && source.enabled {
                     let delta = *point - source.position;
                     mass * (-0.5 * delta.dot(delta) / variance).exp()
                 } else {
@@ -319,7 +362,10 @@ impl CanonicalForcing {
         CanonicalSource::legacy(operator, weights, source.signal, anchor_time)
     }
 
-    fn integrated_rate(&self, time: f64) -> Result<Vec<f64>, WaveError> {
+    /// Integrated nodal source rate at one physical time. Exposed for
+    /// synchronized diagnostics and the static-linear AMR defect; evolution
+    /// uses the same evaluation internally.
+    pub fn integrated_rate(&self, time: f64) -> Result<Vec<f64>, WaveError> {
         let mut rate = vec![0.0; self.prescribed.len()];
         for source in &self.sources {
             let value = source.drive.value(time)?;
@@ -495,6 +541,27 @@ impl CanonicalOutgoingBoundary {
             .iter()
             .map(|mode| mode.trace.len() * std::mem::size_of::<f64>())
             .sum()
+    }
+
+    /// Applies the autonomous passive boundary generator to trace `Q` followed
+    /// by energy-normalized pole memory. This is the diagnostic/AMR oracle for
+    /// checking an accepted endpoint pair; production stepping uses its
+    /// prepared midpoint factor.
+    pub fn diagnostic_derivative(
+        &self,
+        operator: &CanonicalWaveOperator,
+        trace_primary_flux: &[f64],
+        normalized_memory: &[f64],
+    ) -> Result<Vec<f64>, WaveError> {
+        if trace_primary_flux.len() != self.trace_nodes.len()
+            || normalized_memory.len() != self.auxiliary_count
+        {
+            return Err(WaveError::InvalidState);
+        }
+        let mut state = Vec::with_capacity(trace_primary_flux.len() + normalized_memory.len());
+        state.extend_from_slice(trace_primary_flux);
+        state.extend_from_slice(normalized_memory);
+        apply_outgoing_generator(operator, self, &state)
     }
 
     pub fn physical_memory(
@@ -3791,6 +3858,38 @@ mod tests {
                 .all(|(node, (weight, mass))| {
                     (*weight - mass * (0.3 + 0.01 * node as f64)).abs() < 2.0e-15
                 })
+        );
+
+        let authored = [
+            VolumeSource {
+                region: crate::RegionId(4),
+                enabled: false,
+                profile: crate::ScalarField::constant(1.0),
+                parameters: vec![],
+                signal: TimeSignal::harmonic(0.0, 0.7, 2.0, 0.1),
+            },
+            VolumeSource {
+                region: crate::RegionId(5),
+                enabled: true,
+                profile: crate::ScalarField::constant(1.0),
+                parameters: vec![],
+                signal,
+            },
+        ];
+        let mut slotted = CanonicalForcing::none(&operator);
+        slotted
+            .extend_legacy_volume_slots(&operator, &volume, &authored, 0.0)
+            .unwrap();
+        assert_eq!(slotted.sources().len(), 2);
+        assert!(
+            slotted.sources()[0]
+                .weights()
+                .iter()
+                .all(|weight| *weight == 0.0)
+        );
+        assert_eq!(
+            slotted.sources()[1].weights(),
+            forcing.sources()[0].weights()
         );
 
         let mesh = square_with_outer_boundary();

@@ -1,6 +1,8 @@
 // Runtime/clock half of canonical generation handoff.
 const TRANSFER_LAYOUT_VERSION: u32 = 1u;
 const NO_INDEX: u32 = 0xffffffffu;
+const DRIVE_TARGET_PARAMETERS: u32 = 0x80000000u;
+const DRIVE_INDEX_MASK: u32 = 0x7fffffffu;
 const STATUS_LAYOUT: u32 = 1u;
 const MAX_FINITE: f32 = 3.402823466e+38;
 
@@ -60,21 +62,31 @@ fn new_float(word: u32, lane: u32) -> f32 {
 fn mapped_index(offset: u32, index: u32) -> u32 {
     return transfer[offset + index / 4u].data[index % 4u];
 }
-fn advance_drive(base: u32, elapsed: f32, mapped: bool) {
-    let slot = select(0u, 2u, mapped && (old_control.runtime_slots.x & 1u) != 0u);
-    var parameters = vec4<f32>(0.0);
-    var runtime = vec4<u32>(0u);
-    if mapped {
-        parameters = vec4<f32>(
-            old_float(base + slot, 0u), old_float(base + slot, 1u),
-            old_float(base + slot, 2u), old_float(base + slot, 3u));
-        runtime = old_tables[base + slot + 1u].data;
-    } else {
-        parameters = vec4<f32>(
-            new_float(base, 0u), new_float(base, 1u),
-            new_float(base, 2u), new_float(base, 3u));
-        runtime = new_tables[base + 1u].data;
+fn old_drive(base: u32, elapsed: f32) -> f32 {
+    let parameters = vec4<f32>(
+        old_float(base, 0u), old_float(base, 1u),
+        old_float(base, 2u), old_float(base, 3u));
+    let runtime = old_tables[base + 1u].data;
+    if runtime.x == 0u {
+        return parameters.x + parameters.y * sin(parameters.w + parameters.z * elapsed);
     }
+    let half_phase = 0.5 * parameters.z * elapsed;
+    return bitcast<f32>(runtime.y) + parameters.x * elapsed
+        + parameters.y * elapsed * sinc(half_phase)
+            * sin(parameters.w + half_phase);
+}
+fn write_drive(base: u32, parameters: vec4<f32>, runtime: vec4<u32>) {
+    let parameter_bits = bitcast<vec4<u32>>(parameters);
+    new_tables[base].data = parameter_bits;
+    new_tables[base + 1u].data = runtime;
+    new_tables[base + 2u].data = parameter_bits;
+    new_tables[base + 3u].data = runtime;
+}
+fn retain_drive(old_base: u32, new_base: u32, elapsed: f32) {
+    var parameters = vec4<f32>(
+        old_float(old_base, 0u), old_float(old_base, 1u),
+        old_float(old_base, 2u), old_float(old_base, 3u));
+    var runtime = old_tables[old_base + 1u].data;
     if runtime.x != 0u {
         let half_phase = 0.5 * parameters.z * elapsed;
         let next_anchor = bitcast<f32>(runtime.y) + parameters.x * elapsed
@@ -83,11 +95,31 @@ fn advance_drive(base: u32, elapsed: f32, mapped: bool) {
         runtime.y = bitcast<u32>(next_anchor);
     }
     parameters.w = reduced_phase(parameters.w + parameters.z * elapsed);
-    let parameter_bits = bitcast<vec4<u32>>(parameters);
-    new_tables[base].data = parameter_bits;
-    new_tables[base + 1u].data = runtime;
-    new_tables[base + 2u].data = parameter_bits;
-    new_tables[base + 3u].data = runtime;
+    write_drive(new_base, parameters, runtime);
+}
+fn replace_drive(old_base: u32, new_base: u32, old_elapsed: f32) {
+    var parameters = vec4<f32>(
+        new_float(new_base, 0u), new_float(new_base, 1u),
+        new_float(new_base, 2u), new_float(new_base, 3u));
+    var runtime = new_tables[new_base + 1u].data;
+    let old_parameters = vec4<f32>(
+        old_float(old_base, 0u), old_float(old_base, 1u),
+        old_float(old_base, 2u), old_float(old_base, 3u));
+    parameters.w = reduced_phase(old_parameters.w + old_parameters.z * old_elapsed);
+    if runtime.x != 0u {
+        runtime.y = bitcast<u32>(old_drive(old_base, old_elapsed));
+    }
+    write_drive(new_base, parameters, runtime);
+}
+fn start_drive(base: u32, absolute_elapsed: f32) {
+    var parameters = vec4<f32>(
+        new_float(base, 0u), new_float(base, 1u),
+        new_float(base, 2u), new_float(base, 3u));
+    let runtime = new_tables[base + 1u].data;
+    // A genuinely new legacy drive starts with zero integrated rate at the
+    // handoff instant; only its acceleration phase advances to that instant.
+    parameters.w = reduced_phase(parameters.w + parameters.z * absolute_elapsed);
+    write_drive(base, parameters, runtime);
 }
 
 @compute @workgroup_size(128)
@@ -102,30 +134,37 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
     let preparation_delta = (current_origin.x - new_control.clock_origin.x)
         + (current_origin.y - new_control.clock_origin.y);
     if i < target_nodes && new_nodes[i].boundary.z != 0u {
-        let source = mapped_index(transfer[4].data.z, i);
-        if source != NO_INDEX {
-            var signal = old_nodes[source].prescribed;
-            signal.w = reduced_phase(signal.w + signal.z * old_control.clock_f32.y);
-            new_nodes[i].prescribed = signal;
+        let mapping = mapped_index(transfer[4].data.z, i);
+        if mapping != NO_INDEX {
+            let source = mapping & DRIVE_INDEX_MASK;
+            let old_signal = old_nodes[source].prescribed;
+            if (mapping & DRIVE_TARGET_PARAMETERS) != 0u {
+                new_nodes[i].prescribed.w = reduced_phase(
+                    old_signal.w + old_signal.z * old_control.clock_f32.y);
+            } else {
+                var signal = old_signal;
+                signal.w = reduced_phase(signal.w + signal.z * old_control.clock_f32.y);
+                new_nodes[i].prescribed = signal;
+            }
         } else {
             new_nodes[i].prescribed.w = reduced_phase(
                 new_nodes[i].prescribed.w + new_nodes[i].prescribed.z * preparation_delta);
         }
     }
     if i < target_drives {
-        let source = mapped_index(transfer[4].data.w, i);
+        let mapping = mapped_index(transfer[4].data.w, i);
         let new_base = new_control.table_offsets.y + 4u * i;
-        if source != NO_INDEX {
+        if mapping != NO_INDEX {
+            let source = mapping & DRIVE_INDEX_MASK;
             let old_base = old_control.table_offsets.y + 4u * source;
-            // Copy the accepted pair to the target location before advancing.
             let slot = 2u * (old_control.runtime_slots.x & 1u);
-            for (var word = 0u; word < 2u; word += 1u) {
-                new_tables[new_base + word].data = old_tables[old_base + slot + word].data;
-                new_tables[new_base + 2u + word].data = old_tables[old_base + slot + word].data;
+            if (mapping & DRIVE_TARGET_PARAMETERS) != 0u {
+                replace_drive(old_base + slot, new_base, old_control.clock_f32.y);
+            } else {
+                retain_drive(old_base + slot, new_base, old_control.clock_f32.y);
             }
-            advance_drive(new_base, old_control.clock_f32.y, false);
         } else {
-            advance_drive(new_base, preparation_delta, false);
+            start_drive(new_base, preparation_delta);
         }
     }
     if i != 0u { return; }

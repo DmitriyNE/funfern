@@ -28,10 +28,15 @@ use bevy::{
     },
 };
 use funfern_core::{
-    CompiledVolumeSources, GRID_SCALE_FILTER_CADENCE, GRID_SCALE_FILTER_STRENGTH,
-    MAX_VOLUME_SOURCES, OuterBoundaryConditions, PhysicsModel, Point2, PointSource,
-    QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil, QuadraticTransferMap,
-    QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh, source_ramp_seconds,
+    CanonicalPointStencil, CanonicalWaveOperator, CompiledVolumeSources, GRID_SCALE_FILTER_CADENCE,
+    GRID_SCALE_FILTER_STRENGTH, MAX_VOLUME_SOURCES, OuterBoundaryConditions, PhysicsModel, Point2,
+    PointSource, QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil,
+    QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh,
+    canonical_area_quadrature, source_ramp_seconds,
+};
+
+use crate::canonical_gpu::{
+    CanonicalGpuRequest, GpuCanonicalControl, GpuCanonicalNode, GpuCanonicalStateWord,
 };
 
 const WORKGROUP_SIZE: u32 = 128;
@@ -131,38 +136,44 @@ struct WaveBufferHandles {
 }
 
 #[derive(Clone)]
-struct ProbeBufferHandles {
+pub(crate) struct ProbeBufferHandles {
     stencils: Handle<ShaderBuffer>,
     control: Handle<ShaderBuffer>,
     output: Handle<ShaderBuffer>,
     ids: Arc<[u64]>,
-    sample_stride: u64,
+    pub(crate) sample_stride: u64,
+    physics: PhysicsModel,
+    pub(crate) canonical: bool,
 }
 
 #[derive(Clone)]
-struct CurveProbeBufferHandles {
+pub(crate) struct CurveProbeBufferHandles {
     stencils: Handle<ShaderBuffer>,
     control: Handle<ShaderBuffer>,
     output: Handle<ShaderBuffer>,
     descriptors: Arc<[CurveProbeDescriptor]>,
-    sample_strides: Arc<[u64]>,
-    point_count: u32,
+    pub(crate) sample_strides: Arc<[u64]>,
+    pub(crate) point_count: u32,
+    physics: PhysicsModel,
+    pub(crate) canonical: bool,
 }
 
 #[derive(Clone)]
-struct AreaProbeBufferHandles {
+pub(crate) struct AreaProbeBufferHandles {
     contributions: Handle<ShaderBuffer>,
     descriptors: Handle<ShaderBuffer>,
     control: Handle<ShaderBuffer>,
     scratch: Handle<ShaderBuffer>,
     output: Handle<ShaderBuffer>,
     ids: Arc<[u64]>,
-    sample_stride: u64,
-    contribution_count: u32,
+    pub(crate) sample_stride: u64,
+    pub(crate) contribution_count: u32,
+    physics: PhysicsModel,
+    pub(crate) canonical: bool,
 }
 
 #[derive(Clone)]
-struct FarFieldBufferHandles {
+pub(crate) struct FarFieldBufferHandles {
     stencils: Handle<ShaderBuffer>,
     control: Handle<ShaderBuffer>,
     raw: Handle<ShaderBuffer>,
@@ -170,7 +181,8 @@ struct FarFieldBufferHandles {
     /// What the recorded history describes. Only the stencils behind it are
     /// mesh-bound, so a new mesh over the same contour inherits the ring.
     contour: FarFieldContour,
-    sample_stride: u64,
+    pub(crate) sample_stride: u64,
+    pub(crate) canonical: bool,
 }
 
 /// The part of a far-field recorder that the mesh does not name: where the
@@ -239,6 +251,7 @@ fn far_field_period(time_step: f64) -> f64 {
     period
 }
 
+#[cfg(test)]
 fn far_field_bucket(time: f64, period: f64) -> f64 {
     (time / period).floor()
 }
@@ -312,17 +325,17 @@ pub struct WaveGpuRequest {
     stats: Arc<WaveGpuStats>,
     readback_entity: Option<Entity>,
     transfer: Option<WaveTransferHandles>,
-    probes: Option<ProbeBufferHandles>,
-    probe_revision: u64,
+    pub(crate) probes: Option<ProbeBufferHandles>,
+    pub(crate) probe_revision: u64,
     probe_readback_entity: Option<Entity>,
-    curve_probes: Option<CurveProbeBufferHandles>,
-    curve_probe_revision: u64,
+    pub(crate) curve_probes: Option<CurveProbeBufferHandles>,
+    pub(crate) curve_probe_revision: u64,
     curve_probe_readback_entity: Option<Entity>,
-    area_probes: Option<AreaProbeBufferHandles>,
-    area_probe_revision: u64,
+    pub(crate) area_probes: Option<AreaProbeBufferHandles>,
+    pub(crate) area_probe_revision: u64,
     area_probe_readback_entity: Option<Entity>,
-    far_field: Option<FarFieldBufferHandles>,
-    far_field_revision: u64,
+    pub(crate) far_field: Option<FarFieldBufferHandles>,
+    pub(crate) far_field_revision: u64,
     far_field_readback_entity: Option<Entity>,
     grid_scale_filter: bool,
 }
@@ -359,6 +372,13 @@ impl Default for WaveGpuRequest {
 impl WaveGpuRequest {
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Stage-6 recorder ownership follows the accepted canonical generation.
+    /// Rings deliberately survive; the configure paths decide whether their
+    /// observable and contour remain compatible.
+    pub fn adopt_canonical_generation(&mut self, generation: u64) {
+        self.generation = generation;
     }
 
     /// Whether the solver removes what the mesh cannot carry. See
@@ -441,10 +461,9 @@ impl WaveGpuRequest {
         // records by time rather than by slot, so where the new stencils resume
         // writing does not matter.
         let kept = history == RecorderHistory::Keep
-            && self
-                .probes
-                .as_ref()
-                .is_some_and(|handles| handles.ids == ids);
+            && self.probes.as_ref().is_some_and(|handles| {
+                handles.ids == ids && handles.physics == physics && !handles.canonical
+            });
         let handles = if kept {
             let previous = self.probes.take().expect("a kept ring exists");
             assets.remove(previous.stencils.id());
@@ -453,6 +472,8 @@ impl WaveGpuRequest {
                 stencils: assets.add(ShaderBuffer::from(stencils)),
                 control: assets.add(ShaderBuffer::from(control)),
                 sample_stride,
+                physics,
+                canonical: false,
                 ..previous
             }
         } else {
@@ -470,6 +491,110 @@ impl WaveGpuRequest {
                 output: assets.add(ShaderBuffer::from(output)),
                 ids,
                 sample_stride,
+                physics,
+                canonical: false,
+            }
+        };
+        if let Some(entity) = self.probe_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
+        self.probe_revision = self.probe_revision.wrapping_add(1).max(1);
+        self.probe_readback_entity = Some(
+            commands
+                .spawn((
+                    Readback::buffer(handles.output.clone()),
+                    ProbeReadbackTag {
+                        generation: self.generation,
+                        revision: self.probe_revision,
+                        ids: handles.ids.clone(),
+                    },
+                ))
+                .id(),
+        );
+        self.probes = Some(handles);
+        Ok(())
+    }
+
+    pub fn update_canonical_point_probes(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        operator: &CanonicalWaveOperator,
+        probes: &[(u64, Option<QuadraticPointStencil>)],
+        sample_rate: f64,
+        context: RecorderContext,
+    ) -> Result<(), String> {
+        let RecorderContext {
+            time_step,
+            physics,
+            history,
+        } = context;
+        if probes.len() > MAX_POINT_PROBES
+            || !sample_rate.is_finite()
+            || !(30.0..=480.0).contains(&sample_rate)
+            || !time_step.is_finite()
+            || time_step <= 0.0
+        {
+            self.clear_probe_buffers(assets, commands);
+            return Err("Invalid point-probe recorder settings".into());
+        }
+        if probes.is_empty() {
+            self.clear_probe_buffers(assets, commands);
+            return Ok(());
+        }
+        let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
+        let ids = probes.iter().map(|(id, _)| *id).collect::<Arc<[u64]>>();
+        let stencils = probes
+            .iter()
+            .map(|(_, stencil)| {
+                stencil
+                    .map(|stencil| CanonicalPointStencil::from_quadratic(stencil, operator))
+                    .transpose()
+                    .map(gpu_canonical_point_stencil)
+                    .map_err(|error| format!("Canonical point reconstruction failed: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let control = GpuProbeControl {
+            values: Vec4::new(
+                sample_stride as f32,
+                PROBE_RING_FRAMES as f32,
+                probes.len() as f32,
+                probe_physics_flag(physics),
+            ),
+        };
+        let kept = history == RecorderHistory::Keep
+            && self.probes.as_ref().is_some_and(|handles| {
+                handles.ids == ids && handles.physics == physics && handles.canonical
+            });
+        let handles = if kept {
+            let previous = self.probes.take().expect("a kept ring exists");
+            assets.remove(previous.stencils.id());
+            assets.remove(previous.control.id());
+            ProbeBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                sample_stride,
+                physics,
+                canonical: true,
+                ..previous
+            }
+        } else {
+            self.clear_probe_buffers(assets, commands);
+            let output = vec![
+                GpuPointProbeSample {
+                    primary: Vec4::splat(f32::NAN),
+                    secondary: Vec4::splat(f32::NAN),
+                };
+                PROBE_RING_FRAMES * MAX_POINT_PROBES
+            ];
+            ProbeBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                output: assets.add(ShaderBuffer::from(output)),
+                ids,
+                sample_stride,
+                physics,
+                canonical: true,
             }
         };
         if let Some(entity) = self.probe_readback_entity.take() {
@@ -581,10 +706,11 @@ impl WaveGpuRequest {
         // The same probes over the same sample points keep their ring, whatever
         // mesh the stencils now read. Records are taken by time, not by slot.
         let kept = history == RecorderHistory::Keep
-            && self
-                .curve_probes
-                .as_ref()
-                .is_some_and(|handles| handles.descriptors == descriptors);
+            && self.curve_probes.as_ref().is_some_and(|handles| {
+                handles.descriptors == descriptors
+                    && handles.physics == physics
+                    && !handles.canonical
+            });
         let handles = if kept {
             let previous = self.curve_probes.take().expect("a kept ring exists");
             assets.remove(previous.stencils.id());
@@ -593,6 +719,8 @@ impl WaveGpuRequest {
                 stencils: assets.add(ShaderBuffer::from(stencils)),
                 control: assets.add(ShaderBuffer::from(control)),
                 sample_strides: sample_strides.into(),
+                physics,
+                canonical: false,
                 ..previous
             }
         } else {
@@ -604,6 +732,151 @@ impl WaveGpuRequest {
                 descriptors,
                 sample_strides: sample_strides.into(),
                 point_count: point_count as u32,
+                physics,
+                canonical: false,
+            }
+        };
+        if let Some(entity) = self.curve_probe_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
+        self.curve_probe_revision = self.curve_probe_revision.wrapping_add(1).max(1);
+        self.curve_probe_readback_entity = Some(
+            commands
+                .spawn((
+                    Readback::buffer(handles.output.clone()),
+                    CurveProbeReadbackTag {
+                        generation: self.generation,
+                        revision: self.curve_probe_revision,
+                        descriptors: handles.descriptors.clone(),
+                    },
+                ))
+                .id(),
+        );
+        self.curve_probes = Some(handles);
+        Ok(())
+    }
+
+    pub fn update_canonical_curve_probes(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        operator: &CanonicalWaveOperator,
+        probes: &[CurveProbeInput],
+        context: RecorderContext,
+    ) -> Result<(), String> {
+        let RecorderContext {
+            time_step,
+            physics,
+            history,
+        } = context;
+        if !time_step.is_finite() || time_step <= 0.0 {
+            self.clear_curve_probe_buffers(assets, commands);
+            return Err("Invalid line-probe recorder timestep".into());
+        }
+        let point_count = probes
+            .iter()
+            .map(|probe| probe.samples.len())
+            .sum::<usize>();
+        if point_count > MAX_CURVE_PROBE_POINTS
+            || probes.iter().any(|probe| {
+                probe.samples.len() < 2
+                    || !probe.sample_rate.is_finite()
+                    || !(30.0..=120.0).contains(&probe.sample_rate)
+                    || probe
+                        .samples
+                        .iter()
+                        .flatten()
+                        .any(|(_, normal)| !normal.finite())
+            })
+        {
+            self.clear_curve_probe_buffers(assets, commands);
+            return Err("Invalid line-probe recorder settings".into());
+        }
+        if probes.is_empty() {
+            self.clear_curve_probe_buffers(assets, commands);
+            return Ok(());
+        }
+        let mut stencils = Vec::with_capacity(point_count);
+        let mut descriptors = Vec::with_capacity(probes.len());
+        let mut sample_strides = Vec::with_capacity(probes.len());
+        for probe in probes {
+            let offset = stencils.len() as u32;
+            let stride = (1.0 / (probe.sample_rate * time_step)).round().max(1.0) as u64;
+            for sample in &probe.samples {
+                let (point, normal, valid) = match sample {
+                    Some((stencil, normal)) => (
+                        gpu_canonical_point_stencil(Some(
+                            CanonicalPointStencil::from_quadratic(*stencil, operator).map_err(
+                                |error| format!("Canonical line reconstruction failed: {error}"),
+                            )?,
+                        )),
+                        *normal,
+                        1.0,
+                    ),
+                    None => (GpuCanonicalPointStencil::default(), Point2::default(), 0.0),
+                };
+                stencils.push(GpuCanonicalCurveStencil {
+                    point,
+                    normal_stride_valid: Vec4::new(
+                        normal.x as f32,
+                        normal.y as f32,
+                        stride as f32,
+                        valid,
+                    ),
+                });
+            }
+            descriptors.push(CurveProbeDescriptor {
+                id: probe.id,
+                offset,
+                count: probe.samples.len() as u32,
+            });
+            sample_strides.push(stride);
+        }
+        let control = GpuProbeControl {
+            values: Vec4::new(
+                point_count as f32,
+                CURVE_PROBE_RING_FRAMES as f32,
+                MAX_CURVE_PROBE_POINTS as f32,
+                probe_physics_flag(physics),
+            ),
+        };
+        let descriptors = Arc::<[CurveProbeDescriptor]>::from(descriptors);
+        let kept = history == RecorderHistory::Keep
+            && self.curve_probes.as_ref().is_some_and(|handles| {
+                handles.descriptors == descriptors
+                    && handles.physics == physics
+                    && handles.canonical
+            });
+        let handles = if kept {
+            let previous = self.curve_probes.take().expect("a kept ring exists");
+            assets.remove(previous.stencils.id());
+            assets.remove(previous.control.id());
+            CurveProbeBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                sample_strides: sample_strides.into(),
+                physics,
+                canonical: true,
+                ..previous
+            }
+        } else {
+            self.clear_curve_probe_buffers(assets, commands);
+            let output = vec![
+                GpuCurveProbeSample {
+                    primary: Vec4::splat(f32::NAN),
+                    secondary: Vec4::splat(f32::NAN),
+                };
+                CURVE_PROBE_RING_FRAMES * MAX_CURVE_PROBE_POINTS
+            ];
+            CurveProbeBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                output: assets.add(ShaderBuffer::from(output)),
+                descriptors,
+                sample_strides: sample_strides.into(),
+                point_count: point_count as u32,
+                physics,
+                canonical: true,
             }
         };
         if let Some(entity) = self.curve_probe_readback_entity.take() {
@@ -752,10 +1025,9 @@ impl WaveGpuRequest {
         // dispatch's working space, so it is rebuilt with the contributions it
         // sums.
         let kept = history == RecorderHistory::Keep
-            && self
-                .area_probes
-                .as_ref()
-                .is_some_and(|handles| handles.ids == ids);
+            && self.area_probes.as_ref().is_some_and(|handles| {
+                handles.ids == ids && handles.physics == physics && !handles.canonical
+            });
         let handles = if kept {
             let previous = self.area_probes.take().expect("a kept ring exists");
             for handle in [
@@ -773,6 +1045,8 @@ impl WaveGpuRequest {
                 scratch: assets.add(ShaderBuffer::from(scratch)),
                 sample_stride,
                 contribution_count: contribution_count as u32,
+                physics,
+                canonical: false,
                 ..previous
             }
         } else {
@@ -794,6 +1068,155 @@ impl WaveGpuRequest {
                 ids,
                 sample_stride,
                 contribution_count: contribution_count as u32,
+                physics,
+                canonical: false,
+            }
+        };
+        if let Some(entity) = self.area_probe_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
+        self.area_probe_revision = self.area_probe_revision.wrapping_add(1).max(1);
+        self.area_probe_readback_entity = Some(
+            commands
+                .spawn((
+                    Readback::buffer(handles.output.clone()),
+                    AreaProbeReadbackTag {
+                        generation: self.generation,
+                        revision: self.area_probe_revision,
+                        ids: handles.ids.clone(),
+                    },
+                ))
+                .id(),
+        );
+        self.area_probes = Some(handles);
+        Ok(())
+    }
+
+    pub fn update_canonical_area_probes(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        operator: &CanonicalWaveOperator,
+        probes: &[AreaProbeInput],
+        sample_rate: f64,
+        context: RecorderContext,
+    ) -> Result<(), String> {
+        let RecorderContext {
+            time_step,
+            physics,
+            history,
+        } = context;
+        let contribution_count = probes
+            .iter()
+            .filter_map(|probe| probe.stencil.as_ref())
+            .map(|stencil| stencil.elements.len())
+            .sum::<usize>();
+        if probes.len() > MAX_POINT_PROBES {
+            self.clear_area_probe_buffers(assets, commands);
+            return Err(format!("Maximum {MAX_POINT_PROBES} area probes"));
+        }
+        if contribution_count > MAX_AREA_PROBE_ELEMENTS {
+            self.clear_area_probe_buffers(assets, commands);
+            return Err(format!(
+                "Area probes cover {contribution_count} element pieces; maximum is {MAX_AREA_PROBE_ELEMENTS}"
+            ));
+        }
+        if !sample_rate.is_finite()
+            || !(30.0..=120.0).contains(&sample_rate)
+            || !time_step.is_finite()
+            || time_step <= 0.0
+        {
+            self.clear_area_probe_buffers(assets, commands);
+            return Err("Invalid area-probe recorder settings".into());
+        }
+        if probes.is_empty() {
+            self.clear_area_probe_buffers(assets, commands);
+            return Ok(());
+        }
+        let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
+        let mut contributions = Vec::with_capacity(contribution_count.max(1));
+        let mut descriptors = Vec::with_capacity(probes.len());
+        for probe in probes {
+            let offset = contributions.len() as u32;
+            if let Some(stencil) = &probe.stencil {
+                for element in &stencil.elements {
+                    contributions.push(gpu_canonical_area_contribution(*element, operator)?);
+                }
+                descriptors.push(GpuAreaProbeDescriptor {
+                    offset_count: UVec4::new(offset, stencil.elements.len() as u32, 0, 0),
+                    areas: Vec4::new(
+                        stencil.covered_area as f32,
+                        stencil.target_area as f32,
+                        1.0,
+                        0.0,
+                    ),
+                });
+            } else {
+                descriptors.push(GpuAreaProbeDescriptor {
+                    offset_count: UVec4::new(offset, 0, 0, 0),
+                    areas: Vec4::ZERO,
+                });
+            }
+        }
+        if contributions.is_empty() {
+            contributions.push(GpuCanonicalAreaContribution::default());
+        }
+        let control = GpuProbeControl {
+            values: Vec4::new(
+                sample_stride as f32,
+                AREA_PROBE_RING_FRAMES as f32,
+                probes.len() as f32,
+                contribution_count as f32,
+            ),
+        };
+        let scratch = vec![GpuAreaProbeContributionSample::default(); contribution_count.max(1)];
+        let ids = probes.iter().map(|probe| probe.id).collect::<Arc<[u64]>>();
+        let kept = history == RecorderHistory::Keep
+            && self.area_probes.as_ref().is_some_and(|handles| {
+                handles.ids == ids && handles.physics == physics && handles.canonical
+            });
+        let handles = if kept {
+            let previous = self.area_probes.take().expect("a kept ring exists");
+            for handle in [
+                previous.contributions.id(),
+                previous.descriptors.id(),
+                previous.control.id(),
+                previous.scratch.id(),
+            ] {
+                assets.remove(handle);
+            }
+            AreaProbeBufferHandles {
+                contributions: assets.add(ShaderBuffer::from(contributions)),
+                descriptors: assets.add(ShaderBuffer::from(descriptors)),
+                control: assets.add(ShaderBuffer::from(control)),
+                scratch: assets.add(ShaderBuffer::from(scratch)),
+                sample_stride,
+                contribution_count: contribution_count as u32,
+                physics,
+                canonical: true,
+                ..previous
+            }
+        } else {
+            self.clear_area_probe_buffers(assets, commands);
+            let output = vec![
+                GpuAreaProbeSample {
+                    primary: Vec4::splat(f32::NAN),
+                    secondary: Vec4::splat(f32::NAN),
+                    tertiary: Vec4::splat(f32::NAN),
+                };
+                AREA_PROBE_RING_FRAMES * MAX_POINT_PROBES
+            ];
+            AreaProbeBufferHandles {
+                contributions: assets.add(ShaderBuffer::from(contributions)),
+                descriptors: assets.add(ShaderBuffer::from(descriptors)),
+                control: assets.add(ShaderBuffer::from(control)),
+                scratch: assets.add(ShaderBuffer::from(scratch)),
+                output: assets.add(ShaderBuffer::from(output)),
+                ids,
+                sample_stride,
+                contribution_count: contribution_count as u32,
+                physics,
+                canonical: true,
             }
         };
         if let Some(entity) = self.area_probe_readback_entity.take() {
@@ -916,7 +1339,7 @@ impl WaveGpuRequest {
             && self
                 .far_field
                 .as_ref()
-                .is_some_and(|handles| handles.contour == contour);
+                .is_some_and(|handles| handles.contour == contour && !handles.canonical);
         let handles = if kept {
             let previous = self.far_field.take().expect("a kept ring exists");
             assets.remove(previous.stencils.id());
@@ -926,6 +1349,7 @@ impl WaveGpuRequest {
                 control: assets.add(ShaderBuffer::from(control)),
                 contour,
                 sample_stride: far_field_sample_stride(period, time_step),
+                canonical: false,
                 ..previous
             }
         } else {
@@ -949,6 +1373,153 @@ impl WaveGpuRequest {
                 output: assets.add(ShaderBuffer::from(output)),
                 contour,
                 sample_stride: far_field_sample_stride(period, time_step),
+                canonical: false,
+            }
+        };
+        if let Some(entity) = self.far_field_readback_entity.take() {
+            commands.entity(entity).despawn();
+        }
+        self.far_field_revision = self.far_field_revision.wrapping_add(1).max(1);
+        self.far_field_readback_entity = Some(
+            commands
+                .spawn((
+                    Readback::buffer(handles.output.clone()),
+                    FarFieldReadbackTag {
+                        generation: self.generation,
+                        revision: self.far_field_revision,
+                    },
+                ))
+                .id(),
+        );
+        self.far_field = Some(handles);
+        Ok(if kept {
+            FarFieldHandoff::Kept
+        } else {
+            FarFieldHandoff::Restarted
+        })
+    }
+
+    pub fn update_canonical_far_field(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        input: Option<&FarFieldInput>,
+        time_step: f64,
+        history: RecorderHistory,
+    ) -> Result<FarFieldHandoff, String> {
+        let Some(input) = input else {
+            self.clear_far_field_buffers(assets, commands);
+            return Ok(FarFieldHandoff::Off);
+        };
+        if input.samples.len() != FAR_FIELD_CONTOUR_POINTS
+            || !input.wave_speed.is_finite()
+            || input.wave_speed <= 0.0
+            || !input.sample_spacing.is_finite()
+            || input.sample_spacing <= 0.0
+            || !input.delay_margin.is_finite()
+            || input.delay_margin <= 0.0
+            || !time_step.is_finite()
+            || time_step <= 0.0
+        {
+            self.clear_far_field_buffers(assets, commands);
+            return Err("Invalid far-field recorder settings".into());
+        }
+        let period = far_field_period(time_step);
+        let contour = FarFieldContour {
+            points: input
+                .samples
+                .iter()
+                .map(|(_, position, normal)| (*position, *normal))
+                .collect(),
+            wave_speed: input.wave_speed,
+            sample_spacing: input.sample_spacing,
+            delay_margin: input.delay_margin,
+            period,
+        };
+        let stencils = input
+            .samples
+            .iter()
+            .map(|(stencil, position, normal)| {
+                let point = gpu_probe_stencil(Some(*stencil));
+                GpuCanonicalFarFieldStencil {
+                    nodes_a: point.nodes_a,
+                    nodes_b: point.nodes_b,
+                    weights_a: point.weights_a,
+                    weights_b: point.weights_b,
+                    gradient_x_a: point.gradient_x_a,
+                    gradient_x_b: point.gradient_x_b,
+                    gradient_y_a: point.gradient_y_a,
+                    gradient_y_b: point.gradient_y_b,
+                    position_normal: Vec4::new(
+                        position.x as f32,
+                        position.y as f32,
+                        normal.x as f32,
+                        normal.y as f32,
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        let maximum_history = (FAR_FIELD_RING_FRAMES - 2) as f64 * period;
+        if input.history_seconds() > maximum_history {
+            self.clear_far_field_buffers(assets, commands);
+            return Err(format!(
+                "Exterior wave speed is too low for the {:.1} s far-field delay window",
+                maximum_history
+            ));
+        }
+        let control = GpuFarFieldControl {
+            sampling: Vec4::new(
+                period as f32,
+                FAR_FIELD_RING_FRAMES as f32,
+                FAR_FIELD_CONTOUR_POINTS as f32,
+                FAR_FIELD_DIRECTIONS as f32,
+            ),
+            projection: Vec4::new(
+                input.wave_speed as f32,
+                input.sample_spacing as f32,
+                input.delay_margin as f32,
+                0.0,
+            ),
+        };
+        let kept = history == RecorderHistory::Keep
+            && self
+                .far_field
+                .as_ref()
+                .is_some_and(|handles| handles.contour == contour && handles.canonical);
+        let handles = if kept {
+            let previous = self.far_field.take().expect("a kept ring exists");
+            assets.remove(previous.stencils.id());
+            assets.remove(previous.control.id());
+            FarFieldBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                contour,
+                sample_stride: far_field_sample_stride(period, time_step),
+                canonical: true,
+                ..previous
+            }
+        } else {
+            self.clear_far_field_buffers(assets, commands);
+            let raw = vec![
+                GpuProbeSample {
+                    values: Vec4::new(0.0, 0.0, 0.0, FAR_FIELD_UNRECORDED),
+                };
+                FAR_FIELD_RING_FRAMES * FAR_FIELD_CONTOUR_POINTS
+            ];
+            let output = vec![
+                GpuProbeSample {
+                    values: Vec4::new(0.0, 0.0, FAR_FIELD_UNRECORDED, 0.0),
+                };
+                FAR_FIELD_RING_FRAMES * FAR_FIELD_DIRECTIONS
+            ];
+            FarFieldBufferHandles {
+                stencils: assets.add(ShaderBuffer::from(stencils)),
+                control: assets.add(ShaderBuffer::from(control)),
+                raw: assets.add(ShaderBuffer::from(raw)),
+                output: assets.add(ShaderBuffer::from(output)),
+                contour,
+                sample_stride: far_field_sample_stride(period, time_step),
+                canonical: true,
             }
         };
         if let Some(entity) = self.far_field_readback_entity.take() {
@@ -1946,9 +2517,12 @@ pub struct WaveDisplay {
     pub indicator_displacement: Vec<f32>,
     pub indicator_velocity: Vec<f32>,
     pub indicator_acceleration: Vec<f32>,
-    /// DC-stabilized inverse time derivative used to reconstruct the transverse
-    /// EM field, aligned with the indicator fields.
+    /// Legacy scalar-solver reconstruction lane. The production canonical
+    /// adapter leaves it empty; retained only by the optional comparison path.
     pub indicator_potential: Vec<f32>,
+    /// Canonical six-sample complementary flux read directly by vector and AMR
+    /// consumers. Empty on the optional scalar comparison path.
+    pub complementary_flux: Vec<[f32; 2]>,
     pub completed_steps: u64,
     pub readbacks: u64,
 }
@@ -2274,6 +2848,133 @@ struct GpuFarFieldControl {
     projection: Vec4,
 }
 
+/// Direct-state point reconstruction. Primary weights act on `Q / M`; the
+/// complementary weights reconstruct the six independent quadrature samples
+/// belonging to one element.
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuCanonicalPointStencil {
+    nodes_a: UVec4,
+    nodes_b: UVec4,
+    primary_a: Vec4,
+    primary_b: Vec4,
+    complementary_a: Vec4,
+    complementary_b: Vec4,
+    sample_valid: UVec4,
+    reference_inverse: Vec4,
+    orientation: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuCanonicalCurveStencil {
+    point: GpuCanonicalPointStencil,
+    normal_stride_valid: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuCanonicalAreaQuadrature {
+    primary_a: Vec4,
+    primary_b: Vec4,
+    complementary_a: Vec4,
+    complementary_b: Vec4,
+    reference_inverse: Vec4,
+    weight: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuCanonicalAreaContribution {
+    nodes_a: UVec4,
+    nodes_b: UVec4,
+    sample_valid: UVec4,
+    quadrature: [GpuCanonicalAreaQuadrature; 12],
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuCanonicalFarFieldStencil {
+    nodes_a: UVec4,
+    nodes_b: UVec4,
+    weights_a: Vec4,
+    weights_b: Vec4,
+    gradient_x_a: Vec4,
+    gradient_x_b: Vec4,
+    gradient_y_a: Vec4,
+    gradient_y_b: Vec4,
+    position_normal: Vec4,
+}
+
+fn gpu_canonical_point_stencil(stencil: Option<CanonicalPointStencil>) -> GpuCanonicalPointStencil {
+    let Some(stencil) = stencil else {
+        return GpuCanonicalPointStencil::default();
+    };
+    let primary = stencil.primary_weights.map(|value| value as f32);
+    let complementary = stencil.complementary_weights.map(|value| value as f32);
+    GpuCanonicalPointStencil {
+        nodes_a: UVec4::new(
+            stencil.nodes[0],
+            stencil.nodes[1],
+            stencil.nodes[2],
+            stencil.nodes[3],
+        ),
+        nodes_b: UVec4::new(stencil.nodes[4], stencil.nodes[5], stencil.nodes[6], 0),
+        primary_a: Vec4::from_array([primary[0], primary[1], primary[2], primary[3]]),
+        primary_b: Vec4::from_array([primary[4], primary[5], primary[6], 0.0]),
+        complementary_a: Vec4::from_array([
+            complementary[0],
+            complementary[1],
+            complementary[2],
+            complementary[3],
+        ]),
+        complementary_b: Vec4::from_array([complementary[4], complementary[5], 0.0, 0.0]),
+        sample_valid: UVec4::new(stencil.complementary_samples[0], 1, 0, 0),
+        reference_inverse: Vec4::new(
+            stencil.primary_reference as f32,
+            stencil.complementary_inverse.xx as f32,
+            stencil.complementary_inverse.xy as f32,
+            stencil.complementary_inverse.yy as f32,
+        ),
+        orientation: Vec4::new(stencil.orientation as f32, 0.0, 0.0, 0.0),
+    }
+}
+
+fn gpu_canonical_area_contribution(
+    element: QuadraticAreaElement,
+    operator: &CanonicalWaveOperator,
+) -> Result<GpuCanonicalAreaContribution, String> {
+    let quadrature = canonical_area_quadrature(element, operator)
+        .map_err(|error| format!("Canonical area reconstruction failed: {error}"))?;
+    Ok(GpuCanonicalAreaContribution {
+        nodes_a: UVec4::new(
+            element.nodes[0],
+            element.nodes[1],
+            element.nodes[2],
+            element.nodes[3],
+        ),
+        nodes_b: UVec4::new(element.nodes[4], element.nodes[5], element.nodes[6], 0),
+        sample_valid: UVec4::new(element.element * 6, 1, 0, 0),
+        quadrature: quadrature.map(|point| {
+            let primary = point.primary_weights.map(|value| value as f32);
+            let complementary = point.complementary_weights.map(|value| value as f32);
+            GpuCanonicalAreaQuadrature {
+                primary_a: Vec4::from_array([primary[0], primary[1], primary[2], primary[3]]),
+                primary_b: Vec4::from_array([primary[4], primary[5], primary[6], 0.0]),
+                complementary_a: Vec4::from_array([
+                    complementary[0],
+                    complementary[1],
+                    complementary[2],
+                    complementary[3],
+                ]),
+                complementary_b: Vec4::from_array([complementary[4], complementary[5], 0.0, 0.0]),
+                reference_inverse: Vec4::new(
+                    point.primary_reference as f32,
+                    point.complementary_inverse.xx as f32,
+                    point.complementary_inverse.xy as f32,
+                    point.complementary_inverse.yy as f32,
+                ),
+                weight: Vec4::new(point.physical_weight as f32, 0.0, 0.0, 0.0),
+            }
+        }),
+    })
+}
+
 fn gpu_probe_stencil(stencil: Option<QuadraticPointStencil>) -> GpuProbeStencil {
     let Some(stencil) = stencil else {
         return GpuProbeStencil::default();
@@ -2405,7 +3106,7 @@ fn gpu_far_field_stencil(
     }
 }
 
-fn probe_sample_due(completed_step: u64, stride: u64) -> bool {
+pub(crate) fn probe_sample_due(completed_step: u64, stride: u64) -> bool {
     stride > 0 && completed_step.is_multiple_of(stride)
 }
 
@@ -2656,6 +3357,10 @@ impl Plugin for WaveGpuPlugin {
         embedded_asset!(app, "curve_probe.wgsl");
         embedded_asset!(app, "area_probe.wgsl");
         embedded_asset!(app, "far_field.wgsl");
+        embedded_asset!(app, "canonical_probe.wgsl");
+        embedded_asset!(app, "canonical_curve_probe.wgsl");
+        embedded_asset!(app, "canonical_area_probe.wgsl");
+        embedded_asset!(app, "canonical_far_field.wgsl");
         embedded_asset!(app, "wave_transfer_old.wgsl");
         embedded_asset!(app, "wave_transfer_new.wgsl");
         app.init_resource::<WaveGpuRequest>()
@@ -2691,12 +3396,16 @@ impl Plugin for WaveGpuPlugin {
 }
 
 #[derive(Resource)]
-struct WavePipeline {
+pub(crate) struct WavePipeline {
     layout: BindGroupLayoutDescriptor,
     probe_layout: BindGroupLayoutDescriptor,
     curve_probe_layout: BindGroupLayoutDescriptor,
     area_probe_layout: BindGroupLayoutDescriptor,
     far_field_layout: BindGroupLayoutDescriptor,
+    canonical_probe_layout: BindGroupLayoutDescriptor,
+    canonical_curve_probe_layout: BindGroupLayoutDescriptor,
+    canonical_area_probe_layout: BindGroupLayoutDescriptor,
+    canonical_far_field_layout: BindGroupLayoutDescriptor,
     transfer_old_layout: BindGroupLayoutDescriptor,
     transfer_new_layout: BindGroupLayoutDescriptor,
     step: CachedComputePipelineId,
@@ -2714,6 +3423,12 @@ struct WavePipeline {
     area_probe_reduce: CachedComputePipelineId,
     far_field_sample: CachedComputePipelineId,
     far_field_project: CachedComputePipelineId,
+    pub(crate) canonical_probe: CachedComputePipelineId,
+    pub(crate) canonical_curve_probe: CachedComputePipelineId,
+    pub(crate) canonical_area_probe_elements: CachedComputePipelineId,
+    pub(crate) canonical_area_probe_reduce: CachedComputePipelineId,
+    pub(crate) canonical_far_field_sample: CachedComputePipelineId,
+    pub(crate) canonical_far_field_project: CachedComputePipelineId,
 }
 
 fn init_pipeline(
@@ -2851,6 +3566,112 @@ fn init_pipeline(
         "wave far-field projector",
         "project_directions",
     ));
+    let canonical_probe_layout = BindGroupLayoutDescriptor::new(
+        "canonical point-probe buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only::<GpuCanonicalControl>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalNode>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalPointStencil>>(false),
+                storage_buffer_read_only::<GpuProbeControl>(false),
+                storage_buffer::<Vec<GpuPointProbeSample>>(false),
+            ),
+        ),
+    );
+    let canonical_probe = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some(Cow::Borrowed("canonical point probes")),
+        layout: vec![canonical_probe_layout.clone()],
+        shader: load_embedded_asset!(asset_server.as_ref(), "canonical_probe.wgsl"),
+        entry_point: Some(Cow::Borrowed("sample_probes")),
+        ..default()
+    });
+    let canonical_curve_probe_layout = BindGroupLayoutDescriptor::new(
+        "canonical line-probe buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only::<GpuCanonicalControl>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalNode>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalCurveStencil>>(false),
+                storage_buffer_read_only::<GpuProbeControl>(false),
+                storage_buffer::<Vec<GpuCurveProbeSample>>(false),
+            ),
+        ),
+    );
+    let canonical_curve_probe = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some(Cow::Borrowed("canonical line probes")),
+        layout: vec![canonical_curve_probe_layout.clone()],
+        shader: load_embedded_asset!(asset_server.as_ref(), "canonical_curve_probe.wgsl"),
+        entry_point: Some(Cow::Borrowed("sample_curve_probes")),
+        ..default()
+    });
+    let canonical_area_probe_layout = BindGroupLayoutDescriptor::new(
+        "canonical area-probe buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only::<GpuCanonicalControl>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalNode>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalAreaContribution>>(false),
+                storage_buffer_read_only::<Vec<GpuAreaProbeDescriptor>>(false),
+                storage_buffer_read_only::<GpuProbeControl>(false),
+                storage_buffer::<Vec<GpuAreaProbeContributionSample>>(false),
+                storage_buffer::<Vec<GpuAreaProbeSample>>(false),
+            ),
+        ),
+    );
+    let canonical_area_shader =
+        load_embedded_asset!(asset_server.as_ref(), "canonical_area_probe.wgsl");
+    let canonical_area_pipeline =
+        |label: &'static str, entry: &'static str| ComputePipelineDescriptor {
+            label: Some(Cow::Borrowed(label)),
+            layout: vec![canonical_area_probe_layout.clone()],
+            shader: canonical_area_shader.clone(),
+            entry_point: Some(Cow::Borrowed(entry)),
+            ..default()
+        };
+    let canonical_area_probe_elements = pipeline_cache.queue_compute_pipeline(
+        canonical_area_pipeline("canonical area-probe elements", "sample_area_elements"),
+    );
+    let canonical_area_probe_reduce = pipeline_cache.queue_compute_pipeline(
+        canonical_area_pipeline("canonical area-probe reduction", "reduce_area_probes"),
+    );
+    let canonical_far_field_layout = BindGroupLayoutDescriptor::new(
+        "canonical far-field buffers",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only::<GpuCanonicalControl>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalStateWord>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalNode>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalFarFieldStencil>>(false),
+                storage_buffer_read_only::<GpuFarFieldControl>(false),
+                storage_buffer::<Vec<GpuProbeSample>>(false),
+                storage_buffer::<Vec<GpuProbeSample>>(false),
+            ),
+        ),
+    );
+    let canonical_far_shader =
+        load_embedded_asset!(asset_server.as_ref(), "canonical_far_field.wgsl");
+    let canonical_far_pipeline =
+        |label: &'static str, entry: &'static str| ComputePipelineDescriptor {
+            label: Some(Cow::Borrowed(label)),
+            layout: vec![canonical_far_field_layout.clone()],
+            shader: canonical_far_shader.clone(),
+            entry_point: Some(Cow::Borrowed(entry)),
+            ..default()
+        };
+    let canonical_far_field_sample = pipeline_cache.queue_compute_pipeline(canonical_far_pipeline(
+        "canonical far-field contour sampler",
+        "sample_contour",
+    ));
+    let canonical_far_field_project = pipeline_cache.queue_compute_pipeline(
+        canonical_far_pipeline("canonical far-field projector", "project_directions"),
+    );
     let transfer_old_layout = BindGroupLayoutDescriptor::new(
         "wave old-state transfer buffers",
         &BindGroupLayoutEntries::sequential(
@@ -2928,6 +3749,10 @@ fn init_pipeline(
         curve_probe_layout,
         area_probe_layout,
         far_field_layout,
+        canonical_probe_layout,
+        canonical_curve_probe_layout,
+        canonical_area_probe_layout,
+        canonical_far_field_layout,
         transfer_old_layout,
         transfer_new_layout,
         step,
@@ -2945,6 +3770,12 @@ fn init_pipeline(
         area_probe_reduce,
         far_field_sample,
         far_field_project,
+        canonical_probe,
+        canonical_curve_probe,
+        canonical_area_probe_elements,
+        canonical_area_probe_reduce,
+        canonical_far_field_sample,
+        canonical_far_field_project,
     });
 }
 
@@ -2966,36 +3797,38 @@ struct WaveTransferBindGroups {
 }
 
 #[derive(Resource)]
-struct ProbeBindGroup {
-    generation: u64,
-    revision: u64,
-    bind_group: BindGroup,
+pub(crate) struct ProbeBindGroup {
+    pub(crate) generation: u64,
+    pub(crate) revision: u64,
+    pub(crate) bind_group: BindGroup,
 }
 
 #[derive(Resource)]
-struct CurveProbeBindGroup {
-    generation: u64,
-    revision: u64,
-    bind_group: BindGroup,
+pub(crate) struct CurveProbeBindGroup {
+    pub(crate) generation: u64,
+    pub(crate) revision: u64,
+    pub(crate) bind_group: BindGroup,
 }
 
 #[derive(Resource)]
-struct AreaProbeBindGroup {
-    generation: u64,
-    revision: u64,
-    bind_group: BindGroup,
+pub(crate) struct AreaProbeBindGroup {
+    pub(crate) generation: u64,
+    pub(crate) revision: u64,
+    pub(crate) bind_group: BindGroup,
 }
 
 #[derive(Resource)]
-struct FarFieldBindGroup {
-    generation: u64,
-    revision: u64,
-    bind_group: BindGroup,
+pub(crate) struct FarFieldBindGroup {
+    pub(crate) generation: u64,
+    pub(crate) revision: u64,
+    pub(crate) bind_group: BindGroup,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_far_field_bind_group(
     mut commands: Commands,
     request: Option<Res<WaveGpuRequest>>,
+    canonical_request: Option<Res<CanonicalGpuRequest>>,
     existing: Option<Res<FarFieldBindGroup>>,
     pipeline: Res<WavePipeline>,
     pipeline_cache: Res<PipelineCache>,
@@ -3014,10 +3847,7 @@ fn prepare_far_field_bind_group(
     }) {
         return;
     }
-    let Some(wave) = &request.buffers else { return };
-    let (Some(parameters), Some(state), Some(stencils), Some(control), Some(raw), Some(output)) = (
-        gpu_buffers.get(&wave.parameters),
-        gpu_buffers.get(&wave.state),
+    let (Some(stencils), Some(control), Some(raw), Some(output)) = (
         gpu_buffers.get(&far_field.stencils),
         gpu_buffers.get(&far_field.control),
         gpu_buffers.get(&far_field.raw),
@@ -3025,18 +3855,54 @@ fn prepare_far_field_bind_group(
     ) else {
         return;
     };
-    let bind_group = render_device.create_bind_group(
-        Some("wave far-field bind group"),
-        &pipeline_cache.get_bind_group_layout(&pipeline.far_field_layout),
-        &BindGroupEntries::sequential((
-            parameters.buffer.as_entire_buffer_binding(),
-            state.buffer.as_entire_buffer_binding(),
-            stencils.buffer.as_entire_buffer_binding(),
-            control.buffer.as_entire_buffer_binding(),
-            raw.buffer.as_entire_buffer_binding(),
-            output.buffer.as_entire_buffer_binding(),
-        )),
-    );
+    let bind_group = if far_field.canonical {
+        let Some(canonical) = canonical_request
+            .as_ref()
+            .and_then(|request| request.buffer_handles())
+        else {
+            return;
+        };
+        let (Some(canonical_control), Some(state), Some(nodes)) = (
+            gpu_buffers.get(&canonical.control),
+            gpu_buffers.get(&canonical.state),
+            gpu_buffers.get(&canonical.nodes),
+        ) else {
+            return;
+        };
+        render_device.create_bind_group(
+            Some("canonical far-field bind group"),
+            &pipeline_cache.get_bind_group_layout(&pipeline.canonical_far_field_layout),
+            &BindGroupEntries::sequential((
+                canonical_control.buffer.as_entire_buffer_binding(),
+                state.buffer.as_entire_buffer_binding(),
+                nodes.buffer.as_entire_buffer_binding(),
+                stencils.buffer.as_entire_buffer_binding(),
+                control.buffer.as_entire_buffer_binding(),
+                raw.buffer.as_entire_buffer_binding(),
+                output.buffer.as_entire_buffer_binding(),
+            )),
+        )
+    } else {
+        let Some(wave) = &request.buffers else { return };
+        let (Some(parameters), Some(state)) = (
+            gpu_buffers.get(&wave.parameters),
+            gpu_buffers.get(&wave.state),
+        ) else {
+            return;
+        };
+        render_device.create_bind_group(
+            Some("wave far-field bind group"),
+            &pipeline_cache.get_bind_group_layout(&pipeline.far_field_layout),
+            &BindGroupEntries::sequential((
+                parameters.buffer.as_entire_buffer_binding(),
+                state.buffer.as_entire_buffer_binding(),
+                stencils.buffer.as_entire_buffer_binding(),
+                control.buffer.as_entire_buffer_binding(),
+                raw.buffer.as_entire_buffer_binding(),
+                output.buffer.as_entire_buffer_binding(),
+            )),
+        )
+    };
     commands.insert_resource(FarFieldBindGroup {
         generation: request.generation,
         revision: request.far_field_revision,
@@ -3044,9 +3910,11 @@ fn prepare_far_field_bind_group(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_area_probe_bind_group(
     mut commands: Commands,
     request: Option<Res<WaveGpuRequest>>,
+    canonical_request: Option<Res<CanonicalGpuRequest>>,
     existing: Option<Res<AreaProbeBindGroup>>,
     pipeline: Res<WavePipeline>,
     pipeline_cache: Res<PipelineCache>,
@@ -3065,40 +3933,65 @@ fn prepare_area_probe_bind_group(
     }) {
         return;
     }
-    let Some(wave) = &request.buffers else { return };
-    let (
-        Some(parameters),
-        Some(state),
-        Some(contributions),
-        Some(descriptors),
-        Some(control),
-        Some(scratch),
-        Some(output),
-    ) = (
-        gpu_buffers.get(&wave.parameters),
-        gpu_buffers.get(&wave.state),
+    let (Some(contributions), Some(descriptors), Some(control), Some(scratch), Some(output)) = (
         gpu_buffers.get(&probes.contributions),
         gpu_buffers.get(&probes.descriptors),
         gpu_buffers.get(&probes.control),
         gpu_buffers.get(&probes.scratch),
         gpu_buffers.get(&probes.output),
-    )
-    else {
+    ) else {
         return;
     };
-    let bind_group = render_device.create_bind_group(
-        Some("wave area-probe bind group"),
-        &pipeline_cache.get_bind_group_layout(&pipeline.area_probe_layout),
-        &BindGroupEntries::sequential((
-            parameters.buffer.as_entire_buffer_binding(),
-            state.buffer.as_entire_buffer_binding(),
-            contributions.buffer.as_entire_buffer_binding(),
-            descriptors.buffer.as_entire_buffer_binding(),
-            control.buffer.as_entire_buffer_binding(),
-            scratch.buffer.as_entire_buffer_binding(),
-            output.buffer.as_entire_buffer_binding(),
-        )),
-    );
+    let bind_group = if probes.canonical {
+        let Some(canonical) = canonical_request
+            .as_ref()
+            .and_then(|request| request.buffer_handles())
+        else {
+            return;
+        };
+        let (Some(canonical_control), Some(state), Some(nodes)) = (
+            gpu_buffers.get(&canonical.control),
+            gpu_buffers.get(&canonical.state),
+            gpu_buffers.get(&canonical.nodes),
+        ) else {
+            return;
+        };
+        render_device.create_bind_group(
+            Some("canonical area-probe bind group"),
+            &pipeline_cache.get_bind_group_layout(&pipeline.canonical_area_probe_layout),
+            &BindGroupEntries::sequential((
+                canonical_control.buffer.as_entire_buffer_binding(),
+                state.buffer.as_entire_buffer_binding(),
+                nodes.buffer.as_entire_buffer_binding(),
+                contributions.buffer.as_entire_buffer_binding(),
+                descriptors.buffer.as_entire_buffer_binding(),
+                control.buffer.as_entire_buffer_binding(),
+                scratch.buffer.as_entire_buffer_binding(),
+                output.buffer.as_entire_buffer_binding(),
+            )),
+        )
+    } else {
+        let Some(wave) = &request.buffers else { return };
+        let (Some(parameters), Some(state)) = (
+            gpu_buffers.get(&wave.parameters),
+            gpu_buffers.get(&wave.state),
+        ) else {
+            return;
+        };
+        render_device.create_bind_group(
+            Some("wave area-probe bind group"),
+            &pipeline_cache.get_bind_group_layout(&pipeline.area_probe_layout),
+            &BindGroupEntries::sequential((
+                parameters.buffer.as_entire_buffer_binding(),
+                state.buffer.as_entire_buffer_binding(),
+                contributions.buffer.as_entire_buffer_binding(),
+                descriptors.buffer.as_entire_buffer_binding(),
+                control.buffer.as_entire_buffer_binding(),
+                scratch.buffer.as_entire_buffer_binding(),
+                output.buffer.as_entire_buffer_binding(),
+            )),
+        )
+    };
     commands.insert_resource(AreaProbeBindGroup {
         generation: request.generation,
         revision: request.area_probe_revision,
@@ -3106,9 +3999,11 @@ fn prepare_area_probe_bind_group(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_curve_probe_bind_group(
     mut commands: Commands,
     request: Option<Res<WaveGpuRequest>>,
+    canonical_request: Option<Res<CanonicalGpuRequest>>,
     existing: Option<Res<CurveProbeBindGroup>>,
     pipeline: Res<WavePipeline>,
     pipeline_cache: Res<PipelineCache>,
@@ -3127,27 +4022,59 @@ fn prepare_curve_probe_bind_group(
     }) {
         return;
     }
-    let Some(wave) = &request.buffers else { return };
-    let (Some(parameters), Some(state), Some(stencils), Some(control), Some(output)) = (
-        gpu_buffers.get(&wave.parameters),
-        gpu_buffers.get(&wave.state),
+    let (Some(stencils), Some(control), Some(output)) = (
         gpu_buffers.get(&probes.stencils),
         gpu_buffers.get(&probes.control),
         gpu_buffers.get(&probes.output),
     ) else {
         return;
     };
-    let bind_group = render_device.create_bind_group(
-        Some("wave line-probe bind group"),
-        &pipeline_cache.get_bind_group_layout(&pipeline.curve_probe_layout),
-        &BindGroupEntries::sequential((
-            parameters.buffer.as_entire_buffer_binding(),
-            state.buffer.as_entire_buffer_binding(),
-            stencils.buffer.as_entire_buffer_binding(),
-            control.buffer.as_entire_buffer_binding(),
-            output.buffer.as_entire_buffer_binding(),
-        )),
-    );
+    let bind_group = if probes.canonical {
+        let Some(canonical) = canonical_request
+            .as_ref()
+            .and_then(|request| request.buffer_handles())
+        else {
+            return;
+        };
+        let (Some(canonical_control), Some(state), Some(nodes)) = (
+            gpu_buffers.get(&canonical.control),
+            gpu_buffers.get(&canonical.state),
+            gpu_buffers.get(&canonical.nodes),
+        ) else {
+            return;
+        };
+        render_device.create_bind_group(
+            Some("canonical line-probe bind group"),
+            &pipeline_cache.get_bind_group_layout(&pipeline.canonical_curve_probe_layout),
+            &BindGroupEntries::sequential((
+                canonical_control.buffer.as_entire_buffer_binding(),
+                state.buffer.as_entire_buffer_binding(),
+                nodes.buffer.as_entire_buffer_binding(),
+                stencils.buffer.as_entire_buffer_binding(),
+                control.buffer.as_entire_buffer_binding(),
+                output.buffer.as_entire_buffer_binding(),
+            )),
+        )
+    } else {
+        let Some(wave) = &request.buffers else { return };
+        let (Some(parameters), Some(state)) = (
+            gpu_buffers.get(&wave.parameters),
+            gpu_buffers.get(&wave.state),
+        ) else {
+            return;
+        };
+        render_device.create_bind_group(
+            Some("wave line-probe bind group"),
+            &pipeline_cache.get_bind_group_layout(&pipeline.curve_probe_layout),
+            &BindGroupEntries::sequential((
+                parameters.buffer.as_entire_buffer_binding(),
+                state.buffer.as_entire_buffer_binding(),
+                stencils.buffer.as_entire_buffer_binding(),
+                control.buffer.as_entire_buffer_binding(),
+                output.buffer.as_entire_buffer_binding(),
+            )),
+        )
+    };
     commands.insert_resource(CurveProbeBindGroup {
         generation: request.generation,
         revision: request.curve_probe_revision,
@@ -3155,9 +4082,11 @@ fn prepare_curve_probe_bind_group(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_probe_bind_group(
     mut commands: Commands,
     request: Option<Res<WaveGpuRequest>>,
+    canonical_request: Option<Res<CanonicalGpuRequest>>,
     existing: Option<Res<ProbeBindGroup>>,
     pipeline: Res<WavePipeline>,
     pipeline_cache: Res<PipelineCache>,
@@ -3178,29 +4107,61 @@ fn prepare_probe_bind_group(
     }) {
         return;
     }
-    let Some(wave) = &request.buffers else {
-        return;
-    };
-    let (Some(parameters), Some(state), Some(stencils), Some(control), Some(output)) = (
-        gpu_buffers.get(&wave.parameters),
-        gpu_buffers.get(&wave.state),
+    let (Some(stencils), Some(control), Some(output)) = (
         gpu_buffers.get(&probes.stencils),
         gpu_buffers.get(&probes.control),
         gpu_buffers.get(&probes.output),
     ) else {
         return;
     };
-    let bind_group = render_device.create_bind_group(
-        Some("wave point-probe bind group"),
-        &pipeline_cache.get_bind_group_layout(&pipeline.probe_layout),
-        &BindGroupEntries::sequential((
-            parameters.buffer.as_entire_buffer_binding(),
-            state.buffer.as_entire_buffer_binding(),
-            stencils.buffer.as_entire_buffer_binding(),
-            control.buffer.as_entire_buffer_binding(),
-            output.buffer.as_entire_buffer_binding(),
-        )),
-    );
+    let bind_group = if probes.canonical {
+        let Some(canonical) = canonical_request
+            .as_ref()
+            .and_then(|request| request.buffer_handles())
+        else {
+            return;
+        };
+        let (Some(canonical_control), Some(state), Some(nodes)) = (
+            gpu_buffers.get(&canonical.control),
+            gpu_buffers.get(&canonical.state),
+            gpu_buffers.get(&canonical.nodes),
+        ) else {
+            return;
+        };
+        render_device.create_bind_group(
+            Some("canonical point-probe bind group"),
+            &pipeline_cache.get_bind_group_layout(&pipeline.canonical_probe_layout),
+            &BindGroupEntries::sequential((
+                canonical_control.buffer.as_entire_buffer_binding(),
+                state.buffer.as_entire_buffer_binding(),
+                nodes.buffer.as_entire_buffer_binding(),
+                stencils.buffer.as_entire_buffer_binding(),
+                control.buffer.as_entire_buffer_binding(),
+                output.buffer.as_entire_buffer_binding(),
+            )),
+        )
+    } else {
+        let Some(wave) = &request.buffers else {
+            return;
+        };
+        let (Some(parameters), Some(state)) = (
+            gpu_buffers.get(&wave.parameters),
+            gpu_buffers.get(&wave.state),
+        ) else {
+            return;
+        };
+        render_device.create_bind_group(
+            Some("wave point-probe bind group"),
+            &pipeline_cache.get_bind_group_layout(&pipeline.probe_layout),
+            &BindGroupEntries::sequential((
+                parameters.buffer.as_entire_buffer_binding(),
+                state.buffer.as_entire_buffer_binding(),
+                stencils.buffer.as_entire_buffer_binding(),
+                control.buffer.as_entire_buffer_binding(),
+                output.buffer.as_entire_buffer_binding(),
+            )),
+        )
+    };
     commands.insert_resource(ProbeBindGroup {
         generation: request.generation,
         revision: request.probe_revision,
@@ -4091,6 +5052,38 @@ mod tests {
         assert!(shader.contains("let poynting = select(0.0, abs(displacement) * transverse"));
     }
 
+    #[test]
+    fn canonical_probe_shaders_consume_direct_accepted_state() {
+        let point = include_str!("canonical_probe.wgsl");
+        assert!(point.contains("accepted_q(a.x) * nodes[a.x].mass_loss.y"));
+        assert!(point.contains("return select(value.xy, value.zw"));
+        assert!(point.contains("dot(flux, complement)"));
+        assert!(point.contains("orientation.x * primary.x"));
+        assert!(!point.contains("indicator_potential"));
+
+        let curve = include_str!("canonical_curve_probe.wgsl");
+        assert!(curve.contains("dot(flow, record.normal_stride_valid.xy)"));
+        assert!(curve.contains("control.clock_u32.w % stride"));
+
+        let area = include_str!("canonical_area_probe.wgsl");
+        assert!(area.contains("fn sample_area_elements"));
+        assert!(area.contains("fn reduce_area_probes"));
+        assert!(area.contains("weight * dot(complement, complement)"));
+        assert!(area.contains("total_energy / covered_area"));
+    }
+
+    #[test]
+    fn canonical_far_field_uses_primary_field_without_inverse_derivative_state() {
+        let shader = include_str!("canonical_far_field.wgsl");
+        assert!(shader.contains("accepted_q(a.x) * nodes[a.x].mass_loss.y"));
+        assert!(shader.contains("let rate = (primary - previous) / control.clock_f32.x;"));
+        assert!(
+            shader.contains("let normal_gradient = dot(gradient, stencil.position_normal.zw);")
+        );
+        assert!(shader.contains("sample.z - dot(normal, ray) * sample.y / wave_speed"));
+        assert!(!shader.contains("potential"));
+    }
+
     /// One envelope multiplies the whole source term, so a phased array's
     /// sources ease in together and the phases between them — which are what
     /// steer the beam — are untouched. A prescribed boundary load is left
@@ -4289,6 +5282,7 @@ mod tests {
     #[test]
     fn area_probe_upload_preserves_integrated_element_matrices() {
         let element = QuadraticAreaElement {
+            element: 0,
             nodes: [0, 1, 2, 3, 4, 5, 6],
             barycentric_vertices: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             barycentric_gradients: [
@@ -4626,6 +5620,8 @@ mod tests {
 
     fn far_field_input(shift: f64) -> FarFieldInput {
         let stencil = QuadraticPointStencil {
+            element: 0,
+            barycentric: [1.0, 0.0, 0.0],
             nodes: [0; 7],
             value_weights: [0.0; 7],
             gradient_weights: [Point2::default(); 7],
@@ -4760,6 +5756,9 @@ mod tests {
             include_str!("curve_probe.wgsl"),
             include_str!("area_probe.wgsl"),
             include_str!("far_field.wgsl"),
+            include_str!("canonical_curve_probe.wgsl"),
+            include_str!("canonical_area_probe.wgsl"),
+            include_str!("canonical_far_field.wgsl"),
         ] {
             assert!(!shader.contains("bitcast<f32>(0x7fc00000u)"));
         }

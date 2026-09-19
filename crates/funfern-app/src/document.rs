@@ -116,27 +116,18 @@ pub enum VectorOverlay {
 }
 
 impl VectorOverlay {
-    /// Modes that actually produce arrows for this physics skin. The mechanical
-    /// scalar field has no complementary transverse vector to reconstruct, so
-    /// only energy flow is offered there.
-    pub const fn choices(physics: PhysicsModel) -> &'static [Self] {
-        match physics {
-            PhysicsModel::Mechanical => &[Self::Off, Self::RelativeEnergyFlow],
-            PhysicsModel::Electromagnetic { .. } => &[
-                Self::Off,
-                Self::ComplementaryField,
-                Self::RelativeEnergyFlow,
-            ],
-        }
+    /// Every skin is a presentation of the same canonical primary and
+    /// complementary state, so both vector observables remain available.
+    pub const fn choices(_physics: PhysicsModel) -> &'static [Self] {
+        &[
+            Self::Off,
+            Self::ComplementaryField,
+            Self::RelativeEnergyFlow,
+        ]
     }
 
-    /// Maps a stored mode onto one this skin can draw. A scene saved in EM and
-    /// reopened as mechanical therefore shows energy flow instead of nothing.
-    pub const fn resolved(self, physics: PhysicsModel) -> Self {
-        match (self, physics) {
-            (Self::ComplementaryField, PhysicsModel::Mechanical) => Self::RelativeEnergyFlow,
-            _ => self,
-        }
+    pub const fn resolved(self, _physics: PhysicsModel) -> Self {
+        self
     }
 
     pub const fn label(self, physics: PhysicsModel) -> &'static str {
@@ -154,8 +145,7 @@ impl VectorOverlay {
                     polarization: ElectromagneticPolarization::Te,
                 },
             ) => "Electric field E",
-            // Unreachable: `resolved` turns this into energy flow first.
-            (Self::ComplementaryField, PhysicsModel::Mechanical) => "Energy flow",
+            (Self::ComplementaryField, PhysicsModel::Mechanical) => "In-plane field",
             (Self::RelativeEnergyFlow, PhysicsModel::Electromagnetic { .. }) => "Poynting flow",
             (Self::RelativeEnergyFlow, PhysicsModel::Mechanical) => "Energy flow",
         }

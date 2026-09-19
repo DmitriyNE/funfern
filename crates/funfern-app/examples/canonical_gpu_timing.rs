@@ -1,4 +1,4 @@
-//! Full render-graph validation/timing harness for the Stage 4 canonical GPU
+//! Full render-graph validation/timing harness for the production canonical GPU
 //! solver. This runs the same plugin, buffers, shader and atomic commit path as
 //! the application; it is not an isolated kernel benchmark.
 

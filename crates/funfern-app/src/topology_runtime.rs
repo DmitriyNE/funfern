@@ -151,6 +151,9 @@ pub struct PreparedTopology {
     pub bundle: Arc<AcceptedTopology>,
     pub mesh: Arc<TriMesh>,
     pub operator: Arc<QuadraticWaveOperator>,
+    pub canonical_operator: Arc<CanonicalWaveOperator>,
+    pub canonical_forcing: Arc<CanonicalForcing>,
+    pub canonical_transfer: Option<Arc<PreparedCanonicalTransfer>>,
     pub volume_sources: Arc<CompiledVolumeSources>,
     pub probes: Arc<[CompiledTopologyProbe]>,
     pub far_field: Option<Result<Arc<QuadraticFarFieldStencil>, String>>,
@@ -170,12 +173,22 @@ pub struct PreparedTopology {
     pub meshing: MeshingOptions,
 }
 
+#[derive(Clone, Debug)]
+pub struct PreparedCanonicalTransfer {
+    pub primary: Arc<CanonicalPrimaryTransferMap>,
+    pub complementary: Arc<CanonicalVectorTransferMap>,
+    pub thin_gap: Arc<CanonicalThinGapHistoryTransferMap>,
+    pub outgoing: Arc<CanonicalOutgoingNormalizedTransfer>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TopologyPreparationPhase {
     Repairing,
     Meshing,
     Assembling,
+    AssemblingCanonical,
     Transferring,
+    TransferringCanonical,
     CompilingSources,
     CompilingMeasurements,
     Ready,
@@ -188,7 +201,9 @@ impl TopologyPreparationPhase {
             Self::Repairing => "Repairing the mesh",
             Self::Meshing => "Mesh rebuilding",
             Self::Assembling => "Assembling wave operator",
+            Self::AssemblingCanonical => "Compiling canonical constitutive state",
             Self::Transferring => "Carrying the field across",
+            Self::TransferringCanonical => "Preparing canonical field transfer",
             Self::CompilingSources => "Compiling sources",
             Self::CompilingMeasurements => "Compiling probes",
             Self::Ready => "Ready for GPU upload",
@@ -255,10 +270,20 @@ pub struct TopologyPreparationJob {
     mesh: Option<Arc<TriMesh>>,
     assembly_job: Option<QuadraticAssemblyJob>,
     operator: Option<Arc<QuadraticWaveOperator>>,
+    canonical_assembly_job: Option<CanonicalAssemblyJob>,
+    canonical_operator: Option<Arc<CanonicalWaveOperator>>,
     transfer_job: Option<QuadraticTransferJob>,
     transfer: Option<Arc<QuadraticTransferMap>>,
     source_job: Option<VolumeSourceCompileJob>,
     volume_sources: Option<Arc<CompiledVolumeSources>>,
+    canonical_forcing: Option<Arc<CanonicalForcing>>,
+    canonical_primary_transfer: Option<Arc<CanonicalPrimaryTransferMap>>,
+    canonical_vector_job: Option<CanonicalVectorTransferJob>,
+    canonical_vector_transfer: Option<Arc<CanonicalVectorTransferMap>>,
+    canonical_gap_transfer: Option<Arc<CanonicalThinGapHistoryTransferMap>>,
+    canonical_outgoing_job: Option<CanonicalOutgoingNormalizedTransferJob>,
+    canonical_outgoing_transfer: Option<Arc<CanonicalOutgoingNormalizedTransfer>>,
+    canonical_transfer: Option<Arc<PreparedCanonicalTransfer>>,
     operator_reused: bool,
     adapted: bool,
     done: bool,
@@ -391,6 +416,8 @@ impl TopologyPreparationJob {
         let operator_reused =
             same_authored_scene && matches!(mesh_action, TopologyMeshUpdateAction::Reuse);
         let operator = operator_reused.then(|| previous.as_ref().unwrap().operator.clone());
+        let canonical_operator =
+            operator_reused.then(|| previous.as_ref().unwrap().canonical_operator.clone());
         let volume_sources =
             operator_reused.then(|| previous.as_ref().unwrap().volume_sources.clone());
         Ok(Self {
@@ -409,10 +436,20 @@ impl TopologyPreparationJob {
             mesh,
             operator,
             assembly_job: None,
+            canonical_assembly_job: None,
+            canonical_operator,
             transfer_job: None,
             transfer: None,
             source_job: None,
             volume_sources,
+            canonical_forcing: None,
+            canonical_primary_transfer: None,
+            canonical_vector_job: None,
+            canonical_vector_transfer: None,
+            canonical_gap_transfer: None,
+            canonical_outgoing_job: None,
+            canonical_outgoing_transfer: None,
+            canonical_transfer: None,
             operator_reused,
             adapted: false,
             done: false,
@@ -460,10 +497,20 @@ impl TopologyPreparationJob {
             mesh: Some(Arc::new(mesh)),
             operator: None,
             assembly_job: None,
+            canonical_assembly_job: None,
+            canonical_operator: None,
             transfer_job: None,
             transfer: None,
             source_job: None,
             volume_sources: None,
+            canonical_forcing: None,
+            canonical_primary_transfer: None,
+            canonical_vector_job: None,
+            canonical_vector_transfer: None,
+            canonical_gap_transfer: None,
+            canonical_outgoing_job: None,
+            canonical_outgoing_transfer: None,
+            canonical_transfer: None,
             operator_reused: false,
             adapted: true,
             done: false,
@@ -486,7 +533,13 @@ impl TopologyPreparationJob {
             job.phase()
         } else if let Some(job) = &self.assembly_job {
             job.phase()
+        } else if let Some(job) = &self.canonical_assembly_job {
+            job.phase()
         } else if let Some(job) = &self.transfer_job {
+            job.phase()
+        } else if let Some(job) = &self.canonical_vector_job {
+            job.phase()
+        } else if let Some(job) = &self.canonical_outgoing_job {
             job.phase()
         } else {
             self.phase.label()
@@ -626,25 +679,57 @@ impl TopologyPreparationJob {
                 Ok(()) => {}
                 Err(error) => return Some(Err(self.fail(error))),
             }
-            self.operator = Some(operator.clone());
-            if !self.fresh
-                && let Some(previous) = &self.previous
-            {
-                self.phase = TopologyPreparationPhase::Transferring;
-                self.transfer_job = Some(QuadraticTransferJob::new(
-                    previous.mesh.clone(),
-                    previous.operator.clone(),
-                    mesh,
-                    operator,
-                ));
-            } else if let Err(error) = self.start_sources(mesh, operator) {
-                return Some(Err(self.fail(error)));
-            }
+            self.operator = Some(operator);
         } else if self.transfer_job.is_none()
             && let Err(error) = self
                 .validate_point_source(self.mesh.as_ref().unwrap(), self.operator.as_ref().unwrap())
         {
             return Some(Err(self.fail(error)));
+        }
+
+        if self.canonical_operator.is_none() {
+            let mesh = self.mesh.as_ref().unwrap().clone();
+            let operator = self.operator.as_ref().unwrap().clone();
+            if self.canonical_assembly_job.is_none() {
+                self.phase = TopologyPreparationPhase::AssemblingCanonical;
+                match CanonicalAssemblyJob::new(
+                    mesh,
+                    operator,
+                    self.bundle.model(),
+                    self.bundle.token.document_revision,
+                ) {
+                    Ok(job) => self.canonical_assembly_job = Some(job),
+                    Err(error) => return Some(Err(self.fail(error.to_string()))),
+                }
+            }
+            let started = Instant::now();
+            let result = self
+                .canonical_assembly_job
+                .as_mut()
+                .unwrap()
+                .advance(budget);
+            self.timing.assembly_ms += elapsed_ms(started);
+            let result = result?;
+            self.canonical_assembly_job = None;
+            match result {
+                Ok(operator) => self.canonical_operator = Some(Arc::new(operator)),
+                Err(error) => return Some(Err(self.fail(error.to_string()))),
+            }
+        }
+
+        if !self.fresh
+            && !self.operator_reused
+            && self.transfer.is_none()
+            && self.transfer_job.is_none()
+        {
+            let previous = self.previous.as_ref().unwrap();
+            self.phase = TopologyPreparationPhase::Transferring;
+            self.transfer_job = Some(QuadraticTransferJob::new(
+                previous.mesh.clone(),
+                previous.operator.clone(),
+                self.mesh.as_ref().unwrap().clone(),
+                self.operator.as_ref().unwrap().clone(),
+            ));
         }
         if let Some(job) = &mut self.transfer_job {
             let started = Instant::now();
@@ -656,6 +741,9 @@ impl TopologyPreparationJob {
                 Ok(transfer) => self.transfer = Some(Arc::new(transfer)),
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             }
+        }
+
+        if self.volume_sources.is_none() && self.source_job.is_none() {
             let mesh = self.mesh.as_ref().unwrap().clone();
             let operator = self.operator.as_ref().unwrap().clone();
             if let Err(error) = self.start_sources(mesh, operator) {
@@ -673,6 +761,119 @@ impl TopologyPreparationJob {
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             }
         }
+
+        if self.canonical_forcing.is_none() {
+            let forcing = match compile_canonical_forcing(
+                self.mesh.as_ref().unwrap(),
+                self.operator.as_ref().unwrap(),
+                self.canonical_operator.as_ref().unwrap(),
+                self.volume_sources.as_ref().unwrap(),
+                &self.bundle.authored.volume_sources,
+                self.point_source,
+            ) {
+                Ok(forcing) => forcing,
+                Err(error) => return Some(Err(self.fail(error))),
+            };
+            self.canonical_forcing = Some(Arc::new(forcing));
+        }
+
+        if !self.fresh && self.canonical_transfer.is_none() {
+            self.phase = TopologyPreparationPhase::TransferringCanonical;
+            let interpolation = if let Some(transfer) = &self.transfer {
+                transfer.clone()
+            } else {
+                let previous = self.previous.as_ref().unwrap();
+                match QuadraticTransferMap::identity_on_mesh(
+                    self.mesh.as_ref().unwrap(),
+                    &previous.operator,
+                    self.operator.as_ref().unwrap(),
+                ) {
+                    Ok(map) => Arc::new(map),
+                    Err(error) => return Some(Err(self.fail(error.to_string()))),
+                }
+            };
+            let previous = self.previous.as_ref().unwrap();
+            if self.canonical_primary_transfer.is_none() {
+                let primary = CanonicalPrimaryTransferMap::prepare_with_meshes(
+                    &interpolation,
+                    &previous.mesh,
+                    &previous.canonical_operator,
+                    self.mesh.as_ref().unwrap(),
+                    self.canonical_operator.as_ref().unwrap(),
+                );
+                let primary = match primary {
+                    Ok(primary) => Arc::new(primary),
+                    Err(error) => return Some(Err(self.fail(error.to_string()))),
+                };
+                self.canonical_primary_transfer = Some(primary);
+                self.canonical_vector_job = Some(CanonicalVectorTransferJob::new(
+                    previous.mesh.clone(),
+                    previous.canonical_operator.clone(),
+                    self.mesh.as_ref().unwrap().clone(),
+                    self.canonical_operator.as_ref().unwrap().clone(),
+                ));
+                self.canonical_gap_transfer = match CanonicalThinGapHistoryTransferMap::prepare(
+                    previous.canonical_operator.thin_gap_samples(),
+                    self.canonical_operator.as_ref().unwrap().thin_gap_samples(),
+                ) {
+                    Ok(map) => Some(Arc::new(map)),
+                    Err(error) => return Some(Err(self.fail(error.to_string()))),
+                };
+                let outgoing = match CanonicalOutgoingHistoryTransferMap::prepare(
+                    &interpolation,
+                    &previous.canonical_operator,
+                    self.canonical_operator.as_ref().unwrap(),
+                ) {
+                    Ok(map) => Arc::new(map),
+                    Err(error) => return Some(Err(self.fail(error.to_string()))),
+                };
+                self.canonical_outgoing_job = Some(CanonicalOutgoingNormalizedTransferJob::new(
+                    outgoing,
+                    previous.canonical_operator.clone(),
+                    self.canonical_operator.as_ref().unwrap().clone(),
+                ));
+            }
+            if let Some(job) = &mut self.canonical_vector_job {
+                let started = Instant::now();
+                let result = job.advance(budget);
+                self.timing.transfer_ms += elapsed_ms(started);
+                if let Some(result) = result {
+                    self.canonical_vector_job = None;
+                    match result {
+                        Ok(map) => self.canonical_vector_transfer = Some(Arc::new(map)),
+                        Err(error) => return Some(Err(self.fail(error.to_string()))),
+                    }
+                }
+            }
+            if let Some(job) = &mut self.canonical_outgoing_job {
+                let started = Instant::now();
+                let result = job.advance(budget);
+                self.timing.transfer_ms += elapsed_ms(started);
+                if let Some(result) = result {
+                    self.canonical_outgoing_job = None;
+                    match result {
+                        Ok(map) => self.canonical_outgoing_transfer = Some(Arc::new(map)),
+                        Err(error) => return Some(Err(self.fail(error.to_string()))),
+                    }
+                }
+            }
+            if let (Some(primary), Some(complementary), Some(thin_gap), Some(outgoing)) = (
+                self.canonical_primary_transfer.clone(),
+                self.canonical_vector_transfer.clone(),
+                self.canonical_gap_transfer.clone(),
+                self.canonical_outgoing_transfer.clone(),
+            ) {
+                self.canonical_transfer = Some(Arc::new(PreparedCanonicalTransfer {
+                    primary,
+                    complementary,
+                    thin_gap,
+                    outgoing,
+                }));
+            } else {
+                return None;
+            }
+        }
+
         self.phase = TopologyPreparationPhase::CompilingMeasurements;
         let measurements_started = Instant::now();
         let mesh = self.mesh.as_ref().unwrap().clone();
@@ -701,6 +902,9 @@ impl TopologyPreparationJob {
             bundle: self.bundle.clone(),
             mesh,
             operator,
+            canonical_operator: self.canonical_operator.as_ref().unwrap().clone(),
+            canonical_forcing: self.canonical_forcing.as_ref().unwrap().clone(),
+            canonical_transfer: self.canonical_transfer.take(),
             volume_sources: self.volume_sources.take().unwrap(),
             probes: probes.into(),
             far_field,
@@ -980,6 +1184,36 @@ impl TopologyRuntime {
             });
         }
     }
+}
+
+fn compile_canonical_forcing(
+    mesh: &TriMesh,
+    quadratic: &QuadraticWaveOperator,
+    canonical: &CanonicalWaveOperator,
+    volume: &CompiledVolumeSources,
+    authored_volume: &[VolumeSource],
+    point: PointSource,
+) -> Result<CanonicalForcing, String> {
+    let mut forcing = CanonicalForcing::from_legacy_boundaries(canonical, quadratic, 0.0)
+        .map_err(|error| error.to_string())?;
+    let mut membership = vec![false; canonical.degrees_of_freedom()];
+    for (triangle, nodes) in mesh.triangles.iter().zip(canonical.element_nodes()) {
+        if triangle.region == point.region {
+            for node in nodes {
+                membership[*node as usize] = true;
+            }
+        }
+    }
+    forcing
+        .push_source(
+            CanonicalForcing::legacy_point_source(canonical, point, &membership, 0.0)
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    forcing
+        .extend_legacy_volume_slots(canonical, volume, authored_volume, 0.0)
+        .map_err(|error| error.to_string())?;
+    Ok(forcing)
 }
 
 fn compile_probes(

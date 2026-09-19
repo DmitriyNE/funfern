@@ -189,7 +189,7 @@ Inspection also found incomplete app literals in the GRIN example and `topology_
 
 ## 5. Implementation stages
 
-The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–5 are complete; the old production solver remains connected and Stage 6 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
+The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–6 are complete; the canonical solver is the shared production path and Stage 7 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
 
 ### Stage 0 — Close implementation contracts and establish acceptance cases
 
@@ -299,7 +299,7 @@ Exit: latest-state transfer, exact unchanged support/samples, bounded conservati
 
 ### Stage 6 — Port all consumers and switch production skins
 
-Status: next implementation boundary.
+Status: complete. See the [Stage 6 production-cutover report](funfern-material-laws-stage6-report.md).
 
 Port scalar/vector rendering, point/curve/area probes, discrete bulk-plus-boundary energy and flow, far-field eligibility/sampling, readback adapters and static-linear AMR. Derive synchronized scalar-equivalent estimator inputs and include thin-gap/outgoing/interface terms. Revalidate error normalization. Segment or convert probe history explicitly when its physical meaning changes.
 
@@ -308,6 +308,8 @@ Switch Mechanical/TM/TE to the same direct state. Remove inverse-derivative reco
 Exit: first release boundary. Supported existing linear scenes, both outgoing orders, curved/topology regressions, static tensors, live edits/handoff/skin toggles and all consumers pass. Actual-core steady cost, matched-accuracy throughput, responsiveness and memory meet agreed budgets. If a gate fails, report the specific tradeoff; do not silently downgrade boundaries or discard history.
 
 ### Stage 7 — Time-driven media and runtime switching
+
+Status: next implementation boundary.
 
 Implement stage-time coefficient evaluation on both physical sides, harmonic/smoothed-square/travelling drives, Switch stamping, phase anchors, ramp reversal and trajectory bounds. Sample travelling phase in actual material frames at nodes/quadrature. Validate reciprocal factors as reciprocal trajectories, not newly interpolated endpoints.
 
@@ -363,4 +365,4 @@ Fix new-fixture thresholds and target-device budgets before judging results. Tra
 
 Planning, correctness spikes, Stage 0 contracts, Stage 1 inert authoring, the Stage 2 linear CPU core, Stage 3 linear composition/reference transfer, the [Stage 4 f32 GPU core](funfern-material-laws-stage4-report.md) and the [Stage 5 latest-state handoff](funfern-material-laws-stage5-report.md) are complete. The selected design is fully reconciled in the [specification](funfern-material-laws-plan.md). The remaining tasks are explicit implementation-stage gates, not unresolved architecture alternatives.
 
-Start Stage 6 from the accepted Stage 5 generation/readback ownership rather than reconstructing scalar state or adding a second field transfer. Port rendering, probes, energy/flow/far-field, thin-gap diagnostics and static-linear AMR to synchronized `Q,b` plus physical histories, then cut all three skins over together only when their fixtures pass. Retain the old solver for comparison until that consumer boundary closes. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use the linear handoff result as a claim that curved radiation or nonlinear compositions already pass.
+Start Stage 7 from the accepted Stage 6 production state and its synchronized direct-state consumers. Add stage-time coefficient evaluation and runtime switching without reviving scalar reconstruction or a second skin-specific solver. Dynamic AMR, temporal work, exterior/boundary policy and event admission must close before their combinations become executable. The committed experiment artifacts retain both passing and expected-failing results; do not erase historical failures or use the linear cutover as a claim that curved radiation, driven media or nonlinear compositions already pass.

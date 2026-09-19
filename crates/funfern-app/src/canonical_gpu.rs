@@ -1,9 +1,6 @@
-//! Production-intended f32 layout and execution path for the canonical
-//! integrated-flux solver.
-//!
-//! Stage 4 deliberately lives beside the currently connected scalar GPU
-//! solver.  The old path remains the application path until transfer and every
-//! consumer have crossed their later gates.
+//! Production f32 layout and execution path for the canonical integrated-flux
+//! solver. Generation acceptance owns state, clock, physical histories and
+//! live events atomically; synchronized consumers record only accepted steps.
 
 use std::{
     borrow::Cow,
@@ -42,6 +39,11 @@ use funfern_core::{
     WaveError,
 };
 
+use crate::wave_gpu::{
+    AreaProbeBindGroup, CurveProbeBindGroup, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS,
+    FarFieldBindGroup, ProbeBindGroup, WaveGpuRequest, WavePipeline, probe_sample_due,
+};
+
 pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 2;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
 pub const CANONICAL_GPU_WORKGROUP_SIZE: u32 = 128;
@@ -57,6 +59,8 @@ const EVENT_MAINTENANCE: u32 = 4;
 const EVENT_SOURCE_PATCH: u32 = 5;
 const TRANSFER_LAYOUT_VERSION: u32 = 1;
 const TRANSFER_HEADER_WORDS: usize = 8;
+const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
+const DRIVE_INDEX_MASK: u32 = !DRIVE_TARGET_PARAMETERS;
 
 const _: () = assert!(CANONICAL_GPU_STORAGE_BINDINGS <= 8);
 
@@ -277,6 +281,84 @@ impl CanonicalGpuRuntimeTransfer {
                 .map(|drive| Some(drive as u32))
                 .collect(),
             runtime_serials: [0; 4],
+        })
+    }
+
+    /// Builds stable runtime ownership from the already prepared support map.
+    /// Component shares are geometric retained-support fractions, so a split
+    /// or merge does not depend on the instantaneous field being transferred.
+    pub fn from_primary_transfer(
+        source: &CanonicalWaveOperator,
+        target: &CanonicalWaveOperator,
+        source_forcing: &CanonicalForcing,
+        target_forcing: &CanonicalForcing,
+        primary: &CanonicalPrimaryTransferMap,
+        runtime_serials: [u32; 4],
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        let targets = primary.targets();
+        if targets.len() != target.degrees_of_freedom()
+            || primary.source_support().len() != source.degrees_of_freedom()
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "runtime ownership requires the generation's primary transfer map",
+            ));
+        }
+        let mut source_support = vec![0.0; source.component_count()];
+        for (support, component) in primary
+            .source_support()
+            .iter()
+            .zip(source.component_labels())
+        {
+            source_support[*component as usize] += support;
+        }
+        let mut retained = vec![vec![0.0; source.component_count()]; target.component_count()];
+        for row in &targets {
+            let target_component = row.target_component as usize;
+            for slot in 0..row.source_count as usize {
+                let source_node = row.source_nodes[slot] as usize;
+                let source_component = source.component_labels()[source_node] as usize;
+                retained[target_component][source_component] +=
+                    row.coefficients[slot] * primary.source_support()[source_node];
+            }
+        }
+        let components = retained
+            .into_iter()
+            .map(|by_source| CanonicalComponentTransfer {
+                sources: by_source
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(component, support)| {
+                        let total = source_support[component];
+                        (support > 1.0e-14 * total.max(1.0) && total > 0.0)
+                            .then_some((component as u32, (support / total).clamp(0.0, 1.0)))
+                    })
+                    .collect(),
+            })
+            .collect();
+        let prescribed_sources = targets
+            .iter()
+            .enumerate()
+            .map(|(target_node, row)| {
+                target_forcing.prescribed()[target_node]?;
+                (0..row.source_count as usize)
+                    .filter_map(|slot| {
+                        let source_node = row.source_nodes[slot];
+                        source_forcing.prescribed()[source_node as usize]
+                            .is_some()
+                            .then_some((source_node, row.coefficients[slot].abs()))
+                    })
+                    .max_by(|left, right| left.1.total_cmp(&right.1))
+                    .map(|(node, _)| node)
+            })
+            .collect();
+        let drive_sources = (0..target_forcing.sources().len())
+            .map(|drive| (drive < source_forcing.sources().len()).then_some(drive as u32))
+            .collect();
+        Ok(Self {
+            components,
+            prescribed_sources,
+            drive_sources,
+            runtime_serials,
         })
     }
 }
@@ -1202,7 +1284,7 @@ impl CanonicalGpuTransferPlan {
             .drive_sources
             .iter()
             .flatten()
-            .any(|drive| *drive as usize >= source_forcing.sources().len())
+            .any(|drive| (*drive & DRIVE_INDEX_MASK) as usize >= source_forcing.sources().len())
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "source-drive runtime correspondence is out of range",
@@ -1352,19 +1434,29 @@ impl CanonicalGpuTransferPlan {
         }
         let prescribed_offset = words.len();
         if target_forcing.prescribed().iter().any(Option::is_some) {
-            for mappings in runtime.prescribed_sources.chunks(4) {
+            for (chunk, mappings) in runtime.prescribed_sources.chunks(4).enumerate() {
                 let mut packed = [NO_INDEX; 4];
                 for (slot, mapping) in mappings.iter().enumerate() {
-                    packed[slot] = mapping.unwrap_or(NO_INDEX);
+                    let target = chunk * 4 + slot;
+                    packed[slot] = mapping.map_or(NO_INDEX, |source| {
+                        let edited = source_forcing.prescribed()[source as usize]
+                            != target_forcing.prescribed()[target];
+                        source | (u32::from(edited) * DRIVE_TARGET_PARAMETERS)
+                    });
                 }
                 words.push(transfer_word(packed[0], packed[1], packed[2], packed[3]));
             }
         }
         let drive_offset = words.len();
-        for mappings in runtime.drive_sources.chunks(4) {
+        for (chunk, mappings) in runtime.drive_sources.chunks(4).enumerate() {
             let mut packed = [NO_INDEX; 4];
             for (slot, mapping) in mappings.iter().enumerate() {
-                packed[slot] = mapping.unwrap_or(NO_INDEX);
+                let target = chunk * 4 + slot;
+                packed[slot] = mapping.map_or(NO_INDEX, |source| {
+                    let edited = source_forcing.sources()[source as usize].drive()
+                        != target_forcing.sources()[target].drive();
+                    source | (u32::from(edited) * DRIVE_TARGET_PARAMETERS)
+                });
             }
             words.push(transfer_word(packed[0], packed[1], packed[2], packed[3]));
         }
@@ -1842,17 +1934,17 @@ impl CanonicalGpuStats {
 }
 
 #[derive(Clone)]
-struct CanonicalGpuBufferHandles {
-    control: Handle<ShaderBuffer>,
-    status: Handle<ShaderBuffer>,
-    state: Handle<ShaderBuffer>,
-    nodes: Handle<ShaderBuffer>,
-    samples: Handle<ShaderBuffer>,
-    tables: Handle<ShaderBuffer>,
-    scratch: Handle<ShaderBuffer>,
-    boundary: Handle<ShaderBuffer>,
-    node_count: u32,
-    sample_count: u32,
+pub(crate) struct CanonicalGpuBufferHandles {
+    pub(crate) control: Handle<ShaderBuffer>,
+    pub(crate) status: Handle<ShaderBuffer>,
+    pub(crate) state: Handle<ShaderBuffer>,
+    pub(crate) nodes: Handle<ShaderBuffer>,
+    pub(crate) samples: Handle<ShaderBuffer>,
+    pub(crate) tables: Handle<ShaderBuffer>,
+    pub(crate) scratch: Handle<ShaderBuffer>,
+    pub(crate) boundary: Handle<ShaderBuffer>,
+    pub(crate) node_count: u32,
+    pub(crate) sample_count: u32,
     gap_count: u32,
     state_count: u32,
     scratch_count: u32,
@@ -2009,6 +2101,10 @@ fn add_canonical_buffers(
 }
 
 impl CanonicalGpuRequest {
+    pub(crate) fn buffer_handles(&self) -> Option<&CanonicalGpuBufferHandles> {
+        self.buffers.as_ref()
+    }
+
     pub fn install(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
@@ -2100,12 +2196,28 @@ impl CanonicalGpuRequest {
         self.desired_steps
     }
 
+    pub fn live_event_pending(&self) -> bool {
+        self.live_event.is_some()
+    }
+
     pub fn caught_up(&self) -> bool {
         self.stats.completed_steps() >= self.desired_steps || self.stats.failure() != 0
     }
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn ready(&self) -> bool {
+        self.buffers.is_some() && self.stats.status() == "ready" && self.stats.failure() == 0
+    }
+
+    pub fn failed(&self) -> bool {
+        self.stats.failure() != 0
     }
 
     pub fn manifest(&self) -> Option<&CanonicalGpuLayoutManifest> {
@@ -2326,8 +2438,14 @@ impl CanonicalGpuRequest {
 pub struct CanonicalGpuDisplay {
     pub generation: u64,
     pub primary_flux: Vec<f32>,
+    pub previous_primary_flux: Vec<f32>,
+    /// Accepted constitutive force cache. Thin-gap and boundary terms remain
+    /// separately owned physical contributions and are not folded into it.
+    pub constitutive_force: Vec<f32>,
     pub complementary_flux: Vec<[f32; 2]>,
+    pub previous_complementary_flux: Vec<[f32; 2]>,
     pub auxiliary: Vec<f32>,
+    pub previous_auxiliary: Vec<f32>,
     pub clock: Option<CanonicalGpuDisplayClock>,
     pub accounting: [f32; 8],
     pub readbacks: u64,
@@ -2486,6 +2604,14 @@ fn refresh_canonical_display(display: &mut CanonicalGpuDisplay) {
         .iter()
         .map(|word| if second { word.values.y } else { word.values.x })
         .collect();
+    display.previous_primary_flux = display.raw_state[..nodes]
+        .iter()
+        .map(|word| if second { word.values.x } else { word.values.y })
+        .collect();
+    display.constitutive_force = display.raw_state[..nodes]
+        .iter()
+        .map(|word| if second { word.values.w } else { word.values.z })
+        .collect();
     display.complementary_flux = display.raw_state[nodes..nodes + samples]
         .iter()
         .map(|word| {
@@ -2496,9 +2622,23 @@ fn refresh_canonical_display(display: &mut CanonicalGpuDisplay) {
             }
         })
         .collect();
+    display.previous_complementary_flux = display.raw_state[nodes..nodes + samples]
+        .iter()
+        .map(|word| {
+            if second {
+                [word.values.x, word.values.y]
+            } else {
+                [word.values.z, word.values.w]
+            }
+        })
+        .collect();
     display.auxiliary = display.raw_state[nodes + samples..]
         .iter()
         .map(|word| if second { word.values.y } else { word.values.x })
+        .collect();
+    display.previous_auxiliary = display.raw_state[nodes + samples..]
+        .iter()
+        .map(|word| if second { word.values.x } else { word.values.y })
         .collect();
 }
 
@@ -3227,11 +3367,18 @@ fn prepare_canonical_live_event_bind_group(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_canonical_wave(
     mut render_context: RenderContext,
     request: Option<Res<CanonicalGpuRequest>>,
     group: Option<ResMut<CanonicalBindGroup>>,
     live_group: Option<Res<CanonicalLiveEventBindGroup>>,
+    recorders: Option<Res<WaveGpuRequest>>,
+    probe_group: Option<Res<ProbeBindGroup>>,
+    curve_probe_group: Option<Res<CurveProbeBindGroup>>,
+    area_probe_group: Option<Res<AreaProbeBindGroup>>,
+    far_field_group: Option<Res<FarFieldBindGroup>>,
+    consumer_pipeline: Option<Res<WavePipeline>>,
     pipeline: Res<CanonicalPipeline>,
     pipeline_cache: Res<PipelineCache>,
 ) {
@@ -3384,8 +3531,74 @@ fn compute_canonical_wave(
             .fetch_add(event_dispatches, Ordering::Relaxed);
         pass.set_bind_group(0, &group.bind_group, &[]);
     }
+    let point_recorder = recorders.as_ref().and_then(|recorders| {
+        let consumer_pipeline = consumer_pipeline.as_ref()?;
+        let handles = recorders.probes.as_ref()?;
+        let bind_group = probe_group.as_ref()?;
+        (handles.canonical
+            && bind_group.generation == request.generation
+            && bind_group.revision == recorders.probe_revision)
+            .then(|| {
+                (
+                    handles,
+                    bind_group,
+                    pipeline_cache.get_compute_pipeline(consumer_pipeline.canonical_probe),
+                )
+            })
+    });
+    let curve_recorder = recorders.as_ref().and_then(|recorders| {
+        let consumer_pipeline = consumer_pipeline.as_ref()?;
+        let handles = recorders.curve_probes.as_ref()?;
+        let bind_group = curve_probe_group.as_ref()?;
+        (handles.canonical
+            && bind_group.generation == request.generation
+            && bind_group.revision == recorders.curve_probe_revision)
+            .then(|| {
+                (
+                    handles,
+                    bind_group,
+                    pipeline_cache.get_compute_pipeline(consumer_pipeline.canonical_curve_probe),
+                )
+            })
+    });
+    let area_recorder = recorders.as_ref().and_then(|recorders| {
+        let consumer_pipeline = consumer_pipeline.as_ref()?;
+        let handles = recorders.area_probes.as_ref()?;
+        let bind_group = area_probe_group.as_ref()?;
+        (handles.canonical
+            && bind_group.generation == request.generation
+            && bind_group.revision == recorders.area_probe_revision)
+            .then(|| {
+                (
+                    handles,
+                    bind_group,
+                    pipeline_cache
+                        .get_compute_pipeline(consumer_pipeline.canonical_area_probe_elements),
+                    pipeline_cache
+                        .get_compute_pipeline(consumer_pipeline.canonical_area_probe_reduce),
+                )
+            })
+    });
+    let far_recorder = recorders.as_ref().and_then(|recorders| {
+        let consumer_pipeline = consumer_pipeline.as_ref()?;
+        let handles = recorders.far_field.as_ref()?;
+        let bind_group = far_field_group.as_ref()?;
+        (handles.canonical
+            && bind_group.generation == request.generation
+            && bind_group.revision == recorders.far_field_revision)
+            .then(|| {
+                (
+                    handles,
+                    bind_group,
+                    pipeline_cache
+                        .get_compute_pipeline(consumer_pipeline.canonical_far_field_sample),
+                    pipeline_cache
+                        .get_compute_pipeline(consumer_pipeline.canonical_far_field_project),
+                )
+            })
+    });
     let mut rebases = 0_u64;
-    for _ in 0..pending {
+    for offset in 0..pending {
         if group.encoded_local_step.saturating_add(1) >= handles.rebase_step_limit {
             pass.set_pipeline(pipelines[22]);
             pass.dispatch_workgroups(
@@ -3442,6 +3655,48 @@ fn compute_canonical_wave(
         }
         pass.set_pipeline(pipelines[13]);
         pass.dispatch_workgroups(1, 1, 1);
+        let step_after = group.encoded_steps + offset + 1;
+        if let Some((handles, bind_group, Some(consumer))) = point_recorder
+            && probe_sample_due(step_after, handles.sample_stride)
+        {
+            pass.set_bind_group(0, &bind_group.bind_group, &[]);
+            pass.set_pipeline(consumer);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_bind_group(0, &group.bind_group, &[]);
+        }
+        if let Some((handles, bind_group, Some(consumer))) = curve_recorder
+            && handles
+                .sample_strides
+                .iter()
+                .any(|stride| probe_sample_due(step_after, *stride))
+        {
+            pass.set_bind_group(0, &bind_group.bind_group, &[]);
+            pass.set_pipeline(consumer);
+            pass.dispatch_workgroups(handles.point_count.div_ceil(64), 1, 1);
+            pass.set_bind_group(0, &group.bind_group, &[]);
+        }
+        if let Some((handles, bind_group, Some(elements), Some(reduce))) = area_recorder
+            && probe_sample_due(step_after, handles.sample_stride)
+        {
+            pass.set_bind_group(0, &bind_group.bind_group, &[]);
+            if handles.contribution_count > 0 {
+                pass.set_pipeline(elements);
+                pass.dispatch_workgroups(handles.contribution_count.div_ceil(64), 1, 1);
+            }
+            pass.set_pipeline(reduce);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_bind_group(0, &group.bind_group, &[]);
+        }
+        if let Some((handles, bind_group, Some(sample), Some(project))) = far_recorder
+            && probe_sample_due(step_after, handles.sample_stride)
+        {
+            pass.set_bind_group(0, &bind_group.bind_group, &[]);
+            pass.set_pipeline(sample);
+            pass.dispatch_workgroups((FAR_FIELD_CONTOUR_POINTS as u32).div_ceil(64), 1, 1);
+            pass.set_pipeline(project);
+            pass.dispatch_workgroups((FAR_FIELD_DIRECTIONS as u32).div_ceil(64), 1, 1);
+            pass.set_bind_group(0, &group.bind_group, &[]);
+        }
         group.encoded_local_step += 1;
     }
     if handles.needs_accounting && pending != 0 {
@@ -3783,6 +4038,77 @@ mod tests {
         assert_eq!(transfer.words[7].data.y, 1);
         assert_eq!(transfer.words[7].data.z, 1);
         assert_eq!(transfer.words[7].data.w, 1);
+    }
+
+    #[test]
+    fn edited_source_handoff_selects_target_parameters_with_old_runtime_anchor() {
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            17,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 17).unwrap();
+        let interpolation =
+            QuadraticTransferMap::identity_on_mesh(&mesh, &scalar, &scalar).unwrap();
+        let primary =
+            CanonicalPrimaryTransferMap::prepare(&interpolation, &operator, &operator).unwrap();
+        let vector =
+            CanonicalVectorTransferMap::prepare(&mesh, &operator, &mesh, &operator).unwrap();
+        let gap = CanonicalThinGapHistoryTransferMap::prepare(
+            operator.thin_gap_samples(),
+            operator.thin_gap_samples(),
+        )
+        .unwrap();
+        let outgoing =
+            CanonicalOutgoingHistoryTransferMap::prepare(&interpolation, &operator, &operator)
+                .unwrap();
+        let mut source = CanonicalForcing::none(&operator);
+        source
+            .push_source(
+                CanonicalSource::legacy(
+                    &operator,
+                    operator.primary_mass().to_vec(),
+                    TimeSignal::harmonic(0.0, 1.0, 2.0, 0.1),
+                    0.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut target = CanonicalForcing::none(&operator);
+        target
+            .push_source(
+                CanonicalSource::legacy(
+                    &operator,
+                    operator.primary_mass().to_vec(),
+                    TimeSignal::harmonic(0.2, 0.7, 3.0, 0.4),
+                    0.0,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let runtime =
+            CanonicalGpuRuntimeTransfer::identity(&operator, &operator, &source, &target).unwrap();
+        let transfer = CanonicalGpuTransferPlan::compile(
+            &operator, &operator, &source, &target, &primary, &vector, &gap, &outgoing, &runtime,
+        )
+        .unwrap();
+        let drive_offset = transfer.words[4].data.w as usize;
+        assert_eq!(transfer.words[drive_offset].data.x, DRIVE_TARGET_PARAMETERS);
+        let shader = include_str!("canonical_transfer_runtime.wgsl");
+        assert!(shader.contains("replace_drive(old_base + slot, new_base"));
+        assert!(shader.contains("runtime.y = bitcast<u32>(old_drive(old_base, old_elapsed));"));
+        assert!(shader.contains("start_drive(new_base, preparation_delta);"));
     }
 
     #[test]

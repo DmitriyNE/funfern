@@ -6,3 +6,4 @@ pub mod topology_examples;
 pub mod topology_persistence;
 pub mod topology_runtime;
 pub mod topology_viewport;
+pub mod wave_gpu;

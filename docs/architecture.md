@@ -350,52 +350,27 @@ from the previously open scene. Ordinary edits and AMR retain their normal
 field-preserving handoff.
 
 Physics is part of the undoable `Scene` and operator equality, while geometry
-equality deliberately ignores it. A physics or polarization change therefore
-reassembles coefficients on the existing mesh, clears transient probe and vector
-history, and initializes a fresh zero field. EM wall semantics are explicit at the
-scene layer: PEC is zero `E_z` for TM and zero normal `H_z` flux for TE; PMC is the
-dual. Assembly and the AMR boundary estimator resolve those semantic variants to
-the existing scalar Dirichlet or Neumann implementation before numerical work.
+equality deliberately ignores it. A physics or polarization change reassembles
+the presentation-specific coefficient roles on the existing mesh and transfers
+the live canonical state at the same accepted-step boundary as other generation
+edits. Point and line histories are cleared because their labels and physical
+meaning change; the evolving field is not reset. EM wall semantics are explicit
+at the scene layer: PEC is zero `E_z` for TM and zero normal `H_z` flux for TE;
+PMC is the dual. Assembly and the static-linear AMR adapter resolve those
+semantic variants to canonical prescribed/free ownership before numerical work.
 
-The scalar wave equation leaves the complementary EM field's integration constant
-unconstrained. A raw `integral(u dt)` therefore retains startup bias and stationary
-imprints after a source carrier moves. The GPU instead applies a critically damped,
-DC-rejecting inverse derivative beside each primary scalar DOF:
+The production solver stores integrated nodal primary flux `Q` and an independent
+two-component complementary flux `b` at six quadrature samples per element. A
+consumer obtains `u=Q/M`, evaluates the physical complementary field `c=B^-1 b`,
+and uses `orientation*u*R*c` for directed energy flow. Mechanical, TM and TE are
+presentations of this same state. No skin reconstructs a transverse field from a
+bulk potential or inverse derivative, so stationary complementary modes remain
+visible and physical across handoff.
 
-```text
-a_t + lambda a = u,    b_t + lambda b = a,    A = a - lambda b.
-```
-
-Its transfer function is `s/(s + lambda)^2`: it approaches `1/s` above the low
-cutoff, has zero response at DC, and makes stale integration constants decay. The
-initial implementation uses `lambda = 0.5`, or about `0.08 Hz`, and trapezoidally
-advances both stages with the centered wave step. Transfer interpolates both stages
-with displacement and velocity, so ordinary remeshing and AMR handoffs preserve the
-reconstructed oscillatory field. At display sample points the CPU evaluates the
-quadratic gradient of `A` and reconstructs `H = (-A_y, A_x)/mu` for TM or
-`E = (A_y, -A_x)/epsilon` for TE. The corresponding Poynting vector is
-`S = -k u grad(A)`, where `k` is `1/mu` for TM or `1/epsilon` for TE. Screen bins
-bound arrow density and an exponential display filter reduces jitter. Arrow
-exposure shares the automatic scale described below. Mechanical scenes retain the prior
-`-k u_t grad(u)` energy-flow display. These arrows derive the transverse field
-belonging to one scalar polarization and are not presented as a simultaneous
-full-vector Maxwell state.
-
-The field is drawn relative to each isolated subdomain's own rigid offset. The
-coupling graph of the operator's sparsity gives the components, and a component
-holding no prescribed node carries a free constant; that component's
-mass-weighted mean is removed for display, while a pinned one is left alone
-because its offset is part of its solution. Per component rather than globally,
-because a reflecting separator leaves halves whose constants drift
-independently. This is a display correction and not a projection of the solver's
-state: it is done once per rendered frame, which is also why it does not flicker
-against a domain whose offset is still ramping. Removing the ramp itself would
-mean removing momentum, which is real kinetic energy rather than a gauge choice;
-that is left to the reprojection work the engineering log carries. Because the
-correction hides what it removes, `Performance diagnostics` reports each
-subdomain's offset and drift rate, and the status marker is raised once when an
-offset passes `FIELD_OFFSET_WARNING` times the field's own scale — the point past
-which single precision stops carrying both.
+The accepted primary field is drawn directly, including a real free-component
+constant. There is no display-only mean subtraction or hidden gauge correction.
+The paired grid-scale filter is an explicit accepted-state event at its exact
+cadence boundary; it is not a presentation transform.
 
 Every source in a scene is eased in by one shared smooth envelope spanning
 `SOURCE_RAMP_PERIODS` periods of the slowest oscillating source. A sine started
@@ -966,7 +941,38 @@ The current bridge search is deliberately simple and deterministic. Difficult
 valid arrangements may return a topology or capacity error rather than attempting
 unbounded recovery.
 
-## Initial evolution model
+## Production canonical evolution model
+
+The production linear core advances direct physical state
+
+```text
+Qdot = -orientation C^T W J b + integrated sources
+bdot =  orientation C u,                 u = Q / M
+```
+
+with endpoint/midpoint kick-drift-kick composition. Fixed primary and
+complementary loss, prescribed exchange, thin-gap jump history, first-order
+outgoing impedance and the passive nonlocal three-state second-order boundary all
+participate in the same accepted/candidate transaction. The paired grid filter,
+pulses, maintenance and linear-law events use that global acceptance boundary as
+well. A rejected step or event leaves accepted physical state and its clock
+unchanged.
+
+The GPU manifest stays within eight storage bindings and owns explicit accepted
+and candidate lanes for `Q`, `b`, physical auxiliaries, force caches, energy
+accounting and the bounded epoch clock. Every topology/material generation is
+prepared while the current one evolves, maps the latest accepted direct state and
+physical histories on GPU, validates the complete target, then switches all
+resources together. The [material-law Stage 4](funfern-material-laws-stage4-report.md),
+[Stage 5](funfern-material-laws-stage5-report.md) and
+[Stage 6](funfern-material-laws-stage6-report.md) reports contain the equations,
+layouts, transfer contracts and measured acceptance results.
+
+## Legacy scalar evolution model
+
+The following centered scalar formulation is retained as a numerical comparison
+path and as historical context for older fixtures. It is not selected by any
+production skin after the canonical Stage 6 cutover.
 
 Use a dimensionless scalar model
 
@@ -1018,28 +1024,25 @@ fixed-size GPU signal record with reserved space for later waveform parameters;
 the volume signal table shares the existing forcing buffer. No second wgpu device
 or extra storage binding is needed.
 
-Point probes compile to seven-node enriched-quadratic interpolation stencils with
-separate gradient weights. A small compute pipeline samples the centered primary
-field, its rate, and its reconstructed transverse potential at uniform solver-step
-intervals. Mechanical readouts expose displacement, velocity, and
-`rho v²/2 + k |grad u|²/2`. EM readouts expose signed `E_z` or `H_z`, the
-transverse magnitude `k |grad A|`, Poynting magnitude `|u| k |grad A|`, and the
-physical energy density `(m u² + k |grad A|²)/2`. It writes a bounded time-stamped ring
-through a separate five-binding layout, preserving the eight-storage-binding limit
-of the wave pipeline. Host history survives ordinary remesh and AMR handoffs;
-stencils are rebuilt against each committed operator. Reset and fresh scene loads
-clear samples. Locations on duplicated or material-interface traces are inactive
-until moved away because their pointwise gradient or field side is ambiguous.
+Point probes compile seven-node primary interpolation plus the six independent
+complementary samples of the containing element. A dedicated canonical compute
+pipeline samples `u=Q/M`, its accepted endpoint rate, `c=B^-1 b`, canonical energy
+density and `orientation*u*R*c` flow at uniform accepted-step intervals. Mechanical
+and EM skins expose the same quantities with presentation-appropriate names. The
+bounded time-stamped ring has its own portable layout. Host history survives an
+ordinary remesh/AMR handoff only when probe identity, skin and canonical semantics
+still match; skin changes, reset and fresh scene loads clear it. Locations on
+duplicated or material-interface traces are inactive until moved away because
+their pointwise physical side is ambiguous.
 
 Straight line and geometry-attached boundary probes use their own bounded
 five-binding compute recorder. Sampling
 presets pair 32/64/128 uniformly spaced enriched-quadratic stencils with 30/60/120
 samples per simulated second; all line probes share a 512-point document budget and
-a 64-frame GPU ring. Each valid point records the primary field, transverse
-magnitude, local energy density, and directed flux. Mechanical flux is
-`-k u_t grad(u) dot n`; EM flux is the normal Poynting component
-`-k u grad(A) dot n`, where `n` is the left normal of the ordered start-to-end
-segment for free lines. Boundary probes compile directly from
+a 64-frame GPU ring. Each valid point records primary field/rate, complementary
+magnitude, local canonical energy density and directed flow. Normal flow is
+`orientation*u*(R c) dot n`, where `n` is the left normal of the ordered
+start-to-end segment for free lines. Boundary probes compile directly from
 mesh boundary labels and parameter intervals, select one explicit physical trace,
 and carry an outward normal per sample. They store a contiguous spline-span run,
 follow topology edits by best-overlap remapping, and retain their probe ID through
@@ -1060,17 +1063,17 @@ vertical time axis.
 Area probes compile either a free disk or one stable material region into compact
 clipped element contributions. Region targets integrate complete mesh triangles;
 disk targets clip each triangle against a bounded, world-space approximation of the
-circle before applying a degree-six triangle rule. Each clipped quadratic element
-is uploaded as preintegrated field, symmetric mass, and symmetric stiffness weights.
-A first compute dispatch evaluates its primary-field integral, squared-field
-integral, transverse-field squared integral, energy, and area; a second dispatch
-reduces the probe's contiguous contributions to
+circle before applying a degree-six triangle rule. Each contribution uploads the
+canonical primary and six-sample complementary interpolation required by the shared
+physical quadrature. A first compute dispatch evaluates its primary integral/RMS,
+complementary-field RMS, canonical energy and area; a second dispatch reduces the
+probe's contiguous contributions to
 one compact ring record. Readback size therefore depends on the 16-probe, 2048-frame
 ring rather than mesh density. The recorder runs at most 120 samples per simulated
 second and limits one compiled set to 200,000 element contributions. CPU and GPU
 paths report mean and RMS primary field, mean energy density, total energy, covered
-area, and geometric coverage. EM records additionally report RMS transverse-field
-magnitude. Definitions and host histories survive ordinary
+area, geometric coverage and RMS in-plane complementary-field magnitude.
+Definitions and host histories survive ordinary
 solver handoffs; stencils rebuild for each committed mesh.
 
 The singleton far-field monitor derives a counterclockwise rectangular contour from
@@ -1085,7 +1088,8 @@ contour. Spatial or driven materials remain valid in fully enclosed faces. The
 legacy path checks adaptively subdivided periodic and open spline traces with the
 same fixed world-space margin. Both paths deliberately ignore control polygons
 because their hull may extend beyond a fully enclosed curve.
-For exterior speed `c`, the GPU records `u`, `u_t`, and `grad(u) dot n` at 60
+For exterior speed `c`, the canonical GPU records direct `u=Q/M`, its accepted
+backward endpoint rate, and `grad(u) dot n` at 60
 samples per simulated second. A second compute dispatch evaluates 96 directions
 with temporal interpolation of the retarded contour data and the directional
 Huygens integrand `grad(u) dot n - (n dot d) u_t / c`. The observation timestamp is
@@ -1142,10 +1146,9 @@ The production application now uses this enriched quadratic operator at parent
 h=0.08 by default. The CSR gather evolution is independent of element degree; GPU
 node data includes the parent vertices, shared edge midpoints, and element bubble
 centroids. Field display splits each parent triangle into six visual triangles so
-all seven coefficients contribute. Transaction transfer locates every new node in
-an old parent triangle and applies its seven enriched basis values to displacement
-and velocity. Source velocity is reconstructed once per old DOF and cached before
-the interpolation gather, avoiding repeated old-operator rows. Ordinary
+all seven coefficients contribute. Canonical transaction transfer locates target
+primary support in source parent triangles for bounded conservative `Q` mapping,
+and reconstructs the six complementary samples in physical coordinates. Ordinary
 higher-degree triangular Lagrange bases must not inherit P1 lumping. Report mesh
 preparation, operator preparation, display time, and stepping throughput separately,
 with DOFs, memory, timestep, and phase/amplitude error.
@@ -1168,15 +1171,16 @@ a scene can afford falls short instead of running away. The reached rate is
 reported beside the ceiling, read from a held best rather than the raw windowed
 measurement, because that measurement dips to about three quarters whenever a
 handoff withholds stepping inside its window; comparing it directly would report
-a shortfall on scenes that are keeping up perfectly well. Pulse injection modifies both stored levels equally,
-giving zero added velocity; it remains an initial-condition action rather than a
-time signal. The point source is a Gaussian nodal acceleration multiplied by its
-shared time signal. Its default frequency is 2.5 cycles per dimensionless time,
-corresponding to wavelength 0.4 at wave speed one.
+a shortfall on scenes that are keeping up perfectly well. Pulse injection is an
+accepted `Q` increment and remains an initial-condition action rather than a time
+signal. Version-22 point and volume sources author acceleration waveforms; the
+canonical forcing path uses their zero-initial-rate analytic antiderivative and
+the immutable generation reference mass. The default frequency is 2.5 cycles per
+dimensionless time, corresponding to wavelength 0.4 at wave speed one.
 
-The old solver keeps running while a replacement mesh is prepared. Invalid drafts
-do not alter the active solver. Reset is explicit; accepted geometry edits carry
-the field forward through the transaction lifecycle below.
+The accepted canonical generation keeps running while a replacement is prepared.
+Invalid drafts do not alter it. Reset is explicit; accepted geometry edits carry
+the direct field and physical histories through the transaction lifecycle below.
 
 ## Transaction lifecycle
 
@@ -1184,35 +1188,35 @@ The implementation maintains an accepted simulation revision, at most one active
 candidate, and the latest requested geometry revision.
 
 1. Capture a candidate request and its accepted source-discretization revision.
-2. Prepare geometry, mesh, connectivity, operators, boundary labels, transfer map,
-   and timestep under a bounded work budget. Continue evolution on the old system.
+2. Prepare geometry, mesh, connectivity, scalar comparison and canonical operators,
+   boundary labels, direct-state/history transfer maps, forcing and timestep under
+   a bounded work budget. Continue evolution on the accepted generation.
 3. Validate the candidate. Preparation errors discard the candidate, not the
    accepted simulation.
-4. At a complete timestep boundary, verify the transfer's source revision is still
-   current and apply it to the latest GPU state.
+4. At a complete timestep boundary, verify the transfer's source generation is
+   still current and apply it to the latest accepted GPU `Q,b` and physical history.
 5. Initialize or transfer auxiliary state as specified, enforce constraints, and
    validate the resulting state before activating it. Preserve old buffers until
    the candidate can safely become active.
 6. Switch all accepted resources together, then schedule the latest outstanding
    request if necessary.
 
-Candidate mesh construction, operator assembly, and the spatial transfer map are
-all resumable and yield under the frame's step budget; assembly steps one
-triangle at a time and the transfer one source triangle or target node at a
-time. Probe and far-field compilation still run inside one slice, which measured
-at a fraction of a millisecond. The old solver continues until all previously requested
-steps have been encoded. The application then pauses scheduling briefly, dispatches
-the transfer, and waits for a generation-tagged finite GPU readback before switching
-mesh, operator, timestep, and displayed field together. A shader failure restores
-the retained old buffers.
+Candidate mesh construction, scalar/canonical operator assembly, and scalar/vector/
+physical-history transfer maps are resumable and yield under the frame's work
+budget. Probe and far-field compilation remain bounded generation work. The
+accepted canonical generation continues until all previously requested steps have
+been encoded. The application then pauses scheduling, dispatches transfer and
+validation, and waits for one global accepted-generation commit before switching
+mesh, operators, timestep, recorders and displayed state together. A rejected
+candidate leaves the retained accepted buffers active.
 
-The old mesh/operators remain fixed during candidate preparation; only the old
-state evolves. Transfer maps target the source discretization, not a captured
-field snapshot. For enriched quadratic triangles, map every new solution node to an
-old parent triangle on the CPU, then evaluate that triangle's seven basis functions.
-The CPU lookup uses a uniform spatial bin index rather than testing every old
-triangle for every new node. Keep other discretizations free to provide different
-transfer operations.
+The source mesh/operators remain fixed during candidate preparation; only their
+state evolves. Transfer maps target that discretization, not a captured field
+snapshot. Primary `Q` uses support-aware conservative seven-node interpolation and
+bounded component correction. Complementary `b` reconstructs six physical-coordinate
+samples locally. Thin-gap and outgoing maps transfer physical jump/trace histories,
+not modal indices. The CPU locator uses a uniform spatial bin index rather than
+testing every source triangle for every target node.
 
 Coalesce pointer events. Do not restart all preparation on every event: useful
 intermediate shapes may commit while a newer request waits. Obsolete or invalid
@@ -1221,15 +1225,13 @@ latency is visible and understandable.
 
 ## State transfer and stability
 
-Transfer both the field and its time derivative (or equivalent complete integrator
-state). Respect time staggering; changing the timestep must not reinterpret an old
-half-step state as a new one. Boundary auxiliary fields need an explicit policy.
-
-Enriched quadratic interpolation does not conserve energy. A target node maps only
-through an old triangle that contains it, so transfer never crosses an excluded
-obstacle. Nodes newly exposed by a shrinking or moved obstacle start with zero
-displacement and velocity. Mild local smoothing is a possible response to
-edit-induced bursts, not a substitute for stable stepping.
+Transfer integrated primary flux, independent complementary flux, physical boundary
+histories, forcing runtime anchors, accounting and the exact accepted clock. Respect
+time staggering; changing the timestep cannot reinterpret endpoint data. A target
+node maps only through source support that contains it, so transfer does not cross
+an excluded obstacle. Bounded local extension supplies new connected support;
+disconnected new islands start at zero. Transfer is deliberately local and bounded,
+not a claim of exact global energy conservation.
 
 Legacy transfer for closed regions respects topological connectivity. Regions
 joined through material interfaces form one transferable component, while a
@@ -1250,22 +1252,12 @@ a transmitting face split inherit the old field. Pulse and continuous source
 stencils separately use shortest paths through the cut finite-element graph, so
 they can reach the opposite bank only by travelling around a free tip.
 
-The hard zero policy is intentionally temporary. When newly exposed nodes meet a
-nonzero retained field, it creates a steep artificial front and injects broadband
-wave content. A future commit pass should construct a narrow transition band around
-the exposed region and smooth or taper both displacement and velocity there while
-leaving established nodes outside that band unchanged. The pass needs a bounded
-work budget and diagnostics for its energy and spectral effect; it must not silently
-renormalize the whole field.
-
-For the centered two-level scheme, the first GPU transfer dispatch reconstructs
-current velocity once per old DOF from previous/current displacement, the old
-operator, damping, forcing, and timestep. It stores velocity in the old state's
-otherwise disposable scratch component. A second dispatch maps current displacement
-and velocity with seven basis weights. A third applies the new operator and forcing
-to initialize the new previous displacement consistently with the new timestep.
-The exact GPU clock is copied at commit, so a point source retains its phase.
-Every pipeline stays within WebGPU's portable eight-storage-buffer-per-stage limit.
+GPU transfer reads the latest accepted source lanes, maps `Q,b` and physical
+auxiliaries, rebuilds target force caches and prescribed ownership, validates the
+whole candidate, then commits one generation serial. Source and prescribed edits
+install target authored parameters while preserving accepted runtime anchors where
+the contract requires continuity. Every transfer/evolution pipeline stays within
+WebGPU's portable eight-storage-buffer-per-stage limit.
 
 Validate finite values, positive areas/masses, operator consistency, and admissible
 timesteps. State magnitude guards and recovery behavior can be added based on
@@ -1343,26 +1335,24 @@ one-versus-two-element adjacency, and matching subdivisions for paired separated
 traces. A one-sided hole boundary has no artificial partner.
 
 Geometry revision identifies the accepted scene, while mesh revision identifies a
-particular discretization of it. Wave operators and linear/quadratic transfer maps
-validate both. A successful adaptation assembles a candidate operator, prepares a
-quadratic transfer from the still-running source mesh, and commits mesh, operator,
-state, timestep, and lineage together after the tagged GPU handoff. The target field
-is transient and is not serialized. The application derives it automatically from
-the live quadratic solution. The existing GPU state readback uses spare auxiliary
-lanes to carry centered displacement, velocity, and acceleration at one explicit
-time level; this avoids another buffer or readback. The core estimator combines
-material-aware recovered flux defects, a strong interior equation residual with the
-volume source removed, interior flux jumps, and physical-boundary residuals.
-Reflecting and prescribed Neumann faces measure normal-flux error. First-order
-impedance faces also include boundary velocity. Second-order radiation faces add
-the tangential second derivative of their auxiliary memory. The host reconstructs
-that memory at the centered indicator time from the post-step auxiliary readback,
-`psi(t) = psi(t + dt) - dt (u(t) + u(t + dt)) / 2`, so the boundary law is evaluated
-at one time level without another GPU transfer. Thin-gap faces add their paired
-trace spring residual on both sides. Prescribed Dirichlet mismatch is reported as a
-diagnostic but does not change the size target because strong elimination already
-enforces those nodal values. Recovery never averages across a material region or a
-duplicated baffle/wall trace.
+particular discretization of it. Scalar comparison and canonical operators plus
+their transfer maps validate both. A successful adaptation prepares a candidate
+canonical generation from the still-running source mesh and commits mesh,
+operators, direct state, physical history, timestep and lineage together after the
+tagged GPU handoff. The target field is transient and is not serialized.
+
+For a static-linear generation, synchronized canonical readback supplies `u=Q/M`,
+accepted endpoint rate, acceleration and independent `b`. The established scalar
+spatial estimator retains recovered-flux, strong interior, interface-jump and
+ordinary boundary terms, with primary loss included in the acceleration adapter.
+A canonical supplement adds direct primary/complementary energy normalization,
+the complementary curl/half-loss endpoint defect, and thin-gap/outgoing endpoint
+defects plus their stored boundary energy. Those residuals are distributed to the
+adjacent elements; retired scalar gap and second-order-memory terms are disabled
+when the supplement is present. Prescribed mismatch remains a diagnostic because
+strong ownership already enforces it. Recovery never averages across a material
+region or duplicated baffle/wall trace. Time-driven and nonlinear generations do
+not use this adapter until their residual/work contracts are derived.
 
 The relative indicator maps error to local edge length, caps that length by the
 shortest wavelength of every active time-varying point, volume, or boundary drive, and grades
@@ -1437,46 +1427,43 @@ energy. These measurements include finite-beam bandwidth, diffraction, spatial
 discretization, and time integration, so the plane-wave values are context rather
 than exact expected outputs.
 
-The implemented higher-order option is the second-order Engquist-Majda rational
+The production higher-order option is the passive three-state-per-mode rational
 condition
 
 ```text
-∂n u = -u_t/c + (c/2) ∂t^-1 ∂ss u,    ψ_t = u.
+d = sqrt(7/8) c |k_tau|
+Y(s)/Y0 = 1 + (6d/7)/s - (8d/7)/(s+d) + (2d/7)/(s+2d).
 ```
 
-With material stiffness `k`, its semidiscrete weak equation is
+For each normalized trace mode it stores energy-normalized forms of three states
 
 ```text
-M u_tt + K u + CΓ u_t + (k c/2) KΓ ψ = f.
+xdot = -d diag(0,1,2) x + sqrt(d) [1,1,1]^T w
+j = w + sqrt(d) [6/7,-8/7,2/7] x.
 ```
 
-`KΓ` is the one-dimensional tangential stiffness assembled on the quadratic outer
-edges. In endpoint/endpoint/midpoint order its local matrix is
-`[[7,1,-8],[1,7,-8],[-8,-8,16]]/(3L)`. It is symmetric, positive semidefinite, and
-annihilates constants. The global outer-corner DOF is shared by both incident
-sides, so their tangential terms couple at the corner instead of evolving two
-unrelated endpoint states. The added stored energy is
-`ψᵀ (k c/2 KΓ) ψ / 2`.
+The trace graph diagonalizes the normalized tangential stiffness, applies the
+three-state response independently per mode and transforms the flux back to the
+physical trace. Stored variables `z=H^(1/2)x` have energy `|z|^2/2`; the prepared
+positive storage matrix gives an explicit passive bulk-plus-boundary balance.
+Zero tangential modes reduce exactly to first order. The corrected implementation
+uses force-coupled implicit midpoint boundary kicks around the explicit interior
+drift, rather than a separate boundary-only split.
 
-The centered displacement step reads `ψ[n]`; after predicting `u[n+1]`, a
-trapezoidal update advances `ψ` by `dt (u[n] + u[n+1]) / 2` on DOFs assigned a
-second-order condition. CPU and WGSL use the same update. The GPU packs interior and boundary
-coefficients together, keeping a single CSR gather. At the production timestep,
-a 10,000-step regression remains finite and decays.
+This is a genuinely nonlocal trace operation. Disconnected trace components are
+prepared separately, while corners share the assembled trace graph. Generation
+handoff maps physical trace histories and then composes the target modal basis;
+it never interpolates modal indices. Prescribed trace intersections use a cached
+constrained factor and essential ownership wins at mixed junctions.
 
-A geometry transaction with an unchanged auxiliary boundary layout interpolates
-`ψ` with the same quadratic map used for displacement and velocity. A boundary-law
-change clears auxiliary memory conservatively; unchanged same-mesh settings still
-bypass spatial point location. The tangential operator is assembled only on spans
-assigned the second-order law, and essential values take precedence at mixed
-junctions.
-
-The rational form follows the [original Engquist-Majda absorbing-boundary
-construction](https://doi.org/10.1090/S0025-5718-1977-0436612-4). Further
-Hagstrom-Warburton orders remain candidates, but their finite-element realization
-must retain symmetric operators suitable for the explicit solver; see the
-[symmetric FEM formulation](https://doi.org/10.1016/j.cma.2024.117579) and the
-[complete radiation-condition hierarchy](https://doi.org/10.1137/090745477).
+The candidate retains the quadratic angular expansion of the old Engquist-Majda
+condition but trades some planar reflection accuracy for passivity and robustness.
+On curved/corner traces the graph realization is passive, not an exact exterior
+DtN map. The [auxiliary derivation](funfern-boundary-auxiliary-spike.md) and
+[corrected scattering study](funfern-boundary-scattering-spike.md) document the
+energy proof, reflection tradeoff and rejected split. Higher-order CRBC or
+shape-specific DtN variants remain future work behind this power-conjugate
+boundary interface.
 
 IGA follows the interior-region, assigned-boundary, and expanded spline-editing
 product work. Start with an untrimmed single patch. Boundary splines alone do not

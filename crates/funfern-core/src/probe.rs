@@ -114,6 +114,11 @@ impl ProbeModel<'_> {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QuadraticPointStencil {
+    /// Parent quadratic element. Canonical consumers address the six
+    /// independent complementary samples through this stable local owner.
+    pub element: u32,
+    /// Parent-element coordinates of the physical sample point.
+    pub barycentric: [f64; 3],
     pub nodes: [u32; 7],
     pub value_weights: [f64; 7],
     pub gradient_weights: [Point2; 7],
@@ -252,6 +257,8 @@ pub enum AreaProbeShape {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QuadraticAreaElement {
+    /// Parent quadratic element for canonical complementary-sample lookup.
+    pub element: u32,
     pub nodes: [u32; 7],
     /// Vertices of the clipped integration triangle in parent-element coordinates.
     pub barycentric_vertices: [[f64; 3]; 3],
@@ -511,6 +518,8 @@ impl QuadraticPointStencil {
             .get(triangle_index)
             .ok_or(PointProbeError::InvalidMesh)?;
         Ok(Self {
+            element: triangle_index as u32,
+            barycentric,
             nodes,
             value_weights: enriched_quadratic_basis(barycentric),
             gradient_weights: enriched_quadratic_basis_gradients(barycentric, gradients),
@@ -683,6 +692,7 @@ impl QuadraticAreaStencil {
                         .map_err(|_| AreaProbeError::InvalidMesh)?;
                 }
                 elements.push(QuadraticAreaElement {
+                    element: triangle_index as u32,
                     nodes,
                     barycentric_vertices,
                     barycentric_gradients: gradients,

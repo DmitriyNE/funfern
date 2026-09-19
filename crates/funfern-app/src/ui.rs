@@ -1,5 +1,9 @@
 #![allow(clippy::collapsible_if)]
 
+use crate::canonical_gpu::{
+    CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuHandoffOutcome, CanonicalGpuLiveEvent,
+    CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuRuntimeTransfer, CanonicalGpuTransferPlan,
+};
 use crate::files::{self, FileEvent, SaveKind};
 use crate::material_overlay::{
     MaterialOverlay, MaterialOverlayJob, MaterialOverlaySnapshot, MaterialProperty, OverlayKey,
@@ -9,8 +13,8 @@ use crate::recording::{self, DestinationRequest, RecordingEvent, RecordingSpec, 
 use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, AreaProbeRecord, CurveProbeDisplay, CurveProbeInput,
     CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldDisplay, FarFieldHandoff, FarFieldInput,
-    FarFieldRecord, MAX_STEPS_PER_FRAME, PointProbeRecord, ProbeDisplay, PulseSettings,
-    RecorderContext, RecorderHistory, WaveDisplay, WaveGpuRequest, WaveTransfer,
+    FarFieldRecord, MAX_STEPS_PER_FRAME, PointProbeRecord, ProbeDisplay, RecorderContext,
+    RecorderHistory, WaveDisplay, WaveGpuRequest,
 };
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -436,8 +440,8 @@ impl LineProbeQuantity {
         }
     }
 
-    const fn applies(self, physics: PhysicsModel) -> bool {
-        !matches!(self, Self::Transverse) || matches!(physics, PhysicsModel::Electromagnetic { .. })
+    const fn applies(self, _physics: PhysicsModel) -> bool {
+        true
     }
 
     /// Whether the row is drawn from the trailing mean of the recorded flux
@@ -483,6 +487,7 @@ struct ProbeViewState {
     span: f64,
     field: bool,
     secondary_field: bool,
+    transverse_field: bool,
     poynting: bool,
     energy: bool,
     area_mean_field: bool,
@@ -509,6 +514,7 @@ impl ProbeViewState {
             span: span.min(2.0),
             field: true,
             secondary_field: false,
+            transverse_field: false,
             poynting: false,
             energy: true,
             area_mean_field: false,
@@ -662,7 +668,6 @@ struct Uploading {
     token: TopologyToken,
     generation: u64,
     fresh: bool,
-    time_offset: f64,
     degrees_of_freedom: usize,
 }
 
@@ -783,6 +788,9 @@ pub struct Playground {
     pulse_amplitude: f32,
     pulse_width: f32,
     pending_pulse: Option<(Point2, RegionId)>,
+    canonical_event_serial: u32,
+    canonical_event_observed: u32,
+    canonical_filter_step: u64,
     probe_mode: Option<ProbePlacement>,
     selected_probe: Option<ProbeId>,
     probe_windows: BTreeSet<ProbeId>,
@@ -827,6 +835,10 @@ pub struct Playground {
     /// the old mesh rather than anything the new one will record again.
     probe_upload_previous: Option<ProbeUpload>,
     probe_clock_restarted: bool,
+    /// Skin whose physical labels and observable meanings own the current
+    /// traces. A skin change starts a new history segment rather than joining
+    /// differently named fields into one plot.
+    probe_history_physics: Option<PhysicsModel>,
     /// Simulated time the far-field ring started recording from, or `None` when
     /// no recorder is running.
     far_field_recording_from: Option<f64>,
@@ -837,16 +849,8 @@ pub struct Playground {
     vector_overlay_mode: VectorOverlay,
     vector_overlay_exposure: AutoExposure,
     field_exposure: AutoExposure,
-    /// The operator's free-constant components, cached against the mesh they
-    /// were read from.
-    field_components: Option<(u64, ConstantModes)>,
-    /// The field with each free component's own offset taken out, which is what
-    /// the exposure measures and the viewport paints.
-    field_centred: Vec<f32>,
-    /// What was taken out, per component, for the diagnostics panel.
-    field_offsets: Vec<FieldOffset>,
-    /// Whether the drift warning has already been raised for this run.
-    field_offset_warned: bool,
+    /// Canonical primary field copied for exposure and paint traversal.
+    field_render: Vec<f32>,
     /// Reused by the field's quantile so a frame's sample costs no allocation.
     exposure_scratch: Vec<f64>,
     /// Wall-clock seconds since the previous frame, which is what the exposures
@@ -881,6 +885,7 @@ pub struct Playground {
     amr_report: Option<MeshAdaptationReport>,
     gpu_status: &'static str,
     gpu_dispatches: u64,
+    canonical_gpu_bytes: Option<usize>,
     step_backlog: u64,
     diagnostics_open: bool,
     /// What the transient channels said before they were overwritten, newest
@@ -978,6 +983,9 @@ impl Default for Playground {
             pulse_amplitude: 1.0,
             pulse_width: 0.06,
             pending_pulse: None,
+            canonical_event_serial: 0,
+            canonical_event_observed: 0,
+            canonical_filter_step: 0,
             probe_mode: None,
             selected_probe: None,
             probe_windows: BTreeSet::new(),
@@ -1019,6 +1027,7 @@ impl Default for Playground {
             probe_upload: None,
             probe_upload_previous: None,
             probe_clock_restarted: true,
+            probe_history_physics: None,
             far_field_recording_from: None,
             frame_ms: 16.0,
             wave_energy: None,
@@ -1027,10 +1036,7 @@ impl Default for Playground {
             vector_overlay_mode: VectorOverlay::Off,
             vector_overlay_exposure: AutoExposure::default(),
             field_exposure: AutoExposure::default(),
-            field_components: None,
-            field_centred: Vec::new(),
-            field_offsets: Vec::new(),
-            field_offset_warned: false,
+            field_render: Vec::new(),
             exposure_scratch: Vec::new(),
             frame_delta: 0.0,
             material_overlay_job: None,
@@ -1057,6 +1063,7 @@ impl Default for Playground {
             amr_report: None,
             gpu_status: "loading",
             gpu_dispatches: 0,
+            canonical_gpu_bytes: None,
             step_backlog: 0,
             diagnostics_open: false,
             events: VecDeque::with_capacity(EVENT_LOG_ENTRIES),
@@ -1176,7 +1183,6 @@ impl Playground {
         // scene is still on display until its replacement is prepared, and a
         // scale cleared now would measure that — magnifying a residue for as
         // long as the new mesh takes.
-        self.field_offset_warned = false;
         self.invalidate_samples();
         Ok(())
     }
@@ -2823,6 +2829,11 @@ impl Playground {
                 .range(0.001..=1.0)
                 .prefix("Width "),
         );
+        ui.small(
+            "Version-22 acceleration control: the canonical solver integrates this signal \
+             analytically into a primary-field-rate drive and applies the accepted \
+             generation's immutable reference mass.",
+        );
         if source != before {
             if let Err(error) = self.editor.set_point_source(source) {
                 self.notify(error)
@@ -2844,7 +2855,7 @@ impl Playground {
         if self.runtime.active().is_some() {
             ui.separator();
             ui.label(format!(
-                "Energy: {}",
+                "Canonical stored energy: {}",
                 self.wave_energy.map_or("—".into(), |v| format!("{v:.4e}"))
             ));
         }
@@ -3170,6 +3181,11 @@ impl Playground {
                 let before = source.signal;
                 edit_time_signal(ui, &mut source.signal);
                 source_changed |= source.signal != before;
+                ui.small(
+                    "Version-22 acceleration control: this signal is analytically integrated \
+                     into a canonical primary-field-rate drive using immutable \
+                     accepted-generation normalization.",
+                );
             }
             // Committed outside the block so unchecking is recorded rather than
             // springing back on the next frame.
@@ -3916,64 +3932,6 @@ impl Playground {
     /// seconds wrong, which is what loading one example over another used to do
     /// to the arrows. How loud the run has been is kept, so a field decaying
     /// through an adaptation handoff is not renormalized back into view.
-    /// Fills `field_centred` with the field minus each free component's own
-    /// offset, and records what was removed.
-    fn centre_field(&mut self, active: &PreparedTopology, display: &WaveDisplay) {
-        let mesh_revision = active.mesh.mesh_revision;
-        if self
-            .field_components
-            .as_ref()
-            .is_none_or(|(cached, _)| *cached != mesh_revision)
-        {
-            self.field_components = Some((mesh_revision, ConstantModes::of(&active.operator)));
-        }
-        // Taken out so the labels and the scratch can be borrowed at once; the
-        // cache goes straight back.
-        let Some((cached, modes)) = self.field_components.take() else {
-            return;
-        };
-        let time_step = self.solver_time_step();
-        self.field_offsets = centre_free_constants(
-            &modes,
-            active.operator.lumped_mass(),
-            &display.current,
-            &display.previous,
-            time_step,
-            &mut self.field_centred,
-        );
-        self.field_components = Some((cached, modes));
-        self.warn_about_field_offset();
-    }
-
-    /// Raises the status marker once when a subdomain's offset grows past what
-    /// `f32` can carry alongside the wave. Once per run: a drift that is going
-    /// to cross this will cross it every frame afterwards.
-    fn warn_about_field_offset(&mut self) {
-        if self.field_offset_warned {
-            return;
-        }
-        let Some(reference) = self.field_exposure.reference() else {
-            return;
-        };
-        let Some((index, worst)) = self
-            .field_offsets
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.offset.abs().total_cmp(&b.1.offset.abs()))
-        else {
-            return;
-        };
-        if worst.offset.abs() <= reference * FIELD_OFFSET_WARNING {
-            return;
-        }
-        self.field_offset_warned = true;
-        self.unseen_error = true;
-        self.notify(format!(
-            "Subdomain {index} has drifted to {:.0}× the field it carries; see Performance diagnostics",
-            worst.offset.abs() / reference
-        ));
-    }
-
     /// A handoff carries the field onto a new mesh — the same field, renumbered
     /// — so its scale carries across untouched. Only a field replaced with zeros
     /// starts a new run.
@@ -4120,13 +4078,12 @@ impl Playground {
             && display.generation > 0
             && display.current.len() == active.operator.degrees_of_freedom()
         {
-            // A rigid offset is not part of the wave and no radiating wall can
-            // remove one, so it is taken out before the field is measured or
-            // painted; left in, it becomes the exposure's own reference and
-            // washes the domain flat.
-            self.centre_field(&active, display);
+            // The canonical primary field is authoritative. Display no longer
+            // removes a component mean or reconstructs a gauge-dependent
+            // scalar before exposure.
+            self.field_render.clone_from(&display.current);
             let level = exposure_level(
-                &self.field_centred,
+                &self.field_render,
                 FIELD_EXPOSURE_QUANTILE,
                 &mut self.exposure_scratch,
             );
@@ -4139,12 +4096,7 @@ impl Playground {
             let mut field = egui::Mesh::default();
             field.reserve_vertices(active.operator.degrees_of_freedom());
             field.reserve_triangles(active.operator.element_nodes().len() * 6);
-            for (point, value) in active
-                .operator
-                .node_points()
-                .iter()
-                .zip(&self.field_centred)
-            {
+            for (point, value) in active.operator.node_points().iter().zip(&self.field_render) {
                 let scaled = (f64::from(*value) * scale) as f32;
                 let color = if presentation.material_overlay == MaterialOverlay::Off {
                     field_color(scaled, Color32::TRANSPARENT)
@@ -4191,6 +4143,7 @@ impl Playground {
                 &active.bundle.authored,
                 mesh,
                 &active.operator,
+                &active.canonical_operator,
                 display,
                 mode,
                 presentation.vector_overlay_density,
@@ -6616,19 +6569,16 @@ impl Playground {
     }
     fn refresh_runtime(
         &mut self,
-        request: &mut WaveGpuRequest,
-        display: &WaveDisplay,
+        request: &mut CanonicalGpuRequest,
+        display: &CanonicalGpuDisplay,
+        recorders: &mut WaveGpuRequest,
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
         delta: f64,
     ) {
-        // Starting another preparation mid-upload clears `runtime.ready`, and the
-        // in-flight commit then fails after the GPU has already been finalised.
-        // The edit is picked up on a later frame; `request_runtime` compares the
-        // document revision every frame.
-        // A plain toggle: the strength lives in the buffers the generation was
-        // built with, and this only decides whether the dispatches are encoded.
-        request.set_grid_scale_filter(self.grid_scale_filter);
+        // Starting another preparation mid-upload clears `runtime.ready`, and
+        // would make the accepted GPU generation impossible to publish under
+        // its immutable topology token. A later frame picks the edit up.
         if self.uploading.is_none() {
             self.retime_for_speed();
             self.request_runtime();
@@ -6641,134 +6591,108 @@ impl Playground {
         }
         if self.uploading.is_none() && self.runtime.ready().is_some() && request.caught_up() {
             let candidate = self.runtime.ready().unwrap().clone();
-            let in_place = candidate.operator_reused
-                && candidate.transfer.is_none()
-                && self.runtime.active().is_some_and(|active| {
-                    Arc::ptr_eq(&active.mesh, &candidate.mesh)
-                        && Arc::ptr_eq(&active.operator, &candidate.operator)
+            let dt = paced_time_step(
+                candidate.canonical_operator.recommended_time_step(),
+                self.editor.document.presentation.simulation_speed,
+            );
+            let placeholder = CanonicalWaveState::zero(&candidate.canonical_operator, dt);
+            let upload = placeholder
+                .map_err(|error| error.to_string())
+                .and_then(|state| {
+                    CanonicalGpuPlan::compile(
+                        &candidate.canonical_operator,
+                        &state,
+                        &candidate.canonical_forcing,
+                        CanonicalGpuClock::initial(dt).map_err(|error| format!("{error:?}"))?,
+                    )
+                    .map_err(|error| format!("{error:?}"))
+                })
+                .and_then(|plan| {
+                    if candidate.fresh || self.runtime.active().is_none() {
+                        request.install(assets, commands, plan);
+                        Ok(())
+                    } else {
+                        let active = self.runtime.active().unwrap();
+                        let transfer = candidate
+                            .canonical_transfer
+                            .as_ref()
+                            .ok_or_else(|| "Canonical handoff maps are not prepared".to_owned())?;
+                        let runtime = CanonicalGpuRuntimeTransfer::from_primary_transfer(
+                            &active.canonical_operator,
+                            &candidate.canonical_operator,
+                            &active.canonical_forcing,
+                            &candidate.canonical_forcing,
+                            &transfer.primary,
+                            display.runtime_serials,
+                        )
+                        .map_err(|error| format!("{error:?}"))?;
+                        let gpu_transfer = CanonicalGpuTransferPlan::compile_prepared(
+                            &active.canonical_operator,
+                            &candidate.canonical_operator,
+                            &active.canonical_forcing,
+                            &candidate.canonical_forcing,
+                            &transfer.primary,
+                            &transfer.complementary,
+                            &transfer.thin_gap,
+                            &transfer.outgoing,
+                            &runtime,
+                        )
+                        .map_err(|error| format!("{error:?}"))?;
+                        request
+                            .begin_handoff(assets, commands, plan, gpu_transfer)
+                            .map_err(str::to_owned)
+                    }
                 });
-            if in_place {
-                let token = candidate.bundle.token;
-                self.handoff_upload = Some(Instant::now());
-                match request.update_source(
-                    assets,
-                    &candidate.mesh,
-                    &candidate.operator,
-                    candidate.point_source,
-                ) {
-                    Ok(()) => match self.runtime.commit_ready(token) {
-                        Ok(active) => {
-                            self.message = "Simulation settings committed".into();
-                            self.record_handoff(&active);
-                        }
-                        Err(error) => self.message = error,
-                    },
-                    Err(error) => {
-                        self.runtime.reject_ready(token, error.clone());
-                        self.message = error;
-                    }
-                }
-            } else {
-                let dt = paced_time_step(
-                    candidate.operator.recommended_time_step(),
-                    self.editor.document.presentation.simulation_speed,
-                );
-                // What the step counter of the generation about to start counts
-                // from. The wave readback is a frame or two behind what has been
-                // encoded, and `caught_up` above says the encoded count is the
-                // whole of it, so the solver's own tally is the one that keeps
-                // this clock from losing a few milliseconds per handoff. It is
-                // read before the upload, which resets it.
-                let time_offset = if candidate.fresh {
-                    0.0
-                } else if self.runtime.active().is_some() {
-                    self.sim_time_offset
-                        + request.stats().completed_steps() as f64 * self.uploaded_time_step
-                } else {
-                    self.sim_time_offset
-                };
-                let upload = if candidate.fresh || self.runtime.active().is_none() {
-                    request.replace_with_volume_sources(
-                        assets,
-                        commands,
-                        &candidate.mesh,
-                        &candidate.operator,
-                        dt,
-                        candidate.point_source,
-                        &candidate.volume_sources,
-                    )
-                } else if let (Some(active), Some(map)) =
-                    (self.runtime.active(), candidate.transfer.as_ref())
-                {
-                    request.replace_transferred_with_volume_sources(
-                        assets,
-                        commands,
-                        WaveTransfer {
-                            source_mesh: &active.mesh,
-                            source_operator: &active.operator,
-                            target_mesh: &candidate.mesh,
-                            target_operator: &candidate.operator,
-                            target_time_step: dt,
-                            source: candidate.point_source,
-                            map,
+            match upload {
+                Ok(()) => {
+                    self.uploaded_time_step = dt;
+                    self.handoff_upload = Some(Instant::now());
+                    self.uploading = Some(Uploading {
+                        token: candidate.bundle.token,
+                        generation: if candidate.fresh {
+                            request.generation()
+                        } else {
+                            request.generation().wrapping_add(1).max(1)
                         },
-                        &candidate.volume_sources,
-                    )
-                } else {
-                    request.replace_with_volume_sources(
-                        assets,
-                        commands,
-                        &candidate.mesh,
-                        &candidate.operator,
-                        dt,
-                        candidate.point_source,
-                        &candidate.volume_sources,
-                    )
-                };
-                match upload {
-                    Ok(()) => {
-                        self.uploaded_time_step = dt;
-                        self.handoff_upload = Some(Instant::now());
-                        self.uploading = Some(Uploading {
-                            token: candidate.bundle.token,
-                            generation: request.generation(),
-                            fresh: candidate.fresh,
-                            time_offset,
-                            degrees_of_freedom: candidate.operator.degrees_of_freedom(),
-                        })
-                    }
-                    Err(error) => {
-                        let token = candidate.bundle.token;
-                        self.runtime.reject_ready(token, error.clone());
-                        self.message = error;
-                    }
+                        fresh: candidate.fresh,
+                        degrees_of_freedom: candidate.canonical_operator.degrees_of_freedom(),
+                    });
+                }
+                Err(error) => {
+                    let token = candidate.bundle.token;
+                    self.runtime.reject_ready(token, error.clone());
+                    self.message = error;
                 }
             }
         }
         if let Some(upload) = &self.uploading {
-            if request.failed() {
+            if request.failed()
+                || matches!(
+                    request.handoff_outcome(),
+                    CanonicalGpuHandoffOutcome::Rejected(_)
+                )
+            {
                 let token = upload.token;
-                if request.transfer_pending() {
-                    let _ = request.rollback_transfer(assets, commands);
-                }
-                self.runtime.reject_ready(token, "GPU upload failed");
+                self.runtime
+                    .reject_ready(token, "Canonical GPU upload failed");
                 self.uploading = None;
             } else if request.ready()
                 && display.generation == upload.generation
-                && display.current.len() == upload.degrees_of_freedom
+                && display.primary_flux.len() == upload.degrees_of_freedom
+                && !matches!(
+                    request.handoff_outcome(),
+                    CanonicalGpuHandoffOutcome::Pending
+                )
             {
                 let upload = self.uploading.take().unwrap();
-                // `finish_transfer` frees the old buffers, so it must not run
-                // until the candidate is actually committed. Finalising first
-                // would leave the GPU on a discretization `runtime.active()`
-                // does not name.
                 match self.runtime.commit_ready(upload.token) {
                     Ok(active) => {
-                        request.finish_transfer(assets);
-                        self.sim_time_offset = upload.time_offset;
                         if upload.fresh {
                             self.accumulator = 0.0;
                             self.restart_probe_traces();
+                            self.canonical_event_serial = 0;
+                            self.canonical_event_observed = 0;
+                            self.canonical_filter_step = 0;
                         }
                         self.restart_exposures_after_handoff(upload.fresh);
                         self.amr_adaptation_state = if active.adapted {
@@ -6786,106 +6710,139 @@ impl Playground {
                         self.message = "Simulation topology committed".into();
                         self.record_handoff(&active);
                     }
-                    Err(error) => {
-                        if request.transfer_pending() {
-                            let _ = request.rollback_transfer(assets, commands);
-                        }
-                        self.message = error;
-                    }
+                    Err(error) => self.message = error,
                 }
             }
         }
-        // Reset rebuilds the GPU buffers against the active topology, which bumps
-        // the generation the pending commit is waiting for. That wedges the
-        // handoff, and because stepping is withheld while one is pending, it
-        // stops the solver for good. It stays queued instead.
         if self.reset_requested && self.uploading.is_none() {
             if let Some(active) = self.runtime.active() {
                 let dt = paced_time_step(
-                    active.operator.recommended_time_step(),
+                    active.canonical_operator.recommended_time_step(),
                     self.editor.document.presentation.simulation_speed,
                 );
-                if request
-                    .reset(
-                        assets,
-                        commands,
-                        &active.mesh,
-                        &active.operator,
-                        dt,
-                        active.point_source,
-                    )
-                    .is_ok()
-                {
+                let reset = CanonicalWaveState::zero(&active.canonical_operator, dt)
+                    .map_err(|error| error.to_string())
+                    .and_then(|state| {
+                        CanonicalGpuPlan::compile(
+                            &active.canonical_operator,
+                            &state,
+                            &active.canonical_forcing,
+                            CanonicalGpuClock::initial(dt).map_err(|error| format!("{error:?}"))?,
+                        )
+                        .map_err(|error| format!("{error:?}"))
+                    });
+                if let Ok(plan) = reset {
+                    request.install(assets, commands, plan);
                     self.reset_requested = false;
                     self.uploaded_time_step = dt;
                     self.sim_time_offset = 0.0;
+                    self.canonical_event_serial = 0;
+                    self.canonical_event_observed = 0;
+                    self.canonical_filter_step = 0;
                     self.restart_probe_traces();
-                    // The scale is deliberately left alone. Reset zeroes the
-                    // field on the GPU, but the readback still holds the old one
-                    // for a few frames, so a scale cleared here measures that
-                    // residue and paints it at full brightness until the zeros
-                    // arrive — a tenth of a second of magnified nothing.
-                    // Nothing has to be cleared: a zero field paints as the base
-                    // colour whatever the scale says, and the new run's field
-                    // takes the scale over as it grows.
                 }
             }
         }
-        // Every probe buffer belongs to the wave buffers and dies with them, so
-        // the upload is repeated whenever the topology or the GPU generation
-        // moves. A commit moves the token; a reset or a rolled-back transfer
-        // moves the generation on its own, and used to leave the probes with
-        // nothing to sample and no way back.
-        // Mid-upload the buffers already belong to the candidate while the
-        // active topology still names the old mesh, so the wait is the same one
-        // the pulse takes below: the commit a few frames later carries both.
+        recorders.adopt_canonical_generation(request.generation());
         if self.uploading.is_none()
             && let Some(active) = self.runtime.active().cloned()
             && probes_need_upload(self.probe_upload, active.bundle.token, request.generation())
         {
-            self.configure_probes(request, assets, commands, &active);
+            self.configure_probes(recorders, assets, commands, &active);
         }
         if let Some(active) = self.runtime.active() {
             let dt = self.solver_time_step();
-            // A pulse written during an upload would land in the new buffers
-            // through the old operator's stencil, so it waits too.
             if let Some((position, region)) = self
                 .uploading
                 .is_none()
                 .then(|| self.pending_pulse.take())
                 .flatten()
-                && let Err(error) = request.inject_pulse(
-                    assets,
-                    &active.mesh,
-                    &active.operator,
-                    PulseSettings {
-                        position,
-                        width: self.pulse_width,
-                        amplitude: self.pulse_amplitude,
-                        region,
-                    },
-                )
             {
-                self.message = error;
+                let mut increment = vec![0.0; active.canonical_operator.degrees_of_freedom()];
+                for (triangle, nodes) in active
+                    .mesh
+                    .triangles
+                    .iter()
+                    .zip(active.canonical_operator.element_nodes())
+                {
+                    if triangle.region != region {
+                        continue;
+                    }
+                    for node in nodes {
+                        let delta =
+                            active.canonical_operator.node_points()[*node as usize] - position;
+                        increment[*node as usize] = f64::from(self.pulse_amplitude)
+                            * (-0.5 * delta.dot(delta) / f64::from(self.pulse_width).powi(2)).exp();
+                    }
+                }
+                self.canonical_event_serial = self
+                    .canonical_event_serial
+                    .max(request.stats().processed_event())
+                    .saturating_add(1)
+                    .max(1);
+                match CanonicalGpuLiveEvent::primary_pulse(
+                    &active.canonical_operator,
+                    &increment,
+                    self.canonical_event_serial,
+                )
+                .map_err(|error| format!("{error:?}"))
+                .and_then(|event| {
+                    request
+                        .queue_live_event(assets, event)
+                        .map_err(str::to_owned)
+                }) {
+                    Ok(()) => {}
+                    Err(error) => self.message = error,
+                }
             }
-            // A pending handoff can only replace the GPU buffers once the render
-            // world has encoded every step already requested. Withhold both
-            // continuous and manual scheduling until then, leaving the user's
-            // Run/Pause preference and a pressed Step untouched.
             let handoff_pending = self.runtime.ready().is_some() || self.uploading.is_some();
             if !handoff_pending {
+                let completed = request.stats().completed_steps();
+                if !self.grid_scale_filter {
+                    self.canonical_filter_step = completed;
+                } else if completed
+                    >= self
+                        .canonical_filter_step
+                        .saturating_add(GRID_SCALE_FILTER_CADENCE)
+                    && !request.live_event_pending()
+                {
+                    self.canonical_event_serial = self
+                        .canonical_event_serial
+                        .max(request.stats().processed_event())
+                        .saturating_add(1)
+                        .max(1);
+                    match CanonicalGpuLiveEvent::grid_filter(1.0, self.canonical_event_serial)
+                        .map_err(|error| format!("{error:?}"))
+                        .and_then(|event| {
+                            request
+                                .queue_live_event(assets, event)
+                                .map_err(str::to_owned)
+                        }) {
+                        Ok(()) => self.canonical_filter_step = completed,
+                        Err(error) => self.message = error,
+                    }
+                }
+                let steps_until_filter = self
+                    .canonical_filter_step
+                    .saturating_add(GRID_SCALE_FILTER_CADENCE)
+                    .saturating_sub(request.requested_steps());
                 if self.wave_running {
-                    let steps = steps_for_frame(
+                    let mut steps = steps_for_frame(
                         &mut self.accumulator,
                         delta,
                         self.editor.document.presentation.simulation_speed,
                         dt,
                     );
+                    if self.grid_scale_filter {
+                        steps = steps.min(steps_until_filter);
+                    }
                     if steps > 0 {
                         request.request_steps(steps);
                     }
                 } else if self.wave_step {
-                    request.request_steps(1);
+                    if !self.grid_scale_filter || steps_until_filter > 0 {
+                        request.request_steps(1);
+                    }
                     self.wave_step = false;
                 }
                 self.speed_reached =
@@ -6895,33 +6852,54 @@ impl Playground {
         self.completed_steps = request.stats().completed_steps();
         self.gpu_status = request.stats().status();
         self.gpu_dispatches = request.stats().dispatches();
+        let processed_event = request.stats().processed_event();
+        if processed_event != self.canonical_event_observed {
+            self.canonical_event_observed = processed_event;
+            let rejection = request.stats().event_rejection();
+            if rejection != 0 {
+                self.unseen_error = true;
+                self.notify(format!(
+                    "Canonical event {processed_event} was rejected without changing the accepted state (failure code {rejection})"
+                ));
+            }
+        }
+        self.canonical_gpu_bytes = request
+            .manifest()
+            .map(|manifest| manifest.bytes.steady_bytes());
         self.step_backlog = request
             .requested_steps()
             .saturating_sub(self.completed_steps);
         if let Some(active) = self.runtime.active()
             && display.generation == request.generation()
-            && display.current.len() == active.operator.degrees_of_freedom()
+            && display.primary_flux.len() == active.canonical_operator.degrees_of_freedom()
         {
-            let current = display
-                .current
+            let primary = display
+                .primary_flux
                 .iter()
-                .map(|value| *value as f64)
+                .map(|value| f64::from(*value))
                 .collect::<Vec<_>>();
-            let previous = display
-                .previous
+            let complementary = display
+                .complementary_flux
                 .iter()
-                .map(|value| *value as f64)
+                .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
                 .collect::<Vec<_>>();
             let auxiliary = display
                 .auxiliary
                 .iter()
-                .map(|value| *value as f64)
+                .map(|value| f64::from(*value))
                 .collect::<Vec<_>>();
-            let time_step = self.solver_time_step();
-            self.wave_energy = active
-                .operator
-                .discrete_energy_with_auxiliary(&current, &previous, &auxiliary, time_step)
-                .ok();
+            self.wave_energy = canonical_energy_breakdown(
+                &active.canonical_operator,
+                &primary,
+                &complementary,
+                &auxiliary,
+            )
+            .ok()
+            .map(CanonicalEnergyBreakdown::total);
+            if let Some(clock) = display.clock {
+                self.sim_time_offset = clock.absolute_seconds
+                    - self.completed_steps as f64 * f64::from(clock.time_step);
+            }
         }
         self.accumulate_step_rate(
             request.generation(),
@@ -7028,6 +7006,13 @@ impl Playground {
         }
         let dt = self.solver_time_step();
         let physics = active.bundle.authored.physics;
+        if self
+            .probe_history_physics
+            .is_some_and(|previous| previous != physics)
+        {
+            self.restart_probe_traces();
+        }
+        self.probe_history_physics = Some(physics);
         // Every recorder writes a time series on the solver's own clock, and a
         // transfer carries that clock across. So a new mesh over the same
         // recorders takes over the rings they were filling, and only a clock
@@ -7046,9 +7031,33 @@ impl Playground {
             history,
         };
         let result = request
-            .update_point_probes(assets, commands, &points, 120.0, context)
-            .and_then(|()| request.update_curve_probes(assets, commands, &curves, context))
-            .and_then(|()| request.update_area_probes(assets, commands, &areas, 60.0, context));
+            .update_canonical_point_probes(
+                assets,
+                commands,
+                &active.canonical_operator,
+                &points,
+                120.0,
+                context,
+            )
+            .and_then(|()| {
+                request.update_canonical_curve_probes(
+                    assets,
+                    commands,
+                    &active.canonical_operator,
+                    &curves,
+                    context,
+                )
+            })
+            .and_then(|()| {
+                request.update_canonical_area_probes(
+                    assets,
+                    commands,
+                    &active.canonical_operator,
+                    &areas,
+                    60.0,
+                    context,
+                )
+            });
         if let Err(error) = result {
             self.message = error;
         }
@@ -7065,7 +7074,7 @@ impl Playground {
         // The far field records at fixed world points rather than at a probe,
         // so a contour that moved starts its delay window again even when the
         // clock did not.
-        match request.update_far_field(assets, commands, far.as_ref(), dt, history) {
+        match request.update_canonical_far_field(assets, commands, far.as_ref(), dt, history) {
             Ok(FarFieldHandoff::Restarted) => {
                 self.far_field_trace = FarFieldTrace::default();
                 self.far_field_recording_from = Some(self.simulated_time());
@@ -7161,7 +7170,12 @@ impl Playground {
         let recorded = (self.simulated_time() - from) / history;
         (history > 0.0 && recorded < 1.0).then(|| recorded.clamp(0.0, 1.0))
     }
-    fn refresh_amr(&mut self, request: &WaveGpuRequest, display: &WaveDisplay) {
+    fn refresh_amr(
+        &mut self,
+        request: &CanonicalGpuRequest,
+        canonical: &CanonicalGpuDisplay,
+        display: &WaveDisplay,
+    ) {
         if !self.amr_enabled {
             self.amr_indicator_job = None;
             self.amr_adaptation_job = None;
@@ -7255,7 +7269,7 @@ impl Playground {
             };
             if active.bundle.token != token
                 || request.generation() != generation
-                || request.buffer_revision() != buffer_revision
+                || request.revision() != buffer_revision
             {
                 self.amr_status = "discarded stale estimate".into();
                 return;
@@ -7339,6 +7353,10 @@ impl Playground {
             || display.indicator_displacement.len() != dofs
             || display.indicator_velocity.len() != dofs
             || display.indicator_acceleration.len() != dofs
+            || canonical.previous_primary_flux.len() != dofs
+            || canonical.previous_complementary_flux.len()
+                != active.canonical_operator.complementary_degrees_of_freedom()
+            || canonical.previous_auxiliary.len() != canonical.auxiliary.len()
         {
             self.amr_status = "waiting for aligned readback".into();
             return;
@@ -7355,11 +7373,10 @@ impl Playground {
             return;
         }
         let dt = self.solver_time_step();
-        let time = self.sim_time_offset + step.saturating_sub(1) as f64 * dt;
-        let Some(volume_acceleration) = request.volume_acceleration(time) else {
-            self.amr_status = "waiting for source state".into();
-            return;
-        };
+        let time = canonical
+            .clock
+            .map_or(self.simulated_time(), |clock| clock.absolute_seconds);
+        let volume_acceleration = active.volume_sources.acceleration(time);
         let Some(auxiliary) = aligned_indicator_auxiliary(display, &active.operator, dt, step)
         else {
             self.amr_status = "waiting for aligned readback".into();
@@ -7387,28 +7404,79 @@ impl Playground {
             time,
             time_step: dt,
         };
-        self.amr_indicator_job = Some(SolutionIndicatorJob::new_topology(
-            active.mesh.clone(),
-            active.operator.clone(),
-            &active.bundle.plan,
-            active.bundle.model(),
-            snapshot,
-            SolutionIndicatorOptions {
-                minimum_edge_length: self.amr_minimum_edge,
-                maximum_edge_length: self.amr_maximum_edge,
-                relative_tolerance: self.amr_target_accuracy(),
-                elements_per_wavelength: self.amr_elements_per_wavelength,
-                forcing_frequency_hz: highest_forcing_frequency(
-                    &active.bundle.authored,
-                    active.point_source,
-                ),
-                ..Default::default()
-            },
-        ));
+        let canonical_snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: active.mesh.mesh_revision,
+            primary_flux: canonical
+                .primary_flux
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect(),
+            previous_primary_flux: canonical
+                .previous_primary_flux
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect(),
+            complementary_flux: canonical
+                .complementary_flux
+                .iter()
+                .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
+                .collect(),
+            previous_complementary_flux: canonical
+                .previous_complementary_flux
+                .iter()
+                .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
+                .collect(),
+            auxiliary: canonical
+                .auxiliary
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect(),
+            previous_auxiliary: canonical
+                .previous_auxiliary
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect(),
+            time,
+            time_step: dt,
+        };
+        let supplement = match canonical_indicator_supplement(
+            &active.mesh,
+            &active.canonical_operator,
+            &active.canonical_forcing,
+            &canonical_snapshot,
+        ) {
+            Ok(supplement) => supplement,
+            Err(error) => {
+                self.amr_status = "canonical estimate failed".into();
+                self.amr_error = Some(error.to_string());
+                return;
+            }
+        };
+        self.amr_indicator_job = Some(
+            SolutionIndicatorJob::new_topology(
+                active.mesh.clone(),
+                active.operator.clone(),
+                &active.bundle.plan,
+                active.bundle.model(),
+                snapshot,
+                SolutionIndicatorOptions {
+                    minimum_edge_length: self.amr_minimum_edge,
+                    maximum_edge_length: self.amr_maximum_edge,
+                    relative_tolerance: self.amr_target_accuracy(),
+                    elements_per_wavelength: self.amr_elements_per_wavelength,
+                    forcing_frequency_hz: highest_forcing_frequency(
+                        &active.bundle.authored,
+                        active.point_source,
+                    ),
+                    ..Default::default()
+                },
+            )
+            .with_canonical_supplement(supplement),
+        );
         self.amr_indicator_source = Some((
             active.bundle.token,
             request.generation(),
-            request.buffer_revision(),
+            request.revision(),
             step,
         ));
         self.amr_last_started = Some(Instant::now());
@@ -9042,12 +9110,10 @@ impl Playground {
                                     );
                                 });
                         } else if is_area {
-                            let electromagnetic =
-                                matches!(physics, PhysicsModel::Electromagnetic { .. });
                             let active = [
                                 view.area_mean_field,
                                 view.area_rms_field,
-                                view.area_rms_transverse && electromagnetic,
+                                view.area_rms_transverse,
                                 view.area_mean_energy,
                                 view.area_total_energy,
                             ]
@@ -9069,15 +9135,13 @@ impl Playground {
                                         &mut view.area_rms_field,
                                         format!("RMS {}", primary_field_label(physics)),
                                     );
-                                    if electromagnetic {
-                                        ui.checkbox(
-                                            &mut view.area_rms_transverse,
-                                            format!(
-                                                "RMS {}",
-                                                transverse_field_magnitude_label(physics)
-                                            ),
-                                        );
-                                    }
+                                    ui.checkbox(
+                                        &mut view.area_rms_transverse,
+                                        format!(
+                                            "RMS {}",
+                                            transverse_field_magnitude_label(physics)
+                                        ),
+                                    );
                                     ui.checkbox(&mut view.area_mean_energy, "Mean energy density");
                                     ui.checkbox(
                                         &mut view.area_total_energy,
@@ -9085,12 +9149,11 @@ impl Playground {
                                     );
                                 });
                         } else {
-                            let electromagnetic =
-                                matches!(physics, PhysicsModel::Electromagnetic { .. });
                             let active = [
                                 view.field,
                                 view.secondary_field,
-                                view.poynting && electromagnetic,
+                                view.transverse_field,
+                                view.poynting,
                                 view.energy,
                             ]
                             .into_iter()
@@ -9106,18 +9169,16 @@ impl Playground {
                                     ui.checkbox(&mut view.field, primary_field_label(physics));
                                     ui.checkbox(
                                         &mut view.secondary_field,
-                                        match physics {
-                                            PhysicsModel::Mechanical => {
-                                                primary_field_rate_label(physics)
-                                            }
-                                            PhysicsModel::Electromagnetic { .. } => {
-                                                transverse_field_magnitude_label(physics)
-                                            }
-                                        },
+                                        primary_field_rate_label(physics),
                                     );
-                                    if electromagnetic {
-                                        ui.checkbox(&mut view.poynting, "Poynting magnitude |S|");
-                                    }
+                                    ui.checkbox(
+                                        &mut view.transverse_field,
+                                        transverse_field_magnitude_label(physics),
+                                    );
+                                    ui.checkbox(
+                                        &mut view.poynting,
+                                        energy_flow_magnitude_label(physics),
+                                    );
                                     ui.checkbox(&mut view.energy, "Energy density");
                                 });
                         }
@@ -9257,8 +9318,7 @@ impl Playground {
                                 TEAL,
                             ),
                             (
-                                view.area_rms_transverse
-                                    && matches!(physics, PhysicsModel::Electromagnetic { .. }),
+                                view.area_rms_transverse,
                                 format!("RMS {}", transverse_field_magnitude_label(physics)),
                                 history_of(|s| s.rms_transverse_magnitude),
                                 Color32::from_rgb(188, 139, 255),
@@ -9289,8 +9349,6 @@ impl Playground {
                             }
                         }
                     } else {
-                        let electromagnetic =
-                            matches!(physics, PhysicsModel::Electromagnetic { .. });
                         if view.field {
                             Self::probe_plot(
                                 ui,
@@ -9305,28 +9363,29 @@ impl Playground {
                         if view.secondary_field {
                             Self::probe_plot(
                                 ui,
-                                match physics {
-                                    PhysicsModel::Mechanical => primary_field_rate_label(physics),
-                                    PhysicsModel::Electromagnetic { .. } => {
-                                        transverse_field_magnitude_label(physics)
-                                    }
-                                },
+                                primary_field_rate_label(physics),
                                 &point_samples,
-                                |sample| match physics {
-                                    PhysicsModel::Mechanical => sample.velocity,
-                                    PhysicsModel::Electromagnetic { .. } => {
-                                        sample.transverse_magnitude
-                                    }
-                                },
+                                |sample| sample.velocity,
                                 TEAL,
                                 &mut view,
                                 history,
                             );
                         }
-                        if view.poynting && electromagnetic {
+                        if view.transverse_field {
                             Self::probe_plot(
                                 ui,
-                                "Poynting magnitude |S|",
+                                transverse_field_magnitude_label(physics),
+                                &point_samples,
+                                |sample| sample.transverse_magnitude,
+                                Color32::from_rgb(188, 139, 255),
+                                &mut view,
+                                history,
+                            );
+                        }
+                        if view.poynting {
+                            Self::probe_plot(
+                                ui,
+                                energy_flow_magnitude_label(physics),
                                 &point_samples,
                                 |sample| sample.poynting_magnitude,
                                 RED,
@@ -9616,7 +9675,6 @@ impl Playground {
                     ui.monospace(self.summary_line());
                     ui.separator();
                     self.frame_section(ui);
-                    self.field_offset_section(ui);
                     // Above the sections whose height follows whatever the
                     // last transaction did, so reading the log does not mean
                     // chasing it down the window.
@@ -9787,43 +9845,6 @@ impl Playground {
                 ui.small("A radial profile, for example: parameter R = 0.35 with stiffness 2 - clamp(0, 1, r / R)^2.");
             });
         self.formula_help_open = open;
-    }
-
-    /// The rigid offset the view takes out of each isolated subdomain.
-    ///
-    /// Taking it out is what keeps a decayed field from being renormalized into
-    /// a flat wash, but it also hides it, and an offset no wall can damp grows
-    /// until the wave loses the precision it is carried in. So it is reported
-    /// here, per subdomain, with the rate that says whether it will keep going.
-    fn field_offset_section(&self, ui: &mut egui::Ui) {
-        if self.field_offsets.is_empty() {
-            return;
-        }
-        egui::CollapsingHeader::new("Field offset")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.small(
-                    "A rigid displacement carries no energy and no radiating wall can damp it, \
-                     so a drifting figure here will keep growing.",
-                );
-                let reference = self.field_exposure.reference();
-                for (index, entry) in self.field_offsets.iter().enumerate() {
-                    let headroom = reference.map(|reference| entry.offset.abs() / reference);
-                    let text = format!(
-                        "Subdomain {index}: {:+.3e} · drift {:+.3e}/s{}",
-                        entry.offset,
-                        entry.drift,
-                        headroom.map_or_else(String::new, |headroom| format!(
-                            " · {headroom:.0}× the field"
-                        ))
-                    );
-                    if headroom.is_some_and(|headroom| headroom > FIELD_OFFSET_WARNING) {
-                        ui.colored_label(GOLD, text);
-                    } else {
-                        ui.small(text);
-                    }
-                }
-            });
     }
 
     fn frame_section(&self, ui: &mut egui::Ui) {
@@ -10093,10 +10114,13 @@ impl Playground {
                 match self.runtime.active() {
                     Some(active) => {
                         let dt = self.solver_time_step();
+                        let solver_bytes = self
+                            .canonical_gpu_bytes
+                            .unwrap_or_else(|| active.operator.estimated_gpu_bytes());
                         ui.small(format!(
-                            "{} dofs · {:.2} MiB",
+                            "{} dofs · {:.2} MiB canonical solver storage",
                             active.operator.degrees_of_freedom(),
-                            active.operator.estimated_gpu_bytes() as f64 / (1024.0 * 1024.0),
+                            solver_bytes as f64 / (1024.0 * 1024.0),
                         ));
                         ui.small(format!(
                             "dt {dt:.3e} · {:.0} steps/s · {:.2} simulated s per wall s",
@@ -10127,7 +10151,9 @@ impl Playground {
                     },
                 ));
                 if let Some(energy) = self.wave_energy {
-                    ui.small(format!("Discrete energy {energy:.6e}"));
+                    ui.small(format!(
+                        "Canonical discrete energy {energy:.6e} · bulk + gaps + outgoing memory"
+                    ));
                 }
             });
     }
@@ -10773,6 +10799,13 @@ const fn transverse_field_magnitude_label(physics: PhysicsModel) -> &'static str
     }
 }
 
+const fn energy_flow_magnitude_label(physics: PhysicsModel) -> &'static str {
+    match physics {
+        PhysicsModel::Mechanical => "Energy-flow magnitude |F|",
+        PhysicsModel::Electromagnetic { .. } => "Poynting magnitude |S|",
+    }
+}
+
 /// Diverging blue/red ramp for a signed waterfall cell, or a single-sided ramp
 /// for a non-negative quantity such as energy density.
 fn waterfall_color(normalized: f32, single_sided: bool) -> Color32 {
@@ -10881,78 +10914,6 @@ fn grid_lines(minimum: f64, maximum: f64, step: f64) -> Vec<f64> {
         value += step;
     }
     lines
-}
-
-/// What the display took out of one isolated subdomain.
-///
-/// Recorded because taking it out makes it invisible, and a rigid offset that no
-/// wall can damp will keep growing until it eats the mantissa the wave is
-/// carried in. A number nobody can see is not a thing you find out about.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct FieldOffset {
-    /// Mass-weighted mean of the component. Weighted, because an unweighted node
-    /// average moves with mesh density rather than with the field.
-    offset: f64,
-    /// How fast that mean is moving. A domain with nothing to damp it drifts at
-    /// a constant rate, so this is what says an offset will keep growing rather
-    /// than settle.
-    drift: f64,
-}
-
-/// How many times the field's own scale an offset may reach before the status
-/// marker asks for attention. `f32` carries about seven digits, so three of them
-/// spent on an offset still leaves the wave legible; past that it will not.
-const FIELD_OFFSET_WARNING: f64 = 1.0e3;
-
-/// Removes each free component's own mass-weighted mean from `current` into
-/// `centred`, and answers with what was removed and how fast it is moving.
-///
-/// Per component rather than for the mesh as a whole: a reflecting separator
-/// leaves two halves whose constants drift independently, and a single global
-/// mean would only half-centre each of them. A component that a wall pins is
-/// left alone, because its offset is part of its solution rather than a free
-/// gauge.
-fn centre_free_constants(
-    modes: &ConstantModes,
-    mass: &[f64],
-    current: &[f32],
-    previous: &[f32],
-    time_step: f64,
-    centred: &mut Vec<f32>,
-) -> Vec<FieldOffset> {
-    let mut now = vec![0.0_f64; modes.count()];
-    let mut before = vec![0.0_f64; modes.count()];
-    for (node, label) in modes.labels().iter().enumerate() {
-        let slot = *label as usize;
-        let weight = mass.get(node).copied().unwrap_or_default();
-        now[slot] += weight * f64::from(current.get(node).copied().unwrap_or_default());
-        before[slot] += weight * f64::from(previous.get(node).copied().unwrap_or_default());
-    }
-    let offsets = (0..modes.count())
-        .map(|slot| {
-            let total = modes.mass()[slot];
-            if !modes.free()[slot] || total <= 0.0 {
-                return FieldOffset::default();
-            }
-            let offset = now[slot] / total;
-            let earlier = before[slot] / total;
-            FieldOffset {
-                offset,
-                drift: if time_step > 0.0 {
-                    (offset - earlier) / time_step
-                } else {
-                    0.0
-                },
-            }
-        })
-        .collect::<Vec<_>>();
-    centred.clear();
-    centred.reserve(current.len());
-    centred.extend(current.iter().enumerate().map(|(node, value)| {
-        let slot = modes.labels().get(node).copied().unwrap_or_default() as usize;
-        (f64::from(*value) - offsets[slot].offset) as f32
-    }));
-    offsets
 }
 
 /// Whether the next preparation starts the field at zero instead of carrying
@@ -11624,10 +11585,12 @@ fn highest_forcing_frequency(scene: &TopologyScene, source: PointSource) -> f64 
     frequency
 }
 
+#[allow(clippy::too_many_arguments)]
 fn vector_overlay_samples(
     scene: &TopologyScene,
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
+    canonical: &CanonicalWaveOperator,
     display: &WaveDisplay,
     mode: VectorOverlay,
     spacing: f32,
@@ -11637,11 +11600,26 @@ fn vector_overlay_samples(
     if mesh.triangles.len() != operator.element_nodes().len()
         || display.indicator_displacement.len() != operator.degrees_of_freedom()
         || display.indicator_velocity.len() != operator.degrees_of_freedom()
-        || display.indicator_potential.len() != operator.degrees_of_freedom()
+        || display.complementary_flux.len() != canonical.complementary_degrees_of_freedom()
         || spacing <= 0.0
     {
         return vec![];
     }
+    let primary = display
+        .indicator_displacement
+        .iter()
+        .map(|value| f64::from(*value))
+        .collect::<Vec<_>>();
+    let rate = display
+        .indicator_velocity
+        .iter()
+        .map(|value| f64::from(*value))
+        .collect::<Vec<_>>();
+    let flux = display
+        .complementary_flux
+        .iter()
+        .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
+        .collect::<Vec<_>>();
     let mut bins = BTreeMap::<(i32, i32), (usize, Pos2, Point2, f32)>::new();
     for (element, triangle) in mesh.triangles.iter().enumerate() {
         let points = triangle.vertices.map(|index| mesh.vertices[index].point);
@@ -11671,47 +11649,28 @@ fn vector_overlay_samples(
     bins.into_iter()
         .filter_map(|(key, (element, screen, centroid, _))| {
             let triangle = &mesh.triangles[element];
-            let (primary, gradient) = operator.element_value_and_gradient(
-                element,
-                &display.indicator_displacement,
-                [1.0 / 3.0; 3],
-            )?;
-            let (velocity, _) = operator.element_value_and_gradient(
-                element,
-                &display.indicator_velocity,
-                [1.0 / 3.0; 3],
-            )?;
-            let (_, potential_gradient) = operator.element_value_and_gradient(
-                element,
-                &display.indicator_potential,
-                [1.0 / 3.0; 3],
-            )?;
             let region = scene.region(triangle.region)?;
             let material = scene.material(region.material)?;
             let raw = material.evaluate(region.frame, centroid).ok()?;
             let coefficients = scene
                 .physics
                 .directional_wave_coefficients(raw, region.frame);
-            let potential_flux = coefficients.stiffness.apply(potential_gradient);
-            let flux = coefficients.stiffness.apply(gradient);
-            let vector = match (mode, scene.physics) {
-                (
-                    VectorOverlay::ComplementaryField,
-                    PhysicsModel::Electromagnetic {
-                        polarization: ElectromagneticPolarization::Tm,
-                    },
-                ) => Point2::new(-potential_flux.y, potential_flux.x),
-                (
-                    VectorOverlay::ComplementaryField,
-                    PhysicsModel::Electromagnetic {
-                        polarization: ElectromagneticPolarization::Te,
-                    },
-                ) => Point2::new(potential_flux.y, -potential_flux.x),
-                (VectorOverlay::RelativeEnergyFlow, PhysicsModel::Electromagnetic { .. }) => {
-                    potential_flux * -primary
-                }
-                (VectorOverlay::RelativeEnergyFlow, PhysicsModel::Mechanical) => flux * -velocity,
-                _ => return None,
+            let stencil = QuadraticPointStencil {
+                element: element as u32,
+                barycentric: [1.0 / 3.0; 3],
+                nodes: operator.element_nodes()[element],
+                value_weights: enriched_quadratic_basis([1.0 / 3.0; 3]),
+                gradient_weights: [Point2::default(); 7],
+                region: triangle.region,
+                mass_density: coefficients.mass_density,
+                stiffness: coefficients.stiffness,
+            };
+            let stencil = CanonicalPointStencil::from_quadratic(stencil, canonical).ok()?;
+            let sample = stencil.sample(&primary, &rate, &flux).ok()?;
+            let vector = match mode {
+                VectorOverlay::ComplementaryField => sample.complementary,
+                VectorOverlay::RelativeEnergyFlow => sample.energy_flow,
+                VectorOverlay::Off => return None,
             };
             vector.finite().then_some((key, screen, vector))
         })
@@ -11753,13 +11712,83 @@ fn aligned_indicator_auxiliary(
     )
 }
 
+fn refresh_canonical_wave_display(
+    active: Option<&Arc<PreparedTopology>>,
+    canonical: &CanonicalGpuDisplay,
+    request: &CanonicalGpuRequest,
+    display: &mut WaveDisplay,
+) {
+    let Some(active) = active else { return };
+    let operator = &active.canonical_operator;
+    if canonical.generation != request.generation()
+        || canonical.primary_flux.len() != operator.degrees_of_freedom()
+        || canonical.previous_primary_flux.len() != operator.degrees_of_freedom()
+        || canonical.constitutive_force.len() != operator.degrees_of_freedom()
+    {
+        return;
+    }
+    let dt = canonical
+        .clock
+        .map_or(operator.recommended_time_step(), |clock| {
+            f64::from(clock.time_step)
+        });
+    display.generation = canonical.generation;
+    display.completed_steps = request.stats().completed_steps();
+    display.current = canonical
+        .primary_flux
+        .iter()
+        .zip(operator.primary_mass())
+        .map(|(flux, mass)| (f64::from(*flux) / mass) as f32)
+        .collect();
+    display.previous = canonical
+        .previous_primary_flux
+        .iter()
+        .zip(operator.primary_mass())
+        .map(|(flux, mass)| (f64::from(*flux) / mass) as f32)
+        .collect();
+    display.indicator_velocity = display
+        .current
+        .iter()
+        .zip(&display.previous)
+        .map(|(current, previous)| (*current - *previous) / dt as f32)
+        .collect();
+    display.indicator_displacement = display.current.clone();
+    let displacement = display
+        .indicator_displacement
+        .iter()
+        .map(|value| f64::from(*value))
+        .collect::<Vec<_>>();
+    let stiffness = active
+        .operator
+        .apply_stiffness(&displacement)
+        .unwrap_or_else(|_| vec![0.0; displacement.len()]);
+    let time = canonical.clock.map_or(0.0, |clock| clock.absolute_seconds);
+    let volume = active.volume_sources.acceleration(time);
+    display.indicator_acceleration = stiffness
+        .iter()
+        .zip(active.operator.lumped_mass())
+        .zip(operator.primary_loss_rate())
+        .zip(&display.indicator_velocity)
+        .zip(volume)
+        .map(|((((force, mass), loss), velocity), source)| {
+            (source - force / mass - loss * f64::from(*velocity)) as f32
+        })
+        .collect();
+    display.auxiliary = vec![0.0; operator.degrees_of_freedom()];
+    display.indicator_potential.clear();
+    display.complementary_flux = canonical.complementary_flux.clone();
+    display.readbacks = canonical.readbacks;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn frame(
     mut contexts: EguiContexts,
     mut state: ResMut<Playground>,
     time: Res<Time>,
-    mut request: ResMut<WaveGpuRequest>,
-    display: Res<WaveDisplay>,
+    mut recorders: ResMut<WaveGpuRequest>,
+    mut request: ResMut<CanonicalGpuRequest>,
+    canonical_display: Res<CanonicalGpuDisplay>,
+    mut display: ResMut<WaveDisplay>,
     probe_display: Res<ProbeDisplay>,
     curve_display: Res<CurveProbeDisplay>,
     area_display: Res<AreaProbeDisplay>,
@@ -11819,12 +11848,19 @@ pub fn frame(
     state.editor.validate_frame(12000);
     state.refresh_runtime(
         &mut request,
-        &display,
+        &canonical_display,
+        &mut recorders,
         &mut assets,
         &mut commands,
         time.delta_secs_f64(),
     );
-    state.refresh_amr(&request, &display);
+    refresh_canonical_wave_display(
+        state.runtime.active(),
+        &canonical_display,
+        &request,
+        &mut display,
+    );
+    state.refresh_amr(&request, &canonical_display, &display);
     state.ingest_probes(&probe_display);
     state.ingest_spatial_probes(&curve_display, &area_display, &far_display);
     state.refresh_probe_metadata();
@@ -12346,223 +12382,12 @@ mod tests {
         assert_eq!(field_scale(2.0, None, true), 0.0);
     }
 
-    /// A vertical reflecting separator, so the operator has two components whose
-    /// constants are independent.
-    fn split_operator() -> QuadraticWaveOperator {
-        let ids = [TopologyVertexId(1), TopologyVertexId(2)];
-        let mut divider = TopologyCurve::new(
-            CurveId(1),
-            CurveSpline::Open(
-                OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)])
-                    .unwrap(),
-            ),
-            vec![CurveSpan {
-                id: CurveSpanId(1),
-                behavior: SpanBehavior::Separated {
-                    left: FaceBoundaryCondition::Reflecting,
-                    right: FaceBoundaryCondition::Reflecting,
-                    coupling: InternalBoundaryCoupling::Independent,
-                },
-            }],
-        )
-        .unwrap();
-        divider.nodes = vec![
-            CurveNode {
-                vertex: Some(ids[0]),
-            },
-            CurveNode {
-                vertex: Some(ids[1]),
-            },
-        ];
-        let geometry = TopologyGeometry {
-            curves: vec![divider],
-            vertices: vec![
-                TopologyVertex {
-                    id: ids[0],
-                    location: TopologyVertexLocation::Outer {
-                        side: OuterSide::Bottom,
-                        fraction: 0.5,
-                    },
-                },
-                TopologyVertex {
-                    id: ids[1],
-                    location: TopologyVertexLocation::Outer {
-                        side: OuterSide::Top,
-                        fraction: 0.5,
-                    },
-                },
-            ],
-            ..TopologyGeometry::default()
-        };
-        let snapshot = compile_topology(&geometry, 1).unwrap();
-        let assignments = snapshot
-            .faces
-            .iter()
-            .enumerate()
-            .map(|(index, face)| FaceRegionAssignment {
-                face: face.id,
-                region: Some(RegionId(index as u64 + 1)),
-            })
-            .collect::<Vec<_>>();
-        let plan = TopologyMeshPlan::new(&snapshot, &assignments).unwrap();
-        let mesh = mesh_topology_plan(
-            &plan,
-            2,
-            MeshingOptions {
-                target_edge_length: 0.25,
-                ..MeshingOptions::default()
-            },
-        )
-        .unwrap();
-        let mut scene = TopologyScene::default();
-        for assignment in &assignments {
-            if let Some(region) = assignment.region
-                && !scene.regions.iter().any(|existing| existing.id == region)
-            {
-                scene.regions.push(Region {
-                    id: region,
-                    material: DEFAULT_MATERIAL,
-                    frame: MaterialFrame::world(),
-                });
-            }
-        }
-        scene.materials = vec![Material::default_medium()];
-        QuadraticWaveOperator::assemble_topology(
-            &mesh,
-            &plan,
-            TopologyWaveModel::from_topology_scene(&scene),
-        )
-        .unwrap()
-    }
-
-    fn component_mean(modes: &ConstantModes, mass: &[f64], values: &[f32], slot: usize) -> f64 {
-        let mut weighted = 0.0;
-        for (node, label) in modes.labels().iter().enumerate() {
-            if *label as usize == slot {
-                weighted += mass[node] * f64::from(values[node]);
-            }
-        }
-        weighted / modes.mass()[slot]
-    }
-
-    /// Each half of a separated domain owns its constant, so each is centred on
-    /// its own. One global mean would leave both halves off by half their
-    /// difference — which is what the two assertions below would catch.
     #[test]
-    fn each_isolated_subdomain_is_centred_on_its_own_offset() {
-        let operator = split_operator();
-        let modes = ConstantModes::of(&operator);
-        assert_eq!(modes.count(), 2, "the fixture did not split");
-        let mass = operator.lumped_mass();
-        let offsets = [0.4_f64, -0.9];
-        let drift = 0.25_f64;
-        let time_step = 0.01_f64;
-        let wave = |node: usize| (node as f64 * 0.7).sin() * 0.01;
-        let current = (0..operator.degrees_of_freedom())
-            .map(|node| (offsets[modes.labels()[node] as usize] + wave(node)) as f32)
-            .collect::<Vec<_>>();
-        let previous = (0..operator.degrees_of_freedom())
-            .map(|node| {
-                (offsets[modes.labels()[node] as usize] - drift * time_step + wave(node)) as f32
-            })
-            .collect::<Vec<_>>();
-        let mut centred = Vec::new();
-        let reported =
-            centre_free_constants(&modes, mass, &current, &previous, time_step, &mut centred);
-        assert_eq!(centred.len(), current.len());
-        for (slot, entry) in reported.iter().enumerate() {
-            let before = component_mean(&modes, mass, &current, slot);
-            let after = component_mean(&modes, mass, &centred, slot);
-            assert!(
-                (before - entry.offset).abs() < 1.0e-6,
-                "component {slot} reported {:e} against {before:e}",
-                entry.offset
-            );
-            assert!(after.abs() < 1.0e-6, "component {slot} left at {after:e}");
-            assert!(
-                (entry.drift - drift).abs() < 1.0e-3,
-                "component {slot} drift {:e}",
-                entry.drift
-            );
-        }
-        // Only a constant went: centring is a shift, so every difference within
-        // a component survives it untouched.
-        for node in 1..current.len() {
-            if modes.labels()[node] != modes.labels()[node - 1] {
-                continue;
-            }
-            let before = f64::from(current[node]) - f64::from(current[node - 1]);
-            let after = f64::from(centred[node]) - f64::from(centred[node - 1]);
-            assert!(
-                (before - after).abs() < 1.0e-6,
-                "node {node} moved relative to its neighbour"
-            );
-        }
-    }
-
-    /// A wall that prescribes a value gives its component a determinate offset,
-    /// which is part of the solution rather than a free gauge.
-    #[test]
-    fn a_pinned_subdomain_keeps_the_offset_it_is_held_at() {
-        let mesh = mesh_scene(
-            &Scene::default(),
-            5,
-            MeshingOptions {
-                target_edge_length: 0.3,
-                ..MeshingOptions::default()
-            },
-        )
-        .unwrap();
-        let operator = QuadraticWaveOperator::assemble_with_boundary(
-            &mesh,
-            WaveCoefficients::default(),
-            OuterBoundaryCondition::Dirichlet {
-                signal: TimeSignal::ZERO,
-            },
-        )
-        .unwrap();
-        let modes = ConstantModes::of(&operator);
-        let held = vec![0.5_f32; operator.degrees_of_freedom()];
-        let mut centred = Vec::new();
-        let reported = centre_free_constants(
-            &modes,
-            operator.lumped_mass(),
-            &held,
-            &held,
-            0.01,
-            &mut centred,
-        );
-        assert!(reported.iter().all(|entry| entry.offset == 0.0));
-        assert_eq!(centred, held, "a pinned component was centred anyway");
-    }
-
-    /// Taking the offset out of the view hides it, so a drift that will eat the
-    /// wave's precision has to announce itself exactly once.
-    #[test]
-    fn a_runaway_subdomain_offset_raises_the_marker_once() {
+    fn canonical_render_keeps_authoritative_component_offsets() {
+        let values = vec![0.4_f32, 0.41, -0.9, -0.89];
         let mut state = Playground::default();
-        state.field_exposure.update(1.0e-2, 0.016);
-        state.field_offsets = vec![FieldOffset {
-            offset: 1.0e-2 * FIELD_OFFSET_WARNING * 2.0,
-            drift: 1.0,
-        }];
-        state.warn_about_field_offset();
-        assert!(state.unseen_error, "a runaway offset went unannounced");
-        assert!(state.message.contains("drifted"));
-
-        state.unseen_error = false;
-        state.warn_about_field_offset();
-        assert!(!state.unseen_error, "the warning repeated");
-
-        // An offset the field can carry says nothing.
-        let mut quiet = Playground::default();
-        quiet.field_exposure.update(1.0e-2, 0.016);
-        quiet.field_offsets = vec![FieldOffset {
-            offset: 1.0e-2,
-            drift: 0.0,
-        }];
-        quiet.warn_about_field_offset();
-        assert!(!quiet.unseen_error);
+        state.field_render.clone_from(&values);
+        assert_eq!(state.field_render, values);
     }
 
     /// Loading a document used to raise `reset_requested`, which the GPU reset
@@ -14079,10 +13904,14 @@ mod probe_interaction_tests {
     }
 
     #[test]
-    fn vector_overlay_offers_only_modes_that_draw() {
+    fn vector_overlay_exposes_the_shared_canonical_vectors_in_every_skin() {
         assert_eq!(
             VectorOverlay::choices(PhysicsModel::Mechanical),
-            &[VectorOverlay::Off, VectorOverlay::RelativeEnergyFlow]
+            &[
+                VectorOverlay::Off,
+                VectorOverlay::ComplementaryField,
+                VectorOverlay::RelativeEnergyFlow,
+            ]
         );
         assert_eq!(
             VectorOverlay::choices(PhysicsModel::Electromagnetic {
@@ -14093,7 +13922,7 @@ mod probe_interaction_tests {
         );
         assert_eq!(
             VectorOverlay::ComplementaryField.resolved(PhysicsModel::Mechanical),
-            VectorOverlay::RelativeEnergyFlow
+            VectorOverlay::ComplementaryField
         );
         assert_eq!(
             VectorOverlay::ComplementaryField.resolved(PhysicsModel::Electromagnetic {
@@ -14103,7 +13932,7 @@ mod probe_interaction_tests {
         );
         assert_eq!(
             VectorOverlay::ComplementaryField.label(PhysicsModel::Mechanical),
-            VectorOverlay::RelativeEnergyFlow.label(PhysicsModel::Mechanical)
+            "In-plane field"
         );
     }
 
@@ -14667,7 +14496,11 @@ mod probe_interaction_tests {
         let second = activate(&mut state);
         assert_ne!(second.mesh.mesh_revision, first.mesh.mesh_revision);
 
-        state.refresh_amr(&WaveGpuRequest::default(), &WaveDisplay::default());
+        state.refresh_amr(
+            &CanonicalGpuRequest::default(),
+            &CanonicalGpuDisplay::default(),
+            &WaveDisplay::default(),
+        );
         assert!(state.amr_adaptation_job.is_none());
         assert!(state.amr_adaptation_source.is_none());
         assert_eq!(state.amr_error, None);
