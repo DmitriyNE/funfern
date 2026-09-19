@@ -957,8 +957,9 @@ complementary loss, prescribed exchange, thin-gap jump history, first-order
 outgoing impedance and the passive nonlocal three-state second-order boundary all
 participate in the same accepted/candidate transaction. The paired grid filter,
 pulses, maintenance and linear-law events use that global acceptance boundary as
-well. A rejected step or event leaves accepted physical state and its clock
-unchanged.
+well. Its fixed-cadence production filter is resident in the solver command
+stream; authored pulses and edits remain host-queued events. A rejected step or
+event leaves accepted physical state and its clock unchanged.
 
 The GPU manifest stays within eight storage bindings and owns explicit accepted
 and candidate lanes for `Q`, `b`, physical auxiliaries, force caches, energy

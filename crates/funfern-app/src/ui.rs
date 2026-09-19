@@ -877,7 +877,6 @@ pub struct Playground {
     pending_pulse: Option<(Point2, RegionId)>,
     canonical_event_serial: u32,
     canonical_event_observed: u32,
-    canonical_filter_step: u64,
     probe_mode: Option<ProbePlacement>,
     selected_probe: Option<ProbeId>,
     probe_windows: BTreeSet<ProbeId>,
@@ -1079,7 +1078,6 @@ impl Default for Playground {
             pending_pulse: None,
             canonical_event_serial: 0,
             canonical_event_observed: 0,
-            canonical_filter_step: 0,
             probe_mode: None,
             selected_probe: None,
             probe_windows: BTreeSet::new(),
@@ -6674,6 +6672,7 @@ impl Playground {
         commands: &mut Commands,
         delta: f64,
     ) {
+        request.set_grid_scale_filter(self.grid_scale_filter);
         // Starting another preparation mid-upload clears `runtime.ready`, and
         // would make the accepted GPU generation impossible to publish under
         // its immutable topology token. A later frame picks the edit up.
@@ -6806,7 +6805,6 @@ impl Playground {
                             self.restart_probe_traces();
                             self.canonical_event_serial = 0;
                             self.canonical_event_observed = 0;
-                            self.canonical_filter_step = 0;
                         }
                         self.restart_exposures_after_handoff(upload.fresh);
                         self.amr_adaptation_state = if active.adapted {
@@ -6853,7 +6851,6 @@ impl Playground {
                     self.sim_time_offset = 0.0;
                     self.canonical_event_serial = 0;
                     self.canonical_event_observed = 0;
-                    self.canonical_filter_step = 0;
                     self.restart_probe_traces();
                 }
             }
@@ -6912,52 +6909,18 @@ impl Playground {
             }
             let handoff_pending = self.runtime.ready().is_some() || self.uploading.is_some();
             if !handoff_pending {
-                let completed = request.stats().completed_steps();
-                if !self.grid_scale_filter {
-                    self.canonical_filter_step = completed;
-                } else if completed
-                    >= self
-                        .canonical_filter_step
-                        .saturating_add(GRID_SCALE_FILTER_CADENCE)
-                    && !request.live_event_pending()
-                {
-                    self.canonical_event_serial = self
-                        .canonical_event_serial
-                        .max(request.stats().processed_event())
-                        .saturating_add(1)
-                        .max(1);
-                    match CanonicalGpuLiveEvent::grid_filter(1.0, self.canonical_event_serial)
-                        .map_err(|error| format!("{error:?}"))
-                        .and_then(|event| {
-                            request
-                                .queue_live_event(assets, event)
-                                .map_err(str::to_owned)
-                        }) {
-                        Ok(()) => self.canonical_filter_step = completed,
-                        Err(error) => self.message = error,
-                    }
-                }
-                let steps_until_filter = self
-                    .canonical_filter_step
-                    .saturating_add(GRID_SCALE_FILTER_CADENCE)
-                    .saturating_sub(request.requested_steps());
                 if self.wave_running {
-                    let mut steps = steps_for_frame(
+                    let steps = steps_for_frame(
                         &mut self.accumulator,
                         delta,
                         self.editor.document.presentation.simulation_speed,
                         dt,
                     );
-                    if self.grid_scale_filter {
-                        steps = steps.min(steps_until_filter);
-                    }
                     if steps > 0 {
                         request.request_steps(steps);
                     }
                 } else if self.wave_step {
-                    if !self.grid_scale_filter || steps_until_filter > 0 {
-                        request.request_steps(1);
-                    }
+                    request.request_steps(1);
                     self.wave_step = false;
                 }
                 self.speed_reached =
@@ -14717,9 +14680,9 @@ mod probe_interaction_tests {
         assert!(!adaptation_refines(&report(3, 0, 0.9), 0.12));
     }
 
-    /// An estimate owns a copied solution snapshot. Periodic grid filtering is
-    /// a live event and may replace GPU command buffers while the CPU walks
-    /// that snapshot; only a topology/generation handoff makes it stale.
+    /// An estimate owns a copied solution snapshot. Accepted-state maintenance
+    /// may continue while the CPU walks that snapshot; only a
+    /// topology/generation handoff makes it stale.
     #[test]
     fn a_live_gpu_event_does_not_disown_an_amr_snapshot() {
         let token = TopologyToken {

@@ -5,13 +5,44 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Resident canonical grid damping
+
+- Follow-up interactive testing isolated the roughly 220-step/s cap to “Damp
+  unresolvable detail”. The canonical cutover had represented the fixed
+  every-16-step filter as a host-authored live event. Each filter therefore
+  uploaded an event buffer, changed the request revision, rebuilt render-world
+  bindings, stopped the next batch at the event boundary and waited for host
+  acknowledgement/readback. That fixed-frequency round trip explains both the
+  weak DOF dependence and the periodic microstutter; ordinary damping and the
+  outgoing condition were not the cause.
+- Restored the old execution property in the canonical solver: the paired `Q,b`
+  filter is now encoded directly in the resident command stream at the exact
+  accepted-step cadence. It reuses candidate-state validation and atomically
+  accepts or latches failure, but creates no live event, request revision,
+  upload, bind-group rebuild or host wait. Probes observe the post-filter state.
+- Corrected the lane-paired step-accounting boundary exposed by outgoing modes.
+  Pending loss/work is consolidated before a resident filter, and every
+  zero-duration event starts a fresh contribution bank when it flips the
+  accepted lane. This retains filter removal and boundary loss in one ledger.
+- The terminating Metal fixture matches the CPU oracle with periodic filtering:
+  at 93,144 `Q` / 185,310 `b`, 512 measured steps take 521 ms (about 982
+  steps/s, 1.90 simulated seconds/wall second); relative errors are 5.14e-6 and
+  1.32e-6. The passive second-order fixture also passes, including its auxiliary
+  state and energy gate. These are solver-path measurements, not a claim about
+  final UI frame pacing.
+- Formatting, all 641 workspace tests (plus the known ignored curved-boundary
+  reproducer), strict Clippy, wasm32 checking and the release application build
+  pass. The terminating five-event GPU harness also retains CPU-oracle parity.
+
 ## 2026-09-19 — Stage 6 interactive-performance correction
 
-- Traced the apparent 220-step/s regression at roughly 100k primary DOFs to the
-  interactive consumer path rather than the canonical evolution kernels. The
+- The first follow-up isolated the steady canonical evolution kernels from the
+  apparent 220-step/s regression at roughly 100k primary DOFs. The
   production harness sustains 1,025 steps/s with continuous full readback and
   1,164 steps/s with the production primary-only stream on a 93,144 `Q` /
-  185,310 `b` reflecting fixture (about 2.04× and 2.25× real time).
+  185,310 `b` reflecting fixture (about 2.04× and 2.25× real time). Subsequent
+  UI isolation identified the periodic host-scheduled grid-filter event as the
+  remaining fixed-rate bottleneck; the 2026-09-20 entry records its correction.
 - Fixed step-rate accounting after Stage 5 made accepted-step totals continuous
   across generations. A handoff now establishes the new observation baseline
   instead of crediting the entire run again, so the speed-shortfall notice can
@@ -41,13 +72,13 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 ## 2026-09-19 — Stage 6 acceptance: AMR liveness and preparation latency
 
 - Native acceptance found that AMR completed its first handoff and then discarded
-  every estimate as stale: periodic grid filtering changes the GPU buffer
-  revision, which is not snapshot ownership. AMR now keys an estimate to the
-  topology token and canonical generation, retaining the sampled accepted step
-  only for cadence. A Metal run completed repeated 9,653 → 12,669 → 15,683 DOF
-  adaptive handoffs. Mandatory wavelength/max-edge limits also win when the
-  error target binds the same element, rather than being suppressed by the
-  global accuracy gate.
+  every estimate as stale: the then-host-scheduled periodic grid filter changed
+  the GPU buffer revision, which is not snapshot ownership. AMR now keys an
+  estimate to the topology token and canonical generation, retaining the sampled
+  accepted step only for cadence. A Metal run completed repeated 9,653 → 12,669
+  → 15,683 DOF adaptive handoffs. Mandatory wavelength/max-edge limits also win
+  when the error target binds the same element, rather than being suppressed by
+  the global accuracy gate.
 - Preparation's wall-time budget was checked after 256-element batches, and the
   dense outgoing-boundary eigensolve still hid in one final unit. The trace saw
   222–631 ms worst slices as AMR grew the mesh. Deadlines are now checked after

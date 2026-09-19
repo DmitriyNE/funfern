@@ -11,10 +11,11 @@ use funfern_app::canonical_gpu::{
 };
 use funfern_core::{
     BACKGROUND_REGION, CanonicalAuxiliaryState, CanonicalForcing, CanonicalSource,
-    CanonicalWaveOperator, CanonicalWaveState, DampingLaw, InternalBoundary,
-    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw, LossChannel, MeshingOptions,
-    Obstacle, ObstacleId, OpenCubicSpline, OuterBoundaryCondition, PeriodicCubicSpline, Point2,
-    QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
+    CanonicalWaveOperator, CanonicalWaveState, DampingLaw, GRID_SCALE_FILTER_CADENCE,
+    InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw,
+    LossChannel, MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline, OuterBoundaryCondition,
+    PeriodicCubicSpline, Point2, QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive,
+    TimeSignal, mesh_scene,
 };
 
 const DEFAULT_STEPS: u64 = 128;
@@ -39,6 +40,7 @@ struct Expected {
     initial_step: u64,
     failure_test: bool,
     primary_readback: bool,
+    periodic_filter: bool,
     failure_snapshot: Option<FailureSnapshot>,
     recovering: bool,
     started: Option<Instant>,
@@ -84,6 +86,7 @@ fn main() {
     };
     let failure_test = std::env::args().any(|argument| argument == "--failure");
     let primary_readback = std::env::args().any(|argument| argument == "--primary-readback");
+    let periodic_filter = std::env::args().any(|argument| argument == "--periodic-filter");
     let clock_rebase = std::env::args().any(|argument| argument == "--clock-rebase");
     let preparation = Instant::now();
     let mut scene = if thin_gap || obstacles {
@@ -301,6 +304,13 @@ fn main() {
         oracle
             .step_with_forcing(&operator, &forcing)
             .expect("CPU oracle step");
+        if periodic_filter
+            && (initial_step + oracle.steps()).is_multiple_of(GRID_SCALE_FILTER_CADENCE)
+        {
+            oracle
+                .apply_grid_filter(&operator, &forcing, 1.0)
+                .expect("CPU periodic grid filter");
+        }
     }
     let expected = Expected {
         primary: oracle.primary_flux().to_vec(),
@@ -355,6 +365,7 @@ fn main() {
         initial_step,
         failure_test,
         primary_readback,
+        periodic_filter,
         failure_snapshot: None,
         recovering: false,
         started: None,
@@ -422,6 +433,7 @@ fn install(
             .set_continuous_full_state_readback(true)
             .expect("select validation readback mode");
     }
+    request.set_grid_scale_filter(expected.periodic_filter);
     request.install(
         &mut assets,
         &mut commands,

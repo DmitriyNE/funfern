@@ -433,13 +433,32 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+// Periodic grid damping is resident solver maintenance, not a host-authored
+// event. Start the same staged paired filter without touching event serials or
+// runtime ownership; the matching commit below accepts it atomically on the
+// GPU before the next ordinary step in this command buffer.
+@compute @workgroup_size(1)
+fn resident_filter_begin() {
+    if stopped() { return; }
+    control.event.z = accepted_slot() | (2u << 8u);
+    control.event.w = bitcast<u32>(1.0);
+}
+
 @compute @workgroup_size(128)
 fn event_begin(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
-    if stopped() || event_operation() == 0u || i >= control.counts_a.w { return; }
+    if stopped() || event_operation() == 0u { return; }
     if i == 0u {
         control.candidate_accounting_a = control.accepted_accounting_a;
         control.candidate_accounting_b = control.accepted_accounting_b;
+    }
+    // State and the cumulative step-accounting bank share the accepted lane.
+    // A zero-duration event flips that lane, so begin a fresh contribution
+    // bank from the consolidated control totals rather than exposing the
+    // previous candidate bank as accepted.
+    if i < accounting_item_count() {
+        let candidate = accounting_bank_offset(accepted_slot() ^ 1u) + i;
+        scratch[candidate].values = vec4<f32>(0.0);
     }
     if i < control.counts_a.x {
         set_candidate_q(i, accepted_q(i));
@@ -447,7 +466,7 @@ fn event_begin(@builtin(global_invocation_id) id: vec3<u32>) {
     } else if i < control.counts_a.x + control.counts_a.y {
         let sample = i - complementary_offset();
         set_candidate_b(sample, accepted_b(sample));
-    } else {
+    } else if i < control.counts_a.w {
         let auxiliary = i - auxiliary_offset();
         set_candidate_auxiliary(auxiliary, accepted_auxiliary(auxiliary));
     }
@@ -626,6 +645,18 @@ fn commit_event() {
     }
     control.event_result = vec4<u32>(
         control.event.y, operation, control.event.y, 0u);
+}
+
+@compute @workgroup_size(1)
+fn resident_filter_commit() {
+    let failure = atomicLoad(&status.candidate);
+    if failure != 0u {
+        atomicMax(&status.latch, failure);
+        return;
+    }
+    control.event.z = accepted_slot() ^ 1u;
+    control.accepted_accounting_a = control.candidate_accounting_a;
+    control.accepted_accounting_b = control.candidate_accounting_b;
 }
 
 @compute @workgroup_size(128)

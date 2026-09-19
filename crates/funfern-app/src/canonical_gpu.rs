@@ -35,8 +35,8 @@ use funfern_core::{
     CanonicalAuxiliaryState, CanonicalForcing, CanonicalOutgoingHistoryTransferMap,
     CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
     CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferMap, CanonicalWaveOperator, CanonicalWaveState, Point2,
-    QuadraticWaveOperator, TimeSignal, WaveError,
+    CanonicalVectorTransferMap, CanonicalWaveOperator, CanonicalWaveState,
+    GRID_SCALE_FILTER_CADENCE, Point2, QuadraticWaveOperator, TimeSignal, WaveError,
 };
 
 use crate::wave_gpu::{
@@ -69,6 +69,8 @@ const EVENT_GRID_FILTER: u32 = 2;
 const EVENT_LINEAR_LAW_PATCH: u32 = 3;
 const EVENT_MAINTENANCE: u32 = 4;
 const EVENT_SOURCE_PATCH: u32 = 5;
+const RESIDENT_FILTER_DISPATCHES: u64 = 7;
+const RESIDENT_FILTER_ACCOUNTING_DISPATCHES: u64 = 1;
 const TRANSFER_LAYOUT_VERSION: u32 = 1;
 const TRANSFER_HEADER_WORDS: usize = 8;
 const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
@@ -2111,6 +2113,7 @@ pub struct CanonicalGpuRequest {
     status_readback_entity: Option<Entity>,
     full_state_readback_entity: Option<Entity>,
     continuous_full_state_readback: bool,
+    grid_scale_filter: bool,
     handoff: Option<CanonicalGpuHandoffHandles>,
     handoff_outcome: CanonicalGpuHandoffOutcome,
     live_event: Option<CanonicalGpuLiveEventHandles>,
@@ -2129,6 +2132,7 @@ impl Default for CanonicalGpuRequest {
             status_readback_entity: None,
             full_state_readback_entity: None,
             continuous_full_state_readback: false,
+            grid_scale_filter: false,
             handoff: None,
             handoff_outcome: CanonicalGpuHandoffOutcome::None,
             live_event: None,
@@ -2323,6 +2327,18 @@ impl CanonicalGpuRequest {
 
     pub fn live_event_pending(&self) -> bool {
         self.live_event.is_some()
+    }
+
+    /// Enables the resident paired Q,b grid filter. Unlike authored live
+    /// events, this deterministic maintenance operation is encoded directly at
+    /// the fixed solver-step cadence and never changes buffer ownership or
+    /// waits for a host acknowledgement.
+    pub fn set_grid_scale_filter(&mut self, enabled: bool) {
+        self.grid_scale_filter = enabled;
+    }
+
+    pub fn grid_scale_filter(&self) -> bool {
+        self.grid_scale_filter
     }
 
     pub fn caught_up(&self) -> bool {
@@ -3103,6 +3119,8 @@ struct CanonicalPipeline {
     handoff_clear_scratch: CachedComputePipelineId,
     handoff_commit: CachedComputePipelineId,
     live_event_stage: CachedComputePipelineId,
+    resident_filter_begin: CachedComputePipelineId,
+    resident_filter_commit: CachedComputePipelineId,
 }
 
 #[derive(Resource)]
@@ -3183,6 +3201,8 @@ fn init_canonical_pipeline(
     let handoff_clear_scratch = queue("handoff_clear_scratch");
     let handoff_commit = queue("handoff_commit");
     let live_event_stage = queue("live_event_stage");
+    let resident_filter_begin = queue("resident_filter_begin");
+    let resident_filter_commit = queue("resident_filter_commit");
     commands.insert_resource(CanonicalPipeline {
         layout,
         start_loss,
@@ -3215,6 +3235,8 @@ fn init_canonical_pipeline(
         handoff_clear_scratch,
         handoff_commit,
         live_event_stage,
+        resident_filter_begin,
+        resident_filter_commit,
     });
 
     let map_layout = BindGroupLayoutDescriptor::new(
@@ -3676,6 +3698,8 @@ fn compute_canonical_wave(
         pipeline.commit_clock_rebase,
         pipeline.stage_accounting,
         pipeline.live_event_stage,
+        pipeline.resident_filter_begin,
+        pipeline.resident_filter_commit,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -3733,7 +3757,12 @@ fn compute_canonical_wave(
         };
         pass.set_pipeline(pipelines[14]);
         pass.dispatch_workgroups(
-            workgroups(handles.state_count.max(handles.drive_count)),
+            workgroups(
+                handles
+                    .state_count
+                    .max(handles.drive_count)
+                    .max(handles.accounting_item_count),
+            ),
             1,
             1,
         );
@@ -3850,6 +3879,7 @@ fn compute_canonical_wave(
             })
     });
     let mut rebases = 0_u64;
+    let mut resident_filters = 0_u64;
     for offset in 0..pending {
         if group.encoded_local_step.saturating_add(1) >= handles.rebase_step_limit {
             pass.set_pipeline(pipelines[22]);
@@ -3908,6 +3938,39 @@ fn compute_canonical_wave(
         pass.set_pipeline(pipelines[13]);
         pass.dispatch_workgroups(1, 1, 1);
         let step_after = group.encoded_steps + offset + 1;
+        if request.grid_scale_filter && step_after.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
+            if handles.needs_accounting {
+                // Per-step contributions live in a lane-paired scratch bank.
+                // Consolidate them before the zero-duration event flips the
+                // accepted lane; event_begin then starts the next bank empty.
+                pass.set_pipeline(pipelines[12]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            pass.set_pipeline(pipelines[26]);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(pipelines[14]);
+            pass.dispatch_workgroups(
+                workgroups(
+                    handles
+                        .state_count
+                        .max(handles.drive_count)
+                        .max(handles.accounting_item_count),
+                ),
+                1,
+                1,
+            );
+            pass.set_pipeline(pipelines[16]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.set_pipeline(pipelines[17]);
+            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.set_pipeline(pipelines[18]);
+            pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
+            pass.set_pipeline(pipelines[19]);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(pipelines[27]);
+            pass.dispatch_workgroups(1, 1, 1);
+            resident_filters += 1;
+        }
         if let Some((handles, bind_group, Some(consumer))) = point_recorder
             && probe_sample_due(step_after, handles.sample_stride)
         {
@@ -3961,6 +4024,12 @@ fn compute_canonical_wave(
         pending
             .saturating_mul(handles.dispatches_per_step)
             .saturating_add(2 * rebases)
+            .saturating_add(RESIDENT_FILTER_DISPATCHES * resident_filters)
+            .saturating_add(
+                RESIDENT_FILTER_ACCOUNTING_DISPATCHES
+                    * resident_filters
+                    * u64::from(handles.needs_accounting),
+            )
             .saturating_add(u64::from(handles.needs_accounting && pending != 0)),
         Ordering::Relaxed,
     );
@@ -4373,5 +4442,15 @@ mod tests {
         assert_eq!(pulse.upload.len(), operator_nodes + 1);
         assert!(CanonicalGpuLiveEvent::grid_filter(1.1, 8).is_err());
         assert!(CanonicalGpuLiveEvent::maintenance(&[], 0).is_err());
+    }
+
+    #[test]
+    fn resident_filter_toggle_does_not_create_a_host_event_or_revision() {
+        let mut request = CanonicalGpuRequest::default();
+        let revision = request.revision();
+        request.set_grid_scale_filter(true);
+        assert!(request.grid_scale_filter());
+        assert_eq!(request.revision(), revision);
+        assert!(!request.live_event_pending());
     }
 }

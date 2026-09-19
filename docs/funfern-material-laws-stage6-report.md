@@ -86,13 +86,13 @@ The first production acceptance run exposed two integration defects that the
 isolated Stage 6 fixtures did not exercise.
 
 - An AMR estimate was owned by the canonical request's mutable buffer revision.
-  The periodic paired grid filter legitimately advances that revision, so after
-  the first adaptive handoff every later CPU estimate was discarded as stale.
-  Estimate ownership now consists of the immutable topology token, canonical GPU
-  generation and sampled accepted step. Live events may run while the owned CPU
-  snapshot is evaluated; a generation handoff still invalidates it. A native
-  Metal trace then completed repeated adaptive handoffs from 9,653 to 12,669 and
-  15,683 degrees of freedom.
+  The then-host-scheduled periodic paired grid filter advanced that revision, so
+  after the first adaptive handoff every later CPU estimate was discarded as
+  stale. Estimate ownership now consists of the immutable topology token,
+  canonical GPU generation and sampled accepted step. Live events may run while
+  the owned CPU snapshot is evaluated; a generation handoff still invalidates
+  it. A native Metal trace then completed repeated adaptive handoffs from 9,653
+  to 12,669 and 15,683 degrees of freedom.
 - A wavelength or maximum-edge floor that bound the same element as the error
   target was classified as error-only. A satisfied global accuracy target could
   therefore suppress a mandatory resolution floor. Error and limit binding are
@@ -145,11 +145,14 @@ gate did not expose:
 The full production render-graph harness at 93,144 `Q` plus 185,310 independent
 `b` samples sustains 1,025 steps/s with continuous full-state validation readback
 and 1,164 steps/s with the production primary-only stream. Those runs correspond
-to 2.04 and 2.25 simulated seconds per wall second on the M1 Max fixture. Thus
-the reported ~220-step/s behavior was an interactive scheduling/readback problem,
-not the steady canonical arithmetic kernel. The terminating harness requests one
-full snapshot after the primary-only timing interval and still meets the original
-state and energy tolerances.
+to 2.04 and 2.25 simulated seconds per wall second on the M1 Max fixture and
+exclude periodic filtering. Follow-up UI isolation found that the remaining
+~220-step/s cap came from representing the every-16-step filter as a host live
+event: each occurrence forced an upload, request revision, binding rebuild and
+host acknowledgement. The filter now runs as validated resident maintenance in
+the solver command stream. With it enabled, the same 93,144 / 185,310 fixture
+runs 512 measured steps in 521 ms (about 982 steps/s and 1.90 simulated
+seconds/wall second) while retaining the CPU-oracle and energy tolerances.
 
 ## Generation, events and source continuity
 
@@ -172,9 +175,11 @@ with the same instantaneous carrier-phase rule. Disabled authored volume-source
 slots remain present with zero weights, so enabling a source cannot shift runtime
 slot ownership.
 
-The periodic paired filter is scheduled at an exact accepted-step boundary with
-its canonical admissible strength. Request batching stops at that boundary, so
-filtering cannot land halfway through a multi-step encode.
+The periodic paired filter is encoded at an exact accepted-step boundary with
+its canonical admissible strength. It uses the ordinary accepted/candidate
+validation boundary inside the same command stream: success flips the accepted
+lane before consumers and the next step, while failure latches the global solver
+status. It does not create a host event, request revision, upload or readback.
 
 ## Verification
 
@@ -190,7 +195,7 @@ target/release/examples/canonical_gpu_timing [reflecting/first/second-order]
 target/release/funfern-app
 ```
 
-The workspace suite completes with 639 passes; one historical legacy
+The workspace suite completes with 641 passes; one historical legacy
 curved-second-order reproducer remains ignored. The shader suite parses and validates the four new
 consumer shaders as well as the evolution and transfer shaders. Strict Clippy,
 all-target native checks and the wasm32 application check pass. A release native
