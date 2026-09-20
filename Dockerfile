@@ -5,10 +5,16 @@ RUN rustup target add wasm32-unknown-unknown \
 
 WORKDIR /opt/funfern
 
+ARG TARGETARCH
+
 COPY Cargo.toml Cargo.lock Trunk.toml index.html ./
 COPY crates ./crates
+COPY assets ./assets
 
-RUN NO_COLOR=true trunk build --release
+RUN --mount=type=cache,id=funfern-wasm-target-${TARGETARCH},target=/opt/funfern/target \
+    --mount=type=cache,id=funfern-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry \
+    --mount=type=cache,id=funfern-trunk-tools-${TARGETARCH},target=/root/.cache/trunk \
+    CARGO_NET_RETRY=10 CARGO_HTTP_TIMEOUT=600 NO_COLOR=true trunk build --release
 
 FROM nginx:1.29-alpine
 

@@ -22,13 +22,13 @@ Tested toolchain: Rust 1.96.0, Trunk 0.21.14. Install the browser tools once:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo install trunk --locked
+cargo install trunk --version 0.21.14 --locked
 ```
 
 From the repository root:
 
 ```sh
-trunk serve
+NO_COLOR=true trunk serve
 ```
 
 Open <http://127.0.0.1:8080/> in a WebGPU-capable browser with hardware
@@ -49,15 +49,14 @@ recording uses the browser's built-in `MediaRecorder` and needs no additional to
 Release browser bundle (output: `dist/`):
 
 ```sh
-trunk build --release
+NO_COLOR=true trunk build --release
 # Serve the optimized build locally:
-trunk serve --release
+NO_COLOR=true trunk serve --release
 ```
 
-If your shell sets `NO_COLOR=1`, Trunk 0.21.14 rejects that value. Use
-`NO_COLOR=true trunk serve` or `NO_COLOR=true trunk build --release` instead.
-The release build and serving commands were exercised with this environment
-setting. Keep `Cargo.lock` for reproducibility. The pinned integration is
+The explicit `NO_COLOR=true` works around a Trunk 0.21.14 bug: that release
+rejects the conventional `NO_COLOR=1` value set by some terminals and automation.
+Keep `Cargo.lock` for reproducibility. The pinned integration is
 [Bevy 0.19.1](https://docs.rs/bevy/0.19.1/bevy/) with
 [bevy_egui 0.42.0](https://docs.rs/crate/bevy_egui/0.42.0).
 See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for tooling.

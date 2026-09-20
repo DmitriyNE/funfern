@@ -5,6 +5,35 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Browser packaging and local serving repair
+
+- The toolbar logo became a compile-time asset after the original container
+  recipe was written, but the builder still copied only the workspace manifests
+  and `crates/`. The image build therefore failed when Rust evaluated the logo's
+  `include_bytes!`. The builder now copies `assets/` before compiling. Its release
+  target, Cargo registry and Trunk helper downloads use architecture-specific
+  BuildKit caches, so transient registry/helper-download failures no longer
+  discard the expensive WASM compilation or mix host executables between ARM64
+  and x86-64 builds. The build step also gives Cargo explicit retry and timeout
+  budgets for slow container-network transfers.
+- The generated Trunk page, JavaScript and WASM all serve correctly, and a
+  self-closing Chrome/WebGPU smoke check reaches the running canvas without page
+  or console errors. The apparent bare-`trunk serve` failure in this environment
+  was Trunk 0.21.14 rejecting the conventional inherited `NO_COLOR=1`; the primary
+  README commands now use the accepted `NO_COLOR=true` spelling and pin the tested
+  Trunk version explicitly. Reverse-DNS address discovery is disabled so the
+  server reports only its configured `127.0.0.1` endpoint instead of misleading
+  Docker Desktop aliases.
+- Validation includes Compose configuration parsing, a locked release Trunk build
+  with nonempty HTML/WASM output, and the Chrome smoke check. A repaired container
+  build completed the release Rust application compile past the former missing
+  logo, then Docker networking timed out downloading Trunk's `wasm-opt`; later
+  retries were blocked earlier by crates.io and Docker Hub timeouts, including
+  failure to resolve the already selected `rust:1.96-bookworm` base-image tag.
+  Final nginx image assembly therefore remains to be rerun when the external
+  container network is reachable; no source/build-definition error remained in
+  the completed portions.
+
 ## 2026-09-20 — Measured terminal tail and self-describing snapshots
 
 - Interactive retesting showed no observable change from the first dormancy
