@@ -36,6 +36,12 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   known curved-boundary reproducer ignored; warning-denied Clippy, shader
   validation, wasm32 checking, formatting, diff checks and the release app build
   also pass.
+- TODO: this remains an empirical stopgap rather than a finished terminal-field
+  policy. Refine scalar/vector exposure and AMR dormancy around a principled,
+  quantity-aware numerical-noise estimate that behaves consistently across
+  scenes, meshes, material scales and genuinely persistent low-amplitude fields;
+  reassess whether more of the tail should be removed by the resident filter
+  without damaging its intentionally preserved stationary kernel.
 
 ## 2026-09-20 — Filter-boundary consumers and dormant-field AMR
 
