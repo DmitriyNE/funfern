@@ -942,6 +942,280 @@ fn spawn_preparation_worker(
     false
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackgroundAmrKind {
+    Indicator,
+    Adaptation,
+}
+
+enum BackgroundAmrJob {
+    Indicator(Box<SolutionIndicatorJob>),
+    Adaptation(Box<MeshAdaptationJob>),
+}
+
+impl BackgroundAmrJob {
+    fn kind(&self) -> BackgroundAmrKind {
+        match self {
+            Self::Indicator(_) => BackgroundAmrKind::Indicator,
+            Self::Adaptation(_) => BackgroundAmrKind::Adaptation,
+        }
+    }
+
+    fn phase(&self) -> &'static str {
+        match self {
+            Self::Indicator(job) => job.phase(),
+            Self::Adaptation(job) => job.phase(),
+        }
+    }
+}
+
+#[cfg_attr(
+    all(target_arch = "wasm32", not(feature = "browser-threads")),
+    allow(dead_code)
+)]
+enum BackgroundAmrCommand {
+    Run { serial: u64, job: BackgroundAmrJob },
+    Cancel,
+}
+
+#[cfg_attr(
+    all(target_arch = "wasm32", not(feature = "browser-threads")),
+    allow(dead_code)
+)]
+enum BackgroundAmrResult {
+    Indicator(Result<SolutionIndicatorResult, SolutionIndicatorError>),
+    Adaptation(Result<MeshAdaptationResult, MeshAdaptationError>),
+}
+
+#[cfg_attr(
+    all(target_arch = "wasm32", not(feature = "browser-threads")),
+    allow(dead_code)
+)]
+enum BackgroundAmrEvent {
+    Progress {
+        serial: u64,
+        kind: BackgroundAmrKind,
+        phase: &'static str,
+    },
+    Finished {
+        serial: u64,
+        result: Box<BackgroundAmrResult>,
+    },
+}
+
+impl BackgroundAmrEvent {
+    fn serial(&self) -> u64 {
+        match self {
+            Self::Progress { serial, .. } | Self::Finished { serial, .. } => *serial,
+        }
+    }
+}
+
+/// One independent worker advances the immutable solution estimate and the
+/// subsequent mesh transaction. Their old two-millisecond UI slices made total
+/// AMR throughput proportional to display FPS: precisely when the GPU was
+/// overloaded, adaptation also appeared to stop. Assembly has its own worker,
+/// so accepting an adapted mesh can start candidate preparation without either
+/// job sharing a queue or a core with the other.
+struct BackgroundAmrWorker {
+    sender: Sender<BackgroundAmrCommand>,
+    receiver: Mutex<Receiver<BackgroundAmrEvent>>,
+    next_serial: u64,
+    active_serial: Option<u64>,
+    kind: Option<BackgroundAmrKind>,
+    phase: Option<&'static str>,
+}
+
+impl BackgroundAmrWorker {
+    #[cfg(any(
+        not(target_arch = "wasm32"),
+        all(target_arch = "wasm32", feature = "browser-threads")
+    ))]
+    const QUANTUM: std::time::Duration = std::time::Duration::from_millis(8);
+
+    fn spawn() -> Option<Self> {
+        let (job_sender, job_receiver) = mpsc::channel::<BackgroundAmrCommand>();
+        let (event_sender, event_receiver) = mpsc::channel::<BackgroundAmrEvent>();
+        if !spawn_amr_worker(job_receiver, event_sender) {
+            return None;
+        }
+        Some(Self {
+            sender: job_sender,
+            receiver: Mutex::new(event_receiver),
+            next_serial: 0,
+            active_serial: None,
+            kind: None,
+            phase: None,
+        })
+    }
+
+    fn submit(&mut self, job: BackgroundAmrJob) -> Result<(), BackgroundAmrJob> {
+        let kind = job.kind();
+        let phase = job.phase();
+        let serial = self.next_serial.wrapping_add(1).max(1);
+        self.next_serial = serial;
+        match self.sender.send(BackgroundAmrCommand::Run { serial, job }) {
+            Ok(()) => {
+                self.active_serial = Some(serial);
+                self.kind = Some(kind);
+                self.phase = Some(phase);
+                Ok(())
+            }
+            Err(error) => match error.0 {
+                BackgroundAmrCommand::Run { job, .. } => Err(job),
+                BackgroundAmrCommand::Cancel => unreachable!(),
+            },
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.active_serial = None;
+        self.kind = None;
+        self.phase = None;
+        let _ = self.sender.send(BackgroundAmrCommand::Cancel);
+    }
+
+    fn cancel_kind(&mut self, kind: BackgroundAmrKind) {
+        if self.kind == Some(kind) {
+            self.cancel();
+        }
+    }
+
+    fn drain(&mut self) -> Vec<BackgroundAmrEvent> {
+        let events = {
+            let receiver = self.receiver.lock().unwrap();
+            std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>()
+        };
+        let mut current = Vec::new();
+        for event in events {
+            if self.active_serial != Some(event.serial()) {
+                continue;
+            }
+            match &event {
+                BackgroundAmrEvent::Progress { kind, phase, .. } => {
+                    self.kind = Some(*kind);
+                    self.phase = Some(*phase);
+                }
+                BackgroundAmrEvent::Finished { .. } => {
+                    self.active_serial = None;
+                    self.kind = None;
+                    self.phase = None;
+                }
+            }
+            current.push(event);
+        }
+        current
+    }
+}
+
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(target_arch = "wasm32", feature = "browser-threads")
+))]
+fn run_amr_worker(
+    job_receiver: Receiver<BackgroundAmrCommand>,
+    event_sender: Sender<BackgroundAmrEvent>,
+) {
+    while let Ok(command) = job_receiver.recv() {
+        let BackgroundAmrCommand::Run {
+            mut serial,
+            mut job,
+        } = command
+        else {
+            continue;
+        };
+        loop {
+            let mut cancelled = false;
+            loop {
+                match job_receiver.try_recv() {
+                    Ok(BackgroundAmrCommand::Run {
+                        serial: newer_serial,
+                        job: newer,
+                    }) => {
+                        serial = newer_serial;
+                        job = newer;
+                        cancelled = false;
+                    }
+                    Ok(BackgroundAmrCommand::Cancel) => cancelled = true,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                }
+            }
+            if cancelled {
+                break;
+            }
+
+            let started = Instant::now();
+            let result = loop {
+                let result = match &mut job {
+                    BackgroundAmrJob::Indicator(job) => {
+                        job.advance(64).map(BackgroundAmrResult::Indicator)
+                    }
+                    BackgroundAmrJob::Adaptation(job) => {
+                        job.advance(64).map(BackgroundAmrResult::Adaptation)
+                    }
+                };
+                if result.is_some() || started.elapsed() >= BackgroundAmrWorker::QUANTUM {
+                    break result;
+                }
+            };
+            if let Some(result) = result {
+                if event_sender
+                    .send(BackgroundAmrEvent::Finished {
+                        serial,
+                        result: Box::new(result),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                break;
+            }
+            if event_sender
+                .send(BackgroundAmrEvent::Progress {
+                    serial,
+                    kind: job.kind(),
+                    phase: job.phase(),
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_amr_worker(
+    job_receiver: Receiver<BackgroundAmrCommand>,
+    event_sender: Sender<BackgroundAmrEvent>,
+) -> bool {
+    std::thread::Builder::new()
+        .name("funfern-amr".into())
+        .spawn(move || run_amr_worker(job_receiver, event_sender))
+        .is_ok()
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+fn spawn_amr_worker(
+    job_receiver: Receiver<BackgroundAmrCommand>,
+    event_sender: Sender<BackgroundAmrEvent>,
+) -> bool {
+    if !BROWSER_PREPARATION_WORKER_READY.load(Ordering::Acquire) {
+        return false;
+    }
+    rayon::spawn(move || run_amr_worker(job_receiver, event_sender));
+    true
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "browser-threads")))]
+fn spawn_amr_worker(
+    _job_receiver: Receiver<BackgroundAmrCommand>,
+    _event_sender: Sender<BackgroundAmrEvent>,
+) -> bool {
+    false
+}
+
 fn compile_gpu_upload(
     candidate: PreparedTopology,
     active: Option<Arc<PreparedTopology>>,
@@ -1051,6 +1325,7 @@ pub struct Playground {
     editor: TopologyEditor,
     runtime: TopologyRuntime,
     background_preparation: Option<BackgroundPreparationWorker>,
+    background_amr: Option<BackgroundAmrWorker>,
     selection: TopologySelection,
     inspector: Option<InspectorPanel>,
     draw_open: bool,
@@ -1245,10 +1520,12 @@ pub struct Playground {
     amr_last_analyzed_step: Option<u64>,
     amr_coarsen_streak: u8,
     amr_indicator_job: Option<SolutionIndicatorJob>,
+    amr_indicator_completed: Option<Result<SolutionIndicatorResult, SolutionIndicatorError>>,
     amr_indicator_source: Option<AmrIndicatorSource>,
     amr_indicator_result: Option<SolutionIndicatorResult>,
     amr_energy_peak: f64,
     amr_adaptation_job: Option<MeshAdaptationJob>,
+    amr_adaptation_completed: Option<Result<MeshAdaptationResult, MeshAdaptationError>>,
     /// Revision of the active mesh the running adaptation started from. The
     /// job is dropped as soon as that mesh is no longer the active one.
     amr_adaptation_source: Option<u64>,
@@ -1294,6 +1571,7 @@ impl Default for Playground {
             editor,
             runtime: TopologyRuntime::default(),
             background_preparation: BackgroundPreparationWorker::spawn(),
+            background_amr: BackgroundAmrWorker::spawn(),
             selection: TopologySelection::None,
             inspector: Some(InspectorPanel::Edit),
             draw_open: false,
@@ -1436,10 +1714,12 @@ impl Default for Playground {
             amr_last_analyzed_step: None,
             amr_coarsen_streak: 0,
             amr_indicator_job: None,
+            amr_indicator_completed: None,
             amr_indicator_source: None,
             amr_indicator_result: None,
             amr_energy_peak: 0.0,
             amr_adaptation_job: None,
+            amr_adaptation_completed: None,
             amr_adaptation_source: None,
             amr_adaptation_state: None,
             amr_pending_state: None,
@@ -3261,8 +3541,14 @@ impl Playground {
         ui.separator();
         self.advanced_settings(ui);
         if self.amr_settings() != before_amr {
+            self.cancel_background_amr();
             self.amr_indicator_job = None;
+            self.amr_indicator_completed = None;
+            self.amr_indicator_source = None;
             self.amr_adaptation_job = None;
+            self.amr_adaptation_completed = None;
+            self.amr_adaptation_source = None;
+            self.amr_pending_state = None;
             self.amr_last_analyzed_step = None;
             self.amr_last_started = None;
             self.amr_coarsen_streak = 0;
@@ -7302,7 +7588,12 @@ impl Playground {
     fn commit_in_place(&mut self, token: TopologyToken, message: &'static str) {
         match self.runtime.commit_ready(token) {
             Ok(active) => {
+                if let Some(worker) = &mut self.background_amr {
+                    worker.cancel_kind(BackgroundAmrKind::Indicator);
+                }
                 self.amr_indicator_job = None;
+                self.amr_indicator_completed = None;
+                self.amr_indicator_source = None;
                 self.amr_indicator_result = None;
                 self.amr_last_analyzed_step = None;
                 self.message = message.into();
@@ -7590,7 +7881,12 @@ impl Playground {
                             self.amr_pending_state = None;
                             Some(MeshAdaptationState::from_mesh(&active.mesh))
                         };
+                        if let Some(worker) = &mut self.background_amr {
+                            worker.cancel_kind(BackgroundAmrKind::Indicator);
+                        }
                         self.amr_indicator_job = None;
+                        self.amr_indicator_completed = None;
+                        self.amr_indicator_source = None;
                         self.amr_indicator_result = None;
                         self.amr_last_analyzed_step = None;
                         self.message = "Simulation topology committed".into();
@@ -8067,15 +8363,93 @@ impl Playground {
         let recorded = (self.simulated_time() - from) / history;
         (history > 0.0 && recorded < 1.0).then(|| recorded.clamp(0.0, 1.0))
     }
+
+    fn drain_background_amr(&mut self) {
+        let events = self
+            .background_amr
+            .as_mut()
+            .map_or_else(Vec::new, BackgroundAmrWorker::drain);
+        for event in events {
+            if let BackgroundAmrEvent::Finished { result, .. } = event {
+                match *result {
+                    BackgroundAmrResult::Indicator(result) => {
+                        self.amr_indicator_completed = Some(result);
+                    }
+                    BackgroundAmrResult::Adaptation(result) => {
+                        self.amr_adaptation_completed = Some(result);
+                    }
+                }
+            }
+        }
+    }
+
+    fn background_amr_kind(&self) -> Option<BackgroundAmrKind> {
+        self.background_amr.as_ref().and_then(|worker| worker.kind)
+    }
+
+    fn background_amr_phase(&self, kind: BackgroundAmrKind) -> Option<&'static str> {
+        self.background_amr
+            .as_ref()
+            .filter(|worker| worker.kind == Some(kind))
+            .and_then(|worker| worker.phase)
+    }
+
+    fn start_indicator_job(&mut self, job: SolutionIndicatorJob) {
+        if let Some(mut worker) = self.background_amr.take() {
+            match worker.submit(BackgroundAmrJob::Indicator(Box::new(job))) {
+                Ok(()) => {
+                    self.background_amr = Some(worker);
+                    return;
+                }
+                Err(BackgroundAmrJob::Indicator(job)) => {
+                    self.amr_indicator_job = Some(*job);
+                    return;
+                }
+                Err(BackgroundAmrJob::Adaptation(_)) => unreachable!(),
+            }
+        }
+        self.amr_indicator_job = Some(job);
+    }
+
+    fn start_adaptation_job(&mut self, job: MeshAdaptationJob) {
+        if let Some(mut worker) = self.background_amr.take() {
+            match worker.submit(BackgroundAmrJob::Adaptation(Box::new(job))) {
+                Ok(()) => {
+                    self.background_amr = Some(worker);
+                    return;
+                }
+                Err(BackgroundAmrJob::Adaptation(job)) => {
+                    self.amr_adaptation_job = Some(*job);
+                    return;
+                }
+                Err(BackgroundAmrJob::Indicator(_)) => unreachable!(),
+            }
+        }
+        self.amr_adaptation_job = Some(job);
+    }
+
+    fn cancel_background_amr(&mut self) {
+        if let Some(worker) = &mut self.background_amr {
+            worker.cancel();
+        }
+    }
+
     fn refresh_amr(
         &mut self,
         request: &CanonicalGpuRequest,
         canonical: &CanonicalGpuDisplay,
         display: &WaveDisplay,
     ) {
+        self.drain_background_amr();
         if !self.amr_enabled {
+            self.cancel_background_amr();
             self.amr_indicator_job = None;
+            self.amr_indicator_completed = None;
+            self.amr_indicator_source = None;
             self.amr_adaptation_job = None;
+            self.amr_adaptation_completed = None;
+            self.amr_adaptation_source = None;
+            self.amr_pending_state = None;
             self.amr_indicator_result = None;
             self.amr_coarsen_streak = 0;
             self.amr_status = "off".into();
@@ -8085,21 +8459,28 @@ impl Playground {
         // it. Its result is only meaningful against the mesh it started from,
         // so once another mesh is active the job is dropped here instead of
         // finishing and being rejected at the handoff as an error.
-        if self.amr_adaptation_job.is_some()
+        let adaptation_in_progress = self.amr_adaptation_job.is_some()
+            || self.amr_adaptation_completed.is_some()
+            || self.background_amr_kind() == Some(BackgroundAmrKind::Adaptation);
+        if adaptation_in_progress
             && self.amr_adaptation_source.is_some_and(|source| {
                 self.runtime
                     .active()
                     .is_none_or(|active| active.mesh.mesh_revision != source)
             })
         {
+            if let Some(worker) = &mut self.background_amr {
+                worker.cancel_kind(BackgroundAmrKind::Adaptation);
+            }
             self.amr_adaptation_job = None;
+            self.amr_adaptation_completed = None;
             self.amr_adaptation_source = None;
             self.amr_pending_state = None;
             self.amr_status = "adaptation discarded: the mesh changed underneath it".into();
             return;
         }
         if self.uploading.is_some() || self.preparation_in_progress() || self.editor.editing() {
-            self.amr_status = if self.amr_adaptation_job.is_some() {
+            self.amr_status = if adaptation_in_progress {
                 "adapting mesh"
             } else {
                 "geometry has priority"
@@ -8115,8 +8496,14 @@ impl Playground {
             while result.is_none() && started.elapsed().as_secs_f64() < 0.002 {
                 result = job.advance(64);
             }
-            let Some(result) = result else { return };
-            self.amr_adaptation_job = None;
+            if let Some(result) = result {
+                self.amr_adaptation_completed = Some(result);
+                self.amr_adaptation_job = None;
+            } else {
+                return;
+            }
+        }
+        if let Some(result) = self.amr_adaptation_completed.take() {
             self.amr_adaptation_source = None;
             match result {
                 Ok(mut result) => {
@@ -8162,6 +8549,13 @@ impl Playground {
             }
             return;
         }
+        if self.background_amr_kind() == Some(BackgroundAmrKind::Adaptation) {
+            self.amr_status = self
+                .background_amr_phase(BackgroundAmrKind::Adaptation)
+                .unwrap_or("Adapting mesh")
+                .into();
+            return;
+        }
 
         if let Some(job) = &mut self.amr_indicator_job {
             self.amr_status = job.phase().into();
@@ -8170,9 +8564,15 @@ impl Playground {
             while result.is_none() && started.elapsed().as_secs_f64() < 0.002 {
                 result = job.advance(64);
             }
-            let Some(result) = result else { return };
+            if let Some(result) = result {
+                self.amr_indicator_completed = Some(result);
+                self.amr_indicator_job = None;
+            } else {
+                return;
+            }
+        }
+        if let Some(result) = self.amr_indicator_completed.take() {
             let source = self.amr_indicator_source.take();
-            self.amr_indicator_job = None;
             let Some(source) = source else {
                 self.amr_status = "discarded stale estimate".into();
                 return;
@@ -8250,16 +8650,24 @@ impl Playground {
                 ..Default::default()
             };
             let field: Arc<dyn MeshSizeField> = result.field;
-            self.amr_adaptation_job = Some(MeshAdaptationJob::new_topology(
+            let job = MeshAdaptationJob::new_topology(
                 active.mesh.clone(),
                 &active.bundle.plan,
                 state,
                 target_revision,
                 field,
                 options,
-            ));
+            );
             self.amr_adaptation_source = Some(active.mesh.mesh_revision);
+            self.start_adaptation_job(job);
             self.amr_status = "adapting mesh".into();
+            return;
+        }
+        if self.background_amr_kind() == Some(BackgroundAmrKind::Indicator) {
+            self.amr_status = self
+                .background_amr_phase(BackgroundAmrKind::Indicator)
+                .unwrap_or("Preparing AMR estimate")
+                .into();
             return;
         }
 
@@ -8392,34 +8800,33 @@ impl Playground {
                 return;
             }
         };
-        self.amr_indicator_job = Some(
-            SolutionIndicatorJob::new_topology(
-                active.mesh.clone(),
-                active.operator.clone(),
-                &active.bundle.plan,
-                active.bundle.model(),
-                snapshot,
-                SolutionIndicatorOptions {
-                    minimum_edge_length: self.amr_minimum_edge,
-                    maximum_edge_length: self.amr_maximum_edge,
-                    relative_tolerance: self.amr_target_accuracy(),
-                    elements_per_wavelength: self.amr_elements_per_wavelength,
-                    forcing_frequency_hz: highest_forcing_frequency(
-                        &active.bundle.authored,
-                        active.point_source,
-                    ),
-                    coarsen_ratio: AMR_COARSEN_EDGE_RATIO,
-                    dormant_below_energy: self.amr_energy_peak * DORMANT_ENERGY_RATIO,
-                    ..Default::default()
-                },
-            )
-            .with_canonical_supplement(supplement),
-        );
+        let job = SolutionIndicatorJob::new_topology(
+            active.mesh.clone(),
+            active.operator.clone(),
+            &active.bundle.plan,
+            active.bundle.model(),
+            snapshot,
+            SolutionIndicatorOptions {
+                minimum_edge_length: self.amr_minimum_edge,
+                maximum_edge_length: self.amr_maximum_edge,
+                relative_tolerance: self.amr_target_accuracy(),
+                elements_per_wavelength: self.amr_elements_per_wavelength,
+                forcing_frequency_hz: highest_forcing_frequency(
+                    &active.bundle.authored,
+                    active.point_source,
+                ),
+                coarsen_ratio: AMR_COARSEN_EDGE_RATIO,
+                dormant_below_energy: self.amr_energy_peak * DORMANT_ENERGY_RATIO,
+                ..Default::default()
+            },
+        )
+        .with_canonical_supplement(supplement);
         self.amr_indicator_source = Some(AmrIndicatorSource {
             topology: active.bundle.token,
             gpu_generation: request.generation(),
             accepted_step: step,
         });
+        self.start_indicator_job(job);
         self.amr_last_started = Some(Instant::now());
         self.amr_status = "preparing estimate".into();
     }
@@ -12108,17 +12515,20 @@ fn canonical_steps_withheld(packed_candidate_waiting: bool, fresh_upload: bool) 
 ///
 /// `speed` is the ceiling on simulated seconds per wall second: the wall-clock
 /// time a frame took is scaled by it before being spent, so half asks for half
-/// the steps. The frame's own delta is clamped first, so a stall cannot spend
-/// more than a tenth of a second at once, and the leftover is capped at one
-/// frame's worth — the solver cannot encode more than `MAX_STEPS_PER_FRAME` in
-/// a frame, so unspent time is dropped rather than queued into a backlog that
-/// never drains. That cap is also why a high speed on a heavy scene simply
-/// falls short instead of running away.
+/// the steps. A late frame may spend at most one 60 Hz display interval. Trying
+/// to catch up the whole late interval creates a positive feedback loop on a
+/// saturated GPU: a long solver batch delays drawing, the delayed frame asks
+/// for a still larger batch, and rendering collapses to the step ceiling. The
+/// interactive contract is instead to preserve display service and report the
+/// simulation-speed shortfall. The fractional remainder is still retained, but
+/// is capped at one solver batch so high requested speeds cannot queue an
+/// unbounded backlog.
 fn steps_for_frame(accumulator: &mut f64, delta: f64, speed: f64, time_step: f64) -> u64 {
     if !time_step.is_finite() || time_step <= 0.0 || !speed.is_finite() || speed <= 0.0 {
         return 0;
     }
-    *accumulator += delta.clamp(0.0, 0.1) * speed;
+    const DISPLAY_INTERVAL: f64 = 1.0 / 60.0;
+    *accumulator += delta.clamp(0.0, DISPLAY_INTERVAL) * speed;
     let steps = (*accumulator / time_step)
         .floor()
         .clamp(0.0, MAX_STEPS_PER_FRAME as f64) as u64;
@@ -13016,6 +13426,61 @@ mod tests {
         assert!(state.handoff_ready.is_some());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn background_amr_worker_finishes_a_mesh_transaction() {
+        let scene = Scene::default();
+        let mesh = Arc::new(
+            mesh_scene(
+                &scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.2,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let job = MeshAdaptationJob::new(
+            mesh.clone(),
+            scene,
+            MeshAdaptationState::from_mesh(&mesh),
+            2,
+            Arc::new(|_, _| 0.2),
+            MeshAdaptationOptions {
+                minimum_target_edge_length: 0.01,
+                maximum_target_edge_length: 0.3,
+                max_refinement_changes: 0,
+                max_coarsening_changes: 0,
+                ..Default::default()
+            },
+        );
+        let mut worker = BackgroundAmrWorker::spawn().expect("native AMR worker");
+        worker
+            .submit(BackgroundAmrJob::Adaptation(Box::new(job)))
+            .map_err(|_| ())
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        loop {
+            for event in worker.drain() {
+                if let BackgroundAmrEvent::Finished { result, .. } = event {
+                    let BackgroundAmrResult::Adaptation(result) = *result else {
+                        panic!("wrong AMR result kind");
+                    };
+                    let result = result.unwrap();
+                    assert_eq!(result.report.topology_changes, 0);
+                    return;
+                }
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "native AMR worker timed out"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     #[test]
     fn handoff_withholds_steps_only_when_the_source_cannot_advance() {
         assert!(!canonical_steps_withheld(false, false));
@@ -13447,14 +13912,20 @@ mod tests {
         assert_eq!(quiet_total, 19);
     }
 
-    /// The per-frame ceiling is what turns a speed the scene cannot afford into
-    /// a shortfall rather than a runaway backlog.
+    /// A late display frame drops missed wall time instead of asking the GPU to
+    /// catch up and making the next frame later still. Very high requested
+    /// speeds retain the independent solver-batch ceiling.
     #[test]
-    fn the_frame_ceiling_caps_the_steps_and_the_leftover() {
+    fn late_frames_preserve_the_display_budget_and_cap_the_leftover() {
         let step = 1.0e-3;
+        let mut on_time = 0.0;
+        let mut late = 0.0;
+        let expected = steps_for_frame(&mut on_time, 1.0 / 60.0, 1.0, step);
+        assert_eq!(steps_for_frame(&mut late, 1.0, 1.0, step), expected);
+        assert!((late - on_time).abs() < 1.0e-12);
+
         let mut accumulator = 0.0;
-        // A whole clamped frame at double speed wants 200 steps.
-        let steps = steps_for_frame(&mut accumulator, 1.0, 2.0, step);
+        let steps = steps_for_frame(&mut accumulator, 1.0, 8.0, step);
         assert_eq!(steps, MAX_STEPS_PER_FRAME);
         assert!(
             accumulator <= MAX_STEPS_PER_FRAME as f64 * step + 1.0e-12,
@@ -13462,7 +13933,7 @@ mod tests {
         );
         // And it stays capped however long the solver is behind.
         for _ in 0..100 {
-            steps_for_frame(&mut accumulator, 1.0, 2.0, step);
+            steps_for_frame(&mut accumulator, 1.0, 8.0, step);
         }
         assert!(accumulator <= MAX_STEPS_PER_FRAME as f64 * step + 1.0e-12);
 

@@ -184,6 +184,20 @@ gate did not expose:
   production autosave's field, Regions, mesh and boundary layers all enabled, a
   release run remained around 54–60 FPS through 52,660–67,956 DOFs and stabilized
   at 60 FPS on the settled 67,956-DOF mesh.
+- Refining beyond that run exposed a solver/display feedback loop rather than a
+  further presentation copy. Once one real-time solver batch missed 60 Hz, the
+  next frame spent the whole late wall interval and submitted a larger batch to
+  the same GPU queue as rendering and AMR readback. At the observed ~15 FPS this
+  reached the 64-step frame ceiling. Pacing now spends at most one 60 Hz interval
+  per frame; an overloaded scene falls short of requested simulated speed instead
+  of starving display service in an attempt to catch up.
+- Error estimation and mesh adaptation no longer receive a two-millisecond slice
+  per rendered frame. A dedicated long-lived worker advances both jobs, separate
+  from the candidate-assembly worker, and publishes only serialized results that
+  still pass the topology/generation gate. Native and threaded WebAssembly use
+  the worker; static WebAssembly retains the cooperative runner. A release profile
+  of the production autosave showed AMR traversals on `funfern-amr` while assembly
+  independently occupied `funfern-cpu-prepare`.
 - Preparing a 93,144-primary-DOF GPU generation took about 155 ms synchronously,
   followed by a redundant second copy while turning roughly 80.7 MiB of typed
   buffers into Bevy assets. Reusing the already validated scalar CSR reduces plan

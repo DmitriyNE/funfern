@@ -5,6 +5,29 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Solver overload yields display time; AMR leaves the UI thread
+
+- The next autosave cliff was not another egui topology copy. At roughly 70k
+  DOFs the shorter stable step made a real-time frame expensive enough to miss
+  60 Hz. Pacing then spent the complete late wall interval on the next solver
+  batch. The resulting positive feedback reached the 64-step frame ceiling at
+  about 15 FPS: solver compute, drawing and coherent AMR readback all shared the
+  same GPU queue, while AMR's CPU job received only one 2 ms slice per rendered
+  frame.
+- Interactive pacing now spends at most one 60 Hz wall interval per frame.
+  Overload is reported as a simulation-speed shortfall instead of being repaid
+  with ever larger GPU batches that starve presentation. Fractional step time
+  and the independent high-speed batch ceiling remain bounded.
+- A second long-lived worker, independent of candidate assembly, now owns both
+  solution-indicator and mesh-adaptation jobs. Native and threaded-browser
+  builds advance them continuously in bounded quanta; static WebAssembly keeps
+  the cooperative fallback. Serialized results retain the topology/generation
+  acceptance checks, and cancellation makes late results harmless after edits.
+- A release profile on the same autosave showed indicator and adaptation work on
+  `funfern-amr`, concurrent candidate work on `funfern-cpu-prepare`, and no AMR
+  traversal on the UI thread. Exact post-change FPS and simulated-speed behavior
+  at the user's threshold remain a hands-on acceptance check.
+
 ## 2026-09-20 — Dense presentation leaves egui's transient mesh path
 
 - The earlier field-render correction was incomplete. The production autosave
