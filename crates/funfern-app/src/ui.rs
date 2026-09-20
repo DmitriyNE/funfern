@@ -12337,7 +12337,9 @@ fn edit_face_condition(
         FaceBoundaryCondition::Dirichlet { .. } => BoundaryKind::Dirichlet,
     }
     .presented(physics);
+    let menu_height = boundary_combo_height(ui, physics);
     egui::ComboBox::from_id_salt("span-condition")
+        .height(menu_height)
         .selected_text(kind.label_for(physics))
         .show_ui(ui, |ui| boundary_kind_choices(ui, physics, &mut kind));
     if kind != face_kind(before).presented(physics) {
@@ -12379,7 +12381,9 @@ fn edit_outer_condition(
 ) -> bool {
     let before = *condition;
     let mut kind = outer_kind(*condition).presented(physics);
+    let menu_height = boundary_combo_height(ui, physics);
     egui::ComboBox::from_id_salt("outer-condition")
+        .height(menu_height)
         .selected_text(kind.label_for(physics))
         .show_ui(ui, |ui| boundary_kind_choices(ui, physics, &mut kind));
     if kind != outer_kind(before).presented(physics) {
@@ -12471,6 +12475,13 @@ fn boundary_kind_choices(ui: &mut egui::Ui, physics: PhysicsModel, kind: &mut Bo
     for value in BoundaryKind::choices(physics) {
         ui.selectable_value(kind, *value, value.label_for(physics));
     }
+}
+
+fn boundary_combo_height(ui: &egui::Ui, physics: PhysicsModel) -> f32 {
+    // egui's default combo height fits about five ordinary rows. Leave one
+    // row of headroom so the six-entry EM picker never acquires an unobvious
+    // scrollbar through rounding, font scaling, or popup padding.
+    ui.spacing().interact_size.y * (BoundaryKind::choices(physics).len() as f32 + 1.0)
 }
 
 fn edit_time_signal(ui: &mut egui::Ui, signal: &mut TimeSignal) {
