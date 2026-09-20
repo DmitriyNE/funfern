@@ -1018,6 +1018,15 @@ Stage 5 adds latest-state GPU transfer, atomic generation handoff, physical-hist
 
 Stage 6 ports rendering, point/line/area probes, canonical energy and flow, far-field sampling, readback and static-linear AMR to synchronized direct state, then connects that generation to Mechanical, TM and TE together. Its follow-up keeps the source display live through target admission and gives vector arrows a compact display-rate GPU consumer independent of full AMR snapshots. It also makes zero-duration resident-filter boundaries explicit to temporal consumers and makes terminal AMR error dormant below a run-relative energy floor while retaining hard resolution limits. The [Stage 6 production-cutover report](funfern-material-laws-stage6-report.md) records consumer semantics, history policy, source-edit correction, memory and actual-core performance. The legacy scalar solver remains only optional comparison infrastructure. Keep time-driven and nonlinear laws unavailable until their dependent stages rather than silently ignoring them.
 
+Stage 7 now has a real-device conservative-bulk correctness gate in addition to
+its f64 and packed-f32 fixtures. The production render graph executes travelling
+reciprocal mass modulation, smoothed-square stiffness modulation and an active
+Switch through a forced material-runtime clock rebase; on Apple M1 Max / Metal,
+96 steps matched the f64 oracle to `3.72e-7` relative Q error and `2.62e-6`
+relative b error. This closes neither live law-event/runtime transfer nor the
+filter, AMR, diagnostic and supported-boundary gates, and it is not the pending
+incremental-cost measurement.
+
 ## 13. Verification and acceptance
 
 ### 13.1 Numerical tests

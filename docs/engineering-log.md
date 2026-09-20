@@ -5,6 +5,29 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-21 — Stage 7 temporal bulk passes the real GPU path
+
+- Added a focused hidden-app gate around the production canonical render graph,
+  storage bindings, shader stages, global step commit and full-state readback.
+  The fixture combines travelling reciprocal primary modulation, smoothed-square
+  complementary modulation, an in-progress material Switch and a nonzero
+  absolute clock.
+- The gate installs two steps before the production clock-rebase threshold, so
+  a successful comparison also exercises GPU phase reanchoring, Switch-origin
+  translation and accepted/candidate runtime-slot publication. A clock-aligned
+  temporal-state constructor now represents an accepted generation directly;
+  the test does not manufacture its start time through thousands of warmup
+  steps.
+- On Apple M1 Max / Metal, 96 production steps (2,214 Q DOFs and 4,182 vector
+  samples) crossed epoch 7 to 8 with relative f64-oracle errors of `3.72e-7`
+  for Q and `2.62e-6` for b. Reconstructed absolute-time error was
+  `1.93e-5 s`; no GPU failure was reported. This is a correctness run, not the
+  Stage 7 incremental-cost measurement.
+- The path remains dormant in the application. Next: transactional live
+  Switch/law events and temporal runtime transfer, followed by filter, dynamic
+  AMR, diagnostic and supported-boundary gates before authoring controls are
+  enabled.
+
 ## 2026-09-20 — Stage 7 bulk laws occupy the production GPU layout
 
 - Added the dormant conservative temporal-plan compiler to the actual

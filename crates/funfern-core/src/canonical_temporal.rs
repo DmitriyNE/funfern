@@ -783,10 +783,25 @@ impl CanonicalTemporalWaveState {
         primary_flux: Vec<f64>,
         complementary_flux: Vec<Point2>,
     ) -> Result<Self, WaveError> {
+        Self::new_at(operator, time_step, primary_flux, complementary_flux, 0.0)
+    }
+
+    /// Constructs an accepted conservative-bulk state at an existing clock
+    /// boundary. This is used by generation handoff and clock-rebase
+    /// validation; the authored material runtime remains anchored to absolute
+    /// time until an explicit accepted event changes it.
+    pub fn new_at(
+        operator: &CanonicalTemporalWaveOperator,
+        time_step: f64,
+        primary_flux: Vec<f64>,
+        complementary_flux: Vec<Point2>,
+        time: f64,
+    ) -> Result<Self, WaveError> {
         if !operator.conservative_bulk_supported()
             || !time_step.is_finite()
             || time_step <= 0.0
             || time_step > operator.maximum_time_step()
+            || !time.is_finite()
         {
             return Err(WaveError::InvalidCoefficients);
         }
@@ -811,7 +826,7 @@ impl CanonicalTemporalWaveState {
             complementary_flux,
             runtime: operator.initial_runtime(),
             time_step,
-            time: 0.0,
+            time,
         })
     }
 

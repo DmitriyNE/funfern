@@ -310,7 +310,9 @@ Exit: first release boundary. Supported existing linear scenes, both outgoing or
 ### Stage 7 — Time-driven media and runtime switching
 
 Status: in progress; temporal runtime/compiler, conservative bulk reference and
-the dormant production-layout f32 bulk KDK are complete, while application
+the dormant production-layout f32 bulk KDK are complete. A real-device gate now
+runs that layout through the production render graph, accepted-state transaction,
+full readback and a material-runtime clock rebase with f64 parity. Application
 enablement, GPU event/transfer integration and dependent consumer gates remain.
 
 Implement stage-time coefficient evaluation on both physical sides, harmonic/smoothed-square/travelling drives, Switch stamping, phase anchors, ramp reversal and trajectory bounds. Sample travelling phase in actual material frames at nodes/quadrature. Validate reciprocal factors as reciprocal trajectories, not newly interpolated endpoints.
