@@ -1,10 +1,11 @@
-//! Persistent GPU paint path for the dense scalar field surface.
+//! Persistent GPU paint path for dense solution and mesh surfaces.
 //!
 //! Egui meshes are flattened into one transient vertex/index stream every
 //! frame. At adaptive-mesh scale that copied several megabytes of unchanged
-//! topology on the main thread. This callback keeps positions and indices on
-//! the render device and uploads only one f32 field value per node plus a tiny
-//! view/exposure uniform.
+//! topology and tessellated tens of thousands of mesh-outline shapes on the
+//! main thread. This callback keeps scalar-field indices, categorical triangles
+//! and unique mesh edges on the render device. Frames upload field values,
+//! optional flat colors and a tiny view/style uniform.
 
 use std::{borrow::Cow, sync::Arc};
 
@@ -38,16 +39,29 @@ pub struct FieldPaintTopology {
     pub mesh_revision: u64,
     pub positions: Arc<[[f32; 2]]>,
     pub indices: Arc<[u32]>,
+    pub triangles: Arc<[[f32; 6]]>,
+    pub edges: Arc<[FieldPaintEdge]>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct FieldPaintEdge {
+    pub endpoints: [f32; 4],
+    pub boundary: u32,
 }
 
 #[derive(Clone)]
 pub struct FieldPaintCallback {
     pub topology: Arc<FieldPaintTopology>,
-    pub values: Arc<[f32]>,
+    pub values: Option<Arc<[f32]>>,
+    pub overlay_colors: Option<Arc<[[u8; 4]]>>,
     pub world_center: [f32; 2],
     pub world_to_clip: [f32; 2],
+    pub point_to_clip: [f32; 2],
     pub color_scale: f32,
     pub over_overlay: bool,
+    pub mesh_lines: bool,
+    pub boundary_lines: bool,
 }
 
 impl FieldPaintCallback {
@@ -60,7 +74,8 @@ impl FieldPaintCallback {
 #[derive(Clone, Copy, Pod, Zeroable, ShaderType)]
 struct FieldPaintUniform {
     world_to_clip: [f32; 4],
-    color: [f32; 4],
+    field: [f32; 4],
+    lines: [f32; 4],
 }
 
 #[derive(Component)]
@@ -68,12 +83,32 @@ struct FieldPaintBuffers {
     mesh_revision: u64,
     vertex_count: usize,
     index_count: u32,
+    triangle_count: u32,
+    edge_count: u32,
     positions: Buffer,
     values: Buffer,
     indices: Buffer,
+    triangles: Buffer,
+    overlay_colors: Buffer,
+    edges: Buffer,
     uniform: Buffer,
     bind_group: BindGroup,
-    pipeline: CachedRenderPipelineId,
+    field_pipeline: CachedRenderPipelineId,
+    overlay_pipeline: CachedRenderPipelineId,
+    line_pipeline: CachedRenderPipelineId,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum FieldPaintPass {
+    Field,
+    Overlay,
+    Lines,
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct FieldPaintPipelineKey {
+    egui: EguiPipelineKey,
+    pass: FieldPaintPass,
 }
 
 #[derive(Resource)]
@@ -99,18 +134,15 @@ impl FromWorld for FieldPaintPipeline {
 }
 
 impl SpecializedRenderPipeline for FieldPaintPipeline {
-    type Key = EguiPipelineKey;
+    type Key = FieldPaintPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
-        RenderPipelineDescriptor {
-            label: Some(Cow::Borrowed("field paint pipeline")),
-            layout: vec![self.layout.clone()],
-            immediate_size: 0,
-            vertex: VertexState {
-                shader: self.shader.clone(),
-                shader_defs: vec![],
-                entry_point: Some(Cow::Borrowed("vertex")),
-                buffers: vec![
+        let (label, vertex_entry, fragment_entry, buffers) = match key.pass {
+            FieldPaintPass::Field => (
+                "field paint pipeline",
+                "field_vertex",
+                "field_fragment",
+                vec![
                     VertexBufferLayout {
                         array_stride: 8,
                         step_mode: VertexStepMode::Vertex,
@@ -130,6 +162,75 @@ impl SpecializedRenderPipeline for FieldPaintPipeline {
                         }],
                     },
                 ],
+            ),
+            FieldPaintPass::Overlay => (
+                "field categorical overlay pipeline",
+                "overlay_vertex",
+                "overlay_fragment",
+                vec![
+                    VertexBufferLayout {
+                        array_stride: 24,
+                        step_mode: VertexStepMode::Instance,
+                        attributes: vec![
+                            VertexAttribute {
+                                format: VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            VertexAttribute {
+                                format: VertexFormat::Float32x2,
+                                offset: 8,
+                                shader_location: 1,
+                            },
+                            VertexAttribute {
+                                format: VertexFormat::Float32x2,
+                                offset: 16,
+                                shader_location: 2,
+                            },
+                        ],
+                    },
+                    VertexBufferLayout {
+                        array_stride: 4,
+                        step_mode: VertexStepMode::Instance,
+                        attributes: vec![VertexAttribute {
+                            format: VertexFormat::Unorm8x4,
+                            offset: 0,
+                            shader_location: 3,
+                        }],
+                    },
+                ],
+            ),
+            FieldPaintPass::Lines => (
+                "field mesh line pipeline",
+                "line_vertex",
+                "line_fragment",
+                vec![VertexBufferLayout {
+                    array_stride: 20,
+                    step_mode: VertexStepMode::Instance,
+                    attributes: vec![
+                        VertexAttribute {
+                            format: VertexFormat::Float32x4,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        VertexAttribute {
+                            format: VertexFormat::Uint32,
+                            offset: 16,
+                            shader_location: 1,
+                        },
+                    ],
+                }],
+            ),
+        };
+        RenderPipelineDescriptor {
+            label: Some(Cow::Borrowed(label)),
+            layout: vec![self.layout.clone()],
+            immediate_size: 0,
+            vertex: VertexState {
+                shader: self.shader.clone(),
+                shader_defs: vec![],
+                entry_point: Some(Cow::Borrowed(vertex_entry)),
+                buffers,
             },
             primitive: PrimitiveState {
                 topology: bevy::mesh::PrimitiveTopology::TriangleList,
@@ -145,9 +246,9 @@ impl SpecializedRenderPipeline for FieldPaintPipeline {
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
                 shader_defs: vec![],
-                entry_point: Some(Cow::Borrowed("fragment")),
+                entry_point: Some(Cow::Borrowed(fragment_entry)),
                 targets: vec![Some(ColorTargetState {
-                    format: key.target_format,
+                    format: key.egui.target_format,
                     blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: ColorWrites::ALL,
                 })],
@@ -165,20 +266,38 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
         key: EguiPipelineKey,
         world: &mut World,
     ) {
-        if self.values.len() != self.topology.positions.len() || self.topology.indices.is_empty() {
+        let field_active = self
+            .values
+            .as_ref()
+            .is_some_and(|values| values.len() == self.topology.positions.len())
+            && !self.topology.indices.is_empty();
+        let overlay_active = self
+            .overlay_colors
+            .as_ref()
+            .is_some_and(|colors| colors.len() == self.topology.triangles.len());
+        let lines_active =
+            (self.mesh_lines || self.boundary_lines) && !self.topology.edges.is_empty();
+        if !field_active && !overlay_active && !lines_active {
             return;
         }
-        let pipeline_id = world.resource_scope(
+        let pipeline_ids = world.resource_scope(
             |world, mut specialized: Mut<SpecializedRenderPipelines<FieldPaintPipeline>>| {
                 let pipeline = world.resource::<FieldPaintPipeline>();
                 let cache = world.resource::<PipelineCache>();
-                specialized.specialize(cache, pipeline, key)
+                [
+                    FieldPaintPass::Field,
+                    FieldPaintPass::Overlay,
+                    FieldPaintPass::Lines,
+                ]
+                .map(|pass| {
+                    specialized.specialize(
+                        cache,
+                        pipeline,
+                        FieldPaintPipelineKey { egui: key, pass },
+                    )
+                })
             },
         );
-        world
-            .resource_mut::<PipelineCache>()
-            .block_on_render_pipeline(pipeline_id);
-
         let replace = world
             .get_entity(render_entity.id())
             .ok()
@@ -187,8 +306,18 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
                 buffers.mesh_revision != self.topology.mesh_revision
                     || buffers.vertex_count != self.topology.positions.len()
                     || buffers.index_count as usize != self.topology.indices.len()
+                    || buffers.triangle_count as usize != self.topology.triangles.len()
+                    || buffers.edge_count as usize != self.topology.edges.len()
+                    || buffers.field_pipeline != pipeline_ids[0]
+                    || buffers.overlay_pipeline != pipeline_ids[1]
+                    || buffers.line_pipeline != pipeline_ids[2]
             });
         if replace {
+            for pipeline_id in pipeline_ids {
+                world
+                    .resource_mut::<PipelineCache>()
+                    .block_on_render_pipeline(pipeline_id);
+            }
             let device = world.resource::<RenderDevice>();
             let cache = world.resource::<PipelineCache>();
             let pipeline = world.resource::<FieldPaintPipeline>();
@@ -200,7 +329,7 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
             });
             let values = device.create_buffer(&BufferDescriptor {
                 label: Some("field paint values"),
-                size: (self.values.len() * 4) as u64,
+                size: (self.topology.positions.len() * 4).max(4) as u64,
                 usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -208,6 +337,25 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
                 label: Some("field paint indices"),
                 size: (self.topology.indices.len() * 4) as u64,
                 usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let triangles = device.create_buffer(&BufferDescriptor {
+                label: Some("field paint categorical triangles"),
+                size: (self.topology.triangles.len() * 24).max(4) as u64,
+                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let overlay_colors = device.create_buffer(&BufferDescriptor {
+                label: Some("field paint categorical colors"),
+                size: (self.topology.triangles.len() * 4).max(4) as u64,
+                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let edges = device.create_buffer(&BufferDescriptor {
+                label: Some("field paint mesh edges"),
+                size: (self.topology.edges.len() * std::mem::size_of::<FieldPaintEdge>()).max(4)
+                    as u64,
+                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             let uniform = device.create_buffer(&BufferDescriptor {
@@ -224,18 +372,27 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
             let queue = world.resource::<RenderQueue>();
             queue.write_buffer(&positions, 0, cast_slice(self.topology.positions.as_ref()));
             queue.write_buffer(&indices, 0, cast_slice(self.topology.indices.as_ref()));
+            queue.write_buffer(&triangles, 0, cast_slice(self.topology.triangles.as_ref()));
+            queue.write_buffer(&edges, 0, cast_slice(self.topology.edges.as_ref()));
             world
                 .entity_mut(render_entity.id())
                 .insert(FieldPaintBuffers {
                     mesh_revision: self.topology.mesh_revision,
                     vertex_count: self.topology.positions.len(),
                     index_count: self.topology.indices.len() as u32,
+                    triangle_count: self.topology.triangles.len() as u32,
+                    edge_count: self.topology.edges.len() as u32,
                     positions,
                     values,
                     indices,
+                    triangles,
+                    overlay_colors,
+                    edges,
                     uniform,
                     bind_group,
-                    pipeline: pipeline_id,
+                    field_pipeline: pipeline_ids[0],
+                    overlay_pipeline: pipeline_ids[1],
+                    line_pipeline: pipeline_ids[2],
                 });
         }
 
@@ -250,10 +407,29 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
                 self.world_to_clip[0],
                 self.world_to_clip[1],
             ],
-            color: [self.color_scale, self.over_overlay as u8 as f32, 0.0, 0.0],
+            field: [self.color_scale, self.over_overlay as u8 as f32, 0.0, 0.0],
+            lines: [
+                self.point_to_clip[0],
+                self.point_to_clip[1],
+                self.mesh_lines as u8 as f32,
+                self.boundary_lines as u8 as f32,
+            ],
         };
         let queue = world.resource::<RenderQueue>();
-        queue.write_buffer(&buffers.values, 0, cast_slice(self.values.as_ref()));
+        if field_active {
+            queue.write_buffer(
+                &buffers.values,
+                0,
+                cast_slice(self.values.as_ref().unwrap().as_ref()),
+            );
+        }
+        if overlay_active {
+            queue.write_buffer(
+                &buffers.overlay_colors,
+                0,
+                cast_slice(self.overlay_colors.as_ref().unwrap().as_ref()),
+            );
+        }
         queue.write_buffer(&buffers.uniform, 0, bytes_of(&uniform));
     }
 
@@ -272,18 +448,40 @@ impl EguiBevyPaintCallbackImpl for FieldPaintCallback {
         else {
             return;
         };
-        let Some(pipeline) = world
-            .resource::<PipelineCache>()
-            .get_render_pipeline(buffers.pipeline)
-        else {
-            return;
-        };
-        render_pass.set_render_pipeline(pipeline);
-        render_pass.set_bind_group(0, &buffers.bind_group, &[]);
-        render_pass.set_vertex_buffer(0, buffers.positions.slice(..));
-        render_pass.set_vertex_buffer(1, buffers.values.slice(..));
-        render_pass.set_index_buffer(buffers.indices.slice(..), IndexFormat::Uint32);
-        render_pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+        let cache = world.resource::<PipelineCache>();
+        if self
+            .overlay_colors
+            .as_ref()
+            .is_some_and(|colors| colors.len() == buffers.triangle_count as usize)
+            && let Some(pipeline) = cache.get_render_pipeline(buffers.overlay_pipeline)
+        {
+            render_pass.set_render_pipeline(pipeline);
+            render_pass.set_bind_group(0, &buffers.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, buffers.triangles.slice(..));
+            render_pass.set_vertex_buffer(1, buffers.overlay_colors.slice(..));
+            render_pass.draw(0..3, 0..buffers.triangle_count);
+        }
+        if self
+            .values
+            .as_ref()
+            .is_some_and(|values| values.len() == buffers.vertex_count)
+            && let Some(pipeline) = cache.get_render_pipeline(buffers.field_pipeline)
+        {
+            render_pass.set_render_pipeline(pipeline);
+            render_pass.set_bind_group(0, &buffers.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, buffers.positions.slice(..));
+            render_pass.set_vertex_buffer(1, buffers.values.slice(..));
+            render_pass.set_index_buffer(buffers.indices.slice(..), IndexFormat::Uint32);
+            render_pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+        }
+        if (self.mesh_lines || self.boundary_lines)
+            && let Some(pipeline) = cache.get_render_pipeline(buffers.line_pipeline)
+        {
+            render_pass.set_render_pipeline(pipeline);
+            render_pass.set_bind_group(0, &buffers.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, buffers.edges.slice(..));
+            render_pass.draw(0..6, 0..buffers.edge_count);
+        }
     }
 }
 

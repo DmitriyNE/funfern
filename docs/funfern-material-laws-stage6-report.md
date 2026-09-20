@@ -177,6 +177,13 @@ gate did not expose:
   complementary/flow records after rendered solver batches, rather than forcing
   a 15 Hz full snapshot and whole-mesh CPU reconstruction. Energy and acceleration
   run at their consumer cadence, and host vectors retain their allocations.
+- Dense presentation no longer asks egui to flatten topology-sized geometry each
+  frame. One clipped callback retains quadratic field positions/indices, linear
+  categorical triangles and a unique mesh-edge list in GPU buffers; frames update
+  field values, optional per-triangle colors and view/style uniforms. With the
+  production autosave's field, Regions, mesh and boundary layers all enabled, a
+  release run remained around 54–60 FPS through 52,660–67,956 DOFs and stabilized
+  at 60 FPS on the settled 67,956-DOF mesh.
 - Preparing a 93,144-primary-DOF GPU generation took about 155 ms synchronously,
   followed by a redundant second copy while turning roughly 80.7 MiB of typed
   buffers into Bevy assets. Reusing the already validated scalar CSR reduces plan

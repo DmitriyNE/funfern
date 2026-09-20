@@ -5,6 +5,28 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Dense presentation leaves egui's transient mesh path
+
+- The earlier field-render correction was incomplete. The production autosave
+  also enables the categorical Regions overlay, complete mesh and mesh-boundary
+  display. At about 50k DOFs, `draw_solution` still rebuilt one filled triangle
+  and one separately antialiased closed-line shape for every FEM triangle on
+  every frame. The outline alone became tens of thousands of egui shapes and
+  reproduced the reported frame-rate cliff even though field topology was
+  already persistent.
+- The field callback now also owns persistent linear-triangle positions and a
+  unique edge list. Categorical colors are a compact per-triangle update; region
+  fill, the quadratic field, unique mesh-edge quads and boundary-edge quads draw
+  in order inside the same clipped GPU callback. Ordinary pan/zoom and frames no
+  longer rebuild or tessellate topology-sized egui geometry. Property and AMR
+  target overlays remain opt-in transient meshes for now.
+- On the M1 Max autosave with field, Regions, mesh and boundaries all enabled,
+  the corrected release run stayed around 54–60 FPS while adapting through
+  52,660, 61,828 and 67,956 DOFs, then stabilized at 60 FPS at 67,956 DOFs. The
+  solver stayed around 1,090 steps/s once the mesh settled. This supersedes the
+  earlier unmeasured assumption that persistent scalar-field indices alone had
+  removed the dense-presentation cliff.
+
 ## 2026-09-20 — AMR transactions stop fighting their own accuracy gate
 
 - The controller correctly suppressed error-driven refinement once the global

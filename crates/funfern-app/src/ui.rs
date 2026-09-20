@@ -5,7 +5,7 @@ use crate::canonical_gpu::{
     CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuRuntimeTransfer, CanonicalGpuTransferPlan,
     canonical_failure_description,
 };
-use crate::field_paint::{FieldPaintCallback, FieldPaintTopology};
+use crate::field_paint::{FieldPaintCallback, FieldPaintEdge, FieldPaintTopology};
 use crate::files::{self, FileEvent, SaveKind};
 use crate::material_overlay::{
     MaterialOverlay, MaterialOverlayJob, MaterialOverlaySnapshot, MaterialProperty, OverlayKey,
@@ -4513,55 +4513,45 @@ impl Playground {
                 }
             }
         }
-        // One mesh rather than one polygon per triangle. A polygon carries its
-        // own antialiased outline, and the outlines of neighbours leave a seam
-        // along every shared edge, which imprints the mesh on a categorical
-        // overlay whether or not the user asked to see it. Vertices are
-        // duplicated per triangle so each keeps its own flat colour and the
-        // boundary between two regions stays a step rather than a gradient.
-        if matches!(
+        // Categorical colors remain flat per triangle, but their positions and
+        // draw call live in the persistent field callback. Sending one egui
+        // mesh per frame became a second topology-sized copy after the scalar
+        // field itself moved to the GPU path.
+        let categorical_colors: Option<Arc<[[u8; 4]]>> = matches!(
             presentation.material_overlay,
             MaterialOverlay::Regions | MaterialOverlay::Subdomains
-        ) {
-            let mut fills = egui::Mesh::default();
-            fills.reserve_vertices(mesh.triangles.len() * 3);
-            fills.reserve_triangles(mesh.triangles.len());
-            for triangle in &mesh.triangles {
-                let base = match presentation.material_overlay {
-                    MaterialOverlay::Regions => active
-                        .bundle
-                        .authored
-                        .region(triangle.region)
-                        .and_then(|region| active.bundle.authored.material(region.material))
-                        .map(|m| {
-                            Color32::from_rgba_unmultiplied(
-                                m.color[0],
-                                m.color[1],
-                                m.color[2],
-                                (presentation.material_overlay_opacity * 210.0) as u8,
-                            )
-                        })
-                        .unwrap_or(Color32::TRANSPARENT),
-                    _ => subdomain_color(
-                        &self.editor.document.model.draft,
-                        triangle.region,
-                        presentation.material_overlay_opacity,
-                    ),
-                };
-                if base == Color32::TRANSPARENT {
-                    continue;
-                }
-                let first = fills.vertices.len() as u32;
-                for index in triangle.vertices {
-                    fills.colored_vertex(self.screen(mesh.vertices[index].point, r), base);
-                }
-                fills.add_triangle(first, first + 1, first + 2);
-            }
-            if !fills.is_empty() {
-                painter.add(egui::Shape::mesh(fills));
-            }
-        }
-        if presentation.field
+        )
+        .then(|| {
+            mesh.triangles
+                .iter()
+                .map(|triangle| {
+                    match presentation.material_overlay {
+                        MaterialOverlay::Regions => active
+                            .bundle
+                            .authored
+                            .region(triangle.region)
+                            .and_then(|region| active.bundle.authored.material(region.material))
+                            .map(|material| {
+                                Color32::from_rgba_unmultiplied(
+                                    material.color[0],
+                                    material.color[1],
+                                    material.color[2],
+                                    (presentation.material_overlay_opacity * 210.0) as u8,
+                                )
+                            })
+                            .unwrap_or(Color32::TRANSPARENT),
+                        _ => subdomain_color(
+                            &self.editor.document.model.draft,
+                            triangle.region,
+                            presentation.material_overlay_opacity,
+                        ),
+                    }
+                    .to_array()
+                })
+                .collect::<Vec<_>>()
+                .into()
+        });
+        let (field_values, color_scale): (Option<Arc<[f32]>>, f32) = if presentation.field
             && display.generation > 0
             && display.current.len() == active.operator.degrees_of_freedom()
         {
@@ -4586,9 +4576,19 @@ impl Playground {
                     reference,
                     presentation.field_auto_exposure,
                 );
+            (Some(field_values), scale as f32)
+        } else {
+            (None, 0.0)
+        };
+        if field_values.is_some()
+            || categorical_colors.is_some()
+            || presentation.mesh
+            || presentation.mesh_boundaries
+        {
             if self.field_paint_topology.as_ref().is_none_or(|topology| {
                 topology.mesh_revision != active.mesh.mesh_revision
                     || topology.positions.len() != active.operator.degrees_of_freedom()
+                    || topology.triangles.len() != mesh.triangles.len()
             }) {
                 let mut indices = Vec::with_capacity(active.operator.element_nodes().len() * 18);
                 for nodes in active.operator.element_nodes() {
@@ -4596,6 +4596,41 @@ impl Playground {
                         indices.extend_from_slice(&[nodes[a], nodes[b], nodes[6]]);
                     }
                 }
+                let triangles = mesh
+                    .triangles
+                    .iter()
+                    .map(|triangle| {
+                        let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
+                        [
+                            a.x as f32, a.y as f32, b.x as f32, b.y as f32, c.x as f32, c.y as f32,
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                let mut edge_kinds = BTreeMap::<[usize; 2], bool>::new();
+                for triangle in &mesh.triangles {
+                    for [a, b] in [
+                        [triangle.vertices[0], triangle.vertices[1]],
+                        [triangle.vertices[1], triangle.vertices[2]],
+                        [triangle.vertices[2], triangle.vertices[0]],
+                    ] {
+                        edge_kinds.entry([a.min(b), a.max(b)]).or_insert(false);
+                    }
+                }
+                for edge in &mesh.boundary_edges {
+                    let [a, b] = edge.vertices;
+                    edge_kinds.insert([a.min(b), a.max(b)], true);
+                }
+                let edges = edge_kinds
+                    .into_iter()
+                    .map(|([a, b], boundary)| {
+                        let a = mesh.vertices[a].point;
+                        let b = mesh.vertices[b].point;
+                        FieldPaintEdge {
+                            endpoints: [a.x as f32, a.y as f32, b.x as f32, b.y as f32],
+                            boundary: u32::from(boundary),
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 let replacement = Arc::new(FieldPaintTopology {
                     mesh_revision: active.mesh.mesh_revision,
                     positions: active
@@ -4606,6 +4641,8 @@ impl Playground {
                         .collect::<Vec<_>>()
                         .into(),
                     indices: indices.into(),
+                    triangles: triangles.into(),
+                    edges: edges.into(),
                 });
                 self.field_paint_topology = Some(replacement);
             }
@@ -4613,39 +4650,20 @@ impl Playground {
                 FieldPaintCallback {
                     topology: self.field_paint_topology.as_ref().unwrap().clone(),
                     values: field_values,
+                    overlay_colors: categorical_colors,
                     world_center: [self.center.x as f32, self.center.y as f32],
                     world_to_clip: [
                         (2.0 * self.scale / f64::from(r.width())) as f32,
                         (2.0 * self.scale / f64::from(r.height())) as f32,
                     ],
-                    color_scale: scale as f32,
+                    point_to_clip: [2.0 / r.width(), 2.0 / r.height()],
+                    color_scale,
                     over_overlay: presentation.material_overlay != MaterialOverlay::Off,
+                    mesh_lines: presentation.mesh,
+                    boundary_lines: presentation.mesh_boundaries,
                 }
                 .shape(r),
             );
-        }
-        // The field covers the whole domain and is opaque with no material
-        // overlay under it, so the mesh has to be drawn over the field rather
-        // than under it, and brightly enough to read against one.
-        if presentation.mesh {
-            for triangle in &mesh.triangles {
-                let points = triangle
-                    .vertices
-                    .map(|index| self.screen(mesh.vertices[index].point, r));
-                painter.add(egui::Shape::closed_line(
-                    points.to_vec(),
-                    Stroke::new(0.7, Color32::from_rgba_unmultiplied(160, 180, 195, 110)),
-                ));
-            }
-        }
-        if presentation.mesh_boundaries {
-            for edge in &mesh.boundary_edges {
-                let [a, b] = edge.vertices.map(|index| mesh.vertices[index].point);
-                painter.line_segment(
-                    [self.screen(a, r), self.screen(b, r)],
-                    Stroke::new(1.15, Color32::from_rgba_unmultiplied(184, 201, 211, 180)),
-                );
-            }
         }
         let mode = presentation
             .vector_overlay
