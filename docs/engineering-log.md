@@ -5,6 +5,33 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-21 — GPU-stamped temporal material events
+
+- Added zero-duration live transactions for material-wide Switch begin/reversal.
+  The host uploads material, target, duration and serial but no time. The GPU
+  evaluates the accepted ramp at the actual complete-step boundary, fills the
+  candidate runtime bank and publishes it only through the existing global
+  acceptance dispatch. Mid-ramp reversal is therefore value-continuous even
+  after clock rebasing or host/readback delay.
+- Same-layout temporal-law patches stage complete target coefficient records
+  in the transient eighth binding. Frequency edits preserve the accepted
+  instantaneous carrier at the GPU boundary; depth, smooth-square sharpness,
+  travelling spatial phase, reciprocal flag and alternate factor can change
+  together. Candidate f32 factors and the target trajectory timestep bound are
+  checked before coefficient records and the runtime slot are committed.
+- The fast path rejects material/drive-kind ownership changes, static operator
+  changes and explicit authored phase jumps. Those require a prepared
+  generation transition until their distinct mapping/admission contracts are
+  implemented. Other event classes remain gated on temporal generations until
+  their composition tests close.
+- The production-render-graph harness now crosses a clock rebase, reverses an
+  active Switch, applies a frequency/depth/alternate/spatial law patch, and
+  evolves after both transactions. On Apple M1 Max / Metal, 96 steps matched
+  the f64 piecewise-operator oracle to `3.63e-7` relative Q error and
+  `2.41e-6` relative b error; the absolute clock error remained `1.93e-5 s`.
+  Naga and Chrome WebGPU accept the shader. Next: temporal runtime generation
+  transfer and explicit temporal-event rollback injection.
+
 ## 2026-09-21 — Stage 7 temporal bulk passes the real GPU path
 
 - Added a focused hidden-app gate around the production canonical render graph,

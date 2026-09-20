@@ -242,6 +242,21 @@ fn temporal_enabled() -> bool {
     return (control.runtime_slots.w & 1u) != 0u;
 }
 
+fn smootherstep(value: f32) -> f32 {
+    return value * value * value
+        * (value * (value * 6.0 - 15.0) + 10.0);
+}
+
+fn temporal_switch_blend(runtime_word: u32, local_time: f32) -> f32 {
+    let start_blend = table_float(runtime_word + 1u, 0u);
+    let target_blend = table_float(runtime_word + 1u, 1u);
+    let start_time = table_float(runtime_word + 1u, 2u);
+    let duration = table_float(runtime_word + 1u, 3u);
+    if duration == 0.0 { return target_blend; }
+    let z = clamp((local_time - start_time) / duration, 0.0, 1.0);
+    return start_blend + (target_blend - start_blend) * smootherstep(z);
+}
+
 fn temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
     let metadata = tables[coefficient_word].data;
     let runtime_header = tables[control.runtime_slots.z].data;
@@ -279,16 +294,7 @@ fn temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
         // shader modules reject even in an unreachable branch.
         default: { return 0.0; }
     }
-    let start_blend = table_float(runtime_word + 1u, 0u);
-    let target_blend = table_float(runtime_word + 1u, 1u);
-    let start_time = table_float(runtime_word + 1u, 2u);
-    let duration = table_float(runtime_word + 1u, 3u);
-    var blend = target_blend;
-    if duration != 0.0 {
-        let z = clamp((local_time - start_time) / duration, 0.0, 1.0);
-        let smoother = z * z * z * (z * (z * 6.0 - 15.0) + 10.0);
-        blend = start_blend + (target_blend - start_blend) * smoother;
-    }
+    let blend = temporal_switch_blend(runtime_word, local_time);
     var switch_factor = 1.0;
     if (metadata.w & TEMPORAL_HAS_ALTERNATE) != 0u {
         let alternate = table_float(coefficient_word + 1u, 1u);
@@ -318,6 +324,48 @@ fn temporal_complementary_factor(sample: u32, local_time: f32) -> f32 {
 
 fn boundary_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(boundary[word].data[lane]);
+}
+
+fn uploaded_temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
+    let metadata = boundary[coefficient_word].data;
+    let runtime_header = tables[control.runtime_slots.z].data;
+    let runtime_word = runtime_header.w + 6u * metadata.x
+        + 3u * ((control.runtime_slots.y & 1u) ^ 1u);
+    let phase = table_float(runtime_word, metadata.y)
+        + boundary_float(coefficient_word + 1u, 3u) * local_time;
+    let carrier = reduced_phase(phase);
+    let depth = boundary_float(coefficient_word + 1u, 2u);
+    let shape = boundary_float(coefficient_word + 2u, 0u);
+    let spatial_phase = boundary_float(coefficient_word + 2u, 1u);
+    var drive = 1.0;
+    switch metadata.z {
+        case TEMPORAL_DRIVE_NONE: {}
+        case TEMPORAL_DRIVE_PUMP: { drive += depth * cos(carrier); }
+        case TEMPORAL_DRIVE_CRYSTAL: {
+            let cosine = cos(carrier);
+            var square: f32;
+            if abs(shape) < 0.001 {
+                square = cosine * (1.0
+                    + shape * shape * (1.0 - cosine * cosine) / 3.0);
+            } else {
+                square = tanh(shape * cosine) / tanh(shape);
+            }
+            drive += depth * square;
+        }
+        case TEMPORAL_DRIVE_TRAVELLING: {
+            drive += depth * cos(carrier - spatial_phase);
+        }
+        default: { return 0.0; }
+    }
+    let blend = temporal_switch_blend(runtime_word, local_time);
+    var switch_factor = 1.0;
+    if (metadata.w & TEMPORAL_HAS_ALTERNATE) != 0u {
+        switch_factor += blend
+            * (boundary_float(coefficient_word + 1u, 1u) - 1.0);
+    }
+    let factor = drive * switch_factor;
+    return select(factor, 1.0 / factor,
+        (metadata.w & TEMPORAL_INVERTED) != 0u);
 }
 
 fn packed_boundary_scalar(word_offset: u32, scalar_index: u32) -> f32 {
@@ -547,6 +595,72 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
             if !finite_scalar(weight) { reject(STATUS_NON_FINITE); }
         }
     }
+    if operation == 7u {
+        if !temporal_enabled() { reject(STATUS_LAYOUT); return; }
+        let header = tables[control.runtime_slots.z].data;
+        let runtime_count = tables[control.runtime_slots.z + 1u].data.x;
+        if upload.z >= runtime_count || upload.w > 1u {
+            reject(STATUS_LAYOUT);
+            return;
+        }
+        if i < runtime_count {
+            let root = header.w + 6u * i;
+            let accepted = root + 3u * (control.runtime_slots.y & 1u);
+            let candidate = root + 3u * ((control.runtime_slots.y & 1u) ^ 1u);
+            tables[candidate].data = tables[accepted].data;
+            tables[candidate + 1u].data = tables[accepted + 1u].data;
+            tables[candidate + 2u].data = tables[accepted + 2u].data;
+            if i == upload.z {
+                let target_blend = f32(upload.w);
+                let duration = boundary_float(1u, 0u);
+                var start = temporal_switch_blend(accepted, control.clock_f32.y);
+                if duration == 0.0 { start = target_blend; }
+                tables[candidate + 1u].data = bitcast<vec4<u32>>(vec4<f32>(
+                    start, target_blend, control.clock_f32.y, duration));
+                if !finite_scalar(start) || !finite_scalar(duration)
+                    || duration < 0.0 {
+                    reject(STATUS_LAYOUT);
+                }
+            }
+        }
+    }
+    if operation == 8u {
+        if !temporal_enabled() { reject(STATUS_LAYOUT); return; }
+        let header = tables[control.runtime_slots.z].data;
+        let table_metadata = tables[control.runtime_slots.z + 1u].data;
+        let event_metadata = boundary[1u].data;
+        if upload.z != header.y || upload.w != control.counts_a.y
+            || event_metadata.x != table_metadata.x
+            || event_metadata.y != TEMPORAL_COEFFICIENT_WORDS {
+            reject(STATUS_LAYOUT);
+            return;
+        }
+        if i < table_metadata.x {
+            let frequency_offset = 2u
+                + TEMPORAL_COEFFICIENT_WORDS * (upload.z + upload.w);
+            let target_frequency = bitcast<vec4<f32>>(
+                boundary[frequency_offset + i].data);
+            let root = header.w + 6u * i;
+            let accepted = root + 3u * (control.runtime_slots.y & 1u);
+            let candidate = root + 3u * ((control.runtime_slots.y & 1u) ^ 1u);
+            let old_phase = bitcast<vec4<f32>>(tables[accepted].data);
+            let old_frequency = bitcast<vec4<f32>>(tables[accepted + 2u].data);
+            var next_phase: vec4<f32>;
+            for (var lane = 0u; lane < 4u; lane += 1u) {
+                let current = reduced_phase(
+                    old_phase[lane] + old_frequency[lane] * control.clock_f32.y);
+                next_phase[lane] = reduced_phase(
+                    current - target_frequency[lane] * control.clock_f32.y);
+            }
+            tables[candidate].data = bitcast<vec4<u32>>(next_phase);
+            tables[candidate + 1u].data = tables[accepted + 1u].data;
+            tables[candidate + 2u].data = bitcast<vec4<u32>>(target_frequency);
+            if !finite_vector(next_phase) || !finite_vector(target_frequency)
+                || any(target_frequency < vec4<f32>(0.0)) {
+                reject(STATUS_LAYOUT);
+            }
+        }
+    }
 }
 
 // Periodic grid damping is resident solver maintenance, not a host-authored
@@ -604,6 +718,38 @@ fn event_simple_stage(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if stopped() { return; }
     let operation = event_operation();
+    if operation == 8u {
+        let upload = boundary[0u].data;
+        let event_metadata = boundary[1u].data;
+        if i == 0u {
+            let maximum_dt = bitcast<f32>(event_metadata.z);
+            if !finite_scalar(maximum_dt) || maximum_dt <= 0.0
+                || control.clock_f32.x > maximum_dt {
+                reject(STATUS_TIMESTEP);
+            }
+        }
+        if i < control.counts_a.x {
+            let header = tables[control.runtime_slots.z].data;
+            let range = nodes[i].stiffness.zw;
+            var mass = 0.0;
+            for (var record = 0u; record < range.y; record += 1u) {
+                let source = 2u + (range.x - header.x)
+                    + record * TEMPORAL_COEFFICIENT_WORDS;
+                mass += boundary_float(source + 1u, 0u)
+                    * uploaded_temporal_factor(source, control.clock_f32.y);
+            }
+            if !finite_scalar(mass) || mass <= 0.0 { reject(STATUS_INVERSE_DOMAIN); }
+        } else if i < control.counts_a.x + control.counts_a.y {
+            let sample = i - control.counts_a.x;
+            let source = 2u + TEMPORAL_COEFFICIENT_WORDS
+                * (upload.z + sample);
+            let factor = uploaded_temporal_factor(source, control.clock_f32.y);
+            if !finite_scalar(factor) || factor <= 0.0 {
+                reject(STATUS_INVERSE_DOMAIN);
+            }
+        }
+        return;
+    }
     if i < control.counts_a.x {
         if operation == 1u || operation == 4u {
             var next = accepted_q(i) + scratch[i].values.x;
@@ -720,6 +866,21 @@ fn event_validate(@builtin(local_invocation_id) id: vec3<u32>) {
 fn event_accept_tables(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if atomicLoad(&status.candidate) != 0u || atomicLoad(&status.latch) != 0u { return; }
+    if event_operation() == 8u {
+        let upload = boundary[0u].data;
+        let header = tables[control.runtime_slots.z].data;
+        let primary_words = TEMPORAL_COEFFICIENT_WORDS * upload.z;
+        let coefficient_words = primary_words
+            + TEMPORAL_COEFFICIENT_WORDS * upload.w;
+        if i < coefficient_words {
+            var target_word = header.x + i;
+            if i >= primary_words {
+                target_word = header.z + i - primary_words;
+            }
+            tables[target_word].data = boundary[2u + i].data;
+        }
+        return;
+    }
     if event_operation() == 6u {
         if i < control.counts_a.x {
             let start = nodes[i].ranges.z;
@@ -773,6 +934,13 @@ fn commit_event() {
     } else if operation == 5u || operation == 6u {
         control.runtime_serials.x = control.event.y;
         control.runtime_slots.x ^= 1u;
+    } else if operation == 7u {
+        control.runtime_serials.y = control.event.y;
+        control.runtime_slots.y ^= 1u;
+    } else if operation == 8u {
+        control.runtime_serials.y = control.event.y;
+        control.runtime_slots.y ^= 1u;
+        control.clock_f32.w = bitcast<f32>(boundary[1u].data.z);
     }
     control.event_result = vec4<u32>(
         control.event.y, operation, control.event.y, 0u);

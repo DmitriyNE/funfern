@@ -8,13 +8,14 @@ use std::time::{Duration, Instant};
 
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
-    CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest,
-    CanonicalWaveGpuPlugin,
+    CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuLiveEvent, CanonicalGpuPlan,
+    CanonicalGpuRequest, CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
-    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, MeshingOptions,
-    OuterBoundaryCondition, QuadraticWaveOperator, ScalarField, Scene, TimeDrive, mesh_scene,
+    CanonicalMaterialDrive, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
+    CoefficientLaw, MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, ScalarField,
+    Scene, TimeDrive, mesh_scene,
 };
 
 const DEFAULT_STEPS: u64 = 96;
@@ -30,6 +31,12 @@ struct Expected {
     initial_epoch: u64,
     initial_step: u64,
     steps: u64,
+    switch_steps: u64,
+    law_steps: u64,
+    switch_event: Option<CanonicalGpuLiveEvent>,
+    law_event: Option<CanonicalGpuLiveEvent>,
+    switch_queued: bool,
+    law_queued: bool,
     time_step: f64,
     started: Instant,
     deadline: Instant,
@@ -41,7 +48,10 @@ fn main() {
     let steps = std::env::args()
         .find_map(|argument| argument.strip_prefix("--steps=")?.parse::<u64>().ok())
         .unwrap_or(DEFAULT_STEPS);
-    assert!(steps >= 2, "the temporal gate must cross a clock rebase");
+    assert!(
+        steps >= 64,
+        "the temporal gate needs post-event evolution after both transactions"
+    );
 
     let mut scene = Scene::initial();
     let material = &mut scene.materials[0];
@@ -134,9 +144,90 @@ fn main() {
     let plan = CanonicalGpuPlan::compile_temporal_bulk(&operator, &state, clock)
         .expect("temporal GPU plan");
     let temporal = plan.manifest.temporal.expect("temporal layout manifest");
+    let switch_steps = 16.min(steps - 1);
+    let law_steps = 48.min(steps - 1).max(switch_steps + 1);
+    let switch_event = CanonicalGpuLiveEvent::temporal_switch(&state, material_id, false, 0.9, 1)
+        .expect("temporal Switch event");
+
+    let mut target_scene = scene.clone();
+    let target_material = &mut target_scene.materials[0];
+    target_material.mass_law.drive = TimeDrive::TravellingModulation {
+        depth: ScalarField::constant(0.16),
+        frequency_hz: ScalarField::constant(1.05),
+        phase_radians: ScalarField::constant(0.31),
+        wavenumber: ScalarField::constant(2.2),
+        angle_radians: ScalarField::constant(-0.25),
+    };
+    target_material.mass_law.alternate = Some(ScalarField::constant(1.55));
+    target_material.stiffness_law.drive = TimeDrive::TimeCrystal {
+        depth: ScalarField::constant(0.12),
+        frequency_hz: ScalarField::constant(0.85),
+        phase_radians: ScalarField::constant(-0.23),
+        sharpness: ScalarField::constant(2.6),
+    };
+    target_material.stiffness_law.alternate = Some(ScalarField::constant(0.82));
+    let target_operator =
+        CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &target_scene, 2)
+            .expect("target temporal validation operator");
+    let target_state = CanonicalTemporalWaveState::new_at(
+        &target_operator,
+        time_step,
+        state.primary_flux().to_vec(),
+        state.complementary_flux().to_vec(),
+        state.time(),
+    )
+    .expect("target clock-aligned temporal state");
+    let target_plan =
+        CanonicalGpuPlan::compile_temporal_bulk(&target_operator, &target_state, clock)
+            .expect("target temporal GPU plan");
+    let law_event = CanonicalGpuLiveEvent::temporal_law_patch(&plan, &target_plan, 2)
+        .expect("temporal law event");
+
+    let old_mass_drive = scene.materials[0]
+        .mass_law
+        .drive
+        .evaluate(&scene.materials[0].parameters)
+        .expect("old mass drive");
+    let old_stiffness_drive = scene.materials[0]
+        .stiffness_law
+        .drive
+        .evaluate(&scene.materials[0].parameters)
+        .expect("old stiffness drive");
     let mut oracle = state;
-    for _ in 0..steps {
+    for _ in 0..switch_steps {
         oracle.step(&operator).expect("f64 temporal oracle step");
+    }
+    let switch_time = oracle.time();
+    oracle
+        .runtime_mut()
+        .begin_switch(material_id, false, switch_time, 0.9)
+        .expect("f64 Switch reversal");
+    for _ in switch_steps..law_steps {
+        oracle.step(&operator).expect("f64 temporal oracle step");
+    }
+    let law_time = oracle.time();
+    oracle
+        .runtime_mut()
+        .preserve_carrier(
+            material_id,
+            CanonicalMaterialDrive::MassCoefficient,
+            old_mass_drive,
+            law_time,
+        )
+        .expect("preserve mass-drive carrier");
+    oracle
+        .runtime_mut()
+        .preserve_carrier(
+            material_id,
+            CanonicalMaterialDrive::StiffnessCoefficient,
+            old_stiffness_drive,
+            law_time,
+        )
+        .expect("preserve stiffness-drive carrier");
+    for _ in law_steps..steps {
+        oracle
+            .step(&target_operator)
+            .expect("f64 target temporal oracle step");
     }
     let expected = Expected {
         primary: oracle.primary_flux().to_vec(),
@@ -149,6 +240,12 @@ fn main() {
         initial_epoch: clock.epoch,
         initial_step: clock.step_in_epoch as u64,
         steps,
+        switch_steps,
+        law_steps,
+        switch_event: Some(switch_event),
+        law_event: Some(law_event),
+        switch_queued: false,
+        law_queued: false,
         time_step,
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(90),
@@ -156,7 +253,7 @@ fn main() {
         failed: false,
     };
     println!(
-        "temporal GPU gate: {} Q, {} b, {} runtime records, {} steps across clock rebase",
+        "temporal GPU gate: {} Q, {} b, {} runtime records, {} steps across clock rebase, Switch reversal, and law patch",
         plan.node_count, plan.sample_count, temporal.runtime_record_count, steps,
     );
 
@@ -194,12 +291,13 @@ fn install(
         &mut commands,
         plans.0.take().expect("one pending temporal plan"),
     );
-    request.request_steps(expected.steps);
+    request.request_steps(expected.switch_steps);
     commands.spawn(Camera2d);
 }
 
 fn finish_when_ready(
-    request: Res<CanonicalGpuRequest>,
+    mut assets: ResMut<Assets<ShaderBuffer>>,
+    mut request: ResMut<CanonicalGpuRequest>,
     display: Res<CanonicalGpuDisplay>,
     mut expected: ResMut<Expected>,
     mut exit: MessageWriter<AppExit>,
@@ -229,11 +327,62 @@ fn finish_when_ready(
         exit.write(AppExit::error());
         return;
     }
+    if expected.switch_queued
+        && request.stats().processed_event() >= 1
+        && request.stats().event_rejection() != 0
+    {
+        eprintln!(
+            "temporal material transaction was rejected ({})",
+            request.stats().event_rejection()
+        );
+        expected.finished = true;
+        expected.failed = true;
+        exit.write(AppExit::error());
+        return;
+    }
+
+    let switch_boundary = expected.initial_step + expected.switch_steps;
+    if !expected.switch_queued {
+        let Some(clock) = display.clock else { return };
+        if (clock.accepted_steps as u64) < switch_boundary {
+            return;
+        }
+        let event = expected
+            .switch_event
+            .take()
+            .expect("one temporal Switch event");
+        request
+            .queue_live_event(&mut assets, event)
+            .expect("queue temporal Switch event");
+        request.request_steps(expected.law_steps - expected.switch_steps);
+        expected.switch_queued = true;
+        return;
+    }
+
+    let law_boundary = expected.initial_step + expected.law_steps;
+    if !expected.law_queued {
+        let Some(clock) = display.clock else { return };
+        if (clock.accepted_steps as u64) < law_boundary
+            || display.runtime_serials[1] != 1
+            || request.live_event_pending()
+        {
+            return;
+        }
+        let event = expected.law_event.take().expect("one temporal law event");
+        request
+            .queue_live_event(&mut assets, event)
+            .expect("queue temporal law event");
+        request.request_steps(expected.steps - expected.law_steps);
+        expected.law_queued = true;
+        return;
+    }
 
     let target = expected.initial_step + expected.steps;
     let Some(clock) = display.clock else { return };
     if (clock.accepted_steps as u64) < target
         || display.full_snapshot_completed_steps() < target
+        || clock.event_serial != 2
+        || display.runtime_serials[1] != 2
         || display.primary_flux.len() != expected.primary.len()
         || display.complementary_flux.len() != expected.complementary.len()
     {

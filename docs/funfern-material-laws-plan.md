@@ -1023,9 +1023,20 @@ its f64 and packed-f32 fixtures. The production render graph executes travelling
 reciprocal mass modulation, smoothed-square stiffness modulation and an active
 Switch through a forced material-runtime clock rebase; on Apple M1 Max / Metal,
 96 steps matched the f64 oracle to `3.72e-7` relative Q error and `2.62e-6`
-relative b error. This closes neither live law-event/runtime transfer nor the
-filter, AMR, diagnostic and supported-boundary gates, and it is not the pending
-incremental-cost measurement.
+relative b error. This initial run did not close generation runtime transfer,
+the remaining event compositions, or the filter, AMR, diagnostic and
+supported-boundary gates, and it is not the pending incremental-cost
+measurement.
+
+The same gate now stops at accepted GPU boundaries to reverse an in-progress
+Switch and to apply a same-layout law patch. The events contain no host time:
+the GPU samples the accepted ramp and carrier, stages a complete candidate
+runtime bank, validates target f32 factors/timestep, and commits runtime plus
+coefficient records together. The combined clock-rebase/Switch/frequency-depth-
+alternate-spatial-edit run retains `3.63e-7` relative Q and `2.41e-6` relative
+b agreement with its f64 piecewise-operator oracle. Drive-kind, material
+ownership, static-operator and explicit phase changes remain generation edits;
+temporal generation transfer and injected event rollback are still open.
 
 ## 13. Verification and acceptance
 

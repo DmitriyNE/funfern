@@ -74,6 +74,8 @@ const EVENT_LINEAR_LAW_PATCH: u32 = 3;
 const EVENT_MAINTENANCE: u32 = 4;
 const EVENT_SOURCE_PATCH: u32 = 5;
 const EVENT_SOURCE_WEIGHT_PATCH: u32 = 6;
+const EVENT_TEMPORAL_SWITCH: u32 = 7;
+const EVENT_TEMPORAL_LAW_PATCH: u32 = 8;
 const RESIDENT_FILTER_DISPATCHES: u64 = 7;
 const RESIDENT_FILTER_ACCOUNTING_DISPATCHES: u64 = 1;
 const TRANSFER_LAYOUT_VERSION: u32 = 1;
@@ -219,7 +221,7 @@ pub(crate) struct GpuCanonicalStateWord {
     pub values: Vec4,
 }
 
-#[derive(Clone, Copy, Default, ShaderType)]
+#[derive(Clone, Copy, Default, PartialEq, ShaderType)]
 pub(crate) struct GpuCanonicalNode {
     /// Mass, inverse mass, accepted and candidate half-stage loss fractions.
     pub mass_loss: Vec4,
@@ -235,7 +237,7 @@ pub(crate) struct GpuCanonicalNode {
     pub stiffness: UVec4,
 }
 
-#[derive(Clone, Copy, Default, ShaderType)]
+#[derive(Clone, Copy, Default, PartialEq, ShaderType)]
 pub(crate) struct GpuCanonicalSample {
     pub nodes_a: UVec4,
     pub nodes_b: UVec4,
@@ -248,7 +250,7 @@ pub(crate) struct GpuCanonicalSample {
     pub constitutive: Vec4,
 }
 
-#[derive(Clone, Copy, Default, ShaderType)]
+#[derive(Clone, Copy, Default, PartialEq, ShaderType)]
 pub(crate) struct GpuCanonicalTableWord {
     /// Integer metadata stays in integer lanes. Floating lanes are stored by
     /// their IEEE bits and explicitly bitcast by the shader.
@@ -600,6 +602,170 @@ impl CanonicalGpuLiveEvent {
         })
     }
 
+    /// Begins or reverses one material-wide Switch at the actual accepted GPU
+    /// boundary. The upload deliberately contains no host timestamp: the
+    /// shader samples the accepted ramp and stamps the new local-time anchor
+    /// in the same zero-duration transaction that publishes the runtime slot.
+    pub fn temporal_switch(
+        state: &CanonicalTemporalWaveState,
+        material: MaterialId,
+        switched: bool,
+        duration: f64,
+        serial: u32,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        Self::validate_serial(serial)?;
+        if !duration.is_finite() || duration < 0.0 {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a material Switch duration must be finite and nonnegative",
+            ));
+        }
+        let runtime_index = state
+            .runtime()
+            .records()
+            .binary_search_by_key(&material, |record| record.material())
+            .map_err(|_| {
+                CanonicalGpuBuildError::InvalidLayout(
+                    "a material Switch must name a compiled runtime record",
+                )
+            })?;
+        Ok(Self {
+            kind: EVENT_TEMPORAL_SWITCH,
+            serial,
+            dispatches: 4,
+            upload: vec![
+                GpuCanonicalTableWord {
+                    data: UVec4::new(
+                        EVENT_TEMPORAL_SWITCH,
+                        serial,
+                        usize_u32(runtime_index)?,
+                        u32::from(switched),
+                    ),
+                },
+                GpuCanonicalTableWord {
+                    data: UVec4::new(
+                        finite_f32(duration, "material Switch duration")?.to_bits(),
+                        0,
+                        0,
+                        0,
+                    ),
+                },
+            ],
+        })
+    }
+
+    /// Builds a same-layout field-linear temporal-law update. Carrier phases
+    /// are preserved at the eventual GPU commit boundary, including frequency
+    /// edits; explicit authored phase jumps require a new generation for now.
+    pub fn temporal_law_patch(
+        current: &CanonicalGpuPlan,
+        target: &CanonicalGpuPlan,
+        serial: u32,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        Self::validate_serial(serial)?;
+        let current_manifest =
+            current
+                .manifest
+                .temporal
+                .ok_or(CanonicalGpuBuildError::InvalidLayout(
+                    "a temporal-law patch requires a temporal source generation",
+                ))?;
+        let target_manifest =
+            target
+                .manifest
+                .temporal
+                .ok_or(CanonicalGpuBuildError::InvalidLayout(
+                    "a temporal-law patch requires a temporal target generation",
+                ))?;
+        if current_manifest.primary_record_count != target_manifest.primary_record_count
+            || current_manifest.complementary_record_count
+                != target_manifest.complementary_record_count
+            || current_manifest.runtime_record_count != target_manifest.runtime_record_count
+            || current_manifest.coefficient_words != TEMPORAL_COEFFICIENT_WORDS
+            || target_manifest.coefficient_words != TEMPORAL_COEFFICIENT_WORDS
+            || current.node_count != target.node_count
+            || current.sample_count != target.sample_count
+            || current.time_step != target.time_step
+            || current.temporal_runtime_materials != target.temporal_runtime_materials
+            || current.nodes != target.nodes
+            || current.samples != target.samples
+            || current_manifest.header_offset != target_manifest.header_offset
+            || current.tables[..current_manifest.header_offset]
+                != target.tables[..target_manifest.header_offset]
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a live temporal-law patch must preserve the compiled static layout",
+            ));
+        }
+        if target.control.clock_f32.x > target.control.clock_f32.w {
+            return Err(CanonicalGpuBuildError::InvalidClock);
+        }
+
+        let current_header = current.tables[current_manifest.header_offset].data;
+        let target_header = target.tables[target_manifest.header_offset].data;
+        let current_records = temporal_coefficient_records(current, current_header)?;
+        let target_records = temporal_coefficient_records(target, target_header)?;
+        if current_records.len() != target_records.len()
+            || current_records
+                .iter()
+                .zip(&target_records)
+                .any(|(current, target)| {
+                    let current = current[0].data;
+                    let target = target[0].data;
+                    current.x != target.x || current.y != target.y || current.z != target.z
+                })
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a live temporal-law patch cannot change material ownership or drive kind",
+            ));
+        }
+        if current_records
+            .iter()
+            .zip(&target_records)
+            .any(|(current, target)| current[2].data.z != target[2].data.z)
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "an explicit temporal phase edit requires a generation transition",
+            ));
+        }
+
+        let mut upload = Vec::with_capacity(
+            2 + target_records.len() * TEMPORAL_COEFFICIENT_WORDS
+                + target_manifest.runtime_record_count,
+        );
+        upload.push(GpuCanonicalTableWord {
+            data: UVec4::new(
+                EVENT_TEMPORAL_LAW_PATCH,
+                serial,
+                usize_u32(target_manifest.primary_record_count)?,
+                usize_u32(target_manifest.complementary_record_count)?,
+            ),
+        });
+        upload.push(GpuCanonicalTableWord {
+            data: UVec4::new(
+                usize_u32(target_manifest.runtime_record_count)?,
+                TEMPORAL_COEFFICIENT_WORDS as u32,
+                target.control.clock_f32.w.to_bits(),
+                0,
+            ),
+        });
+        upload.extend(target_records.into_iter().flatten());
+        let target_runtime_offset = target_header.w as usize;
+        let target_slot = (target.control.runtime_slots.y & 1) as usize;
+        for runtime in 0..target_manifest.runtime_record_count {
+            let word = target_runtime_offset
+                + runtime * TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS
+                + target_slot * TEMPORAL_RUNTIME_WORDS_PER_SLOT
+                + 2;
+            upload.push(target.tables[word]);
+        }
+        Ok(Self {
+            kind: EVENT_TEMPORAL_LAW_PATCH,
+            serial,
+            dispatches: 5,
+            upload,
+        })
+    }
+
     fn scalar_payload(
         kind: u32,
         serial: u32,
@@ -707,6 +873,7 @@ pub struct CanonicalGpuPlan {
     needs_accounting: bool,
     event_kind: u32,
     time_step: f64,
+    temporal_runtime_materials: Vec<MaterialId>,
     pub(crate) control: GpuCanonicalControl,
     pub(crate) status: GpuCanonicalStatus,
     pub(crate) state: Vec<GpuCanonicalStateWord>,
@@ -807,6 +974,10 @@ impl CanonicalGpuPlan {
             .enumerate()
             .map(|(index, record)| (record.material(), index as u32))
             .collect::<BTreeMap<_, _>>();
+        self.temporal_runtime_materials = runtime_records
+            .iter()
+            .map(|record| record.material())
+            .collect();
         let mut drives = BTreeMap::<(MaterialId, u32), TimeDriveValues>::new();
         for sample in primary_samples.iter().chain(&complementary_samples) {
             let key = (sample.material, temporal_drive_index(sample.drive));
@@ -1394,6 +1565,7 @@ impl CanonicalGpuPlan {
             needs_accounting,
             event_kind: EVENT_NONE,
             time_step: clock.time_step,
+            temporal_runtime_materials: Vec::new(),
             control,
             status: GpuCanonicalStatus::default(),
             state: state_words,
@@ -2206,6 +2378,36 @@ fn temporal_drive_index(drive: CanonicalMaterialDrive) -> u32 {
     }
 }
 
+fn temporal_coefficient_records(
+    plan: &CanonicalGpuPlan,
+    header: UVec4,
+) -> Result<Vec<[GpuCanonicalTableWord; TEMPORAL_COEFFICIENT_WORDS]>, CanonicalGpuBuildError> {
+    let manifest = plan
+        .manifest
+        .temporal
+        .ok_or(CanonicalGpuBuildError::InvalidLayout(
+            "a temporal table has no manifest",
+        ))?;
+    let ranges = [
+        (header.x as usize, manifest.primary_record_count),
+        (header.z as usize, manifest.complementary_record_count),
+    ];
+    let mut records =
+        Vec::with_capacity(manifest.primary_record_count + manifest.complementary_record_count);
+    for (start, count) in ranges {
+        let end = start
+            .checked_add(count * TEMPORAL_COEFFICIENT_WORDS)
+            .filter(|end| *end <= plan.tables.len())
+            .ok_or(CanonicalGpuBuildError::InvalidLayout(
+                "a temporal coefficient range exceeds its table",
+            ))?;
+        for words in plan.tables[start..end].chunks_exact(TEMPORAL_COEFFICIENT_WORDS) {
+            records.push([words[0], words[1], words[2]]);
+        }
+    }
+    Ok(records)
+}
+
 fn temporal_drive_from_index(index: u32) -> CanonicalMaterialDrive {
     match index {
         0 => CanonicalMaterialDrive::MassCoefficient,
@@ -2311,7 +2513,15 @@ fn pack_temporal_coefficient(
             ],
             "temporal coefficient",
         )?,
-        finite_float_word([shape, spatial_phase, 0.0, 0.0], "temporal coefficient")?,
+        finite_float_word(
+            [
+                shape,
+                spatial_phase,
+                sample.law.drive.authored_phase_radians(),
+                0.0,
+            ],
+            "temporal coefficient",
+        )?,
     ])
 }
 
@@ -2572,6 +2782,7 @@ struct CanonicalGpuLiveEventHandles {
     kind: u32,
     serial: u32,
     dispatches: u64,
+    upload_words: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2941,11 +3152,45 @@ impl CanonicalGpuRequest {
                     == handles.drive_count as usize * 4 + handles.source_count as usize + 1
                     && event.upload[0].data.w == handles.source_count
             }
+            EVENT_TEMPORAL_SWITCH => {
+                event.upload.len() == 2
+                    && event.upload[0].data.z < handles.material_runtime_count
+                    && event.upload[0].data.w <= 1
+            }
+            EVENT_TEMPORAL_LAW_PATCH => self
+                .manifest
+                .as_ref()
+                .and_then(|manifest| manifest.temporal)
+                .is_some_and(|temporal| {
+                    event.upload.len()
+                        == 2 + TEMPORAL_COEFFICIENT_WORDS
+                            * (temporal.primary_record_count + temporal.complementary_record_count)
+                            + temporal.runtime_record_count
+                        && event.upload[0].data.z as usize == temporal.primary_record_count
+                        && event.upload[0].data.w as usize == temporal.complementary_record_count
+                        && event.upload[1].data.x as usize == temporal.runtime_record_count
+                        && event.upload[1].data.y as usize == TEMPORAL_COEFFICIENT_WORDS
+                }),
             _ => false,
         };
         if !payload_valid {
             return Err("live canonical event does not match the active generation");
         }
+        if handles.material_runtime_count != 0
+            && !matches!(event.kind, EVENT_TEMPORAL_SWITCH | EVENT_TEMPORAL_LAW_PATCH)
+        {
+            return Err("this event has not passed its Stage 7 temporal composition gate");
+        }
+        if handles.material_runtime_count == 0
+            && matches!(event.kind, EVENT_TEMPORAL_SWITCH | EVENT_TEMPORAL_LAW_PATCH)
+        {
+            return Err("a temporal material event requires a temporal generation");
+        }
+        let upload_words = event
+            .upload
+            .len()
+            .try_into()
+            .map_err(|_| "a live canonical event upload exceeds u32 indexing")?;
         if event.kind == EVENT_LINEAR_LAW_PATCH {
             let handles = self.buffers.as_mut().expect("checked installed buffers");
             // Conservative host scheduling: extra loss/accounting dispatches
@@ -2965,6 +3210,7 @@ impl CanonicalGpuRequest {
             kind: event.kind,
             serial: event.serial,
             dispatches: event.dispatches,
+            upload_words,
         });
         self.revision = self.revision.wrapping_add(1).max(1);
         Ok(())
@@ -4342,6 +4588,7 @@ fn compute_canonical_wave(
         });
     pass.set_bind_group(0, &group.bind_group, &[]);
     if has_pending_event {
+        let event_upload_words = live_event.map_or(0, |event| event.upload_words);
         let (event_kind, event_dispatches, is_live) = if let Some(event) = live_event {
             pass.set_bind_group(
                 0,
@@ -4350,7 +4597,12 @@ fn compute_canonical_wave(
             );
             pass.set_pipeline(pipelines[25]);
             pass.dispatch_workgroups(
-                workgroups(handles.state_count.max(handles.drive_count)),
+                workgroups(
+                    handles
+                        .state_count
+                        .max(handles.drive_count)
+                        .max(handles.material_runtime_count),
+                ),
                 1,
                 1,
             );
@@ -4399,6 +4651,16 @@ fn compute_canonical_wave(
             EVENT_SOURCE_PATCH => {
                 pass.set_pipeline(pipelines[19]);
                 pass.dispatch_workgroups(1, 1, 1);
+            }
+            EVENT_TEMPORAL_SWITCH => {
+                pass.set_pipeline(pipelines[19]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            EVENT_TEMPORAL_LAW_PATCH => {
+                pass.set_pipeline(pipelines[15]);
+                pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
+                pass.set_pipeline(pipelines[20]);
+                pass.dispatch_workgroups(workgroups(event_upload_words), 1, 1);
             }
             EVENT_SOURCE_WEIGHT_PATCH => {
                 pass.set_pipeline(pipelines[19]);
@@ -5491,6 +5753,72 @@ mod tests {
         assert_eq!(pulse.upload.len(), operator_nodes + 1);
         assert!(CanonicalGpuLiveEvent::grid_filter(1.1, 8).is_err());
         assert!(CanonicalGpuLiveEvent::maintenance(&[], 0).is_err());
+    }
+
+    #[test]
+    fn temporal_switch_payload_defers_its_timestamp_to_the_gpu() {
+        let (_, state, _) = temporal_plan();
+        let material = state.runtime().records()[0].material();
+        let event =
+            CanonicalGpuLiveEvent::temporal_switch(&state, material, false, 0.75, 11).unwrap();
+        assert_eq!(event.kind, EVENT_TEMPORAL_SWITCH);
+        assert_eq!(event.serial, 11);
+        assert_eq!(event.dispatches, 4);
+        assert_eq!(event.upload.len(), 2);
+        assert_eq!(event.upload[0].data, UVec4::new(7, 11, 0, 0));
+        assert_eq!(f32::from_bits(event.upload[1].data.x), 0.75);
+        assert!(
+            CanonicalGpuLiveEvent::temporal_switch(&state, MaterialId(u64::MAX), true, 0.1, 12,)
+                .is_err()
+        );
+        assert!(CanonicalGpuLiveEvent::temporal_switch(&state, material, true, -0.1, 12).is_err());
+        assert!(CanonicalGpuLiveEvent::temporal_switch(&state, material, true, 0.0, 0).is_err());
+    }
+
+    #[test]
+    fn temporal_law_patch_requires_one_static_layout_and_drive_kind() {
+        let (_, _, current) = temporal_plan();
+        let mut target = current.clone();
+        let manifest = target.manifest.temporal.unwrap();
+        let header = target.tables[manifest.header_offset].data;
+        let primary = header.x as usize;
+        target.tables[primary + 1].data.z = 0.12_f32.to_bits();
+        target.tables[primary + 1].data.w = 1.7_f32.to_bits();
+        let runtime = header.w as usize;
+        target.tables[runtime + 2].data.x = 1.7_f32.to_bits();
+
+        let event = CanonicalGpuLiveEvent::temporal_law_patch(&current, &target, 13).unwrap();
+        assert_eq!(event.kind, EVENT_TEMPORAL_LAW_PATCH);
+        assert_eq!(event.serial, 13);
+        assert_eq!(event.dispatches, 5);
+        assert_eq!(
+            event.upload[0].data.z as usize,
+            manifest.primary_record_count
+        );
+        assert_eq!(
+            event.upload[0].data.w as usize,
+            manifest.complementary_record_count
+        );
+        assert_eq!(
+            event.upload[1].data.x as usize,
+            manifest.runtime_record_count
+        );
+        assert_eq!(
+            event.upload.len(),
+            2 + TEMPORAL_COEFFICIENT_WORDS
+                * (manifest.primary_record_count + manifest.complementary_record_count)
+                + manifest.runtime_record_count
+        );
+
+        let mut changed_kind = target.clone();
+        changed_kind.tables[primary].data.z = TEMPORAL_DRIVE_PUMP;
+        assert!(CanonicalGpuLiveEvent::temporal_law_patch(&current, &changed_kind, 14).is_err());
+        let mut changed_phase = target.clone();
+        changed_phase.tables[primary + 2].data.z = 0.9_f32.to_bits();
+        assert!(CanonicalGpuLiveEvent::temporal_law_patch(&current, &changed_phase, 14).is_err());
+        let mut changed_static = target;
+        changed_static.nodes[0].mass_loss.x *= 1.01;
+        assert!(CanonicalGpuLiveEvent::temporal_law_patch(&current, &changed_static, 14).is_err());
     }
 
     #[test]
