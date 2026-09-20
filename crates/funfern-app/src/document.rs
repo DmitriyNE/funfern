@@ -178,7 +178,9 @@ pub struct PresentationSettings {
     /// its own.
     pub field_auto_exposure: bool,
     pub vector_overlay: VectorOverlay,
-    pub vector_overlay_smoothed: bool,
+    /// Presentation-only high-pass for complementary-field arrows. The
+    /// authoritative canonical field, probes and energy remain untouched.
+    pub vector_overlay_ac_coupled: bool,
     pub vector_overlay_density: f32,
     pub vector_overlay_gain: f32,
     pub material_overlay: MaterialOverlay,
@@ -227,7 +229,7 @@ impl Default for PresentationSettings {
             field_gain: 2.0,
             field_auto_exposure: true,
             vector_overlay: VectorOverlay::Off,
-            vector_overlay_smoothed: true,
+            vector_overlay_ac_coupled: true,
             vector_overlay_density: 54.0,
             vector_overlay_gain: 1.0,
             material_overlay: MaterialOverlay::Regions,

@@ -283,17 +283,13 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   anisotropy overlay uses a logarithmic ratio scale and sparse fast-axis marks.
   Automatic
   solution AMR evaluates varying coefficients and their gradients directly.
-- **Vector view:** View can overlay arrows derived from the synchronized quadratic
-  field readback. A DC-rejecting inverse time derivative reconstructs the transverse
-  field without retaining stationary startup or source-edit imprints. TM scenes show
-  the in-plane magnetic field `H`, TE scenes show the in-plane electric field `E`,
-  and either polarization can show the corresponding Poynting vector. Mechanical
-  scenes offer energy flow only; the scalar displacement field has no
-  complementary transverse vector, so that mode is not listed there. Arrow spacing
-  and gain are screen-space presentation controls, with optional temporal
-  smoothing; the length arrows are drawn at is set automatically the same way the
-  scalar field's colours are. Each EM mode remains one scalar Maxwell polarization rather than a
-  simultaneous six-component field solve.
+- **Vector view:** View can overlay the canonical complementary field or energy flow
+  sampled directly on the GPU at display cadence. Arrow spacing and gain are
+  screen-space presentation controls. Complementary-field arrows optionally subtract
+  a slow, explicitly presentation-only baseline; energy-flow arrows do not, because
+  their time average is meaningful. The canonical state, probes and energy always
+  retain the full field. Each EM mode remains one scalar Maxwell polarization rather
+  than a simultaneous six-component field solve.
 - **Field exposure:** the scalar field and the vector overlay each set their own
   scale from what is on screen, so a scene whose amplitude is a hundredth of
   another's reads the same. Auto exposure can be turned off, which puts the
@@ -302,8 +298,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   back slowly — slower than a field drains away, so a domain that has emptied goes
   dark instead of being renormalized back to full brightness. A placed pulse
   therefore holds the scale for some seconds before the view returns to normal. It
-  will not fall below a thousandth of the loudest level seen, which stops a field
-  that has decayed into rounding noise from being magnified back into view. Field
+  will not fall below a thousandth of the loudest level seen. Below that floor the
+  drawing fades smoothly, so a field that has decayed into rounding noise is not
+  magnified back into view. Field
   intensity and arrow gain trim that automatic scale rather than replacing it, and
   View prints the level the colours are relative to so a decaying field can be
   told from a steady one. Each isolated subdomain is also drawn relative to its

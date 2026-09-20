@@ -1100,8 +1100,12 @@ struct StoredPresentation {
     field_auto_exposure: bool,
     #[serde(default)]
     vector_overlay: StoredVectorOverlay,
+    /// Retired component-wise temporal smoothing. Kept in version-22 JSON so
+    /// an older build sees the replacement as explicitly disabled.
     #[serde(default = "default_vector_overlay_smoothed")]
     vector_overlay_smoothed: bool,
+    #[serde(default)]
+    vector_overlay_ac_coupled: Option<bool>,
     #[serde(default = "default_vector_overlay_density")]
     vector_overlay_density: f32,
     #[serde(default = "default_vector_overlay_gain")]
@@ -1781,7 +1785,8 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
             VectorOverlay::ComplementaryField => StoredVectorOverlay::ComplementaryField,
             VectorOverlay::RelativeEnergyFlow => StoredVectorOverlay::RelativeEnergyFlow,
         },
-        vector_overlay_smoothed: settings.vector_overlay_smoothed,
+        vector_overlay_smoothed: false,
+        vector_overlay_ac_coupled: Some(settings.vector_overlay_ac_coupled),
         vector_overlay_density: settings.vector_overlay_density,
         vector_overlay_gain: settings.vector_overlay_gain,
         material_overlay: match settings.material_overlay {
@@ -1833,7 +1838,11 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
             StoredVectorOverlay::ComplementaryField => VectorOverlay::ComplementaryField,
             StoredVectorOverlay::RelativeEnergyFlow => VectorOverlay::RelativeEnergyFlow,
         },
-        vector_overlay_smoothed: stored.vector_overlay_smoothed,
+        // Files from before AC coupling reuse the retired checkbox's value;
+        // newly written files carry the separate setting explicitly.
+        vector_overlay_ac_coupled: stored
+            .vector_overlay_ac_coupled
+            .unwrap_or(stored.vector_overlay_smoothed),
         vector_overlay_density: stored.vector_overlay_density,
         vector_overlay_gain: stored.vector_overlay_gain,
         // A scene from before the move carries the target as its own flag. It
@@ -2325,7 +2334,7 @@ mod tests {
                 simulation_speed: 0.35,
                 field_auto_exposure: !flag,
                 vector_overlay: vectors[index % vectors.len()],
-                vector_overlay_smoothed: flag,
+                vector_overlay_ac_coupled: flag,
                 vector_overlay_density: 71.5,
                 vector_overlay_gain: 2.5,
                 material_overlay: overlay,
@@ -2371,6 +2380,7 @@ mod tests {
             "simulation_speed",
             "vector_overlay",
             "vector_overlay_smoothed",
+            "vector_overlay_ac_coupled",
             "vector_overlay_density",
             "vector_overlay_gain",
         ] {
@@ -2386,6 +2396,25 @@ mod tests {
             migrated.presentation.material_overlay,
             MaterialOverlay::AdaptationTarget
         );
+    }
+
+    #[test]
+    fn the_retired_smoothing_choice_migrates_to_arrow_ac_coupling() {
+        for old_value in [false, true] {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&save(&TopologyDocument::default()).unwrap()).unwrap();
+            assert!(
+                value["presentation"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("vector_overlay_ac_coupled")
+                    .is_some()
+            );
+            value["presentation"]["vector_overlay_smoothed"] = old_value.into();
+            let migrated =
+                parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+            assert_eq!(migrated.presentation.vector_overlay_ac_coupled, old_value);
+        }
     }
 
     /// The value codecs are the last guard before a bad number reaches the

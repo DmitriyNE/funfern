@@ -331,8 +331,10 @@ axis-ratio field and anisotropy presentation overlay. Version 19 moved the
 editable axis-aligned domain into both draft and accepted scenes. Version 18
 added the scene physics model, polarization, explicit electric/magnetic wall
 variants, and a tagged material law whose serialized property names follow the
-active physics; it also persists the derived vector-overlay mode, smoothing,
-density, and gain. Version 17 introduced the tagged shared time-signal
+active physics; it also persisted the derived vector-overlay mode, its then-current
+smoothing flag, density, and gain. The compatible version-22 presentation record
+now writes that retired flag as false and separately stores optional arrow AC
+coupling. Version 17 introduced the tagged shared time-signal
 representation and moved the point source into the numerical core alongside its
 spatial carrier. Version 16 added presentation settings. Version 15 added
 region-owned volume sources and their profiles, parameters, and harmonic signals
@@ -367,7 +369,10 @@ consumer obtains `u=Q/M`, evaluates the physical complementary field `c=B^-1 b`,
 and uses `orientation*u*R*c` for directed energy flow. Mechanical, TM and TE are
 presentations of this same state. No skin reconstructs a transverse field from a
 bulk potential or inverse derivative, so stationary complementary modes remain
-visible and physical across handoff.
+part of the physical state across handoff and remain visible to direct probes and diagnostics.
+The complementary-field arrow view can explicitly AC-couple its presentation at
+the old 0.08 Hz corner; this subtracts only a slow per-arrow display baseline.
+Energy-flow arrows never use it because their temporal mean is meaningful.
 
 The accepted primary field is drawn directly, including a real free-component
 constant. There is no display-only mean subtraction or hidden gauge correction.
@@ -402,8 +407,10 @@ field's own decay, or the scale merely follows a draining domain down and the
 wave looks like it never left; the rate trades the brightness a decayed field
 settles at against how long a placed pulse holds the scale, and is set from a
 recorded level series rather than by taste. The scale never falls below a
-thousandth of the loudest level the run has reached, which is the backstop that
-keeps a field decayed into rounding noise from being magnified back into view.
+thousandth of the loudest level the run has reached. Below that floor a squared
+smoothstep visibility factor takes both scalar colour and arrow length to zero;
+flooring the denominator alone still left late f32 residue visible as a
+full-domain static pattern.
 
 The scale starts again only when a field replaced with zeros actually arrives —
 the frame the upload commits — and never at the moment one is asked for. A reset

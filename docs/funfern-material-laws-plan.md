@@ -566,7 +566,11 @@ Add thin-gap and outgoing storage energies explicitly. Synchronize scalar and co
 
 ### 7.1 Physical field display and stationary state
 
-Recover complementary observables directly from `b`. There is no filtered inverse-derivative reconstruction, bulk potential, potential rebasing, or per-component scalar display subtraction. Optional arrow smoothing is presentation-only.
+Recover complementary observables directly from `b`. There is no filtered
+inverse-derivative reconstruction, bulk potential, potential rebasing, or
+per-component scalar display subtraction. The optional complementary-field arrow
+AC view subtracts a slow presentation-only baseline; it does not alter `b`, probes,
+energy, transfer, or energy-flow arrows and must be labelled as a filtered view.
 
 A bounded uniform primary field remains visible. Do not impose zero component totals to hide it. Direct complementary state can contain both legitimate loss-generated stationary flux and numerical stationary artifacts. The [core spike, sections 1 and 3](funfern-material-laws-spike-report.md) measures these separately; a blanket projection onto potential-derived flux would erase valid state.
 

@@ -799,6 +799,12 @@ impl AmrIndicatorSource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct VectorAcState {
+    input: Point2,
+    output: Point2,
+}
+
 #[derive(Resource)]
 pub struct Playground {
     editor: TopologyEditor,
@@ -961,8 +967,11 @@ pub struct Playground {
     full_snapshot_requested: Instant,
     viewport_rect: Rect,
     vector_overlay_layout: Option<VectorOverlayLayout>,
-    vector_overlay_average: BTreeMap<(i32, i32), Point2>,
-    vector_overlay_step: u64,
+    /// Presentation-only DC-blocker state for complementary-field arrows. It
+    /// never feeds the canonical solver or physical consumers.
+    vector_overlay_ac_state: BTreeMap<(i32, i32), VectorAcState>,
+    vector_overlay_dc_step: u64,
+    vector_overlay_dc_active: bool,
     vector_overlay_mode: VectorOverlay,
     vector_overlay_exposure: AutoExposure,
     field_exposure: AutoExposure,
@@ -1153,8 +1162,9 @@ impl Default for Playground {
             full_snapshot_requested: Instant::now(),
             viewport_rect: Rect::NOTHING,
             vector_overlay_layout: None,
-            vector_overlay_average: BTreeMap::new(),
-            vector_overlay_step: u64::MAX,
+            vector_overlay_ac_state: BTreeMap::new(),
+            vector_overlay_dc_step: u64::MAX,
+            vector_overlay_dc_active: false,
             vector_overlay_mode: VectorOverlay::Off,
             vector_overlay_exposure: AutoExposure::default(),
             field_exposure: AutoExposure::default(),
@@ -2664,7 +2674,13 @@ impl Playground {
                 }
             });
         if p.vector_overlay != VectorOverlay::Off {
-            ui.checkbox(&mut p.vector_overlay_smoothed, "Smooth arrows");
+            if p.vector_overlay == VectorOverlay::ComplementaryField {
+                ui.checkbox(&mut p.vector_overlay_ac_coupled, "AC-couple arrows")
+                    .on_hover_text(
+                        "Subtract a slowly varying presentation baseline from the arrows. \
+                         The canonical field, probes and energy remain unchanged.",
+                    );
+            }
             ui.add(
                 egui::Slider::new(&mut p.vector_overlay_density, 28.0..=120.0)
                     .text("Arrow spacing"),
@@ -4298,11 +4314,17 @@ impl Playground {
                 &mut self.exposure_scratch,
             );
             let reference = self.field_exposure.update(level, self.frame_delta);
-            let scale = field_scale(
-                presentation.field_gain,
-                reference,
-                presentation.field_auto_exposure,
-            );
+            let visibility = if presentation.field_auto_exposure {
+                self.field_exposure.visibility(level)
+            } else {
+                1.0
+            };
+            let scale = visibility
+                * field_scale(
+                    presentation.field_gain,
+                    reference,
+                    presentation.field_auto_exposure,
+                );
             let mut field = egui::Mesh::default();
             field.reserve_vertices(active.operator.degrees_of_freedom());
             field.reserve_triangles(active.operator.element_nodes().len() * 6);
@@ -4376,8 +4398,9 @@ impl Playground {
                 .unwrap_or_default();
             self.draw_vector_overlay(painter, samples, vector_display.completed_steps);
         } else {
-            self.vector_overlay_average.clear();
-            self.vector_overlay_step = u64::MAX;
+            self.vector_overlay_ac_state.clear();
+            self.vector_overlay_dc_step = u64::MAX;
+            self.vector_overlay_dc_active = false;
         }
     }
 
@@ -4392,32 +4415,25 @@ impl Playground {
             .vector_overlay
             .resolved(self.editor.document.model.draft.physics);
         if self.vector_overlay_mode != mode {
-            self.vector_overlay_average.clear();
-            self.vector_overlay_step = u64::MAX;
-            self.vector_overlay_exposure.restart();
+            self.vector_overlay_ac_state.clear();
+            self.vector_overlay_dc_step = u64::MAX;
+            self.vector_overlay_dc_active = false;
+            self.vector_overlay_exposure.clear();
             self.vector_overlay_mode = mode;
         }
-        if settings.vector_overlay_smoothed {
-            if self.vector_overlay_step != completed_steps {
-                let mut next = BTreeMap::new();
-                for (key, _, value) in &samples {
-                    let filtered = self
-                        .vector_overlay_average
-                        .get(key)
-                        .map_or(*value, |previous| *previous * 0.82 + *value * 0.18);
-                    next.insert(*key, filtered);
-                }
-                self.vector_overlay_average = next;
-                self.vector_overlay_step = completed_steps;
-            }
-            for (key, _, value) in &mut samples {
-                if let Some(filtered) = self.vector_overlay_average.get(key) {
-                    *value = *filtered;
-                }
-            }
+        let dc_active =
+            mode == VectorOverlay::ComplementaryField && settings.vector_overlay_ac_coupled;
+        if self.vector_overlay_dc_active != dc_active {
+            self.vector_overlay_ac_state.clear();
+            self.vector_overlay_dc_step = u64::MAX;
+            self.vector_overlay_exposure.clear();
+            self.vector_overlay_dc_active = dc_active;
+        }
+        if dc_active {
+            self.ac_couple_vector_samples(&mut samples, completed_steps);
         } else {
-            self.vector_overlay_average.clear();
-            self.vector_overlay_step = completed_steps;
+            self.vector_overlay_ac_state.clear();
+            self.vector_overlay_dc_step = completed_steps;
         }
         let mut magnitudes = samples
             .iter()
@@ -4429,18 +4445,16 @@ impl Playground {
         }
         magnitudes.sort_by(f64::total_cmp);
         let instantaneous = magnitudes[(magnitudes.len() - 1) * 9 / 10];
-        // No absolute cutoff and no hard silence below the run peak: the
-        // exposure's own floor keeps decayed noise from being magnified, and
-        // below it the arrows shorten away smoothly instead of vanishing at a
-        // threshold.
         let Some(reference) = self
             .vector_overlay_exposure
             .update(instantaneous, self.frame_delta)
         else {
             return;
         };
+        let visibility = self.vector_overlay_exposure.visibility(instantaneous);
         let maximum_length = settings.vector_overlay_density * 0.46;
-        let scale = maximum_length as f64 * settings.vector_overlay_gain as f64 / reference;
+        let scale =
+            maximum_length as f64 * settings.vector_overlay_gain as f64 * visibility / reference;
         for (_, origin, value) in samples {
             let magnitude = value.norm();
             if magnitude < reference * 0.015 || !magnitude.is_finite() {
@@ -4455,6 +4469,51 @@ impl Playground {
             painter.line_segment([origin, tip], stroke);
             painter.line_segment([tip, tip - direction * head + normal * head * 0.55], stroke);
             painter.line_segment([tip, tip - direction * head - normal * head * 0.55], stroke);
+        }
+    }
+
+    /// Removes only the slowly varying presentation baseline from the sampled
+    /// complementary field. The exact pole and trapezoidal input difference
+    /// keep the corner stable across solver steps and readback batching without
+    /// attenuating ordinary source frequencies.
+    fn ac_couple_vector_samples(
+        &mut self,
+        samples: &mut [((i32, i32), Pos2, Point2)],
+        completed_steps: u64,
+    ) {
+        let restarted = self.vector_overlay_dc_step == u64::MAX
+            || completed_steps < self.vector_overlay_dc_step;
+        if completed_steps < self.vector_overlay_dc_step {
+            self.vector_overlay_ac_state.clear();
+        }
+        let elapsed_steps = if restarted {
+            0
+        } else {
+            completed_steps - self.vector_overlay_dc_step
+        };
+        let elapsed = elapsed_steps as f64 * self.uploaded_time_step.max(0.0);
+        let pole = (-VECTOR_DC_REJECTION_RATE * elapsed).exp();
+        let input_gain = 0.5 * (1.0 + pole);
+        for (key, _, value) in samples {
+            match self.vector_overlay_ac_state.entry(*key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(VectorAcState {
+                        input: *value,
+                        output: *value,
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let state = entry.get_mut();
+                    if !restarted {
+                        state.output = state.output * pole + (*value - state.input) * input_gain;
+                        state.input = *value;
+                    }
+                    *value = state.output;
+                }
+            }
+        }
+        if restarted || elapsed_steps > 0 {
+            self.vector_overlay_dc_step = completed_steps;
         }
     }
     fn draw_sampled(
@@ -11265,6 +11324,12 @@ impl AutoExposure {
         self.reference = 0.0;
     }
 
+    /// Starts a genuinely different displayed quantity. Unlike a fresh field
+    /// in the same run, it must not inherit a peak measured in different units.
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
     fn reference(self) -> Option<f64> {
         (self.reference > 0.0).then_some(self.reference)
     }
@@ -11282,6 +11347,19 @@ impl AutoExposure {
         }
         self.reference()
     }
+
+    /// Smoothly turns off structure below the run-relative quiet floor. Merely
+    /// flooring the denominator still paints late f32 residue at a few percent,
+    /// which reads as a full-domain static pattern. Squaring the smoothstep
+    /// makes that residue disappear without a visible threshold crossing.
+    fn visibility(self, level: f64) -> f64 {
+        if !level.is_finite() || level <= 0.0 || self.peak <= 0.0 {
+            return 0.0;
+        }
+        let fraction = (level / (self.peak * Self::QUIET_FLOOR)).clamp(0.0, 1.0);
+        let smooth = fraction * fraction * (3.0 - 2.0 * fraction);
+        smooth * smooth
+    }
 }
 
 /// Where the field's reference level sits in its own distribution: above the
@@ -11293,6 +11371,12 @@ const FIELD_EXPOSURE_QUANTILE: f64 = 0.98;
 /// about three quarters of full colour, which leaves the brightest nodes
 /// brighter still instead of clipping them flat.
 const FIELD_EXPOSURE_GAIN: f32 = 0.5;
+
+/// Presentation-only complementary-field DC rejection. This is the old
+/// reconstruction corner (0.5 rad/s, about 0.08 Hz), now applied only to arrow
+/// samples and measured in simulated time. Ordinary 2.5--4 Hz waves therefore
+/// retain more than 99.9% of their amplitude.
+const VECTOR_DC_REJECTION_RATE: f64 = 0.5;
 
 /// The `quantile` of `values` by magnitude, sampled rather than sorted.
 ///
@@ -12288,6 +12372,10 @@ mod tests {
                 (probe / a - probe * scale / b).abs() < 1.0e-9 * (probe / a).max(1.0e-9),
                 "{level}: {a} against {b}"
             );
+            assert!(
+                (quiet.visibility(level) - loud.visibility(level * scale)).abs() < 1.0e-12,
+                "the quiet-tail fade changed with absolute field scale"
+            );
         }
         assert!(floored, "the run never reached the quiet floor");
     }
@@ -12356,6 +12444,69 @@ mod tests {
             "{floor}"
         );
         assert!(1.0e-9 / floor < 1.0e-5, "noise would still be drawn");
+        assert!(
+            exposure.visibility(1.0e-9) < 1.0e-10,
+            "late residue was not faded out"
+        );
+    }
+
+    #[test]
+    fn exposure_fades_smoothly_below_its_run_relative_floor() {
+        let mut exposure = AutoExposure::default();
+        exposure.update(1.0, 0.0);
+        assert_eq!(exposure.visibility(AutoExposure::QUIET_FLOOR), 1.0);
+        let tenth = exposure.visibility(AutoExposure::QUIET_FLOOR * 0.1);
+        assert!((0.0..1.0e-3).contains(&tenth), "weak fade {tenth}");
+        assert_eq!(exposure.visibility(0.0), 0.0);
+        assert_eq!(exposure.visibility(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn arrow_ac_coupling_rejects_static_state_in_simulation_time() {
+        let mut state = Playground {
+            uploaded_time_step: 0.01,
+            ..Playground::default()
+        };
+        let sample = |value| vec![((0, 0), Pos2::ZERO, Point2::new(value, 0.0))];
+
+        let mut first = sample(1.0);
+        state.ac_couple_vector_samples(&mut first, 0);
+        assert_eq!(first[0].2.x, 1.0);
+
+        let mut after_one_second = sample(1.0);
+        state.ac_couple_vector_samples(&mut after_one_second, 100);
+        assert!((after_one_second[0].2.x - (-VECTOR_DC_REJECTION_RATE).exp()).abs() < 1.0e-12);
+
+        let mut after_two_seconds = sample(1.0);
+        state.ac_couple_vector_samples(&mut after_two_seconds, 200);
+        assert!(
+            (after_two_seconds[0].2.x - (-2.0 * VECTOR_DC_REJECTION_RATE).exp()).abs() < 1.0e-12
+        );
+    }
+
+    #[test]
+    fn arrow_ac_coupling_preserves_an_ordinary_source_frequency() {
+        let mut state = Playground {
+            uploaded_time_step: 1.0 / 600.0,
+            ..Playground::default()
+        };
+        let frequency = 3.0;
+        let mut input_square = 0.0;
+        let mut output_square = 0.0;
+        // The solver advances ten small steps between display-rate samples.
+        for frame in 0..600_u64 {
+            let step = frame * 10;
+            let time = step as f64 * state.uploaded_time_step;
+            let value = (std::f64::consts::TAU * frequency * time).sin();
+            let mut samples = vec![((0, 0), Pos2::ZERO, Point2::new(value, 0.0))];
+            state.ac_couple_vector_samples(&mut samples, step);
+            if frame >= 300 {
+                input_square += value * value;
+                output_square += samples[0].2.x * samples[0].2.x;
+            }
+        }
+        let retained = (output_square / input_square).sqrt();
+        assert!(retained > 0.999, "3 Hz amplitude retention {retained}");
     }
 
     /// Release is a rate in seconds, so the same second of wall clock has to

@@ -5,6 +5,27 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — AC arrow view and quiet-tail exposure
+
+- Removed the old `0.82 old + 0.18 new` arrow smoothing. It was a component-wise
+  low-pass inherited from the derived scalar-field reconstruction, and its physical
+  time constant changed when the compact sampler raised arrow updates from 15 Hz to
+  display cadence.
+- Complementary-field arrows now optionally subtract a presentation-only baseline
+  with the former reconstruction's 0.5 rad/s (about 0.08 Hz) corner, evaluated from
+  accepted simulated time. Static display bias decays without touching canonical
+  `b`, probes, energy, transfer, or energy-flow arrows. A 3 Hz regression retains
+  more than 99.9% of the vector amplitude.
+- Auto exposure now multiplies scalar colour and arrow length by a squared smoothstep
+  below the run-relative quiet floor. The reference still releases continuously and
+  preserves genuine surviving DC above that floor, while late f32 residue fades to
+  black instead of being normalized into a static pattern.
+- Version-22 presentation JSON keeps the retired smoothing key as `false` for older
+  readers and stores AC coupling separately. Reading an older file migrates its
+  former checkbox value to the new presentation option.
+- All 311 app tests (308 unit, two catalog and shader validation) pass;
+  warning-denied Clippy and the wasm32 application check also pass.
+
 ## 2026-09-20 — Scrollable inspectors
 
 - Long Edit, View, Simulation, Materials and Probes inspectors now scroll within

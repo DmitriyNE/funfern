@@ -41,9 +41,11 @@ potential, inverse-derivative filter or component-mean subtraction.
 - Far-field sampling reads direct `u`, its accepted backward rate and `grad(u)` at
   the existing contour. Its uniform, isotropic, lossless exterior eligibility
   contract is unchanged.
-- The vector overlay reads the independent complementary field directly. All
+- The GPU vector sampler reads the independent complementary field directly. All
   skins offer the in-plane field and energy-flow views; no skin reconstructs a
-  transverse field from a scalar history.
+  transverse field from a scalar history. The complementary-field arrow view may
+  subtract a slow presentation-only baseline, explicitly labelled AC coupling;
+  the sampler, physical consumers and energy-flow view retain the full field.
 - Total energy is the sum of primary, complementary, thin-gap and outgoing
   physical storage. UI terminology now says canonical/discrete energy and energy
   flow rather than implying the retired potential formulation.
