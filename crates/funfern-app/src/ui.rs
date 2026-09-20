@@ -194,15 +194,59 @@ impl BoundaryKind {
         }
     }
 
-    const ALL: [Self; 7] = [
-        Self::Reflecting,
-        Self::FirstOrder,
-        Self::SecondOrder,
-        Self::ElectricWall,
-        Self::MagneticWall,
-        Self::Neumann,
-        Self::Dirichlet,
-    ];
+    const fn choices(physics: PhysicsModel) -> &'static [Self] {
+        match physics {
+            PhysicsModel::Mechanical => &[
+                Self::Reflecting,
+                Self::FirstOrder,
+                Self::SecondOrder,
+                Self::Neumann,
+                Self::Dirichlet,
+            ],
+            PhysicsModel::Electromagnetic { .. } => &[
+                Self::ElectricWall,
+                Self::MagneticWall,
+                Self::FirstOrder,
+                Self::SecondOrder,
+                Self::Neumann,
+                Self::Dirichlet,
+            ],
+        }
+    }
+
+    /// Give a persisted superset condition the physical name of its active
+    /// skin. The underlying value remains untouched until the user edits it,
+    /// preserving old scenes and polarization switches exactly.
+    const fn presented(self, physics: PhysicsModel) -> Self {
+        match (self, physics) {
+            (Self::ElectricWall, PhysicsModel::Mechanical) => Self::Dirichlet,
+            (Self::MagneticWall, PhysicsModel::Mechanical) => Self::Reflecting,
+            (
+                Self::Reflecting,
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                },
+            ) => Self::MagneticWall,
+            (
+                Self::Reflecting,
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Te,
+                },
+            ) => Self::ElectricWall,
+            _ => self,
+        }
+    }
+
+    const fn label_for(self, physics: PhysicsModel) -> &'static str {
+        match (self, physics) {
+            (Self::Reflecting, PhysicsModel::Mechanical) => "Free boundary",
+            (Self::Neumann, PhysicsModel::Mechanical) => "Prescribed traction",
+            (Self::Dirichlet, PhysicsModel::Mechanical) => "Fixed / prescribed displacement",
+            (Self::Neumann, PhysicsModel::Electromagnetic { .. }) => "Prescribed normal flux",
+            (Self::Dirichlet, PhysicsModel::Electromagnetic { .. }) => "Prescribed axial field",
+            _ => self.label(),
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DrawTool {
@@ -2907,7 +2951,7 @@ impl Playground {
                         CurveTraceSide::Right => right,
                     },
                 };
-                if edit_face_condition(ui, &mut condition)
+                if edit_face_condition(ui, self.editor.document.model.draft.physics, &mut condition)
                     && let Err(error) = self.editor.set_span_face_condition(
                         &curve_spans,
                         self.selected_side,
@@ -3144,7 +3188,7 @@ impl Playground {
             let sides = outer.iter().copied().collect::<BTreeSet<_>>();
             let mut condition =
                 self.editor.document.model.draft.outer_boundaries.sides[outer[0].index()];
-            if edit_outer_condition(ui, &mut condition)
+            if edit_outer_condition(ui, self.editor.document.model.draft.physics, &mut condition)
                 && let Err(error) = self.editor.set_outer_condition(&sides, condition)
             {
                 self.notify(error);
@@ -4230,10 +4274,11 @@ impl Playground {
         if let Some(mut material) = self.material_edit.take() {
             ui.separator();
             ui.text_edit_singleline(&mut material.name);
+            let labels = material_editor_labels(self.editor.document.model.draft.physics);
             material_scalar_editor(
                 ui,
                 (material.id.0, 0),
-                "Density / ε",
+                labels.mass,
                 &mut material.mass_density,
                 &material.parameters,
                 0.000001,
@@ -4243,7 +4288,7 @@ impl Playground {
             material_scalar_editor(
                 ui,
                 (material.id.0, 1),
-                "Stiffness / μ",
+                labels.stiffness,
                 &mut material.stiffness,
                 &material.parameters,
                 0.000001,
@@ -4253,7 +4298,7 @@ impl Playground {
             material_scalar_editor(
                 ui,
                 (material.id.0, 2),
-                "Damping / α",
+                labels.damping,
                 &mut material.damping,
                 &material.parameters,
                 0.0,
@@ -4263,7 +4308,7 @@ impl Playground {
             material_scalar_editor(
                 ui,
                 (material.id.0, 3),
-                "Axis ratio",
+                labels.axis_ratio,
                 &mut material.axis_ratio,
                 &material.parameters,
                 1.0,
@@ -12149,6 +12194,33 @@ const FORMULA_FUNCTIONS: [(&str, &str, &str); 11] = [
     ),
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MaterialEditorLabels {
+    mass: &'static str,
+    stiffness: &'static str,
+    damping: &'static str,
+    axis_ratio: &'static str,
+}
+
+/// The stored rows predate the skin adapters, but the editor should name the
+/// physical response the user is authoring rather than its generic slot.
+const fn material_editor_labels(physics: PhysicsModel) -> MaterialEditorLabels {
+    match physics {
+        PhysicsModel::Mechanical => MaterialEditorLabels {
+            mass: "Density ρ₀",
+            stiffness: "Stiffness k₀",
+            damping: "Damping σ",
+            axis_ratio: "Stiffness axis ratio",
+        },
+        PhysicsModel::Electromagnetic { .. } => MaterialEditorLabels {
+            mass: "Permittivity ε",
+            stiffness: "Permeability μ",
+            damping: "Loss rate α",
+            axis_ratio: "Constitutive axis ratio",
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn material_scalar_editor(
     ui: &mut egui::Ui,
@@ -12249,7 +12321,11 @@ fn material_scalar_editor(
     }
 }
 
-fn edit_face_condition(ui: &mut egui::Ui, condition: &mut FaceBoundaryCondition) -> bool {
+fn edit_face_condition(
+    ui: &mut egui::Ui,
+    physics: PhysicsModel,
+    condition: &mut FaceBoundaryCondition,
+) -> bool {
     let before = *condition;
     let mut kind = match condition {
         FaceBoundaryCondition::Reflecting => BoundaryKind::Reflecting,
@@ -12259,11 +12335,12 @@ fn edit_face_condition(ui: &mut egui::Ui, condition: &mut FaceBoundaryCondition)
         FaceBoundaryCondition::MagneticWall => BoundaryKind::MagneticWall,
         FaceBoundaryCondition::Neumann { .. } => BoundaryKind::Neumann,
         FaceBoundaryCondition::Dirichlet { .. } => BoundaryKind::Dirichlet,
-    };
+    }
+    .presented(physics);
     egui::ComboBox::from_id_salt("span-condition")
-        .selected_text(condition.label())
-        .show_ui(ui, |ui| boundary_kind_choices(ui, &mut kind));
-    if kind != face_kind(before) {
+        .selected_text(kind.label_for(physics))
+        .show_ui(ui, |ui| boundary_kind_choices(ui, physics, &mut kind));
+    if kind != face_kind(before).presented(physics) {
         *condition = match kind {
             BoundaryKind::Reflecting => FaceBoundaryCondition::Reflecting,
             BoundaryKind::FirstOrder => FaceBoundaryCondition::Impedance { ratio: 1.0 },
@@ -12295,13 +12372,17 @@ fn edit_face_condition(ui: &mut egui::Ui, condition: &mut FaceBoundaryCondition)
     *condition != before
 }
 
-fn edit_outer_condition(ui: &mut egui::Ui, condition: &mut OuterBoundaryCondition) -> bool {
+fn edit_outer_condition(
+    ui: &mut egui::Ui,
+    physics: PhysicsModel,
+    condition: &mut OuterBoundaryCondition,
+) -> bool {
     let before = *condition;
-    let mut kind = outer_kind(*condition);
+    let mut kind = outer_kind(*condition).presented(physics);
     egui::ComboBox::from_id_salt("outer-condition")
-        .selected_text(condition.label())
-        .show_ui(ui, |ui| boundary_kind_choices(ui, &mut kind));
-    if kind != outer_kind(before) {
+        .selected_text(kind.label_for(physics))
+        .show_ui(ui, |ui| boundary_kind_choices(ui, physics, &mut kind));
+    if kind != outer_kind(before).presented(physics) {
         *condition = match kind {
             BoundaryKind::Reflecting => OuterBoundaryCondition::Reflecting,
             BoundaryKind::FirstOrder => OuterBoundaryCondition::FirstOrderOutgoing,
@@ -12386,9 +12467,9 @@ fn outer_condition_color(condition: OuterBoundaryCondition) -> Color32 {
     }
 }
 
-fn boundary_kind_choices(ui: &mut egui::Ui, kind: &mut BoundaryKind) {
-    for value in BoundaryKind::ALL {
-        ui.selectable_value(kind, value, value.label());
+fn boundary_kind_choices(ui: &mut egui::Ui, physics: PhysicsModel, kind: &mut BoundaryKind) {
+    for value in BoundaryKind::choices(physics) {
+        ui.selectable_value(kind, *value, value.label_for(physics));
     }
 }
 
@@ -15120,6 +15201,15 @@ mod tests {
     /// it.
     #[test]
     fn boundary_names_agree_across_every_source() {
+        let all = [
+            BoundaryKind::Reflecting,
+            BoundaryKind::FirstOrder,
+            BoundaryKind::SecondOrder,
+            BoundaryKind::ElectricWall,
+            BoundaryKind::MagneticWall,
+            BoundaryKind::Neumann,
+            BoundaryKind::Dirichlet,
+        ];
         let signal = TimeSignal::harmonic(0.0, 1.0, 1.0, 0.0);
         let faces = [
             FaceBoundaryCondition::Reflecting,
@@ -15159,16 +15249,85 @@ mod tests {
             faces.map(face_kind).to_vec(),
             outers.map(outer_kind).to_vec(),
         ] {
-            assert_eq!(kinds, BoundaryKind::ALL.to_vec());
+            assert_eq!(kinds, all.to_vec());
         }
         assert_eq!(
-            BoundaryKind::ALL
-                .iter()
+            all.iter()
                 .map(|kind| kind.label())
                 .collect::<BTreeSet<_>>()
                 .len(),
-            BoundaryKind::ALL.len()
+            all.len()
         );
+    }
+
+    #[test]
+    fn boundary_picker_uses_the_active_skins_physical_vocabulary() {
+        let mechanical = BoundaryKind::choices(PhysicsModel::Mechanical);
+        assert!(mechanical.contains(&BoundaryKind::Reflecting));
+        assert!(!mechanical.contains(&BoundaryKind::ElectricWall));
+        assert!(!mechanical.contains(&BoundaryKind::MagneticWall));
+        assert_eq!(
+            BoundaryKind::Reflecting.label_for(PhysicsModel::Mechanical),
+            "Free boundary"
+        );
+
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        for physics in [tm, te] {
+            let choices = BoundaryKind::choices(physics);
+            assert!(!choices.contains(&BoundaryKind::Reflecting));
+            assert!(choices.contains(&BoundaryKind::ElectricWall));
+            assert!(choices.contains(&BoundaryKind::MagneticWall));
+        }
+        assert_eq!(
+            BoundaryKind::Reflecting.presented(tm),
+            BoundaryKind::MagneticWall,
+            "the natural TM scalar boundary is a magnetic wall"
+        );
+        assert_eq!(
+            BoundaryKind::Reflecting.presented(te),
+            BoundaryKind::ElectricWall,
+            "the natural TE scalar boundary is an electric wall"
+        );
+        assert_eq!(
+            BoundaryKind::ElectricWall.presented(PhysicsModel::Mechanical),
+            BoundaryKind::Dirichlet
+        );
+        assert_eq!(
+            BoundaryKind::MagneticWall.presented(PhysicsModel::Mechanical),
+            BoundaryKind::Reflecting
+        );
+    }
+
+    #[test]
+    fn material_editor_names_the_active_physical_coefficients() {
+        assert_eq!(
+            material_editor_labels(PhysicsModel::Mechanical),
+            MaterialEditorLabels {
+                mass: "Density ρ₀",
+                stiffness: "Stiffness k₀",
+                damping: "Damping σ",
+                axis_ratio: "Stiffness axis ratio",
+            }
+        );
+        for polarization in [
+            ElectromagneticPolarization::Tm,
+            ElectromagneticPolarization::Te,
+        ] {
+            assert_eq!(
+                material_editor_labels(PhysicsModel::Electromagnetic { polarization }),
+                MaterialEditorLabels {
+                    mass: "Permittivity ε",
+                    stiffness: "Permeability μ",
+                    damping: "Loss rate α",
+                    axis_ratio: "Constitutive axis ratio",
+                }
+            );
+        }
     }
 
     /// Both axes step upwards from the lower bound. The vertical one used to
@@ -16307,14 +16466,10 @@ mod probe_interaction_tests {
     }
 
     #[test]
-    fn vector_overlay_exposes_the_shared_canonical_vectors_in_every_skin() {
+    fn vector_overlay_keeps_the_mechanical_skin_on_physical_observables() {
         assert_eq!(
             VectorOverlay::choices(PhysicsModel::Mechanical),
-            &[
-                VectorOverlay::Off,
-                VectorOverlay::ComplementaryField,
-                VectorOverlay::RelativeEnergyFlow,
-            ]
+            &[VectorOverlay::Off, VectorOverlay::RelativeEnergyFlow]
         );
         assert_eq!(
             VectorOverlay::choices(PhysicsModel::Electromagnetic {
@@ -16325,7 +16480,7 @@ mod probe_interaction_tests {
         );
         assert_eq!(
             VectorOverlay::ComplementaryField.resolved(PhysicsModel::Mechanical),
-            VectorOverlay::ComplementaryField
+            VectorOverlay::Off
         );
         assert_eq!(
             VectorOverlay::ComplementaryField.resolved(PhysicsModel::Electromagnetic {
@@ -16335,7 +16490,7 @@ mod probe_interaction_tests {
         );
         assert_eq!(
             VectorOverlay::ComplementaryField.label(PhysicsModel::Mechanical),
-            "In-plane field"
+            "Off"
         );
     }
 

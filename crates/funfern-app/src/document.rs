@@ -116,18 +116,24 @@ pub enum VectorOverlay {
 }
 
 impl VectorOverlay {
-    /// Every skin is a presentation of the same canonical primary and
-    /// complementary state, so both vector observables remain available.
-    pub const fn choices(_physics: PhysicsModel) -> &'static [Self] {
-        &[
-            Self::Off,
-            Self::ComplementaryField,
-            Self::RelativeEnergyFlow,
-        ]
+    /// Mechanical uses the same canonical vector state internally, but that
+    /// implementation detail is not one of its presentation observables.
+    pub const fn choices(physics: PhysicsModel) -> &'static [Self] {
+        match physics {
+            PhysicsModel::Mechanical => &[Self::Off, Self::RelativeEnergyFlow],
+            PhysicsModel::Electromagnetic { .. } => &[
+                Self::Off,
+                Self::ComplementaryField,
+                Self::RelativeEnergyFlow,
+            ],
+        }
     }
 
-    pub const fn resolved(self, _physics: PhysicsModel) -> Self {
-        self
+    pub const fn resolved(self, physics: PhysicsModel) -> Self {
+        match (self, physics) {
+            (Self::ComplementaryField, PhysicsModel::Mechanical) => Self::Off,
+            _ => self,
+        }
     }
 
     pub const fn label(self, physics: PhysicsModel) -> &'static str {
@@ -145,7 +151,9 @@ impl VectorOverlay {
                     polarization: ElectromagneticPolarization::Te,
                 },
             ) => "Electric field E",
-            (Self::ComplementaryField, PhysicsModel::Mechanical) => "In-plane field",
+            // `resolved` prevents this combination; retain an exhaustive arm
+            // so adding another skin cannot accidentally expose a core detail.
+            (Self::ComplementaryField, PhysicsModel::Mechanical) => "Off",
             (Self::RelativeEnergyFlow, PhysicsModel::Electromagnetic { .. }) => "Poynting flow",
             (Self::RelativeEnergyFlow, PhysicsModel::Mechanical) => "Energy flow",
         }

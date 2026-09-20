@@ -5,6 +5,23 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Physics skins expose only their own UI vocabulary
+
+- Mechanical no longer offers the canonical complementary vector as an
+  `In-plane field` arrow overlay. The shared solver still computes it, while
+  the mechanical presentation exposes only energy flow; a persisted selection
+  resolves to Off when opened in that skin.
+- Boundary pickers now expose free/fixed-or-prescribed mechanical conditions in
+  Mechanical and electric/magnetic walls in EM. Generic reflecting is retained
+  as a persistence/core variant but is presented as its exact PEC/PMC alias for
+  the active polarization; old scenes and skin changes are not rewritten merely
+  by opening the inspector.
+- Linear material rows now use skin-specific physical names: density/stiffness
+  in Mechanical and permittivity/permeability in EM. The forthcoming nonlinear
+  wire-up must extend this to the planned Simplified/Advanced response, drive,
+  alternate and named loss-channel controls rather than reverting to generic
+  storage-slot labels.
+
 ## 2026-09-20 — Arrow sampling and AC state survive view and mesh changes
 
 - Pan and zoom previously replaced the GPU arrow lattice every UI frame and
