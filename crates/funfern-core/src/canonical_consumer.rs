@@ -53,7 +53,7 @@ impl CanonicalPointStencil {
             .ok_or(WaveError::InvalidMesh(
                 "the canonical element has no complementary samples",
             ))?;
-        let complementary_weights = quadratic_weights(
+        let complementary_weights = complementary_interpolation_weights(
             samples
                 .iter()
                 .map(|sample| sample.barycentric)
@@ -264,7 +264,7 @@ pub fn canonical_area_quadrature(
         });
         compiled[slot] = CanonicalAreaQuadraturePoint {
             primary_weights: enriched_quadratic_basis(barycentric),
-            complementary_weights: quadratic_weights(sample_points, barycentric)?,
+            complementary_weights: complementary_interpolation_weights(sample_points, barycentric)?,
             primary_reference: element.coefficients[slot].mass_density,
             complementary_inverse: rotate_tensor(element.coefficients[slot].stiffness),
             physical_weight: element.area * weight,
@@ -383,7 +383,7 @@ fn monomials([_l0, l1, l2]: [f64; 3]) -> [f64; 6] {
     [1.0, l1, l2, l1 * l1, l1 * l2, l2 * l2]
 }
 
-fn quadratic_weights(
+pub(crate) fn complementary_interpolation_weights(
     samples: [[f64; 3]; COMPLEMENTARY_SAMPLES],
     target: [f64; 3],
 ) -> Result<[f64; COMPLEMENTARY_SAMPLES], WaveError> {

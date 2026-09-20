@@ -294,6 +294,20 @@ impl TimeSignal {
         offset + amplitude * (std::f64::consts::TAU * frequency_hz * time + phase_radians).sin()
     }
 
+    /// Exact time derivative of the authored signal. Keeping this analytic is
+    /// important for prescribed canonical fields: differencing two stored f32
+    /// endpoints loses the small per-step change long before the field itself.
+    pub fn derivative(self, time: f64) -> f64 {
+        let Self::Harmonic {
+            amplitude,
+            frequency_hz,
+            phase_radians,
+            ..
+        } = self;
+        let omega = std::f64::consts::TAU * frequency_hz;
+        amplitude * omega * (omega * time + phase_radians).cos()
+    }
+
     pub const fn harmonic_parameters(self) -> [f64; 4] {
         let Self::Harmonic {
             offset,

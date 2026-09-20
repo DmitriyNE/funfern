@@ -5,6 +5,40 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Canonical AMR stops chasing invented derivatives
+
+- The autosaved driven scene reproduced both reports: AMR held near 60% and
+  refined toward roughly 130k DOFs, where presentation crossed a frame-budget
+  cliff. Fixed-mesh traces ruled out canonical drift, gap/outgoing history and
+  the wavelength floor. The scalar recovery and strong cell terms dominated.
+- Splitting recovery made the defect explicit. Around 50k DOFs, primary-gradient
+  recovery was only `5e-4–1e-3`, while a scalar rate reconstructed from the f32
+  direct state contributed `0.09–0.22`. Adjacent `Q/M` endpoints lose their tiny
+  per-step difference; evaluating the nodal balance instead still divides a
+  cancellation-heavy f32 force by support area. The scalar semidiscrete-
+  acceleration cell residual separately stayed near `0.05–0.10`.
+- Static-linear canonical AMR now retains primary recovery, interface jumps and
+  boundary checks, replaces rate recovery with region-local recovery of physical
+  `Jb` in its `J^-1` norm, and uses direct endpoint defects for canonical drift,
+  gaps and outgoing memory. It does not reinterpret the direct state as a scalar
+  acceleration residual. The Performance panel reports primary/complementary,
+  cell, jump and boundary contributions.
+- On the same Metal autosave the corrected estimate crossed the 12% target at
+  50,480 DOFs and then remained about 7–10%; the decreasing interior jump was
+  the dominant term. This removes the route that had pushed the scene into the
+  130k-DOF presentation cliff.
+- The cliff itself was structural: egui flattened and recopied the quadratic
+  field's static six-triangle-per-element index stream every frame. A paint
+  callback now retains positions and indices in GPU buffers per mesh and uploads
+  only one f32 value per node plus the view/exposure uniform. The existing
+  material overlays keep their order beneath it. The display readback adapter
+  also stopped deriving unused previous/rate/acceleration arrays at visual
+  cadence; full canonical state remains sampled for AMR at its slower cadence.
+  Native Metal startup and
+  adaptive handoffs produced no render errors; the wasm32 app compiles and the
+  WGSL parser fixture passes. Exact 130k-DOF FPS remains a hands-on acceptance
+  measurement rather than a claim inferred from the smaller corrected mesh.
+
 ## 2026-09-20 — Arrow presentation state survives compatible GPU handoff
 
 - The complementary-arrow DC rejector incorrectly treated every canonical GPU

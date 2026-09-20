@@ -1,6 +1,7 @@
 #[allow(dead_code)]
 mod canonical_gpu;
 mod capture;
+mod field_paint;
 #[allow(dead_code)]
 mod files;
 mod material_overlay;
@@ -27,6 +28,7 @@ fn run_app() {
         ..default()
     }))
     .add_plugins(EguiPlugin::default())
+    .add_plugins(field_paint::FieldPaintPlugin)
     .add_plugins(wave_gpu::WaveGpuPlugin)
     .add_plugins(canonical_gpu::CanonicalWaveGpuPlugin)
     .init_resource::<ui::Playground>()

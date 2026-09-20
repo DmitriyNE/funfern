@@ -5,6 +5,7 @@ use crate::canonical_gpu::{
     CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuRuntimeTransfer, CanonicalGpuTransferPlan,
     canonical_failure_description,
 };
+use crate::field_paint::{FieldPaintCallback, FieldPaintTopology};
 use crate::files::{self, FileEvent, SaveKind};
 use crate::material_overlay::{
     MaterialOverlay, MaterialOverlayJob, MaterialOverlaySnapshot, MaterialProperty, OverlayKey,
@@ -1189,8 +1190,9 @@ pub struct Playground {
     vector_overlay_mode: VectorOverlay,
     vector_overlay_exposure: AutoExposure,
     field_exposure: AutoExposure,
-    /// Canonical primary field copied for exposure and paint traversal.
-    field_render: Vec<f32>,
+    /// Static field-surface geometry. Egui's ordinary mesh path recopies every
+    /// index every frame; the paint callback keeps this topology on the GPU.
+    field_paint_topology: Option<Arc<FieldPaintTopology>>,
     /// Reused by the field's quantile so a frame's sample costs no allocation.
     exposure_scratch: Vec<f64>,
     /// Wall-clock seconds since the previous frame, which is what the exposures
@@ -1387,7 +1389,7 @@ impl Default for Playground {
             vector_overlay_mode: VectorOverlay::Off,
             vector_overlay_exposure: AutoExposure::default(),
             field_exposure: AutoExposure::default(),
-            field_render: Vec::new(),
+            field_paint_topology: None,
             exposure_scratch: Vec::new(),
             frame_delta: 0.0,
             material_overlay_job: None,
@@ -4537,9 +4539,9 @@ impl Playground {
             // The canonical primary field is authoritative. Display no longer
             // removes a component mean or reconstructs a gauge-dependent
             // scalar before exposure.
-            self.field_render.clone_from(&display.current);
+            let field_values: Arc<[f32]> = display.current.clone().into();
             let level = exposure_level(
-                &self.field_render,
+                &field_values,
                 FIELD_EXPOSURE_QUANTILE,
                 &mut self.exposure_scratch,
             );
@@ -4555,24 +4557,43 @@ impl Playground {
                     reference,
                     presentation.field_auto_exposure,
                 );
-            let mut field = egui::Mesh::default();
-            field.reserve_vertices(active.operator.degrees_of_freedom());
-            field.reserve_triangles(active.operator.element_nodes().len() * 6);
-            for (point, value) in active.operator.node_points().iter().zip(&self.field_render) {
-                let scaled = (f64::from(*value) * scale) as f32;
-                let color = if presentation.material_overlay == MaterialOverlay::Off {
-                    field_color(scaled, Color32::TRANSPARENT)
-                } else {
-                    field_color_over_overlay(scaled)
-                };
-                field.colored_vertex(self.screen(*point, r), color);
-            }
-            for nodes in active.operator.element_nodes() {
-                for [a, b] in [[0, 3], [3, 1], [1, 4], [4, 2], [2, 5], [5, 0]] {
-                    field.add_triangle(nodes[a], nodes[b], nodes[6]);
+            if self.field_paint_topology.as_ref().is_none_or(|topology| {
+                topology.mesh_revision != active.mesh.mesh_revision
+                    || topology.positions.len() != active.operator.degrees_of_freedom()
+            }) {
+                let mut indices = Vec::with_capacity(active.operator.element_nodes().len() * 18);
+                for nodes in active.operator.element_nodes() {
+                    for [a, b] in [[0, 3], [3, 1], [1, 4], [4, 2], [2, 5], [5, 0]] {
+                        indices.extend_from_slice(&[nodes[a], nodes[b], nodes[6]]);
+                    }
                 }
+                let replacement = Arc::new(FieldPaintTopology {
+                    mesh_revision: active.mesh.mesh_revision,
+                    positions: active
+                        .operator
+                        .node_points()
+                        .iter()
+                        .map(|point| [point.x as f32, point.y as f32])
+                        .collect::<Vec<_>>()
+                        .into(),
+                    indices: indices.into(),
+                });
+                self.field_paint_topology = Some(replacement);
             }
-            painter.add(egui::Shape::mesh(field));
+            painter.add(
+                FieldPaintCallback {
+                    topology: self.field_paint_topology.as_ref().unwrap().clone(),
+                    values: field_values,
+                    world_center: [self.center.x as f32, self.center.y as f32],
+                    world_to_clip: [
+                        (2.0 * self.scale / f64::from(r.width())) as f32,
+                        (2.0 * self.scale / f64::from(r.height())) as f32,
+                    ],
+                    color_scale: scale as f32,
+                    over_overlay: presentation.material_overlay != MaterialOverlay::Off,
+                }
+                .shape(r),
+            );
         }
         // The field covers the whole domain and is opaque with no material
         // overlay under it, so the mesh has to be drawn over the field rather
@@ -8178,9 +8199,7 @@ impl Playground {
         if !request.ready()
             || display.generation != request.generation()
             || display.snapshot_current.len() != dofs
-            || display.snapshot_previous.len() != dofs
             || display.auxiliary.len() != dofs
-            || display.snapshot_velocity.len() != dofs
             || canonical.previous_primary_flux.len() != dofs
             || canonical.previous_complementary_flux.len()
                 != active.canonical_operator.complementary_degrees_of_freedom()
@@ -8214,50 +8233,6 @@ impl Playground {
         let time = canonical.clock.map_or(self.simulated_time(), |clock| {
             clock.absolute_seconds + (step as f64 - f64::from(clock.accepted_steps)) * dt
         });
-        let displacement = display
-            .snapshot_current
-            .iter()
-            .map(|value| f64::from(*value))
-            .collect::<Vec<_>>();
-        let velocity = display
-            .snapshot_velocity
-            .iter()
-            .map(|value| f64::from(*value))
-            .collect::<Vec<_>>();
-        let stiffness = match active.operator.apply_stiffness(&displacement) {
-            Ok(stiffness) => stiffness,
-            Err(error) => {
-                self.amr_status = "canonical estimate failed".into();
-                self.amr_error = Some(error.to_string());
-                return;
-            }
-        };
-        let volume_acceleration = active.volume_sources.acceleration(time);
-        let acceleration = stiffness
-            .iter()
-            .zip(active.operator.lumped_mass())
-            .zip(active.canonical_operator.primary_loss_rate())
-            .zip(&velocity)
-            .zip(&volume_acceleration)
-            .map(|((((force, mass), loss), velocity), source)| {
-                source - force / mass - loss * velocity
-            })
-            .collect::<Vec<_>>();
-        let Some(auxiliary) = aligned_indicator_auxiliary(display, &active.operator, dt, step)
-        else {
-            self.amr_status = "waiting for aligned readback".into();
-            return;
-        };
-        let snapshot = QuadraticSolutionSnapshot {
-            mesh_revision: active.mesh.mesh_revision,
-            displacement,
-            velocity,
-            acceleration,
-            auxiliary,
-            volume_acceleration,
-            time,
-            time_step: dt,
-        };
         let canonical_snapshot = CanonicalIndicatorSnapshot {
             mesh_revision: active.mesh.mesh_revision,
             primary_flux: canonical
@@ -8290,6 +8265,45 @@ impl Playground {
                 .iter()
                 .map(|value| f64::from(*value))
                 .collect(),
+            time,
+            time_step: dt,
+        };
+        let displacement = display
+            .snapshot_current
+            .iter()
+            .map(|value| f64::from(*value))
+            .collect::<Vec<_>>();
+        let velocity = match canonical_primary_rate(
+            &active.canonical_operator,
+            &active.canonical_forcing,
+            &canonical_snapshot,
+        ) {
+            Ok(velocity) => velocity,
+            Err(error) => {
+                self.amr_status = "canonical estimate failed".into();
+                self.amr_error = Some(error.to_string());
+                return;
+            }
+        };
+        // The canonical estimator deliberately excludes the scalar strong cell
+        // residual: applying the semidiscrete stiffness and feeding it back as
+        // a pointwise acceleration produced a nonconvergent residual floor.
+        // Keep shape-valid placeholders for the shared resumable job instead
+        // of paying for an unused sparse multiply at every estimate.
+        let acceleration = vec![0.0; dofs];
+        let volume_acceleration = vec![0.0; dofs];
+        let Some(auxiliary) = aligned_indicator_auxiliary(display, &active.operator, dt, step)
+        else {
+            self.amr_status = "waiting for aligned readback".into();
+            return;
+        };
+        let snapshot = QuadraticSolutionSnapshot {
+            mesh_revision: active.mesh.mesh_revision,
+            displacement,
+            velocity,
+            acceleration,
+            auxiliary,
+            volume_acceleration,
             time,
             time_step: dt,
         };
@@ -10849,6 +10863,14 @@ impl Playground {
                         report.coarsen_candidates,
                         report.work_units,
                     ));
+                    ui.small(format!(
+                        "Residual: primary {:.2e} + complementary {:.2e} recovery · cell {:.2e} · jump {:.2e} · boundary {:.2e}",
+                        report.displacement_recovery_contribution,
+                        report.complementary_recovery_contribution,
+                        report.cell_residual_contribution,
+                        report.interior_jump_contribution,
+                        report.boundary_residual_contribution,
+                    ));
                     if report.smallest_wavelength_target.is_finite() {
                         ui.small(format!(
                             "Forced wavelength wants {:.4}",
@@ -12089,6 +12111,7 @@ fn field_scale(gain: f32, reference: Option<f64>, automatic: bool) -> f64 {
 /// `scaled` is the node's value already divided by whatever scale is in force —
 /// the exposure's reference when it is on, the intensity slider alone when it is
 /// not — so this only has to decide a colour.
+#[cfg(test)]
 fn field_color(scaled: f32, under: Color32) -> Color32 {
     let value = scaled.tanh();
     let target = if value >= 0.0 {
@@ -12109,6 +12132,7 @@ fn field_color(scaled: f32, under: Color32) -> Color32 {
     )
 }
 
+#[cfg(test)]
 fn field_color_over_overlay(scaled: f32) -> Color32 {
     let value = if scaled.is_finite() {
         scaled.tanh()
@@ -12648,16 +12672,16 @@ fn refresh_canonical_wave_display(
     }
     if display.generation != canonical.generation {
         display.complementary_flux.clear();
+        display.previous.clear();
+        display.indicator_displacement.clear();
+        display.indicator_velocity.clear();
+        display.indicator_acceleration.clear();
+        display.indicator_potential.clear();
         display.snapshot_current.clear();
         display.snapshot_previous.clear();
         display.snapshot_velocity.clear();
         display.snapshot_completed_steps = 0;
     }
-    let dt = canonical
-        .clock
-        .map_or(operator.recommended_time_step(), |clock| {
-            f64::from(clock.time_step)
-        });
     display.generation = canonical.generation;
     display.completed_steps = request.stats().completed_steps();
     display.current.clear();
@@ -12668,46 +12692,13 @@ fn refresh_canonical_wave_display(
             .zip(operator.primary_mass())
             .map(|(flux, mass)| (f64::from(*flux) / mass) as f32),
     );
-    display.previous.clear();
-    display.previous.extend(
-        canonical
-            .previous_primary_flux
-            .iter()
-            .zip(operator.primary_mass())
-            .map(|(flux, mass)| (f64::from(*flux) / mass) as f32),
-    );
-    display.indicator_velocity.clear();
-    display.indicator_velocity.extend(
-        display
-            .current
-            .iter()
-            .zip(&display.previous)
-            .map(|(current, previous)| (*current - *previous) / dt as f32),
-    );
-    display.indicator_displacement.clear();
-    display
-        .indicator_displacement
-        .extend(display.current.iter().copied());
-    // Acceleration needs a sparse stiffness application and is consumed only
-    // by the AMR snapshot. Build it at the 0.75 s AMR cadence instead of on
-    // every visual readback.
-    display.indicator_acceleration.clear();
-    display.auxiliary.clear();
-    display.auxiliary.resize(operator.degrees_of_freedom(), 0.0);
-    display.indicator_potential.clear();
     if canonical.full_readback_at == canonical.readbacks {
         display.snapshot_current.clear();
         display
             .snapshot_current
             .extend(display.current.iter().copied());
-        display.snapshot_previous.clear();
-        display
-            .snapshot_previous
-            .extend(display.previous.iter().copied());
-        display.snapshot_velocity.clear();
-        display
-            .snapshot_velocity
-            .extend(display.indicator_velocity.iter().copied());
+        display.auxiliary.clear();
+        display.auxiliary.resize(operator.degrees_of_freedom(), 0.0);
         display.snapshot_completed_steps = canonical.full_snapshot_completed_steps();
         display.complementary_flux.clear();
         display
@@ -13565,14 +13556,6 @@ mod tests {
         let loud = field_scale(2.0, Some(7.1e-1), true) * 7.1e-1;
         assert!((quiet - loud).abs() < 1.0e-12);
         assert_eq!(field_scale(2.0, None, true), 0.0);
-    }
-
-    #[test]
-    fn canonical_render_keeps_authoritative_component_offsets() {
-        let values = vec![0.4_f32, 0.41, -0.9, -0.89];
-        let mut state = Playground::default();
-        state.field_render.clone_from(&values);
-        assert_eq!(state.field_render, values);
     }
 
     /// Loading a document used to raise `reset_requested`, which the GPU reset

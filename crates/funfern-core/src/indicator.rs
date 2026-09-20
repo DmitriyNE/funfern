@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use crate::canonical_consumer::complementary_interpolation_weights;
 use crate::{
     BoundaryLabel, BoundarySide, CanonicalForcing, CanonicalWaveOperator,
     DirectionalWaveCoefficients, FaceBoundaryCondition, InternalBoundaryCoupling,
@@ -46,12 +47,96 @@ pub struct CanonicalIndicatorSnapshot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalIndicatorSupplement {
     pub mesh_revision: u64,
+    pub element_complementary_recovery: Vec<f64>,
     pub element_cell_residual: Vec<f64>,
     pub element_boundary_residual: Vec<f64>,
     pub element_energy: Vec<f64>,
     pub drift_contribution: f64,
+    pub complementary_recovery_contribution: f64,
     pub thin_gap_contribution: f64,
     pub outgoing_contribution: f64,
+}
+
+/// Reconstructs the instantaneous scalar-field rate from the accepted direct
+/// canonical state for pointwise boundary and energy diagnostics. This avoids
+/// differencing adjacent stored endpoints, but the nodal force still contains
+/// f32 cancellation and therefore must not be spatially differentiated for AMR
+/// recovery; that phase-paired term comes directly from complementary state.
+pub fn canonical_primary_rate(
+    operator: &CanonicalWaveOperator,
+    forcing: &CanonicalForcing,
+    snapshot: &CanonicalIndicatorSnapshot,
+) -> Result<Vec<f64>, WaveError> {
+    let node_count = operator.degrees_of_freedom();
+    let gap_count = operator.thin_gap_samples().len();
+    let outgoing_count = operator
+        .outgoing_boundary()
+        .map_or(0, |boundary| boundary.auxiliary_count());
+    if snapshot.primary_flux.len() != node_count
+        || snapshot.previous_primary_flux.len() != node_count
+        || snapshot.complementary_flux.len() != operator.complementary_degrees_of_freedom()
+        || snapshot.previous_complementary_flux.len() != operator.complementary_degrees_of_freedom()
+        || snapshot.auxiliary.len() != gap_count + outgoing_count
+        || snapshot.previous_auxiliary.len() != gap_count + outgoing_count
+        || forcing.prescribed().len() != node_count
+        || !snapshot.time.is_finite()
+    {
+        return Err(WaveError::InvalidState);
+    }
+
+    let field = operator.primary_field(&snapshot.primary_flux)?;
+    let force = force_with_gaps(operator, &snapshot.complementary_flux, &snapshot.auxiliary)?;
+    let source = forcing.integrated_rate(snapshot.time)?;
+    let mut integrated_rate = source
+        .iter()
+        .zip(&force)
+        .zip(operator.first_order_boundary_damping())
+        .zip(operator.primary_loss_rate())
+        .zip(&snapshot.primary_flux)
+        .zip(&field)
+        .map(
+            |(((((source, force), boundary_damping), loss), flux), field)| {
+                source - force - boundary_damping * field - loss * flux
+            },
+        )
+        .collect::<Vec<_>>();
+
+    // The nonlocal boundary generator owns both its local impedance term and
+    // pole-memory feedback. Replace the ordinary local boundary contribution
+    // on trace nodes with that complete autonomous derivative.
+    if let Some(boundary) = operator.outgoing_boundary() {
+        let trace = boundary
+            .trace_nodes()
+            .iter()
+            .map(|node| snapshot.primary_flux[*node as usize])
+            .collect::<Vec<_>>();
+        let derivative =
+            boundary.diagnostic_derivative(operator, &trace, &snapshot.auxiliary[gap_count..])?;
+        for (position, node) in boundary.trace_nodes().iter().copied().enumerate() {
+            let node = node as usize;
+            integrated_rate[node] = source[node]
+                - force[node]
+                - operator.primary_loss_rate()[node] * snapshot.primary_flux[node]
+                + derivative[position];
+        }
+    }
+
+    // Prescribed primary data owns the endpoint regardless of every force or
+    // passive channel assembled at that node.
+    for (node, signal) in forcing.prescribed().iter().enumerate() {
+        if let Some(signal) = signal {
+            integrated_rate[node] =
+                operator.primary_mass()[node] * signal.derivative(snapshot.time);
+        }
+    }
+    if integrated_rate.iter().any(|value| !value.is_finite()) {
+        return Err(WaveError::InvalidState);
+    }
+    Ok(integrated_rate
+        .iter()
+        .zip(operator.primary_mass())
+        .map(|(rate, mass)| rate / mass)
+        .collect())
 }
 
 pub fn canonical_indicator_supplement(
@@ -89,9 +174,110 @@ pub fn canonical_indicator_supplement(
         .map(|(current, previous)| 0.5 * (current + previous))
         .collect::<Vec<_>>();
     let element_count = mesh.triangles.len();
+    let mut element_complementary_recovery = vec![0.0; element_count];
     let mut element_cell_residual = vec![0.0; element_count];
     let mut element_boundary_residual = vec![0.0; element_count];
     let mut element_energy = vec![0.0; element_count];
+
+    // The scalar estimator's phase-paired term used grad(u_dot), but obtaining
+    // u_dot from an f32 direct state requires either a tiny endpoint difference
+    // or a cancellation-heavy nodal force. Recover the complementary physical
+    // field Jb instead: for a harmonic component grad(u_dot) = -omega^2 b, so
+    // omega^2 ||Jb-recovered(Jb)||_{J^-1} is the same energy-scaled channel
+    // without inventing a derivative that the canonical state does not store.
+    let frequency_hz = forcing
+        .sources()
+        .iter()
+        .filter(|source| source.weights().iter().any(|weight| *weight != 0.0))
+        .map(|source| source.drive().frequency_ceiling_hz())
+        .chain(
+            forcing
+                .prescribed()
+                .iter()
+                .flatten()
+                .map(|signal| signal.frequency_ceiling_hz()),
+        )
+        .fold(0.0, f64::max);
+    let omega = (std::f64::consts::TAU * frequency_hz).max(1.0);
+    let mut recovered_complementary = BTreeMap::<(usize, RegionId), (Point2, f64)>::new();
+    let first_samples = operator
+        .constitutive_samples()
+        .get(..6)
+        .ok_or(WaveError::InvalidState)?;
+    let sample_points: [[f64; 3]; 6] = first_samples
+        .iter()
+        .map(|sample| sample.barycentric)
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| WaveError::InvalidState)?;
+    let vertex_weights = [0, 1, 2]
+        .map(|local| {
+            let target = std::array::from_fn(|coordinate| (coordinate == local) as u8 as f64);
+            complementary_interpolation_weights(sample_points, target)
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    for (element, triangle) in mesh.triangles.iter().enumerate() {
+        let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+        let area = 0.5 * (points[1] - points[0]).cross(points[2] - points[0]);
+        if !area.is_finite() || area <= 0.0 {
+            return Err(WaveError::InvalidMesh(
+                "invalid canonical indicator element",
+            ));
+        }
+        let start = element * 6;
+        let samples = operator
+            .constitutive_samples()
+            .get(start..start + 6)
+            .ok_or(WaveError::InvalidState)?;
+        for (local, interpolation_weights) in vertex_weights.iter().enumerate() {
+            let value = interpolation_weights.iter().zip(samples).enumerate().fold(
+                Point2::default(),
+                |sum, (sample, (weight, law))| {
+                    sum + law
+                        .complementary_inverse
+                        .apply(snapshot.complementary_flux[start + sample])
+                        * *weight
+                },
+            );
+            let entry = recovered_complementary
+                .entry((triangle.vertices[local], triangle.region))
+                .or_default();
+            entry.0 = entry.0 + value * area;
+            entry.1 += area;
+        }
+    }
+    for (element, triangle) in mesh.triangles.iter().enumerate() {
+        let start = element * 6;
+        for (sample_index, sample) in operator.constitutive_samples()[start..start + 6]
+            .iter()
+            .enumerate()
+        {
+            let recovered = triangle.vertices.iter().zip(sample.barycentric).fold(
+                Point2::default(),
+                |sum, (vertex, weight)| {
+                    let entry = recovered_complementary[&(*vertex, triangle.region)];
+                    sum + entry.0 * (weight / entry.1)
+                },
+            );
+            let physical = sample
+                .complementary_inverse
+                .apply(snapshot.complementary_flux[start + sample_index]);
+            let defect = physical - recovered;
+            let determinant = sample.complementary_inverse.determinant();
+            if !determinant.is_finite() || determinant <= 0.0 {
+                return Err(WaveError::InvalidState);
+            }
+            let reference = crate::SymmetricTensor2::new(
+                sample.complementary_inverse.yy / determinant,
+                -sample.complementary_inverse.xy / determinant,
+                sample.complementary_inverse.xx / determinant,
+            );
+            element_complementary_recovery[element] +=
+                omega * omega * sample.integration_weight * defect.dot(reference.apply(defect));
+        }
+    }
+    let complementary_recovery_contribution = element_complementary_recovery.iter().sum();
 
     for contribution in operator.primary_contributions() {
         let node = contribution.node as usize;
@@ -248,10 +434,12 @@ pub fn canonical_indicator_supplement(
 
     Ok(CanonicalIndicatorSupplement {
         mesh_revision: mesh.mesh_revision,
+        element_complementary_recovery,
         element_cell_residual,
         element_boundary_residual,
         element_energy,
         drift_contribution,
+        complementary_recovery_contribution,
         thin_gap_contribution,
         outgoing_contribution,
     })
@@ -329,6 +517,9 @@ pub struct SolutionIndicatorReport {
     pub limit_refine_candidates: usize,
     pub coarsen_candidates: usize,
     pub recovery_contribution: f64,
+    pub displacement_recovery_contribution: f64,
+    pub velocity_recovery_contribution: f64,
+    pub complementary_recovery_contribution: f64,
     pub cell_residual_contribution: f64,
     pub interior_jump_contribution: f64,
     pub boundary_residual_contribution: f64,
@@ -368,6 +559,9 @@ impl Default for SolutionIndicatorReport {
             limit_refine_candidates: 0,
             coarsen_candidates: 0,
             recovery_contribution: 0.0,
+            displacement_recovery_contribution: 0.0,
+            velocity_recovery_contribution: 0.0,
+            complementary_recovery_contribution: 0.0,
             cell_residual_contribution: 0.0,
             interior_jump_contribution: 0.0,
             boundary_residual_contribution: 0.0,
@@ -561,6 +755,8 @@ struct Recovery {
 #[derive(Clone, Copy, Default)]
 struct ElementEstimate {
     recovery: f64,
+    displacement_recovery: f64,
+    velocity_recovery: f64,
     cell_residual: f64,
     interior_jump: f64,
     boundary_residual: f64,
@@ -906,12 +1102,14 @@ impl SolutionIndicatorJob {
         }
         if self.canonical.as_ref().is_some_and(|supplement| {
             supplement.mesh_revision != self.mesh.mesh_revision
+                || supplement.element_complementary_recovery.len() != self.mesh.triangles.len()
                 || supplement.element_cell_residual.len() != self.mesh.triangles.len()
                 || supplement.element_boundary_residual.len() != self.mesh.triangles.len()
                 || supplement.element_energy.len() != self.mesh.triangles.len()
                 || supplement
-                    .element_cell_residual
+                    .element_complementary_recovery
                     .iter()
+                    .chain(&supplement.element_cell_residual)
                     .chain(&supplement.element_boundary_residual)
                     .chain(&supplement.element_energy)
                     .any(|value| !value.is_finite() || *value < 0.0)
@@ -1343,15 +1541,17 @@ impl SolutionIndicatorJob {
             barycentric[local] = 1.0;
             let gradients = enriched_quadratic_basis_gradients(barycentric, geometry.gradients);
             let displacement = gradient(&self.snapshot.displacement, nodes, gradients);
-            let velocity = gradient(&self.snapshot.velocity, nodes, gradients);
             let entry = self
                 .recovery
                 .entry((triangle.vertices[local], triangle.region))
                 .or_default();
             entry.displacement = entry.displacement
                 + material.vertex_stiffness[local].apply(displacement) * geometry.area;
-            entry.velocity =
-                entry.velocity + material.vertex_stiffness[local].apply(velocity) * geometry.area;
+            if self.canonical.is_none() {
+                let velocity = gradient(&self.snapshot.velocity, nodes, gradients);
+                entry.velocity = entry.velocity
+                    + material.vertex_stiffness[local].apply(velocity) * geometry.area;
+            }
             entry.weight += geometry.area;
         }
         self.phase = IndicatorPhase::Recover(index + 1);
@@ -1385,34 +1585,41 @@ impl SolutionIndicatorJob {
         {
             let basis = enriched_quadratic_basis(barycentric);
             let gradients = enriched_quadratic_basis_gradients(barycentric, geometry.gradients);
-            let hessians = enriched_quadratic_basis_hessians(barycentric, geometry.gradients);
             let u = scalar(&self.snapshot.displacement, nodes, basis);
             let v = scalar(&self.snapshot.velocity, nodes, basis);
-            let a = scalar(&self.snapshot.acceleration, nodes, basis);
-            let source = scalar(&self.snapshot.volume_acceleration, nodes, basis);
             let grad_u = gradient(&self.snapshot.displacement, nodes, gradients);
-            let grad_v = gradient(&self.snapshot.velocity, nodes, gradients);
-            let hessian_u = tensor(&self.snapshot.displacement, nodes, hessians);
             let recovered_u = recovered[0].0 * barycentric[0]
                 + recovered[1].0 * barycentric[1]
                 + recovered[2].0 * barycentric[2];
-            let recovered_v = recovered[0].1 * barycentric[0]
-                + recovered[1].1 * barycentric[1]
-                + recovered[2].1 * barycentric[2];
             let flux_u = coefficients.stiffness.apply(grad_u);
-            let flux_v = coefficients.stiffness.apply(grad_v);
             let stiffness_scale = coefficients.geometric_mean_stiffness();
-            estimate.recovery += weight
-                * geometry.area
-                * ((flux_u - recovered_u).dot(flux_u - recovered_u)
-                    + (flux_v - recovered_v).dot(flux_v - recovered_v) / (omega * omega))
-                / stiffness_scale;
-            let residual = coefficients.mass_density * (a - source) + coefficients.damping * v
-                - coefficients.stiffness.contract(hessian_u)
-                - material.stiffness_divergence.dot(grad_u);
-            estimate.cell_residual +=
-                weight * geometry.area * geometry.maximum_edge.powi(2) * residual.powi(2)
+            let displacement_recovery =
+                weight * geometry.area * (flux_u - recovered_u).dot(flux_u - recovered_u)
                     / stiffness_scale;
+            estimate.displacement_recovery += displacement_recovery;
+            estimate.recovery += displacement_recovery;
+            if self.canonical.is_none() {
+                let grad_v = gradient(&self.snapshot.velocity, nodes, gradients);
+                let recovered_v = recovered[0].1 * barycentric[0]
+                    + recovered[1].1 * barycentric[1]
+                    + recovered[2].1 * barycentric[2];
+                let flux_v = coefficients.stiffness.apply(grad_v);
+                let velocity_recovery =
+                    weight * geometry.area * (flux_v - recovered_v).dot(flux_v - recovered_v)
+                        / (omega * omega * stiffness_scale);
+                estimate.velocity_recovery += velocity_recovery;
+                estimate.recovery += velocity_recovery;
+                let a = scalar(&self.snapshot.acceleration, nodes, basis);
+                let source = scalar(&self.snapshot.volume_acceleration, nodes, basis);
+                let hessians = enriched_quadratic_basis_hessians(barycentric, geometry.gradients);
+                let hessian_u = tensor(&self.snapshot.displacement, nodes, hessians);
+                let residual = coefficients.mass_density * (a - source) + coefficients.damping * v
+                    - coefficients.stiffness.contract(hessian_u)
+                    - material.stiffness_divergence.dot(grad_u);
+                estimate.cell_residual +=
+                    weight * geometry.area * geometry.maximum_edge.powi(2) * residual.powi(2)
+                        / stiffness_scale;
+            }
             estimate.energy += weight
                 * geometry.area
                 * (coefficients.stiffness.quadratic_form(grad_u)
@@ -1421,6 +1628,7 @@ impl SolutionIndicatorJob {
         self.total_energy += estimate.energy;
         self.total_area += estimate.area;
         if let Some(canonical) = &self.canonical {
+            estimate.recovery += canonical.element_complementary_recovery[index];
             estimate.cell_residual += canonical.element_cell_residual[index];
             estimate.boundary_residual += canonical.element_boundary_residual[index];
             estimate.energy += canonical.element_energy[index];
@@ -1687,6 +1895,8 @@ impl SolutionIndicatorJob {
     fn finish(&mut self) -> SolutionIndicatorResult {
         for estimate in &self.estimates {
             self.report.recovery_contribution += estimate.recovery;
+            self.report.displacement_recovery_contribution += estimate.displacement_recovery;
+            self.report.velocity_recovery_contribution += estimate.velocity_recovery;
             self.report.cell_residual_contribution += estimate.cell_residual;
             self.report.interior_jump_contribution += estimate.interior_jump;
             self.report.boundary_residual_contribution += estimate.boundary_residual;
@@ -1705,6 +1915,8 @@ impl SolutionIndicatorJob {
             + self.report.boundary_residual_contribution;
         if let Some(canonical) = &self.canonical {
             self.report.canonical_drift_contribution = canonical.drift_contribution;
+            self.report.complementary_recovery_contribution =
+                canonical.complementary_recovery_contribution;
             self.report.thin_gap_history_contribution = canonical.thin_gap_contribution;
             self.report.outgoing_history_contribution = canonical.outgoing_contribution;
         }
@@ -1928,10 +2140,10 @@ fn quadrature() -> [([f64; 3], f64); 6] {
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline,
-        FaceRegionAssignment, InternalBoundary, InternalBoundaryLaw, Material, MaterialId,
-        MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshQuality, MeshTriangle,
-        MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition,
+        BACKGROUND_REGION, CanonicalSource, CurveId, CurveNode, CurveSpan, CurveSpanId,
+        CurveSpline, FaceRegionAssignment, InternalBoundary, InternalBoundaryLaw, Material,
+        MaterialId, MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshQuality,
+        MeshTriangle, MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition,
         OuterBoundaryConditions, OuterSide, Region, TimeSignal, TopologyCurve, TopologyGeometry,
         TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology, mesh_scene,
         mesh_topology_plan,
@@ -3424,7 +3636,9 @@ mod tests {
 
     #[test]
     fn canonical_supplement_is_zero_for_stationary_state_and_detects_drift_defect() {
-        let scene = Scene::initial();
+        let mut scene = Scene::initial();
+        scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
         let mesh = mesh_scene(
             &scene,
             91,
@@ -3469,11 +3683,79 @@ mod tests {
         let detected =
             canonical_indicator_supplement(&mesh, &canonical, &forcing, &broken).unwrap();
         assert!(detected.drift_contribution > 0.0);
+        assert!(detected.complementary_recovery_contribution > 0.0);
         assert!(
             detected
                 .element_cell_residual
                 .iter()
                 .any(|value| *value > 0.0)
         );
+    }
+
+    #[test]
+    fn canonical_primary_rate_uses_balance_and_prescribed_derivative() {
+        let mut scene = Scene::initial();
+        scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        let mesh = mesh_scene(
+            &scene,
+            92,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1).unwrap();
+        let mut snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            primary_flux: vec![0.0; canonical.degrees_of_freedom()],
+            previous_primary_flux: vec![0.0; canonical.degrees_of_freedom()],
+            complementary_flux: vec![
+                Point2::default();
+                canonical.complementary_degrees_of_freedom()
+            ],
+            previous_complementary_flux: vec![
+                Point2::default();
+                canonical.complementary_degrees_of_freedom()
+            ],
+            auxiliary: vec![],
+            previous_auxiliary: vec![],
+            time: 0.125,
+            time_step: 0.01,
+        };
+        snapshot.complementary_flux[0] = Point2::new(0.2, -0.1);
+        let force = canonical.force(&snapshot.complementary_flux).unwrap();
+
+        let mut forcing = CanonicalForcing::none(&canonical);
+        forcing
+            .push_source(
+                CanonicalSource::direct(
+                    &canonical,
+                    canonical.primary_mass().to_vec(),
+                    TimeSignal::harmonic(1.25, 0.0, 1.0, 0.0),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let rate = canonical_primary_rate(&canonical, &forcing, &snapshot).unwrap();
+        for ((rate, force), mass) in rate.iter().zip(force).zip(canonical.primary_mass()) {
+            assert!((*rate - (1.25 - force / mass)).abs() < 2.0e-13);
+        }
+
+        let prescribed = TimeSignal::harmonic(0.4, 0.7, 2.0, 0.3);
+        let mut prescribed_nodes = vec![None; canonical.degrees_of_freedom()];
+        prescribed_nodes[0] = Some(prescribed);
+        let prescribed_forcing =
+            CanonicalForcing::from_prescribed(&canonical, prescribed_nodes).unwrap();
+        let prescribed_rate =
+            canonical_primary_rate(&canonical, &prescribed_forcing, &snapshot).unwrap();
+        assert!((prescribed_rate[0] - prescribed.derivative(snapshot.time)).abs() < 2.0e-13);
     }
 }

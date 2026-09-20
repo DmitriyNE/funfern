@@ -95,6 +95,15 @@ impl CanonicalRateDrive {
             .then_some(value)
             .ok_or(WaveError::InvalidState)
     }
+
+    pub fn frequency_ceiling_hz(self) -> f64 {
+        match self {
+            Self::Direct(signal) => signal.frequency_ceiling_hz(),
+            Self::LegacyIntegratedHarmonic { acceleration, .. } => {
+                acceleration.frequency_ceiling_hz()
+            }
+        }
+    }
 }
 
 /// One spatially integrated source channel. `weights` have the units of the

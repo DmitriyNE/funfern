@@ -700,7 +700,19 @@ Source/law buffer replacement must carry all unchanged tables and runtime mappin
 
 Update every consumer: solver, transfer, grid filter, probes, far-field/energy diagnostics, CPU readback adapters, buffer-size estimates, and shader-layout tests.
 
-AMR is an explicit physics port. The current scalar residual and its displacement/velocity/acceleration snapshot can be retained for the static linear core only with a justified synchronized adapter. Before enabling time-driven or nonlinear media, derive residuals and normalization for their equations, including material interfaces, thin gaps, driven boundaries, and outgoing auxiliary state. Revalidate the reported relative-error measure and wavelength guidance for modulation/generated harmonics. Reuse the resumable estimator/controller architecture, not an unchanged scalar residual with renamed state fields.
+AMR is an explicit physics port. Static-linear production now reuses the
+resumable scalar estimator/controller infrastructure but not its cancellation-
+prone velocity/acceleration surrogates: it combines primary-gradient recovery
+and interface jumps with region-local recovery of the stored complementary
+physical field `Jb`, plus direct complementary, thin-gap and outgoing endpoint
+defects. The [Stage 6 report](funfern-material-laws-stage6-report.md#static-linear-amr)
+records why adjacent f32 endpoint differences and the scalar strong cell residual
+were rejected. Before enabling time-driven or nonlinear media, derive residuals
+and normalization for their equations, including material interfaces, thin gaps,
+driven boundaries, and outgoing auxiliary state. Revalidate the reported
+relative-error measure and wavelength guidance for modulation/generated
+harmonics. Reuse the resumable estimator/controller architecture, not an
+unchanged scalar residual with renamed state fields.
 
 Port point/curve/area probes, canonical energy/flow, vector overlays, and far-field sampling at synchronized stages. Preserve far-field analysis's supported exterior-medium assumptions and reject unsupported nonlinear/driven exteriors explicitly. Treat probe history whose physical meaning changes at a skin transition with an explicit segmentation/conversion policy.
 

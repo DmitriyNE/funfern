@@ -68,12 +68,17 @@ area scratch. They are not hidden in the solver-core figure.
 
 ## Static-linear AMR
 
-AMR retains the existing scalar-equivalent spatial estimator only for static
-linear material generations, and augments it from synchronized canonical
-readback:
+AMR retains the resumable scalar estimator infrastructure only for static linear
+material generations, but its phase-paired field terms now come directly from
+synchronized canonical state:
 
-- the scalar acceleration adapter includes primary loss;
-- element normalization uses direct primary and complementary physical energy;
+- primary-field gradient recovery and ordinary interface jumps remain valid;
+- the phase-paired recovery reconstructs physical `Jb` at region-local vertices
+  and measures quadrature defects in the `J^-1` norm, scaled by the forcing
+  frequency;
+- the cancellation-prone scalar `u_dot` recovery and semidiscrete-acceleration
+  strong cell residual are not evaluated for a canonical snapshot;
+- element normalization includes direct primary and complementary physical energy;
 - complementary endpoint defects compare accepted `b` against the curl drift and
   exact half-loss composition;
 - thin-gap and outgoing endpoint defects are distributed back to adjacent
@@ -82,9 +87,20 @@ readback:
   second-order auxiliary residuals are suppressed when the canonical supplement
   is present.
 
-The supplement reports ordinary drift, thin-gap and outgoing contributions
-separately. Dynamic and nonlinear material AMR stays gated: this adapter is not
-being renamed into a general nonlinear residual.
+The supplement reports complementary recovery, ordinary drift, thin-gap and
+outgoing contributions separately. The Performance panel exposes the primary,
+complementary, cell, jump and boundary split. Dynamic and nonlinear material AMR
+stays gated: this adapter is not being renamed into a general nonlinear residual.
+
+The post-cutover production autosave exposed why this distinction is numerical,
+not cosmetic. At about 50k DOFs, deriving `u_dot` from adjacent f32 `Q/M`
+endpoints or from the cancellation-heavy nodal balance made rate recovery
+`0.09–0.22`, while primary recovery was only `5e-4–1e-3`; the scalar strong cell
+term independently stayed near `0.05–0.10`. The reported error consequently
+hovered around 40–90% and drove refinement despite a resolved primary field.
+With canonical complementary recovery, the same run crossed the 12% target at
+50,480 DOFs and then measured about 7–10%; the decreasing interior jump was the
+dominant remaining term.
 
 The controller treats the paired filter's exact cadence boundary as a
 zero-duration maintenance event, not as an ordinary pair of time endpoints. At
