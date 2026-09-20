@@ -254,6 +254,9 @@ pub struct CanonicalTemporalWaveOperator {
     complementary: Vec<TemporalComplementarySample>,
     initial_runtime: CanonicalMaterialRuntimeState,
     has_temporal_laws: bool,
+    has_loss: bool,
+    conservative_bulk_supported: bool,
+    maximum_time_step: f64,
 }
 
 impl CanonicalTemporalWaveOperator {
@@ -333,12 +336,55 @@ impl CanonicalTemporalWaveOperator {
                 .filter(|material| used_materials.contains(&material.id))
                 .cloned(),
         )?;
+        let has_loss = primary.iter().any(|sample| sample.loss.base_rate != 0.0)
+            || complementary
+                .iter()
+                .any(|sample| sample.loss.base_rate != 0.0);
+        let minimum_primary_factor = primary
+            .iter()
+            .filter_map(|sample| sample.coefficient.law.tangent_range().map(|range| range.0))
+            .fold(f64::INFINITY, f64::min);
+        let minimum_complementary_factor = complementary
+            .iter()
+            .filter_map(|sample| sample.coefficient.law.tangent_range().map(|range| range.0))
+            .fold(f64::INFINITY, f64::min);
+        let maximum_time_step = base.maximum_time_step()
+            * (minimum_primary_factor * minimum_complementary_factor).sqrt();
+        if !maximum_time_step.is_finite() || maximum_time_step <= 0.0 {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        // This reference state deliberately covers only the freely evolving
+        // bulk Poisson system. Open boundaries, imposed fields, sources,
+        // losses and auxiliary memories keep their existing passive or
+        // transactional compositions; they do not justify a global solve just
+        // to attach a full-system symplectic label.
+        let conservative_bulk_supported = !has_loss
+            && base.thin_gap_samples().is_empty()
+            && base
+                .first_order_boundary_damping()
+                .iter()
+                .all(|value| *value == 0.0)
+            && base.outgoing_boundary().is_none()
+            && quadratic.dirichlet_signals().iter().all(Option::is_none)
+            && quadratic
+                .normalized_neumann_weights()
+                .iter()
+                .flatten()
+                .all(|weight| *weight == 0.0)
+            && quadratic
+                .face_neumann_loads()
+                .iter()
+                .flatten()
+                .all(|load| load.normalized_weight == 0.0);
         Ok(Self {
             base,
             primary,
             complementary,
             initial_runtime,
             has_temporal_laws,
+            has_loss,
+            conservative_bulk_supported,
+            maximum_time_step,
         })
     }
 
@@ -354,23 +400,55 @@ impl CanonicalTemporalWaveOperator {
         self.has_temporal_laws
     }
 
+    pub fn has_loss(&self) -> bool {
+        self.has_loss
+    }
+
+    /// Whether the exact kick/drift bulk split can run without composing any
+    /// lossy, forced, prescribed-boundary, or auxiliary subsystem.
+    pub fn conservative_bulk_supported(&self) -> bool {
+        self.conservative_bulk_supported
+    }
+
+    /// Conservative spatial CFL bound over the entire authored coefficient
+    /// trajectory. Resolving a temporal carrier is a separate admission gate.
+    pub fn maximum_time_step(&self) -> f64 {
+        self.maximum_time_step
+    }
+
     pub fn primary_mass_at(
         &self,
         time: f64,
         runtime: &CanonicalMaterialRuntimeState,
     ) -> Result<Vec<f64>, WaveError> {
+        self.primary_mass_and_rate_at(time, runtime)
+            .map(|(mass, _)| mass)
+    }
+
+    pub fn primary_mass_and_rate_at(
+        &self,
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(Vec<f64>, Vec<f64>), WaveError> {
         if !self.has_temporal_laws {
-            return Ok(self.base.primary_mass().to_vec());
+            return Ok((
+                self.base.primary_mass().to_vec(),
+                vec![0.0; self.base.degrees_of_freedom()],
+            ));
         }
         let mut mass = vec![0.0; self.base.degrees_of_freedom()];
+        let mut rate = vec![0.0; self.base.degrees_of_freedom()];
         for (contribution, temporal) in self.base.primary_contributions().iter().zip(&self.primary)
         {
-            let factor = coefficient_factor(temporal.coefficient, time, runtime)?;
-            mass[contribution.node as usize] +=
-                contribution.geometric_weight * contribution.reference_coefficient * factor;
+            let (factor, factor_rate) =
+                coefficient_factor_and_rate(temporal.coefficient, time, runtime)?;
+            let reference = contribution.geometric_weight * contribution.reference_coefficient;
+            mass[contribution.node as usize] += reference * factor;
+            rate[contribution.node as usize] += reference * factor_rate;
         }
         validate_positive(&mass)?;
-        Ok(mass)
+        validate_finite(&rate)?;
+        Ok((mass, rate))
     }
 
     pub fn primary_field_at(
@@ -498,6 +576,332 @@ impl CanonicalTemporalWaveOperator {
             primary,
             complementary,
         })
+    }
+
+    /// Physical bulk Hamiltonian and its explicit partial time derivative at
+    /// fixed canonical state. The derivative is the power exchanged with an
+    /// authored material trajectory, not a finite difference between steps.
+    pub fn energy_and_rate_at(
+        &self,
+        primary_flux: &[f64],
+        complementary_flux: &[Point2],
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(f64, f64), WaveError> {
+        if !time.is_finite() {
+            return Err(WaveError::InvalidState);
+        }
+        let (primary_energy, primary_rate) =
+            self.primary_energy_and_rate(primary_flux, time, runtime)?;
+        let (complementary_energy, complementary_rate) =
+            self.complementary_energy_and_rate(complementary_flux, time, runtime)?;
+        let energy = primary_energy + complementary_energy;
+        let rate = primary_rate + complementary_rate;
+        if energy.is_finite() && rate.is_finite() {
+            Ok((energy, rate))
+        } else {
+            Err(WaveError::InvalidState)
+        }
+    }
+
+    pub fn energy_at(
+        &self,
+        primary_flux: &[f64],
+        complementary_flux: &[Point2],
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<f64, WaveError> {
+        self.energy_and_rate_at(primary_flux, complementary_flux, time, runtime)
+            .map(|(energy, _)| energy)
+    }
+
+    fn primary_energy_and_rate(
+        &self,
+        primary_flux: &[f64],
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(f64, f64), WaveError> {
+        if primary_flux.len() != self.base.degrees_of_freedom() {
+            return Err(WaveError::SizeMismatch {
+                expected: self.base.degrees_of_freedom(),
+                actual: primary_flux.len(),
+            });
+        }
+        let (mass, mass_rate) = self.primary_mass_and_rate_at(time, runtime)?;
+        let mut energy = 0.0;
+        let mut rate = 0.0;
+        for ((flux, mass), mass_rate) in primary_flux.iter().zip(mass).zip(mass_rate) {
+            energy += 0.5 * flux * flux / mass;
+            rate -= 0.5 * flux * flux * mass_rate / (mass * mass);
+        }
+        if energy.is_finite() && rate.is_finite() {
+            Ok((energy, rate))
+        } else {
+            Err(WaveError::InvalidState)
+        }
+    }
+
+    fn complementary_energy_and_rate(
+        &self,
+        complementary_flux: &[Point2],
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(f64, f64), WaveError> {
+        if complementary_flux.len() != self.base.complementary_degrees_of_freedom() {
+            return Err(WaveError::SizeMismatch {
+                expected: self.base.complementary_degrees_of_freedom(),
+                actual: complementary_flux.len(),
+            });
+        }
+        let mut energy = 0.0;
+        let mut rate = 0.0;
+        for ((base, temporal), flux) in self
+            .base
+            .constitutive_samples()
+            .iter()
+            .zip(&self.complementary)
+            .zip(complementary_flux)
+        {
+            let (factor, factor_rate) =
+                coefficient_factor_and_rate(temporal.coefficient, time, runtime)?;
+            let reference =
+                0.5 * base.integration_weight * flux.dot(base.complementary_inverse.apply(*flux));
+            energy += reference / factor;
+            rate -= reference * factor_rate / (factor * factor);
+        }
+        if energy.is_finite() && rate.is_finite() {
+            Ok((energy, rate))
+        } else {
+            Err(WaveError::InvalidState)
+        }
+    }
+
+    fn drift_at(
+        &self,
+        complementary_flux: &mut [Point2],
+        primary_flux: &[f64],
+        time: f64,
+        duration: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<(), WaveError> {
+        if complementary_flux.len() != self.base.complementary_degrees_of_freedom() {
+            return Err(WaveError::SizeMismatch {
+                expected: self.base.complementary_degrees_of_freedom(),
+                actual: complementary_flux.len(),
+            });
+        }
+        if !duration.is_finite() {
+            return Err(WaveError::InvalidState);
+        }
+        let primary_field = self.primary_field_at(primary_flux, time, runtime)?;
+        for (sample_index, (sample, flux)) in self
+            .base
+            .constitutive_samples()
+            .iter()
+            .zip(complementary_flux)
+            .enumerate()
+        {
+            let nodes = self.base.element_nodes()[sample_index / 6];
+            let reference = primary_field[nodes[0] as usize];
+            let mut curl = Point2::default();
+            for (node, shape_curl) in nodes[1..].iter().zip(&sample.curls()[1..]) {
+                curl = curl
+                    + *shape_curl * stable_difference(primary_field[*node as usize], reference);
+            }
+            *flux = *flux + curl * (self.base.orientation() * duration);
+            if !flux.finite() {
+                return Err(WaveError::InvalidState);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Per-step ledger for the conservative bulk split. `temporal_work` is the
+/// explicit material-pump exchange from the extended `(t, p_t)` Hamiltonian;
+/// `splitting_residual` is the remaining discrete defect.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CanonicalTemporalStepAccounting {
+    pub temporal_work: f64,
+    pub energy_change: f64,
+    pub splitting_residual: f64,
+}
+
+/// Dormant Stage 7 CPU oracle for the exact bulk kick/drift subflows. The
+/// autonomous extension is symplectic on every nondegenerate leaf of the bulk
+/// Poisson system. Boundary, loss, source, filter and handoff compositions are
+/// intentionally outside this claim.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalTemporalWaveState {
+    primary_flux: Vec<f64>,
+    complementary_flux: Vec<Point2>,
+    runtime: CanonicalMaterialRuntimeState,
+    time_step: f64,
+    time: f64,
+}
+
+impl CanonicalTemporalWaveState {
+    pub fn new(
+        operator: &CanonicalTemporalWaveOperator,
+        time_step: f64,
+        primary_flux: Vec<f64>,
+        complementary_flux: Vec<Point2>,
+    ) -> Result<Self, WaveError> {
+        if !operator.conservative_bulk_supported()
+            || !time_step.is_finite()
+            || time_step <= 0.0
+            || time_step > operator.maximum_time_step()
+        {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        if primary_flux.len() != operator.base().degrees_of_freedom() {
+            return Err(WaveError::SizeMismatch {
+                expected: operator.base().degrees_of_freedom(),
+                actual: primary_flux.len(),
+            });
+        }
+        if complementary_flux.len() != operator.base().complementary_degrees_of_freedom() {
+            return Err(WaveError::SizeMismatch {
+                expected: operator.base().complementary_degrees_of_freedom(),
+                actual: complementary_flux.len(),
+            });
+        }
+        validate_finite(&primary_flux)?;
+        if complementary_flux.iter().any(|value| !value.finite()) {
+            return Err(WaveError::InvalidState);
+        }
+        Ok(Self {
+            primary_flux,
+            complementary_flux,
+            runtime: operator.initial_runtime(),
+            time_step,
+            time: 0.0,
+        })
+    }
+
+    pub fn zero(
+        operator: &CanonicalTemporalWaveOperator,
+        time_step: f64,
+    ) -> Result<Self, WaveError> {
+        Self::new(
+            operator,
+            time_step,
+            vec![0.0; operator.base().degrees_of_freedom()],
+            vec![Point2::default(); operator.base().complementary_degrees_of_freedom()],
+        )
+    }
+
+    pub fn primary_flux(&self) -> &[f64] {
+        &self.primary_flux
+    }
+
+    pub fn complementary_flux(&self) -> &[Point2] {
+        &self.complementary_flux
+    }
+
+    pub fn runtime(&self) -> &CanonicalMaterialRuntimeState {
+        &self.runtime
+    }
+
+    pub fn runtime_mut(&mut self) -> &mut CanonicalMaterialRuntimeState {
+        &mut self.runtime
+    }
+
+    pub fn time_step(&self) -> f64 {
+        self.time_step
+    }
+
+    pub fn time(&self) -> f64 {
+        self.time
+    }
+
+    pub fn energy(&self, operator: &CanonicalTemporalWaveOperator) -> Result<f64, WaveError> {
+        operator.energy_at(
+            &self.primary_flux,
+            &self.complementary_flux,
+            self.time,
+            &self.runtime,
+        )
+    }
+
+    pub fn step(
+        &mut self,
+        operator: &CanonicalTemporalWaveOperator,
+    ) -> Result<CanonicalTemporalStepAccounting, WaveError> {
+        self.step_by(operator, self.time_step)
+    }
+
+    /// Signed stepping is exposed for the reversibility gate. Production uses
+    /// `step`; a negative duration applies the exact inverse composition.
+    pub fn step_by(
+        &mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        duration: f64,
+    ) -> Result<CanonicalTemporalStepAccounting, WaveError> {
+        if !operator.conservative_bulk_supported()
+            || !duration.is_finite()
+            || duration == 0.0
+            || duration.abs() > operator.maximum_time_step()
+        {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        let start_time = self.time;
+        let middle_time = start_time + 0.5 * duration;
+        let end_time = start_time + duration;
+        if !middle_time.is_finite() || !end_time.is_finite() {
+            return Err(WaveError::InvalidState);
+        }
+        let before = self.energy(operator)?;
+        let (_, complementary_rate_start) = operator.complementary_energy_and_rate(
+            &self.complementary_flux,
+            start_time,
+            &self.runtime,
+        )?;
+
+        let mut primary = self.primary_flux.clone();
+        let mut complementary = self.complementary_flux.clone();
+        let first_force = operator.force_at(&complementary, start_time, &self.runtime)?;
+        for (flux, force) in primary.iter_mut().zip(first_force) {
+            *flux -= 0.5 * duration * force;
+        }
+        validate_finite(&primary)?;
+
+        let (_, primary_rate_middle) =
+            operator.primary_energy_and_rate(&primary, middle_time, &self.runtime)?;
+        operator.drift_at(
+            &mut complementary,
+            &primary,
+            middle_time,
+            duration,
+            &self.runtime,
+        )?;
+        let (_, complementary_rate_end) =
+            operator.complementary_energy_and_rate(&complementary, end_time, &self.runtime)?;
+
+        let second_force = operator.force_at(&complementary, end_time, &self.runtime)?;
+        for (flux, force) in primary.iter_mut().zip(second_force) {
+            *flux -= 0.5 * duration * force;
+        }
+        validate_finite(&primary)?;
+        let after = operator.energy_at(&primary, &complementary, end_time, &self.runtime)?;
+        let temporal_work = duration
+            * (0.5 * complementary_rate_start + primary_rate_middle + 0.5 * complementary_rate_end);
+        let energy_change = after - before;
+        let accounting = CanonicalTemporalStepAccounting {
+            temporal_work,
+            energy_change,
+            splitting_residual: energy_change - temporal_work,
+        };
+        if !accounting.temporal_work.is_finite()
+            || !accounting.energy_change.is_finite()
+            || !accounting.splitting_residual.is_finite()
+        {
+            return Err(WaveError::InvalidState);
+        }
+        self.primary_flux = primary;
+        self.complementary_flux = complementary;
+        self.time = end_time;
+        Ok(accounting)
     }
 }
 
@@ -789,10 +1193,18 @@ fn coefficient_factor(
     time: f64,
     runtime: &CanonicalMaterialRuntimeState,
 ) -> Result<f64, WaveError> {
+    coefficient_factor_and_rate(sample, time, runtime).map(|(factor, _)| factor)
+}
+
+fn coefficient_factor_and_rate(
+    sample: TemporalCoefficientSample,
+    time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<(f64, f64), WaveError> {
     let runtime = runtime.record(sample.material)?;
     sample
         .law
-        .temporal_factor(
+        .temporal_factor_and_rate(
             time,
             sample.coordinates,
             runtime.drive(sample.drive),
@@ -858,6 +1270,16 @@ fn validate_finite(values: &[f64]) -> Result<(), WaveError> {
         .ok_or(WaveError::InvalidState)
 }
 
+fn stable_difference(value: f64, reference: f64) -> f64 {
+    let difference = value - reference;
+    let roundoff = 8.0 * f64::EPSILON * value.abs().max(reference.abs()).max(1.0);
+    if difference.abs() <= roundoff {
+        0.0
+    } else {
+        difference
+    }
+}
+
 fn material_error<T>(
     material: &Material,
     coefficient: &'static str,
@@ -876,9 +1298,10 @@ fn material_error<T>(
 mod tests {
     use super::*;
     use crate::{
-        BACKGROUND_REGION, ElectromagneticPolarization, LoopRole, MaterialFrame, MeshingOptions,
-        Obstacle, ObstacleId, OuterBoundaryCondition, PeriodicCubicSpline, Region, RegionId,
-        ScalarField, SymmetricTensor2, TimeDrive, mesh_scene,
+        BACKGROUND_REGION, CanonicalWaveState, ElectromagneticPolarization, LoopRole,
+        MaterialFrame, MeshingOptions, Obstacle, ObstacleId, OuterBoundaryCondition,
+        PeriodicCubicSpline, Region, RegionId, ScalarField, SymmetricTensor2, TimeDrive,
+        mesh_scene,
     };
 
     fn compile(scene: &Scene) -> Result<CanonicalTemporalWaveOperator, WaveError> {
@@ -1182,6 +1605,173 @@ mod tests {
             Err(WaveError::InvalidCoefficients)
         );
         assert_eq!(scene.regions[0].id, BACKGROUND_REGION);
+    }
+
+    fn reference_fluxes(operator: &CanonicalTemporalWaveOperator) -> (Vec<f64>, Vec<Point2>) {
+        let primary = operator
+            .base()
+            .primary_mass()
+            .iter()
+            .enumerate()
+            .map(|(index, mass)| mass * (0.07 * (index as f64 * 0.37).sin() + 0.03))
+            .collect();
+        let complementary = operator
+            .base()
+            .constitutive_samples()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                Point2::new(
+                    0.02 * (index as f64 * 0.19).cos(),
+                    0.015 * (index as f64 * 0.23).sin(),
+                )
+            })
+            .collect();
+        (primary, complementary)
+    }
+
+    #[test]
+    fn inert_bulk_split_matches_the_existing_kdk_step() {
+        let operator = compile(&Scene::initial()).unwrap();
+        assert!(operator.conservative_bulk_supported());
+        let time_step = 0.2 * operator.maximum_time_step();
+        let (primary, complementary) = reference_fluxes(&operator);
+        let mut fixed = CanonicalWaveState::new(
+            operator.base(),
+            time_step,
+            primary.clone(),
+            complementary.clone(),
+        )
+        .unwrap();
+        let mut temporal =
+            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary).unwrap();
+        fixed.step(operator.base()).unwrap();
+        temporal.step(&operator).unwrap();
+        assert_eq!(temporal.primary_flux(), fixed.primary_flux());
+        assert_eq!(temporal.complementary_flux(), fixed.complementary_flux());
+    }
+
+    #[test]
+    fn driven_bulk_split_is_reversible_to_roundoff() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = pump(0.24, 0.8, 0.31);
+        scene.materials[0].stiffness_law.drive = pump(0.17, 0.6, -0.23);
+        let operator = compile(&scene).unwrap();
+        let time_step = 0.35 * operator.maximum_time_step();
+        let (primary, complementary) = reference_fluxes(&operator);
+        let mut state = CanonicalTemporalWaveState::new(
+            &operator,
+            time_step,
+            primary.clone(),
+            complementary.clone(),
+        )
+        .unwrap();
+        state.step_by(&operator, time_step).unwrap();
+        state.step_by(&operator, -time_step).unwrap();
+        assert!(state.time().abs() < 1.0e-15);
+        for (actual, expected) in state.primary_flux().iter().zip(primary) {
+            assert!((actual - expected).abs() < 2.0e-14);
+        }
+        for (actual, expected) in state.complementary_flux().iter().zip(complementary) {
+            assert!((actual.x - expected.x).abs() < 2.0e-14);
+            assert!((actual.y - expected.y).abs() < 2.0e-14);
+        }
+    }
+
+    #[test]
+    fn bulk_energy_rate_is_the_fixed_state_time_derivative() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = pump(0.22, 0.9, 0.41);
+        scene.materials[0].stiffness_law.drive = pump(0.13, 0.7, -0.19);
+        let operator = compile(&scene).unwrap();
+        let runtime = operator.initial_runtime();
+        let (primary, complementary) = reference_fluxes(&operator);
+        let time = 0.37;
+        let epsilon = 1.0e-6;
+        let (_, rate) = operator
+            .energy_and_rate_at(&primary, &complementary, time, &runtime)
+            .unwrap();
+        let before = operator
+            .energy_at(&primary, &complementary, time - epsilon, &runtime)
+            .unwrap();
+        let after = operator
+            .energy_at(&primary, &complementary, time + epsilon, &runtime)
+            .unwrap();
+        let numerical = (after - before) / (2.0 * epsilon);
+        assert!((rate - numerical).abs() < 2.0e-9 * rate.abs().max(1.0));
+    }
+
+    #[test]
+    fn temporal_work_residual_converges_at_second_order() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = pump(0.31, 1.1, 0.27);
+        scene.materials[0].stiffness_law.drive = pump(0.21, 0.9, -0.34);
+        let operator = compile(&scene).unwrap();
+        let coarse_step = 0.6 * operator.maximum_time_step();
+        let (primary, complementary) = reference_fluxes(&operator);
+        let accumulated_residual = |time_step: f64, steps: usize| {
+            let mut state = CanonicalTemporalWaveState::new(
+                &operator,
+                time_step,
+                primary.clone(),
+                complementary.clone(),
+            )
+            .unwrap();
+            (0..steps)
+                .map(|_| state.step(&operator).unwrap().splitting_residual)
+                .sum::<f64>()
+        };
+        let coarse = accumulated_residual(coarse_step, 16).abs();
+        let fine = accumulated_residual(0.5 * coarse_step, 32).abs();
+        assert!(coarse > 1.0e-12);
+        assert!(fine < 0.35 * coarse, "coarse={coarse:e}, fine={fine:e}");
+    }
+
+    #[test]
+    fn trajectory_cfl_uses_the_worst_bulk_coefficient_factors() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = pump(0.36, 0.8, 0.0);
+        scene.materials[0].stiffness_law.drive = pump(0.19, 0.7, 0.0);
+        let operator = compile(&scene).unwrap();
+        let expected = operator.base().maximum_time_step() * (0.64_f64 * 0.81).sqrt();
+        assert!((operator.maximum_time_step() - expected).abs() < 1.0e-14);
+    }
+
+    #[test]
+    fn bulk_symplectic_state_rejects_loss_and_open_boundaries() {
+        let mut lossy_scene = Scene::initial();
+        lossy_scene.materials[0].damping = ScalarField::constant(0.1);
+        let lossy = compile(&lossy_scene).unwrap();
+        assert!(lossy.has_loss());
+        assert!(!lossy.conservative_bulk_supported());
+        assert!(matches!(
+            CanonicalTemporalWaveState::zero(&lossy, 0.1 * lossy.maximum_time_step()),
+            Err(WaveError::InvalidCoefficients)
+        ));
+
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::FirstOrderOutgoing,
+        )
+        .unwrap();
+        let open =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        assert!(!open.conservative_bulk_supported());
+        assert!(matches!(
+            CanonicalTemporalWaveState::zero(&open, 0.1 * open.maximum_time_step()),
+            Err(WaveError::InvalidCoefficients)
+        ));
     }
 
     #[test]

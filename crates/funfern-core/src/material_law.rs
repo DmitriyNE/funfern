@@ -1000,14 +1000,24 @@ impl Default for MaterialSwitchRuntime {
 
 impl MaterialSwitchRuntime {
     pub fn blend(self, time: f64) -> Result<f64, MaterialError> {
+        self.blend_and_rate(time).map(|(blend, _)| blend)
+    }
+
+    pub fn blend_and_rate(self, time: f64) -> Result<(f64, f64), MaterialError> {
         if !time.is_finite() || !self.valid() {
             return Err(MaterialError::InvalidValue);
         }
         if self.duration == 0.0 {
-            return Ok(self.target_blend);
+            return Ok((self.target_blend, 0.0));
         }
         let z = ((time - self.start_time) / self.duration).clamp(0.0, 1.0);
-        Ok(self.start_blend + (self.target_blend - self.start_blend) * smootherstep(z))
+        let blend = self.start_blend + (self.target_blend - self.start_blend) * smootherstep(z);
+        let rate = if z == 0.0 || z == 1.0 {
+            0.0
+        } else {
+            (self.target_blend - self.start_blend) * smootherstep_slope(z) / self.duration
+        };
+        Ok((blend, rate))
     }
 
     /// Starts or reverses a Switch at an accepted complete-step boundary.
@@ -1305,26 +1315,51 @@ impl TimeDriveValues {
         coordinates: MaterialCoordinates,
         runtime: TimeDriveRuntime,
     ) -> Result<f64, MaterialError> {
+        self.multiplier_and_rate_with_runtime(time, coordinates, runtime)
+            .map(|(multiplier, _)| multiplier)
+    }
+
+    /// Multiplier and its partial time derivative at fixed material-frame
+    /// coordinates. The derivative drives extended-phase-space temporal-work
+    /// accounting; it is not estimated from adjacent timesteps.
+    pub fn multiplier_and_rate_with_runtime(
+        self,
+        time: f64,
+        coordinates: MaterialCoordinates,
+        runtime: TimeDriveRuntime,
+    ) -> Result<(f64, f64), MaterialError> {
         if !coordinates.x.is_finite() || !coordinates.y.is_finite() {
             return Err(MaterialError::InvalidValue);
         }
         let carrier_phase = runtime.carrier_phase(self, time)?;
+        let angular_frequency = std::f64::consts::TAU * self.frequency_hz();
         match self {
-            Self::None => Ok(1.0),
-            Self::ParametricPump { depth, .. } => {
-                finite_positive(1.0 + depth * carrier_phase.cos())
-            }
+            Self::None => Ok((1.0, 0.0)),
+            Self::ParametricPump { depth, .. } => finite_positive_with_rate(
+                1.0 + depth * carrier_phase.cos(),
+                -depth * angular_frequency * carrier_phase.sin(),
+            ),
             Self::TimeCrystal {
                 depth, sharpness, ..
             } => {
                 let carrier = carrier_phase.cos();
-                let square = if sharpness.abs() < 1.0e-6 {
+                let (square, slope) = if sharpness.abs() < 1.0e-6 {
                     // tanh(s c)/tanh(s) = c[1 + s²(1-c²)/3 + O(s⁴)].
-                    carrier * (1.0 + sharpness * sharpness * (1.0 - carrier * carrier) / 3.0)
+                    (
+                        carrier * (1.0 + sharpness * sharpness * (1.0 - carrier * carrier) / 3.0),
+                        1.0 + sharpness * sharpness * (1.0 - 3.0 * carrier * carrier) / 3.0,
+                    )
                 } else {
-                    (sharpness * carrier).tanh() / sharpness.tanh()
+                    let value = (sharpness * carrier).tanh();
+                    (
+                        value / sharpness.tanh(),
+                        sharpness * (1.0 - value * value) / sharpness.tanh(),
+                    )
                 };
-                finite_positive(1.0 + depth * square)
+                finite_positive_with_rate(
+                    1.0 + depth * square,
+                    -depth * angular_frequency * carrier_phase.sin() * slope,
+                )
             }
             Self::TravellingModulation {
                 depth,
@@ -1334,8 +1369,10 @@ impl TimeDriveValues {
             } => {
                 let along =
                     coordinates.x * angle_radians.cos() + coordinates.y * angle_radians.sin();
-                finite_positive(
-                    1.0 + depth * reduce_phase(carrier_phase - wavenumber * along).cos(),
+                let phase = reduce_phase(carrier_phase - wavenumber * along);
+                finite_positive_with_rate(
+                    1.0 + depth * phase.cos(),
+                    -depth * angular_frequency * phase.sin(),
                 )
             }
         }
@@ -1385,8 +1422,20 @@ fn finite_positive(value: f64) -> Result<f64, MaterialError> {
         .ok_or(MaterialError::InvalidValue)
 }
 
+fn finite_positive_with_rate(value: f64, rate: f64) -> Result<(f64, f64), MaterialError> {
+    if value.is_finite() && value > 0.0 && rate.is_finite() {
+        Ok((value, rate))
+    } else {
+        Err(MaterialError::InvalidValue)
+    }
+}
+
 fn smootherstep(value: f64) -> f64 {
     value * value * value * (value * (value * 6.0 - 15.0) + 10.0)
+}
+
+fn smootherstep_slope(value: f64) -> f64 {
+    30.0 * value * value * (value - 1.0) * (value - 1.0)
 }
 
 impl CoefficientLawValues {
@@ -1400,18 +1449,36 @@ impl CoefficientLawValues {
         drive_runtime: TimeDriveRuntime,
         switch_runtime: MaterialSwitchRuntime,
     ) -> Result<f64, MaterialError> {
-        let drive = self
-            .drive
-            .multiplier_with_runtime(time, coordinates, drive_runtime)?;
-        let blend = switch_runtime.blend(time)?;
+        self.temporal_factor_and_rate(time, coordinates, drive_runtime, switch_runtime)
+            .map(|(factor, _)| factor)
+    }
+
+    pub fn temporal_factor_and_rate(
+        self,
+        time: f64,
+        coordinates: MaterialCoordinates,
+        drive_runtime: TimeDriveRuntime,
+        switch_runtime: MaterialSwitchRuntime,
+    ) -> Result<(f64, f64), MaterialError> {
+        let (drive, drive_rate) =
+            self.drive
+                .multiplier_and_rate_with_runtime(time, coordinates, drive_runtime)?;
+        let (blend, blend_rate) = switch_runtime.blend_and_rate(time)?;
         let switch = self
             .alternate
             .map_or(1.0, |alternate| 1.0 + blend * (alternate - 1.0));
+        let switch_rate = self
+            .alternate
+            .map_or(0.0, |alternate| blend_rate * (alternate - 1.0));
         let product = finite_positive(drive * switch)?;
+        let product_rate = drive_rate * switch + drive * switch_rate;
+        if !product_rate.is_finite() {
+            return Err(MaterialError::InvalidValue);
+        }
         if self.inverted {
-            finite_positive(product.recip())
+            finite_positive_with_rate(product.recip(), -product_rate / (product * product))
         } else {
-            Ok(product)
+            Ok((product, product_rate))
         }
     }
 
@@ -2493,6 +2560,58 @@ mod tests {
     }
 
     #[test]
+    fn temporal_drive_rates_match_centered_differences() {
+        let coordinates = MaterialCoordinates {
+            x: 0.37,
+            y: -0.21,
+            r: 0.43,
+            theta: -0.52,
+        };
+        let drives = [
+            TimeDriveValues::ParametricPump {
+                depth: 0.27,
+                frequency_hz: 1.3,
+                phase_radians: 0.41,
+            },
+            TimeDriveValues::TimeCrystal {
+                depth: 0.19,
+                frequency_hz: 0.8,
+                phase_radians: -0.31,
+                sharpness: 3.7,
+            },
+            TimeDriveValues::TimeCrystal {
+                depth: 0.19,
+                frequency_hz: 0.8,
+                phase_radians: -0.31,
+                sharpness: 1.0e-8,
+            },
+            TimeDriveValues::TravellingModulation {
+                depth: 0.22,
+                frequency_hz: 1.1,
+                phase_radians: 0.23,
+                wavenumber: 2.4,
+                angle_radians: -0.6,
+            },
+        ];
+        let time = 0.372;
+        let epsilon = 1.0e-6;
+        for drive in drives {
+            let runtime = TimeDriveRuntime::authored(drive).unwrap();
+            let (_, rate) = drive
+                .multiplier_and_rate_with_runtime(time, coordinates, runtime)
+                .unwrap();
+            let before = drive
+                .multiplier_with_runtime(time - epsilon, coordinates, runtime)
+                .unwrap();
+            let after = drive
+                .multiplier_with_runtime(time + epsilon, coordinates, runtime)
+                .unwrap();
+            let numerical = (after - before) / (2.0 * epsilon);
+            assert!((rate - numerical).abs() < 2.0e-8, "{drive:?}");
+        }
+    }
+
+    #[test]
     fn frequency_retime_preserves_the_carrier_at_the_commit_boundary() {
         let old = TimeDriveValues::ParametricPump {
             depth: 0.3,
@@ -2567,6 +2686,38 @@ mod tests {
             inverse_middle, 0.625,
             "endpoint interpolation is the wrong path"
         );
+    }
+
+    #[test]
+    fn reciprocal_drive_and_switch_rate_matches_a_centered_difference() {
+        let law = CoefficientLawValues {
+            field: FieldLawValues::Linear,
+            drive: TimeDriveValues::ParametricPump {
+                depth: 0.2,
+                frequency_hz: 0.7,
+                phase_radians: 0.3,
+            },
+            alternate: Some(2.5),
+            inverted: true,
+        };
+        let switch = MaterialSwitchRuntime::default()
+            .begin(true, 0.1, 1.3)
+            .unwrap();
+        let drive = TimeDriveRuntime::authored(law.drive).unwrap();
+        let time = 0.63;
+        let epsilon = 1.0e-6;
+        let (_, rate) = law
+            .temporal_factor_and_rate(time, origin(), drive, switch)
+            .unwrap();
+        let before = law
+            .temporal_factor(time - epsilon, origin(), drive, switch)
+            .unwrap();
+        let after = law
+            .temporal_factor(time + epsilon, origin(), drive, switch)
+            .unwrap();
+        assert!((rate - (after - before) / (2.0 * epsilon)).abs() < 2.0e-8);
+        assert_eq!(switch.blend_and_rate(-1.0).unwrap().1, 0.0);
+        assert_eq!(switch.blend_and_rate(2.0).unwrap().1, 0.0);
     }
 
     #[test]

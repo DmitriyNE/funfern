@@ -14,7 +14,7 @@ This specification defines a shared time-domain field solver, nonlinear and time
 
 **Single-boundary scattering follow-up:** [248 checks now pass](funfern-boundary-scattering-spike.md), confirming the candidate's predicted planar reflection and grazing improvement over first order. Legacy second order remains more accurate in the isolated lossless planar comparison, but retains its known robustness failures. The follow-up exposed a fixed-CFL reflection floor in the previous separate boundary split (21 retained failures). Use the corrected **force-coupled boundary midpoint kicks**, with explicit interior drift, as the implementation reference. Do not copy the superseded split from the original auxiliary prototype. Production performance, f32, full nonlinear composition and boundary-history transfer remain implementation gates.
 
-This specification is authoritative for the selected design; the [review and detailed stages](funfern-material-laws-review.md) define work packages. Spike reports preserve historical findings, including failed alternatives, and do not override this consolidated decision. Stages 0–6 are complete; Stage 7 is the next implementation boundary. No further broad spike is prerequisite; numerical gates close before their dependent feature is enabled, not after production cutover.
+This specification is authoritative for the selected design; the [review and detailed stages](funfern-material-laws-review.md) define work packages. Spike reports preserve historical findings, including failed alternatives, and do not override this consolidated decision. Stages 0–6 are complete and Stage 7 is in progress: its temporal runtime/compiler and conservative bulk reference exist, while production GPU execution and dependent consumer gates remain. No further broad spike is prerequisite; numerical gates close before their dependent feature is enabled, not after production cutover.
 
 ## 1. Product contract
 
@@ -159,6 +159,36 @@ Q_{n+1}=Q_{n+1/2}
 
 Display `u` at an explicitly documented synchronized stage; an endpoint display uses `U(Q_{n+1},t_{n+1})`. Do not mix half-step and endpoint fields when constructing Poynting vectors or diagnostics.
 
+For the lossless bulk, this is the selected structure-preserving formulation,
+not merely a generic explicit second-order method. The kick and drift are exact
+subflows of the bulk Poisson Hamiltonian; their symmetric composition is a
+Poisson map, and is symplectic on each nondegenerate leaf. Static linear media
+therefore retain the existing KDK arithmetic and cost.
+
+For a smooth time-dependent material, use the autonomous extension
+`H_ext=H_Q(Q,t)+H_b(b,t)+p_t`. Its physical-state composition is
+
+```text
+B(Δt/2 at t_n) · T(Δt/2) · A(Δt at t_n+1/2)
+  · T(Δt/2) · B(Δt/2 at t_n+1),
+```
+
+where `T` advances the time coordinate. Evaluate coefficient time derivatives
+analytically at the same endpoint/midpoint stages. The corresponding `p_t`
+updates need not occupy a production state lane: accumulate them as the
+temporal-material work diagnostic. Test fixed-state analytic energy rates,
+forward/backward reversibility and second-order convergence of
+`ΔH-W_temporal`. Temporal-work accounting may be sampled diagnostically; it
+must not add a mandatory full energy reduction to every production step.
+
+This structure claim deliberately stops at the source-free, lossless bulk.
+Losses, sources, filters, prescribed-field exchange, handoff and the accepted
+passive outgoing-boundary update retain their passive/transactional symmetric
+compositions. Do not introduce a more expensive global boundary solve merely
+to call the entire open system symplectic. Thin-gap storage may join the claim
+only if its current local spring update is shown to be an exact cheap split;
+otherwise it remains an explicitly accounted composition.
+
 A cached endpoint force can supply the next step's first kick when its state/law generation still matches. The direct-state implementation uses quadrature evaluation and deterministic nodal gather; it does not inherit a one-CSR-per-step cost claim. Any incremental linear force-cache optimization must preserve independent `b`, include loss/filter/event invalidation, and earn its place through parity and actual-core measurements.
 
 At a linear outgoing trace, combine the held interior force with the boundary midpoint kick. For boundary state `X=(QΓ,z)` and its linear generator `GΓ`, each kick of duration `τ=Δt/2` solves
@@ -171,7 +201,11 @@ Use the updated half-stage primary field in the explicit full `b` drift, then ki
 
 Invalidate/recompute force caches after topology changes, constitutive edits, discontinuous drive events, skin changes, complementary-loss updates, or a filter operation that changes the force input.
 
-The method is second order for smooth coefficients. It does not exactly conserve energy, and static CFL compliance is not a proof of stability under arbitrary modulation.
+The method is second order for smooth coefficients. A time-dependent
+Hamiltonian exchanges the measured temporal-material work and therefore does
+not conserve physical energy; even in a static medium the split conserves a
+nearby Hamiltonian rather than exact energy. Static CFL compliance is not a
+proof of stability under arbitrary modulation.
 
 ### 3.2 Discontinuities and switches
 

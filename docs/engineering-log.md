@@ -5,6 +5,28 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Stage 7 adopts the free bulk Poisson split
+
+- Formalized the existing lossless bulk KDK as exact kick/drift subflows: a
+  Poisson map globally and a symplectic map on nondegenerate leaves. Static
+  linear stepping keeps the same arithmetic and cost.
+- Added the dormant smooth-time reference through the autonomous `(t,p_t)`
+  extension. Material laws now provide analytic coefficient rates; the CPU
+  oracle evaluates endpoint/midpoint/endpoint stages and records material-pump
+  work plus the remaining splitting residual without making `p_t` production
+  state.
+- The reference admits only free lossless bulk. It explicitly rejects loss,
+  prescribed/weak/open boundaries and auxiliary couplings. We will not add an
+  expensive global boundary solve merely to claim whole-system symplecticity;
+  those systems retain their passive/transactional compositions. Thin gaps can
+  be included later only if their existing local spring update is a cheap exact
+  split.
+- Tests pin exact inert parity with production KDK, driven forward/backward
+  reversibility, analytic energy-rate finite differences, full-trajectory CFL
+  contraction and second-order convergence of temporal-work residuals. The
+  production GPU path still rejects driven materials pending the remaining
+  Stage 7 boundary/filter/AMR/admission gates.
+
 ## 2026-09-20 — Stage 7 starts from one temporal-runtime contract
 
 - Added the dormant f64 runtime primitives shared by material compilation,

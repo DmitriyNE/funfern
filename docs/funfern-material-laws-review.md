@@ -189,7 +189,7 @@ Inspection also found incomplete app literals in the GRIN example and `topology_
 
 ## 5. Implementation stages
 
-The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–6 are complete; the canonical solver is the shared production path and Stage 7 is next. Each stage is a reviewable change with focused tests and an engineering-log entry.
+The user has adopted direct `Q,b` and the passive three-state second-order outgoing law with corrected force-coupled midpoint kicks. Architecture selection is complete. The [core spike](funfern-material-laws-spike-report.md), [auxiliary derivation](funfern-boundary-auxiliary-spike.md), and [scattering correction](funfern-boundary-scattering-spike.md) are the evidence; their limitations remain gates below. Stages 0–6 are complete; the canonical solver is the shared production path and Stage 7 is in progress. Each stage is a reviewable change with focused tests and an engineering-log entry.
 
 ### Stage 0 — Close implementation contracts and establish acceptance cases
 
@@ -309,9 +309,21 @@ Exit: first release boundary. Supported existing linear scenes, both outgoing or
 
 ### Stage 7 — Time-driven media and runtime switching
 
-Status: next implementation boundary.
+Status: in progress; temporal runtime/compiler and conservative bulk reference
+are complete, while production GPU execution and dependent consumer gates remain.
 
 Implement stage-time coefficient evaluation on both physical sides, harmonic/smoothed-square/travelling drives, Switch stamping, phase anchors, ramp reversal and trajectory bounds. Sample travelling phase in actual material frames at nodes/quadrature. Validate reciprocal factors as reciprocal trajectories, not newly interpolated endpoints.
+
+Use the existing KDK as the free structure-preserving bulk integrator: its
+exact kick/drift subflows form a Poisson map and are symplectic on nondegenerate
+leaves. For smooth driven media, use the autonomous `(t,p_t)` extension with
+coefficient stages at endpoint/midpoint/endpoint and analytic temporal-work
+rates. Pin inert parity, reversibility, fixed-state energy derivatives,
+trajectory CFL bounds and second-order temporal-work residual convergence. Do
+not expand this into an expensive full-system claim: outgoing boundaries,
+losses, sources, filters and handoff keep their passive/transactional
+compositions. Admit thin gaps to the structure claim only if their cheap exact
+local split is verified.
 
 Support timestep-safe table updates and generation retiming with admission against latest state. Verify ε-only and equal ε/μ temporal interfaces, shared-node independently driven materials, paused events and source edits during ramps. Preserve frozen run-start source envelope.
 
