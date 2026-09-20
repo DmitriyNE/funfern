@@ -5,6 +5,21 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Browser AMR worker starvation fixed
+
+- The threaded WebAssembly bootstrap allocated one Rayon worker but submitted
+  two permanent receiver loops to it: topology preparation and canonical AMR.
+  The first loop to run occupied the pool forever, so the other queue could
+  remain indefinitely at its submitted initial phase. In the reported run this
+  left AMR at `Preparing canonical AMR estimate`.
+- The isolated-browser bundle now allocates one worker to each long-lived loop.
+  Both loops publish a startup handshake which the main thread exposes through
+  its existing browser diagnostics; the WebGPU startup regression waits for
+  both handshakes and for a real AMR job to report progress or completion,
+  rather than merely proving that both jobs were scheduled. This restores the
+  native architecture in the threaded browser bundle; only executor creation
+  remains target-specific (`std::thread` versus shared-memory Web Workers).
+
 ## 2026-09-20 — GPU handoff admission and first display state share one receipt
 
 - The remaining small-mesh handoff hiccup was a fixed-latency serialization:

@@ -46,26 +46,49 @@ fn main() {
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
-pub(crate) fn set_browser_preparation_worker_status(status: &str) {
+fn set_browser_worker_status(attribute: &str, status: &str) {
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
         return;
     };
     let Some(root) = document.document_element() else {
         return;
     };
-    let _ = root.set_attribute("data-funfern-preparation-worker", status);
+    let _ = root.set_attribute(attribute, status);
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+pub(crate) fn set_browser_preparation_worker_status(status: &str) {
+    set_browser_worker_status("data-funfern-preparation-worker", status);
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+pub(crate) fn set_browser_amr_worker_status(status: &str) {
+    set_browser_worker_status("data-funfern-amr-worker", status);
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+pub(crate) fn set_browser_amr_job_status(status: &str) {
+    set_browser_worker_status("data-funfern-amr-job", status);
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
 fn main() {
     set_browser_preparation_worker_status("initializing");
+    set_browser_amr_worker_status("initializing");
+    set_browser_amr_job_status("waiting");
     wasm_bindgen_futures::spawn_local(async {
-        let worker_ready =
-            wasm_bindgen_futures::JsFuture::from(wasm_bindgen_rayon::init_thread_pool(1))
-                .await
-                .is_ok();
+        // Topology preparation and AMR each own a permanent receiver loop. A
+        // single Rayon worker can enter only one of them, leaving the other
+        // queue permanently starved rather than merely slow.
+        const BACKGROUND_WORKERS: usize = 2;
+        let worker_ready = wasm_bindgen_futures::JsFuture::from(
+            wasm_bindgen_rayon::init_thread_pool(BACKGROUND_WORKERS),
+        )
+        .await
+        .is_ok();
         ui::set_browser_preparation_worker_ready(worker_ready);
         set_browser_preparation_worker_status(if worker_ready { "ready" } else { "unavailable" });
+        set_browser_amr_worker_status(if worker_ready { "ready" } else { "unavailable" });
         run_app();
     });
 }

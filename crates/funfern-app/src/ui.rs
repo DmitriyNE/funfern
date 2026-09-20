@@ -778,6 +778,7 @@ struct GpuUploadPreparation {
     allow(dead_code)
 )]
 enum BackgroundPreparationEvent {
+    WorkerStarted,
     Progress {
         token: TopologyToken,
         phase: TopologyPreparationPhase,
@@ -843,6 +844,7 @@ impl BackgroundPreparationWorker {
 
     fn observe(&mut self, event: &BackgroundPreparationEvent) {
         match event {
+            BackgroundPreparationEvent::WorkerStarted => {}
             BackgroundPreparationEvent::Progress {
                 token,
                 phase,
@@ -872,6 +874,12 @@ fn run_preparation_worker(
     job_receiver: Receiver<TopologyPreparationJob>,
     event_sender: Sender<BackgroundPreparationEvent>,
 ) {
+    if event_sender
+        .send(BackgroundPreparationEvent::WorkerStarted)
+        .is_err()
+    {
+        return;
+    }
     while let Ok(mut job) = job_receiver.recv() {
         loop {
             loop {
@@ -929,7 +937,7 @@ fn spawn_preparation_worker(
     if !BROWSER_PREPARATION_WORKER_READY.load(Ordering::Acquire) {
         return false;
     }
-    crate::set_browser_preparation_worker_status("active");
+    crate::set_browser_preparation_worker_status("scheduled");
     rayon::spawn(move || run_preparation_worker(job_receiver, event_sender));
     true
 }
@@ -1077,6 +1085,7 @@ enum BackgroundAmrResult {
     allow(dead_code)
 )]
 enum BackgroundAmrEvent {
+    WorkerStarted,
     Progress {
         serial: u64,
         kind: BackgroundAmrKind,
@@ -1089,9 +1098,10 @@ enum BackgroundAmrEvent {
 }
 
 impl BackgroundAmrEvent {
-    fn serial(&self) -> u64 {
+    fn serial(&self) -> Option<u64> {
         match self {
-            Self::Progress { serial, .. } | Self::Finished { serial, .. } => *serial,
+            Self::WorkerStarted => None,
+            Self::Progress { serial, .. } | Self::Finished { serial, .. } => Some(*serial),
         }
     }
 }
@@ -1173,10 +1183,15 @@ impl BackgroundAmrWorker {
         };
         let mut current = Vec::new();
         for event in events {
-            if self.active_serial != Some(event.serial()) {
+            let Some(serial) = event.serial() else {
+                current.push(event);
+                continue;
+            };
+            if self.active_serial != Some(serial) {
                 continue;
             }
             match &event {
+                BackgroundAmrEvent::WorkerStarted => unreachable!("handled above"),
                 BackgroundAmrEvent::Progress { kind, phase, .. } => {
                     self.kind = Some(*kind);
                     self.phase = Some(*phase);
@@ -1201,6 +1216,12 @@ fn run_amr_worker(
     job_receiver: Receiver<BackgroundAmrCommand>,
     event_sender: Sender<BackgroundAmrEvent>,
 ) {
+    if event_sender
+        .send(BackgroundAmrEvent::WorkerStarted)
+        .is_err()
+    {
+        return;
+    }
     while let Ok(command) = job_receiver.recv() {
         let BackgroundAmrCommand::Run {
             mut serial,
@@ -1289,6 +1310,7 @@ fn spawn_amr_worker(
     if !BROWSER_PREPARATION_WORKER_READY.load(Ordering::Acquire) {
         return false;
     }
+    crate::set_browser_amr_worker_status("scheduled");
     rayon::spawn(move || run_amr_worker(job_receiver, event_sender));
     true
 }
@@ -7536,6 +7558,10 @@ impl Playground {
             .as_ref()
             .map_or_else(Vec::new, BackgroundPreparationWorker::drain);
         for event in events {
+            #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+            if matches!(event, BackgroundPreparationEvent::WorkerStarted) {
+                crate::set_browser_preparation_worker_status("active");
+            }
             if let Some(worker) = &mut self.background_preparation {
                 worker.observe(&event);
             }
@@ -8460,6 +8486,18 @@ impl Playground {
             .as_mut()
             .map_or_else(Vec::new, BackgroundAmrWorker::drain);
         for event in events {
+            #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+            match &event {
+                BackgroundAmrEvent::WorkerStarted => {
+                    crate::set_browser_amr_worker_status("active");
+                }
+                BackgroundAmrEvent::Progress { .. } => {
+                    crate::set_browser_amr_job_status("progress");
+                }
+                BackgroundAmrEvent::Finished { .. } => {
+                    crate::set_browser_amr_job_status("finished");
+                }
+            }
             if let BackgroundAmrEvent::Finished { result, .. } = event {
                 match *result {
                     BackgroundAmrResult::Indicator(result) => {

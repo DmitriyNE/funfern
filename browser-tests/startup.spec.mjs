@@ -27,10 +27,36 @@ test("WebGPU app starts, advances, and resizes its render target", async ({ page
         ),
       )
       .toBe("active");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          document.documentElement.getAttribute("data-funfern-amr-worker"),
+        ),
+      )
+      .toBe("active");
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            document.documentElement.getAttribute("data-funfern-amr-job"),
+          ),
+        { timeout: 30_000 },
+      )
+      .toMatch(/^(progress|finished)$/);
   } else {
     expect(
       await page.evaluate(() =>
         document.documentElement.getAttribute("data-funfern-preparation-worker"),
+      ),
+    ).toBeNull();
+    expect(
+      await page.evaluate(() =>
+        document.documentElement.getAttribute("data-funfern-amr-worker"),
+      ),
+    ).toBeNull();
+    expect(
+      await page.evaluate(() =>
+        document.documentElement.getAttribute("data-funfern-amr-job"),
       ),
     ).toBeNull();
   }
