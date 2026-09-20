@@ -8,6 +8,7 @@ const NO_INDEX: u32 = 0xffffffffu;
 const STATUS_LAYOUT: u32 = 1u;
 const STATUS_TIMESTEP: u32 = 2u;
 const STATUS_NON_FINITE: u32 = 4u;
+const HANDOFF_RECEIPT_MAGIC: u32 = 0x48414e44u;
 // Leave serialization headroom below f32::MAX: Naga's decimal WGSL writer
 // rounds the exact maximum upward, which Chrome correctly rejects.
 const MAX_FINITE: f32 = 3.0e+38;
@@ -344,6 +345,28 @@ fn reduce_components(
 @compute @workgroup_size(128)
 fn correct_primary(@builtin(global_invocation_id) id: vec3<u32>) {
     let node = id.x;
+    // Handoff commit clears this marker on both acceptance and rejection. A
+    // second dispatch of this already-warm pipeline can then reuse the
+    // consumed map buffer as the combined CPU receipt without introducing a
+    // first-handoff pipeline-compilation stall.
+    if atomicLoad(&new_status.handoff) == 0u {
+        let target_nodes = new_control.counts_a.x;
+        if node < target_nodes {
+            transfer[node + 1u].data = bitcast<vec4<u32>>(new_state[node].values);
+        }
+        if node == 0u {
+            let failure = max(
+                atomicLoad(&new_status.candidate),
+                atomicLoad(&new_status.latch));
+            let accepted_slot = new_control.event.z & 1u;
+            transfer[0].data = vec4<u32>(
+                HANDOFF_RECEIPT_MAGIC,
+                failure,
+                atomicLoad(&new_status.transaction_1),
+                (atomicLoad(&new_status.transaction_2) << 1u) | accepted_slot);
+        }
+        return;
+    }
     if stopped() || node >= target_node_count() { return; }
     if primary_identity() { return; }
     let base = header(2u).w + node * PRIMARY_WORDS;

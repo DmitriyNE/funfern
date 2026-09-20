@@ -6,7 +6,7 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
@@ -76,6 +76,7 @@ const RESIDENT_FILTER_DISPATCHES: u64 = 7;
 const RESIDENT_FILTER_ACCOUNTING_DISPATCHES: u64 = 1;
 const TRANSFER_LAYOUT_VERSION: u32 = 1;
 const TRANSFER_HEADER_WORDS: usize = 8;
+const HANDOFF_RECEIPT_MAGIC: u32 = 0x4841_4e44;
 const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
 const DRIVE_INDEX_MASK: u32 = !DRIVE_TARGET_PARAMETERS;
 /// Last state-buffer word identifies the accepted lane and clock at the exact
@@ -1697,14 +1698,23 @@ impl CanonicalGpuTransferPlan {
             u32::from(vector_identity),
             u32::from(outgoing.identity),
         );
+        // Once every transfer stage has consumed the packed map, the GPU
+        // reuses its prefix as one atomic admission-and-display receipt. Keep
+        // enough storage for a header plus every target primary state word;
+        // `word_count` above remains the immutable packed-map extent.
+        words.resize(
+            words.len().max(target.degrees_of_freedom() + 1),
+            GpuCanonicalTransferWord::default(),
+        );
         Ok(Self {
             manifest: CanonicalGpuTransferManifest {
                 layout_version: TRANSFER_LAYOUT_VERSION,
                 word_count,
-                bytes: word_count * size_of::<GpuCanonicalTransferWord>(),
+                bytes: words.len() * size_of::<GpuCanonicalTransferWord>(),
                 // Runtime, four state maps, reduction/correction, auxiliary
-                // energy, two main-energy reductions, finalization and commit.
-                dispatches: 14,
+                // energy, two main-energy reductions, finalization, commit and
+                // the combined admission/display receipt.
+                dispatches: 15,
                 exact_primary: primary.exact_nodes(),
                 exact_complementary: complementary.exact_samples(),
                 target_components: target.component_count(),
@@ -2178,12 +2188,19 @@ impl CanonicalGpuBufferHandles {
 }
 
 #[derive(Default)]
+struct CanonicalGpuHandoffReceipt {
+    primary: Vec<GpuCanonicalStateWord>,
+    accepted_slot: u32,
+}
+
+#[derive(Default)]
 struct CanonicalGpuHandoffStats {
     submitted: AtomicU32,
     completed: AtomicU32,
     failure: AtomicU32,
     snapshot_step: AtomicU32,
     snapshot_local_step: AtomicU32,
+    receipt: Mutex<Option<CanonicalGpuHandoffReceipt>>,
 }
 
 #[derive(Clone)]
@@ -2193,7 +2210,7 @@ struct CanonicalGpuHandoffHandles {
     manifest: CanonicalGpuLayoutManifest,
     transfer_manifest: CanonicalGpuTransferManifest,
     stats: Arc<CanonicalGpuHandoffStats>,
-    status_entity: Entity,
+    receipt_entity: Entity,
 }
 
 #[derive(Clone)]
@@ -2416,7 +2433,7 @@ impl CanonicalGpuRequest {
                 assets.remove(handle.id());
             }
             assets.remove(handoff.transfer.id());
-            commands.entity(handoff.status_entity).despawn();
+            commands.entity(handoff.receipt_entity).despawn();
         }
         if let Some(event) = self.live_event.take() {
             assets.remove(event.upload.id());
@@ -2638,24 +2655,31 @@ impl CanonicalGpuRequest {
         target.status.transaction.x = GPU_HANDOFF_PENDING;
         let added = add_canonical_buffers(assets, target);
         let stats = Arc::new(CanonicalGpuHandoffStats::default());
-        let status_entity = commands
+        let transfer_handle = add_shader_buffer!(assets, transfer.words);
+        let receipt_entity = commands
             .spawn((
-                // The target bind group or transfer pipeline may not be ready
-                // in the first render frame. Keep polling the pending marker,
-                // but allow only one status copy to be outstanding at a time.
-                PacedReadback::continuous(Readback::buffer(added.handles.status.clone())),
-                CanonicalHandoffStatusReadback {
+                // The transfer pipelines may not be ready in the first render
+                // frame. Keep polling the transfer-buffer receipt prefix, but
+                // allow only one copy to be outstanding at a time.
+                PacedReadback::continuous(Readback::buffer_range(
+                    transfer_handle.clone(),
+                    0,
+                    (added.handles.node_count as u64 + 1)
+                        * size_of::<GpuCanonicalTransferWord>() as u64,
+                )),
+                CanonicalHandoffReceiptReadback {
                     stats: stats.clone(),
+                    node_count: added.handles.node_count,
                 },
             ))
             .id();
         self.handoff = Some(CanonicalGpuHandoffHandles {
             target: added.handles,
-            transfer: add_shader_buffer!(assets, transfer.words),
+            transfer: transfer_handle,
             manifest: added.manifest,
             transfer_manifest: transfer.manifest,
             stats,
-            status_entity,
+            receipt_entity,
         });
         self.handoff_outcome = CanonicalGpuHandoffOutcome::Pending;
         self.revision = self.revision.wrapping_add(1).max(1);
@@ -2847,8 +2871,9 @@ struct CanonicalStatusReadback {
 }
 
 #[derive(Component)]
-struct CanonicalHandoffStatusReadback {
+struct CanonicalHandoffReceiptReadback {
     stats: Arc<CanonicalGpuHandoffStats>,
+    node_count: u32,
 }
 
 fn receive_canonical_state(
@@ -3089,27 +3114,37 @@ fn receive_canonical_status(event: On<ReadbackComplete>, tags: Query<&CanonicalS
     );
 }
 
-fn receive_canonical_handoff_status(
+fn receive_canonical_handoff_receipt(
     event: On<ReadbackComplete>,
-    tags: Query<&CanonicalHandoffStatusReadback>,
+    tags: Query<&CanonicalHandoffReceiptReadback>,
 ) {
     let Ok(tag) = tags.get(event.entity) else {
         return;
     };
-    let values: Vec<GpuCanonicalStatus> = event.to_shader_type();
-    let Some(value) = values.first() else { return };
-    if value.transaction.x == GPU_HANDOFF_PENDING {
+    if tag.stats.completed.load(Ordering::Acquire) != 0 {
         return;
     }
-    tag.stats
-        .failure
-        .store(value.words.x.max(value.words.y), Ordering::Relaxed);
-    tag.stats
-        .snapshot_step
-        .store(value.transaction.y, Ordering::Relaxed);
+    let values: Vec<GpuCanonicalTransferWord> = event.to_shader_type();
+    if values.len() != tag.node_count as usize + 1 || values[0].data.x != HANDOFF_RECEIPT_MAGIC {
+        return;
+    }
+    let header = values[0].data;
+    let packed_local_step = header.w;
+    let primary = values[1..]
+        .iter()
+        .map(|word| GpuCanonicalStateWord {
+            values: Vec4::from_array(word.data.to_array().map(f32::from_bits)),
+        })
+        .collect();
+    *tag.stats.receipt.lock().unwrap() = Some(CanonicalGpuHandoffReceipt {
+        primary,
+        accepted_slot: packed_local_step & 1,
+    });
+    tag.stats.failure.store(header.y, Ordering::Relaxed);
+    tag.stats.snapshot_step.store(header.z, Ordering::Relaxed);
     tag.stats
         .snapshot_local_step
-        .store(value.transaction.z, Ordering::Relaxed);
+        .store(packed_local_step >> 1, Ordering::Relaxed);
     tag.stats.completed.store(1, Ordering::Release);
 }
 
@@ -3117,6 +3152,7 @@ fn settle_canonical_handoff(
     mut commands: Commands,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut request: ResMut<CanonicalGpuRequest>,
+    mut display: ResMut<CanonicalGpuDisplay>,
 ) {
     let completed = request
         .handoff
@@ -3126,7 +3162,7 @@ fn settle_canonical_handoff(
         return;
     }
     let handoff = request.handoff.take().expect("checked pending handoff");
-    commands.entity(handoff.status_entity).despawn();
+    commands.entity(handoff.receipt_entity).despawn();
     assets.remove(handoff.transfer.id());
     let failure = handoff.stats.failure.load(Ordering::Relaxed);
     if failure != 0 {
@@ -3149,6 +3185,13 @@ fn settle_canonical_handoff(
     let generation = request.generation.wrapping_add(1).max(1);
     let completed_steps = handoff.stats.snapshot_step.load(Ordering::Relaxed) as u64;
     let local_step = handoff.stats.snapshot_local_step.load(Ordering::Relaxed);
+    let receipt = handoff
+        .stats
+        .receipt
+        .lock()
+        .unwrap()
+        .take()
+        .expect("completed GPU handoff has a receipt");
     let desired_steps = request.desired_steps.max(completed_steps);
     let stats = Arc::new(CanonicalGpuStats::default());
     stats
@@ -3157,6 +3200,8 @@ fn settle_canonical_handoff(
     stats.local_step.store(local_step, Ordering::Relaxed);
     stats.status.store(GPU_STATUS_READY, Ordering::Relaxed);
     let target = handoff.target;
+    let target_node_count = target.node_count as usize;
+    let target_sample_count = target.sample_count as usize;
     let state_entity = spawn_canonical_state_readback(
         &mut commands,
         &target,
@@ -3193,6 +3238,19 @@ fn settle_canonical_handoff(
     request.readback_entities = vec![state_entity, control_entity, status_entity];
     request.status_readback_entity = Some(status_entity);
     request.full_state_readback_entity = None;
+    // Admission and the first target display state came from one GPU receipt.
+    // Publish them together, after success, so the UI never waits through a
+    // second map and can never observe a rejected candidate generation.
+    begin_canonical_display_generation(&mut display, generation);
+    display.node_count = target_node_count;
+    display.sample_count = target_sample_count;
+    display.accepted_slot = receipt.accepted_slot;
+    display.raw_state_slot = receipt.accepted_slot;
+    display.raw_state_completed_steps = completed_steps;
+    display.raw_primary_self_describing = true;
+    display.raw_primary = receipt.primary;
+    refresh_canonical_display(&mut display);
+    display.readbacks = display.readbacks.saturating_add(1);
     request.handoff_outcome = CanonicalGpuHandoffOutcome::Accepted;
 }
 
@@ -3228,7 +3286,7 @@ impl Plugin for CanonicalWaveGpuPlugin {
             .add_observer(receive_canonical_state)
             .add_observer(receive_canonical_control)
             .add_observer(receive_canonical_status)
-            .add_observer(receive_canonical_handoff_status)
+            .add_observer(receive_canonical_handoff_receipt)
             .add_systems(
                 Update,
                 (settle_canonical_handoff, settle_canonical_live_event),
@@ -4284,6 +4342,7 @@ fn compute_canonical_handoff(
         transfer.account_handoff,
         canonical.handoff_clear_scratch,
         canonical.handoff_commit,
+        transfer.correct_primary,
     ];
     if ids.iter().any(|id| {
         matches!(
@@ -4351,6 +4410,9 @@ fn compute_canonical_handoff(
     pass.dispatch_workgroups(workgroups(target.scratch_count), 1, 1);
     pass.set_pipeline(pipelines[13]);
     pass.dispatch_workgroups(1, 1, 1);
+    pass.set_bind_group(0, &groups.map, &[]);
+    pass.set_pipeline(pipelines[14]);
+    pass.dispatch_workgroups(workgroups(target.node_count), 1, 1);
     drop(pass);
     groups.encoded = true;
     handoff.stats.submitted.store(1, Ordering::Release);
@@ -4579,8 +4641,13 @@ mod tests {
             transfer.manifest.exact_complementary,
             operator.complementary_degrees_of_freedom()
         );
-        assert_eq!(transfer.manifest.dispatches, 14);
+        assert_eq!(transfer.manifest.dispatches, 15);
         assert_eq!(transfer.manifest.word_count, TRANSFER_HEADER_WORDS);
+        assert!(transfer.words.len() > operator.degrees_of_freedom());
+        assert!(
+            include_str!("canonical_transfer.wgsl")
+                .contains("const HANDOFF_RECEIPT_MAGIC: u32 = 0x48414e44u;")
+        );
         assert_eq!(transfer.words[7].data.y, 1);
         assert_eq!(transfer.words[7].data.z, 1);
         assert_eq!(transfer.words[7].data.w, 1);

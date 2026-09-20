@@ -5,6 +5,32 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — GPU handoff admission and first display state share one receipt
+
+- The remaining small-mesh handoff hiccup was a fixed-latency serialization:
+  the GPU first mapped the candidate status, the host accepted the generation,
+  and only then created and mapped its first target primary-state readback. The
+  UI kept the old topology until that second round trip, so its `upload` phase
+  could reach roughly 140 ms even when transfer arithmetic was tiny.
+- After the transfer map has been fully consumed, its GPU buffer prefix now
+  becomes a self-describing receipt containing validation status, accepted
+  clock/slot data and every target primary-state word. A second dispatch of the
+  already-required primary-transfer pipeline publishes it after commit; this
+  avoids a separate cold compute pipeline. The paced reader remains bounded to
+  one map in flight.
+- The source generation and its readbacks stay owned until a valid receipt
+  arrives. Success promotes the target request and first display snapshot in
+  the same host transaction; failure destroys the candidate without exposing
+  any of its state. Normal target state/control/status streams start after that
+  atomic publication.
+- On the M1 Max release fixture, a 2,692→4,200-DOF nonidentity handoff committed
+  in 30.0 ms (20.9 ms from GPU submission through admission plus display), and
+  the 8,938-DOF standard case committed in 53.2 ms (35.4 ms at that boundary).
+  An injected failure rejected in 34.1 ms with byte-exact source rollback. The
+  fixture now asserts that an accepted outcome can never precede its target
+  display receipt. All 159 app tests, strict Clippy, static WebAssembly and the
+  pinned-nightly shared-memory WebAssembly check pass.
+
 ## 2026-09-20 — Canonical AMR preparation crosses the worker boundary
 
 - A five-second release sample at the reported large-mesh slowdown found one

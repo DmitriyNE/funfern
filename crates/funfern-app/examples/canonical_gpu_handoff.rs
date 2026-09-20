@@ -596,7 +596,7 @@ fn validate(
         exit.write(AppExit::error());
         return;
     }
-    let Some(clock) = display.clock else { return };
+    let clock = display.clock;
     if expected.phase == Phase::Handoff
         && expected.submitted.is_none()
         && request.handoff_submitted()
@@ -605,7 +605,7 @@ fn validate(
         request.request_steps(expected.settlement_steps);
     }
     match expected.phase {
-        Phase::Warmup if clock.accepted_steps >= WARMUP_STEPS as u32 => {
+        Phase::Warmup if clock.is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS as u32) => {
             expected.rollback_snapshot = Some(display.accepted_storage_bits());
             expected.source_generation = display.generation;
             let upload_pack_started = Instant::now();
@@ -633,6 +633,14 @@ fn validate(
                     expected.phase = Phase::Done;
                     return;
                 }
+                if display.generation != request.generation()
+                    || display.primary_flux.len() != expected.primary.len()
+                {
+                    eprintln!("handoff admission became visible before its target display receipt");
+                    expected.failed = true;
+                    expected.phase = Phase::Done;
+                    return;
+                }
                 let accepted = Instant::now();
                 expected.accepted_elapsed =
                     Some(accepted.duration_since(expected.started.unwrap()));
@@ -648,7 +656,7 @@ fn validate(
                     && display.generation == expected.source_generation
                     && display.accepted_storage_bits()
                         == *expected.rollback_snapshot.as_ref().unwrap()
-                    && clock.accepted_steps == WARMUP_STEPS as u32
+                    && clock.is_some_and(|clock| clock.accepted_steps == WARMUP_STEPS as u32)
                 {
                     println!(
                         "injected handoff rejected in {:.2} ms with byte-exact source rollback",
@@ -663,13 +671,15 @@ fn validate(
             _ => {}
         },
         Phase::Evolution
-            if clock.accepted_steps
-                >= (WARMUP_STEPS
-                    + expected.handoff_steps
-                    + expected.settlement_steps
-                    + expected.measured_steps) as u32
-                && display.primary_flux.len() == expected.primary.len() =>
+            if clock.is_some_and(|clock| {
+                clock.accepted_steps
+                    >= (WARMUP_STEPS
+                        + expected.handoff_steps
+                        + expected.settlement_steps
+                        + expected.measured_steps) as u32
+            }) && display.primary_flux.len() == expected.primary.len() =>
         {
+            let clock = clock.expect("evolution guard checked the display clock");
             if expected.settle_after.is_none() {
                 expected.settle_after = Some(display.readbacks + 2);
                 return;
@@ -703,7 +713,7 @@ fn validate(
                     * expected.time_step)
                 .abs();
             println!(
-                "handoff committed in {:.2} ms (admission readback {:.2} ms, source live); Q {:.3e}, b {:.3e}, auxiliary RMS {:.3e}, clock {:.3e} s",
+                "handoff committed in {:.2} ms (admission + first display receipt {:.2} ms, source live); Q {:.3e}, b {:.3e}, auxiliary RMS {:.3e}, clock {:.3e} s",
                 expected.accepted_elapsed.unwrap().as_secs_f64() * 1_000.0,
                 expected
                     .boundary_elapsed
