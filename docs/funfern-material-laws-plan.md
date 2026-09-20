@@ -928,10 +928,12 @@ which packing appeared as solver drain. Material/boundary-only revisions now
 retain the exact mesh object and use the direct scalar identity constructor.
 Exact same-discretization complementary transfer is represented by one identity
 flag: it no longer retains or GPU-packs one row per quadrature sample. Remaining
-P2 work is compact primary-transfer/full-plan reuse needed by retiming and
-spatial-forcing edits, followed by finer bulk/boundary operator dependency
-separation and unchanged outer-trace-mode reuse. P3 remains responsible for
-proportional and genuinely changed trace operators.
+P2 work includes full-plan reuse needed by retiming and source-layout changes,
+followed by finer bulk/boundary operator dependency separation and unchanged
+outer-trace-mode reuse. Exact primary transfer is now compact too: it retains no
+duplicate per-node interpolation rows and is packed directly from its identity
+marker. P3 remains responsible for proportional and genuinely changed trace
+operators.
 
 ### Current implementation handoff
 

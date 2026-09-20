@@ -36,6 +36,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   parameters and spatial weights in one accepted event. Five paused events
   committed in 217.32 ms total (33.33 ms maximum); subsequent evolution matched
   the CPU oracle at relative L2 `Q=3.17e-7`, `b=1.10e-6`, with the clock unchanged.
+- The follow-on identity compaction now covers the primary map as well as the
+  complementary map. Same-discretization handoffs retain no duplicate scalar
+  interpolation rows, and GPU transfer packing consumes the identity marker
+  directly instead of allocating exported rows to rediscover it.
 
 ## 2026-09-20 — Browser preparation worker and overhaul branch
 

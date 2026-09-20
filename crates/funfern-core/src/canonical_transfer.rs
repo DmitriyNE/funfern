@@ -43,6 +43,8 @@ pub struct CanonicalPrimaryTransferTarget {
 /// semantic data, not something point interpolation can infer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalPrimaryTransferMap {
+    identity: bool,
+    target_nodes: usize,
     samples: Vec<Option<QuadraticTransferSample>>,
     source_support: Vec<f64>,
     target_support: Vec<f64>,
@@ -65,6 +67,33 @@ impl CanonicalPrimaryTransferMap {
                 "the scalar transfer map does not match the canonical generations",
             ));
         }
+        let identity = interpolation.source_dofs() == target.degrees_of_freedom()
+            && interpolation
+                .samples()
+                .iter()
+                .enumerate()
+                .all(|(target_node, sample)| {
+                    sample.as_ref().is_some_and(|sample| {
+                        sample.nodes[0] as usize == target_node
+                            && sample.weights[0] == 1.0
+                            && sample.weights[1..].iter().all(|weight| *weight == 0.0)
+                            && source.geometric_support()[target_node].to_bits()
+                                == target.geometric_support()[target_node].to_bits()
+                    })
+                });
+        if identity {
+            return Ok(Self {
+                identity: true,
+                target_nodes: target.degrees_of_freedom(),
+                samples: Vec::new(),
+                source_support: source.geometric_support().to_vec(),
+                target_support: Vec::new(),
+                target_components: target.component_labels().to_vec(),
+                component_count: target.component_count(),
+                exact: Vec::new(),
+                extensions: Vec::new(),
+            });
+        }
         let exact = interpolation
             .samples()
             .iter()
@@ -85,6 +114,8 @@ impl CanonicalPrimaryTransferMap {
             })
             .collect();
         Ok(Self {
+            identity: false,
+            target_nodes: target.degrees_of_freedom(),
             samples: interpolation.samples().to_vec(),
             source_support: source.geometric_support().to_vec(),
             target_support: target.geometric_support().to_vec(),
@@ -113,6 +144,9 @@ impl CanonicalPrimaryTransferMap {
             ));
         }
         let mut map = Self::prepare(interpolation, source, target)?;
+        if map.identity {
+            return Ok(map);
+        }
         let mut distance = vec![usize::MAX; target_mesh.triangles.len()];
         for (element, nodes) in target.element_nodes().iter().enumerate() {
             if nodes
@@ -162,7 +196,18 @@ impl CanonicalPrimaryTransferMap {
     }
 
     pub fn exact_nodes(&self) -> usize {
+        if self.identity {
+            return self.target_nodes;
+        }
         self.exact.iter().filter(|exact| **exact).count()
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.identity
+    }
+
+    pub fn target_node_count(&self) -> usize {
+        self.target_nodes
     }
 
     pub fn source_support(&self) -> &[f64] {
@@ -176,6 +221,18 @@ impl CanonicalPrimaryTransferMap {
     /// Exports the prepared density interpolation/extension without exposing
     /// the quadratic mesher's internal sample representation.
     pub fn targets(&self) -> Vec<CanonicalPrimaryTransferTarget> {
+        if self.identity {
+            return (0..self.target_nodes)
+                .map(|target| CanonicalPrimaryTransferTarget {
+                    source_nodes: [target as u32, 0, 0, 0, 0, 0, 0],
+                    coefficients: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    source_count: 7,
+                    target_component: self.target_components[target],
+                    target_support: self.source_support[target],
+                    exact: true,
+                })
+                .collect();
+        }
         self.samples
             .iter()
             .enumerate()
@@ -225,10 +282,13 @@ impl CanonicalPrimaryTransferMap {
     ) -> Result<(Vec<f64>, CanonicalTransferReport), WaveError> {
         if source_flux.len() != self.source_support.len()
             || desired_component_totals.len() != self.component_count
-            || prescribed_target.len() != self.target_support.len()
+            || prescribed_target.len() != self.target_nodes
             || source_flux.iter().any(|value| !value.is_finite())
         {
             return Err(WaveError::InvalidState);
+        }
+        if self.identity {
+            return Ok((source_flux.to_vec(), CanonicalTransferReport::default()));
         }
         let density = source_flux
             .iter()
@@ -1881,6 +1941,8 @@ mod tests {
         let (quadratic, canonical) = compile(&mesh);
         let nodal = QuadraticTransferMap::identity_on_mesh(&mesh, &quadratic, &quadratic).unwrap();
         let primary = CanonicalPrimaryTransferMap::prepare(&nodal, &canonical, &canonical).unwrap();
+        assert!(primary.is_identity());
+        assert!(primary.samples.is_empty());
         let q = (0..canonical.degrees_of_freedom())
             .map(|index| (index as f64 + 0.25).sin())
             .collect::<Vec<_>>();

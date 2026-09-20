@@ -1402,7 +1402,12 @@ impl CanonicalGpuTransferPlan {
         outgoing: &CanonicalOutgoingNormalizedTransfer,
         runtime: &CanonicalGpuRuntimeTransfer,
     ) -> Result<Self, CanonicalGpuBuildError> {
-        let primary_targets = primary.targets();
+        let primary_identity = primary.is_identity();
+        let primary_targets = if primary_identity {
+            Vec::new()
+        } else {
+            primary.targets()
+        };
         let vector_identity = complementary.is_identity();
         let vector_targets = if vector_identity {
             Vec::new()
@@ -1419,7 +1424,11 @@ impl CanonicalGpuTransferPlan {
             .outgoing_boundary()
             .map_or(0, |boundary| boundary.auxiliary_count());
         if primary.source_support().len() != source.degrees_of_freedom()
-            || primary_targets.len() != target.degrees_of_freedom()
+            || if primary_identity {
+                primary.target_node_count() != target.degrees_of_freedom()
+            } else {
+                primary_targets.len() != target.degrees_of_freedom()
+            }
             || complementary.source_sample_count() != source.complementary_degrees_of_freedom()
             || if vector_identity {
                 source.complementary_degrees_of_freedom()
@@ -1485,11 +1494,6 @@ impl CanonicalGpuTransferPlan {
         }
 
         let mut words = vec![GpuCanonicalTransferWord::default(); TRANSFER_HEADER_WORDS];
-        let primary_identity = source.degrees_of_freedom() == target.degrees_of_freedom()
-            && primary_targets
-                .iter()
-                .enumerate()
-                .all(|(index, target)| target.exact && target.source_nodes[0] == index as u32);
         let primary_offset = words.len();
         for target in primary_targets.iter().filter(|_| !primary_identity) {
             words.extend([
