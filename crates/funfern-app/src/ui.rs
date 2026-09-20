@@ -57,6 +57,11 @@ const FRAME_HISTORY: usize = 120;
 const EVENT_LOG_ENTRIES: usize = 200;
 /// Seconds of progress the steps-per-second readout averages over.
 const STEP_RATE_WINDOW: f64 = 0.5;
+/// The display quiet floor is an amplitude ratio; energy is quadratic in that
+/// amplitude. Below the matching run-relative energy ratio, a relative error
+/// or normalized vector direction describes numerical tail rather than useful
+/// wave content.
+const DORMANT_ENERGY_RATIO: f64 = 1.0e-6;
 /// Frames one line or boundary probe keeps. With the sampling presets' rates
 /// this is 17, 8.5, or 4.3 seconds of path history, and it bounds how far back
 /// the averaged flux row can look.
@@ -960,6 +965,7 @@ pub struct Playground {
     far_field_recording_from: Option<f64>,
     frame_ms: f32,
     wave_energy: Option<f64>,
+    wave_energy_peak: f64,
     /// Full-state energy is a diagnostic, not a render input. Recomputing it
     /// over every canonical node and sample at display rate made large meshes
     /// consume a main-thread core even when the diagnostics window was closed.
@@ -1004,6 +1010,7 @@ pub struct Playground {
     amr_indicator_job: Option<SolutionIndicatorJob>,
     amr_indicator_source: Option<AmrIndicatorSource>,
     amr_indicator_result: Option<SolutionIndicatorResult>,
+    amr_energy_peak: f64,
     amr_adaptation_job: Option<MeshAdaptationJob>,
     /// Revision of the active mesh the running adaptation started from. The
     /// job is dropped as soon as that mesh is no longer the active one.
@@ -1159,6 +1166,7 @@ impl Default for Playground {
             far_field_recording_from: None,
             frame_ms: 16.0,
             wave_energy: None,
+            wave_energy_peak: 0.0,
             energy_readback: 0,
             energy_updated: Instant::now(),
             full_snapshot_requested: Instant::now(),
@@ -1191,6 +1199,7 @@ impl Default for Playground {
             amr_indicator_job: None,
             amr_indicator_source: None,
             amr_indicator_result: None,
+            amr_energy_peak: 0.0,
             amr_adaptation_job: None,
             amr_adaptation_source: None,
             amr_adaptation_state: None,
@@ -3028,6 +3037,10 @@ impl Playground {
     /// says it has nothing instead.
     fn amr_estimate_line(&self) -> String {
         match &self.amr_indicator_result {
+            Some(result) if result.report.dormant => format!(
+                "Estimated error dormant · target {:.0}%",
+                self.amr_accuracy_percent
+            ),
             Some(result) => format!(
                 "Estimated error {:.1}% · target {:.0}%",
                 100.0 * result.report.global_indicator,
@@ -3112,6 +3125,8 @@ impl Playground {
                          nodes - leaves a speckle that stays put for the rest of the run. \
                          This removes it, at a cost of well under a percent per half minute \
                          to a wave resolved as finely as the adaptation above aims for. \
+                         It preserves constants and stationary force-free flux; it is not a \
+                         terminal-silence or DC-removal control. \
                          Turn it off to see the untouched scheme.",
                     );
             });
@@ -4447,11 +4462,18 @@ impl Playground {
                 self.vector_overlay_ac_generation = generation;
                 self.vector_overlay_dc_step = u64::MAX;
             }
-            self.ac_couple_vector_samples(&mut samples, completed_steps);
+            self.ac_couple_vector_samples(
+                &mut samples,
+                completed_steps,
+                resident_filter_boundary(self.grid_scale_filter, completed_steps),
+            );
         } else {
             self.vector_overlay_ac_state.clear();
             self.vector_overlay_ac_generation = generation;
             self.vector_overlay_dc_step = completed_steps;
+        }
+        if energy_is_dormant(self.wave_energy, self.wave_energy_peak) {
+            return;
         }
         let mut magnitudes = samples
             .iter()
@@ -4511,6 +4533,7 @@ impl Playground {
         &mut self,
         samples: &mut [(u32, Pos2, Point2)],
         completed_steps: u64,
+        maintenance_discontinuity: bool,
     ) {
         let restarted = self.vector_overlay_dc_step == u64::MAX
             || completed_steps < self.vector_overlay_dc_step;
@@ -4538,8 +4561,17 @@ impl Playground {
                     if elapsed_steps > 0 {
                         let elapsed = elapsed_steps as f64 * self.uploaded_time_step.max(0.0);
                         let pole = (-VECTOR_DC_REJECTION_RATE * elapsed).exp();
-                        let input_gain = 0.5 * (1.0 + pole);
-                        state.output = state.output * pole + (*value - state.input) * input_gain;
+                        if maintenance_discontinuity {
+                            // The paired grid filter is a zero-duration accepted
+                            // maintenance event. Its jump is not temporal field
+                            // content, so rebase the input without feeding that
+                            // correction through the arrow high-pass.
+                            state.output = state.output * pole;
+                        } else {
+                            let input_gain = 0.5 * (1.0 + pole);
+                            state.output =
+                                state.output * pole + (*value - state.input) * input_gain;
+                        }
                         state.input = *value;
                         state.step = completed_steps;
                     }
@@ -7029,6 +7061,9 @@ impl Playground {
                             self.restart_probe_traces();
                             self.canonical_event_serial = 0;
                             self.canonical_event_observed = 0;
+                            self.wave_energy = None;
+                            self.wave_energy_peak = 0.0;
+                            self.amr_energy_peak = 0.0;
                         }
                         self.restart_exposures_after_handoff(upload.fresh);
                         self.amr_adaptation_state = if active.adapted {
@@ -7224,7 +7259,7 @@ impl Playground {
                     .iter()
                     .map(|value| f64::from(*value))
                     .collect::<Vec<_>>();
-                self.wave_energy = canonical_energy_breakdown(
+                let energy = canonical_energy_breakdown(
                     &active.canonical_operator,
                     &primary,
                     &complementary,
@@ -7232,6 +7267,10 @@ impl Playground {
                 )
                 .ok()
                 .map(CanonicalEnergyBreakdown::total);
+                if let Some(energy) = energy.filter(|energy| energy.is_finite() && *energy > 0.0) {
+                    self.wave_energy_peak = self.wave_energy_peak.max(energy);
+                }
+                self.wave_energy = energy;
                 self.energy_readback = display.full_readbacks;
                 self.energy_updated = Instant::now();
             }
@@ -7619,6 +7658,9 @@ impl Playground {
                     return;
                 }
             };
+            if result.report.total_energy.is_finite() && result.report.total_energy > 0.0 {
+                self.amr_energy_peak = self.amr_energy_peak.max(result.report.total_energy);
+            }
             let refine = adaptation_refines(&result.report, self.amr_target_accuracy());
             let coarsen = result.report.coarsen_candidates >= 4;
             self.amr_coarsen_streak = if coarsen {
@@ -7698,6 +7740,15 @@ impl Playground {
             return;
         }
         let step = display.snapshot_completed_steps;
+        if resident_filter_boundary(self.grid_scale_filter, step) {
+            // The resident filter is accepted at this same solver step and
+            // flips the state lanes once more. At that instant the other lane
+            // is the pre-filter state, not the endpoint one `dt` earlier.
+            // Let the next ordinary step restore the endpoint contract instead
+            // of reporting the deliberate damping correction as wave error.
+            self.amr_status = "waiting for post-filter endpoint".into();
+            return;
+        }
         if self
             .amr_last_analyzed_step
             .is_some_and(|previous| step < previous.saturating_add(8))
@@ -7820,6 +7871,7 @@ impl Playground {
                         &active.bundle.authored,
                         active.point_source,
                     ),
+                    dormant_below_energy: self.amr_energy_peak * DORMANT_ENERGY_RATIO,
                     ..Default::default()
                 },
             )
@@ -10323,16 +10375,20 @@ impl Playground {
                         report.minimum_target,
                         report.maximum_target,
                     ));
-                    ui.small(format!(
-                        "Whole field {:.2}% · target {:.0}% · {}",
-                        100.0 * report.global_indicator,
-                        self.amr_accuracy_percent,
-                        if adaptation_refines(report, self.amr_target_accuracy()) {
-                            "refining"
-                        } else {
-                            "settled"
-                        },
-                    ));
+                    if report.dormant {
+                        ui.small("Whole field dormant · relative error suppressed");
+                    } else {
+                        ui.small(format!(
+                            "Whole field {:.2}% · target {:.0}% · {}",
+                            100.0 * report.global_indicator,
+                            self.amr_accuracy_percent,
+                            if adaptation_refines(report, self.amr_target_accuracy()) {
+                                "refining"
+                            } else {
+                                "settled"
+                            },
+                        ));
+                    }
                     ui.small(format!(
                         "Refine candidates {} ({} error, {} limit) · coarsen candidates {} · \
                          {} work units",
@@ -11975,6 +12031,22 @@ fn adaptation_refines(report: &SolutionIndicatorReport, target_accuracy: f64) ->
         || (report.error_refine_candidates >= 4 && report.global_indicator > target_accuracy)
 }
 
+/// A resident filter flips the accepted state lane without advancing physical
+/// time. The other lane at this boundary is the pre-filter state, not the
+/// previous solver endpoint; derivative and residual consumers must not treat
+/// the pair as one ordinary `dt` step.
+fn resident_filter_boundary(enabled: bool, completed_steps: u64) -> bool {
+    enabled && completed_steps > 0 && completed_steps.is_multiple_of(GRID_SCALE_FILTER_CADENCE)
+}
+
+fn energy_is_dormant(current: Option<f64>, peak: f64) -> bool {
+    peak.is_finite()
+        && peak > 0.0
+        && current.is_some_and(|current| {
+            current.is_finite() && current >= 0.0 && current <= peak * DORMANT_ENERGY_RATIO
+        })
+}
+
 fn highest_forcing_frequency(scene: &TopologyScene, source: PointSource) -> f64 {
     let mut frequency = if source.enabled {
         source.signal.frequency_ceiling_hz()
@@ -12523,16 +12595,59 @@ mod tests {
         let sample = |value| vec![(0, Pos2::ZERO, Point2::new(value, 0.0))];
 
         let mut first = sample(1.0);
-        state.ac_couple_vector_samples(&mut first, 0);
+        state.ac_couple_vector_samples(&mut first, 0, false);
         assert_eq!(first[0].2.x, 0.0);
 
         let mut after_one_second = sample(1.0);
-        state.ac_couple_vector_samples(&mut after_one_second, 100);
+        state.ac_couple_vector_samples(&mut after_one_second, 100, false);
         assert_eq!(after_one_second[0].2.x, 0.0);
 
         let mut after_two_seconds = sample(1.0);
-        state.ac_couple_vector_samples(&mut after_two_seconds, 200);
+        state.ac_couple_vector_samples(&mut after_two_seconds, 200, false);
         assert_eq!(after_two_seconds[0].2.x, 0.0);
+    }
+
+    #[test]
+    fn resident_filter_boundaries_are_not_ordinary_time_endpoints() {
+        assert!(!resident_filter_boundary(true, 0));
+        assert!(!resident_filter_boundary(true, 15));
+        assert!(resident_filter_boundary(true, 16));
+        assert!(resident_filter_boundary(true, 32));
+        assert!(!resident_filter_boundary(false, 16));
+    }
+
+    #[test]
+    fn terminal_energy_is_quiet_only_relative_to_an_established_run() {
+        assert!(!energy_is_dormant(Some(1.0e-12), 0.0));
+        assert!(!energy_is_dormant(None, 1.0));
+        assert!(!energy_is_dormant(Some(f64::NAN), 1.0));
+        assert!(!energy_is_dormant(Some(2.0e-6), 1.0));
+        assert!(energy_is_dormant(Some(DORMANT_ENERGY_RATIO), 1.0));
+        assert!(energy_is_dormant(Some(0.0), 1.0));
+    }
+
+    #[test]
+    fn arrow_ac_coupling_does_not_turn_filter_maintenance_into_a_wave() {
+        let mut state = Playground {
+            uploaded_time_step: 0.01,
+            ..Playground::default()
+        };
+        let mut first = vec![(0, Pos2::ZERO, Point2::default())];
+        state.ac_couple_vector_samples(&mut first, 14, false);
+
+        let mut ordinary = vec![(0, Pos2::ZERO, Point2::new(0.2, 0.0))];
+        state.ac_couple_vector_samples(&mut ordinary, 15, false);
+        assert!((0.19..0.21).contains(&ordinary[0].2.x));
+
+        // Deliberately exaggerated maintenance correction. Feeding the raw
+        // input jump to the high-pass would produce an arrow near 9.0.
+        let mut filtered = vec![(0, Pos2::ZERO, Point2::new(9.0, 0.0))];
+        state.ac_couple_vector_samples(&mut filtered, 16, true);
+        assert!((0.19..0.21).contains(&filtered[0].2.x));
+
+        let mut after = vec![(0, Pos2::ZERO, Point2::new(9.1, 0.0))];
+        state.ac_couple_vector_samples(&mut after, 17, false);
+        assert!((0.28..0.31).contains(&after[0].2.x));
     }
 
     #[test]
@@ -12542,7 +12657,7 @@ mod tests {
             ..Playground::default()
         };
         let mut first = vec![(7, Pos2::ZERO, Point2::new(1.0, 0.0))];
-        state.ac_couple_vector_samples(&mut first, 0);
+        state.ac_couple_vector_samples(&mut first, 0, false);
         assert_eq!(first[0].2, Point2::default());
 
         // The same mesh element carries temporal history even if its screen
@@ -12552,16 +12667,16 @@ mod tests {
             (7, Pos2::new(80.0, 40.0), Point2::new(1.5, 0.0)),
             (11, Pos2::ZERO, Point2::new(9.0, 0.0)),
         ];
-        state.ac_couple_vector_samples(&mut moved, 1);
+        state.ac_couple_vector_samples(&mut moved, 1, false);
         assert!(moved[0].2.x > 0.49, "lost physical-sample history");
         assert_eq!(moved[1].2, Point2::default(), "new sample flashed DC");
 
         // A lazily retained element uses its own last accepted step when it
         // returns to view; time spent off-screen still decays its baseline.
         let mut elsewhere = vec![(11, Pos2::ZERO, Point2::new(9.0, 0.0))];
-        state.ac_couple_vector_samples(&mut elsewhere, 100);
+        state.ac_couple_vector_samples(&mut elsewhere, 100, false);
         let mut returned = vec![(7, Pos2::ZERO, Point2::new(1.5, 0.0))];
-        state.ac_couple_vector_samples(&mut returned, 101);
+        state.ac_couple_vector_samples(&mut returned, 101, false);
         assert!(
             (0.29..0.31).contains(&returned[0].2.x),
             "off-screen time was lost: {}",
@@ -12594,7 +12709,7 @@ mod tests {
             let time = step as f64 * state.uploaded_time_step;
             let value = (std::f64::consts::TAU * frequency * time).sin();
             let mut samples = vec![(0, Pos2::ZERO, Point2::new(value, 0.0))];
-            state.ac_couple_vector_samples(&mut samples, step);
+            state.ac_couple_vector_samples(&mut samples, step, false);
             if frame >= 300 {
                 input_square += value * value;
                 output_square += samples[0].2.x * samples[0].2.x;

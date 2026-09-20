@@ -379,12 +379,22 @@ element cold-starts at zero output until a second accepted sample supplies tempo
 history; a new mesh generation discards the old element identities. Energy-flow
 arrows never use AC coupling because their temporal mean is meaningful. Quiet-tail
 visibility is applied after each arrow saturates, so a sparse numerical outlier
-cannot defeat the overlay-wide fade; sub-pixel residual arrows are not drawn.
+cannot defeat the overlay-wide fade; sub-pixel residual arrows are not drawn. The
+run's canonical-energy peak provides the final global quiet gate: below `10⁻⁶`
+of that peak energy, no normalized arrow is drawn. This is the energy equivalent
+of the scalar display's `10⁻³` amplitude floor and prevents arbitrary directions
+in f32 residue from being amplified back into view.
 
 The accepted primary field is drawn directly, including a real free-component
 constant. There is no display-only mean subtraction or hidden gauge correction.
 The paired grid-scale filter is an explicit accepted-state event at its exact
-cadence boundary; it is not a presentation transform.
+cadence boundary; it is not a presentation transform. It preserves constants and
+stationary force-free complementary flux and is not a terminal-silence control.
+Because it flips the accepted lane without advancing time, its other lane is the
+pre-filter state rather than the endpoint one `dt` earlier. Temporal consumers
+must either consume explicit endpoint metadata or skip/rebase that maintenance
+boundary. The production AMR adapter skips it; complementary-arrow AC presentation
+decays its existing output and rebases its input there.
 
 Every source in a scene is eased in by one shared smooth envelope spanning
 `SOURCE_RAMP_PERIODS` periods of the slowest oscillating source. A sine started
@@ -949,6 +959,16 @@ the band itself is refilled no finer than it was and no finer than those
 requests, and a refilled band is ordinary mesh to the next pass, which refines
 or collapses it as the field asks; the application uses the unified topology
 path end to end.
+
+The static-linear AMR controller keeps a canonical-energy peak across ordinary
+mesh and solver-generation handoffs and resets it only when a fresh zero field is
+accepted. Below `10⁻⁶` of that peak energy, relative residual normalization is
+dormant: element error indicators become coarsening targets and the reported
+whole-field relative error is zero. Wavelength and configured maximum-element
+limits are evaluated independently and remain binding. An aligned full snapshot
+at a resident-filter cadence boundary is deferred until the next ordinary solver
+endpoint because the filter's zero-time lane flip does not provide the previous
+`dt` endpoint required by the temporal residual.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a

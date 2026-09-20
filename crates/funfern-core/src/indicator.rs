@@ -283,6 +283,11 @@ pub struct SolutionIndicatorOptions {
     pub maximum_scale: f64,
     pub coarsen_ratio: f64,
     pub amplitude_floor: f64,
+    /// Absolute whole-field energy below which relative error has no useful
+    /// meaning. Error-driven targets become quiet/coarsening targets there;
+    /// wavelength and configured-size limits remain authoritative. Zero keeps
+    /// the scale-free standalone estimator behavior.
+    pub dormant_below_energy: f64,
     pub max_work_units: usize,
 }
 
@@ -299,6 +304,7 @@ impl Default for SolutionIndicatorOptions {
             maximum_scale: 2.2,
             coarsen_ratio: 0.65,
             amplitude_floor: 1.0e-8,
+            dormant_below_energy: 0.0,
             max_work_units: 5_000_000,
         }
     }
@@ -340,6 +346,9 @@ pub struct SolutionIndicatorReport {
     /// indicators say where the error is; this says how much of it there is,
     /// and is the quantity an accuracy target names.
     pub global_indicator: f64,
+    /// Relative error is suppressed because the whole field has fallen below
+    /// the run-relative energy floor supplied by the controller.
+    pub dormant: bool,
     /// The smallest element the wavelength rule asked for anywhere, or infinity
     /// where nothing is forced. Below the smallest element allowed it, rather
     /// than the accuracy target, is what holds the mesh at its floor.
@@ -370,6 +379,7 @@ impl Default for SolutionIndicatorReport {
             total_energy: 0.0,
             total_residual: 0.0,
             global_indicator: 0.0,
+            dormant: false,
             smallest_wavelength_target: f64::INFINITY,
         }
     }
@@ -832,6 +842,8 @@ impl SolutionIndicatorJob {
             || options.coarsen_ratio >= 1.0
             || !options.amplitude_floor.is_finite()
             || options.amplitude_floor <= 0.0
+            || !options.dormant_below_energy.is_finite()
+            || options.dormant_below_energy < 0.0
             || options.max_work_units == 0
         {
             return Err(SolutionIndicatorError::InvalidOptions);
@@ -1592,7 +1604,13 @@ impl SolutionIndicatorJob {
             + estimate.cell_residual
             + estimate.interior_jump
             + estimate.boundary_residual;
-        let indicator = (residual / (estimate.energy + floor)).sqrt();
+        let dormant = self.options.dormant_below_energy > 0.0
+            && self.total_energy <= self.options.dormant_below_energy;
+        let indicator = if dormant {
+            0.0
+        } else {
+            (residual / (estimate.energy + floor)).sqrt()
+        };
         let scale = if indicator <= f64::MIN_POSITIVE {
             self.options.maximum_scale
         } else {
@@ -1690,9 +1708,11 @@ impl SolutionIndicatorJob {
             self.report.thin_gap_history_contribution = canonical.thin_gap_contribution;
             self.report.outgoing_history_contribution = canonical.outgoing_contribution;
         }
-        // A field with no energy has no error to speak of, whatever the
-        // residuals of its numerical dust add up to.
-        self.report.global_indicator = if self.total_energy > 0.0 {
+        self.report.dormant = self.options.dormant_below_energy > 0.0
+            && self.total_energy <= self.options.dormant_below_energy;
+        // A field with no meaningful energy has no relative error to speak of,
+        // whatever the residuals of its numerical dust add up to.
+        self.report.global_indicator = if self.total_energy > 0.0 && !self.report.dormant {
             (self.report.total_residual / self.total_energy).sqrt()
         } else {
             0.0
@@ -2687,6 +2707,79 @@ mod tests {
         {
             assert!((a - b).abs() < 1.0e-10, "{a} != {b}");
         }
+    }
+
+    #[test]
+    fn a_run_relative_energy_floor_makes_a_terminal_field_dormant() {
+        let (mesh, operator, scene) = setup();
+        let state = snapshot(&mesh, &operator, |point| {
+            point.x.powi(3) - 0.4 * point.y.powi(2)
+        });
+        let options = SolutionIndicatorOptions {
+            minimum_edge_length: 0.005,
+            maximum_edge_length: 2.0,
+            relative_tolerance: 1.0e-6,
+            ..Default::default()
+        };
+        let active = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator.clone(),
+                scene.clone(),
+                state.clone(),
+                options,
+            ),
+            100,
+        )
+        .unwrap();
+        assert!(active.report.total_energy > 0.0);
+        assert!(active.report.global_indicator > 0.0);
+        assert!(!active.report.dormant);
+
+        let dormant = run(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator.clone(),
+                scene.clone(),
+                state.clone(),
+                SolutionIndicatorOptions {
+                    dormant_below_energy: 2.0 * active.report.total_energy,
+                    ..options
+                },
+            ),
+            100,
+        )
+        .unwrap();
+        assert!(dormant.report.dormant);
+        assert_eq!(dormant.report.global_indicator, 0.0);
+        assert_eq!(dormant.report.error_refine_candidates, 0);
+        assert!(
+            dormant
+                .element_indicators
+                .iter()
+                .all(|indicator| *indicator == 0.0)
+        );
+
+        // Dormancy suppresses only relative-error chasing. A declared forcing
+        // wavelength remains a hard resolution floor.
+        let forced = run(
+            SolutionIndicatorJob::new(
+                mesh,
+                operator,
+                scene,
+                state,
+                SolutionIndicatorOptions {
+                    dormant_below_energy: f64::MAX,
+                    forcing_frequency_hz: 10.0,
+                    elements_per_wavelength: 5.0,
+                    ..options
+                },
+            ),
+            100,
+        )
+        .unwrap();
+        assert!(forced.report.dormant);
+        assert!(forced.report.limit_refine_candidates > 0);
     }
 
     #[test]

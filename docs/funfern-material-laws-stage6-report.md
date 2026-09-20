@@ -86,6 +86,14 @@ The supplement reports ordinary drift, thin-gap and outgoing contributions
 separately. Dynamic and nonlinear material AMR stays gated: this adapter is not
 being renamed into a general nonlinear residual.
 
+The controller treats the paired filter's exact cadence boundary as a
+zero-duration maintenance event, not as an ordinary pair of time endpoints. At
+that boundary the spare lane contains the pre-filter state, so AMR waits for the
+next solver step before taking its synchronized snapshot. It also retains the
+run's peak canonical energy across ordinary handoffs. Below `10⁻⁶` of that peak,
+relative error is dormant and error-driven targets coarsen instead of chasing
+floating-point tail; forced-wavelength and maximum-element limits remain active.
+
 ### Post-cutover AMR and preparation correction
 
 The first production acceptance run exposed two integration defects that the
@@ -193,6 +201,11 @@ its canonical admissible strength. It uses the ordinary accepted/candidate
 validation boundary inside the same command stream: success flips the accepted
 lane before consumers and the next step, while failure latches the global solver
 status. It does not create a host event, request revision, upload or readback.
+Consumers must nevertheless recognize that zero-time lane flip: complementary
+arrow AC presentation rebases without treating the filter correction as a wave,
+and the static-linear AMR adapter defers its endpoint sample. The filter preserves
+constants and stationary force-free complementary flux; terminal quieting is a
+separate run-relative presentation/estimator policy.
 
 ## Verification
 

@@ -5,6 +5,36 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Filter-boundary consumers and dormant-field AMR
+
+- The intermittent terminal static was not evidence that the resident paired
+  filter had stopped running. The filter damps compatible top-of-grid dynamic
+  modes, but deliberately leaves constants and stationary complementary flux in
+  `ker(CᵀWJ)` untouched. It is therefore neither a DC remover nor a terminal
+  zeroing operation.
+- The resident filter is a zero-duration accepted event every 16 solver steps and
+  flips the state lanes after the ordinary step. At that exact boundary the other
+  lane is the pre-filter state, not the physical endpoint one `dt` earlier. AMR
+  could intermittently interpret the deliberate filter correction as a temporal
+  residual, and the complementary-arrow AC view could interpret it as new wave
+  content. AMR now waits for the next ordinary endpoint; arrow AC state decays for
+  that sample and rebases its input without admitting the maintenance jump.
+- Relative AMR error is undefined in the useful sense after the whole field has
+  decayed into f32 residue: both its energy and residual normalization approach
+  zero. The application now remembers the canonical energy peak for the current
+  run. Below `10⁻⁶` of that peak energy (the square of the display's `10⁻³`
+  amplitude floor), it marks relative error dormant, supplies coarsening targets
+  and silences normalized vector arrows. Forced-wavelength and maximum-element
+  limits remain active because they are resolution contracts, not error estimates.
+  Fresh zero-field commits reset both peaks; ordinary field-preserving handoffs do
+  not.
+- Regression coverage distinguishes a filter maintenance boundary from an
+  ordinary endpoint, keeps its jump out of arrow AC output, checks run-relative
+  terminal silence, and proves that dormant AMR still obeys hard wavelength
+  limits. All 653 workspace targets/tests pass with the one known curved-boundary
+  reproducer ignored; warning-denied Clippy, the wasm32 application check,
+  formatting and diff checks also pass.
+
 ## 2026-09-20 — View-stable arrow AC state and terminal silence
 
 - The first AC-arrow implementation keyed its history by screen bin. Moving the

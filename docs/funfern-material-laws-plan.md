@@ -595,6 +595,14 @@ Both right-hand sides use the pre-filter state; `0≤α≤1`. Skip zero-operator
 
 This filter leaves `ker(CᵀWJ)` unchanged: it is not a cure for stationary remap artifacts. Validate tensor weighting, boundaries/constraints, nonuniform meshes, cadence, and f32 in the real core. Constrain the filter at prescribed nodes and account exchange explicitly. Do not silently use this fixed-linear energy argument for nonlinear/time-driven maps; derive and test the chosen frozen/reference-operator extension, its admissibility and its energy effect before enabling those media. Filtering invalidates force/observable caches and has staged acceptance.
 
+A successful filter is a zero-duration accepted state event. If it flips paired
+state lanes, the non-accepted lane at that instant is the pre-filter state, not
+the previous physical-time endpoint. Every derivative, residual, AC-presentation
+or history consumer must receive explicit event metadata or defer/rebase at that
+boundary. Do not infer a `dt` interval from lane identity alone. The production
+Stage 6 adapter now defers AMR to the next ordinary endpoint and rebases the
+complementary-arrow AC view.
+
 ## 8. GPU handoff and topology changes
 
 ### 8.1 Preserve the transaction architecture
@@ -846,7 +854,7 @@ Stage 4 ports those equations to a dormant production-intended f32 WebGPU core w
 
 Stage 5 adds latest-state GPU transfer, atomic generation handoff, physical-history/runtime mapping, cooperative nonlocal preparation and genuinely live/paused event service. The standard same-mesh transaction, irregular maps, both outgoing orders, thin gaps, prescribed/source runtime transfer and injected rollback pass the [Stage 5 acceptance report](funfern-material-laws-stage5-report.md).
 
-Stage 6 ports rendering, point/line/area probes, canonical energy and flow, far-field sampling, readback and static-linear AMR to synchronized direct state, then connects that generation to Mechanical, TM and TE together. Its follow-up keeps the source display live through target admission and gives vector arrows a compact display-rate GPU consumer independent of full AMR snapshots. The [Stage 6 production-cutover report](funfern-material-laws-stage6-report.md) records consumer semantics, history policy, source-edit correction, memory and actual-core performance. The legacy scalar solver remains only optional comparison infrastructure. Keep time-driven and nonlinear laws unavailable until their dependent stages rather than silently ignoring them.
+Stage 6 ports rendering, point/line/area probes, canonical energy and flow, far-field sampling, readback and static-linear AMR to synchronized direct state, then connects that generation to Mechanical, TM and TE together. Its follow-up keeps the source display live through target admission and gives vector arrows a compact display-rate GPU consumer independent of full AMR snapshots. It also makes zero-duration resident-filter boundaries explicit to temporal consumers and makes terminal AMR error dormant below a run-relative energy floor while retaining hard resolution limits. The [Stage 6 production-cutover report](funfern-material-laws-stage6-report.md) records consumer semantics, history policy, source-edit correction, memory and actual-core performance. The legacy scalar solver remains only optional comparison infrastructure. Keep time-driven and nonlinear laws unavailable until their dependent stages rather than silently ignoring them.
 
 ## 13. Verification and acceptance
 

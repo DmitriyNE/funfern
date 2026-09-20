@@ -290,7 +290,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   their time average is meaningful. The canonical state, probes and energy always
   retain the full field. The arrow filter follows stable physical mesh samples while
   the view moves; a newly exposed sample starts silent until it has temporal history,
-  so an unknown DC baseline is not flashed as a wave. Each EM mode remains one scalar
+  so an unknown DC baseline is not flashed as a wave. A resident grid-filter event
+  rebases that presentation filter instead of appearing as temporal field content.
+  Once total canonical energy falls below the run's quiet floor, normalized arrows
+  are hidden rather than magnifying f32 residue. Each EM mode remains one scalar
   Maxwell polarization rather than a simultaneous six-component field solve.
 - **Field exposure:** the scalar field and the vector overlay each set their own
   scale from what is on screen, so a scene whose amplitude is a hundredth of
@@ -487,8 +490,12 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   is clamped, so anything it cannot satisfy - a boundary the field disagrees with,
   the grid-scale leftovers of a wave that has passed - otherwise shrinks by that
   same step every cycle until it reaches the smallest element allowed, whatever
-  the target says. Error concentrated in a small part of a field that is
-  comfortably inside the target is the trade one number for the whole field makes.
+  the target says. Once the whole field has fallen below `10⁻⁶` of the run's
+  peak canonical energy, relative error is reported as dormant and stops driving
+  refinement; this prevents numerical tail divided by vanishing field energy from
+  looking increasingly inaccurate. Error concentrated in a small part of a field
+  that is comfortably inside the target is the trade one number for the whole
+  field makes.
   Carrying a forced wavelength and staying under the largest element allowed are
   floors rather than judgements about error, so they refine regardless; Advanced
   settings holds elements per wavelength, at six - twelve nodes, quadratically -
@@ -522,7 +529,9 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   unresolvable detail, on by default: the scheme dissipates at no wavelength and the fastest modes a
   mesh can hold barely travel, so a sharp event leaves a speckle that stays put
   for the rest of the run, and this removes it for well under a percent per half
-  minute of a wave resolved as finely as the mesh indicator aims for. The default
+  minute of a wave resolved as finely as the mesh indicator aims for. It preserves
+  constants and stationary force-free complementary flux, so it is not a general
+  DC-removal or terminal-silence control. The default
   point source starts on a cosine, which carries no net impulse; any other phase
   hands the field a mean velocity, and a region sealed by reflecting walls has
   nowhere to put one, so its level then rises for as long as the run lasts.
