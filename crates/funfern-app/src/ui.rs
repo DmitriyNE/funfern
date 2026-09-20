@@ -10733,13 +10733,16 @@ impl Playground {
 }
 
 fn timing_line(timing: TopologyPreparationTiming) -> String {
+    let other = (timing.work_ms - timing.categorized_ms()).max(0.0);
     format!(
-        "mesh {:.1} · assembly {:.1} · transfer {:.1} · sources {:.1} · probes {:.1} ms · {} slices · longest {:.1} ms",
+        "CPU work {:.1} ms · mesh {:.1} · assembly {:.1} · transfer {:.1} · sources {:.1} · probes {:.1} · other {:.1} ms · {} slices · longest {:.1} ms",
+        timing.work_ms,
         timing.meshing_ms,
         timing.assembly_ms,
         timing.transfer_ms,
         timing.sources_ms,
         timing.measurements_ms,
+        other,
         timing.slices,
         timing.longest_slice_ms,
     )

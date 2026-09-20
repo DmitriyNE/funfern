@@ -5,6 +5,26 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Canonical preparation latency correction begins
+
+- Headless reproduction of the current autosave found both a bug and real
+  nonlocal cost. A 10,756-DOF material edit with a 288-node second-order trace
+  used about 0.94 s of CPU across 235 four-millisecond slices, explaining the
+  roughly five-second request-to-visible delay at display cadence plus upload.
+  Four repeated edits were stable within 2%; AMR growth, not accumulated work,
+  explains the increasing delay.
+- Point-source placement was being revalidated after assembly on virtually
+  every cooperative work unit. Its linear boundary/triangle search accounted
+  for about 0.46 s at the saved mesh and much more after refinement. Validation
+  is now one-shot per candidate, with a call-count regression. Preparation
+  diagnostics also report total CPU work and the unclassified remainder rather
+  than showing phase buckets that omitted this work.
+- Added a staged preparation-latency subplan to the canonical specification.
+  Next is one cancellable native preparation worker, followed by dependency-
+  specific reuse and exact/proportional second-order trace fast paths. A worker
+  isolates the main loop but still shares CPU/cache/memory resources, so active-
+  preparation frame pacing and solver throughput are explicit acceptance gates.
+
 ## 2026-09-20 — Chrome WGSL validation repair
 
 - The canonical solver and handoff shaders passed wgpu's pinned Naga validator

@@ -846,6 +846,46 @@ The [detailed stage plan](funfern-material-laws-review.md#5-implementation-stage
 
 Performance is measured incrementally on the real solver path in Stages 2–6 and again for dynamic/nonlinear additions, not by a disposable isolated kernel benchmark and not only after the catalogue is finished. Include boundary preparation/solve, validation, peak memory and handoff; compare wall time per simulated second at matched accuracy.
 
+### Canonical preparation-latency subplan
+
+This is an active correction track between Stages 6 and 7, not a change to the
+canonical equations. The accepted GPU generation must keep evolving while a
+candidate is prepared, but that alone is insufficient: ordinary edits must
+reach the field quickly without trading the delay for UI stalls or hidden
+solver contention.
+
+The 2026-09-20 autosave investigation separates three costs. At 10,756 primary
+DOFs and a 288-node second-order trace, a material edit used about 0.94 s of CPU
+in 235 four-millisecond slices, hence about 3.9 s at 60 Hz before packing and
+GPU admission. Repeated point-source placement validation accounted for about
+0.46 s of that CPU work. With that scan neutralized, preparation used about
+0.48 s in 120 slices. Repeating four edits stayed within 2%, so the worsening
+over time is mesh/trace growth under AMR, not accumulating stale work. A 43,514-
+DOF, 616-trace-node fixture exposed the genuine nonlocal scaling: canonical
+operator preparation rose from about 0.40 s to 4.37 s and outgoing-history
+composition from about 0.07 s to 0.70 s, consistent with the reference dense
+modal work rather than bulk FEM assembly alone.
+
+Implement and review this correction in the following order:
+
+| Latency stage | Work and gate |
+| --- | --- |
+| P0 — accounting and accidental repetition | Validate point-source placement exactly once per candidate. Report total CPU work as well as categorized phase time, so unbucketed validation cannot disappear from diagnostics. Add call-count and saved-scene regressions. |
+| P1 — native execution isolation | Move the owned CPU preparation job to at most one native worker. Keep the accepted GPU solver and UI live; publish immutable progress/results by token and discard stale results. A newer request cancels or supersedes old work without allowing an unbounded set of workers. WASM remains cooperatively sliced until a real Web Worker path exists. |
+| P2 — dependency-specific reuse | Replace whole-authored-scene invalidation with explicit geometry, bulk-operator, boundary-operator, source and measurement dependencies. Source/probe-only changes must not rebuild operators. Reuse unchanged outer-trace modes across interior edits/AMR and encode exact same-discretization complementary transfer as a compact identity. |
+| P3 — boundary fast paths | Reuse an unchanged normalized trace operator exactly. Detect mathematically proportional trace operators and retain their eigenbasis while updating eigenvalues/scales; map aligned modal history without constructing a dense all-pairs transform. Retain the general basis-invariant transfer for genuine changes. |
+| P4 — general refined-boundary algorithm | If arbitrary changed 500–1,000-node traces remain noninteractive, replace the generic dense Jacobi reference with a resumable solver exploiting disconnected one-dimensional banded/cyclic trace components. Require eigen-residual, orthogonality, passivity, reflection and history-transfer parity before cutover. Capping boundary AMR is an explicit accuracy tradeoff, not the default substitute for this work. |
+
+A separate thread isolates latency-sensitive UI/render work; it does not make
+CPU, cache, memory-bandwidth or unified-memory contention disappear. P1 therefore
+uses one worker rather than a general parallel pool and measures solver step
+rate and frame pacing while preparation is active. The initial native gate is
+request-to-ready at most 0.75 s for the saved 10,756-DOF/288-trace material edit,
+no more than 10% steady solver-throughput loss, and no new frame slice above the
+existing responsiveness budget. Record raw worker CPU time separately from GPU
+packing/admission. Refined-trace budgets are fixed from P3/P4 measurements rather
+than met by silently downgrading the boundary condition.
+
 ### Current implementation handoff
 
 Read this specification and the detailed stages; consult reports for derivations, not as competing live plans. Baseline `beca47e` remains the clean numerical reference. Stage 1 coalesced the useful unfinished authoring work, removed superseded semantics, restored all material literals/imports, and added explicit legacy-solver rejection for non-inert laws. Do not copy the spike Python into production, implement bulk gauge machinery, or interpret the green Stage 1 checks as validation of a canonical or nonlinear solver that does not exist yet.

@@ -112,6 +112,10 @@ pub struct CompiledTopologyProbe {
 /// directly.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TopologyPreparationTiming {
+    /// Wall time actually spent advancing preparation work. This excludes the
+    /// idle time between UI frames but includes validation and phase-transition
+    /// work which may not belong to one of the narrower buckets below.
+    pub work_ms: f64,
     pub meshing_ms: f64,
     pub assembly_ms: f64,
     pub transfer_ms: f64,
@@ -123,6 +127,10 @@ pub struct TopologyPreparationTiming {
 
 impl TopologyPreparationTiming {
     pub fn total_ms(self) -> f64 {
+        self.work_ms
+    }
+
+    pub fn categorized_ms(self) -> f64 {
         self.meshing_ms
             + self.assembly_ms
             + self.transfer_ms
@@ -270,6 +278,9 @@ pub struct TopologyPreparationJob {
     mesh: Option<Arc<TriMesh>>,
     assembly_job: Option<QuadraticAssemblyJob>,
     operator: Option<Arc<QuadraticWaveOperator>>,
+    point_source_validated: bool,
+    #[cfg(test)]
+    point_source_validation_count: u32,
     canonical_assembly_job: Option<CanonicalAssemblyJob>,
     canonical_operator: Option<Arc<CanonicalWaveOperator>>,
     transfer_job: Option<QuadraticTransferJob>,
@@ -435,6 +446,9 @@ impl TopologyPreparationJob {
             mesh_job,
             mesh,
             operator,
+            point_source_validated: false,
+            #[cfg(test)]
+            point_source_validation_count: 0,
             assembly_job: None,
             canonical_assembly_job: None,
             canonical_operator,
@@ -496,6 +510,9 @@ impl TopologyPreparationJob {
             mesh_job: None,
             mesh: Some(Arc::new(mesh)),
             operator: None,
+            point_source_validated: false,
+            #[cfg(test)]
+            point_source_validation_count: 0,
             assembly_job: None,
             canonical_assembly_job: None,
             canonical_operator: None,
@@ -590,8 +607,10 @@ impl TopologyPreparationJob {
         started: Instant,
         mut outcome: Option<Result<PreparedTopology, TopologyPreparationError>>,
     ) -> Option<Result<PreparedTopology, TopologyPreparationError>> {
+        let elapsed = elapsed_ms(started);
+        self.timing.work_ms += elapsed;
         self.timing.slices = self.timing.slices.saturating_add(1);
-        self.timing.longest_slice_ms = self.timing.longest_slice_ms.max(elapsed_ms(started));
+        self.timing.longest_slice_ms = self.timing.longest_slice_ms.max(elapsed);
         // A finished handoff copied the timing before this slice was counted, so
         // without this it omits its own last and usually longest slice, which is
         // exactly the tail the diagnostics exist to show.
@@ -676,16 +695,12 @@ impl TopologyPreparationJob {
                 Ok(operator) => Arc::new(operator),
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             };
-            match self.validate_point_source(&mesh, &operator) {
-                Ok(()) => {}
-                Err(error) => return Some(Err(self.fail(error))),
-            }
             self.operator = Some(operator);
+            if let Err(error) = self.validate_point_source_once() {
+                return Some(Err(self.fail(error)));
+            }
             return None;
-        } else if self.transfer_job.is_none()
-            && let Err(error) = self
-                .validate_point_source(self.mesh.as_ref().unwrap(), self.operator.as_ref().unwrap())
-        {
+        } else if let Err(error) = self.validate_point_source_once() {
             return Some(Err(self.fail(error)));
         }
 
@@ -979,6 +994,25 @@ impl TopologyPreparationJob {
         if stencil.region != self.point_source.region {
             return Err("Point source position does not lie in its assigned region".into());
         }
+        Ok(())
+    }
+
+    /// Point-source placement depends on the candidate mesh/operator but not on
+    /// any later assembly or transfer phase. In particular, do not repeat its
+    /// linear mesh search for every cooperative work unit after assembly.
+    fn validate_point_source_once(&mut self) -> Result<(), String> {
+        if self.point_source_validated {
+            return Ok(());
+        }
+        let mesh = self.mesh.as_ref().unwrap().clone();
+        let operator = self.operator.as_ref().unwrap().clone();
+        #[cfg(test)]
+        {
+            self.point_source_validation_count =
+                self.point_source_validation_count.saturating_add(1);
+        }
+        self.validate_point_source(&mesh, &operator)?;
+        self.point_source_validated = true;
         Ok(())
     }
 
@@ -1583,6 +1617,40 @@ mod tests {
         assert_eq!(finished, token);
         assert!(calls > 1, "a zero budget still yields after one slice");
         assert_eq!(bounded.commit_ready(token).unwrap().timing.slices, calls);
+    }
+
+    #[test]
+    fn point_source_placement_is_validated_once_per_candidate() {
+        let mut editor = TopologyEditor::default();
+        editor.document.model.source.enabled = true;
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        let mut observed = 0;
+        let finished = loop {
+            if let Some(job) = runtime.preparing.as_ref() {
+                observed = observed.max(job.point_source_validation_count);
+                assert!(
+                    job.point_source_validation_count <= 1,
+                    "point-source placement was revalidated during later work"
+                );
+            }
+            if let Some(result) = runtime.advance(1) {
+                break result.unwrap();
+            }
+        };
+        assert_eq!(finished, token);
+        assert_eq!(observed, 1);
+        let timing = runtime.commit_ready(token).unwrap().timing;
+        assert!(timing.work_ms > 0.0);
+        assert!(timing.work_ms >= timing.categorized_ms() * 0.99);
     }
 
     /// The accepted bundle carries the plan the mesh is built from, whose atoms
