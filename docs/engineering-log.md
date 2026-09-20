@@ -5,6 +5,28 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Arrow sampling and AC state survive view and mesh changes
+
+- Pan and zoom previously replaced the GPU arrow lattice every UI frame and
+  invalidated the last completed revision immediately. Readback could not catch
+  a continuously moving target, so arrows disappeared until the camera stopped;
+  a mesh handoff exposed the same asynchronous gap. Lattice replacements are now
+  coalesced one at a time while the last completed world-space arrows remain
+  drawable and reproject with the view. The coalescer also verifies recorder
+  generation/revision ownership: an AMR handoff can orphan a zoom-triggered
+  readback, which is abandoned immediately rather than freezing the gate until
+  reset. A deadline retries any otherwise lost completion.
+- A same-physics remesh keeps the prior arrows until the new samples arrive, then
+  spatially rebases the presentation-only AC state onto nearby new screen-lattice
+  samples. Physics changes and fresh zero-state installs still clear it.
+- The DC blocker had treated every readback on a grid-filter cadence boundary as
+  if its whole change were zero-duration maintenance, discarding genuine wave
+  evolution since the previous readback. The GPU arrow record now includes the
+  pre-filter complementary field: the blocker advances to that endpoint and
+  suppresses only the actual accepted-state correction. Regressions cover static
+  rejection, source-band gain, long-run mean, maintenance separation and remesh
+  continuity.
+
 ## 2026-09-20 — Threaded browser handoff packing matches native placement
 
 - The GRIN-lens boundary-move report exposed another browser-only scheduling

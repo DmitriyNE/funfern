@@ -377,8 +377,11 @@ not reinterpret a spatial jump as temporal signal. State is kept only for elemen
 that have actually been sampled in the current mesh discretization. A newly visible
 element cold-starts at zero output until a second accepted sample supplies temporal
 history. A solver-generation handoff on the same mesh and physics retains that
-history; a remesh or physics-skin change discards the old element identities.
-Fresh zero-state installation also clears it explicitly. Energy-flow
+history. Across a same-physics remesh, new screen-lattice samples inherit the
+nearest old sample's decayed AC output and rebase their raw input to the
+transferred field, avoiding a zero-frame blink without interpreting remap error
+as temporal signal. A physics-skin change discards the old identities and
+meaning. Fresh zero-state installation also clears it explicitly. Energy-flow
 arrows never use AC coupling because their temporal mean is meaningful. Quiet-tail
 visibility is applied after each arrow saturates, so a sparse numerical outlier
 cannot defeat the overlay-wide fade; sub-pixel residual arrows are not drawn. The
@@ -395,7 +398,9 @@ Because it flips the accepted lane without advancing time, its other lane is the
 pre-filter state rather than the endpoint one `dt` earlier. Temporal consumers
 must either consume explicit endpoint metadata or skip/rebase that maintenance
 boundary. The production AMR adapter skips it; complementary-arrow AC presentation
-decays its existing output and rebases its input there.
+advances through the explicitly sampled pre-filter endpoint, then rebases its
+input to the post-filter state without presenting the zero-duration correction
+as a wave.
 
 Every source in a scene is eased in by one shared smooth envelope spanning
 `SOURCE_RAMP_PERIODS` periods of the slowest oscillating source. A sine started
@@ -1068,7 +1073,10 @@ when the view changes, the GPU samples complementary field and energy flow after
 each rendered solver batch, and only the arrow records cross back. Each readback
 carries a GPU-written step marker and compensated two-f32 absolute time. Stale
 asynchronous results cannot be mistaken for a newer level, and presentation
-filters retain their physical decay across timestep-changing handoffs.
+filters retain their physical decay across timestep-changing handoffs. Camera
+changes coalesce behind at most one in-flight sampling-lattice replacement; the
+last completed world-space lattice remains drawable and is reprojected during
+pan/zoom or a mesh handoff until its replacement has actually arrived.
 Continuous buffer readback is completion-paced rather than frame-paced: a shared
 main/render-world token allows at most one staging copy per readback entity to be
 in flight, and a completion event rearms it. Requested full-state snapshots use

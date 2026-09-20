@@ -19,7 +19,12 @@ struct PointStencil {
     sample_valid: vec4<u32>, reference_inverse: vec4<f32>, orientation: vec4<f32>,
 }
 struct ProbeControl { values: vec4<f32> }
-struct ProbeSample { primary: vec4<f32>, secondary: vec4<f32> }
+// The third word is unused by point probes. Vector-overlay samples use it for
+// metadata and keep the second word for the pre-maintenance complementary
+// field needed by the presentation high-pass.
+struct ProbeSample {
+    primary: vec4<f32>, secondary: vec4<f32>, tertiary: vec4<f32>
+}
 
 @group(0) @binding(0) var<storage, read> control: Control;
 @group(0) @binding(1) var<storage, read> state: array<StateWord>;
@@ -37,6 +42,10 @@ fn previous_q(node: u32) -> f32 {
 fn accepted_b(sample: u32) -> vec2<f32> {
     let value = state[control.counts_a.x + sample].values;
     return select(value.xy, value.zw, (control.event.z & 1u) != 0u);
+}
+fn previous_b(sample: u32) -> vec2<f32> {
+    let value = state[control.counts_a.x + sample].values;
+    return select(value.zw, value.xy, (control.event.z & 1u) != 0u);
 }
 fn fields(stencil: PointStencil) -> vec2<f32> {
     let a = stencil.nodes_a;
@@ -71,6 +80,20 @@ fn complementary_flux(stencil: PointStencil) -> vec2<f32> {
         accepted_b(start + 2u).y, accepted_b(start + 3u).y);
     let tail_x = vec4<f32>(accepted_b(start + 4u).x, accepted_b(start + 5u).x, 0.0, 0.0);
     let tail_y = vec4<f32>(accepted_b(start + 4u).y, accepted_b(start + 5u).y, 0.0, 0.0);
+    return vec2<f32>(
+        dot(x, stencil.complementary_a) + dot(tail_x, stencil.complementary_b),
+        dot(y, stencil.complementary_a) + dot(tail_y, stencil.complementary_b));
+}
+fn previous_complementary_flux(stencil: PointStencil) -> vec2<f32> {
+    let start = stencil.sample_valid.x;
+    let x = vec4<f32>(previous_b(start).x, previous_b(start + 1u).x,
+        previous_b(start + 2u).x, previous_b(start + 3u).x);
+    let y = vec4<f32>(previous_b(start).y, previous_b(start + 1u).y,
+        previous_b(start + 2u).y, previous_b(start + 3u).y);
+    let tail_x = vec4<f32>(previous_b(start + 4u).x,
+        previous_b(start + 5u).x, 0.0, 0.0);
+    let tail_y = vec4<f32>(previous_b(start + 4u).y,
+        previous_b(start + 5u).y, 0.0, 0.0);
     return vec2<f32>(
         dot(x, stencil.complementary_a) + dot(tail_x, stencil.complementary_b),
         dot(y, stencil.complementary_a) + dot(tail_y, stencil.complementary_b));
@@ -113,7 +136,8 @@ fn sample_vector_overlay(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let stencil = stencils[sample];
     if stencil.sample_valid.y == 0u {
         output[sample].primary = vec4<f32>(0.0);
-        output[sample].secondary = bitcast<vec4<f32>>(
+        output[sample].secondary = vec4<f32>(0.0);
+        output[sample].tertiary = bitcast<vec4<f32>>(
             vec4<u32>(control.clock_u32.w, 0u,
                 bitcast<u32>(control.clock_origin.x),
                 bitcast<u32>(control.clock_origin.y + control.clock_f32.y)));
@@ -122,9 +146,12 @@ fn sample_vector_overlay(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let primary = fields(stencil);
     let flux = complementary_flux(stencil);
     let complement = physical_complement(stencil, flux);
+    let previous_complement = physical_complement(
+        stencil, previous_complementary_flux(stencil));
     let flow = stencil.orientation.x * primary.x * vec2<f32>(-complement.y, complement.x);
     output[sample].primary = vec4<f32>(complement, flow);
-    output[sample].secondary = bitcast<vec4<f32>>(
+    output[sample].secondary = vec4<f32>(previous_complement, 0.0, 0.0);
+    output[sample].tertiary = bitcast<vec4<f32>>(
         vec4<u32>(control.clock_u32.w, 1u,
             bitcast<u32>(control.clock_origin.x),
             bitcast<u32>(control.clock_origin.y + control.clock_f32.y)));

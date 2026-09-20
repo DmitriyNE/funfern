@@ -534,6 +534,7 @@ impl WaveGpuRequest {
                         generation: self.generation,
                         revision: self.probe_revision,
                         ids: handles.ids.clone(),
+                        canonical: false,
                     },
                 ))
                 .id(),
@@ -608,9 +609,10 @@ impl WaveGpuRequest {
         } else {
             self.clear_probe_buffers(assets, commands);
             let output = vec![
-                GpuPointProbeSample {
+                GpuCanonicalPointProbeSample {
                     primary: Vec4::splat(f32::NAN),
                     secondary: Vec4::splat(f32::NAN),
+                    reserved: Vec4::ZERO,
                 };
                 PROBE_RING_FRAMES * MAX_POINT_PROBES
             ];
@@ -636,6 +638,7 @@ impl WaveGpuRequest {
                         generation: self.generation,
                         revision: self.probe_revision,
                         ids: handles.ids.clone(),
+                        canonical: true,
                     },
                 ))
                 .id(),
@@ -2653,6 +2656,7 @@ struct ProbeReadbackTag {
     generation: u64,
     revision: u64,
     ids: Arc<[u64]>,
+    canonical: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2768,6 +2772,9 @@ pub struct FarFieldRecord {
 pub struct VectorOverlaySample {
     pub complementary: Point2,
     pub energy_flow: Point2,
+    /// Complementary field in the other state lane. At a resident-filter
+    /// boundary this is the pre-filter value at the same physical time.
+    pub pre_filter_complementary: Point2,
 }
 
 #[derive(Resource, Default)]
@@ -2916,8 +2923,16 @@ struct GpuPointProbeSample {
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
+struct GpuCanonicalPointProbeSample {
+    primary: Vec4,
+    secondary: Vec4,
+    reserved: Vec4,
+}
+
+#[derive(Clone, Copy, Default, ShaderType)]
 struct GpuVectorOverlaySample {
     vectors: Vec4,
+    pre_filter_complementary: Vec4,
     metadata: UVec4,
 }
 
@@ -3325,24 +3340,40 @@ fn receive_probe_readback(
     let Ok(tag) = tags.get(event.entity) else {
         return;
     };
-    let samples: Vec<GpuPointProbeSample> = event.to_shader_type();
-    if samples.len() != PROBE_RING_FRAMES * MAX_POINT_PROBES {
-        return;
-    }
     let mut records = Vec::new();
-    for frame in 0..PROBE_RING_FRAMES {
-        for (slot, id) in tag.ids.iter().copied().enumerate() {
-            let sample = samples[frame * MAX_POINT_PROBES + slot];
-            if sample.primary.is_finite() && sample.secondary.is_finite() {
-                records.push(PointProbeRecord {
-                    probe_id: id,
-                    time: sample.primary.w as f64,
-                    displacement: sample.primary.x as f64,
-                    velocity: sample.primary.y as f64,
-                    energy_density: sample.primary.z as f64,
-                    transverse_magnitude: sample.secondary.x as f64,
-                    poynting_magnitude: sample.secondary.y as f64,
-                });
+    let mut append = |slot: usize, primary: Vec4, secondary: Vec4| {
+        if primary.is_finite() && secondary.is_finite() {
+            records.push(PointProbeRecord {
+                probe_id: tag.ids[slot],
+                time: primary.w as f64,
+                displacement: primary.x as f64,
+                velocity: primary.y as f64,
+                energy_density: primary.z as f64,
+                transverse_magnitude: secondary.x as f64,
+                poynting_magnitude: secondary.y as f64,
+            });
+        }
+    };
+    if tag.canonical {
+        let samples: Vec<GpuCanonicalPointProbeSample> = event.to_shader_type();
+        if samples.len() != PROBE_RING_FRAMES * MAX_POINT_PROBES {
+            return;
+        }
+        for frame in 0..PROBE_RING_FRAMES {
+            for slot in 0..tag.ids.len() {
+                let sample = samples[frame * MAX_POINT_PROBES + slot];
+                append(slot, sample.primary, sample.secondary);
+            }
+        }
+    } else {
+        let samples: Vec<GpuPointProbeSample> = event.to_shader_type();
+        if samples.len() != PROBE_RING_FRAMES * MAX_POINT_PROBES {
+            return;
+        }
+        for frame in 0..PROBE_RING_FRAMES {
+            for slot in 0..tag.ids.len() {
+                let sample = samples[frame * MAX_POINT_PROBES + slot];
+                append(slot, sample.primary, sample.secondary);
             }
         }
     }
@@ -3394,6 +3425,10 @@ fn receive_vector_overlay_readback(
         .extend(samples.into_iter().map(|sample| VectorOverlaySample {
             complementary: Point2::new(sample.vectors.x as f64, sample.vectors.y as f64),
             energy_flow: Point2::new(sample.vectors.z as f64, sample.vectors.w as f64),
+            pre_filter_complementary: Point2::new(
+                sample.pre_filter_complementary.x as f64,
+                sample.pre_filter_complementary.y as f64,
+            ),
         }));
     display.readbacks = display.readbacks.saturating_add(1);
 }
@@ -3768,7 +3803,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuCanonicalNode>>(false),
                 storage_buffer_read_only::<Vec<GpuCanonicalPointStencil>>(false),
                 storage_buffer_read_only::<GpuProbeControl>(false),
-                storage_buffer::<Vec<GpuPointProbeSample>>(false),
+                storage_buffer::<Vec<GpuCanonicalPointProbeSample>>(false),
             ),
         ),
     );

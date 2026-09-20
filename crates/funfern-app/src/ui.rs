@@ -745,6 +745,7 @@ struct PreparedGpuUpload {
 struct VectorOverlayLayoutKey {
     mesh_revision: u64,
     generation: u64,
+    physics: PhysicsModel,
     center: Point2,
     scale: f64,
     viewport: Rect,
@@ -762,6 +763,25 @@ struct VectorOverlayLayout {
     key: VectorOverlayLayoutKey,
     revision: u64,
     points: Vec<VectorOverlayLayoutPoint>,
+    submitted_at: Instant,
+}
+
+impl VectorOverlayLayout {
+    fn matches(&self, display: &VectorOverlayDisplay) -> bool {
+        self.key.generation == display.generation
+            && self.revision == display.revision
+            && self.points.len() == display.samples.len()
+    }
+}
+
+fn vector_overlay_revision_owned(
+    generation: u64,
+    revision: u64,
+    recorder_generation: u64,
+    recorder_revision: u64,
+    has_buffers: bool,
+) -> bool {
+    generation == recorder_generation && revision == recorder_revision && has_buffers
 }
 
 /// CPU packing for a candidate generation. The immutable topology owns every
@@ -1489,6 +1509,7 @@ struct VectorAcState {
     output: Point2,
     step: u64,
     time: f64,
+    origin: Pos2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1661,7 +1682,14 @@ pub struct Playground {
     energy_updated: Instant,
     full_snapshot_requested: Instant,
     viewport_rect: Rect,
+    /// Latest sampling lattice submitted to the GPU. Camera changes are
+    /// coalesced while this revision is in flight instead of continually
+    /// replacing the readback before it can complete.
     vector_overlay_layout: Option<VectorOverlayLayout>,
+    /// World-space lattice corresponding to the last completed readback. It
+    /// remains drawable while a camera/remesh replacement is in flight, so
+    /// arrows reproject with the view instead of blinking out.
+    vector_overlay_previous_layout: Option<VectorOverlayLayout>,
     /// Presentation-only DC-blocker state for complementary-field arrows. It
     /// never feeds the canonical solver or physical consumers.
     vector_overlay_ac_state: BTreeMap<u32, VectorAcState>,
@@ -1866,6 +1894,7 @@ impl Default for Playground {
             full_snapshot_requested: Instant::now(),
             viewport_rect: Rect::NOTHING,
             vector_overlay_layout: None,
+            vector_overlay_previous_layout: None,
             vector_overlay_ac_state: BTreeMap::new(),
             vector_overlay_ac_owner: None,
             vector_overlay_dc_step: u64::MAX,
@@ -4828,6 +4857,7 @@ impl Playground {
     fn refresh_vector_overlay(
         &mut self,
         recorders: &mut WaveGpuRequest,
+        display: &VectorOverlayDisplay,
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
         active: Option<&Arc<PreparedTopology>>,
@@ -4839,29 +4869,63 @@ impl Playground {
             .presentation
             .vector_overlay
             .resolved(self.editor.document.model.draft.physics);
-        let Some(active) = active.filter(|_| mode != VectorOverlay::Off) else {
+        if mode == VectorOverlay::Off {
+            self.vector_overlay_previous_layout = None;
             if self.vector_overlay_layout.take().is_some() || recorders.vector_overlay.is_some() {
                 recorders.clear_vector_overlay(assets, commands);
             }
             return;
-        };
+        }
+        // During GPU handoff the request/display generation can lead the
+        // runtime commit for a frame. Keep the completed old lattice visible;
+        // clearing it here creates exactly the mesh-handoff blink this cache
+        // exists to bridge.
+        let Some(active) = active else { return };
         if generation == 0 || !self.viewport_rect.is_positive() {
             return;
         }
         let key = VectorOverlayLayoutKey {
             mesh_revision: active.mesh.mesh_revision,
             generation,
+            physics: active.bundle.authored.physics,
             center: self.center,
             scale: self.scale,
             viewport: self.viewport_rect,
             spacing: self.editor.document.presentation.vector_overlay_density,
         };
-        if self
+        // Keep at most one GPU lattice replacement in flight. Replacing its
+        // readback every camera frame can otherwise starve the overlay until
+        // pan/zoom stops. The last completed world-space lattice is still
+        // reprojected by `draw_solution` while this one catches up. Ownership
+        // and a deadline matter: a dropped/superseded readback must not leave
+        // the coalescer waiting forever (reset used to be the only escape).
+        let current_complete = self
             .vector_overlay_layout
             .as_ref()
-            .is_some_and(|layout| layout.key == key)
-        {
+            .is_some_and(|layout| layout.matches(display));
+        if self.vector_overlay_layout.as_ref().is_some_and(|layout| {
+            layout.key == key && (layout.points.is_empty() || current_complete)
+        }) {
             return;
+        }
+        if self.vector_overlay_layout.as_ref().is_some_and(|layout| {
+            !layout.points.is_empty()
+                && !current_complete
+                && vector_overlay_revision_owned(
+                    layout.key.generation,
+                    layout.revision,
+                    recorders.generation(),
+                    recorders.vector_overlay_revision(),
+                    recorders.vector_overlay.is_some(),
+                )
+                && layout.submitted_at.elapsed() < VECTOR_OVERLAY_READBACK_TIMEOUT
+        }) {
+            return;
+        }
+        if let Some(previous) = self.vector_overlay_layout.take()
+            && previous.matches(display)
+        {
+            self.vector_overlay_previous_layout = Some(previous);
         }
         let points = vector_overlay_layout(
             &active.bundle.authored,
@@ -4878,15 +4942,20 @@ impl Playground {
             &stencils,
         ) {
             Ok(()) => {
+                if points.is_empty() {
+                    self.vector_overlay_previous_layout = None;
+                }
                 self.vector_overlay_layout = Some(VectorOverlayLayout {
                     key,
                     revision: recorders.vector_overlay_revision(),
                     points,
+                    submitted_at: Instant::now(),
                 });
             }
             Err(error) => {
                 recorders.clear_vector_overlay(assets, commands);
                 self.vector_overlay_layout = None;
+                self.vector_overlay_previous_layout = None;
                 self.message = error;
             }
         }
@@ -5132,15 +5201,24 @@ impl Playground {
             .vector_overlay
             .resolved(active.bundle.authored.physics);
         if mode != VectorOverlay::Off {
-            let samples = self
+            let layout = self
                 .vector_overlay_layout
                 .as_ref()
-                .filter(|layout| {
-                    layout.key.mesh_revision == active.mesh.mesh_revision
-                        && layout.key.generation == vector_display.generation
-                        && layout.revision == vector_display.revision
-                        && layout.points.len() == vector_display.samples.len()
+                .filter(|layout| layout.matches(vector_display))
+                .or_else(|| {
+                    self.vector_overlay_previous_layout
+                        .as_ref()
+                        .filter(|layout| layout.matches(vector_display))
                 })
+                // A mesh handoff may briefly draw the conservatively
+                // transferred old lattice over the new mesh, but a skin
+                // change changes the physical meaning of both vectors.
+                .filter(|layout| layout.key.physics == active.bundle.authored.physics);
+            let owner = layout.map(|layout| VectorOverlayAcOwner {
+                mesh_revision: layout.key.mesh_revision,
+                physics: layout.key.physics,
+            });
+            let samples = layout
                 .map(|layout| {
                     layout
                         .points
@@ -5152,7 +5230,12 @@ impl Playground {
                                 VectorOverlay::RelativeEnergyFlow => sample.energy_flow,
                                 VectorOverlay::Off => Point2::default(),
                             };
-                            (point.element, self.screen(point.point, r), value)
+                            (
+                                point.element,
+                                self.screen(point.point, r),
+                                value,
+                                sample.pre_filter_complementary,
+                            )
                         })
                         .collect::<Vec<_>>()
                 })
@@ -5160,10 +5243,10 @@ impl Playground {
             self.draw_vector_overlay(
                 painter,
                 samples,
-                VectorOverlayAcOwner {
+                owner.unwrap_or(VectorOverlayAcOwner {
                     mesh_revision: active.mesh.mesh_revision,
                     physics: active.bundle.authored.physics,
-                },
+                }),
                 vector_display.completed_steps,
                 vector_display.absolute_time,
             );
@@ -5178,7 +5261,7 @@ impl Playground {
     fn draw_vector_overlay(
         &mut self,
         painter: &egui::Painter,
-        mut samples: Vec<(u32, Pos2, Point2)>,
+        mut samples: Vec<(u32, Pos2, Point2, Point2)>,
         owner: VectorOverlayAcOwner,
         completed_steps: u64,
         absolute_time: f64,
@@ -5205,7 +5288,13 @@ impl Playground {
             self.vector_overlay_dc_active = dc_active;
         }
         if dc_active {
-            self.retain_vector_overlay_ac_owner(owner);
+            self.retain_vector_overlay_ac_owner(
+                owner,
+                &samples,
+                completed_steps,
+                absolute_time,
+                settings.vector_overlay_density * 1.5,
+            );
             self.ac_couple_vector_samples(
                 &mut samples,
                 completed_steps,
@@ -5219,7 +5308,7 @@ impl Playground {
         }
         let mut magnitudes = samples
             .iter()
-            .map(|(_, _, value)| value.norm())
+            .map(|(_, _, value, _)| value.norm())
             .filter(|magnitude| magnitude.is_finite() && *magnitude > 0.0)
             .collect::<Vec<_>>();
         if magnitudes.is_empty() {
@@ -5241,7 +5330,7 @@ impl Playground {
             return;
         }
         let maximum_length = settings.vector_overlay_density * 0.46;
-        for (_, origin, value) in samples {
+        for (_, origin, value, _) in samples {
             let magnitude = value.norm();
             if magnitude < reference * 0.015 || !magnitude.is_finite() {
                 continue;
@@ -5267,11 +5356,54 @@ impl Playground {
         }
     }
 
-    fn retain_vector_overlay_ac_owner(&mut self, owner: VectorOverlayAcOwner) {
+    fn retain_vector_overlay_ac_owner(
+        &mut self,
+        owner: VectorOverlayAcOwner,
+        samples: &[(u32, Pos2, Point2, Point2)],
+        completed_steps: u64,
+        absolute_time: f64,
+        remap_radius: f32,
+    ) {
         if self.vector_overlay_ac_owner != Some(owner) {
-            self.vector_overlay_ac_state.clear();
+            let compatible_remesh = self
+                .vector_overlay_ac_owner
+                .is_some_and(|previous| previous.physics == owner.physics)
+                && completed_steps >= self.vector_overlay_dc_step
+                && absolute_time.is_finite();
+            if compatible_remesh {
+                let previous = std::mem::take(&mut self.vector_overlay_ac_state);
+                let radius_squared = remap_radius * remap_radius;
+                for (key, origin, value, _) in samples {
+                    let nearest = previous
+                        .values()
+                        .filter_map(|state| {
+                            let distance = state.origin.distance_sq(*origin);
+                            (distance <= radius_squared).then_some((distance, state))
+                        })
+                        .min_by(|left, right| left.0.total_cmp(&right.0));
+                    if let Some((_, state)) = nearest {
+                        let elapsed = (absolute_time - state.time).max(0.0);
+                        self.vector_overlay_ac_state.insert(
+                            *key,
+                            VectorAcState {
+                                // Remeshing is a zero-duration representation
+                                // change. Carry the visible AC state, but rebase
+                                // its raw input to the transferred new sample.
+                                input: *value,
+                                output: state.output * (-VECTOR_DC_REJECTION_RATE * elapsed).exp(),
+                                step: completed_steps,
+                                time: absolute_time,
+                                origin: *origin,
+                            },
+                        );
+                    }
+                }
+                self.vector_overlay_dc_step = completed_steps;
+            } else {
+                self.vector_overlay_ac_state.clear();
+                self.vector_overlay_dc_step = u64::MAX;
+            }
             self.vector_overlay_ac_owner = Some(owner);
-            self.vector_overlay_dc_step = u64::MAX;
         }
     }
 
@@ -5281,7 +5413,7 @@ impl Playground {
     /// attenuating ordinary source frequencies.
     fn ac_couple_vector_samples(
         &mut self,
-        samples: &mut [(u32, Pos2, Point2)],
+        samples: &mut [(u32, Pos2, Point2, Point2)],
         completed_steps: u64,
         absolute_time: f64,
         maintenance_discontinuity: bool,
@@ -5292,7 +5424,7 @@ impl Playground {
         if restarted {
             self.vector_overlay_ac_state.clear();
         }
-        for (key, _, value) in samples {
+        for (key, origin, value, pre_filter_value) in samples {
             match self.vector_overlay_ac_state.entry(*key) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(VectorAcState {
@@ -5300,6 +5432,7 @@ impl Playground {
                         output: Point2::default(),
                         step: completed_steps,
                         time: absolute_time,
+                        origin: *origin,
                     });
                     // A newly visible physical sample has no temporal history.
                     // Passing its first value through would interpret an
@@ -5310,6 +5443,7 @@ impl Playground {
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     let state = entry.get_mut();
+                    state.origin = *origin;
                     if completed_steps > state.step {
                         // The two-f32 clock is substantially more precise than
                         // one absolute f32, but a clock rebase can still round
@@ -5318,11 +5452,13 @@ impl Playground {
                         let elapsed = (absolute_time - state.time).max(0.0);
                         let pole = (-VECTOR_DC_REJECTION_RATE * elapsed).exp();
                         if maintenance_discontinuity {
-                            // The paired grid filter is a zero-duration accepted
-                            // maintenance event. Its jump is not temporal field
-                            // content, so rebase the input without feeding that
-                            // correction through the arrow high-pass.
-                            state.output = state.output * pole;
+                            // First advance through the ordinary evolution up
+                            // to the pre-filter endpoint, then rebase the input
+                            // to the post-filter value without presenting the
+                            // zero-duration numerical correction as a wave.
+                            let input_gain = 0.5 * (1.0 + pole);
+                            state.output = state.output * pole
+                                + (*pre_filter_value - state.input) * input_gain;
                         } else {
                             let input_gain = 0.5 * (1.0 + pole);
                             state.output =
@@ -7821,11 +7957,13 @@ impl Playground {
             <= 1.0e-12 * wanted.abs().max(self.uploaded_time_step.abs()).max(1.0)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn refresh_runtime(
         &mut self,
         request: &mut CanonicalGpuRequest,
         display: &CanonicalGpuDisplay,
         recorders: &mut WaveGpuRequest,
+        vector_display: &VectorOverlayDisplay,
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
         delta: f64,
@@ -8108,6 +8246,7 @@ impl Playground {
         });
         self.refresh_vector_overlay(
             recorders,
+            vector_display,
             assets,
             commands,
             overlay_active.as_ref(),
@@ -12610,6 +12749,10 @@ const FIELD_EXPOSURE_GAIN: f32 = 0.5;
 /// samples and measured in simulated time. Ordinary 2.5--4 Hz waves therefore
 /// retain more than 99.9% of their amplitude.
 const VECTOR_DC_REJECTION_RATE: f64 = 0.5;
+/// A vector sampling revision is tiny and normally completes within a few
+/// display frames. If its readback disappears during rapid resource churn,
+/// retry instead of allowing the one-in-flight coalescer to deadlock.
+const VECTOR_OVERLAY_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
 /// The longest arrow below this global visibility is less than about a tenth
 /// of a pixel even at the coarsest supported density. Avoiding the draw also
 /// avoids assigning a visible direction to near-zero floating-point residue.
@@ -13466,6 +13609,7 @@ pub fn frame(
         &mut request,
         &canonical_display,
         &mut recorders,
+        &vector_display,
         &mut assets,
         &mut commands,
         time.delta_secs_f64(),
@@ -13925,7 +14069,10 @@ mod tests {
     #[test]
     fn arrow_ac_coupling_rejects_static_state_in_simulation_time() {
         let mut state = Playground::default();
-        let sample = |value| vec![(0, Pos2::ZERO, Point2::new(value, 0.0))];
+        let sample = |value| {
+            let value = Point2::new(value, 0.0);
+            vec![(0, Pos2::ZERO, value, value)]
+        };
 
         let mut first = sample(1.0);
         state.ac_couple_vector_samples(&mut first, 0, 0.0, false);
@@ -13941,6 +14088,17 @@ mod tests {
     }
 
     #[test]
+    fn amr_generation_change_orphans_an_in_flight_arrow_lattice() {
+        assert!(vector_overlay_revision_owned(7, 12, 7, 12, true));
+        assert!(
+            !vector_overlay_revision_owned(7, 12, 8, 12, true),
+            "AMR generation incorrectly kept the stale zoom readback alive"
+        );
+        assert!(!vector_overlay_revision_owned(7, 12, 7, 13, true));
+        assert!(!vector_overlay_revision_owned(7, 12, 7, 12, false));
+    }
+
+    #[test]
     fn resident_filter_boundaries_are_not_ordinary_time_endpoints() {
         assert!(!resident_filter_boundary(true, 0));
         assert!(!resident_filter_boundary(true, 15));
@@ -13952,28 +14110,42 @@ mod tests {
     #[test]
     fn arrow_ac_coupling_does_not_turn_filter_maintenance_into_a_wave() {
         let mut state = Playground::default();
-        let mut first = vec![(0, Pos2::ZERO, Point2::default())];
+        let mut first = vec![(0, Pos2::ZERO, Point2::default(), Point2::default())];
         state.ac_couple_vector_samples(&mut first, 14, 0.14, false);
 
-        let mut ordinary = vec![(0, Pos2::ZERO, Point2::new(0.2, 0.0))];
+        let mut ordinary = vec![(0, Pos2::ZERO, Point2::new(0.2, 0.0), Point2::new(0.2, 0.0))];
         state.ac_couple_vector_samples(&mut ordinary, 15, 0.15, false);
         assert!((0.19..0.21).contains(&ordinary[0].2.x));
 
         // Deliberately exaggerated maintenance correction. Feeding the raw
         // input jump to the high-pass would produce an arrow near 9.0.
-        let mut filtered = vec![(0, Pos2::ZERO, Point2::new(9.0, 0.0))];
+        let mut filtered = vec![(0, Pos2::ZERO, Point2::new(9.0, 0.0), Point2::new(0.2, 0.0))];
         state.ac_couple_vector_samples(&mut filtered, 16, 0.16, true);
         assert!((0.19..0.21).contains(&filtered[0].2.x));
 
-        let mut after = vec![(0, Pos2::ZERO, Point2::new(9.1, 0.0))];
+        let mut after = vec![(0, Pos2::ZERO, Point2::new(9.1, 0.0), Point2::new(9.1, 0.0))];
         state.ac_couple_vector_samples(&mut after, 17, 0.17, false);
         assert!((0.28..0.31).contains(&after[0].2.x));
     }
 
     #[test]
+    fn arrow_ac_coupling_keeps_evolution_before_filter_maintenance() {
+        let mut state = Playground::default();
+        let mut first = vec![(0, Pos2::ZERO, Point2::new(0.2, 0.0), Point2::new(0.2, 0.0))];
+        state.ac_couple_vector_samples(&mut first, 15, 0.15, false);
+
+        // The ordinary endpoint advanced to 0.5 before an intentionally huge
+        // same-time maintenance correction moved the accepted state to 9.0.
+        // The wave increment must survive while the correction itself does not.
+        let mut filtered = vec![(0, Pos2::ZERO, Point2::new(9.0, 0.0), Point2::new(0.5, 0.0))];
+        state.ac_couple_vector_samples(&mut filtered, 16, 0.16, true);
+        assert!((0.29..0.31).contains(&filtered[0].2.x));
+    }
+
+    #[test]
     fn arrow_ac_coupling_tracks_physical_samples_and_cold_starts_new_ones() {
         let mut state = Playground::default();
-        let mut first = vec![(7, Pos2::ZERO, Point2::new(1.0, 0.0))];
+        let mut first = vec![(7, Pos2::ZERO, Point2::new(1.0, 0.0), Point2::new(1.0, 0.0))];
         state.ac_couple_vector_samples(&mut first, 0, 0.0, false);
         assert_eq!(first[0].2, Point2::default());
 
@@ -13981,8 +14153,13 @@ mod tests {
         // cell changes. A genuinely new element does not inherit that history
         // or flash its unknown baseline into the AC view.
         let mut moved = vec![
-            (7, Pos2::new(80.0, 40.0), Point2::new(1.5, 0.0)),
-            (11, Pos2::ZERO, Point2::new(9.0, 0.0)),
+            (
+                7,
+                Pos2::new(80.0, 40.0),
+                Point2::new(1.5, 0.0),
+                Point2::new(1.5, 0.0),
+            ),
+            (11, Pos2::ZERO, Point2::new(9.0, 0.0), Point2::new(9.0, 0.0)),
         ];
         state.ac_couple_vector_samples(&mut moved, 1, 0.01, false);
         assert!(moved[0].2.x > 0.49, "lost physical-sample history");
@@ -13990,9 +14167,9 @@ mod tests {
 
         // A lazily retained element uses its own last accepted step when it
         // returns to view; time spent off-screen still decays its baseline.
-        let mut elsewhere = vec![(11, Pos2::ZERO, Point2::new(9.0, 0.0))];
+        let mut elsewhere = vec![(11, Pos2::ZERO, Point2::new(9.0, 0.0), Point2::new(9.0, 0.0))];
         state.ac_couple_vector_samples(&mut elsewhere, 100, 1.0, false);
-        let mut returned = vec![(7, Pos2::ZERO, Point2::new(1.5, 0.0))];
+        let mut returned = vec![(7, Pos2::ZERO, Point2::new(1.5, 0.0), Point2::new(1.5, 0.0))];
         state.ac_couple_vector_samples(&mut returned, 101, 1.01, false);
         assert!(
             (0.29..0.31).contains(&returned[0].2.x),
@@ -14008,28 +14185,80 @@ mod tests {
             mesh_revision: 17,
             physics: PhysicsModel::Mechanical,
         };
-        state.retain_vector_overlay_ac_owner(owner);
-        let mut first = vec![(3, Pos2::ZERO, Point2::new(1.0, 0.0))];
+        state.retain_vector_overlay_ac_owner(owner, &[], 100, 2.0, 80.0);
+        let mut first = vec![(3, Pos2::ZERO, Point2::new(1.0, 0.0), Point2::new(1.0, 0.0))];
         state.ac_couple_vector_samples(&mut first, 100, 2.0, false);
-        let mut changing = vec![(3, Pos2::ZERO, Point2::new(1.4, 0.0))];
+        let mut changing = vec![(3, Pos2::ZERO, Point2::new(1.4, 0.0), Point2::new(1.4, 0.0))];
         state.ac_couple_vector_samples(&mut changing, 110, 2.1, false);
         assert!(changing[0].2.x > 0.39);
 
         // A GPU generation is deliberately absent from the owner. Rebinding
         // material-dependent stencils on the same mesh therefore retains the
         // temporal baseline and continues at the transferred absolute time.
-        state.retain_vector_overlay_ac_owner(owner);
-        let mut after_handoff = vec![(3, Pos2::ZERO, Point2::new(1.5, 0.0))];
+        state.retain_vector_overlay_ac_owner(owner, &[], 120, 2.2, 80.0);
+        let mut after_handoff = vec![(3, Pos2::ZERO, Point2::new(1.5, 0.0), Point2::new(1.5, 0.0))];
         state.ac_couple_vector_samples(&mut after_handoff, 120, 2.2, false);
         assert!(after_handoff[0].2.x > 0.45, "handoff cold-started arrows");
 
-        state.retain_vector_overlay_ac_owner(VectorOverlayAcOwner {
-            mesh_revision: 18,
-            ..owner
-        });
-        let mut after_remesh = vec![(3, Pos2::ZERO, Point2::new(1.5, 0.0))];
+        state.retain_vector_overlay_ac_owner(
+            VectorOverlayAcOwner {
+                mesh_revision: 18,
+                ..owner
+            },
+            &[],
+            120,
+            2.2,
+            80.0,
+        );
+        let mut after_remesh = vec![(3, Pos2::ZERO, Point2::new(1.5, 0.0), Point2::new(1.5, 0.0))];
         state.ac_couple_vector_samples(&mut after_remesh, 120, 2.2, false);
         assert_eq!(after_remesh[0].2, Point2::default());
+    }
+
+    #[test]
+    fn arrow_ac_history_is_spatially_rebased_across_a_remesh() {
+        let mut state = Playground::default();
+        let old_owner = VectorOverlayAcOwner {
+            mesh_revision: 17,
+            physics: PhysicsModel::Mechanical,
+        };
+        state.retain_vector_overlay_ac_owner(old_owner, &[], 100, 2.0, 80.0);
+        let mut first = vec![(
+            3,
+            Pos2::new(40.0, 50.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 0.0),
+        )];
+        state.ac_couple_vector_samples(&mut first, 100, 2.0, false);
+        let mut changing = vec![(
+            3,
+            Pos2::new(40.0, 50.0),
+            Point2::new(1.4, 0.0),
+            Point2::new(1.4, 0.0),
+        )];
+        state.ac_couple_vector_samples(&mut changing, 110, 2.1, false);
+        let before = changing[0].2;
+
+        let new_samples = vec![(
+            91,
+            Pos2::new(43.0, 48.0),
+            Point2::new(1.45, 0.0),
+            Point2::new(1.45, 0.0),
+        )];
+        state.retain_vector_overlay_ac_owner(
+            VectorOverlayAcOwner {
+                mesh_revision: 18,
+                ..old_owner
+            },
+            &new_samples,
+            110,
+            2.1,
+            80.0,
+        );
+        let mut accepted = new_samples;
+        state.ac_couple_vector_samples(&mut accepted, 110, 2.1, false);
+        assert_eq!(accepted[0].2, before, "remesh blinked the AC arrows");
+        assert_eq!(state.vector_overlay_ac_state[&91].input.x, 1.45);
     }
 
     #[test]
@@ -14055,16 +14284,39 @@ mod tests {
         for frame in 0..600_u64 {
             let step = frame * 10;
             let time = step as f64 * state.uploaded_time_step;
-            let value = (std::f64::consts::TAU * frequency * time).sin();
-            let mut samples = vec![(0, Pos2::ZERO, Point2::new(value, 0.0))];
+            let scalar = (std::f64::consts::TAU * frequency * time).sin();
+            let value = Point2::new(scalar, 0.0);
+            let mut samples = vec![(0, Pos2::ZERO, value, value)];
             state.ac_couple_vector_samples(&mut samples, step, time, false);
             if frame >= 300 {
-                input_square += value * value;
+                input_square += scalar * scalar;
                 output_square += samples[0].2.x * samples[0].2.x;
             }
         }
         let retained = (output_square / input_square).sqrt();
         assert!(retained > 0.999, "3 Hz amplitude retention {retained}");
+    }
+
+    #[test]
+    fn arrow_ac_coupling_does_not_leave_a_mean_on_a_dc_offset_sine() {
+        let mut state = Playground::default();
+        let sample_rate = 60.0;
+        let frequency = 2.3;
+        let mut mean = 0.0;
+        let mut count = 0_u64;
+        for frame in 0..1_800_u64 {
+            let time = frame as f64 / sample_rate;
+            let scalar = 4.0 + (std::f64::consts::TAU * frequency * time).sin();
+            let value = Point2::new(scalar, 0.0);
+            let mut samples = vec![(0, Pos2::ZERO, value, value)];
+            state.ac_couple_vector_samples(&mut samples, frame, time, false);
+            if time >= 20.0 {
+                mean += samples[0].2.x;
+                count += 1;
+            }
+        }
+        mean /= count as f64;
+        assert!(mean.abs() < 1.0e-4, "high-pass mean was {mean}");
     }
 
     /// Release is a rate in seconds, so the same second of wall clock has to
@@ -14320,6 +14572,7 @@ mod tests {
                 output: Point2::new(0.2, 0.0),
                 step: 10,
                 time: 0.1,
+                origin: Pos2::new(20.0, 30.0),
             },
         );
         state.restart_exposures_after_handoff(false);
