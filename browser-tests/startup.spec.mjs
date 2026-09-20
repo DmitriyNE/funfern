@@ -40,9 +40,9 @@ test("WebGPU app starts, advances, and resizes its render target", async ({ page
     .toBe(true);
 
   const firstFrame = await canvas.screenshot();
-  await page.waitForTimeout(1_500);
-  const laterFrame = await canvas.screenshot();
-  expect(laterFrame.equals(firstFrame)).toBe(false);
+  await expect
+    .poll(async () => !(await canvas.screenshot()).equals(firstFrame))
+    .toBe(true);
 
   const oldBackingSize = await canvas.evaluate((element) => ({
     width: element.width,

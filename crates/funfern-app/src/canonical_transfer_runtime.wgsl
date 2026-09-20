@@ -4,7 +4,9 @@ const NO_INDEX: u32 = 0xffffffffu;
 const DRIVE_TARGET_PARAMETERS: u32 = 0x80000000u;
 const DRIVE_INDEX_MASK: u32 = 0x7fffffffu;
 const STATUS_LAYOUT: u32 = 1u;
-const MAX_FINITE: f32 = 3.402823466e+38;
+// Leave serialization headroom below f32::MAX: Naga's decimal WGSL writer
+// rounds the exact maximum upward, which Chrome correctly rejects.
+const MAX_FINITE: f32 = 3.0e+38;
 
 struct Control {
     counts_a: vec4<u32>, counts_b: vec4<u32>, counts_c: vec4<u32>,

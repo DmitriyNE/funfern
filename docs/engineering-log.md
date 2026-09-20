@@ -5,6 +5,22 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Chrome WGSL validation repair
+
+- The canonical solver and handoff shaders passed wgpu's pinned Naga validator
+  but failed Chrome/Dawn. Reduction kernels could return on storage-buffer state
+  before reaching a workgroup barrier, which WGSL uniformity analysis forbids.
+  Every invocation now reaches each reduction barrier; stopped, identity and
+  out-of-range workgroups contribute zero and leave only after the reduction.
+- Bevy's Naga writer also expanded the exact `f32::MAX` sentinel into a rounded
+  decimal just above the representable range. Canonical shaders now use `3e38`
+  as the finite-state ceiling, retaining ample overflow detection headroom. The
+  handoff accounting failure sentinel uses the existing runtime-dependent NaN
+  construction required by WebGPU constant-expression rules.
+- A browser test now submits every raw WGSL module to Chrome, in addition to the
+  native Naga shader test and full application smoke test. The full rebuilt WASM
+  app starts, advances and resizes in Chrome without rendering validation errors.
+
 ## 2026-09-20 — Browser packaging and local serving repair
 
 - The toolbar logo became a compile-time asset after the original container

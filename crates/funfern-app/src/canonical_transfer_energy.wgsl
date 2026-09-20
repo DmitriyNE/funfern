@@ -1,6 +1,8 @@
 // Full-state edit accounting for canonical generation handoff.
 const WORKGROUP_SIZE: u32 = 128u;
-const MAX_FINITE: f32 = 3.402823466e+38;
+// Leave serialization headroom below f32::MAX: Naga's decimal WGSL writer
+// rounds the exact maximum upward, which Chrome correctly rejects.
+const MAX_FINITE: f32 = 3.0e+38;
 
 struct Control {
     counts_a: vec4<u32>, counts_b: vec4<u32>, counts_c: vec4<u32>,
@@ -92,6 +94,8 @@ fn account_handoff(@builtin(local_invocation_id) id: vec3<u32>) {
     if edit >= -MAX_FINITE && edit <= MAX_FINITE {
         new_control.candidate_accounting_b.w += edit;
     } else {
-        new_control.candidate_accounting_b.w = bitcast<f32>(0x7fc00000u);
+        // WebGPU rejects a constant expression whose value is NaN. Keep the
+        // payload runtime-dependent while preserving the failure sentinel.
+        new_control.candidate_accounting_b.w = bitcast<f32>(0x7fc00000u | (local & 1u));
     }
 }

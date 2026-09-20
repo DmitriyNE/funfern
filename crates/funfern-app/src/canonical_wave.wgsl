@@ -15,7 +15,9 @@ const STATUS_LAYOUT: u32 = 1u;
 const STATUS_TIMESTEP: u32 = 2u;
 const STATUS_INVERSE_DOMAIN: u32 = 3u;
 const STATUS_NON_FINITE: u32 = 4u;
-const MAX_FINITE: f32 = 3.402823466e+38;
+// Leave serialization headroom below f32::MAX: Naga's decimal WGSL writer
+// rounds the exact maximum upward, which Chrome correctly rejects.
+const MAX_FINITE: f32 = 3.0e+38;
 
 struct Control {
     counts_a: vec4<u32>,
@@ -573,20 +575,22 @@ fn filter_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(128)
 fn event_validate(@builtin(local_invocation_id) id: vec3<u32>) {
     let local = id.x;
-    if stopped() { return; }
+    let participating = !stopped();
     var energies = vec2<f32>(0.0);
-    for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
-        let inverse_mass = nodes[node].mass_loss.y;
-        let accepted = accepted_q(node);
-        let candidate = candidate_q(node);
-        energies += 0.5 * inverse_mass * vec2<f32>(accepted * accepted, candidate * candidate);
-    }
-    for (var sample = local; sample < control.counts_a.y; sample += WORKGROUP_SIZE) {
-        energies.x += b_energy(sample, accepted_b(sample));
-        energies.y += b_energy(sample, candidate_b(sample));
+    if participating {
+        for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
+            let inverse_mass = nodes[node].mass_loss.y;
+            let accepted = accepted_q(node);
+            let candidate = candidate_q(node);
+            energies += 0.5 * inverse_mass * vec2<f32>(accepted * accepted, candidate * candidate);
+        }
+        for (var sample = local; sample < control.counts_a.y; sample += WORKGROUP_SIZE) {
+            energies.x += b_energy(sample, accepted_b(sample));
+            energies.y += b_energy(sample, candidate_b(sample));
+        }
     }
     let total = reduce_boundary_vector(local, energies);
-    if local != 0u { return; }
+    if !participating || local != 0u { return; }
     if !all(total >= vec2<f32>(-MAX_FINITE))
         || !all(total <= vec2<f32>(MAX_FINITE)) {
         reject(STATUS_NON_FINITE);
@@ -714,13 +718,15 @@ fn handoff_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(128)
 fn handoff_reduce_prescribed(@builtin(local_invocation_id) id: vec3<u32>) {
     let local = id.x;
-    if stopped() { return; }
+    let participating = !stopped();
     var exchange = 0.0;
-    for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
-        exchange += scratch[node].values.y;
+    if participating {
+        for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
+            exchange += scratch[node].values.y;
+        }
     }
     let total = reduce_boundary_scalar(local, exchange);
-    if local == 0u {
+    if participating && local == 0u {
         control.candidate_accounting_a.y += total;
     }
 }
@@ -940,20 +946,22 @@ fn reduce_boundary_vector(local: u32, value: vec2<f32>) -> vec2<f32> {
 }
 
 fn boundary_prepare(mode: u32, local: u32, second: bool) {
-    if stopped() || mode >= control.counts_b.z { return; }
+    let participating = !stopped() && mode < control.counts_b.z;
     let trace_count = control.counts_b.y;
-    let mode_header = boundary[mode_word(mode, 0u)].data;
     var partial_modal = 0.0;
-    for (var trace = local; trace < trace_count; trace += WORKGROUP_SIZE) {
-        let trace_word = boundary[control.table_offsets.z + trace].data;
-        let node = trace_word.x;
-        let current = select(
-            accepted_q(node), candidate_q(node), second || has_loss_stages());
-        partial_modal += trace_coefficient(mode, trace)
-            * current * bitcast<f32>(trace_word.y);
+    if participating {
+        for (var trace = local; trace < trace_count; trace += WORKGROUP_SIZE) {
+            let trace_word = boundary[control.table_offsets.z + trace].data;
+            let node = trace_word.x;
+            let current = select(
+                accepted_q(node), candidate_q(node), second || has_loss_stages());
+            partial_modal += trace_coefficient(mode, trace)
+                * current * bitcast<f32>(trace_word.y);
+        }
     }
     let modal = reduce_boundary_scalar(local, partial_modal);
-    if local != 0u { return; }
+    if !participating || local != 0u { return; }
+    let mode_header = boundary[mode_word(mode, 0u)].data;
     if !second && !has_loss_stages() {
         scratch[mode_accounting_offset() + mode].values = vec4<f32>(0.0);
     }
@@ -1001,7 +1009,18 @@ fn boundary_prepare(mode: u32, local: u32, second: bool) {
 }
 
 fn boundary_reduce(trace: u32, local: u32, second: bool) {
-    if stopped() || trace >= control.counts_b.y { return; }
+    let participating = !stopped() && trace < control.counts_b.y;
+    var partial = vec2<f32>(0.0);
+    if participating {
+        for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
+            let modal_memory = scratch[mode_modal_offset() + mode].values.xy;
+            let coefficient = trace_coefficient_transposed(trace, mode);
+            partial.x += coefficient * (modal_memory.x + modal_memory.y);
+            partial.y += coefficient * scratch[mode_temporary_offset() + mode].values.w;
+        }
+    }
+    let coupling = reduce_boundary_vector(local, partial);
+    if !participating || local != 0u { return; }
     let trace_word_index = control.table_offsets.z + trace;
     let trace_word = boundary[trace_word_index].data;
     let node = trace_word.x;
@@ -1009,15 +1028,6 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
     let damping = bitcast<f32>(trace_word.z);
     let old = select(
         accepted_q(node), candidate_q(node), second || has_loss_stages());
-    var partial = vec2<f32>(0.0);
-    for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
-        let modal_memory = scratch[mode_modal_offset() + mode].values.xy;
-        let coefficient = trace_coefficient_transposed(trace, mode);
-        partial.x += coefficient * (modal_memory.x + modal_memory.y);
-        partial.y += coefficient * scratch[mode_temporary_offset() + mode].values.w;
-    }
-    let coupling = reduce_boundary_vector(local, partial);
-    if local != 0u { return; }
     let derivative = -damping * inverse_mass * old - coupling.x;
     let source_time = control.clock_f32.y
         + select(0.0, control.clock_f32.x, second);
@@ -1037,25 +1047,27 @@ fn boundary_reduce(trace: u32, local: u32, second: bool) {
 }
 
 fn boundary_solve_row(row: u32, local: u32) {
-    if stopped() || row >= control.counts_b.y { return; }
+    let participating = !stopped() && row < control.counts_b.y;
     var partial = 0.0;
-    for (var column = local; column < control.counts_b.y; column += WORKGROUP_SIZE) {
-        let reduced = bitcast<f32>(boundary[control.table_offsets.z + column].data.w);
-        partial += inverse_schur(row, column) * reduced;
+    if participating {
+        for (var column = local; column < control.counts_b.y; column += WORKGROUP_SIZE) {
+            let reduced = bitcast<f32>(boundary[control.table_offsets.z + column].data.w);
+            partial += inverse_schur(row, column) * reduced;
+        }
     }
     let result = reduce_boundary_scalar(local, partial);
-    if local == 0u {
+    if participating && local == 0u {
         scratch[trace_solution_offset() + row].values.x = result;
     }
 }
 
 fn boundary_finalize(i: u32, local: u32, second: bool) {
-    if stopped() || i >= max(control.counts_b.y, control.counts_b.z) { return; }
     let trace_count = control.counts_b.y;
     let mode_count = control.counts_b.z;
+    let participating = !stopped() && i < max(trace_count, mode_count);
     let duration = control.evolution.z;
     var partial_modal = 0.0;
-    if i < mode_count {
+    if participating && i < mode_count {
         for (var trace = local; trace < trace_count; trace += WORKGROUP_SIZE) {
             let trace_word = boundary[control.table_offsets.z + trace].data;
             partial_modal += trace_coefficient(i, trace)
@@ -1064,7 +1076,7 @@ fn boundary_finalize(i: u32, local: u32, second: bool) {
         }
     }
     let new_modal = reduce_boundary_scalar(local, partial_modal);
-    if local != 0u { return; }
+    if !participating || local != 0u { return; }
     if i < trace_count {
         let trace = i;
         let trace_word = boundary[control.table_offsets.z + trace].data;

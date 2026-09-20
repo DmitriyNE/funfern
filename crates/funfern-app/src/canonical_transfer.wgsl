@@ -8,7 +8,9 @@ const NO_INDEX: u32 = 0xffffffffu;
 const STATUS_LAYOUT: u32 = 1u;
 const STATUS_TIMESTEP: u32 = 2u;
 const STATUS_NON_FINITE: u32 = 4u;
-const MAX_FINITE: f32 = 3.402823466e+38;
+// Leave serialization headroom below f32::MAX: Naga's decimal WGSL writer
+// rounds the exact maximum upward, which Chrome correctly rejects.
+const MAX_FINITE: f32 = 3.0e+38;
 
 struct Control {
     counts_a: vec4<u32>,
@@ -257,21 +259,24 @@ fn transfer_outgoing(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(128)
 fn reduce_density(@builtin(local_invocation_id) id: vec3<u32>) {
     let local = id.x;
-    if stopped() { return; }
-    if primary_identity() {
-        if local == 0u { scratch[density_scratch()].values.x = 0.0; }
-        return;
-    }
-    let inverse_support = header(3u).w;
+    let halted = stopped();
+    let identity = primary_identity();
+    let participating = !halted && !identity;
     var square = 0.0;
     var count = 0.0;
-    for (var node = local; node < source_node_count(); node += WORKGROUP_SIZE) {
-        let density = old_q(node) * packed_transfer_float(inverse_support, node);
-        square += density * density;
-        count += 1.0;
+    if participating {
+        let inverse_support = header(3u).w;
+        for (var node = local; node < source_node_count(); node += WORKGROUP_SIZE) {
+            let density = old_q(node) * packed_transfer_float(inverse_support, node);
+            square += density * density;
+            count += 1.0;
+        }
     }
     let total = reduce_four(local, vec4<f32>(square, count, 0.0, 0.0));
-    if local == 0u {
+    if local != 0u || halted { return; }
+    if identity {
+        scratch[density_scratch()].values.x = 0.0;
+    } else {
         scratch[density_scratch()].values.x = max(sqrt(total.x / max(total.y, 1.0)), 1.0e-12);
     }
 }
@@ -283,41 +288,47 @@ fn reduce_components(
 ) {
     let component = group.x;
     let local = id.x;
-    if stopped() || component >= target_component_count() { return; }
-    if primary_identity() {
-        if local == 0u { scratch[component_scratch(component)].values = vec4<f32>(0.0); }
-        return;
-    }
-    let component_stride = header(7u).x;
-    let component_record = header(4u).y + component * component_stride;
-    if transfer[component_record].data.x == 0u {
-        if local == 0u { scratch[component_scratch(component)].values = vec4<f32>(0.0); }
-        return;
-    }
-    let labels = header(4u).x;
+    let halted = stopped();
+    let component_exists = component < target_component_count();
+    let identity = primary_identity();
+    let participating = !halted && component_exists && !identity;
+    var record_enabled = false;
     var partial = vec4<f32>(0.0);
-    for (var node = local; node < source_node_count(); node += WORKGROUP_SIZE) {
-        let source_component = packed_transfer_u32(labels, node);
-        let share = packed_transfer_float(component_record + 1u, source_component);
-        partial.x += share * old_q(node);
-    }
-    let primary = header(2u).w;
-    let floor = scratch[density_scratch()].values.x;
-    for (var node = local; node < target_node_count(); node += WORKGROUP_SIZE) {
-        let metadata = transfer[primary + node * PRIMARY_WORDS + 2u].data.w;
-        let node_component = metadata >> 9u;
-        if node_component != component { continue; }
-        let value = candidate_q(node);
-        partial.y += value;
-        let exact = (metadata & 256u) != 0u;
-        if !exact && new_nodes[node].boundary.z == 0u {
-            let support = transfer_float(primary + node * PRIMARY_WORDS + 3u, 3u);
-            partial.z += abs(value) + floor * support;
-            partial.w += support;
+    if participating {
+        let component_stride = header(7u).x;
+        let component_record = header(4u).y + component * component_stride;
+        record_enabled = transfer[component_record].data.x != 0u;
+        if record_enabled {
+            let labels = header(4u).x;
+            for (var node = local; node < source_node_count(); node += WORKGROUP_SIZE) {
+                let source_component = packed_transfer_u32(labels, node);
+                let share = packed_transfer_float(component_record + 1u, source_component);
+                partial.x += share * old_q(node);
+            }
+            let primary = header(2u).w;
+            let floor = scratch[density_scratch()].values.x;
+            for (var node = local; node < target_node_count(); node += WORKGROUP_SIZE) {
+                let metadata = transfer[primary + node * PRIMARY_WORDS + 2u].data.w;
+                let node_component = metadata >> 9u;
+                if node_component != component { continue; }
+                let value = candidate_q(node);
+                partial.y += value;
+                let exact = (metadata & 256u) != 0u;
+                if !exact && new_nodes[node].boundary.z == 0u {
+                    let support = transfer_float(primary + node * PRIMARY_WORDS + 3u, 3u);
+                    partial.z += abs(value) + floor * support;
+                    partial.w += support;
+                }
+            }
         }
     }
     let total = reduce_four(local, partial);
     if local != 0u { return; }
+    if halted || !component_exists { return; }
+    if identity || !record_enabled {
+        scratch[component_scratch(component)].values = vec4<f32>(0.0);
+        return;
+    }
     let delta = total.x - total.y;
     let ratio = abs(delta) / max(total.z, 1.0e-30);
     if total.w == 0.0 {
@@ -350,28 +361,30 @@ fn correct_primary(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(128)
 fn reduce_auxiliary_energy(@builtin(local_invocation_id) id: vec3<u32>) {
     let local = id.x;
-    if stopped() { return; }
+    let participating = !stopped();
     var energies = vec2<f32>(0.0);
-    let source_gap_energy = header(5u).x;
-    for (var gap = local; gap < source_gap_count(); gap += WORKGROUP_SIZE) {
-        let value = old_auxiliary(gap);
-        energies.x += 0.5 * packed_transfer_float(source_gap_energy, gap) * value * value;
-    }
-    for (var outgoing = local; outgoing < source_outgoing_count(); outgoing += WORKGROUP_SIZE) {
-        let value = old_auxiliary(source_gap_count() + outgoing);
-        energies.x += 0.5 * value * value;
-    }
-    for (var gap = local; gap < target_gap_count(); gap += WORKGROUP_SIZE) {
-        let value = candidate_auxiliary(gap);
-        let weight = transfer_float(header(3u).y + gap * GAP_WORDS + 2u, 0u);
-        energies.y += 0.5 * weight * value * value;
-    }
-    for (var outgoing = local; outgoing < target_outgoing_count(); outgoing += WORKGROUP_SIZE) {
-        let value = candidate_auxiliary(target_gap_count() + outgoing);
-        energies.y += 0.5 * value * value;
+    if participating {
+        let source_gap_energy = header(5u).x;
+        for (var gap = local; gap < source_gap_count(); gap += WORKGROUP_SIZE) {
+            let value = old_auxiliary(gap);
+            energies.x += 0.5 * packed_transfer_float(source_gap_energy, gap) * value * value;
+        }
+        for (var outgoing = local; outgoing < source_outgoing_count(); outgoing += WORKGROUP_SIZE) {
+            let value = old_auxiliary(source_gap_count() + outgoing);
+            energies.x += 0.5 * value * value;
+        }
+        for (var gap = local; gap < target_gap_count(); gap += WORKGROUP_SIZE) {
+            let value = candidate_auxiliary(gap);
+            let weight = transfer_float(header(3u).y + gap * GAP_WORDS + 2u, 0u);
+            energies.y += 0.5 * weight * value * value;
+        }
+        for (var outgoing = local; outgoing < target_outgoing_count(); outgoing += WORKGROUP_SIZE) {
+            let value = candidate_auxiliary(target_gap_count() + outgoing);
+            energies.y += 0.5 * value * value;
+        }
     }
     let total = reduce_four(local, vec4<f32>(energies, 0.0, 0.0));
-    if local == 0u {
+    if participating && local == 0u {
         new_control.candidate_accounting_b.w += total.y - total.x;
     }
 }
