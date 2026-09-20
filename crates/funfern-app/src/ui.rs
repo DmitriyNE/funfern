@@ -948,8 +948,93 @@ enum BackgroundAmrKind {
     Adaptation,
 }
 
+struct CanonicalAmrPreparation {
+    mesh: Arc<TriMesh>,
+    operator: Arc<CanonicalWaveOperator>,
+    forcing: Arc<CanonicalForcing>,
+    snapshot: CanonicalIndicatorSnapshot,
+}
+
+struct AmrIndicatorJob {
+    job: Option<SolutionIndicatorJob>,
+    canonical: Option<CanonicalAmrPreparation>,
+}
+
+impl AmrIndicatorJob {
+    fn with_canonical(
+        job: SolutionIndicatorJob,
+        mesh: Arc<TriMesh>,
+        operator: Arc<CanonicalWaveOperator>,
+        forcing: Arc<CanonicalForcing>,
+        snapshot: CanonicalIndicatorSnapshot,
+    ) -> Self {
+        Self {
+            job: Some(job),
+            canonical: Some(CanonicalAmrPreparation {
+                mesh,
+                operator,
+                forcing,
+                snapshot,
+            }),
+        }
+    }
+
+    fn phase(&self) -> &'static str {
+        if self.canonical.is_some() {
+            "Preparing canonical AMR estimate"
+        } else {
+            self.job
+                .as_ref()
+                .map_or("AMR estimate ready", SolutionIndicatorJob::phase)
+        }
+    }
+
+    fn advance(
+        &mut self,
+        budget: usize,
+    ) -> Option<Result<SolutionIndicatorResult, AmrIndicatorError>> {
+        if let Some(canonical) = self.canonical.take() {
+            let supplement = match canonical_indicator_supplement(
+                &canonical.mesh,
+                &canonical.operator,
+                &canonical.forcing,
+                &canonical.snapshot,
+            ) {
+                Ok(supplement) => supplement,
+                Err(error) => {
+                    self.job = None;
+                    return Some(Err(AmrIndicatorError::Canonical(error)));
+                }
+            };
+            self.job = self
+                .job
+                .take()
+                .map(|job| job.with_canonical_supplement(supplement));
+        }
+        self.job
+            .as_mut()
+            .and_then(|job| job.advance(budget))
+            .map(|result| result.map_err(AmrIndicatorError::Indicator))
+    }
+}
+
+#[derive(Debug)]
+enum AmrIndicatorError {
+    Canonical(WaveError),
+    Indicator(SolutionIndicatorError),
+}
+
+impl std::fmt::Display for AmrIndicatorError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Canonical(error) => write!(formatter, "Canonical AMR estimate failed: {error}"),
+            Self::Indicator(error) => error.fmt(formatter),
+        }
+    }
+}
+
 enum BackgroundAmrJob {
-    Indicator(Box<SolutionIndicatorJob>),
+    Indicator(Box<AmrIndicatorJob>),
     Adaptation(Box<MeshAdaptationJob>),
 }
 
@@ -983,7 +1068,7 @@ enum BackgroundAmrCommand {
     allow(dead_code)
 )]
 enum BackgroundAmrResult {
-    Indicator(Result<SolutionIndicatorResult, SolutionIndicatorError>),
+    Indicator(Result<SolutionIndicatorResult, AmrIndicatorError>),
     Adaptation(Result<MeshAdaptationResult, MeshAdaptationError>),
 }
 
@@ -1519,8 +1604,8 @@ pub struct Playground {
     amr_last_started: Option<Instant>,
     amr_last_analyzed_step: Option<u64>,
     amr_coarsen_streak: u8,
-    amr_indicator_job: Option<SolutionIndicatorJob>,
-    amr_indicator_completed: Option<Result<SolutionIndicatorResult, SolutionIndicatorError>>,
+    amr_indicator_job: Option<AmrIndicatorJob>,
+    amr_indicator_completed: Option<Result<SolutionIndicatorResult, AmrIndicatorError>>,
     amr_indicator_source: Option<AmrIndicatorSource>,
     amr_indicator_result: Option<SolutionIndicatorResult>,
     amr_energy_peak: f64,
@@ -8399,7 +8484,7 @@ impl Playground {
             .and_then(|worker| worker.phase)
     }
 
-    fn start_indicator_job(&mut self, job: SolutionIndicatorJob) {
+    fn start_indicator_job(&mut self, job: AmrIndicatorJob) {
         if let Some(mut worker) = self.background_amr.take() {
             match worker.submit(BackgroundAmrJob::Indicator(Box::new(job))) {
                 Ok(()) => {
@@ -8792,19 +8877,6 @@ impl Playground {
             time,
             time_step: dt,
         };
-        let supplement = match canonical_indicator_supplement(
-            &active.mesh,
-            &active.canonical_operator,
-            &active.canonical_forcing,
-            &canonical_snapshot,
-        ) {
-            Ok(supplement) => supplement,
-            Err(error) => {
-                self.amr_status = "canonical estimate failed".into();
-                self.amr_error = Some(error.to_string());
-                return;
-            }
-        };
         let job = SolutionIndicatorJob::new_topology(
             active.mesh.clone(),
             active.operator.clone(),
@@ -8824,8 +8896,14 @@ impl Playground {
                 dormant_below_energy: self.amr_energy_peak * DORMANT_ENERGY_RATIO,
                 ..Default::default()
             },
-        )
-        .with_canonical_supplement(supplement);
+        );
+        let job = AmrIndicatorJob::with_canonical(
+            job,
+            active.mesh.clone(),
+            active.canonical_operator.clone(),
+            active.canonical_forcing.clone(),
+            canonical_snapshot,
+        );
         self.amr_indicator_source = Some(AmrIndicatorSource {
             topology: active.bundle.token,
             gpu_generation: request.generation(),
@@ -13490,6 +13568,104 @@ mod tests {
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(5),
                 "native AMR worker timed out"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn background_amr_worker_prepares_the_canonical_supplement() {
+        let mut scene = Scene::initial();
+        scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        let mesh = Arc::new(
+            mesh_scene(
+                &scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.2,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &scene,
+                OuterBoundaryCondition::Reflecting,
+            )
+            .unwrap(),
+        );
+        let canonical =
+            Arc::new(CanonicalWaveOperator::compile_scene(&mesh, &operator, &scene, 1).unwrap());
+        let forcing = Arc::new(CanonicalForcing::none(&canonical));
+        let dofs = operator.degrees_of_freedom();
+        let snapshot = QuadraticSolutionSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            displacement: vec![0.0; dofs],
+            velocity: vec![0.0; dofs],
+            acceleration: vec![0.0; dofs],
+            auxiliary: vec![0.0; dofs],
+            volume_acceleration: vec![0.0; dofs],
+            time: 0.01,
+            time_step: 0.01,
+        };
+        let canonical_snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            primary_flux: vec![0.0; canonical.degrees_of_freedom()],
+            previous_primary_flux: vec![0.0; canonical.degrees_of_freedom()],
+            complementary_flux: vec![
+                Point2::default();
+                canonical.complementary_degrees_of_freedom()
+            ],
+            previous_complementary_flux: vec![
+                Point2::default();
+                canonical.complementary_degrees_of_freedom()
+            ],
+            auxiliary: Vec::new(),
+            previous_auxiliary: Vec::new(),
+            time: 0.01,
+            time_step: 0.01,
+        };
+        let job = AmrIndicatorJob::with_canonical(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator,
+                scene,
+                snapshot,
+                SolutionIndicatorOptions::default(),
+            ),
+            mesh,
+            canonical,
+            forcing,
+            canonical_snapshot,
+        );
+        assert_eq!(job.phase(), "Preparing canonical AMR estimate");
+
+        let mut worker = BackgroundAmrWorker::spawn().expect("native AMR worker");
+        worker
+            .submit(BackgroundAmrJob::Indicator(Box::new(job)))
+            .map_err(|_| ())
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        loop {
+            for event in worker.drain() {
+                if let BackgroundAmrEvent::Finished { result, .. } = event {
+                    let BackgroundAmrResult::Indicator(result) = *result else {
+                        panic!("wrong AMR result kind");
+                    };
+                    let result = result.unwrap();
+                    assert_eq!(result.report.canonical_drift_contribution, 0.0);
+                    assert_eq!(result.report.complementary_recovery_contribution, 0.0);
+                    return;
+                }
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "native canonical AMR worker timed out"
             );
             std::thread::yield_now();
         }

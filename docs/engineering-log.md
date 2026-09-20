@@ -5,6 +5,29 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Canonical AMR preparation crosses the worker boundary
+
+- A five-second release sample at the reported large-mesh slowdown found one
+  remaining periodic UI-thread AMR slice: building the direct-state canonical
+  supplement took about 47 ms before the resumable indicator was submitted to
+  `funfern-amr`. The primary-rate reconstruction took about 2 ms in the same
+  sample. This can explain a recurring visible hitch, but not the gradual
+  30–40 FPS ceiling at 112k DOFs.
+- Canonical supplement construction is now a deferred first phase of the AMR
+  indicator job. Native and shared-memory browser builds perform it on
+  `funfern-amr`; static WebAssembly retains the existing synchronous cooperative
+  fallback. Canonical failures return through the same accepted-result path with
+  their original diagnostic instead of being lost at submission.
+- The native worker fixture now exercises the deferred canonical phase. All 159
+  app tests pass, as do native, static-Wasm and pinned-nightly shared-memory-Wasm
+  checks. Hands-on verification still needs to confirm that the periodic hitch
+  is gone in the autosaved 112k-DOF scene.
+- The same live sample kept graphics resources bounded (about 36 MiB across 297
+  graphics mappings) and showed render workers waiting on the next Metal
+  drawable. The remaining gradual FPS loss therefore currently looks like real
+  solver/render/presentation backpressure, not the previously fixed unbounded
+  readback queue. AMR accuracy at that density remains under investigation.
+
 ## 2026-09-20 — GPU readback and solver submission gain completion backpressure
 
 - The live process at the reported FPS cliff/foreground lock-up was blocked in
