@@ -1068,9 +1068,12 @@ The operator, state, sources, and controls use Bevy's render-world buffers and i
 existing wgpu device. State remains GPU-resident; asynchronous primary readback
 supplies the egui field colors, while lower-cadence full snapshots supply the
 canonical energy and AMR diagnostics. Vector arrows use a separate compact
-display-rate consumer: the CPU rebuilds one stencil per visible screen bin only
-when the view changes, the GPU samples complementary field and energy flow after
-each rendered solver batch, and only the arrow records cross back. Each readback
+display-rate consumer: the CPU chooses one stencil per cell of a quantized,
+world-origin-anchored lattice covering the view plus a one-cell apron. Panning
+therefore translates the existing interior arrows with the scene and rebuilds
+only when a view edge crosses a world cell; zoom changes density only at the
+lattice's scale thresholds. The GPU samples complementary field and energy flow
+after each rendered solver batch, and only the arrow records cross back. Each readback
 carries a GPU-written step marker and compensated two-f32 absolute time. Stale
 asynchronous results cannot be mistaken for a newer level, and presentation
 filters retain their physical decay across timestep-changing handoffs. Camera

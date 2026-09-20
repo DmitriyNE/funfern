@@ -26,6 +26,16 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   suppresses only the actual accepted-state correction. Regressions cover static
   rejection, source-band gain, long-run mean, maintenance separation and remesh
   continuity.
+- TODO: the live display can still appear to retain a nonzero arrow mean during
+  long fixed-mesh runs despite the synthetic DC-offset regression settling to
+  zero. Instrument raw and AC-coupled per-sample time means under real readback
+  cadence, including source ramps and resident-filter boundaries, before deciding
+  whether the remainder is physical state, sampling/exposure perception, or a
+  presentation bug. Do not add another subtractor on visual evidence alone.
+- Arrow density cells are now anchored to a quantized world-space lattice rather
+  than to viewport pixels. Panning retains the same interior element winners and
+  merely translates them on screen; a one-cell apron avoids resampling until a
+  view edge crosses a world cell.
 
 ## 2026-09-20 — Threaded browser handoff packing matches native placement
 

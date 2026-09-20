@@ -746,10 +746,8 @@ struct VectorOverlayLayoutKey {
     mesh_revision: u64,
     generation: u64,
     physics: PhysicsModel,
-    center: Point2,
-    scale: f64,
-    viewport: Rect,
-    spacing: f32,
+    world_spacing: f64,
+    visible_bins: [i64; 4],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4884,14 +4882,20 @@ impl Playground {
         if generation == 0 || !self.viewport_rect.is_positive() {
             return;
         }
+        let Some((world_spacing, visible_bins)) = vector_overlay_lattice(
+            self.scale,
+            self.editor.document.presentation.vector_overlay_density,
+            self.center,
+            self.viewport_rect,
+        ) else {
+            return;
+        };
         let key = VectorOverlayLayoutKey {
             mesh_revision: active.mesh.mesh_revision,
             generation,
             physics: active.bundle.authored.physics,
-            center: self.center,
-            scale: self.scale,
-            viewport: self.viewport_rect,
-            spacing: self.editor.document.presentation.vector_overlay_density,
+            world_spacing,
+            visible_bins,
         };
         // Keep at most one GPU lattice replacement in flight. Replacing its
         // readback every camera frame can otherwise starve the overlay until
@@ -4931,8 +4935,8 @@ impl Playground {
             &active.bundle.authored,
             &active.mesh,
             &active.operator,
-            key.spacing,
-            (key.center, key.scale, key.viewport),
+            key.world_spacing,
+            key.visible_bins,
         );
         let stencils = points.iter().map(|point| point.stencil).collect::<Vec<_>>();
         match recorders.update_canonical_vector_overlay(
@@ -13382,46 +13386,86 @@ fn highest_forcing_frequency(scene: &TopologyScene, source: PointSource) -> f64 
     frequency
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A world-anchored 1/2/5 lattice whose projected spacing is at least the
+/// requested arrow spacing. Bounds include a one-cell apron so panning inside
+/// the current boundary cells needs no GPU resampling; the painter clips the
+/// temporarily off-screen arrows.
+fn vector_overlay_lattice(
+    scale: f64,
+    pixel_spacing: f32,
+    center: Point2,
+    viewport: Rect,
+) -> Option<(f64, [i64; 4])> {
+    if !scale.is_finite()
+        || scale <= 0.0
+        || !pixel_spacing.is_finite()
+        || pixel_spacing <= 0.0
+        || !center.x.is_finite()
+        || !center.y.is_finite()
+        || !viewport.is_positive()
+    {
+        return None;
+    }
+    let raw = f64::from(pixel_spacing) / scale;
+    let power = 10f64.powf(raw.log10().floor());
+    let digit = [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .find(|digit| digit * power >= raw)?;
+    let world_spacing = digit * power;
+    let half_width = f64::from(viewport.width()) * 0.5 / scale;
+    let half_height = f64::from(viewport.height()) * 0.5 / scale;
+    let bin = |value: f64| (value / world_spacing).floor() as i64;
+    Some((
+        world_spacing,
+        [
+            bin(center.x - half_width).saturating_sub(1),
+            bin(center.x + half_width).saturating_add(1),
+            bin(center.y - half_height).saturating_sub(1),
+            bin(center.y + half_height).saturating_add(1),
+        ],
+    ))
+}
+
 fn vector_overlay_layout(
     scene: &TopologyScene,
     mesh: &TriMesh,
     operator: &QuadraticWaveOperator,
-    spacing: f32,
-    view: (Point2, f64, Rect),
+    world_spacing: f64,
+    visible_bins: [i64; 4],
 ) -> Vec<VectorOverlayLayoutPoint> {
-    let (view_center, view_scale, viewport) = view;
-    if mesh.triangles.len() != operator.element_nodes().len() || spacing <= 0.0 {
+    if mesh.triangles.len() != operator.element_nodes().len()
+        || !world_spacing.is_finite()
+        || world_spacing <= 0.0
+    {
         return vec![];
     }
-    let mut bins = BTreeMap::<(i32, i32), (usize, Pos2, Point2, f32)>::new();
+    let mut bins = BTreeMap::<(i64, i64), (usize, Point2, f64)>::new();
     for (element, triangle) in mesh.triangles.iter().enumerate() {
         let points = triangle.vertices.map(|index| mesh.vertices[index].point);
         let centroid = (points[0] + points[1] + points[2]) / 3.0;
-        let screen = Pos2::new(
-            viewport.center().x
-                + ((centroid.x - view_center.x) * view_scale).clamp(-1.0e7, 1.0e7) as f32,
-            viewport.center().y
-                - ((centroid.y - view_center.y) * view_scale).clamp(-1.0e7, 1.0e7) as f32,
+        let key = (
+            (centroid.x / world_spacing).floor() as i64,
+            (centroid.y / world_spacing).floor() as i64,
         );
-        if !viewport.contains(screen) {
+        if key.0 < visible_bins[0]
+            || key.0 > visible_bins[1]
+            || key.1 < visible_bins[2]
+            || key.1 > visible_bins[3]
+        {
             continue;
         }
-        let key = (
-            ((screen.x - viewport.left()) / spacing).floor() as i32,
-            ((screen.y - viewport.top()) / spacing).floor() as i32,
+        let cell_center = Point2::new(
+            (key.0 as f64 + 0.5) * world_spacing,
+            (key.1 as f64 + 0.5) * world_spacing,
         );
-        let cell_center = Pos2::new(
-            viewport.left() + (key.0 as f32 + 0.5) * spacing,
-            viewport.top() + (key.1 as f32 + 0.5) * spacing,
-        );
-        let distance = screen.distance_sq(cell_center);
-        if bins.get(&key).is_none_or(|entry| distance < entry.3) {
-            bins.insert(key, (element, screen, centroid, distance));
+        let offset = centroid - cell_center;
+        let distance = offset.dot(offset);
+        if bins.get(&key).is_none_or(|entry| distance < entry.2) {
+            bins.insert(key, (element, centroid, distance));
         }
     }
     bins.into_iter()
-        .filter_map(|(_key, (element, _screen, centroid, _))| {
+        .filter_map(|(_key, (element, centroid, _))| {
             let triangle = &mesh.triangles[element];
             let region = scene.region(triangle.region)?;
             let material = scene.material(region.material)?;
@@ -15413,7 +15457,7 @@ mod probe_interaction_tests {
     }
 
     #[test]
-    fn vector_overlay_layout_selects_at_most_one_sample_per_screen_bin() {
+    fn vector_overlay_layout_is_world_anchored_and_pan_stable() {
         let mut state = Playground {
             editor: TopologyEditor::default(),
             ..Playground::default()
@@ -15421,33 +15465,71 @@ mod probe_interaction_tests {
         let active = activate_at(&mut state, 0.08);
         let viewport = viewport();
         let spacing = 28.0;
+        let (world_spacing, visible_bins) =
+            vector_overlay_lattice(state.scale, spacing, state.center, viewport).unwrap();
         let points = vector_overlay_layout(
             &active.bundle.authored,
             &active.mesh,
             &active.operator,
-            spacing,
-            (state.center, state.scale, viewport),
+            world_spacing,
+            visible_bins,
         );
         assert!(!points.is_empty());
         let keys = points
             .iter()
             .map(|point| {
-                let screen = state.screen(point.point, viewport);
                 (
-                    ((screen.x - viewport.left()) / spacing).floor() as i32,
-                    ((screen.y - viewport.top()) / spacing).floor() as i32,
+                    (point.point.x / world_spacing).floor() as i64,
+                    (point.point.y / world_spacing).floor() as i64,
                 )
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(keys.len(), points.len());
-        let maximum_bins = (viewport.width() / spacing).ceil() as usize
-            * (viewport.height() / spacing).ceil() as usize;
+        let maximum_bins = (visible_bins[1] - visible_bins[0] + 1) as usize
+            * (visible_bins[3] - visible_bins[2] + 1) as usize;
         assert!(points.len() <= maximum_bins);
         assert!(points.iter().all(|point| {
             point.point.x.is_finite()
                 && point.point.y.is_finite()
                 && point.stencil.element < active.mesh.triangles.len() as u32
         }));
+
+        let shifted_center = state.center + Point2::new(world_spacing * 0.35, 0.0);
+        let (shifted_spacing, shifted_bins) =
+            vector_overlay_lattice(state.scale, spacing, shifted_center, viewport).unwrap();
+        assert_eq!(shifted_spacing, world_spacing);
+        let shifted = vector_overlay_layout(
+            &active.bundle.authored,
+            &active.mesh,
+            &active.operator,
+            shifted_spacing,
+            shifted_bins,
+        );
+        let common = [
+            visible_bins[0].max(shifted_bins[0]) + 1,
+            visible_bins[1].min(shifted_bins[1]) - 1,
+            visible_bins[2].max(shifted_bins[2]) + 1,
+            visible_bins[3].min(shifted_bins[3]) - 1,
+        ];
+        let interior = |points: &[VectorOverlayLayoutPoint]| {
+            points
+                .iter()
+                .filter_map(|point| {
+                    let key = (
+                        (point.point.x / world_spacing).floor() as i64,
+                        (point.point.y / world_spacing).floor() as i64,
+                    );
+                    (key.0 >= common[0]
+                        && key.0 <= common[1]
+                        && key.1 >= common[2]
+                        && key.1 <= common[3])
+                        .then_some((key, point.element))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = interior(&points);
+        assert!(!before.is_empty());
+        assert_eq!(before, interior(&shifted));
     }
 
     #[test]
