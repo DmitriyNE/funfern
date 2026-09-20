@@ -1251,9 +1251,29 @@ candidate, and the latest requested geometry revision.
 6. Switch all accepted resources together, then schedule the latest outstanding
    request if necessary.
 
+Not every document revision is a solver-generation replacement. Dependency
+classification admits two narrower transactions on the current generation:
+
+- measurement-only changes compile/adopt probe and far-field metadata without
+  transferring state, packing a solver plan, draining steps, or changing the GPU
+  generation;
+- source-drive-only changes use a staged GPU table event and publish the CPU
+  candidate only after that serial is accepted. This path requires unchanged
+  spatial weights, prescribed data, drive count and timestep; it preserves the
+  instantaneous carrier phase and integrated-rate anchor.
+- source-weight changes with identical sparse support stage candidate weights in
+  unused table lanes, validate them, and atomically promote weights and drive
+  runtime together. A changed zero/nonzero pattern is a layout change and is not
+  eligible for this event.
+
+Spatial source support/layout, prescribed data, operator, mesh or timestep changes retain
+the full lifecycle above. A narrow transaction that fails its dependency check
+must fall back to a full candidate rather than partially updating accepted data.
+
 Candidate mesh construction, scalar/canonical operator assembly, and scalar/vector/
 physical-history transfer maps are resumable and yield under the frame's work
-budget. Probe and far-field compilation remain bounded generation work. The
+budget. Changed probe and far-field stencils are compiled as measurement work;
+unchanged stencils survive revisions. The
 native application packs the immutable GPU plan and transfer tables on a worker;
 the accepted generation keeps running while that result is pending. GPU asset
 serialization adopts the encoder's owned byte vectors rather than duplicating a

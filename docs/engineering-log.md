@@ -5,6 +5,38 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Source and measurement transactions stop rebuilding the solver
+
+- P2 now classifies prepared candidates by the smallest publication boundary.
+  Measurement-only changes adopt probe/far-field metadata on the current GPU
+  generation. Signal-only point/volume source changes use the staged canonical
+  source event, and the CPU candidate is committed only after its GPU serial is
+  accepted. Point position/width and volume-profile changes with unchanged sparse
+  support use an atomic staged weight+drive event; enable/disable, region,
+  sparsity, prescribed and timestep changes still take the full handoff path.
+- The drive-only source path requires identical source weights; both source
+  paths require identical prescribed data and drive count. The shader events
+  preserve instantaneous carrier phase and the integrated-rate anchor.
+  Volume-source signals now reuse both operators
+  and compiled spatial weights; unchanged probes, far-field contours, point-
+  source placement validation and canonical forcing are retained.
+- Handoff diagnostics split GPU-plan packing from requested-step drain. The old
+  `drain` number included both and could not identify the remaining delay.
+  Material/boundary revisions retain the exact mesh object, use the direct
+  scalar identity constructor, and represent an exact complementary transfer as
+  one flag instead of retaining and repacking a row for every quadrature sample.
+  Vector-overlay sampling is keyed to the actual mesh revision, so metadata and
+  source commits do not rebuild the unchanged arrow layout.
+  Runtime regressions cover probe-only metadata publication, point/volume drive
+  edits, a sparse point-source move and full fallback for a support-layout
+  change. The full app
+  test and shader suite pass; hands-on autosave latency and frame pacing are the
+  next acceptance observation before compact primary/full-plan reuse.
+- The production Metal live-event harness now edits both temporal source
+  parameters and spatial weights in one accepted event. Five paused events
+  committed in 217.32 ms total (33.33 ms maximum); subsequent evolution matched
+  the CPU oracle at relative L2 `Q=3.17e-7`, `b=1.10e-6`, with the clock unchanged.
+
 ## 2026-09-20 — Browser preparation worker and overhaul branch
 
 - Canonical-overhaul work now lives on `canonical-overhaul`; local `main` was

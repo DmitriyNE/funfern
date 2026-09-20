@@ -873,7 +873,7 @@ Implement and review this correction in the following order:
 | P0 — accounting and accidental repetition (complete) | Validate point-source placement exactly once per candidate. Report total CPU work as well as categorized phase time, so unbucketed validation cannot disappear from diagnostics. Add call-count and saved-scene regressions. |
 | P1 — native execution isolation (complete) | Move the owned CPU preparation job to at most one native worker. Keep the accepted GPU solver and UI live; publish immutable progress/results by token and discard stale results. A newer request cancels or supersedes old work without allowing an unbounded set of workers. |
 | P1W — browser execution isolation (complete) | Run the same owned job and newest-request policy in one shared-memory Web Worker. Keep a separately built cooperative bundle for static hosts that cannot provide cross-origin isolation. Verify worker activation and both deployment modes in the full WebGPU application, not an isolated benchmark. |
-| P2 — dependency-specific reuse | Replace whole-authored-scene invalidation with explicit geometry, bulk-operator, boundary-operator, source and measurement dependencies. Source/probe-only changes must not rebuild operators. Reuse unchanged outer-trace modes across interior edits/AMR and encode exact same-discretization complementary transfer as a compact identity. |
+| P2 — dependency-specific reuse (in progress) | Replace whole-authored-scene invalidation with explicit geometry, bulk-operator, boundary-operator, source and measurement dependencies. Source/probe-only changes must not rebuild operators. Reuse unchanged outer-trace modes across interior edits/AMR and encode exact same-discretization complementary transfer as a compact identity. |
 | P3 — boundary fast paths | Reuse an unchanged normalized trace operator exactly. Detect mathematically proportional trace operators and retain their eigenbasis while updating eigenvalues/scales; map aligned modal history without constructing a dense all-pairs transform. Retain the general basis-invariant transfer for genuine changes. |
 | P4 — general refined-boundary algorithm | If arbitrary changed 500–1,000-node traces remain noninteractive, replace the generic dense Jacobi reference with a resumable solver exploiting disconnected one-dimensional banded/cyclic trace components. Require eigen-residual, orthogonality, passivity, reflection and history-transfer parity before cutover. Capping boundary AMR is an explicit accuracy tradeoff, not the default substitute for this work. |
 
@@ -902,6 +902,36 @@ cooperative four-millisecond runner because Pages cannot provide those headers;
 that unisolated bundle has its own Chrome startup/advance check. Hands-on frame
 pacing and browser preparation timing remain release observations, while P2 is
 now the next latency stage.
+
+The first P2 slice removes the worst false transactions. Probe/far-field and
+presentation-only revisions with unchanged solver inputs now adopt their
+compiled measurement metadata on the current GPU generation; they do not build
+canonical identity maps, repack the solver, drain it, or upload a generation.
+Unchanged probe stencils and far-field contours are retained individually.
+Point- and volume-source edits that change only temporal drives use the existing
+staged GPU source-table event. Its acceptance boundary preserves instantaneous
+phase and the integrated-rate anchor before the CPU candidate is published.
+Position, width and profile edits whose sparse support is unchanged use a second
+staged event: candidate weights occupy scratch lanes in the existing source
+table, validation precedes their atomic promotion, and the drive runtime is
+migrated at the same boundary. The narrow paths require unchanged prescribed
+data, drive count and timestep; the weight path additionally requires the exact
+same zero/nonzero table layout. Enable/disable, region, sparsity, prescribed or
+timestep changes retain the full transfer transaction. Volume-source changes no
+longer invalidate the bulk/canonical operator merely because the source lives in
+the authored scene; unchanged spatial source weights are retained across signal
+edits.
+
+Handoff diagnostics now separate CPU preparation, GPU-plan packing, requested-
+step drain and GPU admission. This closes the earlier accounting ambiguity in
+which packing appeared as solver drain. Material/boundary-only revisions now
+retain the exact mesh object and use the direct scalar identity constructor.
+Exact same-discretization complementary transfer is represented by one identity
+flag: it no longer retains or GPU-packs one row per quadrature sample. Remaining
+P2 work is compact primary-transfer/full-plan reuse needed by retiming and
+spatial-forcing edits, followed by finer bulk/boundary operator dependency
+separation and unchanged outer-trace-mode reuse. P3 remains responsible for
+proportional and genuinely changed trace operators.
 
 ### Current implementation handoff
 

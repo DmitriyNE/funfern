@@ -32,9 +32,9 @@ use funfern_app::topology_editor::{
 };
 use funfern_app::topology_persistence::{self as persistence, TopologyLoadCandidate};
 use funfern_app::topology_runtime::{
-    PreparedTopology, TopologyPreparationError, TopologyPreparationJob, TopologyPreparationPhase,
-    TopologyPreparationTiming, TopologyProbeCompilation, TopologyProbeStencil, TopologyRuntime,
-    TopologyToken,
+    PreparedSolverUpdate, PreparedTopology, TopologyPreparationError, TopologyPreparationJob,
+    TopologyPreparationPhase, TopologyPreparationTiming, TopologyProbeCompilation,
+    TopologyProbeStencil, TopologyRuntime, TopologyToken,
 };
 use funfern_app::topology_viewport::{
     AttachmentHit, RigidTransform, SampledTopologyGeometry, ScreenPoint, TopologyHandle,
@@ -622,6 +622,7 @@ impl Default for ProbeTrace {
 #[derive(Clone, Debug)]
 struct HandoffRecord {
     prepare_ms: f64,
+    pack_ms: f64,
     drain_ms: f64,
     upload_ms: f64,
     timing: TopologyPreparationTiming,
@@ -698,6 +699,11 @@ struct Uploading {
     degrees_of_freedom: usize,
 }
 
+struct PendingSourceCommit {
+    token: TopologyToken,
+    serial: u32,
+}
+
 struct PreparedGpuUpload {
     plan: CanonicalGpuPlan,
     transfer: Option<CanonicalGpuTransferPlan>,
@@ -705,7 +711,7 @@ struct PreparedGpuUpload {
 
 #[derive(Clone, Debug, PartialEq)]
 struct VectorOverlayLayoutKey {
-    topology: TopologyToken,
+    mesh_revision: u64,
     generation: u64,
     center: Point2,
     scale: f64,
@@ -1065,6 +1071,7 @@ pub struct Playground {
     requested_edge: f64,
     requested_revision: Option<u64>,
     uploading: Option<Uploading>,
+    source_commit: Option<PendingSourceCommit>,
     gpu_upload_preparation: Option<GpuUploadPreparation>,
     wave_running: bool,
     wave_step: bool,
@@ -1231,6 +1238,7 @@ pub struct Playground {
     frame_history: VecDeque<f32>,
     handoff_requested: Option<Instant>,
     handoff_ready: Option<Instant>,
+    handoff_packed: Option<Instant>,
     handoff_upload: Option<Instant>,
     last_handoff: Option<HandoffRecord>,
     ready: bool,
@@ -1292,6 +1300,7 @@ impl Default for Playground {
             requested_edge: f64::NAN,
             requested_revision: None,
             uploading: None,
+            source_commit: None,
             gpu_upload_preparation: None,
             wave_running: true,
             wave_step: false,
@@ -1410,6 +1419,7 @@ impl Default for Playground {
             frame_history: VecDeque::with_capacity(FRAME_HISTORY),
             handoff_requested: None,
             handoff_ready: None,
+            handoff_packed: None,
             handoff_upload: None,
             last_handoff: None,
             ready: false,
@@ -4334,7 +4344,7 @@ impl Playground {
             return;
         }
         let key = VectorOverlayLayoutKey {
-            topology: active.bundle.token,
+            mesh_revision: active.mesh.mesh_revision,
             generation,
             center: self.center,
             scale: self.scale,
@@ -4584,7 +4594,7 @@ impl Playground {
                 .vector_overlay_layout
                 .as_ref()
                 .filter(|layout| {
-                    layout.key.topology == active.bundle.token
+                    layout.key.mesh_revision == active.mesh.mesh_revision
                         && layout.key.generation == vector_display.generation
                         && layout.revision == vector_display.revision
                         && layout.points.len() == vector_display.samples.len()
@@ -7093,6 +7103,7 @@ impl Playground {
         if self.editor.acceptance != TopologyAcceptance::Valid
             || self.editor.editing()
             || self.mesh_edge_dragging
+            || self.source_commit.is_some()
         {
             return;
         }
@@ -7120,12 +7131,22 @@ impl Playground {
             self.runtime.request_full_rebuild();
         }
         self.runtime.set_preserve_adaptation(self.amr_enabled);
-        match self.runtime.request(
+        let require_solver_handoff = self.uploaded_time_step > 0.0
+            && self.runtime.active().is_some_and(|active| {
+                let wanted = paced_time_step(
+                    active.canonical_operator.recommended_time_step(),
+                    self.editor.document.presentation.simulation_speed,
+                );
+                (wanted - self.uploaded_time_step).abs()
+                    > 1.0e-12 * wanted.abs().max(self.uploaded_time_step.abs()).max(1.0)
+            });
+        match self.runtime.request_with_handoff(
             self.editor.revision,
             &self.editor.document,
             self.editor.compiled_accepted.clone(),
             options,
             fresh,
+            require_solver_handoff,
         ) {
             Ok(_) => {
                 self.requested_revision = Some(self.editor.revision);
@@ -7140,6 +7161,7 @@ impl Playground {
     fn begin_handoff_timeline(&mut self) {
         self.handoff_requested = Some(Instant::now());
         self.handoff_ready = None;
+        self.handoff_packed = None;
         self.handoff_upload = None;
     }
     fn record_handoff(&mut self, active: &Arc<PreparedTopology>) {
@@ -7148,10 +7170,12 @@ impl Playground {
             from.map_or(0.0, |from| (to - from).as_secs_f64() * 1000.0)
         };
         let ready = self.handoff_ready.unwrap_or(now);
-        let upload = self.handoff_upload.unwrap_or(ready);
+        let packed = self.handoff_packed.unwrap_or(ready);
+        let upload = self.handoff_upload.unwrap_or(packed);
         self.last_handoff = Some(HandoffRecord {
             prepare_ms: millis(self.handoff_requested, ready),
-            drain_ms: millis(Some(ready), upload),
+            pack_ms: millis(Some(ready), packed),
+            drain_ms: millis(Some(packed), upload),
             upload_ms: millis(Some(upload), now),
             timing: active.timing,
             action: active.mesh_action,
@@ -7175,8 +7199,60 @@ impl Playground {
         }
         self.handoff_requested = None;
         self.handoff_ready = None;
+        self.handoff_packed = None;
         self.handoff_upload = None;
     }
+
+    fn commit_in_place(&mut self, token: TopologyToken, message: &'static str) {
+        match self.runtime.commit_ready(token) {
+            Ok(active) => {
+                self.amr_indicator_job = None;
+                self.amr_indicator_result = None;
+                self.amr_last_analyzed_step = None;
+                self.message = message.into();
+                self.record_handoff(&active);
+            }
+            Err(error) => self.message = error,
+        }
+    }
+
+    fn finish_source_commit(&mut self, request: &CanonicalGpuRequest) {
+        let Some(pending) = self.source_commit.as_ref() else {
+            return;
+        };
+        let processed = request.stats().processed_event();
+        if processed < pending.serial {
+            return;
+        }
+        let pending = self.source_commit.take().unwrap();
+        self.canonical_event_observed = processed;
+        let rejection = request.stats().event_rejection();
+        if rejection != 0 {
+            self.runtime.reject_ready(
+                pending.token,
+                format!("Canonical source update failed (failure code {rejection})"),
+            );
+            self.message = format!(
+                "Canonical source update was rejected without changing the accepted state (failure code {rejection})"
+            );
+            self.unseen_error = true;
+        } else {
+            self.commit_in_place(pending.token, "Simulation sources committed");
+        }
+    }
+
+    fn time_step_unchanged(&self, candidate: &PreparedTopology) -> bool {
+        if self.uploaded_time_step <= 0.0 {
+            return false;
+        }
+        let wanted = paced_time_step(
+            candidate.canonical_operator.recommended_time_step(),
+            self.editor.document.presentation.simulation_speed,
+        );
+        (wanted - self.uploaded_time_step).abs()
+            <= 1.0e-12 * wanted.abs().max(self.uploaded_time_step.abs()).max(1.0)
+    }
+
     fn refresh_runtime(
         &mut self,
         request: &mut CanonicalGpuRequest,
@@ -7187,10 +7263,14 @@ impl Playground {
         delta: f64,
     ) {
         request.set_grid_scale_filter(self.grid_scale_filter);
+        self.finish_source_commit(request);
         // Starting another preparation mid-upload clears `runtime.ready`, and
         // would make the accepted GPU generation impossible to publish under
         // its immutable topology token. A later frame picks the edit up.
-        if self.uploading.is_none() && self.gpu_upload_preparation.is_none() {
+        if self.uploading.is_none()
+            && self.source_commit.is_none()
+            && self.gpu_upload_preparation.is_none()
+        {
             self.retime_for_speed();
             self.request_runtime();
         }
@@ -7203,6 +7283,7 @@ impl Playground {
             self.gpu_upload_preparation = None;
         }
         if self.uploading.is_none()
+            && self.source_commit.is_none()
             && self.gpu_upload_preparation.is_none()
             && let Some(candidate) = self.runtime.ready().cloned()
         {
@@ -7211,33 +7292,106 @@ impl Playground {
                 self.editor.document.presentation.simulation_speed,
             );
             let token = candidate.bundle.token;
-            let active = self.runtime.active().cloned();
-            let runtime_serials = display.runtime_serials;
-            let (sender, receiver) = mpsc::channel();
-            #[cfg(not(target_arch = "wasm32"))]
-            let _ = std::thread::Builder::new()
-                .name("funfern-gpu-pack".into())
-                .spawn(move || {
-                    let _ = sender.send(compile_gpu_upload(candidate, active, dt, runtime_serials));
+            let mut needs_gpu_pack = true;
+            if self.time_step_unchanged(&candidate) {
+                match candidate.solver_update {
+                    PreparedSolverUpdate::MeasurementsOnly => {
+                        self.handoff_packed = self.handoff_ready;
+                        self.handoff_upload = self.handoff_ready;
+                        self.commit_in_place(token, "Simulation measurements committed");
+                        needs_gpu_pack = false;
+                    }
+                    PreparedSolverUpdate::SourceWeightsOnly
+                    | PreparedSolverUpdate::SourceDrivesOnly => {
+                        needs_gpu_pack = false;
+                        if !request.live_event_pending() {
+                            let serial = self
+                                .canonical_event_serial
+                                .max(request.stats().processed_event())
+                                .saturating_add(1)
+                                .max(1);
+                            let event = match candidate.solver_update {
+                                PreparedSolverUpdate::SourceWeightsOnly => self
+                                    .runtime
+                                    .active()
+                                    .ok_or_else(|| "Canonical source generation is missing".into())
+                                    .and_then(|active| {
+                                        CanonicalGpuLiveEvent::source_weight_patch(
+                                            &active.canonical_forcing,
+                                            &candidate.canonical_forcing,
+                                            dt,
+                                            serial,
+                                        )
+                                        .map_err(|error| format!("{error:?}"))
+                                    }),
+                                PreparedSolverUpdate::SourceDrivesOnly => {
+                                    CanonicalGpuLiveEvent::source_patch(
+                                        &candidate.canonical_forcing,
+                                        dt,
+                                        serial,
+                                    )
+                                    .map_err(|error| format!("{error:?}"))
+                                }
+                                _ => unreachable!("matched source-only update"),
+                            };
+                            match event.and_then(|event| {
+                                request
+                                    .queue_live_event(assets, event)
+                                    .map_err(str::to_owned)
+                            }) {
+                                Ok(()) => {
+                                    self.canonical_event_serial = serial;
+                                    self.handoff_packed = self.handoff_ready;
+                                    self.handoff_upload = Some(Instant::now());
+                                    self.source_commit =
+                                        Some(PendingSourceCommit { token, serial });
+                                }
+                                Err(error)
+                                    if error == "another canonical transaction is pending" => {}
+                                Err(error) => {
+                                    self.runtime.reject_ready(token, error.clone());
+                                    self.message = error;
+                                }
+                            }
+                        }
+                    }
+                    PreparedSolverUpdate::FullHandoff => {}
+                }
+            }
+            if needs_gpu_pack {
+                let active = self.runtime.active().cloned();
+                let runtime_serials = display.runtime_serials;
+                let (sender, receiver) = mpsc::channel();
+                #[cfg(not(target_arch = "wasm32"))]
+                let _ = std::thread::Builder::new()
+                    .name("funfern-gpu-pack".into())
+                    .spawn(move || {
+                        let _ =
+                            sender.send(compile_gpu_upload(candidate, active, dt, runtime_serials));
+                    });
+                #[cfg(target_arch = "wasm32")]
+                let _ = sender.send(compile_gpu_upload(candidate, active, dt, runtime_serials));
+                self.gpu_upload_preparation = Some(GpuUploadPreparation {
+                    token,
+                    time_step: dt,
+                    receiver: Mutex::new(receiver),
+                    result: None,
                 });
-            #[cfg(target_arch = "wasm32")]
-            let _ = sender.send(compile_gpu_upload(candidate, active, dt, runtime_serials));
-            self.gpu_upload_preparation = Some(GpuUploadPreparation {
-                token,
-                time_step: dt,
-                receiver: Mutex::new(receiver),
-                result: None,
-            });
+            }
         }
         if let Some(job) = &mut self.gpu_upload_preparation
             && job.result.is_none()
         {
             let received = job.receiver.lock().unwrap().try_recv();
             match received {
-                Ok(result) => job.result = Some(result),
+                Ok(result) => {
+                    job.result = Some(result);
+                    self.handoff_packed = Some(Instant::now());
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     job.result = Some(Err("Canonical GPU packing worker stopped".into()));
+                    self.handoff_packed = Some(Instant::now());
                 }
             }
         }
@@ -7340,7 +7494,7 @@ impl Playground {
                 }
             }
         }
-        if self.reset_requested && self.uploading.is_none() {
+        if self.reset_requested && self.uploading.is_none() && self.source_commit.is_none() {
             if let Some(active) = self.runtime.active() {
                 let dt = paced_time_step(
                     active.canonical_operator.recommended_time_step(),
@@ -7389,11 +7543,10 @@ impl Playground {
         }
         if let Some(active) = self.runtime.active() {
             let dt = self.solver_time_step();
-            if let Some((position, region)) = self
-                .uploading
-                .is_none()
-                .then(|| self.pending_pulse.take())
-                .flatten()
+            if let Some((position, region)) = (self.uploading.is_none()
+                && self.source_commit.is_none())
+            .then(|| self.pending_pulse.take())
+            .flatten()
             {
                 let mut increment = vec![0.0; active.canonical_operator.degrees_of_freedom()];
                 for (triangle, nodes) in active
@@ -10695,6 +10848,8 @@ impl Playground {
             .show(ui, |ui| {
                 if self.uploading.is_some() {
                     ui.label("Uploading the candidate to the GPU");
+                } else if self.source_commit.is_some() {
+                    ui.label("Applying source parameters at a solver boundary");
                 } else if self
                     .gpu_upload_preparation
                     .as_ref()
@@ -10720,8 +10875,11 @@ impl Playground {
                 match &self.last_handoff {
                     Some(record) => {
                         ui.small(format!(
-                            "Last handoff: prepare {:.1} ms · drain {:.1} ms · upload {:.1} ms",
-                            record.prepare_ms, record.drain_ms, record.upload_ms,
+                            "Last handoff: prepare {:.1} ms · pack {:.1} ms · drain {:.1} ms · upload {:.1} ms",
+                            record.prepare_ms,
+                            record.pack_ms,
+                            record.drain_ms,
+                            record.upload_ms,
                         ));
                         ui.small(timing_line(record.timing));
                         ui.small(match record.action {

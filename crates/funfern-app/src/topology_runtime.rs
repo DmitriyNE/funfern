@@ -148,6 +148,9 @@ pub struct PreparationIntent {
     /// Whether a repair refills its band at the sizes adaptation requested
     /// there rather than at the meshing target.
     pub preserve_adaptation: bool,
+    /// The solver timestep or another generation-owned value changed even if
+    /// the authored solver inputs did not.
+    pub require_solver_handoff: bool,
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
@@ -166,7 +169,13 @@ pub struct PreparedTopology {
     pub probes: Arc<[CompiledTopologyProbe]>,
     pub far_field: Option<Result<Arc<QuadraticFarFieldStencil>, String>>,
     pub point_source: PointSource,
+    pub probe_definitions: Arc<[TopologyProbeDefinition]>,
+    pub far_field_settings: FarFieldSettings,
     pub transfer: Option<Arc<QuadraticTransferMap>>,
+    /// Smallest transaction that can publish this candidate. Measurement-only
+    /// edits do not touch solver buffers; drive-only edits use the staged GPU
+    /// source event when the timestep is unchanged.
+    pub solver_update: PreparedSolverUpdate,
     pub fresh: bool,
     pub mesh_action: TopologyMeshUpdateAction,
     pub operator_reused: bool,
@@ -179,6 +188,14 @@ pub struct PreparedTopology {
     /// Options the mesh was built with. A request with different options is
     /// a full rebuild even when the plan is unchanged.
     pub meshing: MeshingOptions,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreparedSolverUpdate {
+    FullHandoff,
+    SourceWeightsOnly,
+    SourceDrivesOnly,
+    MeasurementsOnly,
 }
 
 #[derive(Clone, Debug)]
@@ -296,6 +313,7 @@ pub struct TopologyPreparationJob {
     canonical_outgoing_transfer: Option<Arc<CanonicalOutgoingNormalizedTransfer>>,
     canonical_transfer: Option<Arc<PreparedCanonicalTransfer>>,
     operator_reused: bool,
+    require_solver_handoff: bool,
     adapted: bool,
     done: bool,
     timing: TopologyPreparationTiming,
@@ -316,12 +334,19 @@ impl TopologyPreparationJob {
             fresh,
             force_rebuild,
             preserve_adaptation,
+            require_solver_handoff,
         } = intent;
         let same_authored_scene = previous
             .as_ref()
             .is_some_and(|previous| *previous.bundle.authored == document.model.accepted);
+        let same_operator_scene = previous.as_ref().is_some_and(|previous| {
+            operator_scene_eq(&previous.bundle.authored, &document.model.accepted)
+        });
+        let same_mesh_scene = previous.as_ref().is_some_and(|previous| {
+            mesh_scene_eq(&previous.bundle.authored, &document.model.accepted)
+        });
         let coarsening = AtomCoarsening::from_meshing(options);
-        let bundle = if same_authored_scene {
+        let bundle = if same_mesh_scene {
             let previous = previous.as_ref().unwrap();
             // The plan's atoms depend on the meshing options, so a changed
             // resolution re-derives them from the same compiled scene.
@@ -341,9 +366,17 @@ impl TopologyPreparationJob {
                 token: TopologyToken {
                     document_revision,
                     topology_revision: previous.bundle.token.topology_revision,
-                    mesh_generation: mesh_revision,
+                    mesh_generation: if previous.meshing == options && !force_rebuild {
+                        previous.bundle.token.mesh_generation
+                    } else {
+                        mesh_revision
+                    },
                 },
-                authored: previous.bundle.authored.clone(),
+                authored: if same_authored_scene {
+                    previous.bundle.authored.clone()
+                } else {
+                    Arc::new(document.model.accepted.clone())
+                },
                 snapshot: previous.bundle.snapshot.clone(),
                 plan,
             })
@@ -380,7 +413,7 @@ impl TopologyPreparationJob {
         if matches!(mesh_action, TopologyMeshUpdateAction::Reuse)
             && let Some(active) = previous.as_ref()
         {
-            reused = if same_authored_scene {
+            reused = if same_mesh_scene {
                 Some(active.mesh.clone())
             } else {
                 retraced(&active.mesh, &active.bundle.plan, &bundle.plan).map(Arc::new)
@@ -425,12 +458,49 @@ impl TopologyPreparationJob {
         };
         // A rebuilt mesh needs a fresh operator even when the scene is unchanged.
         let operator_reused =
-            same_authored_scene && matches!(mesh_action, TopologyMeshUpdateAction::Reuse);
+            same_operator_scene && matches!(mesh_action, TopologyMeshUpdateAction::Reuse);
         let operator = operator_reused.then(|| previous.as_ref().unwrap().operator.clone());
         let canonical_operator =
             operator_reused.then(|| previous.as_ref().unwrap().canonical_operator.clone());
-        let volume_sources =
-            operator_reused.then(|| previous.as_ref().unwrap().volume_sources.clone());
+        let point_source_validated = operator_reused
+            && previous.as_ref().is_some_and(|previous| {
+                previous.point_source.enabled == document.model.source.enabled
+                    && previous.point_source.spatial_eq(document.model.source)
+            });
+        let canonical_forcing = (operator_reused
+            && previous.as_ref().is_some_and(|previous| {
+                previous.point_source == document.model.source
+                    && previous.bundle.authored.volume_sources
+                        == document.model.accepted.volume_sources
+            }))
+        .then(|| previous.as_ref().unwrap().canonical_forcing.clone());
+        let volume_sources = operator_reused
+            .then(|| {
+                let previous = previous.as_ref().unwrap();
+                volume_source_layout_eq(
+                    &previous.bundle.authored.volume_sources,
+                    &document.model.accepted.volume_sources,
+                )
+                .then(|| {
+                    if previous.bundle.authored.volume_sources
+                        == document.model.accepted.volume_sources
+                    {
+                        previous.volume_sources.clone()
+                    } else {
+                        let mut compiled = previous.volume_sources.as_ref().clone();
+                        compiled.signals = document
+                            .model
+                            .accepted
+                            .volume_sources
+                            .iter()
+                            .filter(|source| source.enabled)
+                            .map(|source| source.signal)
+                            .collect();
+                        Arc::new(compiled)
+                    }
+                })
+            })
+            .flatten();
         Ok(Self {
             bundle,
             probes: document.model.probes.clone().into(),
@@ -446,7 +516,7 @@ impl TopologyPreparationJob {
             mesh_job,
             mesh,
             operator,
-            point_source_validated: false,
+            point_source_validated,
             #[cfg(test)]
             point_source_validation_count: 0,
             assembly_job: None,
@@ -456,7 +526,7 @@ impl TopologyPreparationJob {
             transfer: None,
             source_job: None,
             volume_sources,
-            canonical_forcing: None,
+            canonical_forcing,
             canonical_primary_transfer: None,
             canonical_vector_job: None,
             canonical_vector_transfer: None,
@@ -465,6 +535,7 @@ impl TopologyPreparationJob {
             canonical_outgoing_transfer: None,
             canonical_transfer: None,
             operator_reused,
+            require_solver_handoff,
             adapted: false,
             done: false,
             timing: TopologyPreparationTiming::default(),
@@ -529,6 +600,7 @@ impl TopologyPreparationJob {
             canonical_outgoing_transfer: None,
             canonical_transfer: None,
             operator_reused: false,
+            require_solver_handoff: true,
             adapted: true,
             done: false,
             timing: TopologyPreparationTiming::default(),
@@ -742,12 +814,27 @@ impl TopologyPreparationJob {
         {
             let previous = self.previous.as_ref().unwrap();
             self.phase = TopologyPreparationPhase::Transferring;
-            self.transfer_job = Some(QuadraticTransferJob::new(
-                previous.mesh.clone(),
-                previous.operator.clone(),
-                self.mesh.as_ref().unwrap().clone(),
-                self.operator.as_ref().unwrap().clone(),
-            ));
+            if Arc::ptr_eq(&previous.mesh, self.mesh.as_ref().unwrap()) {
+                let started = Instant::now();
+                match QuadraticTransferMap::identity_on_mesh(
+                    self.mesh.as_ref().unwrap(),
+                    &previous.operator,
+                    self.operator.as_ref().unwrap(),
+                ) {
+                    Ok(transfer) => {
+                        self.transfer = Some(Arc::new(transfer));
+                        self.timing.transfer_ms += elapsed_ms(started);
+                    }
+                    Err(error) => return Some(Err(self.fail(error.to_string()))),
+                }
+            } else {
+                self.transfer_job = Some(QuadraticTransferJob::new(
+                    previous.mesh.clone(),
+                    previous.operator.clone(),
+                    self.mesh.as_ref().unwrap().clone(),
+                    self.operator.as_ref().unwrap().clone(),
+                ));
+            }
         }
         if let Some(job) = &mut self.transfer_job {
             let started = Instant::now();
@@ -798,7 +885,11 @@ impl TopologyPreparationJob {
             return None;
         }
 
-        if !self.fresh && self.canonical_transfer.is_none() {
+        let solver_update = self.prepared_solver_update();
+        if !self.fresh
+            && solver_update == PreparedSolverUpdate::FullHandoff
+            && self.canonical_transfer.is_none()
+        {
             self.phase = TopologyPreparationPhase::TransferringCanonical;
             let interpolation = if let Some(transfer) = &self.transfer {
                 transfer.clone()
@@ -903,23 +994,47 @@ impl TopologyPreparationJob {
         let measurements_started = Instant::now();
         let mesh = self.mesh.as_ref().unwrap().clone();
         let operator = self.operator.as_ref().unwrap().clone();
-        let probes = compile_probes(&self.probes, &mesh, &operator, &self.bundle);
-        let far_field = self.far_field.enabled.then(|| {
-            QuadraticFarFieldStencil::build_topology(
-                &mesh,
-                &operator,
-                &self.bundle.plan,
-                self.bundle.model(),
-                FarFieldCompileOptions {
-                    inset: self.far_field.inset,
-                    sample_count: FAR_FIELD_CONTOUR_POINTS,
-                    point_source: Some(self.point_source),
-                    volume_sources: &self.bundle.authored.volume_sources,
-                },
-            )
-            .map(Arc::new)
-            .map_err(|error| error.to_string())
-        });
+        let probes = compile_probes_reusing(
+            &self.probes,
+            &mesh,
+            &operator,
+            &self.bundle,
+            self.operator_reused
+                .then_some(self.previous.as_deref())
+                .flatten(),
+        );
+        let far_field = self
+            .previous
+            .as_ref()
+            .filter(|previous| {
+                self.operator_reused
+                    && previous.far_field_settings == self.far_field
+                    && previous.point_source.enabled == self.point_source.enabled
+                    && previous.point_source.spatial_eq(self.point_source)
+                    && volume_source_layout_eq(
+                        &previous.bundle.authored.volume_sources,
+                        &self.bundle.authored.volume_sources,
+                    )
+            })
+            .map(|previous| previous.far_field.clone())
+            .unwrap_or_else(|| {
+                self.far_field.enabled.then(|| {
+                    QuadraticFarFieldStencil::build_topology(
+                        &mesh,
+                        &operator,
+                        &self.bundle.plan,
+                        self.bundle.model(),
+                        FarFieldCompileOptions {
+                            inset: self.far_field.inset,
+                            sample_count: FAR_FIELD_CONTOUR_POINTS,
+                            point_source: Some(self.point_source),
+                            volume_sources: &self.bundle.authored.volume_sources,
+                        },
+                    )
+                    .map(Arc::new)
+                    .map_err(|error| error.to_string())
+                })
+            });
         self.timing.measurements_ms += elapsed_ms(measurements_started);
         self.done = true;
         self.phase = TopologyPreparationPhase::Ready;
@@ -934,7 +1049,10 @@ impl TopologyPreparationJob {
             probes: probes.into(),
             far_field,
             point_source: self.point_source,
+            probe_definitions: self.probes.clone(),
+            far_field_settings: self.far_field,
             transfer: self.transfer.take(),
+            solver_update,
             fresh: self.fresh,
             mesh_action: self.mesh_action,
             operator_reused: self.operator_reused,
@@ -1016,6 +1134,27 @@ impl TopologyPreparationJob {
         Ok(())
     }
 
+    fn prepared_solver_update(&self) -> PreparedSolverUpdate {
+        if self.fresh || !self.operator_reused || self.require_solver_handoff {
+            return PreparedSolverUpdate::FullHandoff;
+        }
+        let Some(previous) = &self.previous else {
+            return PreparedSolverUpdate::FullHandoff;
+        };
+        let Some(forcing) = &self.canonical_forcing else {
+            return PreparedSolverUpdate::FullHandoff;
+        };
+        if forcing.as_ref() == previous.canonical_forcing.as_ref() {
+            PreparedSolverUpdate::MeasurementsOnly
+        } else if forcing_layout_eq(forcing, &previous.canonical_forcing) {
+            PreparedSolverUpdate::SourceDrivesOnly
+        } else if forcing_sparse_layout_eq(forcing, &previous.canonical_forcing) {
+            PreparedSolverUpdate::SourceWeightsOnly
+        } else {
+            PreparedSolverUpdate::FullHandoff
+        }
+    }
+
     fn fail(&mut self, message: String) -> TopologyPreparationError {
         let phase = self.phase;
         self.done = true;
@@ -1026,6 +1165,63 @@ impl TopologyPreparationJob {
             message,
         }
     }
+}
+
+fn operator_scene_eq(left: &TopologyScene, right: &TopologyScene) -> bool {
+    left.geometry == right.geometry
+        && left.physics == right.physics
+        && left.materials == right.materials
+        && left.regions == right.regions
+        && left.face_assignments == right.face_assignments
+        && left.outer_boundaries == right.outer_boundaries
+}
+
+fn mesh_scene_eq(left: &TopologyScene, right: &TopologyScene) -> bool {
+    left.geometry == right.geometry
+        && left.face_assignments == right.face_assignments
+        && left.regions.len() == right.regions.len()
+        && left
+            .regions
+            .iter()
+            .zip(&right.regions)
+            .all(|(left, right)| left.id == right.id)
+}
+
+fn volume_source_layout_eq(left: &[VolumeSource], right: &[VolumeSource]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.region == right.region
+                && left.enabled == right.enabled
+                && left.profile == right.profile
+                && left.parameters == right.parameters
+        })
+}
+
+fn forcing_layout_eq(left: &CanonicalForcing, right: &CanonicalForcing) -> bool {
+    left.prescribed() == right.prescribed()
+        && left.sources().len() == right.sources().len()
+        && left
+            .sources()
+            .iter()
+            .zip(right.sources())
+            .all(|(left, right)| left.weights() == right.weights())
+}
+
+fn forcing_sparse_layout_eq(left: &CanonicalForcing, right: &CanonicalForcing) -> bool {
+    left.prescribed() == right.prescribed()
+        && left.sources().len() == right.sources().len()
+        && left
+            .sources()
+            .iter()
+            .zip(right.sources())
+            .all(|(left, right)| {
+                left.weights().len() == right.weights().len()
+                    && left
+                        .weights()
+                        .iter()
+                        .zip(right.weights())
+                        .all(|(left, right)| (*left == 0.0) == (*right == 0.0))
+            })
 }
 
 pub struct TopologyRuntime {
@@ -1088,6 +1284,18 @@ impl TopologyRuntime {
         options: MeshingOptions,
         fresh: bool,
     ) -> Result<TopologyToken, String> {
+        self.request_with_handoff(document_revision, document, compiled, options, fresh, false)
+    }
+
+    pub fn request_with_handoff(
+        &mut self,
+        document_revision: u64,
+        document: &TopologyDocument,
+        compiled: CompiledTopologyScene,
+        options: MeshingOptions,
+        fresh: bool,
+        require_solver_handoff: bool,
+    ) -> Result<TopologyToken, String> {
         let mesh_revision = self.reserve_mesh_revision();
         let job = TopologyPreparationJob::new(
             document_revision,
@@ -1100,6 +1308,7 @@ impl TopologyRuntime {
                 fresh,
                 force_rebuild: std::mem::take(&mut self.force_rebuild),
                 preserve_adaptation: self.preserve_adaptation,
+                require_solver_handoff,
             },
         )?;
         let token = job.token();
@@ -1304,6 +1513,32 @@ fn compile_probes(
                 id: probe.id,
                 result,
             }
+        })
+        .collect()
+}
+
+fn compile_probes_reusing(
+    probes: &[TopologyProbeDefinition],
+    mesh: &TriMesh,
+    operator: &QuadraticWaveOperator,
+    bundle: &AcceptedTopology,
+    previous: Option<&PreparedTopology>,
+) -> Vec<CompiledTopologyProbe> {
+    probes
+        .iter()
+        .map(|probe| {
+            if let Some(previous) = previous
+                && previous
+                    .probe_definitions
+                    .iter()
+                    .any(|definition| definition == probe)
+                && let Some(compiled) = previous.probes.iter().find(|entry| entry.id == probe.id)
+            {
+                return compiled.clone();
+            }
+            compile_probes(std::slice::from_ref(probe), mesh, operator, bundle)
+                .pop()
+                .expect("one probe compiles to one result")
         })
         .collect()
 }
@@ -1958,12 +2193,21 @@ mod tests {
         let second = runtime
             .request(2, &document, compiled, options(), false)
             .unwrap();
-        prepare(&mut runtime).unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), second);
         let candidate = runtime.ready().unwrap();
         assert_eq!(candidate.mesh_action, TopologyMeshUpdateAction::Reuse);
         assert_eq!(candidate.mesh.mesh_revision, original.mesh.mesh_revision);
+        assert!(Arc::ptr_eq(&candidate.mesh, &original.mesh));
         assert!(!candidate.operator_reused);
         assert!(candidate.transfer.is_some());
+        assert!(
+            candidate
+                .canonical_transfer
+                .as_ref()
+                .unwrap()
+                .complementary
+                .is_identity()
+        );
         runtime.commit_ready(second).unwrap();
     }
 
@@ -2037,6 +2281,188 @@ mod tests {
         assert!(Arc::ptr_eq(&candidate.mesh, &active.mesh));
         assert!(Arc::ptr_eq(&candidate.operator, &active.operator));
         assert!(candidate.transfer.is_none());
+        assert!(candidate.canonical_transfer.is_none());
+        assert_eq!(
+            candidate.solver_update,
+            PreparedSolverUpdate::SourceDrivesOnly
+        );
+    }
+
+    #[test]
+    fn probe_only_request_never_prepares_a_solver_transfer() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let first = runtime
+            .request(
+                1,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        runtime.commit_ready(first).unwrap();
+
+        let mut document = editor.document.clone();
+        document.model.probes.push(TopologyProbeDefinition {
+            id: ProbeId(1),
+            name: "receiver".into(),
+            color: [91, 220, 194],
+            enabled: true,
+            target: TopologyProbeTarget::Point(Point2::new(0.25, 0.0)),
+        });
+        let second = runtime
+            .request(
+                2,
+                &document,
+                document.model.accepted.compile(2).unwrap(),
+                options(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), second);
+        let candidate = runtime.ready().unwrap();
+        assert_eq!(
+            candidate.solver_update,
+            PreparedSolverUpdate::MeasurementsOnly
+        );
+        assert!(candidate.canonical_transfer.is_none());
+        assert_eq!(candidate.probes.len(), 1);
+    }
+
+    #[test]
+    fn timestep_republish_keeps_the_full_identity_handoff() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let first = runtime
+            .request(
+                1,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        runtime.commit_ready(first).unwrap();
+
+        runtime
+            .request_with_handoff(
+                1,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                false,
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        let candidate = runtime.ready().unwrap();
+        assert_eq!(candidate.solver_update, PreparedSolverUpdate::FullHandoff);
+        assert!(candidate.canonical_transfer.is_some());
+    }
+
+    #[test]
+    fn volume_source_signal_edit_reuses_operator_and_spatial_weights() {
+        let editor = TopologyEditor::default();
+        let mut document = editor.document.clone();
+        let source = VolumeSource {
+            region: BACKGROUND_REGION,
+            enabled: true,
+            profile: ScalarField::constant(1.0),
+            parameters: vec![],
+            signal: TimeSignal::harmonic(0.0, 1.0, 2.0, 0.0),
+        };
+        document.model.draft.volume_sources.push(source.clone());
+        document.model.accepted.volume_sources.push(source);
+        let mut runtime = TopologyRuntime::default();
+        let first = runtime
+            .request(
+                1,
+                &document,
+                document.model.accepted.compile(1).unwrap(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        let active = runtime.commit_ready(first).unwrap();
+
+        document.model.draft.volume_sources[0].signal = TimeSignal::harmonic(0.0, 0.5, 4.0, 0.2);
+        document.model.accepted.volume_sources[0].signal =
+            document.model.draft.volume_sources[0].signal;
+        runtime
+            .request(
+                2,
+                &document,
+                document.model.accepted.compile(2).unwrap(),
+                options(),
+                false,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        let candidate = runtime.ready().unwrap();
+        assert!(candidate.operator_reused);
+        assert!(Arc::ptr_eq(&candidate.operator, &active.operator));
+        assert_eq!(
+            candidate.solver_update,
+            PreparedSolverUpdate::SourceDrivesOnly
+        );
+        assert!(candidate.canonical_transfer.is_none());
+    }
+
+    #[test]
+    fn enabled_point_source_move_uses_a_sparse_weight_patch() {
+        let editor = TopologyEditor::default();
+        let mut document = editor.document.clone();
+        document.model.source.enabled = true;
+        let mut runtime = TopologyRuntime::default();
+        let first = runtime
+            .request(
+                1,
+                &document,
+                document.model.accepted.compile(1).unwrap(),
+                options(),
+                true,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        runtime.commit_ready(first).unwrap();
+
+        document.model.source.position.x += 0.05;
+        let second = runtime
+            .request(
+                2,
+                &document,
+                document.model.accepted.compile(2).unwrap(),
+                options(),
+                false,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        let candidate = runtime.ready().unwrap();
+        assert_eq!(
+            candidate.solver_update,
+            PreparedSolverUpdate::SourceWeightsOnly
+        );
+        assert!(candidate.canonical_transfer.is_none());
+        runtime.commit_ready(second).unwrap();
+
+        document.model.source.enabled = false;
+        runtime
+            .request(
+                3,
+                &document,
+                document.model.accepted.compile(3).unwrap(),
+                options(),
+                false,
+            )
+            .unwrap();
+        prepare(&mut runtime).unwrap();
+        let candidate = runtime.ready().unwrap();
+        assert_eq!(candidate.solver_update, PreparedSolverUpdate::FullHandoff);
+        assert!(candidate.canonical_transfer.is_some());
     }
 
     /// A hole with the running field's runtime around it, ready for edits.

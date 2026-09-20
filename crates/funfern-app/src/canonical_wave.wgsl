@@ -414,7 +414,7 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         return;
     }
-    if operation == 5u && i < control.counts_c.z {
+    if (operation == 5u || operation == 6u) && i < control.counts_c.z {
         let source_slot = control.runtime_slots.x & 1u;
         let accepted_base = control.table_offsets.y + 4u * i + 2u * source_slot;
         let candidate_base = control.table_offsets.y + 4u * i
@@ -441,6 +441,18 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
         tables[candidate_base].data = bitcast<vec4<u32>>(parameters);
         tables[candidate_base + 1u].data = runtime;
         if !finite_vector(parameters) { reject(STATUS_NON_FINITE); }
+    }
+    if operation == 6u && i < control.counts_a.x {
+        let drive_words = 4u * control.counts_c.z;
+        let start = nodes[i].ranges.z;
+        let count = nodes[i].ranges.w;
+        for (var slot = 0u; slot < count; slot += 1u) {
+            let entry = start + slot;
+            let source_index = entry - control.counts_c.x;
+            let weight = bitcast<f32>(boundary[1u + drive_words + source_index].data.x);
+            tables[entry].data.w = bitcast<u32>(weight);
+            if !finite_scalar(weight) { reject(STATUS_NON_FINITE); }
+        }
     }
 }
 
@@ -481,7 +493,9 @@ fn event_begin(@builtin(global_invocation_id) id: vec3<u32>) {
         let auxiliary = i - auxiliary_offset();
         set_candidate_auxiliary(auxiliary, accepted_auxiliary(auxiliary));
     }
-    if i < control.counts_c.z && event_operation() != 5u {
+    if i < control.counts_c.z
+        && event_operation() != 5u
+        && event_operation() != 6u {
         let source_slot = control.runtime_slots.x & 1u;
         let accepted_base = control.table_offsets.y + 4u * i + 2u * source_slot;
         let candidate_base = control.table_offsets.y + 4u * i
@@ -613,6 +627,17 @@ fn event_validate(@builtin(local_invocation_id) id: vec3<u32>) {
 fn event_accept_tables(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if atomicLoad(&status.candidate) != 0u || atomicLoad(&status.latch) != 0u { return; }
+    if event_operation() == 6u {
+        if i < control.counts_a.x {
+            let start = nodes[i].ranges.z;
+            let count = nodes[i].ranges.w;
+            for (var slot = 0u; slot < count; slot += 1u) {
+                let entry = start + slot;
+                tables[entry].data.z = tables[entry].data.w;
+            }
+        }
+        return;
+    }
     if event_operation() != 3u { return; }
     if i < control.counts_a.x {
         nodes[i].mass_loss.z = nodes[i].mass_loss.w;
@@ -652,7 +677,7 @@ fn commit_event() {
         control.runtime_serials.z = control.event.y;
     } else if operation == 4u {
         control.runtime_serials.w = control.event.y;
-    } else if operation == 5u {
+    } else if operation == 5u || operation == 6u {
         control.runtime_serials.x = control.event.y;
         control.runtime_slots.x ^= 1u;
     }

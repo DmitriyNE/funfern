@@ -111,12 +111,17 @@ fn main() {
     .expect("event GPU plan");
 
     let new_frequency = 1.45;
+    let new_weights = weights
+        .iter()
+        .zip(operator.node_points())
+        .map(|(weight, point)| weight * (1.0 + 0.15 * point.x))
+        .collect::<Vec<_>>();
     let mut authored_new_forcing = CanonicalForcing::none(&operator);
     authored_new_forcing
         .push_source(
             CanonicalSource::direct(
                 &operator,
-                weights.clone(),
+                new_weights.clone(),
                 // This authored phase is intentionally different: the live
                 // event preserves the current carrier unless phase is edited
                 // through a future explicit phase-edit operation.
@@ -138,8 +143,13 @@ fn main() {
             1,
         )
         .expect("live law event"),
-        CanonicalGpuLiveEvent::source_patch(&authored_new_forcing, time_step, 2)
-            .expect("live source event"),
+        CanonicalGpuLiveEvent::source_weight_patch(
+            &old_forcing,
+            &authored_new_forcing,
+            time_step,
+            2,
+        )
+        .expect("live source-weight event"),
         CanonicalGpuLiveEvent::primary_pulse(&operator, &pulse, 3).expect("live pulse event"),
         CanonicalGpuLiveEvent::grid_filter(FILTER_STRENGTH, 4).expect("live filter event"),
         CanonicalGpuLiveEvent::maintenance(&vec![0.0; operator.degrees_of_freedom()], 5)
@@ -160,7 +170,7 @@ fn main() {
         .push_source(
             CanonicalSource::direct(
                 &operator,
-                weights,
+                new_weights,
                 TimeSignal::harmonic(0.015, 0.03, new_frequency, preserved_anchor),
             )
             .unwrap(),

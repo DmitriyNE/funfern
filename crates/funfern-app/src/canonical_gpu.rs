@@ -70,6 +70,7 @@ const EVENT_GRID_FILTER: u32 = 2;
 const EVENT_LINEAR_LAW_PATCH: u32 = 3;
 const EVENT_MAINTENANCE: u32 = 4;
 const EVENT_SOURCE_PATCH: u32 = 5;
+const EVENT_SOURCE_WEIGHT_PATCH: u32 = 6;
 const RESIDENT_FILTER_DISPATCHES: u64 = 7;
 const RESIDENT_FILTER_ACCOUNTING_DISPATCHES: u64 = 1;
 const TRANSFER_LAYOUT_VERSION: u32 = 1;
@@ -509,6 +510,79 @@ impl CanonicalGpuLiveEvent {
         }
         Ok(Self {
             kind: EVENT_SOURCE_PATCH,
+            serial,
+            dispatches: 4,
+            upload,
+        })
+    }
+
+    pub fn source_weight_patch(
+        current: &CanonicalForcing,
+        target: &CanonicalForcing,
+        time_step: f64,
+        serial: u32,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        Self::validate_serial(serial)?;
+        if current.prescribed() != target.prescribed()
+            || current.sources().len() != target.sources().len()
+            || current
+                .sources()
+                .iter()
+                .zip(target.sources())
+                .any(|(current, target)| {
+                    current.weights().len() != target.weights().len()
+                        || current
+                            .weights()
+                            .iter()
+                            .zip(target.weights())
+                            .any(|(current, target)| (*current == 0.0) != (*target == 0.0))
+                })
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a live source-weight patch must preserve sparse forcing layout",
+            ));
+        }
+        let clock = CanonicalGpuClock::initial(time_step)?;
+        let weight_count = target
+            .sources()
+            .iter()
+            .map(|source| {
+                source
+                    .weights()
+                    .iter()
+                    .filter(|weight| **weight != 0.0)
+                    .count()
+            })
+            .sum::<usize>();
+        let mut upload = vec![GpuCanonicalTableWord {
+            data: UVec4::new(
+                EVENT_SOURCE_WEIGHT_PATCH,
+                serial,
+                usize_u32(target.sources().len())?,
+                usize_u32(weight_count)?,
+            ),
+        }];
+        for source in target.sources() {
+            upload.extend(gpu_drive(source.drive(), clock)?);
+        }
+        let node_count = target.prescribed().len();
+        for node in 0..node_count {
+            for source in target.sources() {
+                let weight = source.weights()[node];
+                if weight != 0.0 {
+                    upload.push(GpuCanonicalTableWord {
+                        data: UVec4::new(
+                            finite_f32(weight, "live source weight")?.to_bits(),
+                            0,
+                            0,
+                            0,
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(Self {
+            kind: EVENT_SOURCE_WEIGHT_PATCH,
             serial,
             dispatches: 5,
             upload,
@@ -1329,7 +1403,12 @@ impl CanonicalGpuTransferPlan {
         runtime: &CanonicalGpuRuntimeTransfer,
     ) -> Result<Self, CanonicalGpuBuildError> {
         let primary_targets = primary.targets();
-        let vector_targets = complementary.targets();
+        let vector_identity = complementary.is_identity();
+        let vector_targets = if vector_identity {
+            Vec::new()
+        } else {
+            complementary.targets()
+        };
         let gap_targets = thin_gap.targets();
         let source_gap_count = source.thin_gap_samples().len();
         let target_gap_count = target.thin_gap_samples().len();
@@ -1342,7 +1421,12 @@ impl CanonicalGpuTransferPlan {
         if primary.source_support().len() != source.degrees_of_freedom()
             || primary_targets.len() != target.degrees_of_freedom()
             || complementary.source_sample_count() != source.complementary_degrees_of_freedom()
-            || vector_targets.len() != target.complementary_degrees_of_freedom()
+            || if vector_identity {
+                source.complementary_degrees_of_freedom()
+                    != target.complementary_degrees_of_freedom()
+            } else {
+                vector_targets.len() != target.complementary_degrees_of_freedom()
+            }
             || gap_targets.len() != target_gap_count
             || thin_gap.source_energy_weights().len() != source_gap_count
             || outgoing.source_count != source_outgoing_count
@@ -1406,14 +1490,6 @@ impl CanonicalGpuTransferPlan {
                 .iter()
                 .enumerate()
                 .all(|(index, target)| target.exact && target.source_nodes[0] == index as u32);
-        let vector_identity = source.complementary_degrees_of_freedom()
-            == target.complementary_degrees_of_freedom()
-            && vector_targets.iter().enumerate().all(|(index, target)| {
-                target.exact
-                    && target.source_count == 1
-                    && target.source_samples[0] == index as u32
-                    && target.weights[0] == 1.0
-            });
         let primary_offset = words.len();
         for target in primary_targets.iter().filter(|_| !primary_identity) {
             words.extend([
@@ -2060,6 +2136,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     accounting_item_count: u32,
     trace_count: u32,
     drive_count: u32,
+    source_count: u32,
     rebase_step_limit: u32,
     dispatches_per_step: u64,
     needs_loss_stages: bool,
@@ -2213,6 +2290,7 @@ fn add_canonical_buffers(
     let state_count = plan.control.counts_a.w;
     let trace_count = plan.control.counts_b.y;
     let drive_count = plan.control.counts_c.z;
+    let source_count = plan.control.counts_c.y;
     let time_limit = (256.0 / plan.control.clock_f32.x as f64)
         .ceil()
         .clamp(1.0, u32::MAX as f64) as u32;
@@ -2237,6 +2315,7 @@ fn add_canonical_buffers(
         accounting_item_count,
         trace_count,
         drive_count,
+        source_count,
         rebase_step_limit,
         dispatches_per_step,
         needs_loss_stages: plan.needs_loss_stages,
@@ -2462,6 +2541,11 @@ impl CanonicalGpuRequest {
                     == handles.node_count as usize + handles.sample_count as usize + 1
             }
             EVENT_SOURCE_PATCH => event.upload.len() == handles.drive_count as usize * 4 + 1,
+            EVENT_SOURCE_WEIGHT_PATCH => {
+                event.upload.len()
+                    == handles.drive_count as usize * 4 + handles.source_count as usize + 1
+                    && event.upload[0].data.w == handles.source_count
+            }
             _ => false,
         };
         if !payload_valid {
@@ -2474,7 +2558,7 @@ impl CanonicalGpuRequest {
             handles.needs_loss_stages = true;
             handles.needs_accounting = true;
         }
-        if event.kind == EVENT_SOURCE_PATCH
+        if matches!(event.kind, EVENT_SOURCE_PATCH | EVENT_SOURCE_WEIGHT_PATCH)
             && self.buffers.as_ref().is_some_and(|handles| {
                 handles.drive_count as usize != event.upload[0].data.z as usize
             })
@@ -3870,6 +3954,12 @@ fn compute_canonical_wave(
                 pass.set_pipeline(pipelines[19]);
                 pass.dispatch_workgroups(1, 1, 1);
             }
+            EVENT_SOURCE_WEIGHT_PATCH => {
+                pass.set_pipeline(pipelines[19]);
+                pass.dispatch_workgroups(1, 1, 1);
+                pass.set_pipeline(pipelines[20]);
+                pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            }
             _ => unreachable!("validated canonical GPU event kind"),
         }
         pass.set_pipeline(pipelines[21]);
@@ -4547,6 +4637,64 @@ mod tests {
         assert_eq!(pulse.upload.len(), operator_nodes + 1);
         assert!(CanonicalGpuLiveEvent::grid_filter(1.1, 8).is_err());
         assert!(CanonicalGpuLiveEvent::maintenance(&[], 0).is_err());
+    }
+
+    #[test]
+    fn live_source_weight_patch_rejects_a_changed_sparse_layout() {
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            23,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 23).unwrap();
+        let weights = operator.primary_mass().to_vec();
+        let signal = TimeSignal::harmonic(0.0, 1.0, 2.0, 0.0);
+        let mut current = CanonicalForcing::none(&operator);
+        current
+            .push_source(CanonicalSource::direct(&operator, weights.clone(), signal).unwrap())
+            .unwrap();
+
+        let mut rescaled = CanonicalForcing::none(&operator);
+        rescaled
+            .push_source(
+                CanonicalSource::direct(
+                    &operator,
+                    weights.iter().map(|weight| 0.5 * weight).collect(),
+                    signal,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let time_step = 0.8 * operator.maximum_time_step();
+        assert!(
+            CanonicalGpuLiveEvent::source_weight_patch(&current, &rescaled, time_step, 1).is_ok()
+        );
+
+        let mut changed_weights = weights;
+        let changed = changed_weights
+            .iter()
+            .position(|weight| *weight != 0.0)
+            .unwrap();
+        changed_weights[changed] = 0.0;
+        let mut changed_layout = CanonicalForcing::none(&operator);
+        changed_layout
+            .push_source(CanonicalSource::direct(&operator, changed_weights, signal).unwrap())
+            .unwrap();
+        assert!(matches!(
+            CanonicalGpuLiveEvent::source_weight_patch(&current, &changed_layout, time_step, 2,),
+            Err(CanonicalGpuBuildError::InvalidLayout(_))
+        ));
     }
 
     #[test]

@@ -338,7 +338,6 @@ impl CanonicalPrimaryTransferMap {
 
 #[derive(Clone, Debug, PartialEq)]
 enum VectorTarget {
-    Exact(usize),
     Reconstruct {
         source_element: u32,
         weights: [f64; 6],
@@ -362,6 +361,7 @@ pub struct CanonicalVectorTransferTarget {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalVectorTransferMap {
     source_samples: usize,
+    identity: bool,
     targets: Vec<VectorTarget>,
 }
 
@@ -556,10 +556,10 @@ impl CanonicalVectorTransferWork {
                 self.identity = source_mesh.vertices == target_mesh.vertices
                     && source_mesh.triangles == target_mesh.triangles
                     && source.constitutive_samples().len() == target.constitutive_samples().len();
-                self.targets = Vec::with_capacity(target.complementary_degrees_of_freedom());
                 if self.identity {
                     self.phase = CanonicalVectorTransferPhase::Locate(0);
                 } else {
+                    self.targets = Vec::with_capacity(target.complementary_degrees_of_freedom());
                     self.bins = Some(CanonicalSourceBins::new(source_mesh)?);
                     self.phase = CanonicalVectorTransferPhase::Bins(0);
                 }
@@ -575,33 +575,46 @@ impl CanonicalVectorTransferWork {
             CanonicalVectorTransferPhase::Locate(target_index) => {
                 let samples = target.constitutive_samples();
                 if target_index == samples.len() {
+                    if self.identity {
+                        self.phase = CanonicalVectorTransferPhase::Done;
+                        return Ok(Some(CanonicalVectorTransferMap {
+                            source_samples: source.complementary_degrees_of_freedom(),
+                            identity: true,
+                            targets: Vec::new(),
+                        }));
+                    }
                     self.phase = CanonicalVectorTransferPhase::PrepareExtension;
                     return Ok(None);
                 }
                 let sample = &samples[target_index];
-                if self.identity
-                    && source.constitutive_samples()[target_index].point == sample.point
-                    && source.constitutive_samples()[target_index].barycentric == sample.barycentric
-                {
-                    self.targets.push(VectorTarget::Exact(target_index));
-                } else {
-                    let target_region = target_mesh.triangles[sample.element as usize].region;
-                    let donor = self
-                        .bins
-                        .as_ref()
-                        .and_then(|bins| bins.locate(source_mesh, sample.point, target_region));
-                    if let Some((source_element, source_barycentric)) = donor {
-                        self.targets.push(VectorTarget::Reconstruct {
-                            source_element: source_element as u32,
-                            weights: quadratic_sample_weights(
-                                &source.constitutive_samples()[source_element * QUADRATURE_SAMPLES
-                                    ..(source_element + 1) * QUADRATURE_SAMPLES],
-                                source_barycentric,
-                            )?,
-                        });
-                    } else {
-                        self.targets.push(VectorTarget::Exposed);
+                if self.identity {
+                    if source.constitutive_samples()[target_index].point != sample.point
+                        || source.constitutive_samples()[target_index].barycentric
+                            != sample.barycentric
+                    {
+                        return Err(WaveError::InvalidMesh(
+                            "identity complementary samples do not share physical coordinates",
+                        ));
                     }
+                    self.phase = CanonicalVectorTransferPhase::Locate(target_index + 1);
+                    return Ok(None);
+                }
+                let target_region = target_mesh.triangles[sample.element as usize].region;
+                let donor = self
+                    .bins
+                    .as_ref()
+                    .and_then(|bins| bins.locate(source_mesh, sample.point, target_region));
+                if let Some((source_element, source_barycentric)) = donor {
+                    self.targets.push(VectorTarget::Reconstruct {
+                        source_element: source_element as u32,
+                        weights: quadratic_sample_weights(
+                            &source.constitutive_samples()[source_element * QUADRATURE_SAMPLES
+                                ..(source_element + 1) * QUADRATURE_SAMPLES],
+                            source_barycentric,
+                        )?,
+                    });
+                } else {
+                    self.targets.push(VectorTarget::Exposed);
                 }
                 self.phase = CanonicalVectorTransferPhase::Locate(target_index + 1);
             }
@@ -620,6 +633,7 @@ impl CanonicalVectorTransferWork {
                     self.phase = CanonicalVectorTransferPhase::Done;
                     return Ok(Some(CanonicalVectorTransferMap {
                         source_samples: source.complementary_degrees_of_freedom(),
+                        identity: false,
                         targets: std::mem::take(&mut self.targets),
                     }));
                 }
@@ -731,28 +745,37 @@ impl CanonicalVectorTransferMap {
     }
 
     pub fn exact_samples(&self) -> usize {
-        self.targets
-            .iter()
-            .filter(|target| matches!(target, VectorTarget::Exact(_)))
-            .count()
+        if self.identity {
+            return self.source_samples;
+        }
+        0
     }
 
     pub fn source_sample_count(&self) -> usize {
         self.source_samples
     }
 
+    pub fn is_identity(&self) -> bool {
+        self.identity
+    }
+
     pub fn targets(&self) -> Vec<CanonicalVectorTransferTarget> {
+        if self.identity {
+            return (0..self.source_samples)
+                .map(|index| CanonicalVectorTransferTarget {
+                    source_samples: [index as u32, 0, 0, 0, 0, 0],
+                    weights: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    source_count: 1,
+                    exact: true,
+                })
+                .collect();
+        }
         self.targets
             .iter()
             .map(|target| {
                 let mut source_samples = [0_u32; QUADRATURE_SAMPLES];
                 let mut weights = [0.0; QUADRATURE_SAMPLES];
                 let (source_count, exact) = match target {
-                    VectorTarget::Exact(index) => {
-                        source_samples[0] = *index as u32;
-                        weights[0] = 1.0;
-                        (1, true)
-                    }
                     VectorTarget::Reconstruct {
                         source_element,
                         weights: prepared,
@@ -795,13 +818,15 @@ impl CanonicalVectorTransferMap {
         if source.len() != self.source_samples || source.iter().any(|value| !value.finite()) {
             return Err(WaveError::InvalidState);
         }
+        if self.identity {
+            return Ok((source.to_vec(), CanonicalTransferReport::default()));
+        }
         let mut exposed = 0;
         let mut extended = 0;
         let values = self
             .targets
             .iter()
             .map(|target| match target {
-                VectorTarget::Exact(index) => source[*index],
                 VectorTarget::Reconstruct {
                     source_element,
                     weights,
@@ -1868,6 +1893,8 @@ mod tests {
 
         let vector =
             CanonicalVectorTransferMap::prepare(&mesh, &canonical, &mesh, &canonical).unwrap();
+        assert!(vector.is_identity());
+        assert!(vector.targets.is_empty());
         let b = canonical
             .constitutive_samples()
             .iter()
@@ -1888,6 +1915,8 @@ mod tests {
             &republished_canonical,
         )
         .unwrap();
+        assert!(vector.is_identity());
+        assert!(vector.targets.is_empty());
         assert_eq!(
             vector.exact_samples(),
             canonical.complementary_degrees_of_freedom(),
@@ -1901,6 +1930,7 @@ mod tests {
         let vector =
             CanonicalVectorTransferMap::prepare(&mesh, &canonical, &moved, &moved_canonical)
                 .unwrap();
+        assert!(!vector.is_identity());
         assert_eq!(
             vector.exact_samples(),
             0,
