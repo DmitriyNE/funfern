@@ -688,7 +688,7 @@ struct VectorOverlayLayoutKey {
 
 #[derive(Clone, Copy, Debug)]
 struct VectorOverlayLayoutPoint {
-    key: (i32, i32),
+    element: u32,
     point: Point2,
     stencil: QuadraticPointStencil,
 }
@@ -803,6 +803,7 @@ impl AmrIndicatorSource {
 struct VectorAcState {
     input: Point2,
     output: Point2,
+    step: u64,
 }
 
 #[derive(Resource)]
@@ -969,7 +970,8 @@ pub struct Playground {
     vector_overlay_layout: Option<VectorOverlayLayout>,
     /// Presentation-only DC-blocker state for complementary-field arrows. It
     /// never feeds the canonical solver or physical consumers.
-    vector_overlay_ac_state: BTreeMap<(i32, i32), VectorAcState>,
+    vector_overlay_ac_state: BTreeMap<u32, VectorAcState>,
+    vector_overlay_ac_generation: u64,
     vector_overlay_dc_step: u64,
     vector_overlay_dc_active: bool,
     vector_overlay_mode: VectorOverlay,
@@ -1163,6 +1165,7 @@ impl Default for Playground {
             viewport_rect: Rect::NOTHING,
             vector_overlay_layout: None,
             vector_overlay_ac_state: BTreeMap::new(),
+            vector_overlay_ac_generation: u64::MAX,
             vector_overlay_dc_step: u64::MAX,
             vector_overlay_dc_active: false,
             vector_overlay_mode: VectorOverlay::Off,
@@ -4391,14 +4394,20 @@ impl Playground {
                                 VectorOverlay::RelativeEnergyFlow => sample.energy_flow,
                                 VectorOverlay::Off => Point2::default(),
                             };
-                            (point.key, self.screen(point.point, r), value)
+                            (point.element, self.screen(point.point, r), value)
                         })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            self.draw_vector_overlay(painter, samples, vector_display.completed_steps);
+            self.draw_vector_overlay(
+                painter,
+                samples,
+                vector_display.generation,
+                vector_display.completed_steps,
+            );
         } else {
             self.vector_overlay_ac_state.clear();
+            self.vector_overlay_ac_generation = u64::MAX;
             self.vector_overlay_dc_step = u64::MAX;
             self.vector_overlay_dc_active = false;
         }
@@ -4407,7 +4416,8 @@ impl Playground {
     fn draw_vector_overlay(
         &mut self,
         painter: &egui::Painter,
-        mut samples: Vec<((i32, i32), Pos2, Point2)>,
+        mut samples: Vec<(u32, Pos2, Point2)>,
+        generation: u64,
         completed_steps: u64,
     ) {
         let settings = self.editor.document.presentation;
@@ -4416,6 +4426,7 @@ impl Playground {
             .resolved(self.editor.document.model.draft.physics);
         if self.vector_overlay_mode != mode {
             self.vector_overlay_ac_state.clear();
+            self.vector_overlay_ac_generation = u64::MAX;
             self.vector_overlay_dc_step = u64::MAX;
             self.vector_overlay_dc_active = false;
             self.vector_overlay_exposure.clear();
@@ -4425,14 +4436,21 @@ impl Playground {
             mode == VectorOverlay::ComplementaryField && settings.vector_overlay_ac_coupled;
         if self.vector_overlay_dc_active != dc_active {
             self.vector_overlay_ac_state.clear();
+            self.vector_overlay_ac_generation = u64::MAX;
             self.vector_overlay_dc_step = u64::MAX;
             self.vector_overlay_exposure.clear();
             self.vector_overlay_dc_active = dc_active;
         }
         if dc_active {
+            if self.vector_overlay_ac_generation != generation {
+                self.vector_overlay_ac_state.clear();
+                self.vector_overlay_ac_generation = generation;
+                self.vector_overlay_dc_step = u64::MAX;
+            }
             self.ac_couple_vector_samples(&mut samples, completed_steps);
         } else {
             self.vector_overlay_ac_state.clear();
+            self.vector_overlay_ac_generation = generation;
             self.vector_overlay_dc_step = completed_steps;
         }
         let mut magnitudes = samples
@@ -4452,15 +4470,28 @@ impl Playground {
             return;
         };
         let visibility = self.vector_overlay_exposure.visibility(instantaneous);
+        // Below this point even the longest possible arrow is sub-pixel. Do
+        // not normalize its direction: f32 residue has no stable direction,
+        // so drawing it only turns numerical noise into visible twitching.
+        if visibility <= VECTOR_OVERLAY_VISIBILITY_CUTOFF {
+            return;
+        }
         let maximum_length = settings.vector_overlay_density * 0.46;
-        let scale =
-            maximum_length as f64 * settings.vector_overlay_gain as f64 * visibility / reference;
         for (_, origin, value) in samples {
             let magnitude = value.norm();
             if magnitude < reference * 0.015 || !magnitude.is_finite() {
                 continue;
             }
-            let length = (magnitude * scale).min(maximum_length as f64) as f32;
+            // Clamp the exposed arrow first and fade the result. Clamping
+            // after multiplication by `visibility` let a sparse outlier undo
+            // the quiet-tail fade and remain at full length.
+            let length = vector_arrow_length(
+                magnitude,
+                reference,
+                settings.vector_overlay_gain,
+                maximum_length,
+                visibility,
+            );
             let direction = egui::vec2(value.x as f32, -value.y as f32).normalized();
             let tip = origin + direction * length;
             let normal = egui::vec2(-direction.y, direction.x);
@@ -4478,41 +4509,45 @@ impl Playground {
     /// attenuating ordinary source frequencies.
     fn ac_couple_vector_samples(
         &mut self,
-        samples: &mut [((i32, i32), Pos2, Point2)],
+        samples: &mut [(u32, Pos2, Point2)],
         completed_steps: u64,
     ) {
         let restarted = self.vector_overlay_dc_step == u64::MAX
             || completed_steps < self.vector_overlay_dc_step;
-        if completed_steps < self.vector_overlay_dc_step {
+        if restarted {
             self.vector_overlay_ac_state.clear();
         }
-        let elapsed_steps = if restarted {
-            0
-        } else {
-            completed_steps - self.vector_overlay_dc_step
-        };
-        let elapsed = elapsed_steps as f64 * self.uploaded_time_step.max(0.0);
-        let pole = (-VECTOR_DC_REJECTION_RATE * elapsed).exp();
-        let input_gain = 0.5 * (1.0 + pole);
         for (key, _, value) in samples {
             match self.vector_overlay_ac_state.entry(*key) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     entry.insert(VectorAcState {
                         input: *value,
-                        output: *value,
+                        output: Point2::default(),
+                        step: completed_steps,
                     });
+                    // A newly visible physical sample has no temporal history.
+                    // Passing its first value through would interpret an
+                    // unknown DC baseline as AC and flash whenever the view
+                    // moves. Start silent; subsequent accepted samples provide
+                    // the temporal difference the high-pass actually knows.
+                    *value = Point2::default();
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     let state = entry.get_mut();
-                    if !restarted {
+                    let elapsed_steps = completed_steps.saturating_sub(state.step);
+                    if elapsed_steps > 0 {
+                        let elapsed = elapsed_steps as f64 * self.uploaded_time_step.max(0.0);
+                        let pole = (-VECTOR_DC_REJECTION_RATE * elapsed).exp();
+                        let input_gain = 0.5 * (1.0 + pole);
                         state.output = state.output * pole + (*value - state.input) * input_gain;
                         state.input = *value;
+                        state.step = completed_steps;
                     }
                     *value = state.output;
                 }
             }
         }
-        if restarted || elapsed_steps > 0 {
+        if restarted || completed_steps > self.vector_overlay_dc_step {
             self.vector_overlay_dc_step = completed_steps;
         }
     }
@@ -11377,6 +11412,24 @@ const FIELD_EXPOSURE_GAIN: f32 = 0.5;
 /// samples and measured in simulated time. Ordinary 2.5--4 Hz waves therefore
 /// retain more than 99.9% of their amplitude.
 const VECTOR_DC_REJECTION_RATE: f64 = 0.5;
+/// The longest arrow below this global visibility is less than about a tenth
+/// of a pixel even at the coarsest supported density. Avoiding the draw also
+/// avoids assigning a visible direction to near-zero floating-point residue.
+const VECTOR_OVERLAY_VISIBILITY_CUTOFF: f64 = 1.0 / 512.0;
+
+/// Scales one arrow under a shared exposure. Saturation belongs before the
+/// quiet-tail visibility: otherwise an arbitrarily large sparse outlier can
+/// cancel an arbitrarily small global fade by hitting the length clamp.
+fn vector_arrow_length(
+    magnitude: f64,
+    reference: f64,
+    gain: f32,
+    maximum_length: f32,
+    visibility: f64,
+) -> f32 {
+    let exposed = (magnitude * f64::from(gain) / reference).clamp(0.0, 1.0);
+    (f64::from(maximum_length) * exposed * visibility.clamp(0.0, 1.0)) as f32
+}
 
 /// The `quantile` of `values` by magnitude, sampled rather than sorted.
 ///
@@ -11991,7 +12044,7 @@ fn vector_overlay_layout(
         }
     }
     bins.into_iter()
-        .filter_map(|(key, (element, _screen, centroid, _))| {
+        .filter_map(|(_key, (element, _screen, centroid, _))| {
             let triangle = &mesh.triangles[element];
             let region = scene.region(triangle.region)?;
             let material = scene.material(region.material)?;
@@ -12010,7 +12063,7 @@ fn vector_overlay_layout(
                 stiffness: coefficients.stiffness,
             };
             Some(VectorOverlayLayoutPoint {
-                key,
+                element: element as u32,
                 point: centroid,
                 stencil,
             })
@@ -12467,21 +12520,63 @@ mod tests {
             uploaded_time_step: 0.01,
             ..Playground::default()
         };
-        let sample = |value| vec![((0, 0), Pos2::ZERO, Point2::new(value, 0.0))];
+        let sample = |value| vec![(0, Pos2::ZERO, Point2::new(value, 0.0))];
 
         let mut first = sample(1.0);
         state.ac_couple_vector_samples(&mut first, 0);
-        assert_eq!(first[0].2.x, 1.0);
+        assert_eq!(first[0].2.x, 0.0);
 
         let mut after_one_second = sample(1.0);
         state.ac_couple_vector_samples(&mut after_one_second, 100);
-        assert!((after_one_second[0].2.x - (-VECTOR_DC_REJECTION_RATE).exp()).abs() < 1.0e-12);
+        assert_eq!(after_one_second[0].2.x, 0.0);
 
         let mut after_two_seconds = sample(1.0);
         state.ac_couple_vector_samples(&mut after_two_seconds, 200);
+        assert_eq!(after_two_seconds[0].2.x, 0.0);
+    }
+
+    #[test]
+    fn arrow_ac_coupling_tracks_physical_samples_and_cold_starts_new_ones() {
+        let mut state = Playground {
+            uploaded_time_step: 0.01,
+            ..Playground::default()
+        };
+        let mut first = vec![(7, Pos2::ZERO, Point2::new(1.0, 0.0))];
+        state.ac_couple_vector_samples(&mut first, 0);
+        assert_eq!(first[0].2, Point2::default());
+
+        // The same mesh element carries temporal history even if its screen
+        // cell changes. A genuinely new element does not inherit that history
+        // or flash its unknown baseline into the AC view.
+        let mut moved = vec![
+            (7, Pos2::new(80.0, 40.0), Point2::new(1.5, 0.0)),
+            (11, Pos2::ZERO, Point2::new(9.0, 0.0)),
+        ];
+        state.ac_couple_vector_samples(&mut moved, 1);
+        assert!(moved[0].2.x > 0.49, "lost physical-sample history");
+        assert_eq!(moved[1].2, Point2::default(), "new sample flashed DC");
+
+        // A lazily retained element uses its own last accepted step when it
+        // returns to view; time spent off-screen still decays its baseline.
+        let mut elsewhere = vec![(11, Pos2::ZERO, Point2::new(9.0, 0.0))];
+        state.ac_couple_vector_samples(&mut elsewhere, 100);
+        let mut returned = vec![(7, Pos2::ZERO, Point2::new(1.5, 0.0))];
+        state.ac_couple_vector_samples(&mut returned, 101);
         assert!(
-            (after_two_seconds[0].2.x - (-2.0 * VECTOR_DC_REJECTION_RATE).exp()).abs() < 1.0e-12
+            (0.29..0.31).contains(&returned[0].2.x),
+            "off-screen time was lost: {}",
+            returned[0].2.x
         );
+    }
+
+    #[test]
+    fn sparse_arrow_outliers_cannot_defeat_the_global_quiet_fade() {
+        let maximum = 55.2;
+        let visibility = VECTOR_OVERLAY_VISIBILITY_CUTOFF;
+        let ordinary = vector_arrow_length(1.0, 1.0, 1.0, maximum, visibility);
+        let outlier = vector_arrow_length(1.0e12, 1.0, 5.0, maximum, visibility);
+        assert!((ordinary - outlier).abs() < f32::EPSILON);
+        assert!(outlier < 0.11, "quiet outlier still spans {outlier} px");
     }
 
     #[test]
@@ -12498,7 +12593,7 @@ mod tests {
             let step = frame * 10;
             let time = step as f64 * state.uploaded_time_step;
             let value = (std::f64::consts::TAU * frequency * time).sin();
-            let mut samples = vec![((0, 0), Pos2::ZERO, Point2::new(value, 0.0))];
+            let mut samples = vec![(0, Pos2::ZERO, Point2::new(value, 0.0))];
             state.ac_couple_vector_samples(&mut samples, step);
             if frame >= 300 {
                 input_square += value * value;
@@ -13595,7 +13690,13 @@ mod probe_interaction_tests {
         assert!(!points.is_empty());
         let keys = points
             .iter()
-            .map(|point| point.key)
+            .map(|point| {
+                let screen = state.screen(point.point, viewport);
+                (
+                    ((screen.x - viewport.left()) / spacing).floor() as i32,
+                    ((screen.y - viewport.top()) / spacing).floor() as i32,
+                )
+            })
             .collect::<BTreeSet<_>>();
         assert_eq!(keys.len(), points.len());
         let maximum_bins = (viewport.width() / spacing).ceil() as usize

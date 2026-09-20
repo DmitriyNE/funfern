@@ -288,8 +288,10 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   screen-space presentation controls. Complementary-field arrows optionally subtract
   a slow, explicitly presentation-only baseline; energy-flow arrows do not, because
   their time average is meaningful. The canonical state, probes and energy always
-  retain the full field. Each EM mode remains one scalar Maxwell polarization rather
-  than a simultaneous six-component field solve.
+  retain the full field. The arrow filter follows stable physical mesh samples while
+  the view moves; a newly exposed sample starts silent until it has temporal history,
+  so an unknown DC baseline is not flashed as a wave. Each EM mode remains one scalar
+  Maxwell polarization rather than a simultaneous six-component field solve.
 - **Field exposure:** the scalar field and the vector overlay each set their own
   scale from what is on screen, so a scene whose amplitude is a hundredth of
   another's reads the same. Auto exposure can be turned off, which puts the
@@ -300,7 +302,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   therefore holds the scale for some seconds before the view returns to normal. It
   will not fall below a thousandth of the loudest level seen. Below that floor the
   drawing fades smoothly, so a field that has decayed into rounding noise is not
-  magnified back into view. Field
+  magnified back into view; sparse arrow outliers cannot override that shared fade.
+  Field
   intensity and arrow gain trim that automatic scale rather than replacing it, and
   View prints the level the colours are relative to so a decaying field can be
   told from a steady one. Each isolated subdomain is also drawn relative to its

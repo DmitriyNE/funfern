@@ -372,7 +372,14 @@ bulk potential or inverse derivative, so stationary complementary modes remain
 part of the physical state across handoff and remain visible to direct probes and diagnostics.
 The complementary-field arrow view can explicitly AC-couple its presentation at
 the old 0.08 Hz corner; this subtracts only a slow per-arrow display baseline.
-Energy-flow arrows never use it because their temporal mean is meaningful.
+Its lazy state is keyed by physical mesh element, not screen bin, so panning does
+not reinterpret a spatial jump as temporal signal. State is kept only for elements
+that have actually been sampled in the current mesh generation. A newly visible
+element cold-starts at zero output until a second accepted sample supplies temporal
+history; a new mesh generation discards the old element identities. Energy-flow
+arrows never use AC coupling because their temporal mean is meaningful. Quiet-tail
+visibility is applied after each arrow saturates, so a sparse numerical outlier
+cannot defeat the overlay-wide fade; sub-pixel residual arrows are not drawn.
 
 The accepted primary field is drawn directly, including a real free-component
 constant. There is no display-only mean subtraction or hidden gauge correction.

@@ -45,7 +45,11 @@ potential, inverse-derivative filter or component-mean subtraction.
   skins offer the in-plane field and energy-flow views; no skin reconstructs a
   transverse field from a scalar history. The complementary-field arrow view may
   subtract a slow presentation-only baseline, explicitly labelled AC coupling;
-  the sampler, physical consumers and energy-flow view retain the full field.
+  its lazy history follows physical mesh samples rather than screen bins, and newly
+  visible samples start silent rather than flashing an unknown DC baseline. The
+  sampler, physical consumers and energy-flow view retain the full field. Shared
+  quiet-tail visibility is applied after arrow saturation so sparse residuals cannot
+  remain full-length after the bulk field has faded.
 - Total energy is the sum of primary, complementary, thin-gap and outgoing
   physical storage. UI terminology now says canonical/discrete energy and energy
   flow rather than implying the retired potential formulation.

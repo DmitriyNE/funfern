@@ -5,6 +5,28 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — View-stable arrow AC state and terminal silence
+
+- The first AC-arrow implementation keyed its history by screen bin. Moving the
+  view reused a bin for a different world point, treating the spatial jump as AC,
+  while a newly occupied bin passed its whole unknown DC value on the first sample.
+  The filter now keys a lazy cache by physical mesh element, measures elapsed time
+  per element when a sample returns to view, and clears identities at a mesh
+  generation change. An element without history starts at zero output. This avoids
+  allocating filter state for the full canonical field and prevents a pan or zoom
+  from manufacturing a transient.
+- Arrow exposure had a separate arithmetic bug: length was clamped *after* the
+  quiet-tail multiplier, so a large isolated residual could cancel an arbitrarily
+  small global fade and still hit full length. Saturation now precedes the shared
+  fade, and the overlay stops drawing below a visibility whose longest supported
+  arrow is about 0.1 pixel. Near-zero f32 directions can no longer appear as random
+  full-size arrows after the field has drained.
+- Regressions cover cold starts, physical-sample continuity across a moved screen
+  position, off-screen simulated-time decay, ordinary-frequency retention, and a
+  sparse outlier under terminal exposure. All 313 app targets/tests (163 library,
+  147 binary, two catalog and one shader validation), warning-denied Clippy, the
+  wasm32 application check, formatting and diff checks pass.
+
 ## 2026-09-20 — AC arrow view and quiet-tail exposure
 
 - Removed the old `0.82 old + 0.18 new` arrow smoothing. It was a component-wise
