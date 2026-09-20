@@ -1666,6 +1666,13 @@ impl Playground {
     }
     fn side_panel(&mut self, root: &mut egui::Ui) {
         let Some(panel) = self.inspector else { return };
+        let title = match panel {
+            InspectorPanel::Edit => "Edit",
+            InspectorPanel::View => "View",
+            InspectorPanel::Simulation => "Simulation",
+            InspectorPanel::Materials => "Materials",
+            InspectorPanel::Probes => "Probes",
+        };
         // On a narrow layout the inspector floats over the viewport instead of
         // docking beside it, which would put a panel inside the capture crop.
         if self.capturing() && root.available_width() < 700.0 {
@@ -1673,24 +1680,18 @@ impl Playground {
         }
         if root.available_width() < 700.0 {
             let mut open = true;
-            egui::Window::new(match panel {
-                InspectorPanel::Edit => "Edit",
-                InspectorPanel::View => "View",
-                InspectorPanel::Simulation => "Simulation",
-                InspectorPanel::Materials => "Materials",
-                InspectorPanel::Probes => "Probes",
-            })
-            .id(egui::Id::new("mobile-inspector"))
-            .open(&mut open)
-            .default_width(280.0)
-            .anchor(egui::Align2::RIGHT_TOP, [-6.0, 48.0])
-            .show(root.ctx(), |ui| match panel {
-                InspectorPanel::Edit => self.edit_panel(ui),
-                InspectorPanel::View => self.view_panel(ui),
-                InspectorPanel::Simulation => self.simulation_panel(ui),
-                InspectorPanel::Materials => self.materials_panel(ui),
-                InspectorPanel::Probes => self.probes_panel(ui),
-            });
+            let maximum_height = (root.ctx().viewport_rect().height() - 54.0).max(96.0);
+            egui::Window::new(title)
+                .id(egui::Id::new("mobile-inspector"))
+                .open(&mut open)
+                .default_width(280.0)
+                .max_height(maximum_height)
+                .anchor(egui::Align2::RIGHT_TOP, [-6.0, 48.0])
+                .show(root.ctx(), |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("mobile-inspector-scroll", title))
+                        .show(ui, |ui| self.inspector_contents(ui, panel));
+                });
             if !open {
                 self.inspector = None;
             }
@@ -1698,13 +1699,21 @@ impl Playground {
         }
         egui::Panel::right("inspector")
             .default_size(292.0)
-            .show(root, |ui| match panel {
-                InspectorPanel::Edit => self.edit_panel(ui),
-                InspectorPanel::View => self.view_panel(ui),
-                InspectorPanel::Simulation => self.simulation_panel(ui),
-                InspectorPanel::Materials => self.materials_panel(ui),
-                InspectorPanel::Probes => self.probes_panel(ui),
+            .show(root, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(("inspector-scroll", title))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.inspector_contents(ui, panel));
             });
+    }
+    fn inspector_contents(&mut self, ui: &mut egui::Ui, panel: InspectorPanel) {
+        match panel {
+            InspectorPanel::Edit => self.edit_panel(ui),
+            InspectorPanel::View => self.view_panel(ui),
+            InspectorPanel::Simulation => self.simulation_panel(ui),
+            InspectorPanel::Materials => self.materials_panel(ui),
+            InspectorPanel::Probes => self.probes_panel(ui),
+        }
     }
     fn edit_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Edit");

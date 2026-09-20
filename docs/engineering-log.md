@@ -5,6 +5,14 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Scrollable inspectors
+
+- Long Edit, View, Simulation, Materials and Probes inspectors now scroll within
+  the available height instead of placing their lower controls off-screen. Each
+  inspector remembers its own scroll position. The narrow-screen floating
+  inspector is also capped below the toolbar so its scroll viewport remains
+  reachable on short windows.
+
 ## 2026-09-20 — Continuous handoff display and compact vector overlay
 
 - The remaining handoff hitch had two distinct clocks. At 93,144 `Q` / 185,310
