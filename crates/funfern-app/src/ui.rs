@@ -96,6 +96,35 @@ const GIZMO_PADDING: f32 = 18.0;
 /// way, because they answer the same question at either end of the loop: how
 /// much detail is this worth.
 const AMR_ACCURACY_PRESETS: [(f64, &str); 3] = [(24.0, "Coarse"), (12.0, "Medium"), (6.0, "Fine")];
+/// Coarsening starts only well below the requested global error. The interval
+/// between this threshold and the target is the controller's global deadband:
+/// an estimate wobbling near the target cannot alternate the mesh direction.
+const AMR_COARSEN_GLOBAL_RATIO: f64 = 0.65;
+/// An edge must be substantially shorter than its requested size before it may
+/// be collapsed. This is below half the 1.05 refinement threshold, so an edge
+/// split just above that threshold is not immediately eligible for reversal.
+const AMR_COARSEN_EDGE_RATIO: f64 = 0.45;
+/// A vertex changed by one transaction must survive the immediately following
+/// generation. Together with the size deadband this prevents split/collapse
+/// ping-pong when a moving wave nudges a target across a threshold.
+const AMR_TOPOLOGY_COOLDOWN_GENERATIONS: u64 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AmrDecision {
+    Hold,
+    Refine,
+    Coarsen,
+}
+
+impl AmrDecision {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Hold => "settled",
+            Self::Refine => "refining",
+            Self::Coarsen => "coarsening",
+        }
+    }
+}
 
 /// What to call the accuracy the adaptation is set to. The slider reaches
 /// everything between, so most values have no name.
@@ -8072,7 +8101,23 @@ impl Playground {
             self.amr_adaptation_job = None;
             self.amr_adaptation_source = None;
             match result {
-                Ok(result) => {
+                Ok(mut result) => {
+                    if result.report.topology_changes == 0 {
+                        // A scan that cannot apply any requested change must
+                        // not manufacture a new mesh revision and force a GPU
+                        // handoff. Still advance the adaptation generation so
+                        // cooldown can expire on an otherwise unchanged mesh.
+                        if let Some(active) = self.runtime.active() {
+                            result.state.mesh_revision = active.mesh.mesh_revision;
+                            self.amr_adaptation_state = Some(result.state);
+                        }
+                        self.amr_report = Some(result.report);
+                        self.amr_pending_state = None;
+                        self.amr_coarsen_streak = 0;
+                        self.amr_status = "mesh unchanged; monitoring solution".into();
+                        self.amr_error = None;
+                        return;
+                    }
                     self.amr_pending_state = Some(result.state);
                     self.amr_report = Some(result.report);
                     match self.runtime.request_adapted(
@@ -8133,20 +8178,19 @@ impl Playground {
             if result.report.total_energy.is_finite() && result.report.total_energy > 0.0 {
                 self.amr_energy_peak = self.amr_energy_peak.max(result.report.total_energy);
             }
-            let refine = adaptation_refines(&result.report, self.amr_target_accuracy());
-            let coarsen = result.report.coarsen_candidates >= 4;
-            self.amr_coarsen_streak = if coarsen {
+            let decision = adaptation_decision(&result.report, self.amr_target_accuracy());
+            self.amr_coarsen_streak = if decision == AmrDecision::Coarsen {
                 self.amr_coarsen_streak.saturating_add(1)
             } else {
                 0
             };
             self.amr_indicator_result = Some(result.clone());
-            if !refine && !coarsen {
+            if decision == AmrDecision::Hold {
                 self.amr_status = "mesh matches solution".into();
                 self.amr_error = None;
                 return;
             }
-            if !refine && self.amr_coarsen_streak < 2 {
+            if decision == AmrDecision::Coarsen && self.amr_coarsen_streak < 2 {
                 self.amr_status = "confirming coarsening".into();
                 return;
             }
@@ -8171,10 +8215,20 @@ impl Playground {
                 },
                 minimum_target_edge_length: self.amr_minimum_edge,
                 maximum_target_edge_length: self.amr_maximum_edge,
-                collapse_ratio: 0.65,
+                collapse_ratio: AMR_COARSEN_EDGE_RATIO,
                 max_topology_changes: 512,
-                max_coarsening_changes: if self.amr_coarsen_streak >= 2 { 256 } else { 0 },
+                max_refinement_changes: if decision == AmrDecision::Refine {
+                    usize::MAX
+                } else {
+                    0
+                },
+                max_coarsening_changes: if decision == AmrDecision::Coarsen {
+                    256
+                } else {
+                    0
+                },
                 max_work_units: 5_000_000,
+                cooldown_generations: AMR_TOPOLOGY_COOLDOWN_GENERATIONS,
                 ..Default::default()
             };
             let field: Arc<dyn MeshSizeField> = result.field;
@@ -8336,6 +8390,7 @@ impl Playground {
                         &active.bundle.authored,
                         active.point_source,
                     ),
+                    coarsen_ratio: AMR_COARSEN_EDGE_RATIO,
                     dormant_below_energy: self.amr_energy_peak * DORMANT_ENERGY_RATIO,
                     ..Default::default()
                 },
@@ -10847,11 +10902,7 @@ impl Playground {
                             "Whole field {:.2}% · target {:.0}% · {}",
                             100.0 * report.global_indicator,
                             self.amr_accuracy_percent,
-                            if adaptation_refines(report, self.amr_target_accuracy()) {
-                                "refining"
-                            } else {
-                                "settled"
-                            },
+                            adaptation_decision(report, self.amr_target_accuracy()).label(),
                         ));
                     }
                     ui.small(format!(
@@ -12493,7 +12544,7 @@ fn amr_target_color(fraction: f32, alpha: u8) -> Color32 {
     )
 }
 
-/// Whether an estimate is asking for a finer mesh.
+/// Chooses one topology direction for the next adaptation transaction.
 ///
 /// A limit is a floor rather than a judgement: too few elements across a forced
 /// wavelength, or an element larger than the largest allowed, is wrong however
@@ -12509,9 +12560,23 @@ fn amr_target_color(fraction: f32, alpha: u8) -> Color32 {
 /// The cost is that error concentrated in a small part of a domain the estimate
 /// is otherwise happy with stops being chased once the whole field is inside
 /// the target. That is the trade a single number for the whole field makes.
-fn adaptation_refines(report: &SolutionIndicatorReport, target_accuracy: f64) -> bool {
-    report.limit_refine_candidates >= 4
+///
+/// Refinement stops at the requested error, but coarsening does not begin until
+/// the estimate is substantially below it. That deadband, plus choosing only
+/// one direction per transaction, prevents a moving wave from making the same
+/// patch alternate between splitting and collapsing.
+fn adaptation_decision(report: &SolutionIndicatorReport, target_accuracy: f64) -> AmrDecision {
+    if report.limit_refine_candidates >= 4
         || (report.error_refine_candidates >= 4 && report.global_indicator > target_accuracy)
+    {
+        AmrDecision::Refine
+    } else if report.coarsen_candidates >= 4
+        && report.global_indicator < target_accuracy * AMR_COARSEN_GLOBAL_RATIO
+    {
+        AmrDecision::Coarsen
+    } else {
+        AmrDecision::Hold
+    }
 }
 
 /// A resident filter flips the accepted state lane without advancing physical
@@ -15722,6 +15787,55 @@ mod probe_interaction_tests {
         );
     }
 
+    #[test]
+    fn an_unchanged_adaptation_does_not_request_a_handoff() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let active = activate(&mut state);
+        state.amr_enabled = true;
+        state.amr_adaptation_job = Some(MeshAdaptationJob::new_topology(
+            active.mesh.clone(),
+            &active.bundle.plan,
+            MeshAdaptationState::from_mesh(&active.mesh),
+            state.runtime.reserve_mesh_revision(),
+            Arc::new(|_, _| 0.1),
+            MeshAdaptationOptions {
+                minimum_target_edge_length: 0.01,
+                maximum_target_edge_length: 1.0,
+                max_refinement_changes: 0,
+                max_coarsening_changes: 0,
+                ..Default::default()
+            },
+        ));
+        state.amr_adaptation_source = Some(active.mesh.mesh_revision);
+
+        for _ in 0..10_000 {
+            state.refresh_amr(
+                &CanonicalGpuRequest::default(),
+                &CanonicalGpuDisplay::default(),
+                &WaveDisplay::default(),
+            );
+            if state.amr_adaptation_job.is_none() {
+                break;
+            }
+        }
+
+        assert!(state.amr_adaptation_job.is_none());
+        assert!(state.runtime.ready().is_none());
+        assert_eq!(
+            state.runtime.active().unwrap().mesh.mesh_revision,
+            active.mesh.mesh_revision
+        );
+        assert_eq!(state.amr_report.as_ref().unwrap().topology_changes, 0);
+        assert_eq!(
+            state.amr_adaptation_state.as_ref().unwrap().mesh_revision,
+            active.mesh.mesh_revision
+        );
+        assert_eq!(state.amr_error, None);
+    }
+
     /// The estimate has no notion of enough on its own. Its step down is
     /// clamped, so an element it cannot satisfy - a boundary the field
     /// disagrees with, the grid-scale leftovers of a wave that has passed -
@@ -15730,22 +15844,53 @@ mod probe_interaction_tests {
     /// and it answers for the whole field at once; the floors it does not
     /// answer for at all.
     #[test]
-    fn the_accuracy_target_settles_error_driven_refinement_alone() {
-        let report = |error, limit, global| SolutionIndicatorReport {
+    fn the_accuracy_target_and_deadband_choose_one_adaptation_direction() {
+        let report = |error, limit, coarsen, global| SolutionIndicatorReport {
             refine_candidates: error + limit,
             error_refine_candidates: error,
             limit_refine_candidates: limit,
+            coarsen_candidates: coarsen,
             global_indicator: global,
             ..Default::default()
         };
-        assert!(adaptation_refines(&report(2000, 0, 0.2), 0.12));
-        assert!(!adaptation_refines(&report(2000, 0, 0.05), 0.12));
+        assert_eq!(
+            adaptation_decision(&report(2000, 0, 0, 0.2), 0.12),
+            AmrDecision::Refine
+        );
+        assert_eq!(
+            adaptation_decision(&report(2000, 0, 0, 0.05), 0.12),
+            AmrDecision::Hold
+        );
         // The same estimate, asked for more: still running.
-        assert!(adaptation_refines(&report(2000, 0, 0.05), 0.04));
+        assert_eq!(
+            adaptation_decision(&report(2000, 0, 0, 0.05), 0.04),
+            AmrDecision::Refine
+        );
         // A forced wavelength is carried whatever the error reads.
-        assert!(adaptation_refines(&report(0, 2000, 0.0), 0.12));
+        assert_eq!(
+            adaptation_decision(&report(0, 2000, 2000, 0.0), 0.12),
+            AmrDecision::Refine
+        );
         // A handful of elements is noise, as it always was.
-        assert!(!adaptation_refines(&report(3, 0, 0.9), 0.12));
+        assert_eq!(
+            adaptation_decision(&report(3, 0, 0, 0.9), 0.12),
+            AmrDecision::Hold
+        );
+        // Coarsening waits below a broad deadband, even if local edges ask.
+        assert_eq!(
+            adaptation_decision(&report(0, 0, 2000, 0.10), 0.12),
+            AmrDecision::Hold
+        );
+        assert_eq!(
+            adaptation_decision(&report(0, 0, 2000, 0.05), 0.12),
+            AmrDecision::Coarsen
+        );
+        // Refinement wins when both local candidate sets are populated; one
+        // transaction never yanks the topology in both directions.
+        assert_eq!(
+            adaptation_decision(&report(2000, 0, 2000, 0.2), 0.12),
+            AmrDecision::Refine
+        );
     }
 
     /// An estimate owns a copied solution snapshot. Accepted-state maintenance

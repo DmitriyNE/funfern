@@ -109,6 +109,13 @@ next solver step before taking its synchronized snapshot. It also retains the
 run's peak canonical energy across ordinary handoffs. Below `10⁻⁴` of that peak,
 relative error is dormant and error-driven targets coarsen instead of chasing
 floating-point tail; forced-wavelength and maximum-element limits remain active.
+Refinement stops at the requested global error, while coarsening requires two
+successive estimates below 65% of it; the interval is a hold band. Transactions
+are directional: refinement disables collapses, and coarsening disables splits,
+so a local size field cannot bypass the global accuracy decision. The spatial
+collapse threshold is 0.45 of target versus refinement above 1.05, with a
+two-generation modified-vertex cooldown. An adaptation scan that changes no
+topology advances cooldown state without publishing a new solver mesh.
 
 Full-state readback is self-describing. One state-buffer metadata word records
 the accepted lane and exact accepted step at every commit, including

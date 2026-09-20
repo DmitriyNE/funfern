@@ -5,6 +5,27 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — AMR transactions stop fighting their own accuracy gate
+
+- The controller correctly suppressed error-driven refinement once the global
+  estimate met its target, but a simultaneous coarsening request still launched
+  the bidirectional mesh job with the local error size field. That nominal
+  coarsening pass could therefore split a locally marked patch, collapse another
+  one, and publish a fresh solver mesh even though global refinement was settled.
+- Each transaction now has one direction. Mandatory wavelength/maximum-edge
+  violations and above-target global error permit refinement with coarsening
+  disabled; coarsening requires two consecutive estimates below 65% of the
+  requested global error and disables all edge splits. The interval from 65%
+  to 100% is a hold band.
+- Spatial hysteresis was also inconsistent: the app refined above `1.05 × target`
+  but collapsed below `0.65 × target`, while a threshold edge split produces
+  halves near `0.525 × target`. Collapse now requires `0.45 × target`, and
+  changed vertices have a two-generation cooldown instead of one.
+- A scan that applies no topology changes now advances only the cooldown state;
+  it does not manufacture a mesh revision or trigger a canonical GPU handoff.
+  Fixtures cover the global decision deadband, a mixed size field under a
+  coarsening-only quota, and suppression of no-op handoffs.
+
 ## 2026-09-20 — Canonical AMR stops chasing invented derivatives
 
 - The autosaved driven scene reproduced both reports: AMR held near 60% and

@@ -23,6 +23,10 @@ pub struct MeshAdaptationOptions {
     pub refine_ratio: f64,
     pub collapse_ratio: f64,
     pub max_topology_changes: usize,
+    /// Maximum edge splits in this transaction. Zero makes the transaction
+    /// coarsening-only without weakening the size field used to decide which
+    /// vertices may be removed.
+    pub max_refinement_changes: usize,
     pub max_coarsening_changes: usize,
     pub max_work_units: usize,
     pub cooldown_generations: u64,
@@ -38,6 +42,7 @@ impl Default for MeshAdaptationOptions {
             refine_ratio: 1.05,
             collapse_ratio: 0.35,
             max_topology_changes: 512,
+            max_refinement_changes: usize::MAX,
             max_coarsening_changes: usize::MAX,
             max_work_units: 5_000_000,
             cooldown_generations: 1,
@@ -1610,6 +1615,16 @@ impl MeshAdaptationJob {
     /// whole list is then applied worst first, so a pass costs one sweep of
     /// the mesh however many edges it splits, rather than one sweep per split.
     fn find_refine(&mut self, index: usize) -> Result<(), MeshAdaptationError> {
+        let refinement_changes = self
+            .report
+            .topology_changes
+            .saturating_sub(self.report.coarsening_changes);
+        if refinement_changes >= self.options.max_refinement_changes {
+            self.refine_candidates.clear();
+            self.changed_since_scan = false;
+            self.phase = AdaptationPhase::ApplyRefine(None);
+            return Ok(());
+        }
         if index == 0 {
             self.report.refine_passes += 1;
             self.changed_since_scan = false;
@@ -1679,6 +1694,15 @@ impl MeshAdaptationJob {
         };
         if self.report.topology_changes >= self.options.max_topology_changes {
             self.report.limit = Some(MeshAdaptationLimit::TopologyChanges);
+            self.refine_candidates.clear();
+            self.phase = AdaptationPhase::ApplyRefine(None);
+            return Ok(());
+        }
+        let refinement_changes = self
+            .report
+            .topology_changes
+            .saturating_sub(self.report.coarsening_changes);
+        if refinement_changes >= self.options.max_refinement_changes {
             self.refine_candidates.clear();
             self.phase = AdaptationPhase::ApplyRefine(None);
             return Ok(());
@@ -3100,6 +3124,60 @@ mod tests {
         assert_eq!(result.report.coarsening_changes, 0);
         assert_eq!(result.report.collapsed_vertices, 0);
         assert!(result.report.inserted_vertices > 0, "{:?}", result.report);
+    }
+
+    #[test]
+    fn zero_refinement_quota_makes_a_transaction_coarsening_only() {
+        let scene = Scene::initial();
+        let mut configuration = options(0.24, 0.08);
+        configuration.max_refinement_changes = 0;
+        configuration.max_coarsening_changes = 0;
+        let source = Arc::new(mesh_scene(&scene, 33, configuration.meshing).unwrap());
+        let result = run(
+            MeshAdaptationJob::new(
+                source.clone(),
+                scene,
+                MeshAdaptationState::from_mesh(&source),
+                34,
+                Arc::new(|_, _| 0.08),
+                configuration,
+            ),
+            37,
+        );
+        assert_eq!(result.report.topology_changes, 0);
+        assert_eq!(result.report.inserted_vertices, 0);
+        assert!(
+            result.report.remaining_oversized_triangles > 0,
+            "the fixture must have requested refinement"
+        );
+    }
+
+    #[test]
+    fn a_coarsening_only_transaction_does_not_split_its_fine_patch() {
+        let scene = Scene::initial();
+        let mut configuration = options(0.24, 0.08);
+        configuration.meshing.target_edge_length = 0.12;
+        configuration.collapse_ratio = 0.65;
+        configuration.max_refinement_changes = 0;
+        configuration.max_coarsening_changes = 100;
+        let source = Arc::new(mesh_scene(&scene, 33, configuration.meshing).unwrap());
+        let result = run(
+            MeshAdaptationJob::new(
+                source.clone(),
+                scene,
+                MeshAdaptationState::from_mesh(&source),
+                34,
+                radial(Point2::new(-0.55, 0.45), 0.08, 0.24),
+                configuration,
+            ),
+            37,
+        );
+        assert!(result.report.coarsening_changes > 0, "{:?}", result.report);
+        assert_eq!(result.report.inserted_vertices, 0, "{:?}", result.report);
+        assert_eq!(
+            result.report.topology_changes,
+            result.report.coarsening_changes
+        );
     }
 
     #[test]
