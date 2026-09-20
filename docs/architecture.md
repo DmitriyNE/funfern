@@ -374,9 +374,11 @@ The complementary-field arrow view can explicitly AC-couple its presentation at
 the old 0.08 Hz corner; this subtracts only a slow per-arrow display baseline.
 Its lazy state is keyed by physical mesh element, not screen bin, so panning does
 not reinterpret a spatial jump as temporal signal. State is kept only for elements
-that have actually been sampled in the current mesh generation. A newly visible
+that have actually been sampled in the current mesh discretization. A newly visible
 element cold-starts at zero output until a second accepted sample supplies temporal
-history; a new mesh generation discards the old element identities. Energy-flow
+history. A solver-generation handoff on the same mesh and physics retains that
+history; a remesh or physics-skin change discards the old element identities.
+Fresh zero-state installation also clears it explicitly. Energy-flow
 arrows never use AC coupling because their temporal mean is meaningful. Quiet-tail
 visibility is applied after each arrow saturates, so a sparse numerical outlier
 cannot defeat the overlay-wide fade; sub-pixel residual arrows are not drawn. The
@@ -1063,8 +1065,10 @@ supplies the egui field colors, while lower-cadence full snapshots supply the
 canonical energy and AMR diagnostics. Vector arrows use a separate compact
 display-rate consumer: the CPU rebuilds one stencil per visible screen bin only
 when the view changes, the GPU samples complementary field and energy flow after
-each rendered solver batch, and only the arrow records cross back. Each readback carries a GPU-written
-step marker so stale asynchronous results cannot be mistaken for a newer level.
+each rendered solver batch, and only the arrow records cross back. Each readback
+carries a GPU-written step marker and compensated two-f32 absolute time. Stale
+asynchronous results cannot be mistaken for a newer level, and presentation
+filters retain their physical decay across timestep-changing handoffs.
 The wave layout already occupies WebGPU's portable eight-storage-binding budget.
 Volume-source weights therefore share the existing point/pulse forcing-weight
 buffer. Each DOF has a compact header containing point/pulse weights plus an

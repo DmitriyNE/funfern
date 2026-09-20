@@ -5,6 +5,25 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Arrow presentation state survives compatible GPU handoff
+
+- The complementary-arrow DC rejector incorrectly treated every canonical GPU
+  generation as a new physical sample space. An accepted material, boundary or
+  timestep handoff therefore discarded every per-element baseline and made the
+  arrows cold-start even when the mesh and observable were unchanged.
+- Arrow-filter ownership is now the mesh discretization plus physics skin, not
+  the transient GPU generation. Same-mesh handoffs retain per-element history;
+  remeshing, a skin change, switching the filtered view, or installing a fresh
+  zero state still clears it deliberately. Exposure already followed this rule
+  and remains continuous.
+- Compact arrow readbacks now carry the solver's compensated absolute time as
+  two f32 lanes as well as the accepted-step marker. The presentation pole uses
+  that time rather than multiplying a step delta by whichever timestep happens
+  to be active after handoff, so retiming does not distort its decay.
+- The full workspace suite, Clippy with warnings denied, the wasm32 application
+  check and the production Metal timing harness pass. The harness also validates
+  the updated compact vector-overlay shader against the CPU oracle.
+
 ## 2026-09-20 — Moving sources keep an explicit structural support
 
 - A point source's packed layout was inferred from `weight != 0`. Narrow or

@@ -114,7 +114,9 @@ fn sample_vector_overlay(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if stencil.sample_valid.y == 0u {
         output[sample].primary = vec4<f32>(0.0);
         output[sample].secondary = bitcast<vec4<f32>>(
-            vec4<u32>(control.clock_u32.w, 0u, 0u, 0u));
+            vec4<u32>(control.clock_u32.w, 0u,
+                bitcast<u32>(control.clock_origin.x),
+                bitcast<u32>(control.clock_origin.y + control.clock_f32.y)));
         return;
     }
     let primary = fields(stencil);
@@ -123,5 +125,7 @@ fn sample_vector_overlay(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let flow = stencil.orientation.x * primary.x * vec2<f32>(-complement.y, complement.x);
     output[sample].primary = vec4<f32>(complement, flow);
     output[sample].secondary = bitcast<vec4<f32>>(
-        vec4<u32>(control.clock_u32.w, 1u, 0u, 0u));
+        vec4<u32>(control.clock_u32.w, 1u,
+            bitcast<u32>(control.clock_origin.x),
+            bitcast<u32>(control.clock_origin.y + control.clock_f32.y)));
 }

@@ -2805,6 +2805,7 @@ pub struct VectorOverlayDisplay {
     pub generation: u64,
     pub revision: u64,
     pub completed_steps: u64,
+    pub absolute_time: f64,
     pub samples: Vec<VectorOverlaySample>,
     pub readbacks: u64,
 }
@@ -3371,15 +3372,20 @@ fn receive_vector_overlay_readback(
         return;
     }
     let completed_steps = samples[0].metadata.x as u64;
-    if samples
-        .iter()
-        .any(|sample| sample.metadata.y == 0 || sample.metadata.x as u64 != completed_steps)
+    let time_bits = samples[0].metadata.zw();
+    let absolute_time = f32::from_bits(time_bits.x) as f64 + f32::from_bits(time_bits.y) as f64;
+    if samples.iter().any(|sample| {
+        sample.metadata.y == 0
+            || sample.metadata.x as u64 != completed_steps
+            || sample.metadata.zw() != time_bits
+    }) || !absolute_time.is_finite()
     {
         return;
     }
     display.generation = tag.generation;
     display.revision = tag.revision;
     display.completed_steps = completed_steps;
+    display.absolute_time = absolute_time;
     display.samples.clear();
     display
         .samples
@@ -5341,7 +5347,9 @@ mod tests {
         assert!(point.contains("orientation.x * primary.x"));
         assert!(point.contains("fn sample_vector_overlay"));
         assert!(point.contains("output[sample].primary = vec4<f32>(complement, flow)"));
-        assert!(point.contains("vec4<u32>(control.clock_u32.w, 1u, 0u, 0u)"));
+        assert!(point.contains("vec4<u32>(control.clock_u32.w, 1u,"));
+        assert!(point.contains("bitcast<u32>(control.clock_origin.x)"));
+        assert!(point.contains("bitcast<u32>(control.clock_origin.y + control.clock_f32.y)"));
         assert!(!point.contains("indicator_potential"));
 
         let curve = include_str!("canonical_curve_probe.wgsl");

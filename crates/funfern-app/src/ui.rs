@@ -1007,6 +1007,13 @@ struct VectorAcState {
     input: Point2,
     output: Point2,
     step: u64,
+    time: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VectorOverlayAcOwner {
+    mesh_revision: u64,
+    physics: PhysicsModel,
 }
 
 #[derive(Resource)]
@@ -1176,7 +1183,7 @@ pub struct Playground {
     /// Presentation-only DC-blocker state for complementary-field arrows. It
     /// never feeds the canonical solver or physical consumers.
     vector_overlay_ac_state: BTreeMap<u32, VectorAcState>,
-    vector_overlay_ac_generation: u64,
+    vector_overlay_ac_owner: Option<VectorOverlayAcOwner>,
     vector_overlay_dc_step: u64,
     vector_overlay_dc_active: bool,
     vector_overlay_mode: VectorOverlay,
@@ -1374,7 +1381,7 @@ impl Default for Playground {
             viewport_rect: Rect::NOTHING,
             vector_overlay_layout: None,
             vector_overlay_ac_state: BTreeMap::new(),
-            vector_overlay_ac_generation: u64::MAX,
+            vector_overlay_ac_owner: None,
             vector_overlay_dc_step: u64::MAX,
             vector_overlay_dc_active: false,
             vector_overlay_mode: VectorOverlay::Off,
@@ -4318,6 +4325,9 @@ impl Playground {
         if fresh {
             self.field_exposure.restart();
             self.vector_overlay_exposure.restart();
+            self.vector_overlay_ac_state.clear();
+            self.vector_overlay_ac_owner = None;
+            self.vector_overlay_dc_step = u64::MAX;
         }
     }
 
@@ -4619,12 +4629,16 @@ impl Playground {
             self.draw_vector_overlay(
                 painter,
                 samples,
-                vector_display.generation,
+                VectorOverlayAcOwner {
+                    mesh_revision: active.mesh.mesh_revision,
+                    physics: active.bundle.authored.physics,
+                },
                 vector_display.completed_steps,
+                vector_display.absolute_time,
             );
         } else {
             self.vector_overlay_ac_state.clear();
-            self.vector_overlay_ac_generation = u64::MAX;
+            self.vector_overlay_ac_owner = None;
             self.vector_overlay_dc_step = u64::MAX;
             self.vector_overlay_dc_active = false;
         }
@@ -4634,8 +4648,9 @@ impl Playground {
         &mut self,
         painter: &egui::Painter,
         mut samples: Vec<(u32, Pos2, Point2)>,
-        generation: u64,
+        owner: VectorOverlayAcOwner,
         completed_steps: u64,
+        absolute_time: f64,
     ) {
         let settings = self.editor.document.presentation;
         let mode = settings
@@ -4643,7 +4658,7 @@ impl Playground {
             .resolved(self.editor.document.model.draft.physics);
         if self.vector_overlay_mode != mode {
             self.vector_overlay_ac_state.clear();
-            self.vector_overlay_ac_generation = u64::MAX;
+            self.vector_overlay_ac_owner = None;
             self.vector_overlay_dc_step = u64::MAX;
             self.vector_overlay_dc_active = false;
             self.vector_overlay_exposure.clear();
@@ -4653,25 +4668,22 @@ impl Playground {
             mode == VectorOverlay::ComplementaryField && settings.vector_overlay_ac_coupled;
         if self.vector_overlay_dc_active != dc_active {
             self.vector_overlay_ac_state.clear();
-            self.vector_overlay_ac_generation = u64::MAX;
+            self.vector_overlay_ac_owner = None;
             self.vector_overlay_dc_step = u64::MAX;
             self.vector_overlay_exposure.clear();
             self.vector_overlay_dc_active = dc_active;
         }
         if dc_active {
-            if self.vector_overlay_ac_generation != generation {
-                self.vector_overlay_ac_state.clear();
-                self.vector_overlay_ac_generation = generation;
-                self.vector_overlay_dc_step = u64::MAX;
-            }
+            self.retain_vector_overlay_ac_owner(owner);
             self.ac_couple_vector_samples(
                 &mut samples,
                 completed_steps,
+                absolute_time,
                 resident_filter_boundary(self.grid_scale_filter, completed_steps),
             );
         } else {
             self.vector_overlay_ac_state.clear();
-            self.vector_overlay_ac_generation = generation;
+            self.vector_overlay_ac_owner = Some(owner);
             self.vector_overlay_dc_step = completed_steps;
         }
         let mut magnitudes = samples
@@ -4724,6 +4736,14 @@ impl Playground {
         }
     }
 
+    fn retain_vector_overlay_ac_owner(&mut self, owner: VectorOverlayAcOwner) {
+        if self.vector_overlay_ac_owner != Some(owner) {
+            self.vector_overlay_ac_state.clear();
+            self.vector_overlay_ac_owner = Some(owner);
+            self.vector_overlay_dc_step = u64::MAX;
+        }
+    }
+
     /// Removes only the slowly varying presentation baseline from the sampled
     /// complementary field. The exact pole and trapezoidal input difference
     /// keep the corner stable across solver steps and readback batching without
@@ -4732,10 +4752,12 @@ impl Playground {
         &mut self,
         samples: &mut [(u32, Pos2, Point2)],
         completed_steps: u64,
+        absolute_time: f64,
         maintenance_discontinuity: bool,
     ) {
         let restarted = self.vector_overlay_dc_step == u64::MAX
-            || completed_steps < self.vector_overlay_dc_step;
+            || completed_steps < self.vector_overlay_dc_step
+            || !absolute_time.is_finite();
         if restarted {
             self.vector_overlay_ac_state.clear();
         }
@@ -4746,6 +4768,7 @@ impl Playground {
                         input: *value,
                         output: Point2::default(),
                         step: completed_steps,
+                        time: absolute_time,
                     });
                     // A newly visible physical sample has no temporal history.
                     // Passing its first value through would interpret an
@@ -4756,9 +4779,12 @@ impl Playground {
                 }
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     let state = entry.get_mut();
-                    let elapsed_steps = completed_steps.saturating_sub(state.step);
-                    if elapsed_steps > 0 {
-                        let elapsed = elapsed_steps as f64 * self.uploaded_time_step.max(0.0);
+                    if completed_steps > state.step {
+                        // The two-f32 clock is substantially more precise than
+                        // one absolute f32, but a clock rebase can still round
+                        // its reconstructed value a hair backwards. Step order
+                        // is authoritative; clamp only that rounding residue.
+                        let elapsed = (absolute_time - state.time).max(0.0);
                         let pole = (-VECTOR_DC_REJECTION_RATE * elapsed).exp();
                         if maintenance_discontinuity {
                             // The paired grid filter is a zero-duration accepted
@@ -4773,6 +4799,7 @@ impl Playground {
                         }
                         state.input = *value;
                         state.step = completed_steps;
+                        state.time = absolute_time;
                     }
                     *value = state.output;
                 }
@@ -7531,6 +7558,7 @@ impl Playground {
                     self.canonical_event_serial = 0;
                     self.canonical_event_observed = 0;
                     self.restart_probe_traces();
+                    self.restart_exposures_after_handoff(true);
                 }
             }
         }
@@ -13065,22 +13093,19 @@ mod tests {
 
     #[test]
     fn arrow_ac_coupling_rejects_static_state_in_simulation_time() {
-        let mut state = Playground {
-            uploaded_time_step: 0.01,
-            ..Playground::default()
-        };
+        let mut state = Playground::default();
         let sample = |value| vec![(0, Pos2::ZERO, Point2::new(value, 0.0))];
 
         let mut first = sample(1.0);
-        state.ac_couple_vector_samples(&mut first, 0, false);
+        state.ac_couple_vector_samples(&mut first, 0, 0.0, false);
         assert_eq!(first[0].2.x, 0.0);
 
         let mut after_one_second = sample(1.0);
-        state.ac_couple_vector_samples(&mut after_one_second, 100, false);
+        state.ac_couple_vector_samples(&mut after_one_second, 100, 1.0, false);
         assert_eq!(after_one_second[0].2.x, 0.0);
 
         let mut after_two_seconds = sample(1.0);
-        state.ac_couple_vector_samples(&mut after_two_seconds, 200, false);
+        state.ac_couple_vector_samples(&mut after_two_seconds, 200, 2.0, false);
         assert_eq!(after_two_seconds[0].2.x, 0.0);
     }
 
@@ -13095,36 +13120,30 @@ mod tests {
 
     #[test]
     fn arrow_ac_coupling_does_not_turn_filter_maintenance_into_a_wave() {
-        let mut state = Playground {
-            uploaded_time_step: 0.01,
-            ..Playground::default()
-        };
+        let mut state = Playground::default();
         let mut first = vec![(0, Pos2::ZERO, Point2::default())];
-        state.ac_couple_vector_samples(&mut first, 14, false);
+        state.ac_couple_vector_samples(&mut first, 14, 0.14, false);
 
         let mut ordinary = vec![(0, Pos2::ZERO, Point2::new(0.2, 0.0))];
-        state.ac_couple_vector_samples(&mut ordinary, 15, false);
+        state.ac_couple_vector_samples(&mut ordinary, 15, 0.15, false);
         assert!((0.19..0.21).contains(&ordinary[0].2.x));
 
         // Deliberately exaggerated maintenance correction. Feeding the raw
         // input jump to the high-pass would produce an arrow near 9.0.
         let mut filtered = vec![(0, Pos2::ZERO, Point2::new(9.0, 0.0))];
-        state.ac_couple_vector_samples(&mut filtered, 16, true);
+        state.ac_couple_vector_samples(&mut filtered, 16, 0.16, true);
         assert!((0.19..0.21).contains(&filtered[0].2.x));
 
         let mut after = vec![(0, Pos2::ZERO, Point2::new(9.1, 0.0))];
-        state.ac_couple_vector_samples(&mut after, 17, false);
+        state.ac_couple_vector_samples(&mut after, 17, 0.17, false);
         assert!((0.28..0.31).contains(&after[0].2.x));
     }
 
     #[test]
     fn arrow_ac_coupling_tracks_physical_samples_and_cold_starts_new_ones() {
-        let mut state = Playground {
-            uploaded_time_step: 0.01,
-            ..Playground::default()
-        };
+        let mut state = Playground::default();
         let mut first = vec![(7, Pos2::ZERO, Point2::new(1.0, 0.0))];
-        state.ac_couple_vector_samples(&mut first, 0, false);
+        state.ac_couple_vector_samples(&mut first, 0, 0.0, false);
         assert_eq!(first[0].2, Point2::default());
 
         // The same mesh element carries temporal history even if its screen
@@ -13134,21 +13153,52 @@ mod tests {
             (7, Pos2::new(80.0, 40.0), Point2::new(1.5, 0.0)),
             (11, Pos2::ZERO, Point2::new(9.0, 0.0)),
         ];
-        state.ac_couple_vector_samples(&mut moved, 1, false);
+        state.ac_couple_vector_samples(&mut moved, 1, 0.01, false);
         assert!(moved[0].2.x > 0.49, "lost physical-sample history");
         assert_eq!(moved[1].2, Point2::default(), "new sample flashed DC");
 
         // A lazily retained element uses its own last accepted step when it
         // returns to view; time spent off-screen still decays its baseline.
         let mut elsewhere = vec![(11, Pos2::ZERO, Point2::new(9.0, 0.0))];
-        state.ac_couple_vector_samples(&mut elsewhere, 100, false);
+        state.ac_couple_vector_samples(&mut elsewhere, 100, 1.0, false);
         let mut returned = vec![(7, Pos2::ZERO, Point2::new(1.5, 0.0))];
-        state.ac_couple_vector_samples(&mut returned, 101, false);
+        state.ac_couple_vector_samples(&mut returned, 101, 1.01, false);
         assert!(
             (0.29..0.31).contains(&returned[0].2.x),
             "off-screen time was lost: {}",
             returned[0].2.x
         );
+    }
+
+    #[test]
+    fn arrow_ac_history_survives_a_compatible_generation_handoff() {
+        let mut state = Playground::default();
+        let owner = VectorOverlayAcOwner {
+            mesh_revision: 17,
+            physics: PhysicsModel::Mechanical,
+        };
+        state.retain_vector_overlay_ac_owner(owner);
+        let mut first = vec![(3, Pos2::ZERO, Point2::new(1.0, 0.0))];
+        state.ac_couple_vector_samples(&mut first, 100, 2.0, false);
+        let mut changing = vec![(3, Pos2::ZERO, Point2::new(1.4, 0.0))];
+        state.ac_couple_vector_samples(&mut changing, 110, 2.1, false);
+        assert!(changing[0].2.x > 0.39);
+
+        // A GPU generation is deliberately absent from the owner. Rebinding
+        // material-dependent stencils on the same mesh therefore retains the
+        // temporal baseline and continues at the transferred absolute time.
+        state.retain_vector_overlay_ac_owner(owner);
+        let mut after_handoff = vec![(3, Pos2::ZERO, Point2::new(1.5, 0.0))];
+        state.ac_couple_vector_samples(&mut after_handoff, 120, 2.2, false);
+        assert!(after_handoff[0].2.x > 0.45, "handoff cold-started arrows");
+
+        state.retain_vector_overlay_ac_owner(VectorOverlayAcOwner {
+            mesh_revision: 18,
+            ..owner
+        });
+        let mut after_remesh = vec![(3, Pos2::ZERO, Point2::new(1.5, 0.0))];
+        state.ac_couple_vector_samples(&mut after_remesh, 120, 2.2, false);
+        assert_eq!(after_remesh[0].2, Point2::default());
     }
 
     #[test]
@@ -13176,7 +13226,7 @@ mod tests {
             let time = step as f64 * state.uploaded_time_step;
             let value = (std::f64::consts::TAU * frequency * time).sin();
             let mut samples = vec![(0, Pos2::ZERO, Point2::new(value, 0.0))];
-            state.ac_couple_vector_samples(&mut samples, step, false);
+            state.ac_couple_vector_samples(&mut samples, step, time, false);
             if frame >= 300 {
                 input_square += value * value;
                 output_square += samples[0].2.x * samples[0].2.x;
@@ -13411,14 +13461,30 @@ mod tests {
         let mut state = Playground::default();
         state.field_exposure.update(0.71, 0.016);
         state.vector_overlay_exposure.update(0.71, 0.016);
+        state.vector_overlay_ac_owner = Some(VectorOverlayAcOwner {
+            mesh_revision: 3,
+            physics: PhysicsModel::Mechanical,
+        });
+        state.vector_overlay_ac_state.insert(
+            4,
+            VectorAcState {
+                input: Point2::new(1.0, 0.0),
+                output: Point2::new(0.2, 0.0),
+                step: 10,
+                time: 0.1,
+            },
+        );
         state.restart_exposures_after_handoff(false);
         assert_eq!(state.field_exposure.reference(), Some(0.71));
         assert_eq!(state.vector_overlay_exposure.reference(), Some(0.71));
+        assert_eq!(state.vector_overlay_ac_state.len(), 1);
 
         // A field replaced with zeros starts the scale again.
         state.restart_exposures_after_handoff(true);
         assert_eq!(state.field_exposure.reference(), None);
         assert_eq!(state.vector_overlay_exposure.reference(), None);
+        assert!(state.vector_overlay_ac_state.is_empty());
+        assert_eq!(state.vector_overlay_ac_owner, None);
     }
 
     /// Loading a document and pressing Reset both leave the scale alone. Each
