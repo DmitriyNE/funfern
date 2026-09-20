@@ -1209,7 +1209,9 @@ fn forcing_layout_eq(left: &CanonicalForcing, right: &CanonicalForcing) -> bool 
             .sources()
             .iter()
             .zip(right.sources())
-            .all(|(left, right)| left.weights() == right.weights())
+            .all(|(left, right)| {
+                left.support() == right.support() && left.weights() == right.weights()
+            })
 }
 
 fn forcing_sparse_layout_eq(left: &CanonicalForcing, right: &CanonicalForcing) -> bool {
@@ -1219,14 +1221,7 @@ fn forcing_sparse_layout_eq(left: &CanonicalForcing, right: &CanonicalForcing) -
             .sources()
             .iter()
             .zip(right.sources())
-            .all(|(left, right)| {
-                left.weights().len() == right.weights().len()
-                    && left
-                        .weights()
-                        .iter()
-                        .zip(right.weights())
-                        .all(|(left, right)| (*left == 0.0) == (*right == 0.0))
-            })
+            .all(|(left, right)| left.support() == right.support())
 }
 
 pub struct TopologyRuntime {
@@ -2429,7 +2424,7 @@ mod tests {
     }
 
     #[test]
-    fn enabled_point_source_move_uses_a_sparse_weight_patch() {
+    fn point_source_motion_and_toggle_keep_the_structural_weight_layout() {
         let editor = TopologyEditor::default();
         let mut document = editor.document.clone();
         document.model.source.enabled = true;
@@ -2477,8 +2472,11 @@ mod tests {
             .unwrap();
         prepare(&mut runtime).unwrap();
         let candidate = runtime.ready().unwrap();
-        assert_eq!(candidate.solver_update, PreparedSolverUpdate::FullHandoff);
-        assert!(candidate.canonical_transfer.is_some());
+        assert_eq!(
+            candidate.solver_update,
+            PreparedSolverUpdate::SourceWeightsOnly
+        );
+        assert!(candidate.canonical_transfer.is_none());
     }
 
     /// A hole with the running field's runtime around it, ready for edits.

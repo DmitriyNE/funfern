@@ -5,6 +5,27 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Moving sources keep an explicit structural support
+
+- A point source's packed layout was inferred from `weight != 0`. Narrow or
+  distant Gaussian tails cross floating-point underflow as the source moves,
+  so an ordinary drag was misclassified as a sparse-layout change and entered
+  the full field handoff at `Locating complementary samples`.
+- Canonical sources now distinguish structural support from numeric weight.
+  The point-source slot reserves the nodes on its selected physical trace side,
+  including nodes whose current weight is zero. Motion, width and enable/disable
+  edits within that support use the atomic weight+drive event; genuinely changed
+  region/volume support still requires a generation handoff. GPU plan packing
+  and live-event packing consume the same explicit support.
+- As a defensive fallback, a full handoff that shares the exact immutable
+  canonical operator now creates the complementary identity map in one work
+  unit rather than rechecking every quadrature carrier.
+- Handoff rejection diagnostics now retain the GPU failure code, describe its
+  validation class, and distinguish a rejected candidate (accepted generation
+  retained) from a fault in the accepted generation.
+- Full workspace tests, Clippy with warnings denied and the wasm32 application
+  check pass.
+
 ## 2026-09-20 — Source and measurement transactions stop rebuilding the solver
 
 - P2 now classifies prepared candidates by the smallest publication boundary.
@@ -12,8 +33,9 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   generation. Signal-only point/volume source changes use the staged canonical
   source event, and the CPU candidate is committed only after its GPU serial is
   accepted. Point position/width and volume-profile changes with unchanged sparse
-  support use an atomic staged weight+drive event; enable/disable, region,
-  sparsity, prescribed and timestep changes still take the full handoff path.
+  support use an atomic staged weight+drive event; point-region changes, volume
+  enable/disable or sparsity changes, prescribed data and timestep changes still
+  take the full handoff path.
 - The drive-only source path requires identical source weights; both source
   paths require identical prescribed data and drive count. The shader events
   preserve instantaneous carrier phase and the integrated-rate anchor.
@@ -28,8 +50,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   Vector-overlay sampling is keyed to the actual mesh revision, so metadata and
   source commits do not rebuild the unchanged arrow layout.
   Runtime regressions cover probe-only metadata publication, point/volume drive
-  edits, a sparse point-source move and full fallback for a support-layout
-  change. The full app
+  edits, a structural-support point-source move and full fallback for a
+  support-layout change. The full app
   test and shader suite pass; hands-on autosave latency and frame pacing are the
   next acceptance observation before compact primary/full-plan reuse.
 - The production Metal live-event harness now edits both temporal source

@@ -609,6 +609,18 @@ impl CanonicalVectorTransferWork {
                         "the vector transfer generations have inconsistent sample layouts",
                     ));
                 }
+                // Reusing the exact immutable operator proves every carrier,
+                // coordinate and ordering identical. Source-layout-only full
+                // handoffs must not spend one cooperative work unit checking
+                // every complementary sample again.
+                if std::ptr::eq(source, target) {
+                    self.phase = CanonicalVectorTransferPhase::Done;
+                    return Ok(Some(CanonicalVectorTransferMap {
+                        source_samples: source.complementary_degrees_of_freedom(),
+                        identity: true,
+                        targets: Vec::new(),
+                    }));
+                }
                 // Revisions identify transactions, not discretizations. A
                 // law-only rebuild commonly republishes an identical mesh
                 // under a new revision; its quadrature carriers still copy
@@ -2068,6 +2080,23 @@ mod tests {
             .map(|(actual, sample)| (*actual - polynomial(sample.point)).norm())
             .fold(0.0, f64::max);
         assert!(error < 2.0e-13, "quadratic transfer error {error:e}");
+    }
+
+    #[test]
+    fn reused_operator_complementary_identity_finishes_in_one_work_unit() {
+        let mesh = Arc::new(mesh(
+            1,
+            &[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            &[[0, 1, 2], [0, 2, 3]],
+        ));
+        let (_, operator) = compile(&mesh);
+        let operator = Arc::new(operator);
+        let mut job =
+            CanonicalVectorTransferJob::new(mesh.clone(), operator.clone(), mesh, operator);
+
+        let map = job.advance(1).unwrap().unwrap();
+        assert!(map.is_identity());
+        assert_eq!(job.phase(), "Finished");
     }
 
     #[test]

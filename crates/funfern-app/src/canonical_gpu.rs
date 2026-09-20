@@ -531,15 +531,11 @@ impl CanonicalGpuLiveEvent {
                 .zip(target.sources())
                 .any(|(current, target)| {
                     current.weights().len() != target.weights().len()
-                        || current
-                            .weights()
-                            .iter()
-                            .zip(target.weights())
-                            .any(|(current, target)| (*current == 0.0) != (*target == 0.0))
+                        || current.support() != target.support()
                 })
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
-                "a live source-weight patch must preserve sparse forcing layout",
+                "a live source-weight patch must preserve structural forcing support",
             ));
         }
         let clock = CanonicalGpuClock::initial(time_step)?;
@@ -548,9 +544,9 @@ impl CanonicalGpuLiveEvent {
             .iter()
             .map(|source| {
                 source
-                    .weights()
+                    .support()
                     .iter()
-                    .filter(|weight| **weight != 0.0)
+                    .filter(|supported| **supported)
                     .count()
             })
             .sum::<usize>();
@@ -569,7 +565,7 @@ impl CanonicalGpuLiveEvent {
         for node in 0..node_count {
             for source in target.sources() {
                 let weight = source.weights()[node];
-                if weight != 0.0 {
+                if source.support()[node] {
                     upload.push(GpuCanonicalTableWord {
                         data: UVec4::new(
                             finite_f32(weight, "live source weight")?.to_bits(),
@@ -842,7 +838,7 @@ impl CanonicalGpuPlan {
         let mut source_by_node = vec![Vec::<GpuCanonicalTableWord>::new(); node_count];
         for (drive_index, source) in forcing.sources().iter().enumerate() {
             for (node, weight) in source.weights().iter().copied().enumerate() {
-                if weight != 0.0 {
+                if source.support()[node] {
                     source_by_node[node].push(table_word(
                         drive_index as u32,
                         0,
@@ -2073,6 +2069,16 @@ pub const CANONICAL_FAILURE_LAYOUT: u32 = 1;
 pub const CANONICAL_FAILURE_TIMESTEP: u32 = 2;
 pub const CANONICAL_FAILURE_INVERSE_DOMAIN: u32 = 3;
 pub const CANONICAL_FAILURE_NON_FINITE: u32 = 4;
+
+pub const fn canonical_failure_description(reason: u32) -> &'static str {
+    match reason {
+        CANONICAL_FAILURE_LAYOUT => "layout or transfer consistency check failed",
+        CANONICAL_FAILURE_TIMESTEP => "stability or conservative-transfer tolerance failed",
+        CANONICAL_FAILURE_INVERSE_DOMAIN => "constitutive inverse left its valid domain",
+        CANONICAL_FAILURE_NON_FINITE => "a non-finite field or accounting value was produced",
+        _ => "unknown canonical GPU failure",
+    }
+}
 // Large explicit validation requests are encoded in one command buffer. The
 // interactive caller still controls its much smaller per-frame request size.
 const MAX_STEPS_PER_FRAME: u64 = 256;
@@ -4338,8 +4344,8 @@ fn compute_canonical_handoff(
 mod tests {
     use super::*;
     use funfern_core::{
-        CanonicalSource, MeshingOptions, OuterBoundaryCondition, QuadraticTransferMap,
-        QuadraticWaveOperator, Scene, mesh_scene,
+        CanonicalRateDrive, CanonicalSource, MeshingOptions, OuterBoundaryCondition,
+        QuadraticTransferMap, QuadraticWaveOperator, Scene, mesh_scene,
     };
 
     fn plan(boundary: OuterBoundaryCondition) -> CanonicalGpuPlan {
@@ -4644,7 +4650,7 @@ mod tests {
     }
 
     #[test]
-    fn live_source_weight_patch_rejects_a_changed_sparse_layout() {
+    fn live_source_weight_patch_rejects_changed_structural_support() {
         let scene = Scene::initial();
         let mesh = mesh_scene(
             &scene,
@@ -4691,12 +4697,29 @@ mod tests {
             .position(|weight| *weight != 0.0)
             .unwrap();
         changed_weights[changed] = 0.0;
+        let mut reserved_zero = CanonicalForcing::none(&operator);
+        reserved_zero
+            .push_source(
+                CanonicalSource::new_with_support(
+                    &operator,
+                    changed_weights.clone(),
+                    vec![true; operator.degrees_of_freedom()],
+                    CanonicalRateDrive::direct(signal).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(
+            CanonicalGpuLiveEvent::source_weight_patch(&current, &reserved_zero, time_step, 2,)
+                .is_ok()
+        );
+
         let mut changed_layout = CanonicalForcing::none(&operator);
         changed_layout
             .push_source(CanonicalSource::direct(&operator, changed_weights, signal).unwrap())
             .unwrap();
         assert!(matches!(
-            CanonicalGpuLiveEvent::source_weight_patch(&current, &changed_layout, time_step, 2,),
+            CanonicalGpuLiveEvent::source_weight_patch(&current, &changed_layout, time_step, 3,),
             Err(CanonicalGpuBuildError::InvalidLayout(_))
         ));
     }

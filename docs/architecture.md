@@ -1261,10 +1261,12 @@ classification admits two narrower transactions on the current generation:
   candidate only after that serial is accepted. This path requires unchanged
   spatial weights, prescribed data, drive count and timestep; it preserves the
   instantaneous carrier phase and integrated-rate anchor.
-- source-weight changes with identical sparse support stage candidate weights in
-  unused table lanes, validate them, and atomically promote weights and drive
-  runtime together. A changed zero/nonzero pattern is a layout change and is not
-  eligible for this event.
+- source-weight changes with identical explicit structural support stage
+  candidate weights in unused table lanes, validate them, and atomically promote
+  weights and drive runtime together. Point-source support is its selected
+  physical trace side, not the exact nonzero pattern of its Gaussian values, so
+  underflow, motion, width and enable/disable edits do not manufacture layout
+  changes. A changed structural support mask is not eligible for this event.
 
 Spatial source support/layout, prescribed data, operator, mesh or timestep changes retain
 the full lifecycle above. A narrow transaction that fails its dependency check

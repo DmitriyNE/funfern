@@ -102,6 +102,11 @@ impl CanonicalRateDrive {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalSource {
     weights: Vec<f64>,
+    /// Structural GPU contribution slots. A supported node may carry a zero
+    /// instantaneous weight; keeping that slot is what lets a moving source
+    /// cross floating-point underflow boundaries without changing the packed
+    /// solver layout.
+    support: Vec<bool>,
     drive: CanonicalRateDrive,
 }
 
@@ -111,8 +116,30 @@ impl CanonicalSource {
         weights: Vec<f64>,
         drive: CanonicalRateDrive,
     ) -> Result<Self, WaveError> {
+        let support = weights.iter().map(|weight| *weight != 0.0).collect();
+        Self::new_with_support(operator, weights, support, drive)
+    }
+
+    pub fn new_with_support(
+        operator: &CanonicalWaveOperator,
+        weights: Vec<f64>,
+        support: Vec<bool>,
+        drive: CanonicalRateDrive,
+    ) -> Result<Self, WaveError> {
         operator.validate_primary(&weights)?;
-        Ok(Self { weights, drive })
+        if support.len() != weights.len()
+            || weights
+                .iter()
+                .zip(&support)
+                .any(|(weight, supported)| *weight != 0.0 && !supported)
+        {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        Ok(Self {
+            weights,
+            support,
+            drive,
+        })
     }
 
     pub fn direct(
@@ -138,6 +165,10 @@ impl CanonicalSource {
 
     pub fn weights(&self) -> &[f64] {
         &self.weights
+    }
+
+    pub fn support(&self) -> &[bool] {
+        &self.support
     }
 
     pub fn drive(&self) -> CanonicalRateDrive {
@@ -359,7 +390,12 @@ impl CanonicalForcing {
                 }
             })
             .collect();
-        CanonicalSource::legacy(operator, weights, source.signal, anchor_time)
+        CanonicalSource::new_with_support(
+            operator,
+            weights,
+            membership.to_vec(),
+            CanonicalRateDrive::legacy(source.signal, anchor_time)?,
+        )
     }
 
     /// Integrated nodal source rate at one physical time. Exposed for
@@ -4169,6 +4205,49 @@ mod tests {
                     if acceleration == signal
             ));
         }
+    }
+
+    #[test]
+    fn point_source_support_is_structural_across_gaussian_underflow() {
+        let (_, operator) = compile(&Scene::default());
+        let membership = vec![true; operator.degrees_of_freedom()];
+        let first_point = operator.node_points()[0];
+        let second_node = operator
+            .node_points()
+            .iter()
+            .position(|point| *point != first_point)
+            .unwrap();
+        let source = |position| PointSource {
+            enabled: true,
+            position,
+            width: 1.0e-12,
+            ..PointSource::default()
+        };
+        let first =
+            CanonicalForcing::legacy_point_source(&operator, source(first_point), &membership, 0.0)
+                .unwrap();
+        let second = CanonicalForcing::legacy_point_source(
+            &operator,
+            source(operator.node_points()[second_node]),
+            &membership,
+            0.0,
+        )
+        .unwrap();
+
+        assert_eq!(first.support(), membership);
+        assert_eq!(second.support(), membership);
+        assert_ne!(
+            first
+                .weights()
+                .iter()
+                .map(|weight| *weight != 0.0)
+                .collect::<Vec<_>>(),
+            second
+                .weights()
+                .iter()
+                .map(|weight| *weight != 0.0)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

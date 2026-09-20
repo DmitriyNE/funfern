@@ -911,13 +911,16 @@ Unchanged probe stencils and far-field contours are retained individually.
 Point- and volume-source edits that change only temporal drives use the existing
 staged GPU source-table event. Its acceptance boundary preserves instantaneous
 phase and the integrated-rate anchor before the CPU candidate is published.
-Position, width and profile edits whose sparse support is unchanged use a second
-staged event: candidate weights occupy scratch lanes in the existing source
-table, validation precedes their atomic promotion, and the drive runtime is
-migrated at the same boundary. The narrow paths require unchanged prescribed
-data, drive count and timestep; the weight path additionally requires the exact
-same zero/nonzero table layout. Enable/disable, region, sparsity, prescribed or
-timestep changes retain the full transfer transaction. Volume-source changes no
+Position, width and profile edits whose structural support is unchanged use a
+second staged event: candidate weights occupy scratch lanes in the existing
+source table, validation precedes their atomic promotion, and the drive runtime
+is migrated at the same boundary. Structural support is explicit rather than
+inferred from exact numeric zeroes: a point-source slot reserves its selected
+physical trace side, so Gaussian underflow, motion, width and enable/disable do
+not change layout. Region changes and volume-source sparsity changes do. The
+narrow paths require unchanged prescribed data, drive count and timestep.
+Changed structural support, prescribed data or timestep retain the full transfer
+transaction. Volume-source changes no
 longer invalidate the bulk/canonical operator merely because the source lives in
 the authored scene; unchanged spatial source weights are retained across signal
 edits.
@@ -927,7 +930,9 @@ step drain and GPU admission. This closes the earlier accounting ambiguity in
 which packing appeared as solver drain. Material/boundary-only revisions now
 retain the exact mesh object and use the direct scalar identity constructor.
 Exact same-discretization complementary transfer is represented by one identity
-flag: it no longer retains or GPU-packs one row per quadrature sample. Remaining
+flag: it no longer retains or GPU-packs one row per quadrature sample. Reusing
+the exact immutable operator now also proves that identity in one preparation
+work unit, without walking all complementary samples. Remaining
 P2 work includes full-plan reuse needed by retiming and source-layout changes,
 followed by finer bulk/boundary operator dependency separation. Exact unchanged
 outer-trace modes are now retained by shared ownership when trace nodes,

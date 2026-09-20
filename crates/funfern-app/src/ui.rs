@@ -3,6 +3,7 @@
 use crate::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuHandoffOutcome, CanonicalGpuLiveEvent,
     CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuRuntimeTransfer, CanonicalGpuTransferPlan,
+    canonical_failure_description,
 };
 use crate::files::{self, FileEvent, SaveKind};
 use crate::material_overlay::{
@@ -7445,15 +7446,25 @@ impl Playground {
             }
         }
         if let Some(upload) = &self.uploading {
-            if request.failed()
-                || matches!(
-                    request.handoff_outcome(),
-                    CanonicalGpuHandoffOutcome::Rejected(_)
-                )
-            {
+            let failure = if request.failed() {
+                let reason = request.stats().failure();
+                Some(format!(
+                    "Accepted canonical GPU generation faulted: {} (failure code {reason}); candidate was not committed",
+                    canonical_failure_description(reason),
+                ))
+            } else if let CanonicalGpuHandoffOutcome::Rejected(reason) = request.handoff_outcome() {
+                Some(format!(
+                    "Canonical GPU handoff rejected: {} (failure code {reason}); accepted generation was retained",
+                    canonical_failure_description(reason),
+                ))
+            } else {
+                None
+            };
+            if let Some(failure) = failure {
                 let token = upload.token;
-                self.runtime
-                    .reject_ready(token, "Canonical GPU upload failed");
+                self.runtime.reject_ready(token, failure.clone());
+                self.message = failure;
+                self.unseen_error = true;
                 self.uploading = None;
             } else if request.ready()
                 && display.generation == upload.generation
