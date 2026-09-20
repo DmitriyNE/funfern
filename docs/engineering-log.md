@@ -21,6 +21,13 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   both worker capacity and the off-UI-thread handoff branch. Typed-array to
   `ShaderBuffer` serialization remains on the publication path and is the next
   place to inspect if a smaller mesh-scaled hitch survives.
+- TODO: perform a full native/threaded-browser divergence sweep before polish
+  is declared complete. Inventory every canonical preparation, AMR, packing,
+  publication, readback and handoff stage; compare executor placement,
+  cancellation/backpressure and fallback semantics; and add browser coverage
+  for each intentional target-specific seam. The static no-threads Wasm path
+  should remain an explicit, separately tested fallback rather than silently
+  defining the threaded browser architecture.
 
 ## 2026-09-20 — Browser AMR worker starvation fixed
 
