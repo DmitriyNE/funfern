@@ -1147,6 +1147,30 @@ impl TopologyRuntime {
         self.preparing.as_ref().map(TopologyPreparationJob::timing)
     }
 
+    /// Moves the current immutable preparation job to an external executor.
+    /// The requested token remains owned here, so a result superseded by a
+    /// newer request is still rejected by [`Self::finish_external_preparation`].
+    pub fn take_preparing_job(&mut self) -> Option<TopologyPreparationJob> {
+        self.preparing.take()
+    }
+
+    /// Restores a job when an optional external executor is unavailable.
+    pub fn restore_preparing_job(&mut self, job: TopologyPreparationJob) {
+        if self.requested == Some(job.token()) && self.preparing.is_none() {
+            self.preparing = Some(job);
+        }
+    }
+
+    /// Settles a result produced outside the calling thread. Token ownership is
+    /// checked exactly like the cooperative path, and a stale result cannot
+    /// clear or replace a newer in-process candidate.
+    pub fn finish_external_preparation(
+        &mut self,
+        result: Result<PreparedTopology, TopologyPreparationError>,
+    ) -> Option<Result<TopologyToken, TopologyPreparationError>> {
+        self.settle(result)
+    }
+
     pub fn active(&self) -> Option<&Arc<PreparedTopology>> {
         self.active.as_ref()
     }
@@ -1483,6 +1507,17 @@ mod tests {
         panic!("topology runtime did not finish");
     }
 
+    fn prepare_job(
+        mut job: TopologyPreparationJob,
+    ) -> Result<PreparedTopology, TopologyPreparationError> {
+        for _ in 0..2_000_000 {
+            if let Some(result) = job.advance(64) {
+                return result;
+            }
+        }
+        panic!("detached topology job did not finish");
+    }
+
     #[test]
     fn complete_candidate_publishes_only_after_explicit_gpu_acknowledgement() {
         let editor = TopologyEditor::default();
@@ -1508,6 +1543,69 @@ mod tests {
             committed.operator.mesh_revision(),
             committed.mesh.mesh_revision
         );
+    }
+
+    #[test]
+    fn externally_prepared_candidate_obeys_the_runtime_transaction() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                true,
+            )
+            .unwrap();
+        let job = runtime.take_preparing_job().unwrap();
+        assert_eq!(job.token(), token);
+        assert!(runtime.phase().is_none());
+
+        let result = prepare_job(job);
+        assert_eq!(
+            runtime
+                .finish_external_preparation(result)
+                .unwrap()
+                .unwrap(),
+            token
+        );
+        assert_eq!(runtime.ready().unwrap().bundle.token, token);
+        assert_eq!(runtime.commit_ready(token).unwrap().bundle.token, token);
+    }
+
+    #[test]
+    fn externally_prepared_stale_candidate_cannot_replace_a_newer_request() {
+        let editor = TopologyEditor::default();
+        let mut runtime = TopologyRuntime::default();
+        let stale = runtime
+            .request(
+                1,
+                &editor.document,
+                editor.document.model.accepted.compile(1).unwrap(),
+                options(),
+                true,
+            )
+            .unwrap();
+        let stale_job = runtime.take_preparing_job().unwrap();
+        let newest = runtime
+            .request(
+                2,
+                &editor.document,
+                editor.document.model.accepted.compile(2).unwrap(),
+                options(),
+                true,
+            )
+            .unwrap();
+        assert_ne!(stale, newest);
+
+        assert!(
+            runtime
+                .finish_external_preparation(prepare_job(stale_job))
+                .is_none()
+        );
+        assert!(runtime.ready().is_none());
+        assert_eq!(runtime.take_preparing_job().unwrap().token(), newest);
     }
 
     /// Assembly and the transfer map yield like the mesh: a stepped preparation

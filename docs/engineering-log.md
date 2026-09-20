@@ -20,10 +20,23 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   diagnostics also report total CPU work and the unclassified remainder rather
   than showing phase buckets that omitted this work.
 - Added a staged preparation-latency subplan to the canonical specification.
-  Next is one cancellable native preparation worker, followed by dependency-
-  specific reuse and exact/proportional second-order trace fast paths. A worker
-  isolates the main loop but still shares CPU/cache/memory resources, so active-
-  preparation frame pacing and solver throughput are explicit acceptance gates.
+  P0 and P1 are now complete: native builds move the owned job to one long-lived
+  worker, report its progress through the existing diagnostics and policy gates,
+  and admit its result through the same token-checked transaction. Between
+  eight-millisecond quanta the worker keeps only the newest queued request, so
+  rapid edits neither publish stale work nor create competing assembly threads.
+  WASM retains the four-millisecond cooperative path; worker spawn/channel failure
+  falls back to it on native builds as well.
+- The release autosave fixture (10,756 primary DOFs, 3,516 triangles, 288 outgoing
+  trace nodes) now reaches a material candidate in 488.6 ms wall time for 488.3 ms
+  of worker CPU. This is 61 worker quanta rather than 121 display-frame slices.
+  A 4,096-step production render-graph run measured 10.28 simulated seconds per
+  wall second both alone and under repeated saved-scene assembly load on Apple M1
+  Max, so this fixture showed no measurable solver-throughput loss.
+- External completion, stale-token rejection and native worker return have focused
+  regressions; topology runtime and UI suites, Clippy and the WASM check pass.
+  Hands-on frame pacing remains a release observation. Next is dependency-specific
+  reuse, followed by exact/proportional second-order trace fast paths.
 
 ## 2026-09-20 — Chrome WGSL validation repair
 

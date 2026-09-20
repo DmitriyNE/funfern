@@ -32,9 +32,11 @@ use funfern_app::topology_editor::{
 };
 use funfern_app::topology_persistence::{self as persistence, TopologyLoadCandidate};
 use funfern_app::topology_runtime::{
-    PreparedTopology, TopologyPreparationTiming, TopologyProbeCompilation, TopologyProbeStencil,
-    TopologyRuntime, TopologyToken,
+    PreparedTopology, TopologyPreparationPhase, TopologyPreparationTiming,
+    TopologyProbeCompilation, TopologyProbeStencil, TopologyRuntime, TopologyToken,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use funfern_app::topology_runtime::{TopologyPreparationError, TopologyPreparationJob};
 use funfern_app::topology_viewport::{
     AttachmentHit, RigidTransform, SampledTopologyGeometry, ScreenPoint, TopologyHandle,
     TopologyHit, TopologySelection, TopologySpanTarget, ViewportTransform, plan_axis_scale,
@@ -718,6 +720,128 @@ struct GpuUploadPreparation {
     result: Option<Result<PreparedGpuUpload, String>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+enum NativePreparationEvent {
+    Progress {
+        token: TopologyToken,
+        phase: TopologyPreparationPhase,
+        detail: &'static str,
+        timing: TopologyPreparationTiming,
+    },
+    Finished {
+        token: TopologyToken,
+        result: Box<Result<PreparedTopology, TopologyPreparationError>>,
+    },
+}
+
+/// One long-lived native worker owns CPU candidate preparation. New jobs queue
+/// through one channel; between bounded quanta the worker drains that queue to
+/// its newest member, so rapid edits cannot create a growing set of competing
+/// assembly threads. The browser retains the cooperative main-thread runner.
+#[cfg(not(target_arch = "wasm32"))]
+struct NativePreparationWorker {
+    sender: Sender<TopologyPreparationJob>,
+    receiver: Mutex<Receiver<NativePreparationEvent>>,
+    token: Option<TopologyToken>,
+    phase: Option<TopologyPreparationPhase>,
+    detail: Option<&'static str>,
+    timing: Option<TopologyPreparationTiming>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativePreparationWorker {
+    const QUANTUM: std::time::Duration = std::time::Duration::from_millis(8);
+
+    fn spawn() -> Option<Self> {
+        let (job_sender, job_receiver) = mpsc::channel::<TopologyPreparationJob>();
+        let (event_sender, event_receiver) = mpsc::channel::<NativePreparationEvent>();
+        std::thread::Builder::new()
+            .name("funfern-cpu-prepare".into())
+            .spawn(move || {
+                while let Ok(mut job) = job_receiver.recv() {
+                    loop {
+                        loop {
+                            match job_receiver.try_recv() {
+                                Ok(newer) => job = newer,
+                                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                            }
+                        }
+                        let token = job.token();
+                        let result = job.advance_for(Self::QUANTUM);
+                        if let Some(result) = result {
+                            if event_sender
+                                .send(NativePreparationEvent::Finished {
+                                    token,
+                                    result: Box::new(result),
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                            break;
+                        }
+                        if event_sender
+                            .send(NativePreparationEvent::Progress {
+                                token,
+                                phase: job.phase(),
+                                detail: job.detail(),
+                                timing: job.timing(),
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self {
+            sender: job_sender,
+            receiver: Mutex::new(event_receiver),
+            token: None,
+            phase: None,
+            detail: None,
+            timing: None,
+        })
+    }
+
+    fn submit(&mut self, job: TopologyPreparationJob) -> Option<Box<TopologyPreparationJob>> {
+        self.token = Some(job.token());
+        self.phase = Some(job.phase());
+        self.detail = Some(job.detail());
+        self.timing = Some(job.timing());
+        self.sender.send(job).err().map(|error| Box::new(error.0))
+    }
+
+    fn drain(&self) -> Vec<NativePreparationEvent> {
+        let receiver = self.receiver.lock().unwrap();
+        std::iter::from_fn(|| receiver.try_recv().ok()).collect()
+    }
+
+    fn observe(&mut self, event: &NativePreparationEvent) {
+        match event {
+            NativePreparationEvent::Progress {
+                token,
+                phase,
+                detail,
+                timing,
+            } if self.token == Some(*token) => {
+                self.phase = Some(*phase);
+                self.detail = Some(*detail);
+                self.timing = Some(*timing);
+            }
+            NativePreparationEvent::Finished { token, .. } if self.token == Some(*token) => {
+                self.token = None;
+                self.phase = None;
+                self.detail = None;
+                self.timing = None;
+            }
+            _ => {}
+        }
+    }
+}
+
 fn compile_gpu_upload(
     candidate: PreparedTopology,
     active: Option<Arc<PreparedTopology>>,
@@ -819,6 +943,8 @@ struct VectorAcState {
 pub struct Playground {
     editor: TopologyEditor,
     runtime: TopologyRuntime,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_preparation: Option<NativePreparationWorker>,
     selection: TopologySelection,
     inspector: Option<InspectorPanel>,
     draw_open: bool,
@@ -1058,6 +1184,8 @@ impl Default for Playground {
         Self {
             editor,
             runtime: TopologyRuntime::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            native_preparation: NativePreparationWorker::spawn(),
             selection: TopologySelection::None,
             inspector: Some(InspectorPanel::Edit),
             draw_open: false,
@@ -6830,6 +6958,100 @@ impl Playground {
     /// average throughput target.
     const PREPARATION_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 
+    /// Candidate state can live either in the cooperative runtime runner or in
+    /// the native worker. Keep that placement detail out of UI/status policy.
+    fn preparation_phase(&self) -> Option<TopologyPreparationPhase> {
+        self.runtime.phase().or_else(|| {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.native_preparation
+                    .as_ref()
+                    .and_then(|worker| worker.phase)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                None
+            }
+        })
+    }
+
+    fn preparation_detail(&self) -> Option<&'static str> {
+        self.runtime.detail().or_else(|| {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.native_preparation
+                    .as_ref()
+                    .and_then(|worker| worker.detail)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                None
+            }
+        })
+    }
+
+    fn preparation_timing(&self) -> Option<TopologyPreparationTiming> {
+        self.runtime.preparing_timing().or_else(|| {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.native_preparation
+                    .as_ref()
+                    .and_then(|worker| worker.timing)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                None
+            }
+        })
+    }
+
+    fn preparation_in_progress(&self) -> bool {
+        self.preparation_phase().is_some()
+    }
+
+    /// Advances candidate assembly without making its execution placement part
+    /// of the topology transaction. Native builds hand the immutable job to one
+    /// long-lived worker; the browser, or a failed worker spawn/channel, uses
+    /// the existing bounded cooperative runner.
+    fn advance_runtime_preparation(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let events = self
+                .native_preparation
+                .as_ref()
+                .map_or_else(Vec::new, NativePreparationWorker::drain);
+            for event in events {
+                if let Some(worker) = &mut self.native_preparation {
+                    worker.observe(&event);
+                }
+                if let NativePreparationEvent::Finished { result, .. } = event
+                    && let Some(Ok(_)) = self.runtime.finish_external_preparation(*result)
+                {
+                    self.handoff_ready = Some(Instant::now());
+                }
+            }
+
+            if let Some(job) = self.runtime.take_preparing_job() {
+                let rejected = match &mut self.native_preparation {
+                    Some(worker) => worker.submit(job),
+                    None => Some(Box::new(job)),
+                };
+                if let Some(job) = rejected {
+                    self.native_preparation = None;
+                    self.runtime.restore_preparing_job(*job);
+                }
+            }
+
+            if self.native_preparation.is_some() {
+                return;
+            }
+        }
+
+        if let Some(Ok(_)) = self.runtime.advance_for(Self::PREPARATION_FRAME_BUDGET) {
+            self.handoff_ready = Some(Instant::now());
+        }
+    }
+
     fn request_runtime(&mut self) {
         if self.editor.acceptance != TopologyAcceptance::Valid
             || self.editor.editing()
@@ -6845,7 +7067,7 @@ impl Playground {
         if !self.remesh_requested
             && self.requested_revision == Some(self.editor.revision)
             && self.requested_edge == self.mesh_edge
-            && (self.runtime.phase().is_some()
+            && (self.preparation_in_progress()
                 || self.runtime.active().is_some_and(|active| {
                     active.bundle.token.document_revision == self.editor.revision
                 }))
@@ -6935,9 +7157,7 @@ impl Playground {
             self.retime_for_speed();
             self.request_runtime();
         }
-        if let Some(Ok(_)) = self.runtime.advance_for(Self::PREPARATION_FRAME_BUDGET) {
-            self.handoff_ready = Some(Instant::now());
-        }
+        self.advance_runtime_preparation();
         if self.gpu_upload_preparation.as_ref().is_some_and(|job| {
             self.runtime
                 .ready()
@@ -7514,7 +7734,7 @@ impl Playground {
     fn retime_for_speed(&mut self) {
         if self.uploaded_time_step <= 0.0
             || self.uploading.is_some()
-            || self.runtime.phase().is_some()
+            || self.preparation_in_progress()
             || self.runtime.ready().is_some()
         {
             return;
@@ -7581,7 +7801,7 @@ impl Playground {
             self.amr_status = "adaptation discarded: the mesh changed underneath it".into();
             return;
         }
-        if self.uploading.is_some() || self.runtime.phase().is_some() || self.editor.editing() {
+        if self.uploading.is_some() || self.preparation_in_progress() || self.editor.editing() {
             self.amr_status = if self.amr_adaptation_job.is_some() {
                 "adapting mesh"
             } else {
@@ -10324,11 +10544,11 @@ impl Playground {
                     )),
                     None => ui.small("No committed topology"),
                 };
-                match (self.runtime.phase(), self.runtime.preparing_timing()) {
+                match (self.preparation_phase(), self.preparation_timing()) {
                     (Some(phase), Some(timing)) => {
                         ui.small(format!(
                             "Preparing: {}",
-                            self.runtime.detail().unwrap_or(phase.label())
+                            self.preparation_detail().unwrap_or(phase.label())
                         ));
                         ui.small(timing_line(timing));
                     }
@@ -10454,7 +10674,7 @@ impl Playground {
                         "Candidate ready · draining {} requested steps",
                         self.step_backlog
                     ));
-                } else if self.runtime.phase().is_some() {
+                } else if self.preparation_in_progress() {
                     ui.label("Preparing a candidate on the CPU");
                 } else {
                     ui.label("Idle");
@@ -10634,9 +10854,9 @@ impl Playground {
                     let status = match self.editor.acceptance {
                         TopologyAcceptance::Invalid(issue) => format!("Geometry invalid: {issue}"),
                         TopologyAcceptance::Pending => "Topology rebuilding: tracing faces".into(),
-                        TopologyAcceptance::Valid => self.runtime.phase().map_or_else(
+                        TopologyAcceptance::Valid => self.preparation_phase().map_or_else(
                             || "Simulation ready".into(),
-                            |phase| self.runtime.detail().unwrap_or(phase.label()).into(),
+                            |phase| self.preparation_detail().unwrap_or(phase.label()).into(),
                         ),
                     };
                     ui.label(status);
@@ -12452,6 +12672,41 @@ pub fn frame(
 mod tests {
     use super::*;
     use funfern_app::topology_viewport::screen_side;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_worker_returns_a_candidate_to_the_runtime_transaction() {
+        let mut state = Playground::default();
+        assert!(state.native_preparation.is_some());
+        for _ in 0..100_000 {
+            state.editor.validate_frame(64);
+            if state.editor.acceptance != TopologyAcceptance::Pending {
+                break;
+            }
+        }
+        assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
+        state.request_runtime();
+        assert!(state.runtime.phase().is_some());
+
+        state.advance_runtime_preparation();
+        assert!(state.runtime.phase().is_none());
+        assert!(state.preparation_in_progress());
+
+        let started = std::time::Instant::now();
+        while state.runtime.ready().is_none()
+            && state.runtime.last_error().is_none()
+            && started.elapsed() < std::time::Duration::from_secs(5)
+        {
+            std::thread::yield_now();
+            state.advance_runtime_preparation();
+        }
+        assert!(state.runtime.last_error().is_none());
+        assert!(
+            state.runtime.ready().is_some(),
+            "native preparation timed out"
+        );
+        assert!(state.handoff_ready.is_some());
+    }
 
     #[test]
     fn handoff_withholds_steps_only_when_the_source_cannot_advance() {
