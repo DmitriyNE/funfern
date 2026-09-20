@@ -5,6 +5,29 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Browser preparation worker and overhaul branch
+
+- Canonical-overhaul work now lives on `canonical-overhaul`; local `main` was
+  returned exactly to remote `main` at `beca47e`, and no remote ref was changed.
+  The preceding browser packaging/toolchain corrections are commit `56a58fd` on
+  the overhaul branch.
+- P1W moves the same owned, token-checked topology preparation job into exactly
+  one shared-memory Web Worker. The worker keeps the native eight-millisecond
+  quanta and newest-request replacement policy, while the accepted GPU solver and
+  main browser thread remain live. Worker bootstrap failure after module startup
+  still falls back to the bounded cooperative runner.
+- The threaded bundle is explicit: `scripts/trunk` selects
+  nightly-2026-05-28, rebuilds `std` with Wasm atomics, enables the worker feature,
+  and local Trunk/nginx serving supplies COOP/COEP. `bevy_egui` is pinned to its
+  Bevy-0.19-compatible 0.41.1 line; 0.42's atomics configuration deliberately
+  makes browser dropped-file handles non-`Send`, which cannot be an ECS component.
+- Static hosting remains supported rather than silently broken. Plain stable
+  `trunk build` emits the cooperative bundle, and Pages publishes that variant
+  because it cannot set cross-origin-isolation headers. Chrome/WebGPU checks pass
+  for both paths; the threaded check asserts `crossOriginIsolated` and actual
+  worker activation before checking frame advance and resize. Hands-on browser
+  preparation timing and frame pacing remain release observations.
+
 ## 2026-09-20 — Canonical preparation latency correction begins
 
 - Headless reproduction of the current autosave found both a bug and real

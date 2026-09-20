@@ -32,11 +32,10 @@ use funfern_app::topology_editor::{
 };
 use funfern_app::topology_persistence::{self as persistence, TopologyLoadCandidate};
 use funfern_app::topology_runtime::{
-    PreparedTopology, TopologyPreparationPhase, TopologyPreparationTiming,
-    TopologyProbeCompilation, TopologyProbeStencil, TopologyRuntime, TopologyToken,
+    PreparedTopology, TopologyPreparationError, TopologyPreparationJob, TopologyPreparationPhase,
+    TopologyPreparationTiming, TopologyProbeCompilation, TopologyProbeStencil, TopologyRuntime,
+    TopologyToken,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use funfern_app::topology_runtime::{TopologyPreparationError, TopologyPreparationJob};
 use funfern_app::topology_viewport::{
     AttachmentHit, RigidTransform, SampledTopologyGeometry, ScreenPoint, TopologyHandle,
     TopologyHit, TopologySelection, TopologySpanTarget, ViewportTransform, plan_axis_scale,
@@ -44,8 +43,15 @@ use funfern_app::topology_viewport::{
 };
 use funfern_core::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+use std::sync::atomic::AtomicBool;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(target_arch = "wasm32", feature = "browser-threads")
+))]
+use std::sync::atomic::Ordering;
 use std::sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, Sender},
@@ -57,6 +63,16 @@ const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const FRAME_HISTORY: usize = 120;
 const EVENT_LOG_ENTRIES: usize = 200;
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+static BROWSER_PREPARATION_WORKER_READY: AtomicBool = AtomicBool::new(false);
+
+/// Called once the shared-memory Rayon worker has entered its browser Worker.
+/// If bootstrap fails the flag stays false and preparation remains cooperative.
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+pub(crate) fn set_browser_preparation_worker_ready(ready: bool) {
+    BROWSER_PREPARATION_WORKER_READY.store(ready, Ordering::Release);
+}
 /// Seconds of progress the steps-per-second readout averages over.
 const STEP_RATE_WINDOW: f64 = 0.5;
 /// Below one percent of the run's meaningful amplitude, automatic exposure is
@@ -720,8 +736,11 @@ struct GpuUploadPreparation {
     result: Option<Result<PreparedGpuUpload, String>>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-enum NativePreparationEvent {
+#[cfg_attr(
+    all(target_arch = "wasm32", not(feature = "browser-threads")),
+    allow(dead_code)
+)]
+enum BackgroundPreparationEvent {
     Progress {
         token: TopologyToken,
         phase: TopologyPreparationPhase,
@@ -734,68 +753,34 @@ enum NativePreparationEvent {
     },
 }
 
-/// One long-lived native worker owns CPU candidate preparation. New jobs queue
-/// through one channel; between bounded quanta the worker drains that queue to
-/// its newest member, so rapid edits cannot create a growing set of competing
-/// assembly threads. The browser retains the cooperative main-thread runner.
-#[cfg(not(target_arch = "wasm32"))]
-struct NativePreparationWorker {
+/// One long-lived worker owns CPU candidate preparation. New jobs queue through
+/// one channel; between bounded quanta the worker drains that queue to its newest
+/// member, so rapid edits cannot create a growing set of competing assembly
+/// threads. Native uses an OS thread and an isolated browser uses one shared-
+/// memory Web Worker in the threaded browser bundle. The static-host bundle and
+/// browser worker bootstrap failure retain the cooperative main-thread runner.
+struct BackgroundPreparationWorker {
     sender: Sender<TopologyPreparationJob>,
-    receiver: Mutex<Receiver<NativePreparationEvent>>,
+    receiver: Mutex<Receiver<BackgroundPreparationEvent>>,
     token: Option<TopologyToken>,
     phase: Option<TopologyPreparationPhase>,
     detail: Option<&'static str>,
     timing: Option<TopologyPreparationTiming>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-impl NativePreparationWorker {
+impl BackgroundPreparationWorker {
+    #[cfg(any(
+        not(target_arch = "wasm32"),
+        all(target_arch = "wasm32", feature = "browser-threads")
+    ))]
     const QUANTUM: std::time::Duration = std::time::Duration::from_millis(8);
 
     fn spawn() -> Option<Self> {
         let (job_sender, job_receiver) = mpsc::channel::<TopologyPreparationJob>();
-        let (event_sender, event_receiver) = mpsc::channel::<NativePreparationEvent>();
-        std::thread::Builder::new()
-            .name("funfern-cpu-prepare".into())
-            .spawn(move || {
-                while let Ok(mut job) = job_receiver.recv() {
-                    loop {
-                        loop {
-                            match job_receiver.try_recv() {
-                                Ok(newer) => job = newer,
-                                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
-                            }
-                        }
-                        let token = job.token();
-                        let result = job.advance_for(Self::QUANTUM);
-                        if let Some(result) = result {
-                            if event_sender
-                                .send(NativePreparationEvent::Finished {
-                                    token,
-                                    result: Box::new(result),
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
-                            break;
-                        }
-                        if event_sender
-                            .send(NativePreparationEvent::Progress {
-                                token,
-                                phase: job.phase(),
-                                detail: job.detail(),
-                                timing: job.timing(),
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                }
-            })
-            .ok()?;
+        let (event_sender, event_receiver) = mpsc::channel::<BackgroundPreparationEvent>();
+        if !spawn_preparation_worker(job_receiver, event_sender) {
+            return None;
+        }
         Some(Self {
             sender: job_sender,
             receiver: Mutex::new(event_receiver),
@@ -814,14 +799,14 @@ impl NativePreparationWorker {
         self.sender.send(job).err().map(|error| Box::new(error.0))
     }
 
-    fn drain(&self) -> Vec<NativePreparationEvent> {
+    fn drain(&self) -> Vec<BackgroundPreparationEvent> {
         let receiver = self.receiver.lock().unwrap();
         std::iter::from_fn(|| receiver.try_recv().ok()).collect()
     }
 
-    fn observe(&mut self, event: &NativePreparationEvent) {
+    fn observe(&mut self, event: &BackgroundPreparationEvent) {
         match event {
-            NativePreparationEvent::Progress {
+            BackgroundPreparationEvent::Progress {
                 token,
                 phase,
                 detail,
@@ -831,7 +816,7 @@ impl NativePreparationWorker {
                 self.detail = Some(*detail);
                 self.timing = Some(*timing);
             }
-            NativePreparationEvent::Finished { token, .. } if self.token == Some(*token) => {
+            BackgroundPreparationEvent::Finished { token, .. } if self.token == Some(*token) => {
                 self.token = None;
                 self.phase = None;
                 self.detail = None;
@@ -840,6 +825,84 @@ impl NativePreparationWorker {
             _ => {}
         }
     }
+}
+
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(target_arch = "wasm32", feature = "browser-threads")
+))]
+fn run_preparation_worker(
+    job_receiver: Receiver<TopologyPreparationJob>,
+    event_sender: Sender<BackgroundPreparationEvent>,
+) {
+    while let Ok(mut job) = job_receiver.recv() {
+        loop {
+            loop {
+                match job_receiver.try_recv() {
+                    Ok(newer) => job = newer,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                }
+            }
+            let token = job.token();
+            let result = job.advance_for(BackgroundPreparationWorker::QUANTUM);
+            if let Some(result) = result {
+                if event_sender
+                    .send(BackgroundPreparationEvent::Finished {
+                        token,
+                        result: Box::new(result),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                break;
+            }
+            if event_sender
+                .send(BackgroundPreparationEvent::Progress {
+                    token,
+                    phase: job.phase(),
+                    detail: job.detail(),
+                    timing: job.timing(),
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_preparation_worker(
+    job_receiver: Receiver<TopologyPreparationJob>,
+    event_sender: Sender<BackgroundPreparationEvent>,
+) -> bool {
+    std::thread::Builder::new()
+        .name("funfern-cpu-prepare".into())
+        .spawn(move || run_preparation_worker(job_receiver, event_sender))
+        .is_ok()
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+fn spawn_preparation_worker(
+    job_receiver: Receiver<TopologyPreparationJob>,
+    event_sender: Sender<BackgroundPreparationEvent>,
+) -> bool {
+    if !BROWSER_PREPARATION_WORKER_READY.load(Ordering::Acquire) {
+        return false;
+    }
+    crate::set_browser_preparation_worker_status("active");
+    rayon::spawn(move || run_preparation_worker(job_receiver, event_sender));
+    true
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "browser-threads")))]
+fn spawn_preparation_worker(
+    _job_receiver: Receiver<TopologyPreparationJob>,
+    _event_sender: Sender<BackgroundPreparationEvent>,
+) -> bool {
+    false
 }
 
 fn compile_gpu_upload(
@@ -943,8 +1006,7 @@ struct VectorAcState {
 pub struct Playground {
     editor: TopologyEditor,
     runtime: TopologyRuntime,
-    #[cfg(not(target_arch = "wasm32"))]
-    native_preparation: Option<NativePreparationWorker>,
+    background_preparation: Option<BackgroundPreparationWorker>,
     selection: TopologySelection,
     inspector: Option<InspectorPanel>,
     draw_open: bool,
@@ -1184,8 +1246,7 @@ impl Default for Playground {
         Self {
             editor,
             runtime: TopologyRuntime::default(),
-            #[cfg(not(target_arch = "wasm32"))]
-            native_preparation: NativePreparationWorker::spawn(),
+            background_preparation: BackgroundPreparationWorker::spawn(),
             selection: TopologySelection::None,
             inspector: Some(InspectorPanel::Edit),
             draw_open: false,
@@ -6959,49 +7020,28 @@ impl Playground {
     const PREPARATION_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 
     /// Candidate state can live either in the cooperative runtime runner or in
-    /// the native worker. Keep that placement detail out of UI/status policy.
+    /// a background worker. Keep that placement detail out of UI/status policy.
     fn preparation_phase(&self) -> Option<TopologyPreparationPhase> {
         self.runtime.phase().or_else(|| {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                self.native_preparation
-                    .as_ref()
-                    .and_then(|worker| worker.phase)
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                None
-            }
+            self.background_preparation
+                .as_ref()
+                .and_then(|worker| worker.phase)
         })
     }
 
     fn preparation_detail(&self) -> Option<&'static str> {
         self.runtime.detail().or_else(|| {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                self.native_preparation
-                    .as_ref()
-                    .and_then(|worker| worker.detail)
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                None
-            }
+            self.background_preparation
+                .as_ref()
+                .and_then(|worker| worker.detail)
         })
     }
 
     fn preparation_timing(&self) -> Option<TopologyPreparationTiming> {
         self.runtime.preparing_timing().or_else(|| {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                self.native_preparation
-                    .as_ref()
-                    .and_then(|worker| worker.timing)
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                None
-            }
+            self.background_preparation
+                .as_ref()
+                .and_then(|worker| worker.timing)
         })
     }
 
@@ -7010,41 +7050,38 @@ impl Playground {
     }
 
     /// Advances candidate assembly without making its execution placement part
-    /// of the topology transaction. Native builds hand the immutable job to one
-    /// long-lived worker; the browser, or a failed worker spawn/channel, uses
-    /// the existing bounded cooperative runner.
+    /// of the topology transaction. Native and cross-origin-isolated browser
+    /// builds hand the immutable job to one long-lived worker; failed worker
+    /// bootstrap or channels use the existing bounded cooperative runner.
     fn advance_runtime_preparation(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let events = self
-                .native_preparation
-                .as_ref()
-                .map_or_else(Vec::new, NativePreparationWorker::drain);
-            for event in events {
-                if let Some(worker) = &mut self.native_preparation {
-                    worker.observe(&event);
-                }
-                if let NativePreparationEvent::Finished { result, .. } = event
-                    && let Some(Ok(_)) = self.runtime.finish_external_preparation(*result)
-                {
-                    self.handoff_ready = Some(Instant::now());
-                }
+        let events = self
+            .background_preparation
+            .as_ref()
+            .map_or_else(Vec::new, BackgroundPreparationWorker::drain);
+        for event in events {
+            if let Some(worker) = &mut self.background_preparation {
+                worker.observe(&event);
             }
+            if let BackgroundPreparationEvent::Finished { result, .. } = event
+                && let Some(Ok(_)) = self.runtime.finish_external_preparation(*result)
+            {
+                self.handoff_ready = Some(Instant::now());
+            }
+        }
 
-            if let Some(job) = self.runtime.take_preparing_job() {
-                let rejected = match &mut self.native_preparation {
-                    Some(worker) => worker.submit(job),
-                    None => Some(Box::new(job)),
-                };
-                if let Some(job) = rejected {
-                    self.native_preparation = None;
-                    self.runtime.restore_preparing_job(*job);
-                }
+        if let Some(job) = self.runtime.take_preparing_job() {
+            let rejected = match &mut self.background_preparation {
+                Some(worker) => worker.submit(job),
+                None => Some(Box::new(job)),
+            };
+            if let Some(job) = rejected {
+                self.background_preparation = None;
+                self.runtime.restore_preparing_job(*job);
             }
+        }
 
-            if self.native_preparation.is_some() {
-                return;
-            }
+        if self.background_preparation.is_some() {
+            return;
         }
 
         if let Some(Ok(_)) = self.runtime.advance_for(Self::PREPARATION_FRAME_BUDGET) {
@@ -12675,9 +12712,9 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn native_worker_returns_a_candidate_to_the_runtime_transaction() {
+    fn background_worker_returns_a_candidate_to_the_runtime_transaction() {
         let mut state = Playground::default();
-        assert!(state.native_preparation.is_some());
+        assert!(state.background_preparation.is_some());
         for _ in 0..100_000 {
             state.editor.validate_frame(64);
             if state.editor.acceptance != TopologyAcceptance::Pending {

@@ -5,7 +5,9 @@ repacking the wave compute layout into eight bindings. The user subsequently
 confirmed that the browser build runs. This checklist reflects the current shell;
 repeat it after interaction or rendering changes.
 
-Start `trunk serve --release`, then open <http://127.0.0.1:8080/>.
+Start `scripts/trunk serve --release`, wait for its listening message, then open
+<http://127.0.0.1:8080/>. The wrapper builds the isolated one-worker bundle;
+plain `trunk` builds the cooperative static-host variant.
 
 - [ ] Initial view fills the window with the square, rounded loop, grid, control
   polygon and handles. The top bar, contextual right inspector, and bottom status

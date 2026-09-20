@@ -8,5 +8,6 @@ wasm_opt = "version_132"
 [serve]
 addresses = ["127.0.0.1"]
 disable_address_lookup = true
+headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder-Policy" = "require-corp" }
 port = 8080
 open = false

@@ -18,17 +18,21 @@ shader entry-point collision in Bevy's browser shader translation path.
 
 ## Run
 
-Tested toolchain: Rust 1.96.1, Trunk 0.22.0-beta.5. Install the browser tools once:
+Native development uses Rust 1.96.1. The threaded browser build uses
+nightly-2026-05-28 so Rust can rebuild `std` with Wasm atomics. Install the
+browser tools once:
 
 ```sh
 rustup target add wasm32-unknown-unknown
+rustup toolchain install nightly-2026-05-28 \
+  --profile minimal --component rust-src --target wasm32-unknown-unknown
 cargo install trunk --version 0.22.0-beta.5 --locked
 ```
 
 From the repository root:
 
 ```sh
-trunk serve
+scripts/trunk serve
 ```
 
 Open <http://127.0.0.1:8080/> in a WebGPU-capable browser with hardware
@@ -51,10 +55,16 @@ recording uses the browser's built-in `MediaRecorder` and needs no additional to
 Release browser bundle (output: `dist/`):
 
 ```sh
-trunk build --release
+scripts/trunk build --release
 # Serve the optimized build locally:
-trunk serve --release
+scripts/trunk serve --release
 ```
+
+The wrapper builds one shared-memory Web Worker for CPU candidate preparation.
+Trunk and the Docker nginx configuration send the COOP/COEP headers required by
+that bundle. A plain `trunk build --release` deliberately produces the
+non-threaded cooperative bundle for static hosts such as GitHub Pages, which
+cannot set those headers.
 
 Trunk 0.22.0-beta.5 is pinned because it accepts conventional nonempty `NO_COLOR`
 values such as `1`; Trunk 0.21.14 exits before serving when that environment value
@@ -63,7 +73,9 @@ pinned separately in `Trunk.toml` because its older default cannot read Rust
 1.96.1's WASM metadata. Keep `Cargo.lock` for reproducibility. The pinned
 integration is
 [Bevy 0.19.1](https://docs.rs/bevy/0.19.1/bevy/) with
-[bevy_egui 0.42.0](https://docs.rs/crate/bevy_egui/0.42.0).
+[bevy_egui 0.41.1](https://docs.rs/crate/bevy_egui/0.41.1). That release line
+retains the `Send + Sync` browser input representation required when Bevy is
+compiled with Wasm atomics.
 See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for tooling.
 
 Docker builds the release WASM bundle and serves it with nginx:
@@ -597,7 +609,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo build -p funfern-app --locked
-trunk build --release
+scripts/trunk build --release
 npm ci
 npx playwright install chromium
 npm run test:browser

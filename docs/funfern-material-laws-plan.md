@@ -871,7 +871,8 @@ Implement and review this correction in the following order:
 | Latency stage | Work and gate |
 | --- | --- |
 | P0 — accounting and accidental repetition (complete) | Validate point-source placement exactly once per candidate. Report total CPU work as well as categorized phase time, so unbucketed validation cannot disappear from diagnostics. Add call-count and saved-scene regressions. |
-| P1 — native execution isolation (complete) | Move the owned CPU preparation job to at most one native worker. Keep the accepted GPU solver and UI live; publish immutable progress/results by token and discard stale results. A newer request cancels or supersedes old work without allowing an unbounded set of workers. WASM remains cooperatively sliced until a real Web Worker path exists. |
+| P1 — native execution isolation (complete) | Move the owned CPU preparation job to at most one native worker. Keep the accepted GPU solver and UI live; publish immutable progress/results by token and discard stale results. A newer request cancels or supersedes old work without allowing an unbounded set of workers. |
+| P1W — browser execution isolation (complete) | Run the same owned job and newest-request policy in one shared-memory Web Worker. Keep a separately built cooperative bundle for static hosts that cannot provide cross-origin isolation. Verify worker activation and both deployment modes in the full WebGPU application, not an isolated benchmark. |
 | P2 — dependency-specific reuse | Replace whole-authored-scene invalidation with explicit geometry, bulk-operator, boundary-operator, source and measurement dependencies. Source/probe-only changes must not rebuild operators. Reuse unchanged outer-trace modes across interior edits/AMR and encode exact same-discretization complementary transfer as a compact identity. |
 | P3 — boundary fast paths | Reuse an unchanged normalized trace operator exactly. Detect mathematically proportional trace operators and retain their eigenbasis while updating eigenvalues/scales; map aligned modal history without constructing a dense all-pairs transform. Retain the general basis-invariant transfer for genuine changes. |
 | P4 — general refined-boundary algorithm | If arbitrary changed 500–1,000-node traces remain noninteractive, replace the generic dense Jacobi reference with a resumable solver exploiting disconnected one-dimensional banded/cyclic trace components. Require eigen-residual, orthogonality, passivity, reflection and history-transfer parity before cutover. Capping boundary AMR is an explicit accuracy tradeoff, not the default substitute for this work. |
@@ -892,9 +893,15 @@ The same 4,096-step production render-graph workload measured 10.28 simulated
 seconds per wall second both alone and while repeated saved-scene preparation
 occupied the worker, so no solver-throughput loss was measurable on the Apple M1
 Max fixture. Runtime tests cover external completion and stale-token rejection;
-the native application integration test covers worker return, and the WASM build
-continues to compile the cooperative four-millisecond runner. Hands-on frame
-pacing remains a release observation, while P2 is now the next latency stage.
+the native application integration test covers worker return. The threaded WASM
+bundle rebuilds `std` with atomics and starts exactly one shared-memory Rayon Web
+Worker behind COOP/COEP; Chrome integration asserts both cross-origin isolation
+and actual worker activation while the complete WebGPU application advances and
+resizes. GitHub Pages receives a separate stable-toolchain bundle that retains the
+cooperative four-millisecond runner because Pages cannot provide those headers;
+that unisolated bundle has its own Chrome startup/advance check. Hands-on frame
+pacing and browser preparation timing remain release observations, while P2 is
+now the next latency stage.
 
 ### Current implementation handoff
 

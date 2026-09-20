@@ -1,6 +1,7 @@
 import { defineConfig } from "@playwright/test";
 
 const testDist = process.env.FUNFERN_TEST_DIST ?? "dist";
+const isolationArgument = process.env.FUNFERN_TEST_ISOLATED === "0" ? "" : " --isolated";
 const webGpuArgs = ["--enable-unsafe-webgpu"];
 if (process.platform === "linux") {
   webGpuArgs.push(
@@ -26,7 +27,7 @@ export default defineConfig({
     viewport: { width: 1100, height: 760 },
   },
   webServer: {
-    command: `python3 -m http.server 4173 --bind 127.0.0.1 --directory ${JSON.stringify(testDist)}`,
+    command: `python3 browser-tests/server.py --port 4173 --directory ${JSON.stringify(testDist)}${isolationArgument}`,
     url: "http://127.0.0.1:4173/",
     reuseExistingServer: !process.env.CI,
     timeout: 15_000,

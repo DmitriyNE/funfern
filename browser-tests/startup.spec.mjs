@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 const fatalConsolePattern =
   /Caught rendering error|Quitting the application due to Validation RenderError|panicked at|RuntimeError: unreachable|WebGPU initialization failed/i;
+const expectPreparationWorker = process.env.FUNFERN_EXPECT_BROWSER_WORKER !== "0";
 
 test("WebGPU app starts, advances, and resizes its render target", async ({ page }) => {
   const fatalMessages = [];
@@ -17,6 +18,22 @@ test("WebGPU app starts, advances, and resizes its render target", async ({ page
   page.on("pageerror", (error) => fatalMessages.push(error.message));
 
   await page.goto("/");
+  expect(await page.evaluate(() => crossOriginIsolated)).toBe(expectPreparationWorker);
+  if (expectPreparationWorker) {
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          document.documentElement.getAttribute("data-funfern-preparation-worker"),
+        ),
+      )
+      .toBe("active");
+  } else {
+    expect(
+      await page.evaluate(() =>
+        document.documentElement.getAttribute("data-funfern-preparation-worker"),
+      ),
+    ).toBeNull();
+  }
   const canvas = page.locator("canvas");
   await expect(canvas).toBeVisible();
   await expect
