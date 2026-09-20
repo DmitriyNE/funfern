@@ -999,6 +999,22 @@ impl Default for MaterialSwitchRuntime {
 }
 
 impl MaterialSwitchRuntime {
+    pub fn start_blend(self) -> f64 {
+        self.start_blend
+    }
+
+    pub fn target_blend(self) -> f64 {
+        self.target_blend
+    }
+
+    pub fn start_time(self) -> f64 {
+        self.start_time
+    }
+
+    pub fn duration(self) -> f64 {
+        self.duration
+    }
+
     pub fn blend(self, time: f64) -> Result<f64, MaterialError> {
         self.blend_and_rate(time).map(|(blend, _)| blend)
     }

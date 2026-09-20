@@ -9,6 +9,13 @@ const MAX_TRACE: u32 = 1024u;
 const MODE_WORDS: u32 = 12u;
 const NO_INDEX: u32 = 0xffffffffu;
 const FORCE_KIND_GAP: u32 = 1u;
+const TEMPORAL_COEFFICIENT_WORDS: u32 = 3u;
+const TEMPORAL_DRIVE_NONE: u32 = 0u;
+const TEMPORAL_DRIVE_PUMP: u32 = 1u;
+const TEMPORAL_DRIVE_CRYSTAL: u32 = 2u;
+const TEMPORAL_DRIVE_TRAVELLING: u32 = 3u;
+const TEMPORAL_HAS_ALTERNATE: u32 = 1u;
+const TEMPORAL_INVERTED: u32 = 2u;
 const SNAPSHOT_METADATA_MAGIC: f32 = 8675309.0;
 
 const STATUS_LAYOUT: u32 = 1u;
@@ -231,6 +238,84 @@ fn table_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(tables[word].data[lane]);
 }
 
+fn temporal_enabled() -> bool {
+    return (control.runtime_slots.w & 1u) != 0u;
+}
+
+fn temporal_factor(coefficient_word: u32, local_time: f32) -> f32 {
+    let metadata = tables[coefficient_word].data;
+    let runtime_header = tables[control.runtime_slots.z].data;
+    let runtime_word = runtime_header.w + 6u * metadata.x
+        + 3u * (control.runtime_slots.y & 1u);
+    let phase = table_float(runtime_word, metadata.y)
+        + table_float(coefficient_word + 1u, 3u) * local_time;
+    let carrier = reduced_phase(phase);
+    let depth = table_float(coefficient_word + 1u, 2u);
+    let shape = table_float(coefficient_word + 2u, 0u);
+    let spatial_phase = table_float(coefficient_word + 2u, 1u);
+    var drive = 1.0;
+    switch metadata.z {
+        case TEMPORAL_DRIVE_NONE: {}
+        case TEMPORAL_DRIVE_PUMP: {
+            drive += depth * cos(carrier);
+        }
+        case TEMPORAL_DRIVE_CRYSTAL: {
+            let cosine = cos(carrier);
+            var square: f32;
+            if abs(shape) < 0.001 {
+                square = cosine * (1.0
+                    + shape * shape * (1.0 - cosine * cosine) / 3.0);
+            } else {
+                square = tanh(shape * cosine) / tanh(shape);
+            }
+            drive += depth * square;
+        }
+        case TEMPORAL_DRIVE_TRAVELLING: {
+            drive += depth * cos(carrier - spatial_phase);
+        }
+        // Packed metadata admits only the four cases above. Zero makes any
+        // corrupted record fail the subsequent positive-factor/non-finite
+        // candidate validation without embedding a NaN constant, which WebGPU
+        // shader modules reject even in an unreachable branch.
+        default: { return 0.0; }
+    }
+    let start_blend = table_float(runtime_word + 1u, 0u);
+    let target_blend = table_float(runtime_word + 1u, 1u);
+    let start_time = table_float(runtime_word + 1u, 2u);
+    let duration = table_float(runtime_word + 1u, 3u);
+    var blend = target_blend;
+    if duration != 0.0 {
+        let z = clamp((local_time - start_time) / duration, 0.0, 1.0);
+        let smoother = z * z * z * (z * (z * 6.0 - 15.0) + 10.0);
+        blend = start_blend + (target_blend - start_blend) * smoother;
+    }
+    var switch_factor = 1.0;
+    if (metadata.w & TEMPORAL_HAS_ALTERNATE) != 0u {
+        let alternate = table_float(coefficient_word + 1u, 1u);
+        switch_factor += blend * (alternate - 1.0);
+    }
+    let factor = drive * switch_factor;
+    return select(factor, 1.0 / factor, (metadata.w & TEMPORAL_INVERTED) != 0u);
+}
+
+fn temporal_primary_mass(node: u32, local_time: f32) -> f32 {
+    let range = nodes[node].stiffness.zw;
+    var mass = 0.0;
+    for (var record = 0u; record < range.y; record += 1u) {
+        let word = range.x + record * TEMPORAL_COEFFICIENT_WORDS;
+        mass += table_float(word + 1u, 0u) * temporal_factor(word, local_time);
+    }
+    return mass;
+}
+
+fn temporal_inverse_primary_mass(node: u32, local_time: f32) -> f32 {
+    return 1.0 / temporal_primary_mass(node, local_time);
+}
+
+fn temporal_complementary_factor(sample: u32, local_time: f32) -> f32 {
+    return temporal_factor(samples[sample].nodes_b.w, local_time);
+}
+
 fn boundary_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(boundary[word].data[lane]);
 }
@@ -266,6 +351,9 @@ fn source_rate(node: u32, local_time: f32) -> f32 {
 
 fn gathered_force(node: u32, second: bool) -> f32 {
     let range = nodes[node].ranges.xy;
+    let driven = temporal_enabled();
+    let force_time = control.clock_f32.y
+        + select(0.0, control.clock_f32.x, second);
     var result = 0.0;
     for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
         let index = tables[entry].data.x;
@@ -279,7 +367,12 @@ fn gathered_force(node: u32, second: bool) -> f32 {
         } else {
             let flux = select(
                 accepted_b(index), candidate_b(index), second || has_loss_stages());
-            result += dot(vec2<f32>(coefficient_x, table_float(entry, 3u)), flux);
+            var inverse_factor = 1.0;
+            if driven {
+                inverse_factor = 1.0 / temporal_complementary_factor(index, force_time);
+            }
+            result += inverse_factor
+                * dot(vec2<f32>(coefficient_x, table_float(entry, 3u)), flux);
         }
     }
     return result;
@@ -812,6 +905,30 @@ fn rebase_clock_records(@builtin(global_invocation_id) id: vec3<u32>) {
             tables[root + 3u].data.y = bitcast<u32>(next_anchor);
         }
     }
+    if temporal_enabled() {
+        let header = tables[control.runtime_slots.z].data;
+        let runtime_count = tables[control.runtime_slots.z + 1u].data.x;
+        if i < runtime_count {
+            let root = header.w + 6u * i;
+            let accepted = root + 3u * (control.runtime_slots.y & 1u);
+            var phase = tables[accepted].data;
+            let frequency = tables[accepted + 2u].data;
+            for (var lane = 0u; lane < 4u; lane += 1u) {
+                phase[lane] = bitcast<u32>(reduced_phase(
+                    bitcast<f32>(phase[lane])
+                    + bitcast<f32>(frequency[lane]) * elapsed));
+            }
+            var switch_runtime = tables[accepted + 1u].data;
+            switch_runtime.z = bitcast<u32>(
+                bitcast<f32>(switch_runtime.z) - elapsed);
+            tables[root].data = phase;
+            tables[root + 1u].data = switch_runtime;
+            tables[root + 2u].data = frequency;
+            tables[root + 3u].data = phase;
+            tables[root + 4u].data = switch_runtime;
+            tables[root + 5u].data = frequency;
+        }
+    }
 }
 
 @compute @workgroup_size(1)
@@ -826,6 +943,7 @@ fn commit_clock_rebase() {
     control.clock_origin = vec4<f32>(origin, origin);
     control.clock_f32.y = 0.0;
     control.clock_f32.z = 0.0;
+    if temporal_enabled() { control.runtime_slots.y = 0u; }
     publish_snapshot_metadata();
 }
 
@@ -1249,12 +1367,25 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
             scratch[complementary_offset() + i].values = vec4<f32>(0.0);
         }
         let sample = samples[i];
-        let reference = candidate_q(sample.nodes_a.x) * nodes[sample.nodes_a.x].mass_loss.y;
         var curl = vec2<f32>(0.0);
-        for (var local = 1u; local < 7u; local += 1u) {
-            let node = sample_node(sample, local);
-            let field = candidate_q(node) * nodes[node].mass_loss.y;
-            curl += sample_curl(sample, local) * (field - reference);
+        if temporal_enabled() {
+            let middle_time = control.clock_f32.y + 0.5 * control.clock_f32.x;
+            let reference = candidate_q(sample.nodes_a.x)
+                * temporal_inverse_primary_mass(sample.nodes_a.x, middle_time);
+            for (var local = 1u; local < 7u; local += 1u) {
+                let node = sample_node(sample, local);
+                let field = candidate_q(node)
+                    * temporal_inverse_primary_mass(node, middle_time);
+                curl += sample_curl(sample, local) * (field - reference);
+            }
+        } else {
+            let reference = candidate_q(sample.nodes_a.x)
+                * nodes[sample.nodes_a.x].mass_loss.y;
+            for (var local = 1u; local < 7u; local += 1u) {
+                let node = sample_node(sample, local);
+                let field = candidate_q(node) * nodes[node].mass_loss.y;
+                curl += sample_curl(sample, local) * (field - reference);
+            }
         }
         let old = select(accepted_b(i), candidate_b(i), has_loss_stages());
         let next = old + control.evolution.y * control.clock_f32.x * curl;

@@ -5,6 +5,32 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Stage 7 bulk laws occupy the production GPU layout
+
+- Added the dormant conservative temporal-plan compiler to the actual
+  eight-binding GPU representation. It uses the already reserved material
+  runtime slot, unused node contribution-range lanes, the unused sample record
+  lane and the existing packed table buffer; static plans retain their current
+  state/node/sample layouts and stepping path.
+- Material-owned runtime records carry four phase anchors, Switch trajectory
+  state and angular frequencies in accepted/candidate slots. Per-contribution
+  primary records preserve independently driven material/frame contributions;
+  complementary records point directly from their quadrature samples. Packing
+  rejects trajectories that remain valid in f64 but collapse or overflow in
+  f32.
+- The shader KDK now has the gated temporal operations it will use in
+  production: endpoint complementary factors in each kick and assembled
+  midpoint primary mass in the drift. The four-dispatch conservative bulk cost
+  is unchanged. Clock rebasing advances all material phases, shifts Switch
+  origins and republishes both runtime slots.
+- CPU decoding of the packed f32 representation matches the f64 node and
+  quadrature maps at every KDK stage; a complete packed f32 step matches the
+  f64 bulk oracle, and rebase invariance is pinned. WGSL passes both the Naga
+  layout test and Chrome's WebGPU shader-module validator. Production
+  installation remains disabled, and temporal
+  filters, events, loss/open-boundary compositions and generation transfer are
+  rejected until their individual Stage 7 gates close.
+
 ## 2026-09-20 — Stage 7 adopts the free bulk Poisson split
 
 - Formalized the existing lossless bulk KDK as exact kick/drift subflows: a

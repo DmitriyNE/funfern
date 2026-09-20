@@ -32,11 +32,13 @@ use bevy::{
     },
 };
 use funfern_core::{
-    CanonicalAuxiliaryState, CanonicalForcing, CanonicalOutgoingHistoryTransferMap,
-    CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
-    CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferMap, CanonicalWaveOperator, CanonicalWaveState,
-    GRID_SCALE_FILTER_CADENCE, Point2, QuadraticWaveOperator, TimeSignal, WaveError,
+    CanonicalAuxiliaryState, CanonicalForcing, CanonicalMaterialDrive,
+    CanonicalOutgoingHistoryTransferMap, CanonicalOutgoingMidpointFactor,
+    CanonicalOutgoingNormalizedTransfer, CanonicalPrimaryTransferMap, CanonicalRateDrive,
+    CanonicalTemporalCoefficientSample, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
+    CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWaveOperator,
+    CanonicalWaveState, GRID_SCALE_FILTER_CADENCE, MaterialId, Point2, QuadraticWaveOperator,
+    TimeDriveValues, TimeSignal, WaveError,
 };
 
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
@@ -79,6 +81,17 @@ const TRANSFER_HEADER_WORDS: usize = 8;
 const HANDOFF_RECEIPT_MAGIC: u32 = 0x4841_4e44;
 const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
 const DRIVE_INDEX_MASK: u32 = !DRIVE_TARGET_PARAMETERS;
+const TEMPORAL_TABLE_VERSION: u32 = 1;
+const TEMPORAL_ENABLED: u32 = 1;
+const TEMPORAL_COEFFICIENT_WORDS: usize = 3;
+const TEMPORAL_RUNTIME_WORDS_PER_SLOT: usize = 3;
+const TEMPORAL_RUNTIME_SLOTS: usize = 2;
+const TEMPORAL_DRIVE_NONE: u32 = 0;
+const TEMPORAL_DRIVE_PUMP: u32 = 1;
+const TEMPORAL_DRIVE_CRYSTAL: u32 = 2;
+const TEMPORAL_DRIVE_TRAVELLING: u32 = 3;
+const TEMPORAL_HAS_ALTERNATE: u32 = 1;
+const TEMPORAL_INVERTED: u32 = 2;
 /// Last state-buffer word identifies the accepted lane and clock at the exact
 /// instant that buffer was copied. State and control are separate asynchronous
 /// readbacks, so the host must not combine their independently arriving values.
@@ -669,6 +682,17 @@ pub struct CanonicalGpuLayoutManifest {
     pub dispatches_per_step: usize,
     pub event_dispatches: usize,
     pub bytes: CanonicalGpuByteReport,
+    pub temporal: Option<CanonicalGpuTemporalManifest>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalGpuTemporalManifest {
+    pub header_offset: usize,
+    pub primary_record_count: usize,
+    pub complementary_record_count: usize,
+    pub runtime_record_count: usize,
+    pub coefficient_words: usize,
+    pub runtime_words_per_material: usize,
 }
 
 #[derive(Clone)]
@@ -722,6 +746,193 @@ impl CanonicalGpuPlan {
             ));
         }
         Self::compile_inner(operator, Some(quadratic), state, forcing, clock)
+    }
+
+    /// Packs the dormant Stage 7 conservative-bulk plan into the production
+    /// eight-binding layout. The application does not submit this plan until
+    /// the temporal step/admission gates close, but this is the actual table
+    /// representation that the shader path consumes rather than a sidecar
+    /// benchmark format.
+    pub fn compile_temporal_bulk(
+        operator: &CanonicalTemporalWaveOperator,
+        state: &CanonicalTemporalWaveState,
+        clock: CanonicalGpuClock,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        let scale = state.time().abs().max(clock.time().abs()).max(1.0);
+        if !operator.conservative_bulk_supported()
+            || state.time_step() != clock.time_step
+            || (state.time() - clock.time()).abs() > 16.0 * f64::EPSILON * scale
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "the temporal state, clock and conservative operator must share one boundary",
+            ));
+        }
+        let fixed_state = CanonicalWaveState::new(
+            operator.base(),
+            state.time_step(),
+            state.primary_flux().to_vec(),
+            state.complementary_flux().to_vec(),
+        )?;
+        let mut plan = Self::compile(
+            operator.base(),
+            &fixed_state,
+            &CanonicalForcing::none(operator.base()),
+            clock,
+        )?;
+        plan.attach_temporal_bulk(operator, state, clock)?;
+        Ok(plan)
+    }
+
+    fn attach_temporal_bulk(
+        &mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        state: &CanonicalTemporalWaveState,
+        clock: CanonicalGpuClock,
+    ) -> Result<(), CanonicalGpuBuildError> {
+        let primary_samples = operator.primary_coefficient_samples().collect::<Vec<_>>();
+        let complementary_samples = operator
+            .complementary_coefficient_samples()
+            .collect::<Vec<_>>();
+        if primary_samples.len() != operator.base().primary_contributions().len()
+            || complementary_samples.len() != self.sample_count
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "temporal coefficient samples do not match the fixed operator",
+            ));
+        }
+
+        let runtime_records = state.runtime().records();
+        let runtime_indices = runtime_records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| (record.material(), index as u32))
+            .collect::<BTreeMap<_, _>>();
+        let mut drives = BTreeMap::<(MaterialId, u32), TimeDriveValues>::new();
+        for sample in primary_samples.iter().chain(&complementary_samples) {
+            let key = (sample.material, temporal_drive_index(sample.drive));
+            if drives
+                .insert(key, sample.law.drive)
+                .is_some_and(|old| old != sample.law.drive)
+            {
+                return Err(CanonicalGpuBuildError::InvalidLayout(
+                    "one material runtime lane resolved to multiple drive definitions",
+                ));
+            }
+        }
+        if primary_samples
+            .iter()
+            .chain(&complementary_samples)
+            .any(|sample| !runtime_indices.contains_key(&sample.material))
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a temporal coefficient has no material runtime record",
+            ));
+        }
+
+        let header_offset = self.tables.len();
+        self.tables.extend([GpuCanonicalTableWord::default(); 2]);
+        let primary_offset = self.tables.len();
+        let mut by_node = vec![Vec::new(); self.node_count];
+        for (contribution, sample) in operator
+            .base()
+            .primary_contributions()
+            .iter()
+            .zip(primary_samples)
+        {
+            let reference = contribution.geometric_weight * contribution.reference_coefficient;
+            by_node[contribution.node as usize].push((sample, reference));
+        }
+        for (node, coefficients) in by_node.into_iter().enumerate() {
+            let start = self.tables.len();
+            for (sample, reference) in &coefficients {
+                self.tables.extend(pack_temporal_coefficient(
+                    *sample,
+                    runtime_indices[&sample.material],
+                    *reference,
+                )?);
+            }
+            self.nodes[node].stiffness.z = usize_u32(start)?;
+            self.nodes[node].stiffness.w = usize_u32(coefficients.len())?;
+        }
+
+        let complementary_offset = self.tables.len();
+        for (index, sample) in complementary_samples.iter().copied().enumerate() {
+            self.samples[index].nodes_b.w = usize_u32(self.tables.len())?;
+            self.tables.extend(pack_temporal_coefficient(
+                sample,
+                runtime_indices[&sample.material],
+                1.0,
+            )?);
+        }
+
+        let runtime_offset = self.tables.len();
+        for record in runtime_records {
+            let mut phases = [0.0; 4];
+            let mut frequencies = [0.0; 4];
+            for (lane, phase) in phases.iter_mut().enumerate() {
+                if let Some(drive) = drives.get(&(record.material(), lane as u32)).copied() {
+                    frequencies[lane] = std::f64::consts::TAU * drive.frequency_hz();
+                    *phase = record
+                        .drive(temporal_drive_from_index(lane as u32))
+                        .carrier_phase(drive, clock.epoch_origin_seconds)
+                        .map_err(|_| {
+                            CanonicalGpuBuildError::Unrepresentable("material carrier phase")
+                        })?;
+                }
+            }
+            let switch = record.switch();
+            let phase_word = finite_float_word(phases, "material carrier phase")?;
+            let frequency_word = finite_float_word(frequencies, "material angular frequency")?;
+            let switch_word = finite_float_word(
+                [
+                    switch.start_blend(),
+                    switch.target_blend(),
+                    switch.start_time() - clock.epoch_origin_seconds,
+                    switch.duration(),
+                ],
+                "material Switch runtime",
+            )?;
+            self.tables.extend([
+                phase_word,
+                switch_word,
+                frequency_word,
+                phase_word,
+                switch_word,
+                frequency_word,
+            ]);
+        }
+
+        self.tables[header_offset] = GpuCanonicalTableWord {
+            data: UVec4::new(
+                usize_u32(primary_offset)?,
+                usize_u32(operator.base().primary_contributions().len())?,
+                usize_u32(complementary_offset)?,
+                usize_u32(runtime_offset)?,
+            ),
+        };
+        self.tables[header_offset + 1] = GpuCanonicalTableWord {
+            data: UVec4::new(
+                usize_u32(runtime_records.len())?,
+                TEMPORAL_COEFFICIENT_WORDS as u32,
+                (TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS) as u32,
+                TEMPORAL_TABLE_VERSION,
+            ),
+        };
+        self.control.runtime_slots.y = 0;
+        self.control.runtime_slots.z = usize_u32(header_offset)?;
+        self.control.runtime_slots.w = TEMPORAL_ENABLED;
+        self.control.boundary_offsets.w &= !4;
+        self.control.clock_f32.w = finite_f32(operator.maximum_time_step(), "time step bound")?;
+        self.manifest.bytes.tables = self.tables.len() * size_of::<GpuCanonicalTableWord>();
+        self.manifest.temporal = Some(CanonicalGpuTemporalManifest {
+            header_offset,
+            primary_record_count: operator.base().primary_contributions().len(),
+            complementary_record_count: self.sample_count,
+            runtime_record_count: runtime_records.len(),
+            coefficient_words: TEMPORAL_COEFFICIENT_WORDS,
+            runtime_words_per_material: TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS,
+        });
+        Ok(())
     }
 
     fn compile_inner(
@@ -1170,6 +1381,7 @@ impl CanonicalGpuPlan {
             dispatches_per_step,
             event_dispatches: 0,
             bytes,
+            temporal: None,
         };
         Ok(Self {
             manifest,
@@ -1230,6 +1442,11 @@ impl CanonicalGpuPlan {
         strength: f64,
         serial: u32,
     ) -> Result<(), CanonicalGpuBuildError> {
+        if self.manifest.temporal.is_some() {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "the Stage 7 dynamic grid-filter gate is not closed",
+            ));
+        }
         if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "grid-filter strength must be in [0, 1]",
@@ -1329,6 +1546,11 @@ impl CanonicalGpuPlan {
         serial: u32,
         dispatches: usize,
     ) -> Result<(), CanonicalGpuBuildError> {
+        if self.manifest.temporal.is_some() {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "Stage 7 temporal event admission is not closed",
+            ));
+        }
         if self.event_kind != EVENT_NONE || serial == 0 {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "one nonzero-serial event may be staged per GPU plan",
@@ -1975,6 +2197,136 @@ fn gpu_drive(
     ])
 }
 
+fn temporal_drive_index(drive: CanonicalMaterialDrive) -> u32 {
+    match drive {
+        CanonicalMaterialDrive::MassCoefficient => 0,
+        CanonicalMaterialDrive::StiffnessCoefficient => 1,
+        CanonicalMaterialDrive::ElectricLoss => 2,
+        CanonicalMaterialDrive::MagneticLoss => 3,
+    }
+}
+
+fn temporal_drive_from_index(index: u32) -> CanonicalMaterialDrive {
+    match index {
+        0 => CanonicalMaterialDrive::MassCoefficient,
+        1 => CanonicalMaterialDrive::StiffnessCoefficient,
+        2 => CanonicalMaterialDrive::ElectricLoss,
+        3 => CanonicalMaterialDrive::MagneticLoss,
+        _ => unreachable!("material runtime lanes are fixed at four"),
+    }
+}
+
+fn pack_temporal_coefficient(
+    sample: CanonicalTemporalCoefficientSample,
+    runtime_index: u32,
+    reference: f64,
+) -> Result<[GpuCanonicalTableWord; TEMPORAL_COEFFICIENT_WORDS], CanonicalGpuBuildError> {
+    let (kind, depth, angular_frequency, shape, spatial_phase) = match sample.law.drive {
+        TimeDriveValues::None => (TEMPORAL_DRIVE_NONE, 0.0, 0.0, 0.0, 0.0),
+        TimeDriveValues::ParametricPump {
+            depth,
+            frequency_hz,
+            ..
+        } => (
+            TEMPORAL_DRIVE_PUMP,
+            depth,
+            std::f64::consts::TAU * frequency_hz,
+            0.0,
+            0.0,
+        ),
+        TimeDriveValues::TimeCrystal {
+            depth,
+            frequency_hz,
+            sharpness,
+            ..
+        } => (
+            TEMPORAL_DRIVE_CRYSTAL,
+            depth,
+            std::f64::consts::TAU * frequency_hz,
+            sharpness,
+            0.0,
+        ),
+        TimeDriveValues::TravellingModulation {
+            depth,
+            frequency_hz,
+            wavenumber,
+            angle_radians,
+            ..
+        } => {
+            let along = sample.coordinates.x * angle_radians.cos()
+                + sample.coordinates.y * angle_radians.sin();
+            (
+                TEMPORAL_DRIVE_TRAVELLING,
+                depth,
+                std::f64::consts::TAU * frequency_hz,
+                0.0,
+                wavenumber * along,
+            )
+        }
+    };
+    let flags = (u32::from(sample.law.alternate.is_some()) * TEMPORAL_HAS_ALTERNATE)
+        | (u32::from(sample.law.inverted) * TEMPORAL_INVERTED);
+    let reference_f32 = finite_f32(reference, "temporal reference coefficient")?;
+    let alternate_f32 = finite_f32(
+        sample.law.alternate.unwrap_or(1.0),
+        "temporal alternate coefficient",
+    )?;
+    let depth_f32 = finite_f32(depth, "temporal drive depth")?;
+    let drive_minimum = 1.0 - depth_f32;
+    let drive_maximum = 1.0 + depth_f32;
+    let switch_minimum = 1.0_f32.min(alternate_f32);
+    let switch_maximum = 1.0_f32.max(alternate_f32);
+    let product_minimum = drive_minimum * switch_minimum;
+    let product_maximum = drive_maximum * switch_maximum;
+    let (factor_minimum, factor_maximum) = if sample.law.inverted {
+        (product_maximum.recip(), product_minimum.recip())
+    } else {
+        (product_minimum, product_maximum)
+    };
+    if reference_f32 <= 0.0
+        || alternate_f32 <= 0.0
+        || factor_minimum <= 0.0
+        || !factor_minimum.is_finite()
+        || !factor_maximum.is_finite()
+    {
+        return Err(CanonicalGpuBuildError::Unrepresentable(
+            "temporal coefficient trajectory",
+        ));
+    }
+    Ok([
+        GpuCanonicalTableWord {
+            data: UVec4::new(
+                runtime_index,
+                temporal_drive_index(sample.drive),
+                kind,
+                flags,
+            ),
+        },
+        finite_float_word(
+            [
+                reference,
+                sample.law.alternate.unwrap_or(1.0),
+                depth,
+                angular_frequency,
+            ],
+            "temporal coefficient",
+        )?,
+        finite_float_word([shape, spatial_phase, 0.0, 0.0], "temporal coefficient")?,
+    ])
+}
+
+fn finite_float_word(
+    values: [f64; 4],
+    name: &'static str,
+) -> Result<GpuCanonicalTableWord, CanonicalGpuBuildError> {
+    Ok(float_word(Vec4::new(
+        finite_f32(values[0], name)?,
+        finite_f32(values[1], name)?,
+        finite_f32(values[2], name)?,
+        finite_f32(values[3], name)?,
+    )))
+}
+
 fn pair(a: Point2, b: Point2) -> Result<Vec4, CanonicalGpuBuildError> {
     Ok(Vec4::new(
         finite_f32(a.x, "curl")?,
@@ -2162,6 +2514,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     accounting_item_count: u32,
     trace_count: u32,
     drive_count: u32,
+    material_runtime_count: u32,
     source_count: u32,
     rebase_step_limit: u32,
     dispatches_per_step: u64,
@@ -2327,6 +2680,10 @@ fn add_canonical_buffers(
     let state_count = plan.control.counts_a.w;
     let trace_count = plan.control.counts_b.y;
     let drive_count = plan.control.counts_c.z;
+    let material_runtime_count = plan
+        .manifest
+        .temporal
+        .map_or(0, |temporal| temporal.runtime_record_count as u32);
     let source_count = plan.control.counts_c.y;
     let time_limit = (256.0 / plan.control.clock_f32.x as f64)
         .ceil()
@@ -2352,6 +2709,7 @@ fn add_canonical_buffers(
         accounting_item_count,
         trace_count,
         drive_count,
+        material_runtime_count,
         source_count,
         rebase_step_limit,
         dispatches_per_step,
@@ -4148,7 +4506,12 @@ fn compute_canonical_wave(
         if group.encoded_local_step.saturating_add(1) >= handles.rebase_step_limit {
             pass.set_pipeline(pipelines[22]);
             pass.dispatch_workgroups(
-                workgroups(handles.node_count.max(handles.drive_count)),
+                workgroups(
+                    handles
+                        .node_count
+                        .max(handles.drive_count)
+                        .max(handles.material_runtime_count),
+                ),
                 1,
                 1,
             );
@@ -4423,11 +4786,217 @@ fn compute_canonical_handoff(
 }
 
 #[cfg(test)]
+fn packed_table_float(plan: &CanonicalGpuPlan, word: usize, lane: usize) -> f32 {
+    f32::from_bits(plan.tables[word].data.to_array()[lane])
+}
+
+#[cfg(test)]
+fn packed_temporal_factor(
+    plan: &CanonicalGpuPlan,
+    coefficient_word: usize,
+    local_time: f32,
+) -> f32 {
+    let metadata = plan.tables[coefficient_word].data.to_array();
+    let runtime_index = metadata[0] as usize;
+    let drive_lane = metadata[1] as usize;
+    let drive_kind = metadata[2];
+    let flags = metadata[3];
+    let root = plan.control.runtime_slots.z as usize;
+    let runtime_offset = plan.tables[root].data.w as usize;
+    let slot = (plan.control.runtime_slots.y & 1) as usize;
+    let runtime_word = runtime_offset
+        + runtime_index * TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS
+        + slot * TEMPORAL_RUNTIME_WORDS_PER_SLOT;
+    let phase = packed_table_float(plan, runtime_word, drive_lane)
+        + packed_table_float(plan, coefficient_word + 1, 3) * local_time;
+    let depth = packed_table_float(plan, coefficient_word + 1, 2);
+    let shape = packed_table_float(plan, coefficient_word + 2, 0);
+    let spatial_phase = packed_table_float(plan, coefficient_word + 2, 1);
+    let carrier = phase.sin().atan2(phase.cos());
+    let drive = match drive_kind {
+        TEMPORAL_DRIVE_NONE => 1.0,
+        TEMPORAL_DRIVE_PUMP => 1.0 + depth * carrier.cos(),
+        TEMPORAL_DRIVE_CRYSTAL => {
+            let cosine = carrier.cos();
+            let square = if shape.abs() < 1.0e-3 {
+                cosine * (1.0 + shape * shape * (1.0 - cosine * cosine) / 3.0)
+            } else {
+                (shape * cosine).tanh() / shape.tanh()
+            };
+            1.0 + depth * square
+        }
+        TEMPORAL_DRIVE_TRAVELLING => {
+            let travelling = carrier - spatial_phase;
+            1.0 + depth * travelling.cos()
+        }
+        _ => f32::NAN,
+    };
+    let switch_word = runtime_word + 1;
+    let start_blend = packed_table_float(plan, switch_word, 0);
+    let target_blend = packed_table_float(plan, switch_word, 1);
+    let start_time = packed_table_float(plan, switch_word, 2);
+    let duration = packed_table_float(plan, switch_word, 3);
+    let blend = if duration == 0.0 {
+        target_blend
+    } else {
+        let z = ((local_time - start_time) / duration).clamp(0.0, 1.0);
+        let smoother = z * z * z * (z * (z * 6.0 - 15.0) + 10.0);
+        start_blend + (target_blend - start_blend) * smoother
+    };
+    let alternate = packed_table_float(plan, coefficient_word + 1, 1);
+    let switch = if flags & TEMPORAL_HAS_ALTERNATE != 0 {
+        1.0 + blend * (alternate - 1.0)
+    } else {
+        1.0
+    };
+    let factor = drive * switch;
+    if flags & TEMPORAL_INVERTED != 0 {
+        factor.recip()
+    } else {
+        factor
+    }
+}
+
+#[cfg(test)]
+fn packed_primary_mass(plan: &CanonicalGpuPlan, node: usize, local_time: f32) -> f32 {
+    let metadata = plan.nodes[node].stiffness.to_array();
+    (0..metadata[3] as usize)
+        .map(|record| {
+            let word = metadata[2] as usize + record * TEMPORAL_COEFFICIENT_WORDS;
+            packed_table_float(plan, word + 1, 0) * packed_temporal_factor(plan, word, local_time)
+        })
+        .sum()
+}
+
+#[cfg(test)]
+fn packed_temporal_force(
+    plan: &CanonicalGpuPlan,
+    complementary: &[[f32; 2]],
+    local_time: f32,
+) -> Vec<f32> {
+    plan.nodes
+        .iter()
+        .map(|node| {
+            let range = node.ranges.to_array();
+            (range[0]..range[0] + range[1])
+                .filter(|entry| plan.tables[*entry as usize].data.y != FORCE_KIND_GAP)
+                .map(|entry| {
+                    let word = plan.tables[entry as usize].data.to_array();
+                    let sample = word[0] as usize;
+                    let factor = packed_temporal_factor(
+                        plan,
+                        plan.samples[sample].nodes_b.w as usize,
+                        local_time,
+                    );
+                    (packed_table_float(plan, entry as usize, 2) * complementary[sample][0]
+                        + packed_table_float(plan, entry as usize, 3) * complementary[sample][1])
+                        / factor
+                })
+                .sum()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn packed_sample_node(sample: &GpuCanonicalSample, local: usize) -> usize {
+    if local < 4 {
+        sample.nodes_a.to_array()[local] as usize
+    } else {
+        sample.nodes_b.to_array()[local - 4] as usize
+    }
+}
+
+#[cfg(test)]
+fn packed_sample_curl(sample: &GpuCanonicalSample, local: usize) -> [f32; 2] {
+    let pair = match local {
+        0 | 1 => sample.curls_01.to_array(),
+        2 | 3 => sample.curls_23.to_array(),
+        4 | 5 => sample.curls_45.to_array(),
+        _ => sample.curl_6_loss.to_array(),
+    };
+    let offset = usize::from(local < 6 && local % 2 == 1) * 2;
+    [pair[offset], pair[offset + 1]]
+}
+
+#[cfg(test)]
+fn packed_temporal_step(plan: &CanonicalGpuPlan) -> (Vec<f32>, Vec<[f32; 2]>) {
+    let mut primary = plan.state[..plan.node_count]
+        .iter()
+        .map(|word| word.values.x)
+        .collect::<Vec<_>>();
+    let mut complementary = plan.state[plan.node_count..plan.node_count + plan.sample_count]
+        .iter()
+        .map(|word| word.values.xy().to_array())
+        .collect::<Vec<_>>();
+    let start_time = plan.control.clock_f32.y;
+    let duration = plan.control.clock_f32.x;
+    let first = packed_temporal_force(plan, &complementary, start_time);
+    for (flux, force) in primary.iter_mut().zip(first) {
+        *flux -= 0.5 * duration * force;
+    }
+    let middle_time = start_time + 0.5 * duration;
+    let field = primary
+        .iter()
+        .enumerate()
+        .map(|(node, flux)| flux / packed_primary_mass(plan, node, middle_time))
+        .collect::<Vec<_>>();
+    for (sample, flux) in plan.samples.iter().zip(&mut complementary) {
+        let reference = field[packed_sample_node(sample, 0)];
+        let mut curl = [0.0; 2];
+        for local in 1..7 {
+            let difference = field[packed_sample_node(sample, local)] - reference;
+            let shape = packed_sample_curl(sample, local);
+            curl[0] += shape[0] * difference;
+            curl[1] += shape[1] * difference;
+        }
+        flux[0] += plan.control.evolution.y * duration * curl[0];
+        flux[1] += plan.control.evolution.y * duration * curl[1];
+    }
+    let second = packed_temporal_force(plan, &complementary, start_time + duration);
+    for (flux, force) in primary.iter_mut().zip(second) {
+        *flux -= 0.5 * duration * force;
+    }
+    (primary, complementary)
+}
+
+#[cfg(test)]
+fn rebase_packed_temporal_runtime(plan: &mut CanonicalGpuPlan, elapsed: f32) {
+    let header_offset = plan.control.runtime_slots.z as usize;
+    let header = plan.tables[header_offset].data.to_array();
+    let runtime_count = plan.tables[header_offset + 1].data.x as usize;
+    let slot = (plan.control.runtime_slots.y & 1) as usize;
+    for runtime in 0..runtime_count {
+        let root =
+            header[3] as usize + runtime * TEMPORAL_RUNTIME_WORDS_PER_SLOT * TEMPORAL_RUNTIME_SLOTS;
+        let accepted = root + slot * TEMPORAL_RUNTIME_WORDS_PER_SLOT;
+        let mut phases = plan.tables[accepted].data.to_array();
+        let frequencies = plan.tables[accepted + 2].data.to_array();
+        for lane in 0..4 {
+            let phase = f32::from_bits(phases[lane]);
+            let frequency = f32::from_bits(frequencies[lane]);
+            phases[lane] = (phase + frequency * elapsed)
+                .sin()
+                .atan2((phase + frequency * elapsed).cos())
+                .to_bits();
+        }
+        let mut switch = plan.tables[accepted + 1].data.to_array();
+        switch[2] = (f32::from_bits(switch[2]) - elapsed).to_bits();
+        for target in [root, root + TEMPORAL_RUNTIME_WORDS_PER_SLOT] {
+            plan.tables[target].data = UVec4::from_array(phases);
+            plan.tables[target + 1].data = UVec4::from_array(switch);
+            plan.tables[target + 2].data = UVec4::from_array(frequencies);
+        }
+    }
+    plan.control.runtime_slots.y = 0;
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use funfern_core::{
-        CanonicalRateDrive, CanonicalSource, MeshingOptions, OuterBoundaryCondition,
-        QuadraticTransferMap, QuadraticWaveOperator, Scene, mesh_scene,
+        CanonicalRateDrive, CanonicalSource, CoefficientLaw, MeshingOptions,
+        OuterBoundaryCondition, QuadraticTransferMap, QuadraticWaveOperator, ScalarField, Scene,
+        TimeDrive, mesh_scene,
     };
 
     fn plan(boundary: OuterBoundaryCondition) -> CanonicalGpuPlan {
@@ -4465,6 +5034,87 @@ mod tests {
         .unwrap()
     }
 
+    fn temporal_plan() -> (
+        CanonicalTemporalWaveOperator,
+        CanonicalTemporalWaveState,
+        CanonicalGpuPlan,
+    ) {
+        let mut scene = Scene::initial();
+        let material = &mut scene.materials[0];
+        material.mass_law.drive = TimeDrive::TravellingModulation {
+            depth: ScalarField::constant(0.24),
+            frequency_hz: ScalarField::constant(0.8),
+            phase_radians: ScalarField::constant(0.31),
+            wavenumber: ScalarField::constant(2.7),
+            angle_radians: ScalarField::constant(-0.4),
+        };
+        material.mass_law.alternate = Some(ScalarField::constant(1.8));
+        material.mass_law.inverted = true;
+        material.stiffness_law.drive = TimeDrive::TimeCrystal {
+            depth: ScalarField::constant(0.17),
+            frequency_hz: ScalarField::constant(0.6),
+            phase_radians: ScalarField::constant(-0.23),
+            sharpness: ScalarField::constant(3.2),
+        };
+        material.stiffness_law.alternate = Some(ScalarField::constant(0.75));
+
+        let mut fixed_scene = scene.clone();
+        for material in &mut fixed_scene.materials {
+            material.mass_law = CoefficientLaw::linear();
+            material.stiffness_law = CoefficientLaw::linear();
+        }
+        let mesh = mesh_scene(
+            &fixed_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.24,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &fixed_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
+        let time_step = 0.4 * operator.maximum_time_step();
+        let primary = operator
+            .base()
+            .primary_mass()
+            .iter()
+            .enumerate()
+            .map(|(index, mass)| mass * (0.04 + 0.03 * (index as f64 * 0.37).sin()))
+            .collect();
+        let complementary = operator
+            .base()
+            .constitutive_samples()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                Point2::new(
+                    0.017 * (index as f64 * 0.13).cos(),
+                    -0.012 * (index as f64 * 0.17).sin(),
+                )
+            })
+            .collect();
+        let mut state =
+            CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary).unwrap();
+        state
+            .runtime_mut()
+            .begin_switch(scene.materials[0].id, true, 0.0, 1.3)
+            .unwrap();
+        let plan = CanonicalGpuPlan::compile_temporal_bulk(
+            &operator,
+            &state,
+            CanonicalGpuClock::initial(time_step).unwrap(),
+        )
+        .unwrap();
+        (operator, state, plan)
+    }
+
     #[test]
     fn manifest_uses_portable_bindings_and_separate_candidate_lanes() {
         let plan = plan(OuterBoundaryCondition::Reflecting);
@@ -4474,6 +5124,9 @@ mod tests {
         assert_eq!(plan.manifest.candidate_primary_lane, 1);
         assert_eq!(plan.manifest.candidate_complementary_lane, 2);
         assert_eq!(plan.manifest.candidate_auxiliary_lane, 1);
+        assert_eq!(plan.manifest.temporal, None);
+        assert_eq!(plan.control.runtime_slots.z, 0);
+        assert_eq!(plan.control.runtime_slots.w, 0);
         assert_eq!(plan.state.len(), plan.control.counts_a.w as usize + 1);
         let metadata = plan.state.last().unwrap().values.to_array();
         assert_eq!(metadata[0], SNAPSHOT_METADATA_MAGIC);
@@ -4503,6 +5156,110 @@ mod tests {
         assert_eq!(GpuCanonicalTableWord::min_size().get() as usize, 16);
         assert_eq!(size_of::<GpuCanonicalControl>(), 272);
         assert_eq!(GpuCanonicalControl::min_size().get() as usize, 272);
+        naga::front::wgsl::parse_str(shader).unwrap();
+    }
+
+    #[test]
+    fn temporal_tables_match_the_f64_material_maps_at_every_kdk_stage() {
+        let (operator, state, mut plan) = temporal_plan();
+        let manifest = plan.manifest.temporal.unwrap();
+        assert_eq!(
+            manifest.primary_record_count,
+            operator.base().primary_contributions().len()
+        );
+        assert_eq!(manifest.complementary_record_count, plan.sample_count);
+        assert_eq!(
+            manifest.runtime_record_count,
+            state.runtime().records().len()
+        );
+        assert_eq!(manifest.coefficient_words, TEMPORAL_COEFFICIENT_WORDS);
+        assert_eq!(plan.control.runtime_slots.w, TEMPORAL_ENABLED);
+        assert_eq!(
+            plan.control.runtime_slots.z as usize,
+            manifest.header_offset
+        );
+        assert_eq!(
+            plan.control.clock_f32.w,
+            operator.maximum_time_step() as f32
+        );
+
+        for time in [0.0, 0.5 * state.time_step(), state.time_step(), 0.73] {
+            let expected_mass = operator.primary_mass_at(time, state.runtime()).unwrap();
+            for (node, expected) in expected_mass.into_iter().enumerate() {
+                let actual = packed_primary_mass(&plan, node, time as f32) as f64;
+                assert!((actual - expected).abs() < 3.0e-5 * expected.abs().max(1.0));
+            }
+
+            let flux = operator
+                .base()
+                .constitutive_samples()
+                .iter()
+                .enumerate()
+                .map(|(index, _)| Point2::new(0.1 + index as f64 * 1.0e-4, -0.07))
+                .collect::<Vec<_>>();
+            let expected = operator
+                .complementary_field_at(&flux, time, state.runtime())
+                .unwrap();
+            let fixed = operator.base().complementary_field(&flux).unwrap();
+            for index in 0..plan.sample_count {
+                let word = plan.samples[index].nodes_b.w as usize;
+                let factor = packed_temporal_factor(&plan, word, time as f32) as f64;
+                let actual = fixed[index] / factor;
+                assert!((actual.x - expected[index].x).abs() < 3.0e-5);
+                assert!((actual.y - expected[index].y).abs() < 3.0e-5);
+            }
+        }
+
+        assert!(matches!(
+            plan.stage_grid_filter(0.1, 1),
+            Err(CanonicalGpuBuildError::InvalidLayout(_))
+        ));
+    }
+
+    #[test]
+    fn packed_f32_temporal_kdk_matches_the_f64_bulk_reference() {
+        let (operator, mut state, plan) = temporal_plan();
+        let (actual_primary, actual_complementary) = packed_temporal_step(&plan);
+        state.step(&operator).unwrap();
+        for (actual, expected) in actual_primary.iter().zip(state.primary_flux()) {
+            let scale = expected.abs().max(1.0e-4);
+            assert!((*actual as f64 - expected).abs() < 8.0e-5 * scale);
+        }
+        for (actual, expected) in actual_complementary.iter().zip(state.complementary_flux()) {
+            let x_scale = expected.x.abs().max(1.0e-4);
+            let y_scale = expected.y.abs().max(1.0e-4);
+            assert!((actual[0] as f64 - expected.x).abs() < 8.0e-5 * x_scale);
+            assert!((actual[1] as f64 - expected.y).abs() < 8.0e-5 * y_scale);
+        }
+    }
+
+    #[test]
+    fn temporal_runtime_rebase_preserves_drive_and_switch_trajectories() {
+        let (_, _, mut plan) = temporal_plan();
+        let elapsed = 0.71_f32;
+        let probe = 0.19_f32;
+        let before = (0..plan.node_count)
+            .map(|node| packed_primary_mass(&plan, node, elapsed + probe))
+            .collect::<Vec<_>>();
+        let complementary_before = (0..plan.sample_count)
+            .map(|sample| {
+                packed_temporal_factor(
+                    &plan,
+                    plan.samples[sample].nodes_b.w as usize,
+                    elapsed + probe,
+                )
+            })
+            .collect::<Vec<_>>();
+        rebase_packed_temporal_runtime(&mut plan, elapsed);
+        for (node, expected) in before.into_iter().enumerate() {
+            let actual = packed_primary_mass(&plan, node, probe);
+            assert!((actual - expected).abs() < 3.0e-6 * expected.abs().max(1.0));
+        }
+        for (sample, expected) in complementary_before.into_iter().enumerate() {
+            let actual =
+                packed_temporal_factor(&plan, plan.samples[sample].nodes_b.w as usize, probe);
+            assert!((actual - expected).abs() < 3.0e-6 * expected.abs().max(1.0));
+        }
     }
 
     #[test]

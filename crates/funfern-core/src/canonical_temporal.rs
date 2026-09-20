@@ -239,6 +239,28 @@ struct TemporalComplementarySample {
     loss: TemporalLossSample,
 }
 
+/// GPU-facing, field-linear coefficient metadata at one compiled physical
+/// sample. Runtime phase/Switch ownership remains material-wide and is exposed
+/// separately through [`CanonicalMaterialRuntimeState`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalTemporalCoefficientSample {
+    pub material: MaterialId,
+    pub coordinates: MaterialCoordinates,
+    pub drive: CanonicalMaterialDrive,
+    pub law: CoefficientLawValues,
+}
+
+impl From<TemporalCoefficientSample> for CanonicalTemporalCoefficientSample {
+    fn from(sample: TemporalCoefficientSample) -> Self {
+        Self {
+            material: sample.material,
+            coordinates: sample.coordinates,
+            drive: sample.drive,
+            law: sample.law,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalTemporalLossRates {
     pub primary: Vec<f64>,
@@ -414,6 +436,20 @@ impl CanonicalTemporalWaveOperator {
     /// trajectory. Resolving a temporal carrier is a separate admission gate.
     pub fn maximum_time_step(&self) -> f64 {
         self.maximum_time_step
+    }
+
+    pub fn primary_coefficient_samples(
+        &self,
+    ) -> impl ExactSizeIterator<Item = CanonicalTemporalCoefficientSample> + '_ {
+        self.primary.iter().map(|sample| sample.coefficient.into())
+    }
+
+    pub fn complementary_coefficient_samples(
+        &self,
+    ) -> impl ExactSizeIterator<Item = CanonicalTemporalCoefficientSample> + '_ {
+        self.complementary
+            .iter()
+            .map(|sample| sample.coefficient.into())
     }
 
     pub fn primary_mass_at(
