@@ -1069,6 +1069,15 @@ each rendered solver batch, and only the arrow records cross back. Each readback
 carries a GPU-written step marker and compensated two-f32 absolute time. Stale
 asynchronous results cannot be mistaken for a newer level, and presentation
 filters retain their physical decay across timestep-changing handoffs.
+Continuous buffer readback is completion-paced rather than frame-paced: a shared
+main/render-world token allows at most one staging copy per readback entity to be
+in flight, and a completion event rearms it. Requested full-state snapshots use
+the token once, while handoff admission polls its pending marker through the same
+bounded gate until the transfer pipeline has run. Independently, the host request
+clock and render-world encoded clock stay within one 64-step interactive batch of
+the last GPU-completed boundary. A slow or background-throttled GPU therefore
+loses obsolete wall-time catch-up and reports a speed shortfall instead of
+accumulating unbounded command buffers and staging resources.
 The wave layout already occupies WebGPU's portable eight-storage-binding budget.
 Volume-source weights therefore share the existing point/pulse forcing-weight
 buffer. Each DOF has a compact header containing point/pulse weights plus an

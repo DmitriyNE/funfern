@@ -5,6 +5,7 @@ mod field_paint;
 #[allow(dead_code)]
 mod files;
 mod material_overlay;
+mod paced_readback;
 mod recording;
 mod recovery;
 #[allow(dead_code)]

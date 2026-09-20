@@ -953,6 +953,21 @@ primary transfer is compact too: it retains no duplicate per-node interpolation
 rows and is packed directly from its identity marker. P3 remains responsible
 for proportional and genuinely changed trace operators.
 
+The contention follow-up also closes an independent unbounded-work path. A
+continuous Bevy readback schedules another staging copy on every render frame;
+when GPU completion slowed or the native window was background-throttled, state,
+status, vector and probe readers accumulated copies and Metal command buffers.
+All canonical and legacy readbacks now admit at most one copy per entity until
+its completion event. Requested full-state snapshots run once; handoff admission
+polls through the same bounded gate until it leaves the pending state. Host
+requests and render encoding remain within 64 steps of the last GPU-completed
+boundary, so display starvation cannot leave minutes of obsolete solver work
+queued. In a release soak of the production autosave, the failed process's 8.9
+GiB/~39,800 graphics mappings and 4,414 command buffers became 41.1 MiB/268
+mappings and 30 command buffers after more than three minutes. This is a
+bounded-resource gate, not a claim that every mesh reaches its requested
+real-time rate; overload is still reported as a speed shortfall.
+
 ### Current implementation handoff
 
 Read this specification and the detailed stages; consult reports for derivations, not as competing live plans. Baseline `beca47e` remains the clean numerical reference. Stage 1 coalesced the useful unfinished authoring work, removed superseded semantics, restored all material literals/imports, and added explicit legacy-solver rejection for non-inert laws. Do not copy the spike Python into production, implement bulk gauge machinery, or interpret the green Stage 1 checks as validation of a canonical or nonlinear solver that does not exist yet.

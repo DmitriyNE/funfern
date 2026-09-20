@@ -38,6 +38,7 @@ use funfern_core::{
 use crate::canonical_gpu::{
     CanonicalGpuRequest, GpuCanonicalControl, GpuCanonicalNode, GpuCanonicalStateWord,
 };
+use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
 
 const WORKGROUP_SIZE: u32 = 128;
 pub const MAX_POINT_PROBES: usize = 16;
@@ -64,6 +65,7 @@ const _: () = {
 /// same bound so the requested and completed counters cannot diverge without
 /// limit when the solver cannot run faster than wall-clock time.
 pub const MAX_STEPS_PER_FRAME: u64 = 64;
+const MAX_ENCODED_STEP_LEAD: u64 = MAX_STEPS_PER_FRAME;
 const STATUS_READY: u8 = 1;
 const STATUS_ERROR: u8 = 2;
 const STATUS_TRANSFERRING: u8 = 3;
@@ -527,7 +529,7 @@ impl WaveGpuRequest {
         self.probe_readback_entity = Some(
             commands
                 .spawn((
-                    Readback::buffer(handles.output.clone()),
+                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
                     ProbeReadbackTag {
                         generation: self.generation,
                         revision: self.probe_revision,
@@ -629,7 +631,7 @@ impl WaveGpuRequest {
         self.probe_readback_entity = Some(
             commands
                 .spawn((
-                    Readback::buffer(handles.output.clone()),
+                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
                     ProbeReadbackTag {
                         generation: self.generation,
                         revision: self.probe_revision,
@@ -700,7 +702,7 @@ impl WaveGpuRequest {
         self.vector_overlay_readback_entity = Some(
             commands
                 .spawn((
-                    Readback::buffer(handles.output.clone()),
+                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
                     VectorOverlayReadbackTag {
                         generation: self.generation,
                         revision: self.vector_overlay_revision,
@@ -847,7 +849,7 @@ impl WaveGpuRequest {
         self.curve_probe_readback_entity = Some(
             commands
                 .spawn((
-                    Readback::buffer(handles.output.clone()),
+                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
                     CurveProbeReadbackTag {
                         generation: self.generation,
                         revision: self.curve_probe_revision,
@@ -990,7 +992,7 @@ impl WaveGpuRequest {
         self.curve_probe_readback_entity = Some(
             commands
                 .spawn((
-                    Readback::buffer(handles.output.clone()),
+                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
                     CurveProbeReadbackTag {
                         generation: self.generation,
                         revision: self.curve_probe_revision,
@@ -1183,7 +1185,7 @@ impl WaveGpuRequest {
         self.area_probe_readback_entity = Some(
             commands
                 .spawn((
-                    Readback::buffer(handles.output.clone()),
+                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
                     AreaProbeReadbackTag {
                         generation: self.generation,
                         revision: self.area_probe_revision,
@@ -1330,7 +1332,7 @@ impl WaveGpuRequest {
         self.area_probe_readback_entity = Some(
             commands
                 .spawn((
-                    Readback::buffer(handles.output.clone()),
+                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
                     AreaProbeReadbackTag {
                         generation: self.generation,
                         revision: self.area_probe_revision,
@@ -1487,7 +1489,7 @@ impl WaveGpuRequest {
         self.far_field_readback_entity = Some(
             commands
                 .spawn((
-                    Readback::buffer(handles.output.clone()),
+                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
                     FarFieldReadbackTag {
                         generation: self.generation,
                         revision: self.far_field_revision,
@@ -1633,7 +1635,7 @@ impl WaveGpuRequest {
         self.far_field_readback_entity = Some(
             commands
                 .spawn((
-                    Readback::buffer(handles.output.clone()),
+                    PacedReadback::continuous(Readback::buffer(handles.output.clone())),
                     FarFieldReadbackTag {
                         generation: self.generation,
                         revision: self.far_field_revision,
@@ -1831,7 +1833,7 @@ impl WaveGpuRequest {
         self.readback_entity = Some(
             commands
                 .spawn((
-                    Readback::buffer(transfer.old.state.clone()),
+                    PacedReadback::continuous(Readback::buffer(transfer.old.state.clone())),
                     WaveReadbackTag {
                         generation: self.generation,
                         stats: self.stats.clone(),
@@ -1884,7 +1886,7 @@ impl WaveGpuRequest {
         self.stats = Arc::new(WaveGpuStats::default());
         let readback_entity = commands
             .spawn((
-                Readback::buffer(handles.state.clone()),
+                PacedReadback::continuous(Readback::buffer(handles.state.clone())),
                 WaveReadbackTag {
                     generation: self.generation,
                     stats: self.stats.clone(),
@@ -3534,6 +3536,9 @@ pub struct WaveGpuPlugin;
 
 impl Plugin for WaveGpuPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<PacedReadbackPlugin>() {
+            app.add_plugins(PacedReadbackPlugin);
+        }
         embedded_asset!(app, "wave.wgsl");
         embedded_asset!(app, "probe.wgsl");
         embedded_asset!(app, "curve_probe.wgsl");
@@ -4713,10 +4718,14 @@ fn compute_wave(
     if request.transfer.is_none() {
         request.stats.status.store(STATUS_READY, Ordering::Relaxed);
     }
+    let encoded_lead = group
+        .completed_steps
+        .saturating_sub(request.stats.completed_steps());
     let pending = request
         .desired_steps
         .saturating_sub(group.completed_steps)
-        .min(MAX_STEPS_PER_FRAME);
+        .min(MAX_STEPS_PER_FRAME)
+        .min(MAX_ENCODED_STEP_LEAD.saturating_sub(encoded_lead));
     let inject_now = request.pulse_serial != group.pulse_serial;
     if pending == 0 && !inject_now {
         return;

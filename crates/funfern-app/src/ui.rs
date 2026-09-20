@@ -8008,8 +8008,13 @@ impl Playground {
                         self.editor.document.presentation.simulation_speed,
                         dt,
                     );
-                    if steps > 0 {
-                        request.request_steps(steps);
+                    let admitted = steps_with_gpu_backpressure(
+                        request.stats().completed_steps(),
+                        request.requested_steps(),
+                        steps,
+                    );
+                    if admitted > 0 {
+                        request.request_steps(admitted);
                     }
                 } else if self.wave_step {
                     request.request_steps(1);
@@ -12537,6 +12542,15 @@ fn steps_for_frame(accumulator: &mut f64, delta: f64, speed: f64, time_step: f64
     steps
 }
 
+/// Keeps the host request clock close to the last GPU-completed boundary. A
+/// render thread can otherwise encode small batches faster than an overloaded
+/// or background-throttled GPU executes them, accumulating minutes of stale
+/// simulation work without ever violating the per-frame batch ceiling.
+fn steps_with_gpu_backpressure(completed: u64, requested: u64, proposed: u64) -> u64 {
+    let outstanding = requested.saturating_sub(completed);
+    proposed.min(MAX_STEPS_PER_FRAME.saturating_sub(outstanding))
+}
+
 /// How close the reached rate has to come to the one asked for before the
 /// shortfall is worth mentioning.
 const SPEED_SHORTFALL_MARGIN: f64 = 0.8;
@@ -13942,6 +13956,17 @@ mod tests {
         assert_eq!(steps_for_frame(&mut idle, 0.016, 1.0, 0.0), 0);
         assert_eq!(steps_for_frame(&mut idle, 0.016, 0.0, 1.0e-3), 0);
         assert_eq!(steps_for_frame(&mut idle, -1.0, 1.0, 1.0e-3), 0);
+    }
+
+    #[test]
+    fn gpu_backpressure_drops_requests_beyond_the_completed_lead() {
+        assert_eq!(steps_with_gpu_backpressure(100, 100, 12), 12);
+        assert_eq!(
+            steps_with_gpu_backpressure(100, 150, 20),
+            MAX_STEPS_PER_FRAME - 50
+        );
+        assert_eq!(steps_with_gpu_backpressure(100, 164, 20), 0);
+        assert_eq!(steps_with_gpu_backpressure(100, 200, 20), 0);
     }
 
     /// The windowed rate dips whenever a handoff withholds stepping inside its

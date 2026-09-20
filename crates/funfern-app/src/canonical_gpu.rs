@@ -39,6 +39,7 @@ use funfern_core::{
     GRID_SCALE_FILTER_CADENCE, Point2, QuadraticWaveOperator, TimeSignal, WaveError,
 };
 
+use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
 use crate::wave_gpu::{
     AreaProbeBindGroup, CurveProbeBindGroup, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS,
     FarFieldBindGroup, ProbeBindGroup, VectorOverlayBindGroup, WaveGpuRequest, WavePipeline,
@@ -2082,6 +2083,11 @@ pub const fn canonical_failure_description(reason: u32) -> &'static str {
 // Large explicit validation requests are encoded in one command buffer. The
 // interactive caller still controls its much smaller per-frame request size.
 const MAX_STEPS_PER_FRAME: u64 = 256;
+/// Bound CPU-encoded evolution against the last GPU-completed clock. Without
+/// this fence the render world can keep feeding Metal while a large solve or a
+/// backgrounded window completes more slowly, building an unbounded queue of
+/// command buffers even though each individual frame is small.
+const MAX_ENCODED_STEP_LEAD: u64 = 64;
 
 #[derive(Default)]
 pub struct CanonicalGpuStats {
@@ -2264,7 +2270,11 @@ fn spawn_canonical_state_readback(
     };
     commands
         .spawn((
-            readback,
+            if one_shot {
+                PacedReadback::once(readback)
+            } else {
+                PacedReadback::continuous(readback)
+            },
             CanonicalStateReadback {
                 generation,
                 node_count: handles.node_count,
@@ -2367,7 +2377,7 @@ impl CanonicalGpuRequest {
         );
         let control_entity = commands
             .spawn((
-                Readback::buffer(handles.control.clone()),
+                PacedReadback::continuous(Readback::buffer(handles.control.clone())),
                 CanonicalControlReadback {
                     generation,
                     stats: self.stats.clone(),
@@ -2376,7 +2386,7 @@ impl CanonicalGpuRequest {
             .id();
         let status_entity = commands
             .spawn((
-                Readback::buffer(handles.status.clone()),
+                PacedReadback::continuous(Readback::buffer(handles.status.clone())),
                 CanonicalStatusReadback {
                     stats: self.stats.clone(),
                 },
@@ -2630,7 +2640,10 @@ impl CanonicalGpuRequest {
         let stats = Arc::new(CanonicalGpuHandoffStats::default());
         let status_entity = commands
             .spawn((
-                Readback::buffer(added.handles.status.clone()),
+                // The target bind group or transfer pipeline may not be ready
+                // in the first render frame. Keep polling the pending marker,
+                // but allow only one status copy to be outstanding at a time.
+                PacedReadback::continuous(Readback::buffer(added.handles.status.clone())),
                 CanonicalHandoffStatusReadback {
                     stats: stats.clone(),
                 },
@@ -2715,7 +2728,7 @@ impl CanonicalGpuRequest {
         }
         let entity = commands
             .spawn((
-                Readback::buffer(handles.status.clone()),
+                PacedReadback::continuous(Readback::buffer(handles.status.clone())),
                 CanonicalStatusReadback {
                     stats: self.stats.clone(),
                 },
@@ -3153,7 +3166,7 @@ fn settle_canonical_handoff(
     );
     let control_entity = commands
         .spawn((
-            Readback::buffer(target.control.clone()),
+            PacedReadback::continuous(Readback::buffer(target.control.clone())),
             CanonicalControlReadback {
                 generation,
                 stats: stats.clone(),
@@ -3162,7 +3175,7 @@ fn settle_canonical_handoff(
         .id();
     let status_entity = commands
         .spawn((
-            Readback::buffer(target.status.clone()),
+            PacedReadback::continuous(Readback::buffer(target.status.clone())),
             CanonicalStatusReadback {
                 stats: stats.clone(),
             },
@@ -3203,6 +3216,9 @@ pub struct CanonicalWaveGpuPlugin;
 
 impl Plugin for CanonicalWaveGpuPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<PacedReadbackPlugin>() {
+            app.add_plugins(PacedReadbackPlugin);
+        }
         embedded_asset!(app, "canonical_wave.wgsl");
         embedded_asset!(app, "canonical_transfer.wgsl");
         embedded_asset!(app, "canonical_transfer_runtime.wgsl");
@@ -3870,10 +3886,14 @@ fn compute_canonical_wave(
         .map(|id| pipeline_cache.get_compute_pipeline(*id))
         .collect::<Option<Vec<_>>>();
     let Some(pipelines) = pipelines else { return };
+    let encoded_lead = group
+        .encoded_steps
+        .saturating_sub(request.stats.completed_steps());
     let pending = request
         .desired_steps
         .saturating_sub(group.encoded_steps)
-        .min(MAX_STEPS_PER_FRAME);
+        .min(MAX_STEPS_PER_FRAME)
+        .min(MAX_ENCODED_STEP_LEAD.saturating_sub(encoded_lead));
     let live_event = request.live_event.as_ref().filter(|event| {
         event.serial != group.encoded_live_event
             && live_group

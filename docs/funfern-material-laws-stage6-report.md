@@ -198,6 +198,19 @@ gate did not expose:
   the worker; static WebAssembly retains the cooperative runner. A release profile
   of the production autosave showed AMR traversals on `funfern-amr` while assembly
   independently occupied `funfern-cpu-prepare`.
+- Solver/display contention had one more independent feedback path. Continuous
+  Bevy readbacks schedule a fresh staging copy every rendered frame; if Metal
+  completion lags, copies and command buffers accumulate even though each frame's
+  solver batch is bounded. State, control/status, vector, probe and far-field
+  streams now allow one copy in flight per entity. Requested full snapshots run
+  once; handoff admission polls its pending marker through the same bounded gate.
+  Both the host request clock and render-world encoding stay within 64 steps of
+  the last GPU-completed boundary. In the reported locked process, graphics
+  mappings had reached 8.9 GiB/~39,800 regions with 4,414 command buffers. The
+  corrected release soak held them to 41.1 MiB/268 regions and 30 command buffers
+  after more than three minutes; physical footprint was about 0.88 GiB with no
+  process compression. This closes the structural unbounded-queue route; exact
+  foreground recovery remains a hands-on application check.
 - Preparing a 93,144-primary-DOF GPU generation took about 155 ms synchronously,
   followed by a redundant second copy while turning roughly 80.7 MiB of typed
   buffers into Bevy assets. Reusing the already validated scalar CSR reduces plan

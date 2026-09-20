@@ -5,6 +5,33 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — GPU readback and solver submission gain completion backpressure
+
+- The live process at the reported FPS cliff/foreground lock-up was blocked in
+  Metal command-buffer creation, not in either CPU worker. Bevy's continuous
+  `Readback` path had submitted a new staging copy every rendered frame even
+  when earlier maps had not completed. The stalled process reached a 9.8 GiB
+  physical footprint (16.8 GiB peak), 8.9 GiB of graphics mappings across about
+  39,800 regions, 4,414 Metal command buffers and 8,194 resource lists.
+- Every long-lived solver, status, arrow, probe and far-field readback now has a
+  shared main/render-world gate and permits one staging copy in flight per
+  entity. Requested full-state snapshots use it once; handoff admission polls
+  its pending marker through the same bounded gate. Completion rearms a
+  continuous reader; removal or rejection cannot leave a stream producing
+  copies without a consumer.
+- Host requests and render-world encoding also stay within 64 steps of the last
+  GPU-completed boundary. If an expensive solve or a backgrounded window slows
+  completion, Funfern drops stale wall-time catch-up instead of accumulating an
+  arbitrarily long GPU queue; the existing speed-shortfall display reports the
+  consequence.
+- In a release soak of the same autosave, after more than three minutes the
+  process remained responsive at about 0.88 GiB with no process compression.
+  Graphics mappings were 41.1 MiB/268 regions, with 30 command buffers and 90
+  resource lists. Native tests and strict Clippy pass; threaded and static
+  WebGPU bundles both build and pass the Chrome startup/advance/resize check.
+  Exact user-visible FPS and the foreground-after-background gesture remain a
+  hands-on acceptance observation.
+
 ## 2026-09-20 — Solver overload yields display time; AMR leaves the UI thread
 
 - The next autosave cliff was not another egui topology copy. At roughly 70k
