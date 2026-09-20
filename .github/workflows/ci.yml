@@ -11,8 +11,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: 1.96.0
-  TRUNK_VERSION: 0.21.14
+  RUST_VERSION: 1.96.1
+  TRUNK_VERSION: 0.22.0-beta.5
 
 jobs:
   ci:
@@ -87,7 +87,7 @@ jobs:
         run: cargo build --release -p funfern-app --locked
 
       - name: Build browser release
-        run: NO_COLOR=true trunk build --release --locked
+        run: trunk build --release --locked
 
       - name: Configure GitHub Pages
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -96,7 +96,7 @@ jobs:
 
       - name: Build browser release for Pages
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        run: NO_COLOR=true trunk build --release --locked --public-url "${{ steps.pages.outputs.base_path }}/"
+        run: trunk build --release --locked --public-url "${{ steps.pages.outputs.base_path }}/"
 
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

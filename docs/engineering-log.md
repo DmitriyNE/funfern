@@ -67,21 +67,24 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   budgets for slow container-network transfers.
 - The generated Trunk page, JavaScript and WASM all serve correctly, and a
   self-closing Chrome/WebGPU smoke check reaches the running canvas without page
-  or console errors. The apparent bare-`trunk serve` failure in this environment
-  was Trunk 0.21.14 rejecting the conventional inherited `NO_COLOR=1`; the primary
-  README commands now use the accepted `NO_COLOR=true` spelling and pin the tested
-  Trunk version explicitly. Reverse-DNS address discovery is disabled so the
-  server reports only its configured `127.0.0.1` endpoint instead of misleading
-  Docker Desktop aliases.
+  or console errors. The bare-`trunk serve` failure was Trunk 0.21.14 rejecting the
+  conventional inherited `NO_COLOR=1` before it bound a socket. The active
+  toolchain is now Rust 1.96.1 and Trunk 0.22.0-beta.5, whose upstream correction
+  accepts the literal documented commands without an environment workaround.
+  Rust 1.96.1 also emits WASM metadata that Binaryen 123 rejects, so Trunk's
+  `wasm-opt` helper is explicitly pinned to current Binaryen 132. Docker and CI
+  use the same pins. Reverse-DNS address discovery is disabled so the server
+  reports only its configured `127.0.0.1` endpoint instead of misleading Docker
+  Desktop aliases.
 - Validation includes Compose configuration parsing, a locked release Trunk build
-  with nonempty HTML/WASM output, and the Chrome smoke check. A repaired container
-  build completed the release Rust application compile past the former missing
-  logo, then Docker networking timed out downloading Trunk's `wasm-opt`; later
-  retries were blocked earlier by crates.io and Docker Hub timeouts, including
-  failure to resolve the already selected `rust:1.96-bookworm` base-image tag.
-  Final nginx image assembly therefore remains to be rerun when the external
-  container network is reachable; no source/build-definition error remained in
-  the completed portions.
+  with nonempty HTML/WASM output, and the Chrome smoke check. With the new pins,
+  the literal inherited-`NO_COLOR=1` `trunk serve --release` command binds
+  `127.0.0.1:8080`; a GET returns HTTP 200 with a nonempty page and Chrome reaches
+  the WebGPU canvas without console or page errors. The test server and browser
+  were closed afterward. A repaired container build had already compiled the
+  application past the former missing logo; final nginx image assembly still
+  needs a rerun because the available Docker network subsequently timed out at
+  GitHub, crates.io and even Docker Hub base-image metadata.
 
 ## 2026-09-20 — Measured terminal tail and self-describing snapshots
 

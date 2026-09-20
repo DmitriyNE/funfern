@@ -18,23 +18,25 @@ shader entry-point collision in Bevy's browser shader translation path.
 
 ## Run
 
-Tested toolchain: Rust 1.96.0, Trunk 0.21.14. Install the browser tools once:
+Tested toolchain: Rust 1.96.1, Trunk 0.22.0-beta.5. Install the browser tools once:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo install trunk --version 0.21.14 --locked
+cargo install trunk --version 0.22.0-beta.5 --locked
 ```
 
 From the repository root:
 
 ```sh
-NO_COLOR=true trunk serve
+trunk serve
 ```
 
 Open <http://127.0.0.1:8080/> in a WebGPU-capable browser with hardware
 acceleration enabled. WebGPU requires HTTPS or localhost. The page displays a
 startup diagnostic if initialization fails. Trunk watches sources and reloads
-on rebuild; its first build downloads matching WASM helpers.
+on rebuild; its first build downloads matching WASM helpers. Trunk binds the
+HTTP socket only after that initial build succeeds, so wait for the explicit
+`server listening at` line before opening the URL.
 
 Native development:
 
@@ -49,14 +51,17 @@ recording uses the browser's built-in `MediaRecorder` and needs no additional to
 Release browser bundle (output: `dist/`):
 
 ```sh
-NO_COLOR=true trunk build --release
+trunk build --release
 # Serve the optimized build locally:
-NO_COLOR=true trunk serve --release
+trunk serve --release
 ```
 
-The explicit `NO_COLOR=true` works around a Trunk 0.21.14 bug: that release
-rejects the conventional `NO_COLOR=1` value set by some terminals and automation.
-Keep `Cargo.lock` for reproducibility. The pinned integration is
+Trunk 0.22.0-beta.5 is pinned because it accepts conventional nonempty `NO_COLOR`
+values such as `1`; Trunk 0.21.14 exits before serving when that environment value
+is present. The beta requires Rust 1.96.1 or newer. Trunk's `wasm-opt` helper is
+pinned separately in `Trunk.toml` because its older default cannot read Rust
+1.96.1's WASM metadata. Keep `Cargo.lock` for reproducibility. The pinned
+integration is
 [Bevy 0.19.1](https://docs.rs/bevy/0.19.1/bevy/) with
 [bevy_egui 0.42.0](https://docs.rs/crate/bevy_egui/0.42.0).
 See the [maintained Trunk project](https://github.com/trunk-rs/trunk) for tooling.
