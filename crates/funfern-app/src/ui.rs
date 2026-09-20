@@ -57,11 +57,15 @@ const FRAME_HISTORY: usize = 120;
 const EVENT_LOG_ENTRIES: usize = 200;
 /// Seconds of progress the steps-per-second readout averages over.
 const STEP_RATE_WINDOW: f64 = 0.5;
-/// The display quiet floor is an amplitude ratio; energy is quadratic in that
-/// amplitude. Below the matching run-relative energy ratio, a relative error
-/// or normalized vector direction describes numerical tail rather than useful
-/// wave content.
-const DORMANT_ENERGY_RATIO: f64 = 1.0e-6;
+/// Below one percent of the run's meaningful amplitude, automatic exposure is
+/// more likely to reveal the slowly decaying numerical tail than useful wave
+/// content. The saved-scene drain fixture plateaus at roughly 0.2--0.3% even
+/// with resident damping, so the former 0.1% floor still normalized that tail.
+const PRESENTATION_QUIET_AMPLITUDE_RATIO: f64 = 1.0e-2;
+/// Energy is quadratic in amplitude. AMR's relative residual becomes dormant
+/// below the energy counterpart of the presentation floor.
+const DORMANT_ENERGY_RATIO: f64 =
+    PRESENTATION_QUIET_AMPLITUDE_RATIO * PRESENTATION_QUIET_AMPLITUDE_RATIO;
 /// Frames one line or boundary probe keeps. With the sampling presets' rates
 /// this is 17, 8.5, or 4.3 seconds of path history, and it bounds how far back
 /// the averaged flux row can look.
@@ -965,7 +969,6 @@ pub struct Playground {
     far_field_recording_from: Option<f64>,
     frame_ms: f32,
     wave_energy: Option<f64>,
-    wave_energy_peak: f64,
     /// Full-state energy is a diagnostic, not a render input. Recomputing it
     /// over every canonical node and sample at display rate made large meshes
     /// consume a main-thread core even when the diagnostics window was closed.
@@ -1166,7 +1169,6 @@ impl Default for Playground {
             far_field_recording_from: None,
             frame_ms: 16.0,
             wave_energy: None,
-            wave_energy_peak: 0.0,
             energy_readback: 0,
             energy_updated: Instant::now(),
             full_snapshot_requested: Instant::now(),
@@ -4472,9 +4474,6 @@ impl Playground {
             self.vector_overlay_ac_generation = generation;
             self.vector_overlay_dc_step = completed_steps;
         }
-        if energy_is_dormant(self.wave_energy, self.wave_energy_peak) {
-            return;
-        }
         let mut magnitudes = samples
             .iter()
             .map(|(_, _, value)| value.norm())
@@ -7062,7 +7061,6 @@ impl Playground {
                             self.canonical_event_serial = 0;
                             self.canonical_event_observed = 0;
                             self.wave_energy = None;
-                            self.wave_energy_peak = 0.0;
                             self.amr_energy_peak = 0.0;
                         }
                         self.restart_exposures_after_handoff(upload.fresh);
@@ -7268,7 +7266,11 @@ impl Playground {
                 .ok()
                 .map(CanonicalEnergyBreakdown::total);
                 if let Some(energy) = energy.filter(|energy| energy.is_finite() && *energy > 0.0) {
-                    self.wave_energy_peak = self.wave_energy_peak.max(energy);
+                    // Full snapshots run throughout the simulation, whether
+                    // AMR is currently enabled or not. Preserve that history
+                    // so AMR enabled after a pulse does not establish its
+                    // "run" peak from the numerical tail it is meant to ignore.
+                    self.amr_energy_peak = self.amr_energy_peak.max(energy);
                 }
                 self.wave_energy = energy;
                 self.energy_readback = display.full_readbacks;
@@ -7760,9 +7762,9 @@ impl Playground {
             return;
         }
         let dt = self.solver_time_step();
-        let time = canonical
-            .clock
-            .map_or(self.simulated_time(), |clock| clock.absolute_seconds);
+        let time = canonical.clock.map_or(self.simulated_time(), |clock| {
+            clock.absolute_seconds + (step as f64 - f64::from(clock.accepted_steps)) * dt
+        });
         let displacement = display
             .snapshot_current
             .iter()
@@ -11399,7 +11401,7 @@ impl AutoExposure {
     /// which is honest, since the pulse really was that much brighter.
     const RELEASE_PER_SECOND: f64 = 1.15;
     /// How far under the loudest level seen the reference may go.
-    const QUIET_FLOOR: f64 = 1.0e-3;
+    const QUIET_FLOOR: f64 = PRESENTATION_QUIET_AMPLITUDE_RATIO;
     /// The longest step the release is allowed to take at once, so a stalled
     /// frame cannot drop the scale by an unbounded factor in one go.
     const MAX_STEP_SECONDS: f32 = 1.0;
@@ -12039,14 +12041,6 @@ fn resident_filter_boundary(enabled: bool, completed_steps: u64) -> bool {
     enabled && completed_steps > 0 && completed_steps.is_multiple_of(GRID_SCALE_FILTER_CADENCE)
 }
 
-fn energy_is_dormant(current: Option<f64>, peak: f64) -> bool {
-    peak.is_finite()
-        && peak > 0.0
-        && current.is_some_and(|current| {
-            current.is_finite() && current >= 0.0 && current <= peak * DORMANT_ENERGY_RATIO
-        })
-}
-
 fn highest_forcing_frequency(scene: &TopologyScene, source: PointSource) -> f64 {
     let mut frequency = if source.enabled {
         source.signal.frequency_ceiling_hz()
@@ -12257,7 +12251,7 @@ fn refresh_canonical_wave_display(
         display
             .snapshot_velocity
             .extend(display.indicator_velocity.iter().copied());
-        display.snapshot_completed_steps = display.completed_steps;
+        display.snapshot_completed_steps = canonical.full_snapshot_completed_steps();
         display.complementary_flux.clear();
         display
             .complementary_flux
@@ -12559,7 +12553,7 @@ mod tests {
     fn an_exposure_refuses_to_magnify_decayed_noise() {
         let mut exposure = AutoExposure::default();
         exposure.update(1.0, 1.0 / 60.0);
-        // Three decades down to the floor at 1.15 a second is about fifty.
+        // Two decades down to the floor at 1.15 a second is about thirty-three.
         for _ in 0..3_600 {
             exposure.update(1.0e-9, 1.0 / 60.0);
         }
@@ -12584,6 +12578,25 @@ mod tests {
         assert!((0.0..1.0e-3).contains(&tenth), "weak fade {tenth}");
         assert_eq!(exposure.visibility(0.0), 0.0);
         assert_eq!(exposure.visibility(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn measured_damped_tail_is_not_renormalized_into_a_field() {
+        let mut exposure = AutoExposure::default();
+        exposure.update(1.0, 0.0);
+        // The saved source-free TM drain fixture settles near 0.2--0.3% of
+        // its propagated peak. Let the release reach its run-relative floor,
+        // then verify that tail still paints below two percent of full scale.
+        let tail = 3.0e-3;
+        for _ in 0..6_000 {
+            exposure.update(tail, 1.0 / 60.0);
+        }
+        let painted = tail / exposure.reference().unwrap() * exposure.visibility(tail);
+        assert!(painted < 0.02, "tail still paints at {painted:.3}");
+        assert_eq!(
+            DORMANT_ENERGY_RATIO,
+            AutoExposure::QUIET_FLOOR * AutoExposure::QUIET_FLOOR
+        );
     }
 
     #[test]
@@ -12614,16 +12627,6 @@ mod tests {
         assert!(resident_filter_boundary(true, 16));
         assert!(resident_filter_boundary(true, 32));
         assert!(!resident_filter_boundary(false, 16));
-    }
-
-    #[test]
-    fn terminal_energy_is_quiet_only_relative_to_an_established_run() {
-        assert!(!energy_is_dormant(Some(1.0e-12), 0.0));
-        assert!(!energy_is_dormant(None, 1.0));
-        assert!(!energy_is_dormant(Some(f64::NAN), 1.0));
-        assert!(!energy_is_dormant(Some(2.0e-6), 1.0));
-        assert!(energy_is_dormant(Some(DORMANT_ENERGY_RATIO), 1.0));
-        assert!(energy_is_dormant(Some(0.0), 1.0));
     }
 
     #[test]

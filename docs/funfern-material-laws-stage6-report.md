@@ -90,9 +90,14 @@ The controller treats the paired filter's exact cadence boundary as a
 zero-duration maintenance event, not as an ordinary pair of time endpoints. At
 that boundary the spare lane contains the pre-filter state, so AMR waits for the
 next solver step before taking its synchronized snapshot. It also retains the
-run's peak canonical energy across ordinary handoffs. Below `10⁻⁶` of that peak,
+run's peak canonical energy across ordinary handoffs. Below `10⁻⁴` of that peak,
 relative error is dormant and error-driven targets coarsen instead of chasing
 floating-point tail; forced-wavelength and maximum-element limits remain active.
+
+Full-state readback is self-describing. One state-buffer metadata word records
+the accepted lane and exact accepted step at every commit, including
+zero-duration events and handoffs. Static-linear AMR therefore never combines a
+state copy with a control readback that arrived from another solver batch.
 
 ### Post-cutover AMR and preparation correction
 

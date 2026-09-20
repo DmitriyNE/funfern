@@ -292,8 +292,8 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   the view moves; a newly exposed sample starts silent until it has temporal history,
   so an unknown DC baseline is not flashed as a wave. A resident grid-filter event
   rebases that presentation filter instead of appearing as temporal field content.
-  Once total canonical energy falls below the run's quiet floor, normalized arrows
-  are hidden rather than magnifying f32 residue. Each EM mode remains one scalar
+  Once the overlay falls below one percent of its run peak it fades rather than
+  magnifying f32 residue. Each EM mode remains one scalar
   Maxwell polarization rather than a simultaneous six-component field solve.
 - **Field exposure:** the scalar field and the vector overlay each set their own
   scale from what is on screen, so a scene whose amplitude is a hundredth of
@@ -303,7 +303,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   back slowly — slower than a field drains away, so a domain that has emptied goes
   dark instead of being renormalized back to full brightness. A placed pulse
   therefore holds the scale for some seconds before the view returns to normal. It
-  will not fall below a thousandth of the loudest level seen. Below that floor the
+  will not fall below a hundredth of the loudest level seen. Below that floor the
   drawing fades smoothly, so a field that has decayed into rounding noise is not
   magnified back into view; sparse arrow outliers cannot override that shared fade.
   Field
@@ -490,7 +490,7 @@ for example `FUNFERN_PORT=9000 docker compose up --build`. Stop it with
   is clamped, so anything it cannot satisfy - a boundary the field disagrees with,
   the grid-scale leftovers of a wave that has passed - otherwise shrinks by that
   same step every cycle until it reaches the smallest element allowed, whatever
-  the target says. Once the whole field has fallen below `10⁻⁶` of the run's
+  the target says. Once the whole field has fallen below `10⁻⁴` of the run's
   peak canonical energy, relative error is reported as dormant and stops driving
   refinement; this prevents numerical tail divided by vanishing field energy from
   looking increasingly inaccurate. Error concentrated in a small part of a field

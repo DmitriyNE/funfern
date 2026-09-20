@@ -1,5 +1,5 @@
-// Canonical direct-state f32 solver. Rust layout version 2.
-const LAYOUT_VERSION: u32 = 2u;
+// Canonical direct-state f32 solver. Rust layout version 3.
+const LAYOUT_VERSION: u32 = 3u;
 const STATE_WORD_STRIDE: u32 = 16u;
 const NODE_STRIDE: u32 = 96u;
 const SAMPLE_STRIDE: u32 = 112u;
@@ -9,6 +9,7 @@ const MAX_TRACE: u32 = 1024u;
 const MODE_WORDS: u32 = 12u;
 const NO_INDEX: u32 = 0xffffffffu;
 const FORCE_KIND_GAP: u32 = 1u;
+const SNAPSHOT_METADATA_MAGIC: f32 = 8675309.0;
 
 const STATUS_LAYOUT: u32 = 1u;
 const STATUS_TIMESTEP: u32 = 2u;
@@ -129,6 +130,14 @@ fn has_prescribed_trace() -> bool { return (control.boundary_offsets.w & 8u) != 
 fn accepted_slot() -> u32 { return control.event.z & 1u; }
 fn event_operation() -> u32 { return control.event.z >> 8u; }
 fn live_event() -> bool { return (control.event.z & 2u) != 0u; }
+
+fn publish_snapshot_metadata() {
+    state[control.counts_a.w].values = vec4<f32>(
+        SNAPSHOT_METADATA_MAGIC,
+        f32(accepted_slot()),
+        f32(control.clock_u32.w & 0xffffu),
+        f32(control.clock_u32.w >> 16u));
+}
 
 fn inject_at(state_word: u32) {
     let injection = atomicLoad(&status.injection);
@@ -645,6 +654,7 @@ fn commit_event() {
     }
     control.event_result = vec4<u32>(
         control.event.y, operation, control.event.y, 0u);
+    publish_snapshot_metadata();
 }
 
 @compute @workgroup_size(1)
@@ -657,6 +667,7 @@ fn resident_filter_commit() {
     control.event.z = accepted_slot() ^ 1u;
     control.accepted_accounting_a = control.candidate_accounting_a;
     control.accepted_accounting_b = control.candidate_accounting_b;
+    publish_snapshot_metadata();
 }
 
 @compute @workgroup_size(128)
@@ -737,6 +748,7 @@ fn handoff_commit() {
     atomicStore(&status.transaction_1, control.clock_u32.w);
     atomicStore(&status.transaction_2, control.clock_u32.z);
     atomicStore(&status.handoff, 0u);
+    publish_snapshot_metadata();
 }
 
 @compute @workgroup_size(128)
@@ -783,6 +795,7 @@ fn commit_clock_rebase() {
     control.clock_origin = vec4<f32>(origin, origin);
     control.clock_f32.y = 0.0;
     control.clock_f32.z = 0.0;
+    publish_snapshot_metadata();
 }
 
 @compute @workgroup_size(128)
@@ -1364,4 +1377,5 @@ fn commit_step(@builtin(global_invocation_id) id: vec3<u32>) {
     control.clock_f32.y += control.clock_f32.x;
     control.clock_f32.z = control.clock_f32.y;
     control.event.x = control.event.y;
+    publish_snapshot_metadata();
 }

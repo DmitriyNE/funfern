@@ -57,7 +57,7 @@ macro_rules! add_shader_buffer {
     }};
 }
 
-pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 2;
+pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 3;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
 pub const CANONICAL_GPU_WORKGROUP_SIZE: u32 = 128;
 pub const CANONICAL_GPU_MAX_TRACE: usize = 1024;
@@ -76,6 +76,10 @@ const TRANSFER_LAYOUT_VERSION: u32 = 1;
 const TRANSFER_HEADER_WORDS: usize = 8;
 const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
 const DRIVE_INDEX_MASK: u32 = !DRIVE_TARGET_PARAMETERS;
+/// Last state-buffer word identifies the accepted lane and clock at the exact
+/// instant that buffer was copied. State and control are separate asynchronous
+/// readbacks, so the host must not combine their independently arriving values.
+const SNAPSHOT_METADATA_MAGIC: f32 = 8_675_309.0;
 
 const _: () = assert!(CANONICAL_GPU_STORAGE_BINDINGS <= 8);
 
@@ -1057,6 +1061,17 @@ impl CanonicalGpuPlan {
                 0.25 * dt,
             ),
         };
+        // This word is outside `counts_a.w`, so no physical-state dispatch
+        // visits it. Commit shaders republish it after every accepted lane or
+        // clock change, making a full state readback self-describing.
+        state_words.push(GpuCanonicalStateWord {
+            values: Vec4::new(
+                SNAPSHOT_METADATA_MAGIC,
+                0.0,
+                (control.clock_u32.w & 0xffff) as f32,
+                (control.clock_u32.w >> 16) as f32,
+            ),
+        });
         let bytes = CanonicalGpuByteReport {
             control: size_of::<GpuCanonicalControl>(),
             status: size_of::<GpuCanonicalStatus>(),
@@ -1260,7 +1275,7 @@ impl CanonicalGpuPlan {
         state_word: u32,
     ) -> Result<(), CanonicalGpuBuildError> {
         if !(CANONICAL_FAILURE_LAYOUT..=CANONICAL_FAILURE_NON_FINITE).contains(&reason)
-            || state_word as usize >= self.state.len()
+            || state_word >= self.control.counts_a.w
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "failure injection must name a valid state word and reason",
@@ -2168,7 +2183,7 @@ fn spawn_canonical_state_readback(
                 node_count: handles.node_count,
                 sample_count: handles.sample_count,
                 state_count: if full {
-                    handles.state_count
+                    handles.state_count + 1
                 } else {
                     handles.node_count
                 },
@@ -2646,16 +2661,23 @@ pub struct CanonicalGpuDisplay {
     sample_count: usize,
     accepted_slot: u32,
     raw_state_slot: u32,
-    raw_state_continuous: bool,
+    /// Absolute accepted step captured inside the state buffer itself. Unlike
+    /// the continuously read control buffer, it describes this exact snapshot.
+    raw_state_completed_steps: u64,
+    raw_primary_self_describing: bool,
 }
 
 impl CanonicalGpuDisplay {
+    pub fn full_snapshot_completed_steps(&self) -> u64 {
+        self.raw_state_completed_steps
+    }
+
     /// Bit-exact accepted physical state plus the accepted force cache. This is
     /// intentionally narrow and exists for transaction rollback verification.
     pub fn accepted_storage_bits(&self) -> Vec<u32> {
         let mut result =
             Vec::with_capacity(self.node_count * 2 + self.sample_count * 2 + self.auxiliary.len());
-        let second = self.accepted_slot != 0;
+        let second = self.raw_state_slot != 0;
         for word in self.raw_state.iter().take(self.node_count) {
             result.push(if second { word.values.y } else { word.values.x }.to_bits());
             result.push(if second { word.values.w } else { word.values.z }.to_bits());
@@ -2749,7 +2771,7 @@ fn receive_canonical_state(
     if tag.generation != request.generation {
         return;
     }
-    let words: Vec<GpuCanonicalStateWord> = event.to_shader_type();
+    let mut words: Vec<GpuCanonicalStateWord> = event.to_shader_type();
     if words.len() != tag.state_count as usize {
         return;
     }
@@ -2757,8 +2779,21 @@ fn receive_canonical_state(
     display.node_count = tag.node_count as usize;
     display.sample_count = tag.sample_count as usize;
     if tag.full {
-        display.raw_state_slot = display.accepted_slot;
-        display.raw_state_continuous = !tag.one_shot;
+        let Some(metadata) = words.pop() else { return };
+        let metadata = metadata.values.to_array();
+        if metadata[0] != SNAPSHOT_METADATA_MAGIC
+            || (metadata[1] != 0.0 && metadata[1] != 1.0)
+            || !(0.0..=65_535.0).contains(&metadata[2])
+            || !(0.0..=65_535.0).contains(&metadata[3])
+            || metadata[2].fract() != 0.0
+            || metadata[3].fract() != 0.0
+        {
+            return;
+        }
+        display.raw_state_slot = metadata[1] as u32;
+        display.raw_state_completed_steps =
+            u64::from(metadata[2] as u32 | (metadata[3] as u32) << 16);
+        display.raw_primary_self_describing = true;
         display.raw_primary.clear();
         display
             .raw_primary
@@ -2766,6 +2801,7 @@ fn receive_canonical_state(
         display.raw_state = words;
     } else {
         display.raw_primary = words;
+        display.raw_primary_self_describing = false;
     }
     refresh_canonical_display(&mut display);
     display.readbacks = display.readbacks.saturating_add(1);
@@ -2793,7 +2829,8 @@ fn begin_canonical_display_generation(display: &mut CanonicalGpuDisplay, generat
     display.node_count = 0;
     display.sample_count = 0;
     display.raw_state_slot = 0;
-    display.raw_state_continuous = false;
+    display.raw_state_completed_steps = 0;
+    display.raw_primary_self_describing = false;
     display.full_readback_at = u64::MAX;
 }
 
@@ -2852,7 +2889,11 @@ fn refresh_canonical_display(display: &mut CanonicalGpuDisplay) {
     if display.raw_primary.len() != nodes {
         return;
     }
-    let second = display.accepted_slot != 0;
+    let second = if display.raw_primary_self_describing {
+        display.raw_state_slot != 0
+    } else {
+        display.accepted_slot != 0
+    };
     display.primary_flux.clear();
     display.primary_flux.extend(
         display.raw_primary[..nodes]
@@ -2874,11 +2915,7 @@ fn refresh_canonical_display(display: &mut CanonicalGpuDisplay) {
     if display.raw_state.len() < nodes + samples {
         return;
     }
-    let snapshot_second = if display.raw_state_continuous {
-        second
-    } else {
-        display.raw_state_slot != 0
-    };
+    let snapshot_second = display.raw_state_slot != 0;
     display.complementary_flux.clear();
     display
         .complementary_flux
@@ -4255,7 +4292,12 @@ mod tests {
         assert_eq!(plan.manifest.candidate_primary_lane, 1);
         assert_eq!(plan.manifest.candidate_complementary_lane, 2);
         assert_eq!(plan.manifest.candidate_auxiliary_lane, 1);
-        assert_eq!(plan.state.len(), plan.control.counts_a.w as usize);
+        assert_eq!(plan.state.len(), plan.control.counts_a.w as usize + 1);
+        let metadata = plan.state.last().unwrap().values.to_array();
+        assert_eq!(metadata[0], SNAPSHOT_METADATA_MAGIC);
+        assert_eq!(metadata[1], 0.0);
+        assert_eq!(metadata[2] as u32, plan.control.clock_u32.w & 0xffff);
+        assert_eq!(metadata[3] as u32, plan.control.clock_u32.w >> 16);
         assert!(plan.manifest.bytes.steady_bytes() > plan.manifest.bytes.state);
     }
 
@@ -4263,11 +4305,12 @@ mod tests {
     fn rust_and_wgsl_layout_manifests_match_exactly() {
         let shader = include_str!("canonical_wave.wgsl");
         for declaration in [
-            "const LAYOUT_VERSION: u32 = 2u;",
+            "const LAYOUT_VERSION: u32 = 3u;",
             "const STATE_WORD_STRIDE: u32 = 16u;",
             "const NODE_STRIDE: u32 = 96u;",
             "const SAMPLE_STRIDE: u32 = 112u;",
             "const TABLE_WORD_STRIDE: u32 = 16u;",
+            "const SNAPSHOT_METADATA_MAGIC: f32 = 8675309.0;",
             "const MAX_TRACE: u32 = 1024u;",
         ] {
             assert!(shader.contains(declaration), "missing {declaration}");

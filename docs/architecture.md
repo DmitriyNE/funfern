@@ -380,10 +380,9 @@ history; a new mesh generation discards the old element identities. Energy-flow
 arrows never use AC coupling because their temporal mean is meaningful. Quiet-tail
 visibility is applied after each arrow saturates, so a sparse numerical outlier
 cannot defeat the overlay-wide fade; sub-pixel residual arrows are not drawn. The
-run's canonical-energy peak provides the final global quiet gate: below `10⁻⁶`
-of that peak energy, no normalized arrow is drawn. This is the energy equivalent
-of the scalar display's `10⁻³` amplitude floor and prevents arbitrary directions
-in f32 residue from being amplified back into view.
+overlay's run peak provides the global quiet reference: below `10⁻²` of that
+amplitude, a squared smoothstep suppresses normalized arrows. This prevents
+arbitrary directions in f32 residue from being amplified back into view.
 
 The accepted primary field is drawn directly, including a real free-component
 constant. There is no display-only mean subtraction or hidden gauge correction.
@@ -424,7 +423,7 @@ field's own decay, or the scale merely follows a draining domain down and the
 wave looks like it never left; the rate trades the brightness a decayed field
 settles at against how long a placed pulse holds the scale, and is set from a
 recorded level series rather than by taste. The scale never falls below a
-thousandth of the loudest level the run has reached. Below that floor a squared
+hundredth of the loudest level the run has reached. Below that floor a squared
 smoothstep visibility factor takes both scalar colour and arrow length to zero;
 flooring the denominator alone still left late f32 residue visible as a
 full-domain static pattern.
@@ -962,13 +961,19 @@ path end to end.
 
 The static-linear AMR controller keeps a canonical-energy peak across ordinary
 mesh and solver-generation handoffs and resets it only when a fresh zero field is
-accepted. Below `10⁻⁶` of that peak energy, relative residual normalization is
+accepted. Below `10⁻⁴` of that peak energy, relative residual normalization is
 dormant: element error indicators become coarsening targets and the reported
 whole-field relative error is zero. Wavelength and configured maximum-element
 limits are evaluated independently and remain binding. An aligned full snapshot
 at a resident-filter cadence boundary is deferred until the next ordinary solver
 endpoint because the filter's zero-time lane flip does not provide the previous
 `dt` endpoint required by the temporal residual.
+
+Every full canonical state snapshot carries a metadata word in the same GPU
+buffer copy: accepted lane and absolute accepted step. AMR and energy decode the
+state with that word rather than pairing it with the separately arriving
+continuous control readback. The latter remains appropriate for live status, but
+cannot identify the lane or time of an asynchronous state snapshot.
 
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a

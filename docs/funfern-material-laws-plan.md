@@ -603,6 +603,12 @@ boundary. Do not infer a `dt` interval from lane identity alone. The production
 Stage 6 adapter now defers AMR to the next ordinary endpoint and rebases the
 complementary-arrow AC view.
 
+Full-state consumers must receive lane and clock metadata from the same GPU copy
+as the state. A separately arriving continuous control readback is status, not a
+snapshot identity. Production layout version 3 appends this metadata to the state
+buffer and republishes it after every accepted step, zero-duration event, rebase
+and handoff.
+
 ## 8. GPU handoff and topology changes
 
 ### 8.1 Preserve the transaction architecture

@@ -5,6 +5,38 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Measured terminal tail and self-describing snapshots
+
+- Interactive retesting showed no observable change from the first dormancy
+  correction. Reproducing the current autosave with its source disabled, a unit
+  Gaussian pulse and the production filter every 16 steps explained why. The
+  energy settles slowly from its peak to `1.63e-5` after 40 simulated seconds;
+  primary p98 and complementary p90 settle around 0.2–0.3% of their propagated
+  peaks. The attempted `1e-6` energy / 0.1% amplitude gates were both below the
+  actual damped tail and never fired. The scalar field had not been connected to
+  the new energy gate either.
+- Automatic scalar and vector exposure now share a measured 1% amplitude quiet
+  floor and smooth fade. AMR uses its squared `1e-4` run-relative energy floor.
+  This is intentionally a presentation/controller threshold, not additional
+  mutation of canonical state; the paired filter still preserves its physical
+  kernel. The saved-scene tail is below both corrected thresholds. The periodic
+  canonical energy snapshot maintains the AMR run peak even while AMR is off,
+  so enabling it after a pulse cannot redefine numerical residue as its peak.
+- Full-state readback previously copied the state buffer alone, then decoded its
+  accepted lane and timestamp from whichever asynchronous continuous control
+  readback the host had most recently received. That is not an aligned snapshot
+  contract and could intermittently swap the current/previous endpoints used by
+  AMR. Canonical layout version 3 appends a state metadata word containing a
+  finite magic, accepted lane and split exact absolute accepted step. Every
+  successful step, event, resident filter, clock rebase and handoff publishes it
+  atomically with state; energy and AMR now use that exact metadata.
+- Validation covers the saved-scene drain trace, layout/metadata parity and tail
+  exposure. Both the ordinary and resident-filter/vector-overlay Metal harnesses
+  retain CPU-oracle agreement. All 653 workspace targets/tests pass with the one
+  known curved-boundary reproducer ignored; warning-denied Clippy, shader
+  validation, wasm32 checking, formatting, diff checks and the release app build
+  also pass.
+
 ## 2026-09-20 — Filter-boundary consumers and dormant-field AMR
 
 - The intermittent terminal static was not evidence that the resident paired
@@ -21,13 +53,11 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   that sample and rebases its input without admitting the maintenance jump.
 - Relative AMR error is undefined in the useful sense after the whole field has
   decayed into f32 residue: both its energy and residual normalization approach
-  zero. The application now remembers the canonical energy peak for the current
-  run. Below `10⁻⁶` of that peak energy (the square of the display's `10⁻³`
-  amplitude floor), it marks relative error dormant, supplies coarsening targets
-  and silences normalized vector arrows. Forced-wavelength and maximum-element
-  limits remain active because they are resolution contracts, not error estimates.
-  Fresh zero-field commits reset both peaks; ordinary field-preserving handoffs do
-  not.
+  zero. The first implementation attempted a `10⁻⁶` peak-energy floor; the
+  measured correction above supersedes that uncalibrated value. Forced-wavelength
+  and maximum-element limits remain active because they are resolution contracts,
+  not error estimates. Fresh zero-field commits reset the AMR peak; ordinary
+  field-preserving handoffs do not.
 - Regression coverage distinguishes a filter maintenance boundary from an
   ordinary endpoint, keeps its jump out of arrow AC output, checks run-relative
   terminal silence, and proves that dormant AMR still obeys hard wavelength
