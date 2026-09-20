@@ -781,11 +781,16 @@ impl TopologyPreparationJob {
             let operator = self.operator.as_ref().unwrap().clone();
             if self.canonical_assembly_job.is_none() {
                 self.phase = TopologyPreparationPhase::AssemblingCanonical;
-                match CanonicalAssemblyJob::new(
+                let previous_outgoing = self
+                    .previous
+                    .as_ref()
+                    .and_then(|previous| previous.canonical_operator.outgoing_boundary_handle());
+                match CanonicalAssemblyJob::new_with_outgoing_reuse(
                     mesh,
                     operator,
                     self.bundle.model(),
                     self.bundle.token.document_revision,
+                    previous_outgoing,
                 ) {
                     Ok(job) => self.canonical_assembly_job = Some(job),
                     Err(error) => return Some(Err(self.fail(error.to_string()))),
@@ -2185,6 +2190,10 @@ mod tests {
             .unwrap();
         prepare(&mut runtime).unwrap();
         let original = runtime.commit_ready(first).unwrap();
+        let original_outgoing = original
+            .canonical_operator
+            .outgoing_boundary_handle()
+            .unwrap();
 
         let mut document = editor.document.clone();
         document.model.accepted.materials[0].damping = ScalarField::constant(0.02);
@@ -2199,6 +2208,13 @@ mod tests {
         assert_eq!(candidate.mesh.mesh_revision, original.mesh.mesh_revision);
         assert!(Arc::ptr_eq(&candidate.mesh, &original.mesh));
         assert!(!candidate.operator_reused);
+        assert!(Arc::ptr_eq(
+            &original_outgoing,
+            &candidate
+                .canonical_operator
+                .outgoing_boundary_handle()
+                .unwrap()
+        ));
         assert!(candidate.transfer.is_some());
         assert!(
             candidate

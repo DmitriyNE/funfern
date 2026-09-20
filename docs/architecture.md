@@ -1284,6 +1284,13 @@ validation, and waits for one global accepted-generation commit before switching
 mesh, operators, timestep, recorders and displayed state together. A rejected
 candidate leaves the retained accepted buffers active.
 
+Canonical reassembly fingerprints the exact sparse input to the second-order
+outgoing trace eigensystem: trace-node order, impedance weights, and tangential
+operator entries. If that signature is unchanged, the candidate retains the
+accepted immutable modal system by shared ownership and skips the dense
+eigensolve. Any signature difference takes the ordinary cooperative compile;
+reuse is never inferred merely from an unchanged boundary-condition label.
+
 The source mesh/operators remain fixed during candidate preparation; only their
 state evolves. Transfer maps target that discretization, not a captured field
 snapshot. Primary `Q` uses support-aware conservative seven-node interpolation and

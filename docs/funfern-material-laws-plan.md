@@ -929,11 +929,12 @@ retain the exact mesh object and use the direct scalar identity constructor.
 Exact same-discretization complementary transfer is represented by one identity
 flag: it no longer retains or GPU-packs one row per quadrature sample. Remaining
 P2 work includes full-plan reuse needed by retiming and source-layout changes,
-followed by finer bulk/boundary operator dependency separation and unchanged
-outer-trace-mode reuse. Exact primary transfer is now compact too: it retains no
-duplicate per-node interpolation rows and is packed directly from its identity
-marker. P3 remains responsible for proportional and genuinely changed trace
-operators.
+followed by finer bulk/boundary operator dependency separation. Exact unchanged
+outer-trace modes are now retained by shared ownership when trace nodes,
+impedance weights and sparse tangential-operator entries all match. Exact
+primary transfer is compact too: it retains no duplicate per-node interpolation
+rows and is packed directly from its identity marker. P3 remains responsible
+for proportional and genuinely changed trace operators.
 
 ### Current implementation handoff
 

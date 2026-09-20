@@ -508,6 +508,15 @@ pub struct CanonicalOutgoingBoundary {
     trace_nodes: Vec<u32>,
     modes: Vec<CanonicalOutgoingMode>,
     auxiliary_count: usize,
+    signature: CanonicalOutgoingSignature,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CanonicalOutgoingSignature {
+    trace_nodes: Vec<u32>,
+    damping: Vec<f64>,
+    /// Sparse normalized-operator input before division by trace damping.
+    entries: Vec<(u32, u32, f64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -541,6 +550,10 @@ impl CanonicalOutgoingBoundary {
             .iter()
             .map(|mode| mode.trace.len() * std::mem::size_of::<f64>())
             .sum()
+    }
+
+    fn matches_quadratic(&self, quadratic: &QuadraticWaveOperator) -> Result<bool, WaveError> {
+        Ok(outgoing_signature(quadratic)?.as_ref() == Some(&self.signature))
     }
 
     /// Applies the autonomous passive boundary generator to trace `Q` followed
@@ -677,7 +690,7 @@ pub struct CanonicalWaveOperator {
     complementary_loss_rate: Vec<f64>,
     thin_gap_samples: Vec<ThinGapSample>,
     first_order_boundary_damping: Vec<f64>,
-    outgoing_boundary: Option<CanonicalOutgoingBoundary>,
+    outgoing_boundary: Option<Arc<CanonicalOutgoingBoundary>>,
     component_labels: Vec<u32>,
     component_count: usize,
     maximum_time_step: f64,
@@ -771,7 +784,11 @@ impl CanonicalWaveOperator {
     }
 
     pub fn outgoing_boundary(&self) -> Option<&CanonicalOutgoingBoundary> {
-        self.outgoing_boundary.as_ref()
+        self.outgoing_boundary.as_deref()
+    }
+
+    pub fn outgoing_boundary_handle(&self) -> Option<Arc<CanonicalOutgoingBoundary>> {
+        self.outgoing_boundary.clone()
     }
 
     pub fn constitutive_samples(&self) -> &[LinearConstitutiveSample] {
@@ -816,7 +833,7 @@ impl CanonicalWaveOperator {
             + self
                 .outgoing_boundary
                 .as_ref()
-                .map_or(0, CanonicalOutgoingBoundary::dense_transform_bytes)
+                .map_or(0, |boundary| boundary.dense_transform_bytes())
             + self.component_labels.len() * std::mem::size_of::<u32>()
     }
 
@@ -2481,7 +2498,7 @@ pub struct CanonicalAssemblyJob {
     complementary_loss_rate: Vec<f64>,
     interior_columns: Vec<Vec<u32>>,
     outgoing_job: Option<CanonicalOutgoingBoundaryJob>,
-    outgoing_boundary: Option<CanonicalOutgoingBoundary>,
+    outgoing_boundary: Option<Arc<CanonicalOutgoingBoundary>>,
 }
 
 #[derive(Clone, Copy)]
@@ -2501,6 +2518,16 @@ impl CanonicalAssemblyJob {
         model: TopologyWaveModel<'_>,
         constitutive_revision: u64,
     ) -> Result<Self, WaveError> {
+        Self::new_with_outgoing_reuse(mesh, quadratic, model, constitutive_revision, None)
+    }
+
+    pub fn new_with_outgoing_reuse(
+        mesh: Arc<TriMesh>,
+        quadratic: Arc<QuadraticWaveOperator>,
+        model: TopologyWaveModel<'_>,
+        constitutive_revision: u64,
+        previous_outgoing: Option<Arc<CanonicalOutgoingBoundary>>,
+    ) -> Result<Self, WaveError> {
         if mesh.geometry_revision != quadratic.geometry_revision()
             || mesh.mesh_revision != quadratic.mesh_revision()
             || mesh.triangles.len() != quadratic.element_nodes().len()
@@ -2518,6 +2545,10 @@ impl CanonicalAssemblyJob {
             interior_columns[sample.right_node as usize]
                 .extend([sample.left_node, sample.right_node]);
         }
+        let outgoing_boundary = match previous_outgoing {
+            Some(boundary) if boundary.matches_quadratic(&quadratic)? => Some(boundary),
+            _ => None,
+        };
         Ok(Self {
             mesh,
             geometric_support: vec![0.0; quadratic.degrees_of_freedom()],
@@ -2536,7 +2567,7 @@ impl CanonicalAssemblyJob {
             generation,
             phase: CanonicalAssemblyPhase::Elements(0),
             outgoing_job: None,
-            outgoing_boundary: None,
+            outgoing_boundary,
         })
     }
 
@@ -2619,6 +2650,10 @@ impl CanonicalAssemblyJob {
                     self.phase = CanonicalAssemblyPhase::ValidateInterior(row + 1);
                 }
                 CanonicalAssemblyPhase::Outgoing => {
+                    if self.outgoing_boundary.is_some() {
+                        self.phase = CanonicalAssemblyPhase::Finish;
+                        continue;
+                    }
                     if self.outgoing_job.is_none() {
                         match CanonicalOutgoingBoundaryJob::new(&self.quadratic) {
                             Ok(Some(job)) => self.outgoing_job = Some(job),
@@ -2637,7 +2672,7 @@ impl CanonicalAssemblyJob {
                     self.outgoing_job = None;
                     match result {
                         Ok(boundary) => {
-                            self.outgoing_boundary = Some(boundary);
+                            self.outgoing_boundary = Some(Arc::new(boundary));
                             self.phase = CanonicalAssemblyPhase::Finish;
                         }
                         Err(error) => {
@@ -2911,11 +2946,68 @@ fn linear_loss_rate(
     }
 }
 
+fn outgoing_signature(
+    quadratic: &QuadraticWaveOperator,
+) -> Result<Option<CanonicalOutgoingSignature>, WaveError> {
+    let trace_nodes = quadratic
+        .second_order_boundary_damping()
+        .iter()
+        .enumerate()
+        .filter_map(|(node, damping)| (*damping > 0.0).then_some(node as u32))
+        .collect::<Vec<_>>();
+    if trace_nodes.is_empty() {
+        if quadratic
+            .auxiliary_stiffness_values()
+            .iter()
+            .any(|value| value.abs() > 1.0e-14)
+        {
+            return Err(WaveError::InvalidMesh(
+                "an outgoing tangential operator has no positive trace impedance",
+            ));
+        }
+        return Ok(None);
+    }
+    let mut trace_position = vec![usize::MAX; quadratic.degrees_of_freedom()];
+    for (position, node) in trace_nodes.iter().enumerate() {
+        trace_position[*node as usize] = position;
+    }
+    let damping = trace_nodes
+        .iter()
+        .map(|node| quadratic.second_order_boundary_damping()[*node as usize])
+        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    for (trace_row, &node) in trace_nodes.iter().enumerate() {
+        let row = node as usize;
+        for entry in
+            quadratic.row_offsets()[row] as usize..quadratic.row_offsets()[row + 1] as usize
+        {
+            let column = quadratic.columns()[entry] as usize;
+            let trace_column = trace_position[column];
+            let value = quadratic.auxiliary_stiffness_values()[entry];
+            if trace_column == usize::MAX {
+                if value.abs() > 2.0e-12 {
+                    return Err(WaveError::InvalidMesh(
+                        "the outgoing tangential operator leaves its physical trace",
+                    ));
+                }
+                continue;
+            }
+            entries.push((trace_row as u32, trace_column as u32, value));
+        }
+    }
+    Ok(Some(CanonicalOutgoingSignature {
+        trace_nodes,
+        damping,
+        entries,
+    }))
+}
+
 /// Cooperative compiler for the dense non-local outgoing boundary. The trace
 /// eigensolve used to run inside the canonical assembly's final work unit; its
 /// cubic cost made that single supposedly time-budgeted unit hundreds of
 /// milliseconds on an adapted mesh.
 struct CanonicalOutgoingBoundaryJob {
+    signature: CanonicalOutgoingSignature,
     trace_nodes: Vec<u32>,
     damping: Vec<f64>,
     eigen: Option<SymmetricEigenJob>,
@@ -2929,53 +3021,17 @@ struct CanonicalOutgoingBoundaryJob {
 
 impl CanonicalOutgoingBoundaryJob {
     fn new(quadratic: &QuadraticWaveOperator) -> Result<Option<Self>, WaveError> {
-        let trace_nodes = quadratic
-            .second_order_boundary_damping()
-            .iter()
-            .enumerate()
-            .filter_map(|(node, damping)| (*damping > 0.0).then_some(node as u32))
-            .collect::<Vec<_>>();
-        if trace_nodes.is_empty() {
-            if quadratic
-                .auxiliary_stiffness_values()
-                .iter()
-                .any(|value| value.abs() > 1.0e-14)
-            {
-                return Err(WaveError::InvalidMesh(
-                    "an outgoing tangential operator has no positive trace impedance",
-                ));
-            }
+        let Some(signature) = outgoing_signature(quadratic)? else {
             return Ok(None);
-        }
+        };
+        let trace_nodes = signature.trace_nodes.clone();
+        let damping = signature.damping.clone();
         let count = trace_nodes.len();
-        let mut trace_position = vec![usize::MAX; quadratic.degrees_of_freedom()];
-        for (position, node) in trace_nodes.iter().enumerate() {
-            trace_position[*node as usize] = position;
-        }
-        let damping = trace_nodes
-            .iter()
-            .map(|node| quadratic.second_order_boundary_damping()[*node as usize])
-            .collect::<Vec<_>>();
         let mut normalized = vec![0.0; count * count];
-        for (trace_row, &node) in trace_nodes.iter().enumerate() {
-            let row = node as usize;
-            for entry in
-                quadratic.row_offsets()[row] as usize..quadratic.row_offsets()[row + 1] as usize
-            {
-                let column = quadratic.columns()[entry] as usize;
-                let trace_column = trace_position[column];
-                let value = quadratic.auxiliary_stiffness_values()[entry];
-                if trace_column == usize::MAX {
-                    if value.abs() > 2.0e-12 {
-                        return Err(WaveError::InvalidMesh(
-                            "the outgoing tangential operator leaves its physical trace",
-                        ));
-                    }
-                    continue;
-                }
-                normalized[trace_row * count + trace_column] =
-                    value / (damping[trace_row] * damping[trace_column]).sqrt();
-            }
+        for &(row, column, value) in &signature.entries {
+            let row = row as usize;
+            let column = column as usize;
+            normalized[row * count + column] = value / (damping[row] * damping[column]).sqrt();
         }
         let matrix_scale = normalized
             .iter()
@@ -2994,6 +3050,7 @@ impl CanonicalOutgoingBoundaryJob {
             }
         }
         Ok(Some(Self {
+            signature,
             trace_nodes,
             damping,
             eigen: Some(SymmetricEigenJob::new(normalized, count)?),
@@ -3061,6 +3118,7 @@ impl CanonicalOutgoingBoundaryJob {
                 trace_nodes: std::mem::take(&mut self.trace_nodes),
                 modes: std::mem::take(&mut self.modes),
                 auxiliary_count: self.auxiliary_count,
+                signature: std::mem::take(&mut self.signature),
             }));
         }
         None
@@ -4254,6 +4312,62 @@ mod tests {
             .unwrap();
         assert!(accounting.boundary_loss > 0.0);
         assert!(state.energy(&operator).unwrap() < before);
+    }
+
+    #[test]
+    fn canonical_reassembly_retains_an_identical_outgoing_trace_system() {
+        let mesh = Arc::new(square_with_outer_boundary());
+        let scene = Scene::default();
+        let quadratic = Arc::new(
+            QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &scene,
+                OuterBoundaryCondition::SecondOrderOutgoing,
+            )
+            .unwrap(),
+        );
+        let previous = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 72).unwrap();
+        let previous_boundary = previous.outgoing_boundary_handle().unwrap();
+        let mut job = CanonicalAssemblyJob::new_with_outgoing_reuse(
+            mesh.clone(),
+            quadratic.clone(),
+            TopologyWaveModel::from_scene(&scene),
+            73,
+            Some(previous_boundary.clone()),
+        )
+        .unwrap();
+        let reassembled = loop {
+            if let Some(result) = job.advance(1) {
+                break result.unwrap();
+            }
+        };
+        assert!(Arc::ptr_eq(
+            &previous_boundary,
+            &reassembled.outgoing_boundary_handle().unwrap()
+        ));
+
+        let reflecting = Arc::new(
+            QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &scene,
+                OuterBoundaryCondition::Reflecting,
+            )
+            .unwrap(),
+        );
+        let mut job = CanonicalAssemblyJob::new_with_outgoing_reuse(
+            mesh,
+            reflecting,
+            TopologyWaveModel::from_scene(&scene),
+            74,
+            Some(previous_boundary),
+        )
+        .unwrap();
+        let changed = loop {
+            if let Some(result) = job.advance(1) {
+                break result.unwrap();
+            }
+        };
+        assert!(changed.outgoing_boundary().is_none());
     }
 
     #[test]

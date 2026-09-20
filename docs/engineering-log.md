@@ -40,6 +40,12 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   complementary map. Same-discretization handoffs retain no duplicate scalar
   interpolation rows, and GPU transfer packing consumes the identity marker
   directly instead of allocating exported rows to rediscover it.
+- Canonical reassembly now retains an unchanged second-order outgoing modal
+  system by `Arc`. Reuse requires an exact signature match over trace nodes,
+  impedance weights and sparse tangential-operator entries; otherwise the
+  cooperative eigensolve runs normally. The topology regression demonstrates
+  that a loss-only material edit keeps the same modal object, while a core
+  regression rejects reuse when the outgoing trace is removed.
 
 ## 2026-09-20 — Browser preparation worker and overhaul branch
 
