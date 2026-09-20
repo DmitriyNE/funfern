@@ -588,6 +588,20 @@ impl DampingLaw {
         })
     }
 
+    /// The loss law's numbers at one physical sample. Keeping the time drive
+    /// beside the field-rate law lets the canonical compiler evaluate both at
+    /// the same synchronized stage without reopening authored expressions.
+    pub fn evaluate_at(
+        &self,
+        coordinates: MaterialCoordinates,
+        parameters: &[MaterialParameter],
+    ) -> Result<DampingLawValues, MaterialError> {
+        Ok(DampingLawValues {
+            rate: self.rate.evaluate_at(coordinates, parameters)?,
+            drive: self.drive.evaluate(parameters)?,
+        })
+    }
+
     fn fields(&self) -> Vec<&ScalarField> {
         let mut fields = self.rate.fields();
         fields.extend(self.drive.fields());
@@ -889,6 +903,151 @@ pub struct CoefficientLawValues {
     pub inverted: bool,
 }
 
+/// Evaluated loss-rate law. Stage 7 initially executes only `Constant` rate
+/// with a time drive; retaining the rate variant here gives Stage 8 one
+/// representation rather than a second field-dependent loss path.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DampingLawValues {
+    pub rate: RateLawValues,
+    pub drive: TimeDriveValues,
+}
+
+/// Bounded carrier phase state for one material drive.
+///
+/// The spatial part of a travelling modulation is deliberately not stored in
+/// this record: frequency edits preserve the common temporal carrier at their
+/// GPU commit boundary, while the newly authored wave vector continues to be
+/// evaluated in the material frame at each physical sample.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimeDriveRuntime {
+    anchor_time: f64,
+    anchor_phase_radians: f64,
+}
+
+impl TimeDriveRuntime {
+    /// Runtime state for an authored drive that has not yet been retuned.
+    pub fn authored(drive: TimeDriveValues) -> Result<Self, MaterialError> {
+        Self::new(0.0, drive.authored_phase_radians())
+    }
+
+    pub fn new(anchor_time: f64, anchor_phase_radians: f64) -> Result<Self, MaterialError> {
+        if !anchor_time.is_finite() || !anchor_phase_radians.is_finite() {
+            return Err(MaterialError::InvalidValue);
+        }
+        Ok(Self {
+            anchor_time,
+            anchor_phase_radians: reduce_phase(anchor_phase_radians),
+        })
+    }
+
+    pub fn anchor_time(self) -> f64 {
+        self.anchor_time
+    }
+
+    pub fn anchor_phase_radians(self) -> f64 {
+        self.anchor_phase_radians
+    }
+
+    /// Reanchors a changed drive at `commit_time` while retaining the old
+    /// instantaneous carrier phase. Callers use this for a frequency edit;
+    /// an explicit authored phase edit intentionally uses `authored` instead.
+    pub fn preserving_carrier_from(
+        old_drive: TimeDriveValues,
+        old_runtime: Self,
+        commit_time: f64,
+    ) -> Result<Self, MaterialError> {
+        let phase = old_runtime.carrier_phase(old_drive, commit_time)?;
+        Self::new(commit_time, phase)
+    }
+
+    pub fn carrier_phase(self, drive: TimeDriveValues, time: f64) -> Result<f64, MaterialError> {
+        if !self.anchor_time.is_finite()
+            || !self.anchor_phase_radians.is_finite()
+            || !time.is_finite()
+        {
+            return Err(MaterialError::InvalidValue);
+        }
+        let phase = self.anchor_phase_radians
+            + std::f64::consts::TAU * drive.frequency_hz() * (time - self.anchor_time);
+        phase
+            .is_finite()
+            .then(|| reduce_phase(phase))
+            .ok_or(MaterialError::InvalidValue)
+    }
+}
+
+/// One material-wide Switch trajectory. The normalized blend is shared by
+/// both constitutive rows; each row applies its own alternate factor.
+/// Reversing a ramp starts from the value at the accepted event boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialSwitchRuntime {
+    start_blend: f64,
+    target_blend: f64,
+    start_time: f64,
+    duration: f64,
+}
+
+impl Default for MaterialSwitchRuntime {
+    fn default() -> Self {
+        Self {
+            start_blend: 0.0,
+            target_blend: 0.0,
+            start_time: 0.0,
+            duration: 0.0,
+        }
+    }
+}
+
+impl MaterialSwitchRuntime {
+    pub fn blend(self, time: f64) -> Result<f64, MaterialError> {
+        if !time.is_finite() || !self.valid() {
+            return Err(MaterialError::InvalidValue);
+        }
+        if self.duration == 0.0 {
+            return Ok(self.target_blend);
+        }
+        let z = ((time - self.start_time) / self.duration).clamp(0.0, 1.0);
+        Ok(self.start_blend + (self.target_blend - self.start_blend) * smootherstep(z))
+    }
+
+    /// Starts or reverses a Switch at an accepted complete-step boundary.
+    pub fn begin(
+        self,
+        switched: bool,
+        commit_time: f64,
+        duration: f64,
+    ) -> Result<Self, MaterialError> {
+        if !commit_time.is_finite() || !duration.is_finite() || duration < 0.0 || !self.valid() {
+            return Err(MaterialError::InvalidValue);
+        }
+        let target_blend = if switched { 1.0 } else { 0.0 };
+        let start_blend = if duration == 0.0 {
+            target_blend
+        } else {
+            self.blend(commit_time)?
+        };
+        Ok(Self {
+            start_blend,
+            target_blend,
+            start_time: commit_time,
+            duration,
+        })
+    }
+
+    pub fn target_switched(self) -> bool {
+        self.target_blend == 1.0
+    }
+
+    fn valid(self) -> bool {
+        self.start_blend.is_finite()
+            && (0.0..=1.0).contains(&self.start_blend)
+            && matches!(self.target_blend, 0.0 | 1.0)
+            && self.start_time.is_finite()
+            && self.duration.is_finite()
+            && self.duration >= 0.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RateLawValues {
     Constant,
@@ -1133,47 +1292,70 @@ fn inverted_polynomial_stationary_points(chi1: f64, chi2: f64, bound: f64) -> Ve
 impl TimeDriveValues {
     /// The multiplier at time `t` and at a point of the material frame.
     pub fn multiplier(self, time: f64, coordinates: MaterialCoordinates) -> f64 {
+        let runtime = TimeDriveRuntime::authored(self)
+            .expect("evaluated material drives have finite authored phases");
+        self.multiplier_with_runtime(time, coordinates, runtime)
+            .expect("evaluated material drives have finite parameters")
+    }
+
+    /// The multiplier evaluated with the accepted carrier phase anchor.
+    pub fn multiplier_with_runtime(
+        self,
+        time: f64,
+        coordinates: MaterialCoordinates,
+        runtime: TimeDriveRuntime,
+    ) -> Result<f64, MaterialError> {
+        if !coordinates.x.is_finite() || !coordinates.y.is_finite() {
+            return Err(MaterialError::InvalidValue);
+        }
+        let carrier_phase = runtime.carrier_phase(self, time)?;
         match self {
-            Self::None => 1.0,
-            Self::ParametricPump {
-                depth,
-                frequency_hz,
-                phase_radians,
-            } => {
-                1.0 + depth
-                    * reduced_cos(std::f64::consts::TAU * frequency_hz * time + phase_radians)
+            Self::None => Ok(1.0),
+            Self::ParametricPump { depth, .. } => {
+                finite_positive(1.0 + depth * carrier_phase.cos())
             }
             Self::TimeCrystal {
-                depth,
-                frequency_hz,
-                phase_radians,
-                sharpness,
+                depth, sharpness, ..
             } => {
-                let carrier =
-                    reduced_cos(std::f64::consts::TAU * frequency_hz * time + phase_radians);
+                let carrier = carrier_phase.cos();
                 let square = if sharpness.abs() < 1.0e-6 {
                     // tanh(s c)/tanh(s) = c[1 + s²(1-c²)/3 + O(s⁴)].
                     carrier * (1.0 + sharpness * sharpness * (1.0 - carrier * carrier) / 3.0)
                 } else {
                     (sharpness * carrier).tanh() / sharpness.tanh()
                 };
-                1.0 + depth * square
+                finite_positive(1.0 + depth * square)
             }
             Self::TravellingModulation {
                 depth,
-                frequency_hz,
-                phase_radians,
                 wavenumber,
                 angle_radians,
+                ..
             } => {
                 let along =
                     coordinates.x * angle_radians.cos() + coordinates.y * angle_radians.sin();
-                1.0 + depth
-                    * reduced_cos(
-                        std::f64::consts::TAU * frequency_hz * time - wavenumber * along
-                            + phase_radians,
-                    )
+                finite_positive(
+                    1.0 + depth * reduce_phase(carrier_phase - wavenumber * along).cos(),
+                )
             }
+        }
+    }
+
+    pub fn frequency_hz(self) -> f64 {
+        match self {
+            Self::None => 0.0,
+            Self::ParametricPump { frequency_hz, .. }
+            | Self::TimeCrystal { frequency_hz, .. }
+            | Self::TravellingModulation { frequency_hz, .. } => frequency_hz,
+        }
+    }
+
+    pub fn authored_phase_radians(self) -> f64 {
+        match self {
+            Self::None => 0.0,
+            Self::ParametricPump { phase_radians, .. }
+            | Self::TimeCrystal { phase_radians, .. }
+            | Self::TravellingModulation { phase_radians, .. } => phase_radians,
         }
     }
 
@@ -1193,11 +1375,46 @@ impl TimeDriveValues {
     }
 }
 
-fn reduced_cos(phase: f64) -> f64 {
-    phase.rem_euclid(std::f64::consts::TAU).cos()
+fn reduce_phase(phase: f64) -> f64 {
+    phase.rem_euclid(std::f64::consts::TAU)
+}
+
+fn finite_positive(value: f64) -> Result<f64, MaterialError> {
+    (value.is_finite() && value > 0.0)
+        .then_some(value)
+        .ok_or(MaterialError::InvalidValue)
+}
+
+fn smootherstep(value: f64) -> f64 {
+    value * value * value * (value * (value * 6.0 - 15.0) + 10.0)
 }
 
 impl CoefficientLawValues {
+    /// Field-independent coefficient factor at one accepted solver stage.
+    /// Stage 7 uses this only when `field == Linear`; Stage 8 composes the
+    /// field multiplier and inversion against the physical field itself.
+    pub fn temporal_factor(
+        self,
+        time: f64,
+        coordinates: MaterialCoordinates,
+        drive_runtime: TimeDriveRuntime,
+        switch_runtime: MaterialSwitchRuntime,
+    ) -> Result<f64, MaterialError> {
+        let drive = self
+            .drive
+            .multiplier_with_runtime(time, coordinates, drive_runtime)?;
+        let blend = switch_runtime.blend(time)?;
+        let switch = self
+            .alternate
+            .map_or(1.0, |alternate| 1.0 + blend * (alternate - 1.0));
+        let product = finite_positive(drive * switch)?;
+        if self.inverted {
+            finite_positive(product.recip())
+        } else {
+            Ok(product)
+        }
+    }
+
     /// The range of `d(coefficient·u)/du` over the field's amplitude, the
     /// drive's cycle and both switch states, in units of the base coefficient
     /// — or `None` when the field law is not monotone. The step bound scales
@@ -1231,6 +1448,29 @@ impl CoefficientLawValues {
     pub fn stiffness_speed_ratio_range(self) -> Option<(f64, f64)> {
         let (low, high) = self.tangent_range()?;
         Some((low.sqrt(), high.sqrt()))
+    }
+}
+
+impl DampingLawValues {
+    /// Loss-rate factor at one synchronized stage. The Stage 7 executable
+    /// subset requires `rate == Constant`; the field argument is already part
+    /// of the contract for Stage 8 rather than being inferred from Q or b.
+    pub fn multiplier(
+        self,
+        field: f64,
+        time: f64,
+        coordinates: MaterialCoordinates,
+        drive_runtime: TimeDriveRuntime,
+    ) -> Result<f64, MaterialError> {
+        let value = self.rate.multiplier(field)
+            * self
+                .drive
+                .multiplier_with_runtime(time, coordinates, drive_runtime)?;
+        if value.is_finite() && value >= 0.0 {
+            Ok(value)
+        } else {
+            Err(MaterialError::InvalidValue)
+        }
     }
 }
 
@@ -2250,6 +2490,99 @@ mod tests {
         };
         assert!((at(0.0) - at(1.0)).abs() < 1.0e-12);
         assert!((at(0.0) - at(0.5)).abs() > 0.1);
+    }
+
+    #[test]
+    fn frequency_retime_preserves_the_carrier_at_the_commit_boundary() {
+        let old = TimeDriveValues::ParametricPump {
+            depth: 0.3,
+            frequency_hz: 1.25,
+            phase_radians: 0.4,
+        };
+        let new = TimeDriveValues::ParametricPump {
+            depth: 0.3,
+            frequency_hz: 2.75,
+            phase_radians: -2.0,
+        };
+        let old_runtime = TimeDriveRuntime::authored(old).unwrap();
+        let commit_time = 1234.567;
+        let new_runtime =
+            TimeDriveRuntime::preserving_carrier_from(old, old_runtime, commit_time).unwrap();
+        let before = old
+            .multiplier_with_runtime(commit_time, origin(), old_runtime)
+            .unwrap();
+        let after = new
+            .multiplier_with_runtime(commit_time, origin(), new_runtime)
+            .unwrap();
+        assert!((before - after).abs() < 1.0e-12);
+        assert_eq!(new_runtime.anchor_time(), commit_time);
+        assert_ne!(
+            new.multiplier_with_runtime(commit_time + 0.125, origin(), new_runtime),
+            old.multiplier_with_runtime(commit_time + 0.125, origin(), old_runtime)
+        );
+    }
+
+    #[test]
+    fn switch_reversal_is_value_continuous_and_zero_duration_is_immediate() {
+        let rising = MaterialSwitchRuntime::default()
+            .begin(true, 10.0, 4.0)
+            .unwrap();
+        let middle = rising.blend(12.0).unwrap();
+        assert!((middle - 0.5).abs() < 1.0e-12);
+        let falling = rising.begin(false, 12.0, 3.0).unwrap();
+        assert!((falling.blend(12.0).unwrap() - middle).abs() < 1.0e-12);
+        assert!(falling.blend(13.0).unwrap() < middle);
+        assert!(!falling.target_switched());
+
+        let hard = falling.begin(true, 13.0, 0.0).unwrap();
+        assert_eq!(hard.blend(13.0).unwrap(), 1.0);
+        assert!(hard.target_switched());
+    }
+
+    #[test]
+    fn reciprocal_switch_uses_the_reciprocal_of_the_live_trajectory() {
+        let direct = CoefficientLawValues {
+            field: FieldLawValues::Linear,
+            drive: TimeDriveValues::None,
+            alternate: Some(4.0),
+            inverted: false,
+        };
+        let inverse = CoefficientLawValues {
+            inverted: true,
+            ..direct
+        };
+        let switch = MaterialSwitchRuntime::default()
+            .begin(true, 0.0, 2.0)
+            .unwrap();
+        let drive = TimeDriveRuntime::authored(TimeDriveValues::None).unwrap();
+        let direct_middle = direct
+            .temporal_factor(1.0, origin(), drive, switch)
+            .unwrap();
+        let inverse_middle = inverse
+            .temporal_factor(1.0, origin(), drive, switch)
+            .unwrap();
+        assert!((direct_middle - 2.5).abs() < 1.0e-12);
+        assert!((inverse_middle - direct_middle.recip()).abs() < 1.0e-12);
+        assert_ne!(
+            inverse_middle, 0.625,
+            "endpoint interpolation is the wrong path"
+        );
+    }
+
+    #[test]
+    fn evaluated_loss_keeps_its_stage_time_drive() {
+        let law = DampingLaw {
+            rate: RateLaw::Constant,
+            drive: TimeDrive::ParametricPump {
+                depth: constant(0.25),
+                frequency_hz: constant(1.0),
+                phase_radians: constant(0.0),
+            },
+        };
+        let values = law.evaluate_at(origin(), &[]).unwrap();
+        let runtime = TimeDriveRuntime::authored(values.drive).unwrap();
+        assert!((values.multiplier(100.0, 0.0, origin(), runtime).unwrap() - 1.25).abs() < 1.0e-12);
+        assert!((values.multiplier(100.0, 0.5, origin(), runtime).unwrap() - 0.75).abs() < 1.0e-12);
     }
 
     #[test]

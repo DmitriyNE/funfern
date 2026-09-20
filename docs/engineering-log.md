@@ -5,6 +5,25 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Stage 7 starts from one temporal-runtime contract
+
+- Added the dormant f64 runtime primitives shared by material compilation,
+  GPU events and handoff: bounded carrier phase anchors, material-wide Switch
+  trajectories, and evaluated loss drives. A frequency edit can reanchor the
+  old instantaneous carrier at the actual commit time, while an explicit phase
+  edit remains an intentional phase change.
+- Mid-ramp Switch reversal now has a precise value-continuous construction from
+  the accepted-time blend. Zero-duration switching is an immediate complete-step
+  event. Constitutive alternates use the shared blend independently per row.
+- Reciprocal coefficient laws evaluate the reciprocal of the complete live
+  drive/Switch trajectory. They never interpolate between reciprocal endpoint
+  values. Focused tests pin phase continuity, reversal, hard switching,
+  reciprocal semantics, and time-driven constant loss.
+- This commit does not make authored drives executable. Next, the canonical
+  compiler must retain material-frame coefficient/loss samples and stable
+  runtime identities, then the f64 stage-time oracle must close before GPU
+  table/layout work begins.
+
 ## 2026-09-20 — Physics skins expose only their own UI vocabulary
 
 - Mechanical no longer offers the canonical complementary vector as an
