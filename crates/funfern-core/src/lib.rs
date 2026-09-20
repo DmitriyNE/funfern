@@ -1,5 +1,6 @@
 //! Dependency-free f64 geometry for the funfern editor.
 mod canonical_consumer;
+mod canonical_temporal;
 mod canonical_transfer;
 mod canonical_wave;
 mod geometry;
@@ -17,6 +18,7 @@ mod volume_source;
 mod wave;
 mod wave_quadratic;
 pub use canonical_consumer::*;
+pub use canonical_temporal::*;
 pub use canonical_transfer::*;
 pub use canonical_wave::*;
 pub use geometry::*;

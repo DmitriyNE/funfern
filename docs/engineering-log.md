@@ -20,9 +20,17 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   values. Focused tests pin phase continuity, reversal, hard switching,
   reciprocal semantics, and time-driven constant loss.
 - This commit does not make authored drives executable. Next, the canonical
-  compiler must retain material-frame coefficient/loss samples and stable
-  runtime identities, then the f64 stage-time oracle must close before GPU
-  table/layout work begins.
+  production path still rejects them. A dormant temporal wrapper now retains
+  exact material-frame coefficient/loss samples and stable material-ID runtime
+  ownership beside the fixed operator. It evaluates assembled primary maps,
+  complementary inverses, forces and frozen loss rates at an explicit time;
+  inert calls delegate exactly to the existing fixed path.
+- Coverage includes travelling node/quadrature coordinates, independent
+  contributions at shared material nodes, TE primary/complementary placement,
+  reciprocal switching, physical loss-channel placement, and explicit Stage 8
+  rejection. Next, use these evaluators in the full f64 KDK composition, add
+  trajectory timestep bounds and temporal-work accounting, then close the
+  boundary/filter/AMR gates before GPU table work.
 
 ## 2026-09-20 — Physics skins expose only their own UI vocabulary
 
