@@ -5,6 +5,23 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-20 — Threaded browser handoff packing matches native placement
+
+- The GRIN-lens boundary-move report exposed another browser-only scheduling
+  fallback: at 34,415 DOFs the canonical GPU plan and transfer took 333 ms to
+  pack, and threaded Wasm performed all of it synchronously in the UI callback.
+  Native already dispatched the identical owned job away from the UI thread.
+- The isolated-browser pool now has a third execution slot for this dependent
+  one-shot task, in addition to the two permanent preparation and AMR receiver
+  loops. The native and threaded-browser call site is shared; only executor
+  creation differs. Static Wasm retains synchronous packing as its explicit
+  no-threads fallback.
+- Browser startup coverage now requires topology and AMR worker handshakes, a
+  real AMR result, and completion of a background GPU-pack job. This guards
+  both worker capacity and the off-UI-thread handoff branch. Typed-array to
+  `ShaderBuffer` serialization remains on the publication path and is the next
+  place to inspect if a smaller mesh-scaled hitch survives.
+
 ## 2026-09-20 — Browser AMR worker starvation fixed
 
 - The threaded WebAssembly bootstrap allocated one Rayon worker but submitted

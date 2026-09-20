@@ -72,21 +72,28 @@ pub(crate) fn set_browser_amr_job_status(status: &str) {
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+pub(crate) fn set_browser_gpu_pack_status(status: &str) {
+    set_browser_worker_status("data-funfern-gpu-pack", status);
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
 fn main() {
     set_browser_preparation_worker_status("initializing");
     set_browser_amr_worker_status("initializing");
     set_browser_amr_job_status("waiting");
+    set_browser_gpu_pack_status("waiting");
     wasm_bindgen_futures::spawn_local(async {
         // Topology preparation and AMR each own a permanent receiver loop. A
-        // single Rayon worker can enter only one of them, leaving the other
-        // queue permanently starved rather than merely slow.
-        const BACKGROUND_WORKERS: usize = 2;
+        // third execution slot gives dependent GPU-plan packing the same
+        // off-UI-thread placement it has natively; the two receiver loops do
+        // not return to Rayon between jobs and therefore cannot lend it a slot.
+        const BACKGROUND_WORKERS: usize = 3;
         let worker_ready = wasm_bindgen_futures::JsFuture::from(
             wasm_bindgen_rayon::init_thread_pool(BACKGROUND_WORKERS),
         )
         .await
         .is_ok();
-        ui::set_browser_preparation_worker_ready(worker_ready);
+        ui::set_browser_background_pool_ready(worker_ready);
         set_browser_preparation_worker_status(if worker_ready { "ready" } else { "unavailable" });
         set_browser_amr_worker_status(if worker_ready { "ready" } else { "unavailable" });
         run_app();

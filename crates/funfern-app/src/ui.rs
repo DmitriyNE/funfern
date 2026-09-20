@@ -67,13 +67,14 @@ const FRAME_HISTORY: usize = 120;
 const EVENT_LOG_ENTRIES: usize = 200;
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
-static BROWSER_PREPARATION_WORKER_READY: AtomicBool = AtomicBool::new(false);
+static BROWSER_BACKGROUND_POOL_READY: AtomicBool = AtomicBool::new(false);
 
-/// Called once the shared-memory Rayon worker has entered its browser Worker.
-/// If bootstrap fails the flag stays false and preparation remains cooperative.
+/// Called once the shared-memory Rayon pool is ready to run every browser
+/// background lane. If bootstrap fails, target-specific cooperative fallbacks
+/// remain in force.
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
-pub(crate) fn set_browser_preparation_worker_ready(ready: bool) {
-    BROWSER_PREPARATION_WORKER_READY.store(ready, Ordering::Release);
+pub(crate) fn set_browser_background_pool_ready(ready: bool) {
+    BROWSER_BACKGROUND_POOL_READY.store(ready, Ordering::Release);
 }
 /// Seconds of progress the steps-per-second readout averages over.
 const STEP_RATE_WINDOW: f64 = 0.5;
@@ -934,7 +935,7 @@ fn spawn_preparation_worker(
     job_receiver: Receiver<TopologyPreparationJob>,
     event_sender: Sender<BackgroundPreparationEvent>,
 ) -> bool {
-    if !BROWSER_PREPARATION_WORKER_READY.load(Ordering::Acquire) {
+    if !BROWSER_BACKGROUND_POOL_READY.load(Ordering::Acquire) {
         return false;
     }
     crate::set_browser_preparation_worker_status("scheduled");
@@ -1307,7 +1308,7 @@ fn spawn_amr_worker(
     job_receiver: Receiver<BackgroundAmrCommand>,
     event_sender: Sender<BackgroundAmrEvent>,
 ) -> bool {
-    if !BROWSER_PREPARATION_WORKER_READY.load(Ordering::Acquire) {
+    if !BROWSER_BACKGROUND_POOL_READY.load(Ordering::Acquire) {
         return false;
     }
     crate::set_browser_amr_worker_status("scheduled");
@@ -1375,6 +1376,75 @@ fn compile_gpu_upload(
         plan,
         transfer: Some(gpu_transfer),
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_gpu_upload_preparation(
+    sender: Sender<Result<PreparedGpuUpload, String>>,
+    candidate: PreparedTopology,
+    active: Option<Arc<PreparedTopology>>,
+    time_step: f64,
+    runtime_serials: [u32; 4],
+) {
+    let failure_sender = sender.clone();
+    if std::thread::Builder::new()
+        .name("funfern-gpu-pack".into())
+        .spawn(move || {
+            let _ = sender.send(compile_gpu_upload(
+                candidate,
+                active,
+                time_step,
+                runtime_serials,
+            ));
+        })
+        .is_err()
+    {
+        let _ = failure_sender.send(Err("Canonical GPU packing worker did not start".into()));
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+fn dispatch_gpu_upload_preparation(
+    sender: Sender<Result<PreparedGpuUpload, String>>,
+    candidate: PreparedTopology,
+    active: Option<Arc<PreparedTopology>>,
+    time_step: f64,
+    runtime_serials: [u32; 4],
+) {
+    if BROWSER_BACKGROUND_POOL_READY.load(Ordering::Acquire) {
+        crate::set_browser_gpu_pack_status("scheduled");
+        rayon::spawn(move || {
+            let _ = sender.send(compile_gpu_upload(
+                candidate,
+                active,
+                time_step,
+                runtime_serials,
+            ));
+        });
+    } else {
+        let _ = sender.send(compile_gpu_upload(
+            candidate,
+            active,
+            time_step,
+            runtime_serials,
+        ));
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "browser-threads")))]
+fn dispatch_gpu_upload_preparation(
+    sender: Sender<Result<PreparedGpuUpload, String>>,
+    candidate: PreparedTopology,
+    active: Option<Arc<PreparedTopology>>,
+    time_step: f64,
+    runtime_serials: [u32; 4],
+) {
+    let _ = sender.send(compile_gpu_upload(
+        candidate,
+        active,
+        time_step,
+        runtime_serials,
+    ));
 }
 
 /// What the probe buffers on the GPU were last built for. The topology names
@@ -7860,15 +7930,7 @@ impl Playground {
                 let active = self.runtime.active().cloned();
                 let runtime_serials = display.runtime_serials;
                 let (sender, receiver) = mpsc::channel();
-                #[cfg(not(target_arch = "wasm32"))]
-                let _ = std::thread::Builder::new()
-                    .name("funfern-gpu-pack".into())
-                    .spawn(move || {
-                        let _ =
-                            sender.send(compile_gpu_upload(candidate, active, dt, runtime_serials));
-                    });
-                #[cfg(target_arch = "wasm32")]
-                let _ = sender.send(compile_gpu_upload(candidate, active, dt, runtime_serials));
+                dispatch_gpu_upload_preparation(sender, candidate, active, dt, runtime_serials);
                 self.gpu_upload_preparation = Some(GpuUploadPreparation {
                     token,
                     time_step: dt,
@@ -7885,6 +7947,8 @@ impl Playground {
                 Ok(result) => {
                     job.result = Some(result);
                     self.handoff_packed = Some(Instant::now());
+                    #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+                    crate::set_browser_gpu_pack_status("finished");
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {

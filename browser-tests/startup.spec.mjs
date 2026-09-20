@@ -43,6 +43,15 @@ test("WebGPU app starts, advances, and resizes its render target", async ({ page
         { timeout: 30_000 },
       )
       .toMatch(/^(progress|finished)$/);
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            document.documentElement.getAttribute("data-funfern-gpu-pack"),
+          ),
+        { timeout: 30_000 },
+      )
+      .toBe("finished");
   } else {
     expect(
       await page.evaluate(() =>
@@ -57,6 +66,11 @@ test("WebGPU app starts, advances, and resizes its render target", async ({ page
     expect(
       await page.evaluate(() =>
         document.documentElement.getAttribute("data-funfern-amr-job"),
+      ),
+    ).toBeNull();
+    expect(
+      await page.evaluate(() =>
+        document.documentElement.getAttribute("data-funfern-gpu-pack"),
       ),
     ).toBeNull();
   }
