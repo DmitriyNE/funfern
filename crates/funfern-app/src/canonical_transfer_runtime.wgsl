@@ -1,5 +1,5 @@
 // Runtime/clock half of canonical generation handoff.
-const TRANSFER_LAYOUT_VERSION: u32 = 1u;
+const TRANSFER_LAYOUT_VERSION: u32 = 2u;
 const NO_INDEX: u32 = 0xffffffffu;
 const DRIVE_TARGET_PARAMETERS: u32 = 0x80000000u;
 const DRIVE_INDEX_MASK: u32 = 0x7fffffffu;
@@ -63,6 +63,22 @@ fn new_float(word: u32, lane: u32) -> f32 {
 }
 fn mapped_index(offset: u32, index: u32) -> u32 {
     return transfer[offset + index / 4u].data[index % 4u];
+}
+fn write_material_runtime(
+    root: u32,
+    phase: vec4<f32>,
+    switch_state: vec4<f32>,
+    frequency: vec4<f32>,
+) {
+    let phase_bits = bitcast<vec4<u32>>(phase);
+    let switch_bits = bitcast<vec4<u32>>(switch_state);
+    let frequency_bits = bitcast<vec4<u32>>(frequency);
+    for (var slot = 0u; slot < 2u; slot += 1u) {
+        let base = root + 3u * slot;
+        new_tables[base].data = phase_bits;
+        new_tables[base + 1u].data = switch_bits;
+        new_tables[base + 2u].data = frequency_bits;
+    }
 }
 fn old_drive(base: u32, elapsed: f32) -> f32 {
     let parameters = vec4<f32>(
@@ -169,6 +185,43 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
             start_drive(new_base, preparation_delta);
         }
     }
+    let material_header = transfer[8].data;
+    let target_materials = material_header.z;
+    if material_header.w != 0u && i < target_materials {
+        let mapping = transfer[material_header.x + i].data;
+        let new_header = new_tables[new_control.runtime_slots.z].data;
+        let new_root = new_header.w + 6u * i;
+        let target_phase = bitcast<vec4<f32>>(new_tables[new_root].data);
+        var phase = vec4<f32>(0.0);
+        var switch_state = bitcast<vec4<f32>>(new_tables[new_root + 1u].data);
+        let frequency = bitcast<vec4<f32>>(new_tables[new_root + 2u].data);
+        if mapping.x != NO_INDEX {
+            let old_header = old_tables[old_control.runtime_slots.z].data;
+            let old_slot = old_control.runtime_slots.y & 1u;
+            let old_root = old_header.w + 6u * mapping.x + 3u * old_slot;
+            let old_phase = bitcast<vec4<f32>>(old_tables[old_root].data);
+            let old_switch = bitcast<vec4<f32>>(old_tables[old_root + 1u].data);
+            let old_frequency = bitcast<vec4<f32>>(old_tables[old_root + 2u].data);
+            for (var lane = 0u; lane < 4u; lane += 1u) {
+                phase[lane] = select(
+                    reduced_phase(target_phase[lane] + frequency[lane] * preparation_delta),
+                    reduced_phase(old_phase[lane] + old_frequency[lane] * old_control.clock_f32.y),
+                    (mapping.y & (1u << lane)) != 0u);
+            }
+            switch_state = vec4<f32>(
+                old_switch.x,
+                old_switch.y,
+                old_switch.z - old_control.clock_f32.y,
+                old_switch.w);
+        } else {
+            for (var lane = 0u; lane < 4u; lane += 1u) {
+                phase[lane] = reduced_phase(
+                    target_phase[lane] + frequency[lane] * preparation_delta);
+            }
+            switch_state.z -= preparation_delta;
+        }
+        write_material_runtime(new_root, phase, switch_state, frequency);
+    }
     if i != 0u { return; }
     let epoch_low = old_control.clock_u32.x + 1u;
     let epoch_high = old_control.clock_u32.y + select(0u, 1u, epoch_low == 0u);
@@ -188,12 +241,15 @@ fn transfer_runtime(@builtin(global_invocation_id) id: vec3<u32>) {
         select(old_control.runtime_serials.y, requested_serials.y, requested_serials.y != 0u),
         select(old_control.runtime_serials.z, requested_serials.z, requested_serials.z != 0u),
         select(old_control.runtime_serials.w, requested_serials.w, requested_serials.w != 0u));
-    new_control.runtime_slots = vec4<u32>(0u);
     new_control.accepted_accounting_a = old_control.accepted_accounting_a;
     new_control.accepted_accounting_b = old_control.accepted_accounting_b;
     new_control.candidate_accounting_a = old_control.accepted_accounting_a;
     new_control.candidate_accounting_b = old_control.accepted_accounting_b;
     if source_drives > old_control.counts_c.z
+        || (material_header.w != 0u
+            && (material_header.y == 0u || material_header.z == 0u
+                || old_control.runtime_slots.w == 0u
+                || new_control.runtime_slots.w == 0u))
         || !all(current_origin >= vec2<f32>(-MAX_FINITE))
         || !all(current_origin <= vec2<f32>(MAX_FINITE)) {
         reject(STATUS_LAYOUT);

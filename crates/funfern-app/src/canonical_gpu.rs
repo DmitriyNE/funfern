@@ -78,8 +78,8 @@ const EVENT_TEMPORAL_SWITCH: u32 = 7;
 const EVENT_TEMPORAL_LAW_PATCH: u32 = 8;
 const RESIDENT_FILTER_DISPATCHES: u64 = 7;
 const RESIDENT_FILTER_ACCOUNTING_DISPATCHES: u64 = 1;
-const TRANSFER_LAYOUT_VERSION: u32 = 1;
-const TRANSFER_HEADER_WORDS: usize = 8;
+const TRANSFER_LAYOUT_VERSION: u32 = 2;
+const TRANSFER_HEADER_WORDS: usize = 9;
 const HANDOFF_RECEIPT_MAGIC: u32 = 0x4841_4e44;
 const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
 const DRIVE_INDEX_MASK: u32 = !DRIVE_TARGET_PARAMETERS;
@@ -425,6 +425,8 @@ pub struct CanonicalGpuTransferPlan {
     target_component_count: usize,
     source_drive_count: usize,
     target_drive_count: usize,
+    source_material_runtime_count: usize,
+    target_material_runtime_count: usize,
     words: Vec<GpuCanonicalTransferWord>,
 }
 
@@ -2124,9 +2126,132 @@ impl CanonicalGpuTransferPlan {
             target_component_count: target.component_count(),
             source_drive_count: source_forcing.sources().len(),
             target_drive_count: target_forcing.sources().len(),
+            source_material_runtime_count: 0,
+            target_material_runtime_count: 0,
             words,
         })
     }
+
+    /// Adds stable material-runtime ownership to an already prepared geometry
+    /// transfer. This is deliberately explicit: a static/temporal conversion
+    /// has no generally valid physical initialization and must not silently
+    /// reset or invent carrier and Switch state.
+    pub fn with_temporal_material_runtime(
+        mut self,
+        source: &CanonicalGpuPlan,
+        target: &CanonicalGpuPlan,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        let source_manifest =
+            source
+                .manifest
+                .temporal
+                .ok_or(CanonicalGpuBuildError::InvalidLayout(
+                    "temporal runtime transfer requires a temporal source generation",
+                ))?;
+        let target_manifest =
+            target
+                .manifest
+                .temporal
+                .ok_or(CanonicalGpuBuildError::InvalidLayout(
+                    "temporal runtime transfer requires a temporal target generation",
+                ))?;
+        if source.node_count != self.source_node_count
+            || source.sample_count != self.source_sample_count
+            || target.node_count != self.target_node_count
+            || target.sample_count != self.target_sample_count
+            || source_manifest.runtime_record_count != source.temporal_runtime_materials.len()
+            || target_manifest.runtime_record_count != target.temporal_runtime_materials.len()
+            || self.words[8].data.w != 0
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "temporal runtime tables do not match the transfer generations",
+            ));
+        }
+
+        let source_signatures = temporal_drive_signatures(source)?;
+        let target_signatures = temporal_drive_signatures(target)?;
+        let source_indices = source
+            .temporal_runtime_materials
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, material)| (material, index))
+            .collect::<BTreeMap<_, _>>();
+
+        // Remove receipt padding before extending the immutable map payload.
+        self.words.truncate(self.manifest.word_count);
+        let mapping_offset = self.words.len();
+        for (target_index, material) in target.temporal_runtime_materials.iter().enumerate() {
+            let Some(&source_index) = source_indices.get(material) else {
+                self.words.push(transfer_word(NO_INDEX, 0, 0, 0));
+                continue;
+            };
+            let mut preserve_carrier = 0_u32;
+            for lane in 0..4 {
+                if source_signatures[source_index][lane].is_some()
+                    && source_signatures[source_index][lane]
+                        == target_signatures[target_index][lane]
+                {
+                    preserve_carrier |= 1 << lane;
+                }
+            }
+            self.words.push(transfer_word(
+                usize_u32(source_index)?,
+                preserve_carrier,
+                0,
+                0,
+            ));
+        }
+        self.source_material_runtime_count = source_manifest.runtime_record_count;
+        self.target_material_runtime_count = target_manifest.runtime_record_count;
+        self.words[8] = transfer_word(
+            usize_u32(mapping_offset)?,
+            usize_u32(self.source_material_runtime_count)?,
+            usize_u32(self.target_material_runtime_count)?,
+            1,
+        );
+        self.manifest.word_count = self.words.len();
+        self.words.resize(
+            self.words.len().max(self.target_node_count + 1),
+            GpuCanonicalTransferWord::default(),
+        );
+        self.words[5].data.y = usize_u32(self.manifest.word_count)?;
+        self.manifest.bytes = self.words.len() * size_of::<GpuCanonicalTransferWord>();
+        Ok(self)
+    }
+}
+
+type TemporalDriveSignature = Option<(u32, u32)>;
+
+fn temporal_drive_signatures(
+    plan: &CanonicalGpuPlan,
+) -> Result<Vec<[TemporalDriveSignature; 4]>, CanonicalGpuBuildError> {
+    let manifest = plan
+        .manifest
+        .temporal
+        .ok_or(CanonicalGpuBuildError::InvalidLayout(
+            "a temporal runtime signature requires a temporal generation",
+        ))?;
+    let header = plan.tables[manifest.header_offset].data;
+    let mut signatures = vec![[None; 4]; manifest.runtime_record_count];
+    for record in temporal_coefficient_records(plan, header)? {
+        let metadata = record[0].data;
+        let runtime = metadata.x as usize;
+        let lane = metadata.y as usize;
+        if runtime >= signatures.len() || lane >= 4 || metadata.z > TEMPORAL_DRIVE_TRAVELLING {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a temporal coefficient names an invalid runtime drive",
+            ));
+        }
+        let signature = (metadata.z, record[2].data.z);
+        if signatures[runtime][lane].is_some_and(|existing| existing != signature) {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "one material runtime lane has inconsistent drive metadata",
+            ));
+        }
+        signatures[runtime][lane] = Some(signature);
+    }
+    Ok(signatures)
 }
 
 fn transfer_word(x: u32, y: u32, z: u32, w: u32) -> GpuCanonicalTransferWord {
@@ -3246,12 +3371,18 @@ impl CanonicalGpuRequest {
                     + transfer.source_gap_count
                     + transfer.source_outgoing_count
             || source.drive_count as usize != transfer.source_drive_count
+            || source.material_runtime_count as usize != transfer.source_material_runtime_count
             || target.node_count != transfer.target_node_count
             || target.sample_count != transfer.target_sample_count
             || target.control.counts_b.x as usize != transfer.target_gap_count
             || target.auxiliary_count != transfer.target_gap_count + transfer.target_outgoing_count
             || target.control.counts_c.w as usize != transfer.target_component_count
             || target.control.counts_c.z as usize != transfer.target_drive_count
+            || target
+                .manifest
+                .temporal
+                .map_or(0, |manifest| manifest.runtime_record_count)
+                != transfer.target_material_runtime_count
             || target.event_kind != EVENT_NONE
         {
             return Err("canonical GPU handoff layouts do not match");
@@ -4992,7 +5123,16 @@ fn compute_canonical_handoff(
         });
     pass.set_bind_group(0, &groups.runtime, &[]);
     pass.set_pipeline(pipelines[0]);
-    pass.dispatch_workgroups(workgroups(target.node_count.max(target.drive_count)), 1, 1);
+    pass.dispatch_workgroups(
+        workgroups(
+            target
+                .node_count
+                .max(target.drive_count)
+                .max(target.material_runtime_count),
+        ),
+        1,
+        1,
+    );
 
     pass.set_bind_group(0, &groups.map, &[]);
     pass.set_pipeline(pipelines[1]);
@@ -5258,7 +5398,7 @@ mod tests {
     use funfern_core::{
         CanonicalRateDrive, CanonicalSource, CoefficientLaw, MeshingOptions,
         OuterBoundaryCondition, QuadraticTransferMap, QuadraticWaveOperator, ScalarField, Scene,
-        TimeDrive, mesh_scene,
+        TimeDrive, TriMesh, mesh_scene,
     };
 
     fn plan(boundary: OuterBoundaryCondition) -> CanonicalGpuPlan {
@@ -5297,6 +5437,9 @@ mod tests {
     }
 
     fn temporal_plan() -> (
+        Scene,
+        TriMesh,
+        QuadraticWaveOperator,
         CanonicalTemporalWaveOperator,
         CanonicalTemporalWaveState,
         CanonicalGpuPlan,
@@ -5374,7 +5517,7 @@ mod tests {
             CanonicalGpuClock::initial(time_step).unwrap(),
         )
         .unwrap();
-        (operator, state, plan)
+        (scene, mesh, scalar, operator, state, plan)
     }
 
     #[test]
@@ -5423,7 +5566,7 @@ mod tests {
 
     #[test]
     fn temporal_tables_match_the_f64_material_maps_at_every_kdk_stage() {
-        let (operator, state, mut plan) = temporal_plan();
+        let (_, _, _, operator, state, mut plan) = temporal_plan();
         let manifest = plan.manifest.temporal.unwrap();
         assert_eq!(
             manifest.primary_record_count,
@@ -5480,7 +5623,7 @@ mod tests {
 
     #[test]
     fn packed_f32_temporal_kdk_matches_the_f64_bulk_reference() {
-        let (operator, mut state, plan) = temporal_plan();
+        let (_, _, _, operator, mut state, plan) = temporal_plan();
         let (actual_primary, actual_complementary) = packed_temporal_step(&plan);
         state.step(&operator).unwrap();
         for (actual, expected) in actual_primary.iter().zip(state.primary_flux()) {
@@ -5497,7 +5640,7 @@ mod tests {
 
     #[test]
     fn temporal_runtime_rebase_preserves_drive_and_switch_trajectories() {
-        let (_, _, mut plan) = temporal_plan();
+        let (_, _, _, _, _, mut plan) = temporal_plan();
         let elapsed = 0.71_f32;
         let probe = 0.19_f32;
         let before = (0..plan.node_count)
@@ -5673,6 +5816,89 @@ mod tests {
     }
 
     #[test]
+    fn temporal_handoff_maps_materials_and_distinguishes_frequency_from_phase_edits() {
+        let (_, mesh, scalar, operator, _, source_plan) = temporal_plan();
+        let mut target_plan = source_plan.clone();
+        let manifest = target_plan.manifest.temporal.unwrap();
+        let header = target_plan.tables[manifest.header_offset].data;
+        for (start, count) in [
+            (header.x as usize, manifest.primary_record_count),
+            (header.z as usize, manifest.complementary_record_count),
+        ] {
+            for record in 0..count {
+                let word = start + record * TEMPORAL_COEFFICIENT_WORDS;
+                let drive_lane = target_plan.tables[word].data.y;
+                if drive_lane == 0 {
+                    target_plan.tables[word + 1].data.w = 1.7_f32.to_bits();
+                } else if drive_lane == 1 {
+                    target_plan.tables[word + 2].data.z = 0.91_f32.to_bits();
+                }
+            }
+        }
+        let runtime = header.w as usize;
+        for slot in 0..TEMPORAL_RUNTIME_SLOTS {
+            let base = runtime + slot * TEMPORAL_RUNTIME_WORDS_PER_SLOT;
+            target_plan.tables[base].data.y = 0.91_f32.to_bits();
+            target_plan.tables[base + 2].data.x = 1.7_f32.to_bits();
+        }
+
+        let interpolation =
+            QuadraticTransferMap::identity_on_mesh(&mesh, &scalar, &scalar).unwrap();
+        let primary =
+            CanonicalPrimaryTransferMap::prepare(&interpolation, operator.base(), operator.base())
+                .unwrap();
+        let vector =
+            CanonicalVectorTransferMap::prepare(&mesh, operator.base(), &mesh, operator.base())
+                .unwrap();
+        let gap = CanonicalThinGapHistoryTransferMap::prepare(
+            operator.base().thin_gap_samples(),
+            operator.base().thin_gap_samples(),
+        )
+        .unwrap();
+        let outgoing = CanonicalOutgoingHistoryTransferMap::prepare(
+            &interpolation,
+            operator.base(),
+            operator.base(),
+        )
+        .unwrap();
+        let forcing = CanonicalForcing::none(operator.base());
+        let runtime_transfer = CanonicalGpuRuntimeTransfer::identity(
+            operator.base(),
+            operator.base(),
+            &forcing,
+            &forcing,
+        )
+        .unwrap();
+        let transfer = CanonicalGpuTransferPlan::compile(
+            operator.base(),
+            operator.base(),
+            &forcing,
+            &forcing,
+            &primary,
+            &vector,
+            &gap,
+            &outgoing,
+            &runtime_transfer,
+        )
+        .unwrap()
+        .with_temporal_material_runtime(&source_plan, &target_plan)
+        .unwrap();
+
+        assert_eq!(transfer.source_material_runtime_count, 1);
+        assert_eq!(transfer.target_material_runtime_count, 1);
+        assert_eq!(transfer.words[8].data.y, 1);
+        assert_eq!(transfer.words[8].data.z, 1);
+        let mapping = transfer.words[transfer.words[8].data.x as usize].data;
+        assert_eq!(mapping.x, 0);
+        assert_ne!(mapping.y & 1, 0);
+        assert_eq!(mapping.y & 2, 0);
+        assert_eq!(transfer.manifest.word_count, TRANSFER_HEADER_WORDS + 1);
+
+        naga::front::wgsl::parse_str(include_str!("canonical_transfer.wgsl")).unwrap();
+        naga::front::wgsl::parse_str(include_str!("canonical_transfer_runtime.wgsl")).unwrap();
+    }
+
+    #[test]
     fn edited_source_handoff_selects_target_parameters_with_old_runtime_anchor() {
         let scene = Scene::initial();
         let mesh = mesh_scene(
@@ -5757,7 +5983,7 @@ mod tests {
 
     #[test]
     fn temporal_switch_payload_defers_its_timestamp_to_the_gpu() {
-        let (_, state, _) = temporal_plan();
+        let (_, _, _, _, state, _) = temporal_plan();
         let material = state.runtime().records()[0].material();
         let event =
             CanonicalGpuLiveEvent::temporal_switch(&state, material, false, 0.75, 11).unwrap();
@@ -5777,7 +6003,7 @@ mod tests {
 
     #[test]
     fn temporal_law_patch_requires_one_static_layout_and_drive_kind() {
-        let (_, _, current) = temporal_plan();
+        let (_, _, _, _, _, current) = temporal_plan();
         let mut target = current.clone();
         let manifest = target.manifest.temporal.unwrap();
         let header = target.tables[manifest.header_offset].data;

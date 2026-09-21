@@ -1036,7 +1036,15 @@ coefficient records together. The combined clock-rebase/Switch/frequency-depth-
 alternate-spatial-edit run retains `3.63e-7` relative Q and `2.41e-6` relative
 b agreement with its f64 piecewise-operator oracle. Drive-kind, material
 ownership, static-operator and explicit phase changes remain generation edits;
-temporal generation transfer and injected event rollback are still open.
+the generation path now maps runtime records by stable material ID, preserves
+accepted carriers across frequency edits, deliberately applies target-authored
+phase for explicit phase/drive-kind changes, and translates an active Switch
+into the target epoch. A production-render-graph gate combining those cases
+matched its f64 oracle after handoff to `2.99e-7` relative Q and `2.09e-6`
+relative b error. Mixed static/temporal generations remain rejected pending an
+explicit physical initialization contract. Injected temporal-event rollback and
+the filter, AMR, diagnostic and supported-boundary composition gates are still
+open.
 
 ## 13. Verification and acceptance
 

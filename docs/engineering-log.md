@@ -5,6 +5,27 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-21 — Temporal runtime survives generation handoff
+
+- Extended the canonical transfer layout with stable material-ID ownership and
+  a per-drive phase policy. Retained drives preserve their accepted carrier at
+  the exact GPU commit boundary even when frequency changes; drive-kind or
+  explicit authored-phase changes intentionally start from the target-authored
+  carrier. New materials also start from their target-authored trajectory.
+- The GPU translates an accepted material-wide Switch origin into the target
+  epoch and publishes identical accepted/candidate runtime banks. Target
+  frequencies remain authoritative. Static transfers retain their old behavior;
+  mixed static/temporal handoffs are rejected because they need an explicit
+  physical initialization contract.
+- Added a hidden production-render-graph handoff gate. On Apple M1 Max / Metal,
+  an active Switch plus a preserved travelling-drive frequency edit and an
+  explicit time-crystal phase edit crossed a 1,934-Q / 3,630-b handoff. After
+  24 source and 40 target steps, relative f64-oracle errors were `2.99e-7` for
+  Q and `2.09e-6` for b; absolute clock error was `1.25e-8 s`.
+- Host tests pin stable-ID mapping and the frequency/phase distinction; Naga
+  accepts both transfer shaders. Next: inject rejection into a temporal live
+  event and prove byte-exact field, coefficient and runtime rollback.
+
 ## 2026-09-21 — GPU-stamped temporal material events
 
 - Added zero-duration live transactions for material-wide Switch begin/reversal.

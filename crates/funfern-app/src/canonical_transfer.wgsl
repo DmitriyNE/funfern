@@ -1,5 +1,5 @@
-// Latest-state canonical generation transfer. Rust transfer layout version 1.
-const TRANSFER_LAYOUT_VERSION: u32 = 1u;
+// Latest-state canonical generation transfer. Rust transfer layout version 2.
+const TRANSFER_LAYOUT_VERSION: u32 = 2u;
 const WORKGROUP_SIZE: u32 = 128u;
 const PRIMARY_WORDS: u32 = 4u;
 const VECTOR_WORDS: u32 = 4u;
