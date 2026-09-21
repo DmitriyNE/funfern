@@ -42,16 +42,12 @@ mod domain;
 mod draw_tools;
 mod events;
 mod exposure;
-
-use exposure::*;
 mod gesture;
 mod gizmo;
 mod input;
 mod inspectors;
 mod materials;
 mod pacing;
-
-use pacing::*;
 mod paint;
 mod panels;
 mod probe_hit;
@@ -65,19 +61,20 @@ mod state;
 mod theme;
 mod viewport;
 mod weld;
-
-use gesture::*;
 mod workers;
 
 pub use state::Playground;
 
-use theme::*;
-
-use workers::*;
-
-use probe_view::*;
-
+// The shared vocabulary every submodule reaches through `use super::*`. A
+// submodule's own business stays private to it; only what more than one of them
+// needs is re-exported here.
 use events::*;
+use exposure::*;
+use gesture::*;
+use pacing::*;
+use probe_view::*;
+use theme::*;
+use workers::*;
 
 const FRAME_HISTORY: usize = 120;
 
