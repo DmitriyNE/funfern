@@ -5,6 +5,25 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — Temporal vector overlay
+
+- The arrow lattice now installs against a time-driven generation through the
+  same shared reconstruction the point and line recorders use. The overlay
+  shader already had the temporal branch and its skip guard; what was missing
+  was a host installer that addresses the law records, so a modulated element
+  drew arrows from fixed coefficients.
+- The pre-filter complementary field the presentation high-pass reads is
+  evaluated with the current law. That is correct at the only boundary the
+  host uses it, a zero-duration filter commit, where the spare lane holds the
+  pre-filter state at the same instant rather than the previous endpoint.
+- The hidden gate now carries four consumers on one fixture. On Apple M1 Max /
+  Metal the arrows matched the f64 point contract to `1.119e-6` in
+  complementary magnitude and `1.354e-6` in flow across five lattice samples,
+  with the point, line and area figures unchanged from the previous run.
+- Formatting, strict workspace Clippy, the workspace suite and a native release
+  build pass. Remaining in the diagnostic gate: the far-field exterior policy,
+  temporal-work accounting and the event-boundary deferral fixtures.
+
 ## 2026-09-22 — Temporal area probes
 
 - Area probes now compile against a time-driven generation. Each contribution

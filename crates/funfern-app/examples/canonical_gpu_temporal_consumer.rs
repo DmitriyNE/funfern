@@ -1,5 +1,5 @@
-//! Real-device validation for synchronized temporal point, line and area
-//! diagnostics.
+//! Real-device validation for synchronized temporal point, line, area and
+//! arrow diagnostics.
 //!
 //! The fixture uses the production canonical render graph with the point and
 //! line recorder shaders, which share one reconstruction block. It compares
@@ -16,7 +16,7 @@ use funfern_app::{
     },
     wave_gpu::{
         AreaProbeDisplay, AreaProbeInput, CurveProbeDisplay, CurveProbeInput, ProbeDisplay,
-        RecorderContext, RecorderHistory, WaveGpuPlugin, WaveGpuRequest,
+        RecorderContext, RecorderHistory, VectorOverlayDisplay, WaveGpuPlugin, WaveGpuRequest,
     },
 };
 use funfern_core::{
@@ -66,6 +66,7 @@ struct Expected {
     line_time: f64,
     area_total_energy: f64,
     area_rms_complementary: f64,
+    arrows: Vec<(f64, f64)>,
     started: Instant,
     deadline: Instant,
     finished: bool,
@@ -217,6 +218,27 @@ fn main() {
             }
         })
         .collect::<Vec<_>>();
+    // The arrow lattice reuses the line's stencils, so the same f64 contract
+    // supplies both and any disagreement is the overlay's own.
+    let arrows = line
+        .iter()
+        .map(|(stencil, _)| {
+            let consumer = CanonicalTemporalPointStencil::from_quadratic(*stencil, &operator)
+                .expect("temporal arrow consumer");
+            let sample = consumer
+                .sample(
+                    &operator,
+                    state.primary_flux(),
+                    &previous_primary,
+                    state.complementary_flux(),
+                    state.time(),
+                    time_step,
+                    state.runtime(),
+                )
+                .expect("f64 temporal arrow sample");
+            (sample.complementary.norm(), sample.energy_flow.norm())
+        })
+        .collect::<Vec<_>>();
     let area_sample = sample_temporal_canonical_area(
         &area,
         &operator,
@@ -238,6 +260,7 @@ fn main() {
         line_time: state.time(),
         area_total_energy: area_sample.total_energy,
         area_rms_complementary: area_sample.rms_complementary,
+        arrows,
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(60),
         finished: false,
@@ -345,6 +368,20 @@ fn install(
             },
         )
         .expect("install temporal area recorder");
+    let lattice = pending
+        .line
+        .iter()
+        .map(|(stencil, _)| *stencil)
+        .collect::<Vec<_>>();
+    recorders
+        .update_temporal_canonical_vector_overlay(
+            &mut assets,
+            &mut commands,
+            &pending.operator,
+            temporal_manifest,
+            &lattice,
+        )
+        .expect("install temporal vector overlay");
     canonical.request_steps(expected.steps);
     commands.spawn(Camera2d);
 }
@@ -354,6 +391,7 @@ fn finish_when_ready(
     display: Res<ProbeDisplay>,
     curves: Res<CurveProbeDisplay>,
     areas: Res<AreaProbeDisplay>,
+    arrows: Res<VectorOverlayDisplay>,
     mut expected: ResMut<Expected>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -444,11 +482,28 @@ fn finish_when_ready(
         line_errors[2],
         line_errors[3]
     );
+    if arrows.samples.len() != expected.arrows.len()
+        || (arrows.absolute_time - expected.line_time).abs() > 2.0e-4
+    {
+        return;
+    }
+    let mut arrow_errors = [0.0_f64; 2];
+    for (sample, (complementary, flow)) in arrows.samples.iter().zip(&expected.arrows) {
+        arrow_errors[0] =
+            arrow_errors[0].max(relative_error(sample.complementary.norm(), *complementary));
+        arrow_errors[1] = arrow_errors[1].max(relative_error(sample.energy_flow.norm(), *flow));
+    }
     println!(
         "temporal area consumer over {:.0}% coverage: total energy {:.3e}, complement rms {:.3e}",
         area.coverage * 100.0,
         area_errors[0],
         area_errors[1]
+    );
+    println!(
+        "temporal arrow consumer worst errors over {} samples: complement {:.3e}, flow {:.3e}",
+        expected.arrows.len(),
+        arrow_errors[0],
+        arrow_errors[1]
     );
     let errors = [
         relative_error(sample.displacement, expected.primary),
@@ -474,6 +529,7 @@ fn finish_when_ready(
         .into_iter()
         .chain(line_errors)
         .chain(area_errors)
+        .chain(arrow_errors)
         .any(|error| error > 2.0e-4)
     {
         expected.failed = true;

@@ -747,6 +747,44 @@ impl WaveGpuRequest {
         operator: &CanonicalWaveOperator,
         stencils: &[QuadraticPointStencil],
     ) -> Result<(), String> {
+        self.update_vector_overlay_from(
+            assets,
+            commands,
+            CanonicalStencilSource::Fixed(operator),
+            stencils,
+        )
+    }
+
+    /// Arrows over a time-driven generation. The lattice runs through the same
+    /// shared reconstruction the point recorder uses, so a modulated element
+    /// shows the field its own samples carry.
+    pub fn update_temporal_canonical_vector_overlay(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        operator: &CanonicalTemporalWaveOperator,
+        manifest: CanonicalGpuTemporalManifest,
+        stencils: &[QuadraticPointStencil],
+    ) -> Result<(), String> {
+        let index = TemporalTableIndex::build(operator, manifest)?;
+        self.update_vector_overlay_from(
+            assets,
+            commands,
+            CanonicalStencilSource::Temporal {
+                operator,
+                index: &index,
+            },
+            stencils,
+        )
+    }
+
+    fn update_vector_overlay_from(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        source: CanonicalStencilSource<'_>,
+        stencils: &[QuadraticPointStencil],
+    ) -> Result<(), String> {
         if stencils.len() > MAX_VECTOR_OVERLAY_SAMPLES {
             self.clear_vector_overlay(assets, commands);
             return Err(format!(
@@ -761,11 +799,7 @@ impl WaveGpuRequest {
         let stencils = stencils
             .iter()
             .copied()
-            .map(|stencil| {
-                CanonicalPointStencil::from_quadratic(stencil, operator)
-                    .map(|stencil| gpu_canonical_point_stencil(Some(stencil)))
-                    .map_err(|error| format!("Canonical vector reconstruction failed: {error}"))
-            })
+            .map(|stencil| source.build(stencil, "vector"))
             .collect::<Result<Vec<_>, _>>()?;
         self.clear_vector_overlay(assets, commands);
         let control = GpuProbeControl {
