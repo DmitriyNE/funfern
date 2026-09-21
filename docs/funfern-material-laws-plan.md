@@ -616,7 +616,7 @@ For static linear mass, a small measured drift `δ=I_c-ΣQᵢ` can be corrected 
 
 Avoid global reductions every step solely for bookkeeping. Accumulate applied increments where needed and reduce on the maintenance cadence. Closed components with no exchanges need no per-step source accounting. Accept accounting, corrections, state, and clock together; rejected candidates leave all unchanged. Deliberate source totals and material-induced changes in mean `u` are not numerical drift.
 
-### 7.3 Selected linear grid filter; nonlinear gate F
+### 7.3 Selected linear and time-driven grid filter; nonlinear gate F
 
 For fixed linear maps `Q=Mu`, `v=Jb`, let `K=CᵀWJC` and let `Λ` bound the largest eigenvalue of `M⁻¹/²KM⁻¹/²`. Use the paired polynomial reference
 
@@ -627,7 +627,21 @@ b ← b - α C M⁻¹ K M⁻¹ CᵀWJ b / Λ².
 
 Both right-hand sides use the pre-filter state; `0≤α≤1`. Skip zero-operator components rather than divide by zero. Compatible `b=ηCψ` remains compatible; constant primary fields and free component totals are preserved to arithmetic accuracy. With the appropriate linear energy norms, a mode of eigenvalue λ is attenuated by `1-α(λ/Λ)²`. The [core spike filter fixture](funfern-material-laws-spike-report.md) tests the unit-complementary-map case: α=0.8 attenuates the top mode by 80%, and a mode at 8.52% of maximum frequency by 0.00422%.
 
-This filter leaves `ker(CᵀWJ)` unchanged: it is not a cure for stationary remap artifacts. Validate tensor weighting, boundaries/constraints, nonuniform meshes, cadence, and f32 in the real core. Constrain the filter at prescribed nodes and account exchange explicitly. Do not silently use this fixed-linear energy argument for nonlinear/time-driven maps; derive and test the chosen frozen/reference-operator extension, its admissibility and its energy effect before enabling those media. Filtering invalidates force/observable caches and has staged acceptance.
+For an admitted time-driven linear generation, freeze every material map at the
+same accepted event time `t`: `M_t=M(t)`, `J_t=J(t)` and
+`K_t=CᵀWJ_tC`. Apply the same two polynomials with every occurrence of
+`M⁻¹`, `J` and `K` replaced by `M_t⁻¹`, `J_t` and `K_t`. Use the
+trajectory-wide bound `Λ=4/dt_max²`, where `dt_max` is the admitted temporal
+operator timestep bound, rather than a phase-local estimate. This is the exact
+frozen-time operator, not a reference-operator approximation. It preserves an
+instantaneously constant primary field, compatible complementary flux,
+component totals and `ker(CᵀWJ_t)` to arithmetic accuracy. Candidate energy is
+measured in the same instantaneous maps and may only commit when it does not
+increase. The temporal GPU path needs five sparse spatial passes instead of the
+static path's three; both the authored-event and every-16-step resident paths
+use the same zero-duration global acceptance boundary.
+
+This filter leaves `ker(CᵀWJ)` unchanged: it is not a cure for stationary remap artifacts. Validate tensor weighting, boundaries/constraints, nonuniform meshes, cadence, and f32 in the real core. Constrain the filter at prescribed nodes and account exchange explicitly. Do not silently use the linear or frozen-time energy argument for nonlinear maps; derive and test the selected tangent/reference-operator extension, its admissibility and its energy effect before enabling those media. Filtering invalidates force/observable caches and has staged acceptance.
 
 A successful filter is a zero-duration accepted state event. If it flips paired
 state lanes, the non-accepted lane at that instant is the pre-filter state, not
@@ -1046,8 +1060,15 @@ explicit physical initialization contract. Injected temporal-law rejection now
 leaves accepted physical storage byte-identical, advances neither clock nor
 material serial, and resumes for one old-law step before a clean retry; the
 combined production-render-graph fixture retains `2.65e-7` relative Q and
-`2.43e-6` relative b agreement. The filter, AMR, diagnostic and
-supported-boundary composition gates are still open.
+`2.43e-6` relative b agreement. The time-driven filter gate is now closed for
+the conservative bulk: CPU fixtures cover instantaneous constant fields,
+compatible and stationary complementary subspaces, component totals and
+energy reduction. On Apple M1 Max / Metal, one authored filter in the combined
+96-step event fixture retained `3.88e-7` relative Q and `4.17e-5` relative b
+agreement; six resident cadence filters retained `7.25e-7` and `2.02e-4`
+respectively. The repeated-filter b bound is deliberately separate from the
+single-event bound because five-pass f32 roundoff accumulates. AMR, diagnostic,
+supported-boundary composition and incremental-cost gates are still open.
 
 ## 13. Verification and acceptance
 

@@ -1096,6 +1096,10 @@ impl CanonicalGpuPlan {
         self.control.runtime_slots.w = TEMPORAL_ENABLED;
         self.control.boundary_offsets.w &= !4;
         self.control.clock_f32.w = finite_f32(operator.maximum_time_step(), "time step bound")?;
+        self.control.evolution.x = finite_f32(
+            1.0 / (4.0 / operator.maximum_time_step().powi(2)).powi(2),
+            "temporal filter scale",
+        )?;
         self.manifest.bytes.tables = self.tables.len() * size_of::<GpuCanonicalTableWord>();
         self.manifest.temporal = Some(CanonicalGpuTemporalManifest {
             header_offset,
@@ -1616,17 +1620,17 @@ impl CanonicalGpuPlan {
         strength: f64,
         serial: u32,
     ) -> Result<(), CanonicalGpuBuildError> {
-        if self.manifest.temporal.is_some() {
-            return Err(CanonicalGpuBuildError::InvalidLayout(
-                "the Stage 7 dynamic grid-filter gate is not closed",
-            ));
-        }
         if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "grid-filter strength must be in [0, 1]",
             ));
         }
-        self.begin_event(EVENT_GRID_FILTER, serial, 6)?;
+        let dispatches = if self.manifest.temporal.is_some() {
+            8
+        } else {
+            6
+        };
+        self.begin_event(EVENT_GRID_FILTER, serial, dispatches)?;
         self.control.event.w = finite_f32(strength, "grid-filter strength")?.to_bits();
         Ok(())
     }
@@ -1720,7 +1724,7 @@ impl CanonicalGpuPlan {
         serial: u32,
         dispatches: usize,
     ) -> Result<(), CanonicalGpuBuildError> {
-        if self.manifest.temporal.is_some() {
+        if self.manifest.temporal.is_some() && kind != EVENT_GRID_FILTER {
             return Err(CanonicalGpuBuildError::InvalidLayout(
                 "Stage 7 temporal event admission is not closed",
             ));
@@ -3250,7 +3254,7 @@ impl CanonicalGpuRequest {
     pub fn queue_live_event(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
-        event: CanonicalGpuLiveEvent,
+        mut event: CanonicalGpuLiveEvent,
     ) -> Result<(), &'static str> {
         if self.buffers.is_none() {
             return Err("canonical GPU is not installed");
@@ -3302,7 +3306,10 @@ impl CanonicalGpuRequest {
             return Err("live canonical event does not match the active generation");
         }
         if handles.material_runtime_count != 0
-            && !matches!(event.kind, EVENT_TEMPORAL_SWITCH | EVENT_TEMPORAL_LAW_PATCH)
+            && !matches!(
+                event.kind,
+                EVENT_GRID_FILTER | EVENT_TEMPORAL_SWITCH | EVENT_TEMPORAL_LAW_PATCH
+            )
         {
             return Err("this event has not passed its Stage 7 temporal composition gate");
         }
@@ -3310,6 +3317,9 @@ impl CanonicalGpuRequest {
             && matches!(event.kind, EVENT_TEMPORAL_SWITCH | EVENT_TEMPORAL_LAW_PATCH)
         {
             return Err("a temporal material event requires a temporal generation");
+        }
+        if handles.material_runtime_count != 0 && event.kind == EVENT_GRID_FILTER {
+            event.dispatches += 2;
         }
         let upload_words = event
             .upload
@@ -4087,6 +4097,8 @@ struct CanonicalPipeline {
     live_event_stage: CachedComputePipelineId,
     resident_filter_begin: CachedComputePipelineId,
     resident_filter_commit: CachedComputePipelineId,
+    filter_temporal_gather: CachedComputePipelineId,
+    filter_temporal_samples: CachedComputePipelineId,
 }
 
 #[derive(Resource)]
@@ -4169,6 +4181,8 @@ fn init_canonical_pipeline(
     let live_event_stage = queue("live_event_stage");
     let resident_filter_begin = queue("resident_filter_begin");
     let resident_filter_commit = queue("resident_filter_commit");
+    let filter_temporal_gather = queue("filter_temporal_gather");
+    let filter_temporal_samples = queue("filter_temporal_samples");
     commands.insert_resource(CanonicalPipeline {
         layout,
         start_loss,
@@ -4203,6 +4217,8 @@ fn init_canonical_pipeline(
         live_event_stage,
         resident_filter_begin,
         resident_filter_commit,
+        filter_temporal_gather,
+        filter_temporal_samples,
     });
 
     let map_layout = BindGroupLayoutDescriptor::new(
@@ -4664,6 +4680,8 @@ fn compute_canonical_wave(
         pipeline.live_event_stage,
         pipeline.resident_filter_begin,
         pipeline.resident_filter_commit,
+        pipeline.filter_temporal_gather,
+        pipeline.filter_temporal_samples,
     ];
     for id in &pipeline_ids {
         if let CachedPipelineState::Err(error) = pipeline_cache.get_compute_pipeline_state(*id) {
@@ -4763,7 +4781,21 @@ fn compute_canonical_wave(
                 pass.set_pipeline(pipelines[16]);
                 pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
                 pass.set_pipeline(pipelines[17]);
-                pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+                pass.dispatch_workgroups(
+                    workgroups(if handles.material_runtime_count != 0 {
+                        handles.sample_count
+                    } else {
+                        handles.node_count
+                    }),
+                    1,
+                    1,
+                );
+                if handles.material_runtime_count != 0 {
+                    pass.set_pipeline(pipelines[28]);
+                    pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+                    pass.set_pipeline(pipelines[29]);
+                    pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+                }
                 pass.set_pipeline(pipelines[18]);
                 pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
                 pass.set_pipeline(pipelines[19]);
@@ -4982,7 +5014,21 @@ fn compute_canonical_wave(
             pass.set_pipeline(pipelines[16]);
             pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
             pass.set_pipeline(pipelines[17]);
-            pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+            pass.dispatch_workgroups(
+                workgroups(if handles.material_runtime_count != 0 {
+                    handles.sample_count
+                } else {
+                    handles.node_count
+                }),
+                1,
+                1,
+            );
+            if handles.material_runtime_count != 0 {
+                pass.set_pipeline(pipelines[28]);
+                pass.dispatch_workgroups(workgroups(handles.node_count), 1, 1);
+                pass.set_pipeline(pipelines[29]);
+                pass.dispatch_workgroups(workgroups(handles.sample_count), 1, 1);
+            }
             pass.set_pipeline(pipelines[18]);
             pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
             pass.set_pipeline(pipelines[19]);
@@ -5056,6 +5102,7 @@ fn compute_canonical_wave(
             .saturating_mul(handles.dispatches_per_step)
             .saturating_add(2 * rebases)
             .saturating_add(RESIDENT_FILTER_DISPATCHES * resident_filters)
+            .saturating_add(2 * resident_filters * u64::from(handles.material_runtime_count != 0))
             .saturating_add(
                 RESIDENT_FILTER_ACCOUNTING_DISPATCHES
                     * resident_filters
@@ -5615,10 +5662,8 @@ mod tests {
             }
         }
 
-        assert!(matches!(
-            plan.stage_grid_filter(0.1, 1),
-            Err(CanonicalGpuBuildError::InvalidLayout(_))
-        ));
+        plan.stage_grid_filter(0.1, 1).unwrap();
+        assert_eq!(plan.manifest.event_dispatches, 8);
     }
 
     #[test]

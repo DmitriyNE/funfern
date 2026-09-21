@@ -462,13 +462,19 @@ fn stiffness_force(node: u32) -> f32 {
 
 fn constitutive_force(node: u32) -> f32 {
     let range = nodes[node].ranges.xy;
+    let driven = temporal_enabled();
     var result = 0.0;
     for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
         if tables[entry].data.y != FORCE_KIND_GAP {
             let sample = tables[entry].data.x;
             let coefficient = vec2<f32>(
                 table_float(entry, 2u), table_float(entry, 3u));
-            result += dot(coefficient, accepted_b(sample));
+            var inverse_factor = 1.0;
+            if driven {
+                inverse_factor = 1.0 / temporal_complementary_factor(
+                    sample, control.clock_f32.y);
+            }
+            result += inverse_factor * dot(coefficient, accepted_b(sample));
         }
     }
     return result;
@@ -476,13 +482,19 @@ fn constitutive_force(node: u32) -> f32 {
 
 fn candidate_constitutive_force(node: u32) -> f32 {
     let range = nodes[node].ranges.xy;
+    let driven = temporal_enabled();
     var result = 0.0;
     for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
         if tables[entry].data.y != FORCE_KIND_GAP {
             let sample = tables[entry].data.x;
             let coefficient = vec2<f32>(
                 table_float(entry, 2u), table_float(entry, 3u));
-            result += dot(coefficient, candidate_b(sample));
+            var inverse_factor = 1.0;
+            if driven {
+                inverse_factor = 1.0 / temporal_complementary_factor(
+                    sample, control.clock_f32.y);
+            }
+            result += inverse_factor * dot(coefficient, candidate_b(sample));
         }
     }
     return result;
@@ -506,6 +518,52 @@ fn b_energy(sample_index: u32, value: vec2<f32>) -> f32 {
         constitutive.x * value.x + constitutive.y * value.y,
         constitutive.y * value.x + constitutive.z * value.y);
     return 0.5 * constitutive.w * dot(value, field);
+}
+
+fn instantaneous_b_energy(sample_index: u32, value: vec2<f32>) -> f32 {
+    let reference = b_energy(sample_index, value);
+    if temporal_enabled() {
+        return reference / temporal_complementary_factor(
+            sample_index, control.clock_f32.y);
+    }
+    return reference;
+}
+
+fn filter_compatible_flux(sample_index: u32, lane: u32, divide_mass: bool) -> vec2<f32> {
+    let sample = samples[sample_index];
+    let reference_node = sample_node(sample, 0u);
+    var reference = scratch[reference_node].values[lane];
+    if divide_mass {
+        reference *= temporal_inverse_primary_mass(reference_node, control.clock_f32.y);
+    }
+    var result = vec2<f32>(0.0);
+    for (var local = 1u; local < 7u; local += 1u) {
+        let node = sample_node(sample, local);
+        var field = scratch[node].values[lane];
+        if divide_mass {
+            field *= temporal_inverse_primary_mass(node, control.clock_f32.y);
+        }
+        result += sample_curl(sample, local) * (field - reference);
+    }
+    return control.evolution.y * result;
+}
+
+fn filter_gather(node: u32, second_pair: bool) -> f32 {
+    let range = nodes[node].ranges.xy;
+    var result = 0.0;
+    for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
+        if tables[entry].data.y != FORCE_KIND_GAP {
+            let sample = tables[entry].data.x;
+            let value = scratch[control.counts_a.x + sample].values;
+            let flux = select(value.xy, value.zw, second_pair);
+            let coefficient = vec2<f32>(
+                table_float(entry, 2u), table_float(entry, 3u));
+            let inverse_factor = 1.0 / temporal_complementary_factor(
+                sample, control.clock_f32.y);
+            result += inverse_factor * dot(coefficient, flux);
+        }
+    }
+    return result;
 }
 
 fn sample_node(sample: Sample, local: u32) -> u32 {
@@ -777,16 +835,56 @@ fn event_simple_stage(@builtin(global_invocation_id) id: vec3<u32>) {
 fn filter_first(@builtin(global_invocation_id) id: vec3<u32>) {
     let node = id.x;
     if stopped() || node >= control.counts_a.x { return; }
+    if temporal_enabled() {
+        scratch[node].values.x = accepted_q(node)
+            * temporal_inverse_primary_mass(node, control.clock_f32.y);
+        scratch[node].values.y = constitutive_force(node);
+        return;
+    }
     scratch[node].values.x = stiffness_force(node);
     scratch[node].values.y = constitutive_force(node);
 }
 
 @compute @workgroup_size(128)
 fn filter_second(@builtin(global_invocation_id) id: vec3<u32>) {
-    let node = id.x;
-    if stopped() || node >= control.counts_a.x { return; }
+    let i = id.x;
+    if stopped() { return; }
+    if temporal_enabled() {
+        if i >= control.counts_a.y { return; }
+        let first = filter_compatible_flux(i, 0u, false);
+        let second = filter_compatible_flux(i, 1u, true);
+        scratch[control.counts_a.x + i].values = vec4<f32>(first, second);
+        return;
+    }
+    if i >= control.counts_a.x { return; }
+    let node = i;
     scratch[node].values.z = stiffness_of_scratch(node, 0u);
     scratch[node].values.w = stiffness_of_scratch(node, 1u);
+}
+
+@compute @workgroup_size(128)
+fn filter_temporal_gather(@builtin(global_invocation_id) id: vec3<u32>) {
+    let node = id.x;
+    if stopped() || !temporal_enabled() || node >= control.counts_a.x { return; }
+    scratch[node].values.z = filter_gather(node, false);
+    scratch[node].values.w = filter_gather(node, true);
+}
+
+@compute @workgroup_size(128)
+fn filter_temporal_samples(@builtin(global_invocation_id) id: vec3<u32>) {
+    let sample = id.x;
+    if stopped() || !temporal_enabled() || sample >= control.counts_a.y { return; }
+    let primary_flux = filter_compatible_flux(sample, 2u, true);
+    let correction = filter_compatible_flux(sample, 3u, true);
+    let next = accepted_b(sample) - bitcast<f32>(control.event.w)
+        * control.evolution.x * correction;
+    let stored = scratch[control.counts_a.x + sample].values;
+    scratch[control.counts_a.x + sample].values = vec4<f32>(primary_flux, stored.zw);
+    set_candidate_b(sample, next);
+    if !all(next >= vec2<f32>(-MAX_FINITE))
+        || !all(next <= vec2<f32>(MAX_FINITE)) {
+        reject(STATUS_NON_FINITE);
+    }
 }
 
 @compute @workgroup_size(128)
@@ -794,6 +892,17 @@ fn filter_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if stopped() { return; }
     let scale = bitcast<f32>(control.event.w) * control.evolution.x;
+    if temporal_enabled() {
+        if i >= control.counts_a.x { return; }
+        let next = accepted_q(i) - scale * filter_gather(i, false);
+        set_candidate_q(i, next);
+        let next_force = candidate_constitutive_force(i);
+        set_candidate_force(i, next_force);
+        if !finite_scalar(next) || !finite_scalar(next_force) {
+            reject(STATUS_NON_FINITE);
+        }
+        return;
+    }
     if i < control.counts_a.x {
         var next = accepted_q(i) - scale * scratch[i].values.z;
         if nodes[i].boundary.z != 0u { next = accepted_q(i); }
@@ -832,14 +941,17 @@ fn event_validate(@builtin(local_invocation_id) id: vec3<u32>) {
     var energies = vec2<f32>(0.0);
     if participating {
         for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
-            let inverse_mass = nodes[node].mass_loss.y;
+            var inverse_mass = nodes[node].mass_loss.y;
+            if temporal_enabled() {
+                inverse_mass = temporal_inverse_primary_mass(node, control.clock_f32.y);
+            }
             let accepted = accepted_q(node);
             let candidate = candidate_q(node);
             energies += 0.5 * inverse_mass * vec2<f32>(accepted * accepted, candidate * candidate);
         }
         for (var sample = local; sample < control.counts_a.y; sample += WORKGROUP_SIZE) {
-            energies.x += b_energy(sample, accepted_b(sample));
-            energies.y += b_energy(sample, candidate_b(sample));
+            energies.x += instantaneous_b_energy(sample, accepted_b(sample));
+            energies.y += instantaneous_b_energy(sample, candidate_b(sample));
         }
     }
     let total = reduce_boundary_vector(local, energies);

@@ -5,6 +5,29 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-21 — Time-driven generations gain the paired grid filter
+
+- Adopted the exact frozen-time extension rather than a reference-operator
+  shortcut. At a zero-duration filter boundary every primary inverse and
+  complementary map is evaluated at the same accepted time; the scale uses
+  the trajectory-wide temporal CFL bound. CPU fixtures pin energy reduction,
+  constant instantaneous primary fields, component totals, compatible flux
+  and stationary complementary state.
+- The temporal GPU filter adds two sparse passes to the existing three spatial
+  stages, evaluates accepted/candidate energy with the instantaneous maps, and
+  commits through the existing global event boundary. Both explicitly queued
+  filters and resident every-16-step maintenance use this path; static
+  generations retain their old dispatch extents and arithmetic.
+- The production Metal fixture crosses a clock rebase, Switch reversal and law
+  patch. One live filter ends at `3.88e-7` relative Q and `4.17e-5` relative b
+  error against f64. Six resident filters end at `7.25e-7` and `2.02e-4`; the
+  latter has a separate `3e-4` repeated-f32 acceptance bound rather than
+  weakening the single-event gate. The unchanged static five-event fixture
+  remains at `3.17e-7` Q and `1.10e-6` b.
+- Next Stage 7 gates are modulation-aware diagnostics and AMR, supported
+  boundary compositions, then actual-core incremental cost. Nonlinear filter
+  semantics remain Stage 8 work.
+
 ## 2026-09-21 — Temporal event rejection retains the accepted generation
 
 - Added a production-render-graph failure gate for a temporal law patch. A

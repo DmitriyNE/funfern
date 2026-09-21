@@ -14,11 +14,12 @@ use funfern_app::canonical_gpu::{
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
     CanonicalMaterialDrive, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CoefficientLaw, MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, ScalarField,
-    Scene, TimeDrive, mesh_scene,
+    CoefficientLaw, GRID_SCALE_FILTER_CADENCE, MeshingOptions, OuterBoundaryCondition,
+    QuadraticWaveOperator, ScalarField, Scene, TimeDrive, mesh_scene,
 };
 
 const DEFAULT_STEPS: u64 = 96;
+const FILTER_STRENGTH: f64 = 0.58;
 
 #[derive(Resource)]
 struct PendingPlan(Option<CanonicalGpuPlan>);
@@ -33,10 +34,14 @@ struct Expected {
     steps: u64,
     switch_steps: u64,
     law_steps: u64,
+    filter_steps: u64,
     switch_event: Option<CanonicalGpuLiveEvent>,
     law_event: Option<CanonicalGpuLiveEvent>,
+    filter_event: Option<CanonicalGpuLiveEvent>,
+    resident_filter: bool,
     switch_queued: bool,
     law_queued: bool,
+    filter_queued: bool,
     time_step: f64,
     started: Instant,
     deadline: Instant,
@@ -45,6 +50,7 @@ struct Expected {
 }
 
 fn main() {
+    let resident_filter = std::env::args().any(|argument| argument == "--resident-filter");
     let steps = std::env::args()
         .find_map(|argument| argument.strip_prefix("--steps=")?.parse::<u64>().ok())
         .unwrap_or(DEFAULT_STEPS);
@@ -146,6 +152,7 @@ fn main() {
     let temporal = plan.manifest.temporal.expect("temporal layout manifest");
     let switch_steps = 16.min(steps - 1);
     let law_steps = 48.min(steps - 1).max(switch_steps + 1);
+    let filter_steps = 64.min(steps - 1).max(law_steps + 1);
     let switch_event = CanonicalGpuLiveEvent::temporal_switch(&state, material_id, false, 0.9, 1)
         .expect("temporal Switch event");
 
@@ -182,6 +189,9 @@ fn main() {
             .expect("target temporal GPU plan");
     let law_event = CanonicalGpuLiveEvent::temporal_law_patch(&plan, &target_plan, 2)
         .expect("temporal law event");
+    let filter_event = (!resident_filter).then(|| {
+        CanonicalGpuLiveEvent::grid_filter(FILTER_STRENGTH, 3).expect("temporal grid-filter event")
+    });
 
     let old_mass_drive = scene.materials[0]
         .mass_law
@@ -194,16 +204,30 @@ fn main() {
         .evaluate(&scene.materials[0].parameters)
         .expect("old stiffness drive");
     let mut oracle = state;
-    for _ in 0..switch_steps {
+    for step in 0..switch_steps {
         oracle.step(&operator).expect("f64 temporal oracle step");
+        if resident_filter
+            && (clock.step_in_epoch as u64 + step + 1).is_multiple_of(GRID_SCALE_FILTER_CADENCE)
+        {
+            oracle
+                .apply_grid_filter(&operator, 1.0)
+                .expect("f64 resident frozen-time filter");
+        }
     }
     let switch_time = oracle.time();
     oracle
         .runtime_mut()
         .begin_switch(material_id, false, switch_time, 0.9)
         .expect("f64 Switch reversal");
-    for _ in switch_steps..law_steps {
+    for step in switch_steps..law_steps {
         oracle.step(&operator).expect("f64 temporal oracle step");
+        if resident_filter
+            && (clock.step_in_epoch as u64 + step + 1).is_multiple_of(GRID_SCALE_FILTER_CADENCE)
+        {
+            oracle
+                .apply_grid_filter(&operator, 1.0)
+                .expect("f64 resident frozen-time filter");
+        }
     }
     let law_time = oracle.time();
     oracle
@@ -224,10 +248,21 @@ fn main() {
             law_time,
         )
         .expect("preserve stiffness-drive carrier");
-    for _ in law_steps..steps {
+    for step in law_steps..steps {
         oracle
             .step(&target_operator)
-            .expect("f64 target temporal oracle step");
+            .expect("f64 filtered temporal oracle step");
+        if resident_filter
+            && (clock.step_in_epoch as u64 + step + 1).is_multiple_of(GRID_SCALE_FILTER_CADENCE)
+        {
+            oracle
+                .apply_grid_filter(&target_operator, 1.0)
+                .expect("f64 resident frozen-time filter");
+        } else if !resident_filter && step + 1 == filter_steps {
+            oracle
+                .apply_grid_filter(&target_operator, FILTER_STRENGTH)
+                .expect("f64 frozen-time filter event");
+        }
     }
     let expected = Expected {
         primary: oracle.primary_flux().to_vec(),
@@ -242,10 +277,14 @@ fn main() {
         steps,
         switch_steps,
         law_steps,
+        filter_steps,
         switch_event: Some(switch_event),
         law_event: Some(law_event),
+        filter_event,
+        resident_filter,
         switch_queued: false,
         law_queued: false,
+        filter_queued: false,
         time_step,
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(90),
@@ -253,8 +292,16 @@ fn main() {
         failed: false,
     };
     println!(
-        "temporal GPU gate: {} Q, {} b, {} runtime records, {} steps across clock rebase, Switch reversal, and law patch",
-        plan.node_count, plan.sample_count, temporal.runtime_record_count, steps,
+        "temporal GPU gate: {} Q, {} b, {} runtime records, {} steps across clock rebase, Switch reversal, law patch, and {} frozen-time filter",
+        plan.node_count,
+        plan.sample_count,
+        temporal.runtime_record_count,
+        steps,
+        if resident_filter {
+            "resident"
+        } else {
+            "live-event"
+        },
     );
 
     let mut app = App::new();
@@ -286,6 +333,7 @@ fn install(
     request
         .set_continuous_full_state_readback(true)
         .expect("select temporal validation readback mode");
+    request.set_grid_scale_filter(expected.resident_filter);
     request.install(
         &mut assets,
         &mut commands,
@@ -372,8 +420,35 @@ fn finish_when_ready(
         request
             .queue_live_event(&mut assets, event)
             .expect("queue temporal law event");
-        request.request_steps(expected.steps - expected.law_steps);
+        request.request_steps(if expected.resident_filter {
+            expected.steps - expected.law_steps
+        } else {
+            expected.filter_steps - expected.law_steps
+        });
         expected.law_queued = true;
+        expected.filter_queued = expected.resident_filter;
+        return;
+    }
+
+    let filter_boundary = expected.initial_step + expected.filter_steps;
+    if !expected.filter_queued {
+        let Some(clock) = display.clock else { return };
+        if (clock.accepted_steps as u64) < filter_boundary
+            || clock.event_serial != 2
+            || display.runtime_serials[1] != 2
+            || request.live_event_pending()
+        {
+            return;
+        }
+        let event = expected
+            .filter_event
+            .take()
+            .expect("one temporal filter event");
+        request
+            .queue_live_event(&mut assets, event)
+            .expect("queue temporal filter event");
+        request.request_steps(expected.steps - expected.filter_steps);
+        expected.filter_queued = true;
         return;
     }
 
@@ -381,7 +456,7 @@ fn finish_when_ready(
     let Some(clock) = display.clock else { return };
     if (clock.accepted_steps as u64) < target
         || display.full_snapshot_completed_steps() < target
-        || clock.event_serial != 2
+        || clock.event_serial != if expected.resident_filter { 2 } else { 3 }
         || display.runtime_serials[1] != 2
         || display.primary_flux.len() != expected.primary.len()
         || display.complementary_flux.len() != expected.complementary.len()
@@ -404,6 +479,11 @@ fn finish_when_ready(
             .flat_map(|value| value.iter().copied()),
     );
     let clock_error = (clock.absolute_seconds - expected.absolute_time).abs();
+    let b_tolerance = if expected.resident_filter {
+        3.0e-4
+    } else {
+        6.0e-5
+    };
     let elapsed = expected.started.elapsed().as_secs_f64();
     let crossed_rebase = clock.epoch > expected.initial_epoch;
     println!(
@@ -420,7 +500,7 @@ fn finish_when_ready(
     );
     expected.finished = true;
     if q_error > 6.0e-5
-        || b_error > 6.0e-5
+        || b_error > b_tolerance
         || clock_error > 2.0e-4 * expected.time_step.max(1.0)
         || !crossed_rebase
     {

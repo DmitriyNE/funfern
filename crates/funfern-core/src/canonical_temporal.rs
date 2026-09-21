@@ -875,6 +875,78 @@ impl CanonicalTemporalWaveState {
         )
     }
 
+    /// Zero-duration paired grid filter with the material maps frozen at the
+    /// accepted event time. This is the time-driven extension of the fixed
+    /// linear polynomial: every `M^-1` and `J` application uses the same
+    /// instantaneous coefficients, while the trajectory-wide CFL bound keeps
+    /// the polynomial contract valid for every authored phase and Switch.
+    pub fn apply_grid_filter(
+        &mut self,
+        operator: &CanonicalTemporalWaveOperator,
+        strength: f64,
+    ) -> Result<f64, WaveError> {
+        if !operator.conservative_bulk_supported()
+            || !strength.is_finite()
+            || !(0.0..=1.0).contains(&strength)
+        {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        if strength == 0.0 {
+            return Ok(0.0);
+        }
+        let before = self.energy(operator)?;
+        let mass = operator.primary_mass_at(self.time, &self.runtime)?;
+        let inverse_mass = |values: Vec<f64>| {
+            values
+                .into_iter()
+                .zip(&mass)
+                .map(|(value, mass)| value / mass)
+                .collect::<Vec<_>>()
+        };
+        let stiffness = |field: &[f64]| -> Result<Vec<f64>, WaveError> {
+            let flux = operator.base().compatible_flux(field)?;
+            operator.force_at(&flux, self.time, &self.runtime)
+        };
+
+        let old_primary = self.primary_flux.clone();
+        let old_complementary = self.complementary_flux.clone();
+        let primary_field = old_primary
+            .iter()
+            .zip(&mass)
+            .map(|(flux, mass)| flux / mass)
+            .collect::<Vec<_>>();
+        let primary_correction = stiffness(&inverse_mass(stiffness(&primary_field)?))?;
+
+        let gathered = operator.force_at(&old_complementary, self.time, &self.runtime)?;
+        let complementary_correction = operator
+            .base()
+            .compatible_flux(&inverse_mass(stiffness(&inverse_mass(gathered))?))?;
+
+        let eigenvalue_bound = 4.0 / operator.maximum_time_step().powi(2);
+        let scale = strength / eigenvalue_bound.powi(2);
+        let mut next_primary = old_primary.clone();
+        let mut next_complementary = old_complementary.clone();
+        for (value, correction) in next_primary.iter_mut().zip(primary_correction) {
+            *value -= scale * correction;
+        }
+        for (value, correction) in next_complementary.iter_mut().zip(complementary_correction) {
+            *value = *value - correction * scale;
+        }
+        validate_finite(&next_primary)?;
+        if next_complementary.iter().any(|value| !value.finite()) {
+            return Err(WaveError::InvalidState);
+        }
+        let after =
+            operator.energy_at(&next_primary, &next_complementary, self.time, &self.runtime)?;
+        let tolerance = 2.0e-12 * before.abs().max(after.abs()).max(1.0);
+        if after > before + tolerance {
+            return Err(WaveError::InvalidState);
+        }
+        self.primary_flux = next_primary;
+        self.complementary_flux = next_complementary;
+        Ok((before - after).max(0.0))
+    }
+
     pub fn step(
         &mut self,
         operator: &CanonicalTemporalWaveOperator,
@@ -1423,6 +1495,138 @@ mod tests {
                 complementary: temporal.base().complementary_loss_rate().to_vec(),
             }
         );
+    }
+
+    #[test]
+    fn frozen_time_filter_reduces_energy_and_preserves_primary_total() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
+            depth: ScalarField::constant(0.22),
+            frequency_hz: ScalarField::constant(0.8),
+            phase_radians: ScalarField::constant(0.31),
+            wavenumber: ScalarField::constant(2.6),
+            angle_radians: ScalarField::constant(-0.37),
+        };
+        scene.materials[0].stiffness_law.drive = TimeDrive::TimeCrystal {
+            depth: ScalarField::constant(0.16),
+            frequency_hz: ScalarField::constant(0.55),
+            phase_radians: ScalarField::constant(-0.21),
+            sharpness: ScalarField::constant(2.9),
+        };
+        let temporal = compile(&scene).unwrap();
+        let time_step = 0.35 * temporal.maximum_time_step();
+        let initial_runtime = temporal.initial_runtime();
+        let instantaneous_mass = temporal.primary_mass_at(0.0, &initial_runtime).unwrap();
+        let constant_primary = instantaneous_mass
+            .iter()
+            .map(|mass| 0.037 * mass)
+            .collect::<Vec<_>>();
+        let mut constant_state = CanonicalTemporalWaveState::new(
+            &temporal,
+            time_step,
+            constant_primary.clone(),
+            vec![Point2::default(); temporal.base().complementary_degrees_of_freedom()],
+        )
+        .unwrap();
+        assert_eq!(
+            constant_state.apply_grid_filter(&temporal, 0.72).unwrap(),
+            0.0
+        );
+        assert_eq!(constant_state.primary_flux(), constant_primary);
+
+        let potential = (0..temporal.base().degrees_of_freedom())
+            .map(|index| (index as f64 * 1.713).sin())
+            .collect::<Vec<_>>();
+        let compatible = temporal.base().compatible_flux(&potential).unwrap();
+        let mut compatible_state = CanonicalTemporalWaveState::new(
+            &temporal,
+            time_step,
+            vec![0.0; temporal.base().degrees_of_freedom()],
+            compatible,
+        )
+        .unwrap();
+        compatible_state.apply_grid_filter(&temporal, 0.72).unwrap();
+        let stationary = temporal
+            .base()
+            .stationary_complementary_component(compatible_state.complementary_flux())
+            .unwrap();
+        let stationary_norm = stationary
+            .iter()
+            .map(|value| value.norm().powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let compatible_norm = compatible_state
+            .complementary_flux()
+            .iter()
+            .map(|value| value.norm().powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!(
+            stationary_norm < 2.0e-10 * compatible_norm.max(1.0),
+            "stationary residual {stationary_norm:e} for compatible norm {compatible_norm:e}"
+        );
+
+        let arbitrary = (0..temporal.base().complementary_degrees_of_freedom())
+            .map(|index| Point2::new((index as f64 * 1.137).sin(), (index as f64 * 0.831).cos()))
+            .collect::<Vec<_>>();
+        let stationary = temporal
+            .base()
+            .stationary_complementary_component(&arbitrary)
+            .unwrap();
+        let mut stationary_state = CanonicalTemporalWaveState::new(
+            &temporal,
+            time_step,
+            vec![0.0; temporal.base().degrees_of_freedom()],
+            stationary.clone(),
+        )
+        .unwrap();
+        stationary_state.apply_grid_filter(&temporal, 0.72).unwrap();
+        assert!(
+            stationary_state
+                .complementary_flux()
+                .iter()
+                .zip(stationary)
+                .all(|(actual, expected)| (*actual - expected).norm() < 2.0e-10)
+        );
+
+        let primary = temporal
+            .base()
+            .primary_mass()
+            .iter()
+            .enumerate()
+            .map(|(index, mass)| mass * (0.03 + 0.025 * (index as f64 * 2.173).sin()))
+            .collect::<Vec<_>>();
+        let complementary = temporal
+            .base()
+            .constitutive_samples()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                Point2::new(
+                    0.018 * (index as f64 * 1.713).cos(),
+                    -0.014 * (index as f64 * 1.291).sin(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut state =
+            CanonicalTemporalWaveState::new(&temporal, time_step, primary, complementary).unwrap();
+        for _ in 0..7 {
+            state.step(&temporal).unwrap();
+        }
+        let before = state.energy(&temporal).unwrap();
+        let total = state.primary_flux().iter().sum::<f64>();
+        let time = state.time();
+        let removed = state.apply_grid_filter(&temporal, 0.72).unwrap();
+        let after = state.energy(&temporal).unwrap();
+        let next_total = state.primary_flux().iter().sum::<f64>();
+        assert!(removed > 0.0);
+        assert!(after < before);
+        assert_eq!(state.time(), time);
+        assert!((next_total - total).abs() < 2.0e-12 * total.abs().max(1.0));
+
+        let unchanged = state.clone();
+        assert_eq!(state.apply_grid_filter(&temporal, 0.0).unwrap(), 0.0);
+        assert_eq!(state, unchanged);
     }
 
     #[test]
