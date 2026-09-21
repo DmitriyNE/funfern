@@ -29,6 +29,15 @@ rustup toolchain install nightly-2026-05-28 \
 cargo install trunk --version 0.22.0-beta.5 --locked
 ```
 
+On Nix or NixOS, `nix develop` supplies all of that instead: both toolchains,
+Trunk 0.22.0-beta.5, the matching `wasm-bindgen` and `wasm-opt` that Trunk would
+otherwise download as non-runnable FHS binaries, and the graphics and input
+libraries the native build opens with `dlopen`. `scripts/trunk` works unchanged
+inside the shell. The Playwright smoke test still needs a browser Playwright can
+launch: `npx playwright install` downloads builds that will not run on NixOS
+without `nix-ld`, so run it with `PLAYWRIGHT_CHANNEL=chrome` and an installed
+Google Chrome.
+
 From the repository root:
 
 ```sh
