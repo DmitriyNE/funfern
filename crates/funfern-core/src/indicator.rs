@@ -460,7 +460,19 @@ pub struct SolutionIndicatorOptions {
     pub maximum_edge_length: f64,
     pub relative_tolerance: f64,
     pub elements_per_wavelength: f64,
+    /// Highest temporal frequency the field is expected to carry. In a driven
+    /// medium this is not the source frequency: mixing puts energy at
+    /// `f_source +/- n f_drive`, and
+    /// [`CanonicalTemporalWaveOperator::resolution_demand`] is what raises it.
     pub forcing_frequency_hz: f64,
+    /// Shortest spatial period the operator's own coefficients carry, from a
+    /// travelling modulation. Infinity where none does.
+    ///
+    /// This is a property of the operator rather than of the field, so it
+    /// binds even where nothing is propagating: a mesh that cannot resolve
+    /// the pattern written into the coefficients is assembling the wrong
+    /// operator, and no error estimate on the field would say so.
+    pub coefficient_wavelength: f64,
     pub grading_ratio: f64,
     pub minimum_scale: f64,
     pub maximum_scale: f64,
@@ -482,6 +494,7 @@ impl Default for SolutionIndicatorOptions {
             relative_tolerance: 0.06,
             elements_per_wavelength: 5.0,
             forcing_frequency_hz: 0.0,
+            coefficient_wavelength: f64::INFINITY,
             grading_ratio: 1.5,
             minimum_scale: 0.6,
             maximum_scale: 2.2,
@@ -1020,6 +1033,8 @@ impl SolutionIndicatorJob {
             || options.elements_per_wavelength <= 0.0
             || !options.forcing_frequency_hz.is_finite()
             || options.forcing_frequency_hz < 0.0
+            || options.coefficient_wavelength.is_nan()
+            || options.coefficient_wavelength <= 0.0
             || !options.grading_ratio.is_finite()
             || options.grading_ratio <= 1.0
             || !options.minimum_scale.is_finite()
@@ -1831,6 +1846,16 @@ impl SolutionIndicatorJob {
             material.minimum_wave_speed
                 / (self.options.forcing_frequency_hz * self.options.elements_per_wavelength)
         });
+        // A travelling modulation patterns the coefficients themselves, so
+        // the same elements-per-wavelength rule applies to that pattern
+        // whether or not a wave is riding on it.
+        let wavelength_target = if self.options.coefficient_wavelength.is_finite() {
+            let pattern =
+                self.options.coefficient_wavelength / self.options.elements_per_wavelength;
+            Some(wavelength_target.map_or(pattern, |wave: f64| wave.min(pattern)))
+        } else {
+            wavelength_target
+        };
         if let Some(wavelength) = wavelength_target {
             self.report.smallest_wavelength_target =
                 self.report.smallest_wavelength_target.min(wavelength);

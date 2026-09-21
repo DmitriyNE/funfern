@@ -5,6 +5,51 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — Modulation-aware mesh sizing and estimator inputs
+
+- Started modulation-aware AMR from the two places a driven medium breaks the
+  existing estimator: what the mesh must resolve, and what the residual is
+  measured against. The refinement and coarsening controller, its hysteresis
+  and its resumable scheduling are untouched, which is what the review asked.
+- A source frequency alone cannot size a mesh in a driven medium. Mixing puts
+  energy at `f_source +/- n f_drive`, so the resolved frequency now adds the
+  drive's reach: sideband order from the modulation depth against a stated
+  one-per-cent amplitude floor, multiplied by the drive's own harmonic order.
+  A cosine pump has one harmonic; a smoothed square carries odd harmonics on
+  a scale set by its sharpness, so a sharpened square reaches further than a
+  cosine of the same depth. Both are bounded at eight orders, which is a
+  guard against a pathological authored depth rather than a physical limit.
+- A travelling modulation additionally writes a spatial pattern into the
+  coefficients, period `2*pi/q`. That binds the mesh through the same
+  elements-per-wavelength rule whether or not a wave is present, because a
+  mesh too coarse for the pattern is assembling the wrong operator and no
+  error estimate on the field would say so. It is the more rigorous of the
+  two rules and needed no threshold.
+- The demand is computed from authored materials as well as from a compiled
+  operator, so the application's size rule is correct the moment drives
+  become authorable rather than needing a second change then. The controller
+  already passes it.
+- Added the variable-coefficient supplement. Endpoint fields divide by the
+  mass in force at their own endpoint, the drift the residual is measured
+  against uses those, and the energy and recovery norms use the instantaneous
+  constitutive inverse. Reusing the authored coefficients would charge the
+  estimator for the medium's own modulation and refine against it. Only the
+  conservative bulk is covered, which is what the temporal path executes; an
+  operator carrying loss, gaps, open boundaries or prescribed data is refused
+  rather than reported with those terms missing.
+- Two fixtures hold it: on an inert medium the temporal supplement reproduces
+  the fixed one to `1e-12` relative in energy, drift and recovery, so the
+  temporal path cannot report different errors for the same physics; on a
+  driven one it departs by more than `1e-3`, so the fixture cannot pass
+  without exercising the new evaluation.
+- The midpoint proxy is unchanged and still approximates the half-kicked
+  field by averaging the two endpoint fields, an `O(dt^2)` mismatch the fixed
+  path has too. What changed is that the two endpoints no longer share a mass.
+- Not claimed: the calibrated relative-error percentage has not been
+  re-validated for driven media, as the review requires before that number is
+  quoted for them. The remaining AMR work is that calibration and a
+  real-device gate over an adaptive run on a modulated scene.
+
 ## 2026-09-22 — The accepted runtime travels with the state
 
 - Closed the temporal-work accounting gate. The accepted material runtime

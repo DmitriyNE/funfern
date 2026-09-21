@@ -8,14 +8,18 @@
 
 use std::collections::BTreeSet;
 
+use std::collections::BTreeMap;
+
 use crate::{
-    CanonicalAreaContribution, CanonicalAreaSample, CanonicalPointSample, CanonicalPointStencil,
+    CanonicalAreaContribution, CanonicalAreaSample, CanonicalIndicatorSnapshot,
+    CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil,
     CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, DampingLaw, DampingLawValues,
     ElectromagneticPolarization, FieldLaw, LossChannel, Material, MaterialCoordinates,
     MaterialError, MaterialId, MaterialSwitchRuntime, PhysicsModel, Point2, QuadraticAreaElement,
     QuadraticAreaStencil, QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues,
-    RestoringLaw, Scene, TimeDriveRuntime, TimeDriveValues, TopologyWaveModel, TriMesh, WaveError,
-    canonical_area_contribution,
+    RegionId, RestoringLaw, Scene, SymmetricTensor2, TimeDriveRuntime, TimeDriveValues,
+    TopologyWaveModel, TriMesh, WaveError, canonical_area_contribution,
+    complementary_interpolation_weights,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -569,6 +573,392 @@ impl CanonicalTemporalAreaContribution {
 
     pub fn sample_coefficients(&self) -> [CanonicalTemporalCoefficientSample; 6] {
         self.samples
+    }
+}
+
+/// The indicator's direct-state defect terms over a time-driven generation.
+///
+/// This is the variable-coefficient counterpart of
+/// [`canonical_indicator_supplement`]. Every map is evaluated at the time it
+/// belongs to rather than at the authored coefficients: the two endpoint
+/// fields use the mass at their own endpoints, the drift the residual
+/// measures against uses the midpoint law, and the energy and recovery norms
+/// use the instantaneous constitutive inverse. Reusing the fixed maps would
+/// charge the estimator for the medium's own modulation and refine against
+/// it.
+///
+/// Only the conservative bulk is covered, which is what the temporal path
+/// executes: an operator carrying loss, thin gaps, open boundaries or
+/// prescribed data is refused rather than reported with those terms missing.
+pub fn canonical_temporal_indicator_supplement(
+    mesh: &TriMesh,
+    operator: &CanonicalTemporalWaveOperator,
+    snapshot: &CanonicalIndicatorSnapshot,
+    runtime: &CanonicalMaterialRuntimeState,
+    resolved_frequency_hz: f64,
+) -> Result<CanonicalIndicatorSupplement, WaveError> {
+    if !operator.conservative_bulk_supported() {
+        return Err(WaveError::InvalidCoefficients);
+    }
+    let base = operator.base();
+    let node_count = base.degrees_of_freedom();
+    let sample_count = base.complementary_degrees_of_freedom();
+    if snapshot.mesh_revision != mesh.mesh_revision
+        || base.generation().mesh_revision != mesh.mesh_revision
+        || base.element_nodes().len() != mesh.triangles.len()
+        || snapshot.primary_flux.len() != node_count
+        || snapshot.previous_primary_flux.len() != node_count
+        || snapshot.complementary_flux.len() != sample_count
+        || snapshot.previous_complementary_flux.len() != sample_count
+        || !snapshot.time.is_finite()
+        || !snapshot.time_step.is_finite()
+        || snapshot.time_step <= 0.0
+        || !resolved_frequency_hz.is_finite()
+        || resolved_frequency_hz < 0.0
+    {
+        return Err(WaveError::InvalidState);
+    }
+    let time = snapshot.time;
+    let previous_time = time - snapshot.time_step;
+
+    // Each endpoint field divides by the mass in force at that endpoint. The
+    // average of the two is the estimator's midpoint proxy, as on the fixed
+    // path; what changes is that the two masses now differ.
+    let current_field = operator.primary_field_at(&snapshot.primary_flux, time, runtime)?;
+    let previous_field =
+        operator.primary_field_at(&snapshot.previous_primary_flux, previous_time, runtime)?;
+    let midpoint_field = current_field
+        .iter()
+        .zip(&previous_field)
+        .map(|(current, previous)| 0.5 * (current + previous))
+        .collect::<Vec<_>>();
+
+    let element_count = mesh.triangles.len();
+    let mut element_complementary_recovery = vec![0.0; element_count];
+    let mut element_cell_residual = vec![0.0; element_count];
+    let element_boundary_residual = vec![0.0; element_count];
+    let mut element_energy = vec![0.0; element_count];
+
+    // Instantaneous complementary inverses, once per sample rather than once
+    // per use: the recovery, the residual norm and the energy all need them.
+    let mut inverses = Vec::with_capacity(sample_count);
+    for (sample, temporal) in base
+        .constitutive_samples()
+        .iter()
+        .zip(&operator.complementary)
+    {
+        let factor = coefficient_factor(temporal.coefficient, time, runtime)?;
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(WaveError::InvalidCoefficients);
+        }
+        inverses.push(SymmetricTensor2::new(
+            sample.complementary_inverse.xx / factor,
+            sample.complementary_inverse.xy / factor,
+            sample.complementary_inverse.yy / factor,
+        ));
+    }
+
+    let omega = (std::f64::consts::TAU * resolved_frequency_hz).max(1.0);
+    let mut recovered = BTreeMap::<(usize, RegionId), (Point2, f64)>::new();
+    let sample_points: [[f64; 3]; 6] = base
+        .constitutive_samples()
+        .get(..6)
+        .ok_or(WaveError::InvalidState)?
+        .iter()
+        .map(|sample| sample.barycentric)
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| WaveError::InvalidState)?;
+    let vertex_weights = [0, 1, 2]
+        .map(|local| {
+            let target = std::array::from_fn(|coordinate| (coordinate == local) as u8 as f64);
+            complementary_interpolation_weights(sample_points, target)
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (element, triangle) in mesh.triangles.iter().enumerate() {
+        let points = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+        let area = 0.5 * (points[1] - points[0]).cross(points[2] - points[0]);
+        if !area.is_finite() || area <= 0.0 {
+            return Err(WaveError::InvalidMesh("invalid temporal indicator element"));
+        }
+        let start = element * 6;
+        for (local, interpolation) in vertex_weights.iter().enumerate() {
+            let value = interpolation.iter().enumerate().fold(
+                Point2::default(),
+                |sum, (sample, weight)| {
+                    sum + inverses[start + sample]
+                        .apply(snapshot.complementary_flux[start + sample])
+                        * *weight
+                },
+            );
+            let entry = recovered
+                .entry((triangle.vertices[local], triangle.region))
+                .or_default();
+            entry.0 = entry.0 + value * area;
+            entry.1 += area;
+        }
+    }
+
+    for (element, triangle) in mesh.triangles.iter().enumerate() {
+        let start = element * 6;
+        for local in 0..6 {
+            let sample = base.constitutive_samples()[start + local];
+            let smoothed = triangle.vertices.iter().zip(sample.barycentric).fold(
+                Point2::default(),
+                |sum, (vertex, weight)| {
+                    let entry = recovered[&(*vertex, triangle.region)];
+                    sum + entry.0 * (weight / entry.1)
+                },
+            );
+            let physical =
+                inverses[start + local].apply(snapshot.complementary_flux[start + local]);
+            let defect = physical - smoothed;
+            let reference = inverses[start + local]
+                .inverse()
+                .ok_or(WaveError::InvalidState)?;
+            element_complementary_recovery[element] +=
+                omega * omega * sample.integration_weight * defect.dot(reference.apply(defect));
+        }
+    }
+    let complementary_recovery_contribution = element_complementary_recovery.iter().sum();
+
+    // Primary energy uses the mass in force now, so a modulated element is
+    // not credited with the storage its authored coefficient would have.
+    let mass = operator.primary_mass_at(time, runtime)?;
+    for contribution in base.primary_contributions() {
+        let node = contribution.node as usize;
+        let element = contribution.element as usize;
+        let factor = coefficient_factor(
+            operator.primary[element * 7 + contribution.local_node as usize].coefficient,
+            time,
+            runtime,
+        )?;
+        let share = contribution.geometric_weight * contribution.reference_coefficient * factor;
+        element_energy[element] +=
+            0.5 * share * snapshot.primary_flux[node] * snapshot.primary_flux[node]
+                / (mass[node] * mass[node]);
+    }
+
+    // The drift the residual measures against is the one the solver takes:
+    // the midpoint primary field, with no loss because the conservative bulk
+    // carries none.
+    for (sample_index, sample) in base.constitutive_samples().iter().enumerate() {
+        let element = sample.element as usize;
+        let current = snapshot.complementary_flux[sample_index];
+        let previous = snapshot.previous_complementary_flux[sample_index];
+        element_energy[element] +=
+            0.5 * sample.integration_weight * current.dot(inverses[sample_index].apply(current));
+        let nodes = base.element_nodes()[element];
+        let reference = midpoint_field[nodes[0] as usize];
+        let mut curl = Point2::default();
+        for local in 1..nodes.len() {
+            curl =
+                curl + sample.curls()[local] * (midpoint_field[nodes[local] as usize] - reference);
+        }
+        let expected = previous + curl * (base.orientation() * snapshot.time_step);
+        let defect = current - expected;
+        element_cell_residual[element] +=
+            0.5 * sample.integration_weight * defect.dot(inverses[sample_index].apply(defect));
+    }
+    let drift_contribution = element_cell_residual.iter().sum();
+
+    Ok(CanonicalIndicatorSupplement {
+        mesh_revision: mesh.mesh_revision,
+        element_complementary_recovery,
+        element_cell_residual,
+        element_boundary_residual,
+        element_energy,
+        drift_contribution,
+        complementary_recovery_contribution,
+        // The conservative bulk carries neither, by the contract checked
+        // above; they are zero rather than unreported.
+        thin_gap_contribution: 0.0,
+        outgoing_contribution: 0.0,
+    })
+}
+
+/// What a driven medium demands of the mesh, beyond what the sources ask.
+///
+/// A modulated coefficient is not just a moving number. It mixes with the
+/// wave to make sidebands the mesh has to resolve, and a travelling
+/// modulation writes a spatial pattern into the operator itself that the mesh
+/// has to resolve whether or not a wave is present.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalTemporalResolution {
+    /// Highest temporal frequency the field is expected to carry, given a
+    /// source at `source_frequency_hz`. Zero when nothing is driven.
+    pub frequency_hz: f64,
+    /// Sideband order the frequency above accounts for. One means only the
+    /// first pair; zero means the drive contributes no resolvable sideband.
+    pub sideband_order: u32,
+    /// Shortest spatial period any travelling modulation writes into the
+    /// coefficients, or infinity where none does. This is a property of the
+    /// operator, so it binds even on a quiet field.
+    pub coefficient_wavelength: f64,
+}
+
+impl CanonicalTemporalResolution {
+    /// Sideband amplitude below which a pair is not worth resolving. A
+    /// first-order pair carries about `depth/2` of the carrier, and each
+    /// further order multiplies by roughly the same factor, so this bounds
+    /// the order rather than fixing it.
+    const SIDEBAND_FLOOR: f64 = 1.0e-2;
+    /// Sidebands counted at most, whatever the depth. Depth is bounded below
+    /// one by the positivity requirement on the multiplier, so this is a
+    /// guard against a pathological authored value rather than a physical
+    /// limit.
+    const MAX_SIDEBAND_ORDER: u32 = 8;
+
+    /// Harmonics a drive's own waveform carries, which multiply its frequency
+    /// before any mixing. A cosine pump has one; a smoothed square has odd
+    /// harmonics whose amplitude falls with the sharpness that produced them.
+    fn harmonic_order(drive: TimeDriveValues) -> u32 {
+        match drive {
+            TimeDriveValues::None => 0,
+            TimeDriveValues::ParametricPump { .. }
+            | TimeDriveValues::TravellingModulation { .. } => 1,
+            TimeDriveValues::TimeCrystal { sharpness, .. } => {
+                // tanh(s cos t)/tanh(s) approaches a square wave as `s`
+                // grows, and its odd harmonics decay on a scale set by `s`.
+                // Counting `1 + 2s` of them keeps the retained content above
+                // the same floor the sidebands use without pretending a
+                // sharp square is band-limited.
+                let order = (1.0 + 2.0 * sharpness.abs()).ceil();
+                if order.is_finite() {
+                    (order as u32).clamp(1, Self::MAX_SIDEBAND_ORDER)
+                } else {
+                    Self::MAX_SIDEBAND_ORDER
+                }
+            }
+        }
+    }
+
+    fn sideband_order(depth: f64) -> u32 {
+        let depth = depth.abs();
+        if depth <= 0.0 {
+            return 0;
+        }
+        // Each further order costs roughly another factor of `depth/2`.
+        let ratio = (0.5 * depth).min(0.99);
+        if ratio <= 0.0 {
+            return 0;
+        }
+        let order = (Self::SIDEBAND_FLOOR.ln() / ratio.ln()).ceil();
+        if order.is_finite() {
+            (order.max(1.0) as u32).min(Self::MAX_SIDEBAND_ORDER)
+        } else {
+            Self::MAX_SIDEBAND_ORDER
+        }
+    }
+
+    fn drive_depth(drive: TimeDriveValues) -> f64 {
+        match drive {
+            TimeDriveValues::None => 0.0,
+            TimeDriveValues::ParametricPump { depth, .. }
+            | TimeDriveValues::TimeCrystal { depth, .. }
+            | TimeDriveValues::TravellingModulation { depth, .. } => depth,
+        }
+    }
+
+    fn drive_frequency_hz(drive: TimeDriveValues) -> f64 {
+        match drive {
+            TimeDriveValues::None => 0.0,
+            TimeDriveValues::ParametricPump { frequency_hz, .. }
+            | TimeDriveValues::TimeCrystal { frequency_hz, .. }
+            | TimeDriveValues::TravellingModulation { frequency_hz, .. } => frequency_hz.abs(),
+        }
+    }
+}
+
+impl CanonicalTemporalResolution {
+    /// Accumulates the demand of a set of evaluated drives over the sources
+    /// already accounted for by `source_frequency_hz`.
+    pub fn of_drives(
+        drives: impl IntoIterator<Item = TimeDriveValues>,
+        source_frequency_hz: f64,
+    ) -> Self {
+        let source_frequency_hz = source_frequency_hz.max(0.0);
+        let mut demand = Self {
+            frequency_hz: source_frequency_hz,
+            sideband_order: 0,
+            coefficient_wavelength: f64::INFINITY,
+        };
+        for drive in drives {
+            let harmonics = Self::harmonic_order(drive);
+            let order = Self::sideband_order(Self::drive_depth(drive));
+            if harmonics == 0 || order == 0 {
+                continue;
+            }
+            let reach = f64::from(order * harmonics) * Self::drive_frequency_hz(drive);
+            if reach.is_finite() {
+                demand.frequency_hz = demand.frequency_hz.max(source_frequency_hz + reach);
+                demand.sideband_order = demand.sideband_order.max(order);
+            }
+            if let TimeDriveValues::TravellingModulation { wavenumber, .. } = drive {
+                let wavenumber = wavenumber.abs();
+                if wavenumber > 0.0 {
+                    demand.coefficient_wavelength = demand
+                        .coefficient_wavelength
+                        .min(std::f64::consts::TAU / wavenumber);
+                }
+            }
+        }
+        demand
+    }
+
+    /// The demand of authored materials, for callers sizing a mesh before a
+    /// temporal operator exists.
+    pub fn of_materials<'a>(
+        materials: impl IntoIterator<Item = &'a Material>,
+        source_frequency_hz: f64,
+    ) -> Result<Self, MaterialError> {
+        let mut drives = Vec::new();
+        for material in materials {
+            let parameters = &material.parameters;
+            drives.push(material.mass_law.drive.evaluate(parameters)?);
+            drives.push(material.stiffness_law.drive.evaluate(parameters)?);
+            for channel in [&material.electric_loss, &material.magnetic_loss]
+                .into_iter()
+                .flatten()
+            {
+                drives.push(channel.law.drive.evaluate(parameters)?);
+            }
+        }
+        Ok(Self::of_drives(drives, source_frequency_hz))
+    }
+}
+
+impl CanonicalTemporalWaveOperator {
+    /// What this operator's drives demand of the mesh, given the sources
+    /// already accounted for by `source_frequency_hz`.
+    ///
+    /// The mesh-size rule cannot keep using the source frequency alone once a
+    /// medium is driven. Mixing puts energy at `f_source +/- n f_drive`, and a
+    /// travelling drive additionally patterns the coefficients in space, which
+    /// constrains the mesh even where the field is quiet.
+    pub fn resolution_demand(&self, source_frequency_hz: f64) -> CanonicalTemporalResolution {
+        if !self.has_temporal_laws {
+            return CanonicalTemporalResolution::of_drives([], source_frequency_hz);
+        }
+        CanonicalTemporalResolution::of_drives(
+            self.primary
+                .iter()
+                .map(|sample| sample.coefficient.law.drive)
+                .chain(
+                    self.complementary
+                        .iter()
+                        .map(|sample| sample.coefficient.law.drive),
+                )
+                .chain(self.primary.iter().map(|sample| sample.loss.law.drive))
+                .chain(
+                    self.complementary
+                        .iter()
+                        .map(|sample| sample.loss.law.drive),
+                ),
+            source_frequency_hz,
+        )
     }
 }
 
@@ -2238,6 +2628,194 @@ mod tests {
     /// instantaneous factor, so inverting at the samples and interpolating the
     /// physical field is not the same as interpolating the flux and inverting
     /// once at the probe. Nonlinear laws cannot do the latter at all.
+    /// Two things the variable-coefficient supplement has to get right. On an
+    /// inert medium it must reproduce the fixed one exactly, or the temporal
+    /// path would report different errors for the same physics. And on a
+    /// driven one it must differ, because reusing the authored coefficients
+    /// charges the estimator for the medium's own modulation and refines
+    /// against it.
+    #[test]
+    fn temporal_supplement_matches_the_fixed_one_when_inert_and_departs_when_driven() {
+        let inert_scene = Scene::initial();
+        let mesh = mesh_scene(
+            &inert_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &inert_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+
+        let inert =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &inert_scene, 1)
+                .unwrap();
+        let base = inert.base();
+        let time_step = 0.4 * inert.maximum_time_step();
+        let primary = base
+            .node_points()
+            .iter()
+            .map(|point| 0.09 + 0.05 * (2.0 * point.x - 1.3 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.04 * (1.6 * point.x + 0.9 * point.y).cos())
+            .collect::<Vec<_>>();
+        let state =
+            CanonicalWaveState::from_primary_and_potential(base, time_step, &primary, &potential)
+                .unwrap();
+        let mut next = state.clone();
+        next.step(base).unwrap();
+        let snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            primary_flux: next.primary_flux().to_vec(),
+            previous_primary_flux: state.primary_flux().to_vec(),
+            complementary_flux: next.complementary_flux().to_vec(),
+            previous_complementary_flux: state.complementary_flux().to_vec(),
+            auxiliary: vec![],
+            previous_auxiliary: vec![],
+            time: time_step,
+            time_step,
+        };
+
+        let forcing = crate::CanonicalForcing::none(base);
+        let fixed =
+            crate::canonical_indicator_supplement(&mesh, base, &forcing, &snapshot).unwrap();
+        let runtime = inert.initial_runtime();
+        let temporal =
+            canonical_temporal_indicator_supplement(&mesh, &inert, &snapshot, &runtime, 0.0)
+                .unwrap();
+        for (element, (left, right)) in temporal
+            .element_energy
+            .iter()
+            .zip(&fixed.element_energy)
+            .enumerate()
+        {
+            assert!(
+                (left - right).abs() <= 1.0e-12 * right.abs().max(1.0e-12),
+                "inert energy differs at {element}: {left} against {right}"
+            );
+        }
+        assert!(
+            (temporal.drift_contribution - fixed.drift_contribution).abs()
+                <= 1.0e-12 * fixed.drift_contribution.abs().max(1.0e-12),
+            "inert drift differs: {} against {}",
+            temporal.drift_contribution,
+            fixed.drift_contribution
+        );
+        assert!(
+            (temporal.complementary_recovery_contribution
+                - fixed.complementary_recovery_contribution)
+                .abs()
+                <= 1.0e-12 * fixed.complementary_recovery_contribution.abs().max(1.0e-12)
+        );
+
+        // Now the same state under a driven medium. The fixed supplement is
+        // blind to the modulation; the temporal one is not.
+        let mut driven_scene = Scene::initial();
+        driven_scene.materials[0].mass_law.drive = pump(0.35, 0.8, 0.4);
+        driven_scene.materials[0].stiffness_law.drive = pump(0.3, 0.6, -0.2);
+        let driven =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &driven_scene, 1)
+                .unwrap();
+        let runtime = driven.initial_runtime();
+        let driven_supplement =
+            canonical_temporal_indicator_supplement(&mesh, &driven, &snapshot, &runtime, 0.0)
+                .unwrap();
+        let energy: f64 = driven_supplement.element_energy.iter().sum();
+        let inert_energy: f64 = fixed.element_energy.iter().sum();
+        assert!(
+            (energy - inert_energy).abs() > 1.0e-3 * inert_energy.abs(),
+            "the drive must move the estimator's energy: {energy} against {inert_energy}"
+        );
+        assert!(
+            driven_supplement
+                .element_energy
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+        );
+    }
+
+    /// A source frequency alone cannot size a mesh in a driven medium. The
+    /// medium mixes, putting energy at `f_source +/- n f_drive`, and a
+    /// travelling drive writes a spatial pattern into the coefficients that
+    /// the mesh must resolve even where the field is quiet.
+    #[test]
+    fn resolution_demand_accounts_for_sidebands_and_the_coefficient_pattern() {
+        // An inert medium asks for nothing beyond the source.
+        let inert = compile(&Scene::initial()).unwrap();
+        let quiet = inert.resolution_demand(2.0);
+        assert_eq!(quiet.frequency_hz, 2.0);
+        assert_eq!(quiet.sideband_order, 0);
+        assert!(quiet.coefficient_wavelength.is_infinite());
+
+        // A shallow pump reaches one sideband pair; a deep one reaches more.
+        let pumped = |depth: f64| {
+            let mut scene = Scene::initial();
+            scene.materials[0].mass_law.drive = pump(depth, 0.5, 0.0);
+            compile(&scene).unwrap().resolution_demand(2.0)
+        };
+        let shallow = pumped(0.02);
+        let deep = pumped(0.9);
+        assert_eq!(shallow.sideband_order, 1);
+        assert!(
+            deep.sideband_order > shallow.sideband_order,
+            "a deeper drive carries further, got {} against {}",
+            deep.sideband_order,
+            shallow.sideband_order
+        );
+        assert!((shallow.frequency_hz - 2.5).abs() < 1.0e-12);
+        assert!(deep.frequency_hz > shallow.frequency_hz);
+
+        // A smoothed square carries its own odd harmonics before mixing, so
+        // it reaches further than a cosine of the same depth and frequency.
+        let mut crystal_scene = Scene::initial();
+        crystal_scene.materials[0].mass_law.drive = TimeDrive::TimeCrystal {
+            depth: ScalarField::constant(0.02),
+            frequency_hz: ScalarField::constant(0.5),
+            phase_radians: ScalarField::constant(0.0),
+            sharpness: ScalarField::constant(3.0),
+        };
+        let crystal = compile(&crystal_scene).unwrap().resolution_demand(2.0);
+        assert!(
+            crystal.frequency_hz > shallow.frequency_hz,
+            "a sharpened square reaches past a cosine: {} against {}",
+            crystal.frequency_hz,
+            shallow.frequency_hz
+        );
+
+        // A travelling drive patterns the operator in space. That binds the
+        // mesh on its own, independently of any source.
+        let mut travelling_scene = Scene::initial();
+        travelling_scene.materials[0].stiffness_law.drive = TimeDrive::TravellingModulation {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(0.4),
+            phase_radians: ScalarField::constant(0.0),
+            wavenumber: ScalarField::constant(8.0),
+            angle_radians: ScalarField::constant(0.3),
+        };
+        let travelling = compile(&travelling_scene).unwrap();
+        let demand = travelling.resolution_demand(0.0);
+        assert!(
+            (demand.coefficient_wavelength - std::f64::consts::TAU / 8.0).abs() < 1.0e-12,
+            "got {}",
+            demand.coefficient_wavelength
+        );
+        assert!(
+            demand.frequency_hz > 0.0,
+            "a driven medium is not quiet just because no source is on"
+        );
+        // A non-travelling drive writes no spatial pattern.
+        assert!(pumped(0.2).coefficient_wavelength.is_infinite());
+    }
+
     /// The pump power must be the actual time derivative of the energy at
     /// fixed state, or a consumer reporting it would mislabel drift as
     /// physics. Checked against a central difference of the energy with the
