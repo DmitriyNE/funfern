@@ -351,7 +351,7 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use funfern_app::topology_editor::TopologyEditor;
+    use funfern_app::topology_editor::{TopologyAcceptance, TopologyEditor};
 
     /// Two subdomains selected and deleted in one gesture. Asking curve by
     /// curve asked about the first one only, closed the history entry to ask,
@@ -466,6 +466,82 @@ mod tests {
             state.editor.history_len(),
             (history.0 + 1, history.1),
             "one gesture, one entry"
+        );
+    }
+    /// The frame gizmo must be reachable wherever the numeric placement controls
+    /// are, otherwise a region-local profile can only be aligned by typing.
+    /// Deleting a selection is one gesture, so it is one undo step however many
+    /// curves it covers.
+    #[test]
+    fn deleting_several_curves_is_one_history_entry() {
+        // The default playground opens an example, which this test is not about.
+        let mut state = Playground {
+            editor: funfern_app::topology_editor::TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let settle = |state: &mut Playground| {
+            for _ in 0..100_000 {
+                state.editor.validate_frame(4096);
+                if state.editor.acceptance != TopologyAcceptance::Pending {
+                    return;
+                }
+            }
+            panic!("validation did not terminate")
+        };
+        settle(&mut state);
+        let mut curves = vec![];
+        for (index, y) in [0.3f64, 0.0, -0.3].into_iter().enumerate() {
+            let x = -0.4 + 0.1 * index as f64;
+            curves.push(
+                state
+                    .editor
+                    .create_boundary_baffle(
+                        OpenCubicSpline::polyline(vec![
+                            Point2::new(x, y),
+                            Point2::new(x + 0.2, y + 0.08),
+                            Point2::new(x + 0.4, y),
+                        ])
+                        .unwrap(),
+                    )
+                    .unwrap(),
+            );
+            settle(&mut state);
+        }
+        assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
+        let before = state.editor.history_len().0;
+        state.selection = TopologySelection::Spans(
+            state
+                .editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curves
+                .iter()
+                .flat_map(|curve| curve.spans.iter())
+                .map(|span| TopologySpanTarget::Curve(span.id))
+                .collect(),
+        );
+
+        state.delete_selection();
+        settle(&mut state);
+        assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
+        assert!(
+            state.editor.document.model.draft.geometry.curves.is_empty(),
+            "every selected curve went"
+        );
+        assert_eq!(
+            state.editor.history_len().0,
+            before + 1,
+            "three curves, one entry"
+        );
+
+        assert!(state.editor.undo());
+        settle(&mut state);
+        assert_eq!(
+            state.editor.document.model.draft.geometry.curves.len(),
+            curves.len(),
+            "one undo brings all three back"
         );
     }
 }

@@ -466,4 +466,92 @@ mod tests {
             "the marker moved between a {coarse} and a {fine} triangle mesh"
         );
     }
+    #[test]
+    fn material_frame_gizmo_appears_with_its_numeric_controls() {
+        let mut state = Playground::default();
+        assert_eq!(state.selected_material_frame(), None, "hidden by default");
+
+        let material = state.editor.add_material().unwrap();
+        let mut updated = state
+            .editor
+            .document
+            .model
+            .draft
+            .material(material)
+            .unwrap()
+            .clone();
+        updated.stiffness = ScalarField::formula("1 + 0.2 * x").unwrap();
+        state.editor.update_material(updated).unwrap();
+        state
+            .editor
+            .set_region_material(BACKGROUND_REGION, material)
+            .unwrap();
+
+        state.inspector = Some(InspectorPanel::Edit);
+        assert_eq!(
+            state.selected_material_frame(),
+            None,
+            "the gizmo belongs to the Materials panel"
+        );
+        state.inspector = Some(InspectorPanel::Materials);
+        state.region_selection = BACKGROUND_REGION;
+        let (region, frame) = state
+            .selected_material_frame()
+            .expect("a frame-using material must expose its gizmo");
+        assert_eq!(region, BACKGROUND_REGION);
+
+        let centre = state.screen(frame.origin, viewport());
+        assert_eq!(
+            state.hit_material_frame_gizmo(centre, viewport()),
+            Some(MaterialFrameGizmoHit::Origin)
+        );
+        assert_eq!(
+            state.hit_material_frame_gizmo(
+                centre + egui::vec2(MATERIAL_FRAME_RADIUS, 0.0),
+                viewport()
+            ),
+            Some(MaterialFrameGizmoHit::Rotate)
+        );
+        assert_eq!(
+            state.hit_material_frame_gizmo(centre + egui::vec2(25.0, 0.0), viewport()),
+            None
+        );
+    }
+
+    /// The combo label and the drawn colour must name the same thing, and two
+    /// subdomains sharing a material must still be told apart.
+    /// Shift snaps what the drag moves, not the pointer, so where inside a probe
+    /// it was picked up cannot leave it off the grid.
+    /// The combo label and the drawn colour must name the same thing, and two
+    /// subdomains sharing a material must still be told apart.
+    #[test]
+    fn subdomain_overlay_is_categorical_and_named_consistently() {
+        assert_eq!(MaterialOverlay::Subdomains.label(), "Subdomains");
+        assert_eq!(
+            MaterialOverlay::Subdomains.label_for(PhysicsModel::Mechanical),
+            MaterialOverlay::Subdomains.label()
+        );
+        assert_eq!(MaterialOverlay::Regions.label(), "Materials");
+
+        let mut scene = TopologyScene::default();
+        scene.regions.push(Region {
+            id: RegionId(7),
+            material: DEFAULT_MATERIAL,
+            frame: MaterialFrame::world(),
+        });
+        scene.regions.push(Region {
+            id: RegionId(8),
+            material: DEFAULT_MATERIAL,
+            frame: MaterialFrame::world(),
+        });
+        let background = subdomain_color(&scene, BACKGROUND_REGION, 1.0);
+        let first = subdomain_color(&scene, RegionId(7), 1.0);
+        let second = subdomain_color(&scene, RegionId(8), 1.0);
+        assert_ne!(first, second, "equal materials must still read apart");
+        assert_ne!(background, first);
+        assert_eq!(
+            subdomain_color(&scene, RegionId(99), 1.0),
+            Color32::TRANSPARENT
+        );
+    }
 }

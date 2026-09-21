@@ -222,3 +222,55 @@ impl Playground {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use funfern_app::topology_viewport::TopologySpanTarget;
+
+    /// A capture crops to the viewport, so what has to be suppressed is the
+    /// chrome inside the crop, not the panels outside it.
+    #[test]
+    fn a_capture_hides_the_chrome_inside_its_crop() {
+        let mut state = Playground::default();
+        assert!(!state.capturing(), "idle is not a capture");
+        for snapshot in [SnapshotState::Armed, SnapshotState::Capturing] {
+            state.snapshot_state = snapshot;
+            assert!(state.capturing(), "{snapshot:?}");
+        }
+        state.snapshot_state = SnapshotState::Saving;
+        assert!(
+            !state.capturing(),
+            "saving happens after the pixels are taken"
+        );
+        state.snapshot_state = SnapshotState::Idle;
+        for recording in [
+            RecordingState::Preparing,
+            RecordingState::Starting,
+            RecordingState::Recording,
+        ] {
+            state.recording_state = recording;
+            assert!(state.capturing(), "{recording:?}");
+        }
+        state.recording_state = RecordingState::SelectingDestination;
+        assert!(
+            !state.capturing(),
+            "choosing a destination is not yet a capture"
+        );
+
+        // Selection emphasis is the one thing that has to read through the
+        // predicate rather than be gated at a call site.
+        state.recording_state = RecordingState::Recording;
+        state.selection = TopologySelection::Spans(
+            [TopologySpanTarget::Outer(OuterSide::Bottom)]
+                .into_iter()
+                .collect(),
+        );
+        assert!(
+            !state.span_selected(TopologySpanTarget::Outer(OuterSide::Bottom)),
+            "a selected span must not read as selected in a capture"
+        );
+        state.recording_state = RecordingState::Idle;
+        assert!(state.span_selected(TopologySpanTarget::Outer(OuterSide::Bottom)));
+    }
+}
