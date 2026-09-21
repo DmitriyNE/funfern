@@ -33,6 +33,12 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   the error the readback removes.
 - `target` is a reserved word in WGSL and the naga suite caught it before the
   device did, which is the second time that test has paid for itself.
+- Re-ran every hidden GPU gate after the layout change, since all of them
+  read the state buffer. All six pass on Apple M1 Max / Metal with their
+  recorded figures: the bulk 96-step run at `3.882e-7` Q and `4.172e-5` b,
+  handoff at `2.986e-7` and `2.090e-6`, rollback at `2.645e-7` and
+  `2.426e-6`, the four consumers unchanged, temporal work as above, and the
+  filter boundary at `4.140e-7` field and `1.094e-6` rate.
 - Formatting, strict workspace Clippy, the workspace suite and a native
   release build pass. The Stage 7 diagnostic gate is now closed. What remains
   in Stage 7 is modulation-aware AMR, supported boundary compositions under
