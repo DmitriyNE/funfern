@@ -105,9 +105,10 @@ jobs:
 
       - name: Build browser release for Pages
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        # Pages cannot send the cross-origin isolation headers required by the
-        # shared-memory bundle, so publish the cooperative browser build there.
-        run: trunk build --release --locked --public-url "${{ steps.pages.outputs.base_path }}/"
+        # Pages cannot send the cross-origin isolation headers the shared-memory
+        # bundle needs, so the page installs coi-serviceworker to add them and
+        # the threaded bundle is what gets published.
+        run: scripts/trunk build --release --locked --public-url "${{ steps.pages.outputs.base_path }}/"
 
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

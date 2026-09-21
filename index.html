@@ -4,25 +4,117 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>funfern · wave playground</title>
+  <!--
+    Cross-origin isolation gate. The threaded bundle imports a shared memory and
+    cannot instantiate unless the page is cross-origin isolated. Trunk's dev
+    server, the Docker nginx configuration and any host that can set response
+    headers provide that directly. On a header-less static host such as GitHub
+    Pages, coi-serviceworker.js installs a worker that adds COOP/COEP to every
+    response instead, which costs one reload. Parsing stops here so that reload
+    does not throw away a partly downloaded module: Trunk injects its loader and
+    a wasm preload further down this head, and the module is tens of megabytes.
+
+    This must stay above the data-trunk rust link below.
+  -->
+  <script>
+    (function () {
+      var flag = 'funfernCoiReload';
+      var store = null;
+      try { store = window.sessionStorage; } catch (e) { /* storage blocked */ }
+      var note = function (text) {
+        document.documentElement.innerHTML =
+          '<head><meta charset="utf-8"><title>funfern</title></head>' +
+          '<body style="margin:0;height:100vh;display:flex;flex-direction:column;' +
+          'align-items:center;justify-content:center;gap:28px;background:#111820;' +
+          'color:#93a7b8;font:14px/1.5 system-ui">' +
+          '<img src="logo.svg" alt="funfern" style="width:min(60vw,460px);height:auto">' +
+          '<p style="margin:0;max-width:46ch;text-align:center">' + text + '</p></body>';
+      };
+
+      if (window.crossOriginIsolated) {
+        try { store && store.removeItem(flag); } catch (e) { /* ignore */ }
+        return;
+      }
+      // Undefined rather than false means the browser has no notion of it.
+      if (window.crossOriginIsolated !== false) return;
+      // Nothing a service worker can do here; let the app report the failure.
+      if (!window.isSecureContext || !navigator.serviceWorker) return;
+      try {
+        if (store && store.getItem(flag)) return;
+        store && store.setItem(flag, '1');
+      } catch (e) { /* ignore */ }
+
+      window.stop();
+      note('Enabling shared memory…');
+
+      var settled = false;
+      var giveUp = function () {
+        if (settled) return;
+        settled = true;
+        note('This browser could not enable cross-origin isolation, which funfern ' +
+          'needs for its shared-memory build. Serve it from a host that sends ' +
+          'Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy.');
+      };
+      // A registration that never activates must not leave the splash spinning.
+      setTimeout(giveUp, 10000);
+      navigator.serviceWorker.register('coi-serviceworker.js')
+        .then(function () { return navigator.serviceWorker.ready; })
+        .then(function () { if (!settled) { settled = true; location.reload(); } })
+        .catch(giveUp);
+    })();
+  </script>
+  <link data-trunk rel="copy-file" href="coi-serviceworker.js">
+  <link data-trunk rel="copy-file" href="assets/logo.svg">
   <link data-trunk rel="rust" href="crates/funfern-app/Cargo.toml" data-bin="funfern-app">
   <style>
     html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; background: #111820; color: #d8e4ee; font: 16px system-ui; }
     canvas { width: 100%; height: 100%; display: block; outline: none; touch-action: none; }
-    #startup { position: absolute; inset: 30% 15% auto; padding: 24px; background: #182430; border: 1px solid #466078; border-radius: 12px; }
-    #startup[hidden] { display: none; }
+
+    /* The app clears the hidden attribute path by setting it on #startup once
+       its first frame is up, so the overlay fades instead of disappearing. */
+    #startup {
+      position: absolute; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 28px;
+      background: radial-gradient(60% 60% at 50% 42%, #16222e 0%, #111820 72%);
+      transition: opacity .4s ease, visibility 0s;
+    }
+    #startup[hidden] {
+      display: flex; opacity: 0; visibility: hidden; pointer-events: none;
+      transition: opacity .4s ease, visibility 0s .4s;
+    }
+    #startup img { width: min(60vw, 460px); height: auto; }
+    #startup p { margin: 0; max-width: 46ch; text-align: center; color: #93a7b8; font-size: 14px; line-height: 1.5; }
+    #startup-bar { width: min(60vw, 460px); height: 3px; border-radius: 2px; background: #1e2a36; overflow: hidden; }
+    #startup-bar div { width: 30%; height: 100%; border-radius: 2px; background: linear-gradient(90deg, transparent, #4f9ed6, transparent); animation: startup-sweep 1.5s ease-in-out infinite; }
+    @keyframes startup-sweep { from { transform: translateX(-120%); } to { transform: translateX(440%); } }
+    #startup.failed #startup-bar { visibility: hidden; }
+    #startup.failed p { color: #e6a8a8; }
+    @media (prefers-reduced-motion: reduce) { #startup-bar div { animation: none; width: 100%; opacity: .45; } }
   </style>
 </head>
 <body>
   <canvas id="funfern" tabindex="0" aria-label="Spline geometry editor"></canvas>
-  <div id="startup" role="status">Starting funfern… WebGPU is required.</div>
+  <div id="startup" role="status" aria-live="polite">
+    <img src="logo.svg" alt="funfern">
+    <div id="startup-bar"><div></div></div>
+    <p id="startup-status">Starting funfern… WebGPU is required.</p>
+  </div>
   <script>
     const startup = document.getElementById('startup');
+    const statusLine = document.getElementById('startup-status');
     let failed = false;
-    const fail = detail => { failed = true; startup.hidden = false; startup.textContent = 'Unable to start WebGPU. Use a WebGPU-capable browser with hardware acceleration on, over HTTPS or localhost. ' + detail; };
+    const running = () => !failed && !startup.hidden;
+    const fail = detail => {
+      failed = true;
+      startup.hidden = false;
+      startup.classList.add('failed');
+      statusLine.textContent = 'Unable to start WebGPU. Use a WebGPU-capable browser with hardware acceleration on, over HTTPS or localhost. ' + detail;
+    };
     if (!navigator.gpu) fail('This browser does not expose navigator.gpu.');
     addEventListener('error', e => fail(e.message));
     addEventListener('unhandledrejection', e => fail(String(e.reason)));
-    setTimeout(() => { if (!startup.hidden && !failed) fail('GPU initialization has not completed. Check the browser console for details.'); }, 30000);
+    setTimeout(() => { if (running()) statusLine.textContent = 'Loading the simulation module. The first visit downloads it in full; later ones come from the browser cache.'; }, 6000);
+    setTimeout(() => { if (running()) fail('GPU initialization has not completed. Check the browser console for details.'); }, 30000);
   </script>
 </body>
 </html>
