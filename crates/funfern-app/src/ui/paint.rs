@@ -1198,3 +1198,115 @@ impl Playground {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use funfern_app::document::VectorOverlay;
+    use funfern_app::topology_editor::TopologyEditor;
+
+    #[test]
+    fn vector_overlay_layout_is_world_anchored_and_pan_stable() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let active = activate_at(&mut state, 0.08);
+        let viewport = viewport();
+        let spacing = 28.0;
+        let (world_spacing, visible_bins) =
+            vector_overlay_lattice(state.scale, spacing, state.center, viewport).unwrap();
+        let points = vector_overlay_layout(
+            &active.bundle.authored,
+            &active.mesh,
+            &active.operator,
+            world_spacing,
+            visible_bins,
+        );
+        assert!(!points.is_empty());
+        let keys = points
+            .iter()
+            .map(|point| {
+                (
+                    (point.point.x / world_spacing).floor() as i64,
+                    (point.point.y / world_spacing).floor() as i64,
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(keys.len(), points.len());
+        let maximum_bins = (visible_bins[1] - visible_bins[0] + 1) as usize
+            * (visible_bins[3] - visible_bins[2] + 1) as usize;
+        assert!(points.len() <= maximum_bins);
+        assert!(points.iter().all(|point| {
+            point.point.x.is_finite()
+                && point.point.y.is_finite()
+                && point.stencil.element < active.mesh.triangles.len() as u32
+        }));
+
+        let shifted_center = state.center + Point2::new(world_spacing * 0.35, 0.0);
+        let (shifted_spacing, shifted_bins) =
+            vector_overlay_lattice(state.scale, spacing, shifted_center, viewport).unwrap();
+        assert_eq!(shifted_spacing, world_spacing);
+        let shifted = vector_overlay_layout(
+            &active.bundle.authored,
+            &active.mesh,
+            &active.operator,
+            shifted_spacing,
+            shifted_bins,
+        );
+        let common = [
+            visible_bins[0].max(shifted_bins[0]) + 1,
+            visible_bins[1].min(shifted_bins[1]) - 1,
+            visible_bins[2].max(shifted_bins[2]) + 1,
+            visible_bins[3].min(shifted_bins[3]) - 1,
+        ];
+        let interior = |points: &[VectorOverlayLayoutPoint]| {
+            points
+                .iter()
+                .filter_map(|point| {
+                    let key = (
+                        (point.point.x / world_spacing).floor() as i64,
+                        (point.point.y / world_spacing).floor() as i64,
+                    );
+                    (key.0 >= common[0]
+                        && key.0 <= common[1]
+                        && key.1 >= common[2]
+                        && key.1 <= common[3])
+                        .then_some((key, point.element))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = interior(&points);
+        assert!(!before.is_empty());
+        assert_eq!(before, interior(&shifted));
+    }
+
+    #[test]
+    fn vector_overlay_keeps_the_mechanical_skin_on_physical_observables() {
+        assert_eq!(
+            VectorOverlay::choices(PhysicsModel::Mechanical),
+            &[VectorOverlay::Off, VectorOverlay::RelativeEnergyFlow]
+        );
+        assert_eq!(
+            VectorOverlay::choices(PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            })
+            .len(),
+            3
+        );
+        assert_eq!(
+            VectorOverlay::ComplementaryField.resolved(PhysicsModel::Mechanical),
+            VectorOverlay::Off
+        );
+        assert_eq!(
+            VectorOverlay::ComplementaryField.resolved(PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Te,
+            }),
+            VectorOverlay::ComplementaryField
+        );
+        assert_eq!(
+            VectorOverlay::ComplementaryField.label(PhysicsModel::Mechanical),
+            "Off"
+        );
+    }
+}
