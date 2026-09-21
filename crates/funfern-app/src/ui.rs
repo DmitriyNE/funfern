@@ -7,8 +7,8 @@ use crate::files::FileEvent;
 use crate::material_overlay::MaterialOverlay;
 use crate::recording::{self, RecordingSpec};
 use crate::wave_gpu::{
-    AreaProbeDisplay, CurveProbeDisplay, FarFieldDisplay, MAX_STEPS_PER_FRAME, ProbeDisplay,
-    VectorOverlayDisplay, WaveDisplay, WaveGpuRequest,
+    AreaProbeDisplay, CurveProbeDisplay, FarFieldDisplay, ProbeDisplay, VectorOverlayDisplay,
+    WaveDisplay, WaveGpuRequest,
 };
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -41,11 +41,24 @@ mod diagnostics;
 mod domain;
 mod draw_tools;
 mod events;
+mod exposure;
+
+use exposure::{
+    AutoExposure, FIELD_EXPOSURE_QUANTILE, VECTOR_DC_REJECTION_RATE,
+    VECTOR_OVERLAY_READBACK_TIMEOUT, VECTOR_OVERLAY_VISIBILITY_CUTOFF, exposure_level, field_scale,
+    vector_arrow_length,
+};
 mod gesture;
 mod gizmo;
 mod input;
 mod inspectors;
 mod materials;
+mod pacing;
+
+use pacing::{
+    TIME_STEP_HYSTERESIS, canonical_steps_withheld, hold_rate, paced_time_step, speed_shortfall,
+    steps_for_frame, steps_with_gpu_backpressure,
+};
 mod paint;
 mod panels;
 mod probe_hit;
@@ -1171,299 +1184,6 @@ const fn starts_from_zero(active: bool, reset_requested: bool, fresh_requested: 
     !active || reset_requested || fresh_requested
 }
 
-/// A display reference level for one measured quantity.
-///
-/// Across the shipped examples the field's own amplitude spans a hundredfold,
-/// which is wider than the intensity slider's whole range, so no fixed gain can
-/// serve them: at the default, seven of the eight painted under a tenth of full
-/// colour, and at the slider's maximum three of them still did. The level is
-/// measured from the field each frame instead.
-///
-/// It rises the instant the field does, so a real transient is never clipped,
-/// and falls back over about a second, so a placed pulse fades out of the scale
-/// rather than darkening everything after it for the rest of the run — which is
-/// what the monotone run peak this replaces used to do. It never falls below a
-/// small fraction of the loudest level seen, and that is what keeps a field
-/// which has decayed into numerical noise from being magnified back into view.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct AutoExposure {
-    reference: f64,
-    peak: f64,
-}
-
-impl AutoExposure {
-    /// The most the reference may fall in a second, as a factor. A scale that
-    /// moves by a factor rather than by a difference takes the same time to
-    /// clear a spike whatever its size, which is the only behaviour that reads
-    /// the same on a field of 6e-3 and one of 7e-1.
-    ///
-    /// This has to be *slower* than the field's own decay or the scale simply
-    /// follows it down and a domain that has emptied still paints at full
-    /// brightness. Measured on a recorded level series from a scene whose walls
-    /// all radiate: after the sources stop the field drains 2000-fold in eight
-    /// seconds, and at the 8.0 this started at that still painted 48 % — the
-    /// wave looked like it never left. The rates trade against each other in one
-    /// direction, the tail brightness a field settles at against how long a
-    /// placed pulse holds the scale:
-    ///
-    /// | per second | drain tail | 20x spike clears |
-    /// | --- | --- | --- |
-    /// | 1.15 | 0.07-0.37 % | 21 s |
-    /// | 1.4 | up to 3.8 % | 9 s |
-    /// | 1.7 | up to 8.2 % | 6 s |
-    /// | 8.0 | 100 % then 48 % | 2 s |
-    ///
-    /// Above about 1.25 the scale catches up with the slow late decay and the
-    /// picture creeps back up — which is also what made the high-frequency modes
-    /// the grid-scale filter is busy killing swim back into view. 1.15 never
-    /// does; the cost is that a pulse holds the scale for some twenty seconds,
-    /// which is honest, since the pulse really was that much brighter.
-    const RELEASE_PER_SECOND: f64 = 1.15;
-    /// How far under the loudest level seen the reference may go.
-    const QUIET_FLOOR: f64 = PRESENTATION_QUIET_AMPLITUDE_RATIO;
-    /// The longest step the release is allowed to take at once, so a stalled
-    /// frame cannot drop the scale by an unbounded factor in one go.
-    const MAX_STEP_SECONDS: f32 = 1.0;
-
-    /// Starts the scale again for a field that has been replaced with zeros.
-    ///
-    /// How loud the session has been is kept. The first frames of a new field
-    /// are numerical dust — measured at 3.5e-10 — and an instant attack onto a
-    /// scale with nothing behind it latches straight onto that and paints it at
-    /// full colour. The remembered peak holds the quiet floor above the dust
-    /// until the field is really there.
-    fn restart(&mut self) {
-        self.reference = 0.0;
-    }
-
-    /// Starts a genuinely different displayed quantity. Unlike a fresh field
-    /// in the same run, it must not inherit a peak measured in different units.
-    fn clear(&mut self) {
-        *self = Self::default();
-    }
-
-    fn reference(self) -> Option<f64> {
-        (self.reference > 0.0).then_some(self.reference)
-    }
-
-    /// Takes this frame's measured level and the wall-clock seconds since the
-    /// previous one, and answers with the level to divide by.
-    fn update(&mut self, level: f64, elapsed: f32) -> Option<f64> {
-        if level.is_finite() && level > 0.0 {
-            self.peak = self.peak.max(level);
-            let elapsed = f64::from(elapsed.clamp(0.0, Self::MAX_STEP_SECONDS));
-            // The maximum rises to meet a louder field at once, so nothing is
-            // ever clipped, and the release only ever slows the way back down.
-            self.reference = level.max(self.reference * Self::RELEASE_PER_SECOND.powf(-elapsed));
-            self.reference = self.reference.max(self.peak * Self::QUIET_FLOOR);
-        }
-        self.reference()
-    }
-
-    /// Smoothly turns off structure below the run-relative quiet floor. Merely
-    /// flooring the denominator still paints late f32 residue at a few percent,
-    /// which reads as a full-domain static pattern. Squaring the smoothstep
-    /// makes that residue disappear without a visible threshold crossing.
-    fn visibility(self, level: f64) -> f64 {
-        if !level.is_finite() || level <= 0.0 || self.peak <= 0.0 {
-            return 0.0;
-        }
-        let fraction = (level / (self.peak * Self::QUIET_FLOOR)).clamp(0.0, 1.0);
-        let smooth = fraction * fraction * (3.0 - 2.0 * fraction);
-        smooth * smooth
-    }
-}
-
-/// Where the field's reference level sits in its own distribution: above the
-/// quiet bulk of the domain, below the few nodes right against a source.
-const FIELD_EXPOSURE_QUANTILE: f64 = 0.98;
-
-/// The intensity slider is a trim on the automatic scale rather than the scale
-/// itself. At its default of 2.0 the reference level lands on `tanh(1.0)`,
-/// about three quarters of full colour, which leaves the brightest nodes
-/// brighter still instead of clipping them flat.
-const FIELD_EXPOSURE_GAIN: f32 = 0.5;
-
-/// Presentation-only complementary-field DC rejection. This is the old
-/// reconstruction corner (0.5 rad/s, about 0.08 Hz), now applied only to arrow
-/// samples and measured in simulated time. Ordinary 2.5--4 Hz waves therefore
-/// retain more than 99.9% of their amplitude.
-const VECTOR_DC_REJECTION_RATE: f64 = 0.5;
-/// A vector sampling revision is tiny and normally completes within a few
-/// display frames. If its readback disappears during rapid resource churn,
-/// retry instead of allowing the one-in-flight coalescer to deadlock.
-const VECTOR_OVERLAY_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
-/// The longest arrow below this global visibility is less than about a tenth
-/// of a pixel even at the coarsest supported density. Avoiding the draw also
-/// avoids assigning a visible direction to near-zero floating-point residue.
-const VECTOR_OVERLAY_VISIBILITY_CUTOFF: f64 = 1.0 / 512.0;
-
-/// Scales one arrow under a shared exposure. Saturation belongs before the
-/// quiet-tail visibility: otherwise an arbitrarily large sparse outlier can
-/// cancel an arbitrarily small global fade by hitting the length clamp.
-fn vector_arrow_length(
-    magnitude: f64,
-    reference: f64,
-    gain: f32,
-    maximum_length: f32,
-    visibility: f64,
-) -> f32 {
-    let exposed = (magnitude * f64::from(gain) / reference).clamp(0.0, 1.0);
-    (f64::from(maximum_length) * exposed * visibility.clamp(0.0, 1.0)) as f32
-}
-
-/// The `quantile` of `values` by magnitude, sampled rather than sorted.
-///
-/// Sorting every node each frame would spend milliseconds placing a number the
-/// field itself moves by more than the estimate's error. Nodes are numbered in
-/// meshing order, which bears no relation to the field, so a strided sample is
-/// a fair one.
-fn exposure_level(values: &[f32], quantile: f64, scratch: &mut Vec<f64>) -> f64 {
-    const SAMPLES: usize = 4096;
-    scratch.clear();
-    let stride = values.len().div_ceil(SAMPLES).max(1);
-    scratch.extend(
-        values
-            .iter()
-            .step_by(stride)
-            .map(|value| f64::from(value.abs()))
-            .filter(|value| value.is_finite()),
-    );
-    if scratch.is_empty() {
-        return 0.0;
-    }
-    let index = ((scratch.len() - 1) as f64 * quantile).round() as usize;
-    *scratch
-        .select_nth_unstable_by(index, |a, b| a.total_cmp(b))
-        .1
-}
-
-/// Wall-clock seconds a frame is budgeted when deciding how small the solver's
-/// step has to be.
-///
-/// Fixed rather than the measured frame time: a step that moved with the frame
-/// rate would jitter, and each jitter costs a republish. A hundred and twentieth
-/// keeps every frame of a fast display fed.
-const PACING_FRAME_SECONDS: f64 = 1.0 / 120.0;
-
-/// How far the wanted step may drift from the one the solver is running before
-/// it is worth republishing to change it.
-const TIME_STEP_HYSTERESIS: f64 = 0.1;
-
-/// The step the solver runs at: the mesh's stability limit, or smaller when the
-/// speed ceiling is low enough that pacing by step count alone would leave whole
-/// frames without one.
-///
-/// Above a speed of `recommended / PACING_FRAME_SECONDS` this is the
-/// recommendation unchanged and the rate is paced purely by how many steps a
-/// frame asks for. Below it that count floors to zero on most frames and the
-/// picture judders — measured at 0.53 steps a frame with 52 % of frames
-/// advancing at 0.05x, and a coarse mesh crosses the threshold at 0.8x — so the
-/// step shrinks instead and every frame gets one. Shrinking is always safe: the
-/// stability limit is an upper bound, and this never goes above it.
-fn paced_time_step(recommended: f64, speed: f64) -> f64 {
-    if !recommended.is_finite() || recommended <= 0.0 || !speed.is_finite() || speed <= 0.0 {
-        return recommended;
-    }
-    recommended.min(PACING_FRAME_SECONDS * speed)
-}
-
-/// The two short boundaries at which it is unsafe to publish more work.
-/// Preparing and uploading a replacement generation are deliberately absent:
-/// the accepted generation can keep advancing through both. We drain just
-/// before `begin_handoff`. Once the transfer is encoded, later source steps
-/// remain visible while validation is in flight and are replayed by the target
-/// from its exact transferred clock before its first visible readback.
-fn canonical_steps_withheld(packed_candidate_waiting: bool, fresh_upload: bool) -> bool {
-    packed_candidate_waiting || fresh_upload
-}
-
-/// Steps to ask the solver for this frame, spending `accumulator` at
-/// `time_step` a step.
-///
-/// `speed` is the ceiling on simulated seconds per wall second: the wall-clock
-/// time a frame took is scaled by it before being spent, so half asks for half
-/// the steps. A late frame may spend at most one 60 Hz display interval. Trying
-/// to catch up the whole late interval creates a positive feedback loop on a
-/// saturated GPU: a long solver batch delays drawing, the delayed frame asks
-/// for a still larger batch, and rendering collapses to the step ceiling. The
-/// interactive contract is instead to preserve display service and report the
-/// simulation-speed shortfall. The fractional remainder is still retained, but
-/// is capped at one solver batch so high requested speeds cannot queue an
-/// unbounded backlog.
-fn steps_for_frame(accumulator: &mut f64, delta: f64, speed: f64, time_step: f64) -> u64 {
-    if !time_step.is_finite() || time_step <= 0.0 || !speed.is_finite() || speed <= 0.0 {
-        return 0;
-    }
-    const DISPLAY_INTERVAL: f64 = 1.0 / 60.0;
-    *accumulator += delta.clamp(0.0, DISPLAY_INTERVAL) * speed;
-    let steps = (*accumulator / time_step)
-        .floor()
-        .clamp(0.0, MAX_STEPS_PER_FRAME as f64) as u64;
-    *accumulator -= steps as f64 * time_step;
-    *accumulator = accumulator.min(MAX_STEPS_PER_FRAME as f64 * time_step);
-    steps
-}
-
-/// Keeps the host request clock close to the last GPU-completed boundary. A
-/// render thread can otherwise encode small batches faster than an overloaded
-/// or background-throttled GPU executes them, accumulating minutes of stale
-/// simulation work without ever violating the per-frame batch ceiling.
-fn steps_with_gpu_backpressure(completed: u64, requested: u64, proposed: u64) -> u64 {
-    let outstanding = requested.saturating_sub(completed);
-    proposed.min(MAX_STEPS_PER_FRAME.saturating_sub(outstanding))
-}
-
-/// How close the reached rate has to come to the one asked for before the
-/// shortfall is worth mentioning.
-const SPEED_SHORTFALL_MARGIN: f64 = 0.8;
-
-/// How fast the held rate gives up a better reading, as a factor per second.
-///
-/// The windowed measurement dips to about three quarters of the rate asked for
-/// whenever a handoff withholds stepping inside its window — measured at every
-/// speed, including ones the solver reaches comfortably — so comparing it
-/// directly would flash the note at random. Holding the best reading rides over
-/// a dip of a second while still letting a real slowdown through in under two.
-const SPEED_HOLD_PER_SECOND: f64 = 1.15;
-
-/// The best rate seen lately: instant to a better reading, slow to give one up.
-fn hold_rate(held: f64, measured: f64, elapsed: f64) -> f64 {
-    if !measured.is_finite() || measured < 0.0 {
-        return held;
-    }
-    measured.max(held * SPEED_HOLD_PER_SECOND.powf(-elapsed.clamp(0.0, 1.0)))
-}
-
-/// The rate actually being reached, when it falls meaningfully short of `target`
-/// and the solver is genuinely trying.
-///
-/// Both are simulated seconds per wall second. Nothing is said while the solver
-/// is paused or before any steps have been measured — neither is the solver
-/// failing to keep up.
-fn speed_shortfall(measured: f64, target: f64, stepping: bool) -> Option<f64> {
-    if !stepping || !measured.is_finite() || measured <= 0.0 {
-        return None;
-    }
-    (measured < target * SPEED_SHORTFALL_MARGIN).then_some(measured)
-}
-
-/// The factor a node's value is multiplied by before it becomes colour.
-///
-/// Automatic, the reference level lands on `tanh(gain * FIELD_EXPOSURE_GAIN)`,
-/// which at the default gain is about three quarters of full colour. Manual, the
-/// slider is the whole scale — `tanh(value * gain)`, exactly what the field was
-/// painted with before it measured its own. With nothing measured yet there is
-/// no scale, and every node is zero anyway.
-fn field_scale(gain: f32, reference: Option<f64>, automatic: bool) -> f64 {
-    if !automatic {
-        return f64::from(gain);
-    }
-    reference.map_or(0.0, |reference| {
-        f64::from(gain) * f64::from(FIELD_EXPOSURE_GAIN) / reference
-    })
-}
-
 /// A fraction in `[0, 1)` without a random-number dependency: the wall clock's
 /// sub-second bits natively, and the platform's own generator in the browser,
 /// where `SystemTime::now` is not available.
@@ -2180,9 +1900,12 @@ pub fn frame(
 
 #[cfg(test)]
 mod tests {
+    use super::exposure::FIELD_EXPOSURE_GAIN;
+    use super::pacing::PACING_FRAME_SECONDS;
     use super::theme::{field_color, field_color_over_overlay};
     use super::*;
     use crate::material_overlay::MaterialProperty;
+    use crate::wave_gpu::MAX_STEPS_PER_FRAME;
     use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyAcceptance, TopologyEditor};
     use funfern_app::topology_viewport::TopologyHandle;
     use funfern_app::topology_viewport::TopologyHit;
