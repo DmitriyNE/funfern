@@ -4,6 +4,8 @@ use super::*;
 use bevy_egui::egui::{self, Pos2, Rect};
 use funfern_app::topology_editor::{TopologyAcceptance, TopologyEditor};
 use funfern_app::topology_runtime::PreparedTopology;
+use funfern_app::topology_viewport::TopologySpanTarget;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub(super) fn viewport() -> Rect {
@@ -53,4 +55,22 @@ pub(super) fn activate_at(
         }
     }
     panic!("topology preparation did not finish");
+}
+
+pub(super) fn every_span(state: &Playground) -> BTreeSet<TopologySpanTarget> {
+    state
+        .editor
+        .document
+        .model
+        .draft
+        .geometry
+        .curves
+        .iter()
+        .flat_map(|curve| {
+            curve
+                .spans
+                .iter()
+                .map(|span| TopologySpanTarget::Curve(span.id))
+        })
+        .collect()
 }

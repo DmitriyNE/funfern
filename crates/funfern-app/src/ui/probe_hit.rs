@@ -380,3 +380,65 @@ impl Playground {
         Some((view.end_time - span, view.end_time))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dragging an endpoint must move only that endpoint, and a body drag must
+    /// translate the whole probe.
+    #[test]
+    fn probe_drags_reshape_and_translate() {
+        let mut state = Playground::default();
+        state
+            .editor
+            .create_probe(
+                "Line".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::Segment {
+                    start: Point2::new(-0.5, 0.0),
+                    end: Point2::new(0.5, 0.0),
+                    preset: ProbeSamplingPreset::Medium,
+                },
+            )
+            .unwrap();
+        let index = state
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .position(|probe| probe.name == "Line")
+            .unwrap();
+        let id = state.editor.document.model.probes[index].id;
+        let original = state.editor.document.model.probes[index].target.clone();
+
+        state.drag_probe(
+            ProbeHit::SegmentEndpoint(id, true),
+            &original,
+            Point2::new(0.0, 0.25),
+            false,
+        );
+        let TopologyProbeTarget::Segment { start, end, .. } =
+            state.editor.document.model.probes[index].target.clone()
+        else {
+            panic!("expected a segment")
+        };
+        assert!((start - Point2::new(-0.5, 0.25)).norm() < 1.0e-12);
+        assert!((end - Point2::new(0.5, 0.0)).norm() < 1.0e-12);
+
+        state.drag_probe(
+            ProbeHit::SegmentBody(id),
+            &original,
+            Point2::new(0.1, -0.1),
+            false,
+        );
+        let TopologyProbeTarget::Segment { start, end, .. } =
+            state.editor.document.model.probes[index].target.clone()
+        else {
+            panic!("expected a segment")
+        };
+        assert!((start - Point2::new(-0.4, -0.1)).norm() < 1.0e-12);
+        assert!((end - Point2::new(0.6, -0.1)).norm() < 1.0e-12);
+    }
+}

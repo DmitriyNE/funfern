@@ -268,3 +268,202 @@ impl Playground {
         domain
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use funfern_app::topology_editor::TopologyProbeTarget;
+
+    /// egui only reports a drag once the pointer has passed `max_click_dist`,
+    /// so a grab radius must still cover the control from that far away.
+    /// Dragging the outer rectangle resizes it: a side moves only its own edge,
+    /// a corner moves the two that meet there, and the rest stays put.
+    #[test]
+    fn domain_drags_move_one_side_or_one_corner() {
+        let start = DomainRect::new(-1.0, 1.0, -1.0, 1.0);
+        for (side, expected) in [
+            (OuterSide::Left, DomainRect::new(-0.5, 1.0, -1.0, 1.0)),
+            (OuterSide::Right, DomainRect::new(-1.0, -0.5, -1.0, 1.0)),
+            (OuterSide::Bottom, DomainRect::new(-1.0, 1.0, -0.5, 1.0)),
+            (OuterSide::Top, DomainRect::new(-1.0, 1.0, -1.0, -0.5)),
+        ] {
+            assert_eq!(
+                Playground::resize_domain(
+                    start,
+                    DomainDrag::Side { side, start },
+                    Point2::new(-0.5, -0.5),
+                ),
+                expected,
+                "{side:?} moved the wrong edge"
+            );
+        }
+        for (index, expected) in [
+            (0usize, DomainRect::new(0.5, 1.0, 0.25, 1.0)),
+            (1, DomainRect::new(-1.0, 0.5, 0.25, 1.0)),
+            (2, DomainRect::new(-1.0, 0.5, -1.0, 0.25)),
+            (3, DomainRect::new(0.5, 1.0, -1.0, 0.25)),
+        ] {
+            assert_eq!(
+                Playground::resize_domain(
+                    start,
+                    DomainDrag::Corner { index, start },
+                    Point2::new(0.5, 0.25),
+                ),
+                expected,
+                "corner {index} moved the wrong pair"
+            );
+        }
+    }
+
+    /// The corners are grabbable at the same radius as any other handle, and
+    /// each offers the diagonal cursor that matches it.
+    #[test]
+    fn domain_corners_are_grabbable_and_cursored() {
+        let state = Playground::default();
+        let domain = state.editor.document.model.draft.geometry.domain;
+        for (index, corner) in domain.corners().into_iter().enumerate() {
+            let centre = state.screen(corner, viewport());
+            assert_eq!(
+                state.hit_domain_corner(centre, viewport()),
+                Some(index),
+                "corner {index} is not grabbable at its own centre"
+            );
+            assert_eq!(
+                state.hit_domain_corner(centre + egui::vec2(60.0, 60.0), viewport()),
+                None,
+                "corner {index} grabs far too wide"
+            );
+        }
+        assert_eq!(
+            Playground::domain_corner_cursor(0),
+            egui::CursorIcon::ResizeNeSw
+        );
+        assert_eq!(
+            Playground::domain_corner_cursor(1),
+            egui::CursorIcon::ResizeNwSe
+        );
+    }
+
+    #[test]
+    fn grab_radii_absorb_the_drag_threshold() {
+        let mut state = Playground::default();
+        state
+            .editor
+            .create_probe(
+                "Spot".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::Point(Point2::new(0.0, 0.0)),
+            )
+            .unwrap();
+        let id = state
+            .editor
+            .document
+            .model
+            .probes
+            .iter()
+            .find(|probe| probe.name == "Spot")
+            .unwrap()
+            .id;
+        let centre = state.screen(Point2::new(0.0, 0.0), viewport());
+        let threshold = egui::InputOptions::default().max_click_dist;
+        // The drawn marker reaches 9 px with its selected ring.
+        let visual = 9.0;
+        assert!(
+            state.hit_tolerance(13.0) >= visual + threshold * 0.5,
+            "grab radius must exceed the drawn control plus half the drag threshold"
+        );
+        for offset in [0.0, 6.0, 12.0] {
+            assert_eq!(
+                state.hit_probe(centre + egui::vec2(offset, 0.0), viewport()),
+                Some(ProbeHit::Point(id)),
+                "probe lost {offset} px from its centre"
+            );
+        }
+        assert_eq!(
+            state.hit_probe(centre + egui::vec2(20.0, 0.0), viewport()),
+            None
+        );
+    }
+
+    /// A subdomain marker is placed from the compiled geometry, so it exists
+    /// before any mesh does and sits where the region's area is.
+    #[test]
+    fn a_subdomain_marker_is_placed_from_the_geometry() {
+        let mut state = Playground::default();
+        let probe = state
+            .editor
+            .create_probe(
+                "Field".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::AreaRegion(RegionId(1)),
+            )
+            .unwrap();
+        assert!(
+            state.runtime.active().is_none(),
+            "the scene has not been meshed"
+        );
+        state.refresh_probe_metadata();
+        let anchor = state
+            .probe_anchors
+            .get(&probe)
+            .copied()
+            .expect("the marker is placed without a mesh");
+
+        let scene = &state.editor.compiled_accepted;
+        let hole = scene
+            .assignments
+            .iter()
+            .find(|assignment| assignment.region.is_none())
+            .and_then(|assignment| scene.topology.face(assignment.face))
+            .and_then(|face| face.centroid())
+            .expect("the default scene holds one excluded face");
+        let center = scene.geometry.domain.center();
+        // Taking area out of a shape moves its centroid away from where that
+        // area was, and no further than the area which left could carry it.
+        // Averaging triangle centroids moved it the other way, towards the
+        // dense mesh the hole's boundary asks for.
+        let moved = anchor - center;
+        let away = center - hole;
+        assert!(moved.norm() > 0.0, "the hole moved the marker");
+        assert!(
+            moved.dot(away) / (moved.norm() * away.norm()) > 0.999,
+            "the marker moved {moved:?}, away from the hole is {away:?}"
+        );
+        assert!(moved.norm() < away.norm(), "the marker left the region");
+    }
+
+    /// The marker is the region's, not the mesh's, so meshing the same scene
+    /// twice at different densities has to leave it exactly where it was.
+    #[test]
+    fn a_subdomain_marker_never_moves_with_the_mesh() {
+        let mut state = Playground::default();
+        let probe = state
+            .editor
+            .create_probe(
+                "Field".into(),
+                [91, 220, 194],
+                TopologyProbeTarget::AreaRegion(RegionId(1)),
+            )
+            .unwrap();
+        let mut placed = Vec::new();
+        for target in [0.30, 0.09] {
+            let active = activate_at(&mut state, target);
+            let triangles = active.mesh.triangles.len();
+            state.refresh_probe_metadata();
+            let anchor = state
+                .probe_anchors
+                .get(&probe)
+                .copied()
+                .expect("the marker is placed");
+            placed.push((triangles, anchor));
+        }
+        let [(coarse, first), (fine, second)] = placed[..] else {
+            unreachable!()
+        };
+        assert!(fine > coarse * 4, "the two meshes differ: {coarse} {fine}");
+        assert_eq!(
+            first, second,
+            "the marker moved between a {coarse} and a {fine} triangle mesh"
+        );
+    }
+}

@@ -347,3 +347,125 @@ impl Playground {
         self.message = format!("Pulse queued in region {}", region.0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use funfern_app::topology_editor::TopologyEditor;
+
+    /// Two subdomains selected and deleted in one gesture. Asking curve by
+    /// curve asked about the first one only, closed the history entry to ask,
+    /// and then returned - so the rest of the selection was never deleted and
+    /// nothing said so. One question over the whole deletion, one entry.
+    #[test]
+    fn a_multi_curve_deletion_asks_once_and_takes_everything() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        for centre in [Point2::new(-0.4, 0.0), Point2::new(0.4, 0.0)] {
+            state
+                .editor
+                .create_closed_curve(
+                    PeriodicCubicSpline::rounded(centre, 0.25),
+                    ClosedCurvePurpose::Subdomain {
+                        material: DEFAULT_MATERIAL,
+                    },
+                )
+                .unwrap();
+            settle(&mut state.editor);
+        }
+        state.selection = TopologySelection::Spans(every_span(&state));
+        let history = state.editor.history_len();
+
+        state.delete_selection();
+        let pending = state.pending_merge.clone().expect("a survivor question");
+        assert_eq!(
+            pending.choices.len(),
+            3,
+            "both subdomains and the background meet in one face: {:?}",
+            pending.choices
+        );
+        assert_eq!(
+            state.editor.history_len(),
+            history,
+            "nothing is deleted until the question is answered"
+        );
+
+        state.pick_merge_survivor(Point2::new(0.0, 0.95));
+        settle(&mut state.editor);
+        assert!(state.pending_merge.is_none());
+        assert!(
+            state.editor.document.model.draft.geometry.curves.is_empty(),
+            "the whole selection goes, not the curve the question was about"
+        );
+        assert_eq!(
+            state.editor.history_len(),
+            (history.0 + 1, history.1),
+            "one gesture, one entry"
+        );
+        assert!(state.editor.undo());
+        settle(&mut state.editor);
+        assert_eq!(
+            state.editor.document.model.draft.geometry.curves.len(),
+            2,
+            "one undo brings the whole gesture back"
+        );
+    }
+
+    /// A selection covering one curve whole and part of another used to delete
+    /// the whole one and ignore the spans on the other without a word.
+    #[test]
+    fn a_deletion_of_one_whole_curve_and_part_of_another_takes_both() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let mut holes = vec![];
+        for centre in [Point2::new(-0.4, 0.0), Point2::new(0.4, 0.0)] {
+            holes.push(
+                state
+                    .editor
+                    .create_closed_curve(
+                        PeriodicCubicSpline::rounded(centre, 0.25),
+                        ClosedCurvePurpose::Hole,
+                    )
+                    .unwrap(),
+            );
+            settle(&mut state.editor);
+        }
+        let geometry = &state.editor.document.model.draft.geometry;
+        let whole = geometry.curve(holes[0]).unwrap();
+        let cut = geometry.curve(holes[1]).unwrap();
+        let spans = whole
+            .spans
+            .iter()
+            .map(|span| TopologySpanTarget::Curve(span.id))
+            .chain(
+                cut.spans
+                    .iter()
+                    .take(2)
+                    .map(|span| TopologySpanTarget::Curve(span.id)),
+            )
+            .collect::<BTreeSet<_>>();
+        let survivors = cut.spans.len() - 2;
+        state.selection = TopologySelection::Spans(spans);
+        let history = state.editor.history_len();
+
+        state.delete_selection();
+        settle(&mut state.editor);
+        assert!(state.pending_merge.is_none(), "{}", state.message);
+        let curves = &state.editor.document.model.draft.geometry.curves;
+        assert_eq!(curves.len(), 1, "one baffle is left, and only that");
+        assert_eq!(
+            curves[0].spans.len(),
+            survivors,
+            "the run went, the rest stayed"
+        );
+        assert_eq!(
+            state.editor.history_len(),
+            (history.0 + 1, history.1),
+            "one gesture, one entry"
+        );
+    }
+}

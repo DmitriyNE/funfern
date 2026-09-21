@@ -303,3 +303,112 @@ impl Playground {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use funfern_app::topology_editor::{
+        OpenCurvePurpose, TopologyAcceptance, TopologyAttachment, TopologyEditor,
+    };
+
+    /// The scene asks for a weld the same way it asks for a deletion: the
+    /// question is staged, nothing is welded, and the click that names a
+    /// subdomain finishes the weld that raised it.
+    #[test]
+    fn a_weld_that_merges_subdomains_is_staged_for_the_picker() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let free = state
+            .editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.4, -0.3),
+                    Point2::new(0.4, 0.0),
+                    Point2::new(0.4, 0.3),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut state.editor);
+        let divider = state
+            .editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.0, -0.8),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.0, 0.8),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                    side: OuterSide::Bottom,
+                    fraction: 0.5,
+                })),
+                Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                    side: OuterSide::Top,
+                    fraction: 0.5,
+                })),
+            )
+            .unwrap()
+            .curve;
+        settle(&mut state.editor);
+        assert_eq!(state.editor.document.model.draft.regions.len(), 2);
+
+        // Anchor on the middle of the free baffle, whichever side resolves.
+        let compiled = &state.editor.compiled_accepted;
+        let owner = compiled.geometry.curve(free).unwrap();
+        let span = owner.spans[1].id;
+        let [a, b] = owner.spline.span_bounds(1).unwrap();
+        let parameter = (a + b) * 0.5;
+        let side = [CurveTraceSide::Left, CurveTraceSide::Right]
+            .into_iter()
+            .find(|side| {
+                FaceAnchor::Curve {
+                    curve: free,
+                    span,
+                    side: *side,
+                    parameter,
+                }
+                .resolve(&compiled.topology)
+                .is_ok()
+            })
+            .expect("a resolvable side");
+        let onto = TopologyAttachment::Boundary(FaceAnchor::Curve {
+            curve: free,
+            span,
+            side,
+            parameter,
+        });
+        state.editor.detach_endpoint(divider, 1).unwrap();
+        settle(&mut state.editor);
+        let node = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(divider)
+            .unwrap()
+            .nodes
+            .len()
+            - 1;
+
+        state.weld(divider, node, 1, onto, None);
+        let pending = state.pending_merge.clone().expect("a survivor question");
+        assert!(matches!(pending.action, MergeAction::Weld { .. }));
+        assert_eq!(pending.choices.len(), 2);
+        assert_eq!(state.editor.document.model.draft.regions.len(), 2);
+
+        state.pick_merge_survivor(Point2::new(-0.5, 0.0));
+        settle(&mut state.editor);
+        assert!(state.pending_merge.is_none(), "{}", state.message);
+        assert_eq!(state.editor.document.model.draft.regions.len(), 1);
+        assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
+    }
+}
