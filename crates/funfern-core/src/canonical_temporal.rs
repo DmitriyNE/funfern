@@ -2743,6 +2743,106 @@ mod tests {
         );
     }
 
+    /// End to end: a travelling modulation must actually shrink the mesh the
+    /// indicator asks for, everywhere the pattern reaches, and it must do so
+    /// on a field quiet enough that no error estimate would have asked.
+    #[test]
+    fn a_travelling_modulation_sizes_the_mesh_even_on_a_quiet_field() {
+        let mut scene = Scene::initial();
+        let wavenumber = 24.0;
+        scene.materials[0].stiffness_law.drive = TimeDrive::TravellingModulation {
+            depth: ScalarField::constant(0.25),
+            frequency_hz: ScalarField::constant(0.4),
+            phase_radians: ScalarField::constant(0.0),
+            wavenumber: ScalarField::constant(wavenumber),
+            angle_radians: ScalarField::constant(0.2),
+        };
+
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = std::sync::Arc::new(
+            mesh_scene(
+                &base_scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.25,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap(),
+        );
+        let quadratic = std::sync::Arc::new(
+            QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &base_scene,
+                OuterBoundaryCondition::Reflecting,
+            )
+            .unwrap(),
+        );
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+
+        let demand = operator.resolution_demand(0.0);
+        let elements_per_wavelength = 5.0;
+        let pattern_limit = demand.coefficient_wavelength / elements_per_wavelength;
+        assert!(
+            (demand.coefficient_wavelength - std::f64::consts::TAU / wavenumber).abs() < 1.0e-12
+        );
+
+        // A field small enough that the accuracy estimate has nothing to say.
+        let count = quadratic.degrees_of_freedom();
+        let snapshot = crate::QuadraticSolutionSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            displacement: vec![1.0e-9; count],
+            velocity: vec![0.0; count],
+            acceleration: vec![0.0; count],
+            volume_acceleration: vec![0.0; count],
+            auxiliary: vec![0.0; count],
+            time: 0.0,
+            time_step: 0.4 * operator.maximum_time_step(),
+        };
+        let mut job = crate::SolutionIndicatorJob::new(
+            mesh.clone(),
+            quadratic.clone(),
+            base_scene,
+            snapshot,
+            crate::SolutionIndicatorOptions {
+                minimum_edge_length: 0.005,
+                maximum_edge_length: 0.25,
+                elements_per_wavelength,
+                forcing_frequency_hz: demand.frequency_hz,
+                coefficient_wavelength: demand.coefficient_wavelength,
+                ..Default::default()
+            },
+        );
+        let result = loop {
+            if let Some(result) = job.advance(4_096) {
+                break result.unwrap();
+            }
+        };
+
+        assert!(
+            result.report.smallest_wavelength_target <= pattern_limit * (1.0 + 1.0e-9),
+            "the pattern must reach the size rule: {} against {pattern_limit}",
+            result.report.smallest_wavelength_target
+        );
+        assert!(
+            result.report.limit_refine_candidates > 0,
+            "a mesh at 0.25 cannot carry a {:.4} pattern and must be asked to refine",
+            demand.coefficient_wavelength
+        );
+        assert_eq!(
+            result.report.error_refine_candidates, 0,
+            "the field is quiet, so nothing here is an accuracy decision"
+        );
+        for target in &result.element_targets {
+            assert!(
+                *target <= pattern_limit * (1.0 + 1.0e-9),
+                "an element was left at {target}, above the pattern limit {pattern_limit}"
+            );
+        }
+    }
+
     /// A source frequency alone cannot size a mesh in a driven medium. The
     /// medium mixes, putting energy at `f_source +/- n f_drive`, and a
     /// travelling drive writes a spatial pattern into the coefficients that

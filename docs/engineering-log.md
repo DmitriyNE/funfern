@@ -45,6 +45,12 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - The midpoint proxy is unchanged and still approximates the half-kicked
   field by averaging the two endpoint fields, an `O(dt^2)` mismatch the fixed
   path has too. What changed is that the two endpoints no longer share a mass.
+- An end-to-end fixture drives the indicator on a travelling modulation of
+  wavenumber 24 over a mesh at 0.25, with the field at `1e-9` so no accuracy
+  estimate has anything to say. Every element target comes back at or below
+  the pattern limit, refinement is asked for, and not one of those requests
+  is an accuracy decision. That is the case a field-based estimator cannot
+  see at all.
 - Not claimed: the calibrated relative-error percentage has not been
   re-validated for driven media, as the review requires before that number is
   quoted for them. The remaining AMR work is that calibration and a
