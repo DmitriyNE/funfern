@@ -747,3 +747,50 @@ impl Playground {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Handover generations preserve the accepted-step total. Their first
+    /// observation establishes a baseline instead of re-crediting the run;
+    /// genuinely new steps on either side remain in the same rate window.
+    #[test]
+    fn the_step_rate_survives_a_handover() {
+        let mut state = Playground::default();
+        // Four frames of a settled generation, then the window closes.
+        state.accumulate_step_rate(7, 0, 0.0);
+        for (frame, completed) in [(1, 300_u64), (2, 600), (3, 900), (4, 1200)] {
+            state.accumulate_step_rate(7, completed, if frame == 4 { 0.5 } else { 0.1 });
+        }
+        assert_eq!(state.steps_per_second, 2400.0);
+        assert_eq!(state.rate_window_steps, 0, "a closed window starts empty");
+
+        // A handover mid-window preserves its total, and the steps already
+        // banked stay without the preserved total being counted a second time.
+        state.accumulate_step_rate(7, 1500, 0.1);
+        assert_eq!(state.rate_window_steps, 300);
+        state.accumulate_step_rate(8, 1500, 0.1);
+        assert_eq!(
+            state.rate_window_steps, 300,
+            "the preserved total is a baseline and the old progress is kept"
+        );
+        state.accumulate_step_rate(8, 1700, 0.5);
+        assert_eq!(state.steps_per_second, 1000.0);
+
+        // A window holding only the frames either side of another handover.
+        state.accumulate_step_rate(8, 5000, 0.1);
+        state.accumulate_step_rate(9, 5000, 0.5);
+        assert_eq!(state.steps_per_second, 3300.0 / 0.5);
+        assert!(
+            state.steps_per_second > 0.0,
+            "a handover is not a stall in the solver"
+        );
+
+        // A fresh install may reset the counter; its first observation is also
+        // only a baseline, and subsequent progress is measured normally.
+        state.accumulate_step_rate(10, 0, 0.1);
+        state.accumulate_step_rate(10, 250, 0.5);
+        assert_eq!(state.steps_per_second, 500.0);
+    }
+}

@@ -499,3 +499,35 @@ impl Playground {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn material_editor_names_the_active_physical_coefficients() {
+        assert_eq!(
+            material_editor_labels(PhysicsModel::Mechanical),
+            MaterialEditorLabels {
+                mass: "Density ρ₀",
+                stiffness: "Stiffness k₀",
+                damping: "Damping σ",
+                axis_ratio: "Stiffness axis ratio",
+            }
+        );
+        for polarization in [
+            ElectromagneticPolarization::Tm,
+            ElectromagneticPolarization::Te,
+        ] {
+            assert_eq!(
+                material_editor_labels(PhysicsModel::Electromagnetic { polarization }),
+                MaterialEditorLabels {
+                    mass: "Permittivity ε",
+                    stiffness: "Permeability μ",
+                    damping: "Loss rate α",
+                    axis_ratio: "Constitutive axis ratio",
+                }
+            );
+        }
+    }
+}

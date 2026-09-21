@@ -706,3 +706,201 @@ impl Playground {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyEditor};
+    use funfern_app::topology_viewport::screen_side;
+
+    /// The picker lists one set of names and the two condition enums answer
+    /// with their own, so a condition used to rename itself the moment it was
+    /// chosen. They are held to the same words here, in both directions: every
+    /// kind is reachable and every condition reads back as the kind that lists
+    /// it.
+    #[test]
+    fn boundary_names_agree_across_every_source() {
+        let all = [
+            BoundaryKind::Reflecting,
+            BoundaryKind::FirstOrder,
+            BoundaryKind::SecondOrder,
+            BoundaryKind::ElectricWall,
+            BoundaryKind::MagneticWall,
+            BoundaryKind::Neumann,
+            BoundaryKind::Dirichlet,
+        ];
+        let signal = TimeSignal::harmonic(0.0, 1.0, 1.0, 0.0);
+        let faces = [
+            FaceBoundaryCondition::Reflecting,
+            FaceBoundaryCondition::Impedance { ratio: 1.0 },
+            FaceBoundaryCondition::SecondOrderOutgoing,
+            FaceBoundaryCondition::ElectricWall,
+            FaceBoundaryCondition::MagneticWall,
+            FaceBoundaryCondition::Neumann { signal },
+            FaceBoundaryCondition::Dirichlet { signal },
+        ];
+        for condition in faces {
+            assert_eq!(
+                face_kind(condition).label(),
+                condition.label(),
+                "{condition:?} is listed under another name"
+            );
+        }
+        let outers = [
+            OuterBoundaryCondition::Reflecting,
+            OuterBoundaryCondition::FirstOrderOutgoing,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+            OuterBoundaryCondition::ElectricWall,
+            OuterBoundaryCondition::MagneticWall,
+            OuterBoundaryCondition::Neumann { signal },
+            OuterBoundaryCondition::Dirichlet { signal },
+        ];
+        for condition in outers {
+            assert_eq!(
+                outer_kind(condition).label(),
+                condition.label(),
+                "{condition:?} is listed under another name"
+            );
+        }
+        // Each list covers every kind the picker offers, so nothing is
+        // unreachable and no two kinds share a name.
+        for kinds in [
+            faces.map(face_kind).to_vec(),
+            outers.map(outer_kind).to_vec(),
+        ] {
+            assert_eq!(kinds, all.to_vec());
+        }
+        assert_eq!(
+            all.iter()
+                .map(|kind| kind.label())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            all.len()
+        );
+    }
+
+    #[test]
+    fn boundary_picker_uses_the_active_skins_physical_vocabulary() {
+        let mechanical = BoundaryKind::choices(PhysicsModel::Mechanical);
+        assert!(mechanical.contains(&BoundaryKind::Reflecting));
+        assert!(!mechanical.contains(&BoundaryKind::ElectricWall));
+        assert!(!mechanical.contains(&BoundaryKind::MagneticWall));
+        assert_eq!(
+            BoundaryKind::Reflecting.label_for(PhysicsModel::Mechanical),
+            "Free boundary"
+        );
+
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        for physics in [tm, te] {
+            let choices = BoundaryKind::choices(physics);
+            assert!(!choices.contains(&BoundaryKind::Reflecting));
+            assert!(choices.contains(&BoundaryKind::ElectricWall));
+            assert!(choices.contains(&BoundaryKind::MagneticWall));
+        }
+        assert_eq!(
+            BoundaryKind::Reflecting.presented(tm),
+            BoundaryKind::MagneticWall,
+            "the natural TM scalar boundary is a magnetic wall"
+        );
+        assert_eq!(
+            BoundaryKind::Reflecting.presented(te),
+            BoundaryKind::ElectricWall,
+            "the natural TE scalar boundary is an electric wall"
+        );
+        assert_eq!(
+            BoundaryKind::ElectricWall.presented(PhysicsModel::Mechanical),
+            BoundaryKind::Dirichlet
+        );
+        assert_eq!(
+            BoundaryKind::MagneticWall.presented(PhysicsModel::Mechanical),
+            BoundaryKind::Reflecting
+        );
+    }
+
+    #[test]
+    fn a_span_selection_reports_one_state_only_when_every_span_agrees() {
+        let mut editor = TopologyEditor::default();
+        editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.3),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        let spans = editor.document.model.draft.geometry.curves[0]
+            .spans
+            .iter()
+            .map(|span| span.id)
+            .collect::<BTreeSet<_>>();
+        assert!(spans.len() > 1);
+        let first = BTreeSet::from([*spans.first().unwrap()]);
+        let state = |editor: &TopologyEditor, spans: &BTreeSet<CurveSpanId>| {
+            span_behavior_state(&editor.document.model.draft.geometry, spans)
+        };
+
+        // A closed subdomain's spans start out transmitting.
+        assert_eq!(state(&editor, &spans), Some(SpanBehaviorState::Transmit));
+
+        editor
+            .set_span_behavior(&first, SpanBehavior::REFLECTING)
+            .unwrap();
+        assert_eq!(state(&editor, &spans), None);
+        assert_eq!(state(&editor, &first), Some(SpanBehaviorState::Boundary));
+
+        // A boundary stays a boundary whatever its faces carry, which is what
+        // the old pair of buttons could not say.
+        editor
+            .set_span_face_condition(
+                &first,
+                CurveTraceSide::Left,
+                FaceBoundaryCondition::Impedance { ratio: 2.0 },
+            )
+            .unwrap();
+        assert_eq!(state(&editor, &first), Some(SpanBehaviorState::Boundary));
+
+        editor
+            .set_span_behavior(&spans, SpanBehavior::REFLECTING)
+            .unwrap();
+        assert_eq!(state(&editor, &spans), Some(SpanBehaviorState::Boundary));
+    }
+
+    #[test]
+    fn the_side_band_falls_where_a_click_reads_the_same_side() {
+        // A span drawn left to right on screen runs along +x in the world, so
+        // its left side is up the screen.
+        assert_eq!(
+            side_offset(egui::vec2(2.0, 0.0), CurveTraceSide::Left),
+            egui::vec2(0.0, -1.0)
+        );
+        for (x, y) in [
+            (1.0, 0.0),
+            (0.0, 1.0),
+            (-1.0, 0.0),
+            (0.0, -1.0),
+            (3.0, -2.0),
+            (-1.5, -4.0),
+        ] {
+            let a = ScreenPoint::new(0.0, 0.0);
+            let b = ScreenPoint::new(f64::from(x), f64::from(y));
+            for side in [CurveTraceSide::Left, CurveTraceSide::Right] {
+                let offset = side_offset(egui::vec2(x, y), side) * 3.0;
+                let point = ScreenPoint::new(f64::from(offset.x), f64::from(offset.y));
+                assert_eq!(
+                    screen_side(a, b, point),
+                    side,
+                    "a band on the {side:?} of ({x}, {y}) reads back as the other side"
+                );
+            }
+        }
+        assert_eq!(
+            side_offset(egui::Vec2::ZERO, CurveTraceSide::Left),
+            egui::Vec2::ZERO
+        );
+    }
+}

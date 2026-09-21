@@ -303,3 +303,65 @@ impl Playground {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both axes step upwards from the lower bound. The vertical one used to
+    /// start at the top of the view and test against the bottom, so the grid
+    /// had only ever been columns.
+    #[test]
+    fn the_grid_covers_both_axes_of_the_view() {
+        // An 800x600 view at 300 pixels per world unit, centred on the origin.
+        let state = Playground {
+            scale: 300.0,
+            center: Point2::default(),
+            ..Playground::default()
+        };
+        let view = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let (step, fine) = grid_steps(state.scale);
+        assert_eq!(step, 0.5, "70 px at this zoom lands on the half-unit");
+        assert_eq!(fine, 0.1, "which divides into five");
+        let (columns, rows) = state.grid_axes(view, step);
+        assert_eq!(columns, vec![-1.5, -1.0, -0.5, 0.0, 0.5, 1.0]);
+        assert_eq!(rows, vec![-1.0, -0.5, 0.0, 0.5, 1.0]);
+        assert!(
+            rows.iter().any(|y| y.abs() < step * 0.1),
+            "the horizontal axis is among them, and is the emphasised line"
+        );
+        // The fine lattice nests inside the drawn one, so every line that is
+        // drawn is one Shift can land on.
+        assert!(
+            (step / fine - 5.0).abs() < 1.0e-9,
+            "a half-unit divides in five"
+        );
+        let (fine_columns, fine_rows) = state.grid_axes(view, fine);
+        assert!(fine_columns.len() >= columns.len() * 4);
+        assert!(fine_rows.len() >= rows.len() * 4);
+
+        // A bound the wrong way round draws nothing rather than looping.
+        assert!(grid_lines(1.0, -1.0, step).is_empty());
+        assert!(grid_lines(-1.0, 1.0, 0.0).is_empty());
+        assert!(grid_lines(f64::NAN, 1.0, step).is_empty());
+        // A degenerate zoom cannot hang the painter.
+        assert!(grid_lines(-1.0, 1.0, grid_steps(0.0).0).is_empty());
+        assert!(grid_lines(-1.0e9, 1.0e9, 1.0e-9).len() <= 4096);
+
+        // The spacing holds its decade: about 70 pixels apart at any zoom, and
+        // the step Shift lands on is always a round division of it.
+        for scale in [12.0, 37.0, 300.0, 1_500.0, 9_000.0] {
+            let (step, fine) = grid_steps(scale);
+            let pixels = step * scale;
+            assert!(
+                (35.0..=180.0).contains(&pixels),
+                "{scale} pixels per unit put lines {pixels} apart"
+            );
+            let divisions = step / fine;
+            assert!(
+                (divisions - divisions.round()).abs() < 1.0e-9 && (4.0..=5.0).contains(&divisions),
+                "{scale} divides {step} into {divisions}"
+            );
+        }
+    }
+}

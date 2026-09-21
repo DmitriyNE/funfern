@@ -544,4 +544,88 @@ mod tests {
             "one undo brings all three back"
         );
     }
+    /// Shift places a point on the same 0.05 grid every drag snaps to. A
+    /// default editor has compiled nothing, so no attachment can outrank it and
+    /// this is the grid path.
+    #[test]
+    fn shift_places_a_drawn_point_on_the_grid() {
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        // The grid belongs to the zoom, so the zoom is named: 400 pixels per
+        // unit divides fifths of a unit in four, landing on 0.05.
+        let mut state = Playground {
+            scale: 400.0,
+            ..Playground::default()
+        };
+        state.begin_draw(DrawTool::Polyline);
+        state.draw_click(
+            Point2::new(0.117, -0.233),
+            ScreenPoint::new(0.0, 0.0),
+            viewport,
+            true,
+        );
+        state.draw_click(
+            Point2::new(-0.481, 0.062),
+            ScreenPoint::new(0.0, 0.0),
+            viewport,
+            false,
+        );
+        let points = &state.draw.as_ref().unwrap().points;
+        assert_eq!(points[0], Point2::new(0.10, -0.25));
+        assert_eq!(
+            points[1],
+            Point2::new(-0.481, 0.062),
+            "without shift the point stays where it was put"
+        );
+
+        // Every tool goes through the same place, the two-click rectangle
+        // included. Clear of the default scene's loop, so it compiles.
+        let before = state.editor.document.model.draft.geometry.curves.len();
+        state.begin_draw(DrawTool::Rectangle);
+        for point in [Point2::new(0.537, 0.562), Point2::new(0.873, 0.818)] {
+            state.draw_click(point, ScreenPoint::new(0.0, 0.0), viewport, true);
+        }
+        assert_eq!(
+            state.editor.document.model.draft.geometry.curves.len(),
+            before + 1,
+            "the rectangle was refused: {}",
+            state.message
+        );
+        let rectangle = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .last()
+            .expect("the rectangle was created")
+            .spline
+            .clone();
+        assert_eq!(rectangle.node_count(), 4);
+        for index in 0..rectangle.node_count() {
+            let corner = rectangle.node_point(index).unwrap();
+            for value in [corner.x, corner.y] {
+                let steps = value / 0.05;
+                assert!(
+                    (steps - steps.round()).abs() < 1.0e-9,
+                    "corner off the grid at {value}"
+                );
+            }
+        }
+    }
+
+    /// Picking a tool starts the gesture and leaves the palette up, so one
+    /// primitive can follow another without a trip back to the toolbar.
+    #[test]
+    fn the_draw_palette_outlives_the_gesture_it_starts() {
+        let mut state = Playground {
+            draw_open: true,
+            ..Playground::default()
+        };
+        state.begin_draw(DrawTool::Circle);
+        assert!(state.draw.is_some());
+        assert!(state.draw_open, "the palette closes only when it is closed");
+        state.begin_draw(DrawTool::Polyline);
+        assert!(state.draw_open);
+    }
 }

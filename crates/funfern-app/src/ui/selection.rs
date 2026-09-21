@@ -210,3 +210,85 @@ impl Playground {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use funfern_app::topology_viewport::{TopologyHandle, TopologyHit};
+
+    #[test]
+    fn marquee_operation_and_direction_are_live_conventions() {
+        assert_eq!(
+            Playground::marquee_operation(egui::Modifiers::NONE),
+            MarqueeOperation::Replace
+        );
+        assert_eq!(
+            Playground::marquee_operation(egui::Modifiers::SHIFT),
+            MarqueeOperation::Add
+        );
+        assert_eq!(
+            Playground::marquee_operation(egui::Modifiers::ALT),
+            MarqueeOperation::Subtract
+        );
+        assert_eq!(
+            MarqueeContainment::from_drag(Pos2::ZERO, Pos2::new(10.0, 4.0)),
+            MarqueeContainment::Enclosed
+        );
+        assert_eq!(
+            MarqueeContainment::from_drag(Pos2::ZERO, Pos2::new(-10.0, 4.0)),
+            MarqueeContainment::Crossing
+        );
+    }
+
+    #[test]
+    fn marquee_add_and_subtract_apply_against_the_drag_baseline() {
+        let a = TopologySpanTarget::Curve(CurveSpanId(1));
+        let b = TopologySpanTarget::Curve(CurveSpanId(2));
+        let base = BTreeSet::from([a]);
+        let hits = BTreeSet::from([b]);
+        assert_eq!(
+            Playground::marquee_result(&base, hits.clone(), MarqueeOperation::Replace),
+            BTreeSet::from([b])
+        );
+        assert_eq!(
+            Playground::marquee_result(&base, hits.clone(), MarqueeOperation::Add),
+            BTreeSet::from([a, b])
+        );
+        assert_eq!(
+            Playground::marquee_result(&BTreeSet::from([a, b]), hits, MarqueeOperation::Subtract,),
+            BTreeSet::from([a])
+        );
+    }
+
+    #[test]
+    fn dragging_a_selected_span_preserves_the_complete_selection() {
+        let a = TopologySpanTarget::Curve(CurveSpanId(1));
+        let b = TopologySpanTarget::Curve(CurveSpanId(2));
+        let selection = TopologySelection::Spans(BTreeSet::from([a, b]));
+
+        assert!(Playground::drag_starts_inside_span_selection(
+            &selection,
+            TopologyHit::Span {
+                target: a,
+                distance: 0.0,
+            },
+        ));
+        assert!(!Playground::drag_starts_inside_span_selection(
+            &selection,
+            TopologyHit::Span {
+                target: TopologySpanTarget::Curve(CurveSpanId(3)),
+                distance: 0.0,
+            },
+        ));
+        assert!(!Playground::drag_starts_inside_span_selection(
+            &selection,
+            TopologyHit::Handle {
+                handle: TopologyHandle::Control {
+                    curve: CurveId(1),
+                    control: 0,
+                },
+                distance: 0.0,
+            },
+        ));
+    }
+}

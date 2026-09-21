@@ -56,3 +56,25 @@ pub(super) fn event_line(entry: &EventEntry) -> String {
         }
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use super::*;
+
+    /// The ring drops its oldest rather than growing without bound.
+    #[test]
+    fn the_log_is_bounded() {
+        let mut state = Playground::default();
+        for index in 0..EVENT_LOG_ENTRIES + 20 {
+            state.message = format!("message {index}");
+            state.record_events(index as f64);
+        }
+        assert_eq!(state.events.len(), EVENT_LOG_ENTRIES);
+        assert_eq!(state.events[0].text, format!("message {}", 20));
+        assert_eq!(
+            state.events[EVENT_LOG_ENTRIES - 1].text,
+            format!("message {}", EVENT_LOG_ENTRIES + 19)
+        );
+    }
+}

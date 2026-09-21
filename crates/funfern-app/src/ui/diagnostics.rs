@@ -736,3 +736,118 @@ impl Playground {
             });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_formula_reference_names_what_the_parser_accepts() {
+        let origin = MaterialCoordinates {
+            x: 0.0,
+            y: 0.0,
+            r: 0.0,
+            theta: 0.0,
+        };
+        for (names, _) in FORMULA_SYMBOLS {
+            for name in names.split(", ") {
+                // An unknown name parses as a material parameter and only fails
+                // once it is evaluated without one, so the evaluation is what
+                // proves the reference still names something built in.
+                let field = ScalarField::formula(name).expect("a listed symbol parses");
+                assert!(
+                    field.evaluate(origin, &[]).is_ok(),
+                    "the reference lists `{name}`, which the parser does not know"
+                );
+            }
+        }
+        for (signature, _, example) in FORMULA_FUNCTIONS {
+            let field = ScalarField::formula(example)
+                .unwrap_or_else(|error| panic!("{signature}: `{example}` is rejected: {error}"));
+            assert!(
+                field.evaluate(origin, &[]).is_ok(),
+                "{signature}: `{example}` does not evaluate"
+            );
+        }
+        for retired in ["ln(1 + r)", "pow(r, 2)"] {
+            assert!(
+                ScalarField::formula(retired).is_err(),
+                "`{retired}` parses, so the reference should be listing it"
+            );
+        }
+    }
+
+    /// Every channel the log watches overwrites itself, so a change is the only
+    /// moment its value can be caught. Holding a value logs it once, clearing
+    /// and returning without anything in between counts a repeat rather than
+    /// filling the ring, and an error keeps the status marker lit until the
+    /// window is opened on it.
+    #[test]
+    fn the_log_keeps_one_entry_per_change_of_a_transient_channel() {
+        let mut state = Playground::default();
+        state.record_events(1.0);
+        assert!(state.events.is_empty());
+        assert!(!state.diagnostics_warning());
+
+        state.message = "Pulse queued in region 1".into();
+        state.record_events(2.0);
+        state.record_events(3.0);
+        assert_eq!(state.events.len(), 1, "a held value is logged once");
+        assert_eq!(state.events[0].source, EventSource::Status);
+        assert_eq!(state.events[0].repeats, 1);
+        assert!(
+            !state.diagnostics_warning(),
+            "a status line is not an error"
+        );
+
+        state.amr_error = Some("Invalid adaptation source".into());
+        state.record_events(4.0);
+        assert_eq!(state.events.len(), 2);
+        assert_eq!(state.events[1].source, EventSource::Adaptation);
+        assert!(state.unseen_error);
+
+        // The adaptation clears itself and fails again with nothing logged in
+        // between, which is the shape that would otherwise flood the ring.
+        for time in [5.0, 6.0, 7.0, 8.0] {
+            state.amr_error = (time as u64)
+                .is_multiple_of(2)
+                .then(|| "Invalid adaptation source".to_owned());
+            state.record_events(time);
+        }
+        assert_eq!(state.events.len(), 2, "{:?}", state.events);
+        assert_eq!(state.events[1].repeats, 3);
+
+        // A different message is its own entry, and the marker survives the
+        // error clearing.
+        state.amr_error = None;
+        state.message = "Simulation topology committed".into();
+        state.record_events(9.0);
+        assert_eq!(state.events.len(), 3);
+        assert_eq!(state.events[2].source, EventSource::Status);
+        assert!(
+            state.diagnostics_warning(),
+            "the marker stays lit for an error the window has not been opened on"
+        );
+
+        state.unseen_error = false;
+        assert!(!state.diagnostics_warning());
+        assert_eq!(
+            event_line(&state.events[1]),
+            "0:08.0 · adaptation · Invalid adaptation source ×3"
+        );
+
+        // A repair fallback is queued by the transaction that reported it and
+        // stamped on the next frame, so two transactions that fall back the
+        // same way are counted rather than reading as one.
+        state.pending_repairs = vec!["mesh repair failed".into(), "mesh repair failed".into()];
+        state.record_events(10.0);
+        assert!(state.pending_repairs.is_empty());
+        assert_eq!(state.events.len(), 4);
+        assert_eq!(state.events[3].source, EventSource::Repair);
+        assert_eq!(state.events[3].repeats, 2);
+        assert!(
+            !state.diagnostics_warning(),
+            "a rebuild that carried the edit through is not an error"
+        );
+    }
+}
