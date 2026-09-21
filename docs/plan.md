@@ -926,6 +926,19 @@ documented numerical and performance observations.
 Multipatch/trimmed IGA, higher-order triangles, and physical moving-boundary effects.
 Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
+## Maintenance
+
+- Enable fat LTO and `codegen-units = 1` for the native release build. The
+  browser bundle already gets both through `scripts/trunk`, which exports
+  `CARGO_PROFILE_RELEASE_LTO` and `CARGO_PROFILE_RELEASE_CODEGEN_UNITS`; that
+  took 822 KB off its gzipped size. They were deliberately kept out of
+  `[profile.release]` because the same profile builds the benchmarks, so turning
+  them on there invalidates the timings recorded in the engineering log against
+  the current codegen settings. Doing it therefore means re-baselining
+  `mesh_timing`, `mesh_edit_timing`, `--mesh-edit-benchmark` and the
+  `--wave-gpu-check` throughput figure in the same change, and accepting a
+  slower native release build in CI.
+
 ## Working practice
 
 Keep the engineering log brief and useful. Update it after meaningful work with
