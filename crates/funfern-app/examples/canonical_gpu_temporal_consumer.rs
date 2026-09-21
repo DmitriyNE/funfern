@@ -1,4 +1,4 @@
-//! Real-device validation for synchronized temporal point and line
+//! Real-device validation for synchronized temporal point, line and area
 //! diagnostics.
 //!
 //! The fixture uses the production canonical render graph with the point and
@@ -15,20 +15,24 @@ use funfern_app::{
         CanonicalGpuClock, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalWaveGpuPlugin,
     },
     wave_gpu::{
-        CurveProbeDisplay, CurveProbeInput, ProbeDisplay, RecorderContext, RecorderHistory,
-        WaveGpuPlugin, WaveGpuRequest,
+        AreaProbeDisplay, AreaProbeInput, CurveProbeDisplay, CurveProbeInput, ProbeDisplay,
+        RecorderContext, RecorderHistory, WaveGpuPlugin, WaveGpuRequest,
     },
 };
 use funfern_core::{
-    CanonicalTemporalPointStencil, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CoefficientLaw, MeshingOptions, OuterBoundaryCondition, PhysicsModel, Point2,
-    QuadraticPointStencil, QuadraticWaveOperator, ScalarField, Scene, TimeDrive, mesh_scene,
+    AreaProbeShape, BACKGROUND_REGION, CanonicalTemporalPointStencil,
+    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, MeshingOptions,
+    OuterBoundaryCondition, PhysicsModel, Point2, QuadraticAreaStencil, QuadraticPointStencil,
+    QuadraticWaveOperator, ScalarField, Scene, TimeDrive, mesh_scene,
+    sample_temporal_canonical_area,
 };
 
 const PROBE_ID: u64 = 71;
 const LINE_PROBE_ID: u64 = 72;
+const AREA_PROBE_ID: u64 = 73;
 const SAMPLE_RATE: f64 = 480.0;
 const LINE_SAMPLE_RATE: f64 = 120.0;
+const AREA_SAMPLE_RATE: f64 = 60.0;
 
 #[derive(Resource)]
 struct Pending {
@@ -36,6 +40,7 @@ struct Pending {
     operator: CanonicalTemporalWaveOperator,
     stencil: QuadraticPointStencil,
     line: Vec<(QuadraticPointStencil, Point2)>,
+    area: QuadraticAreaStencil,
 }
 
 /// One line sample's expected values, from the same f64 contract the point
@@ -59,6 +64,8 @@ struct Expected {
     energy: f64,
     line: Vec<ExpectedLineSample>,
     line_time: f64,
+    area_total_energy: f64,
+    area_rms_complementary: f64,
     started: Instant,
     deadline: Instant,
     finished: bool,
@@ -125,13 +132,27 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
+    // The whole active face, so the reported energy must equal the solver's.
+    let area = QuadraticAreaStencil::build(
+        &mesh,
+        &scalar,
+        &fixed_scene,
+        AreaProbeShape::Region(BACKGROUND_REGION),
+    )
+    .expect("region area stencil");
+
     let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
         .expect("temporal consumer operator");
     let time_step = 0.38 * operator.maximum_time_step();
     let sample_stride = (1.0 / (SAMPLE_RATE * time_step)).round().max(1.0) as u64;
     let line_stride = (1.0 / (LINE_SAMPLE_RATE * time_step)).round().max(1.0) as u64;
     // Both recorders must land their last sample on the compared state.
-    let cadence = sample_stride / gcd(sample_stride, line_stride) * line_stride;
+    let area_stride = (1.0 / (AREA_SAMPLE_RATE * time_step)).round().max(1.0) as u64;
+    let cadence = [line_stride, area_stride]
+        .into_iter()
+        .fold(sample_stride, |cadence, stride| {
+            cadence / gcd(cadence, stride) * stride
+        });
     let steps = (8 * sample_stride).div_ceil(cadence) * cadence;
 
     let primary = operator
@@ -196,6 +217,15 @@ fn main() {
             }
         })
         .collect::<Vec<_>>();
+    let area_sample = sample_temporal_canonical_area(
+        &area,
+        &operator,
+        state.primary_flux(),
+        state.complementary_flux(),
+        state.time(),
+        state.runtime(),
+    )
+    .expect("f64 temporal area sample");
     let expected = Expected {
         steps,
         time: state.time(),
@@ -206,6 +236,8 @@ fn main() {
         energy: sample.energy_density,
         line: line_expected,
         line_time: state.time(),
+        area_total_energy: area_sample.total_energy,
+        area_rms_complementary: area_sample.rms_complementary,
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(60),
         finished: false,
@@ -236,6 +268,7 @@ fn main() {
         operator,
         stencil,
         line,
+        area,
     })
     .insert_resource(expected)
     .add_systems(Startup, install)
@@ -294,6 +327,24 @@ fn install(
             },
         )
         .expect("install temporal line recorder");
+    recorders
+        .update_temporal_canonical_area_probes(
+            &mut assets,
+            &mut commands,
+            &pending.operator,
+            temporal_manifest,
+            &[AreaProbeInput {
+                id: AREA_PROBE_ID,
+                stencil: Some(pending.area.clone()),
+            }],
+            AREA_SAMPLE_RATE,
+            RecorderContext {
+                time_step: 0.38 * pending.operator.maximum_time_step(),
+                physics: PhysicsModel::Mechanical,
+                history: RecorderHistory::Restart,
+            },
+        )
+        .expect("install temporal area recorder");
     canonical.request_steps(expected.steps);
     commands.spawn(Camera2d);
 }
@@ -302,6 +353,7 @@ fn finish_when_ready(
     canonical: Res<CanonicalGpuRequest>,
     display: Res<ProbeDisplay>,
     curves: Res<CurveProbeDisplay>,
+    areas: Res<AreaProbeDisplay>,
     mut expected: ResMut<Expected>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -366,6 +418,24 @@ fn finish_when_ready(
             line_errors[lane] = line_errors[lane].max(relative_error(got[lane], reference[lane]));
         }
     }
+    let Some(area) = areas
+        .records
+        .iter()
+        .filter(|record| record.probe_id == AREA_PROBE_ID)
+        .max_by(|left, right| left.time.total_cmp(&right.time))
+    else {
+        return;
+    };
+    if (area.time - expected.line_time).abs() > 2.0e-4 {
+        return;
+    }
+    let area_errors = [
+        relative_error(area.total_energy, expected.area_total_energy),
+        relative_error(
+            area.rms_transverse_magnitude,
+            expected.area_rms_complementary,
+        ),
+    ];
     println!(
         "temporal line consumer worst errors over {} samples: u {:.3e}, complement {:.3e}, energy {:.3e}, normal flow {:.3e}",
         expected.line.len(),
@@ -373,6 +443,12 @@ fn finish_when_ready(
         line_errors[1],
         line_errors[2],
         line_errors[3]
+    );
+    println!(
+        "temporal area consumer over {:.0}% coverage: total energy {:.3e}, complement rms {:.3e}",
+        area.coverage * 100.0,
+        area_errors[0],
+        area_errors[1]
     );
     let errors = [
         relative_error(sample.displacement, expected.primary),
@@ -397,6 +473,7 @@ fn finish_when_ready(
     if errors
         .into_iter()
         .chain(line_errors)
+        .chain(area_errors)
         .any(|error| error > 2.0e-4)
     {
         expected.failed = true;

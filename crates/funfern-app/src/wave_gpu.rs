@@ -45,6 +45,8 @@ use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
 const WORKGROUP_SIZE: u32 = 128;
 /// Independent complementary flux samples per enriched-quadratic element.
 const COMPLEMENTARY_SAMPLES: usize = 6;
+/// Nodes per enriched-quadratic element.
+const LOCAL_NODES: usize = 7;
 pub const MAX_POINT_PROBES: usize = 16;
 const PROBE_RING_FRAMES: usize = 2048;
 pub const MAX_CURVE_PROBE_POINTS: usize = 512;
@@ -59,16 +61,19 @@ pub const MAX_VECTOR_OVERLAY_SAMPLES: usize = 16_384;
 const WAVE_STORAGE_BINDINGS: usize = 8;
 const TRANSFER_STORAGE_BINDINGS: usize = 8;
 const AREA_PROBE_STORAGE_BINDINGS: usize = 7;
-/// The canonical area recorder is at the portable limit, which is why it
-/// carries per-sample constitutive data in its contributions rather than
-/// binding the law tables the point-family shaders read.
-const CANONICAL_AREA_PROBE_STORAGE_BINDINGS: usize = 8;
+/// The canonical area recorder declares nine buffers across its two passes,
+/// which is one more than a portable stage may bind. Neither entry point uses
+/// all nine, so each takes its own layout over the same numbering; these are
+/// the counts those layouts must respect.
+const CANONICAL_AREA_ELEMENT_STORAGE_BINDINGS: usize = 7;
+const CANONICAL_AREA_REDUCE_STORAGE_BINDINGS: usize = 5;
 const WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT: usize = 8;
 const _: () = {
     assert!(WAVE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
     assert!(TRANSFER_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
     assert!(AREA_PROBE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
-    assert!(CANONICAL_AREA_PROBE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
+    assert!(CANONICAL_AREA_ELEMENT_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
+    assert!(CANONICAL_AREA_REDUCE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
 };
 /// Steps encoded per rendered frame. The host paces its own requests with the
 /// same bound so the requested and completed counters cannot diverge without
@@ -582,10 +587,14 @@ impl WaveGpuRequest {
         sample_rate: f64,
         context: RecorderContext,
     ) -> Result<(), String> {
+        let index = TemporalTableIndex::build(operator, manifest)?;
         self.update_point_probes_from(
             assets,
             commands,
-            CanonicalStencilSource::Temporal { operator, manifest },
+            CanonicalStencilSource::Temporal {
+                operator,
+                index: &index,
+            },
             probes,
             sample_rate,
             context,
@@ -962,10 +971,14 @@ impl WaveGpuRequest {
         probes: &[CurveProbeInput],
         context: RecorderContext,
     ) -> Result<(), String> {
+        let index = TemporalTableIndex::build(operator, manifest)?;
         self.update_curve_probes_from(
             assets,
             commands,
-            CanonicalStencilSource::Temporal { operator, manifest },
+            CanonicalStencilSource::Temporal {
+                operator,
+                index: &index,
+            },
             probes,
             context,
         )
@@ -1308,6 +1321,54 @@ impl WaveGpuRequest {
         sample_rate: f64,
         context: RecorderContext,
     ) -> Result<(), String> {
+        self.update_area_probes_from(
+            assets,
+            commands,
+            operator,
+            None,
+            probes,
+            sample_rate,
+            context,
+        )
+    }
+
+    /// Area probes over a time-driven generation. Each contribution addresses
+    /// its own law records, so the assembled nodal map and the samples'
+    /// inverses are evaluated at the sampled instant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_temporal_canonical_area_probes(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        operator: &CanonicalTemporalWaveOperator,
+        manifest: CanonicalGpuTemporalManifest,
+        probes: &[AreaProbeInput],
+        sample_rate: f64,
+        context: RecorderContext,
+    ) -> Result<(), String> {
+        let index = TemporalTableIndex::build(operator, manifest)?;
+        self.update_area_probes_from(
+            assets,
+            commands,
+            operator.base(),
+            Some((operator, &index)),
+            probes,
+            sample_rate,
+            context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_area_probes_from(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        operator: &CanonicalWaveOperator,
+        temporal: Option<(&CanonicalTemporalWaveOperator, &TemporalTableIndex)>,
+        probes: &[AreaProbeInput],
+        sample_rate: f64,
+        context: RecorderContext,
+    ) -> Result<(), String> {
         let RecorderContext {
             time_step,
             physics,
@@ -1347,7 +1408,9 @@ impl WaveGpuRequest {
             let offset = contributions.len() as u32;
             if let Some(stencil) = &probe.stencil {
                 for element in &stencil.elements {
-                    contributions.push(gpu_canonical_area_contribution(*element, operator)?);
+                    contributions.push(gpu_canonical_area_contribution(
+                        *element, operator, temporal,
+                    )?);
                 }
                 descriptors.push(GpuAreaProbeDescriptor {
                     offset_count: UVec4::new(offset, stencil.elements.len() as u32, 0, 0),
@@ -3158,10 +3221,17 @@ struct GpuCanonicalAreaContribution {
     /// `xyz` is the constitutive inverse at sample `i` of the parent element,
     /// `w` its integration weight. Shared by all twelve quadrature points.
     sample_inverse: [Vec4; COMPLEMENTARY_SAMPLES],
-    /// Each local node's share of its own lumped mass, locals 0-3 then 4-6,
-    /// with the piece's covered fraction of its parent in the last lane.
+    /// This element's contribution to each local node's lumped mass, locals
+    /// 0-3 then 4-6, with the piece's covered fraction of its parent in the
+    /// last lane. The shader applies the node's inverse mass itself, so these
+    /// stay correct when a driven material changes that mass.
     node_shares_a: Vec4,
     node_shares_b: Vec4,
+    /// Law-table word for each local node's own primary contribution, and in
+    /// the last lane of `b` the element's first complementary record. Zero on
+    /// a static generation, where `sample_valid.z` is also zero.
+    temporal_primary_a: UVec4,
+    temporal_primary_b: UVec4,
     quadrature: [GpuCanonicalAreaQuadrature; 12],
 }
 
@@ -3187,7 +3257,7 @@ enum CanonicalStencilSource<'a> {
     Fixed(&'a CanonicalWaveOperator),
     Temporal {
         operator: &'a CanonicalTemporalWaveOperator,
-        manifest: CanonicalGpuTemporalManifest,
+        index: &'a TemporalTableIndex,
     },
 }
 
@@ -3201,12 +3271,12 @@ impl CanonicalStencilSource<'_> {
             Self::Fixed(operator) => CanonicalPointStencil::from_quadratic(stencil, operator)
                 .map(|stencil| gpu_canonical_point_stencil(Some(stencil)))
                 .map_err(|error| format!("Canonical {consumer} reconstruction failed: {error}")),
-            Self::Temporal { operator, manifest } => {
+            Self::Temporal { operator, index } => {
                 let stencil = CanonicalTemporalPointStencil::from_quadratic(stencil, operator)
                     .map_err(|error| {
                         format!("Temporal {consumer} reconstruction failed: {error}")
                     })?;
-                gpu_temporal_canonical_point_stencil(stencil, operator, *manifest)
+                gpu_temporal_canonical_point_stencil(stencil, operator, index)
             }
         }
     }
@@ -3253,88 +3323,152 @@ fn gpu_canonical_point_stencil(stencil: Option<CanonicalPointStencil>) -> GpuCan
     }
 }
 
+/// Where each element's law records sit in the GPU table.
+///
+/// Primary records are packed node-major, so an element's contribution to a
+/// node sits in that node's run, offset by how many earlier elements share
+/// it. Resolving that by scanning the contribution list is tolerable for
+/// sixteen point probes and quadratic for an area probe covering a mesh, so
+/// the runs and ranks are computed once per recorder upload instead.
+struct TemporalTableIndex {
+    node_starts: Vec<u32>,
+    contribution_ranks: Vec<u32>,
+    complementary_offset: usize,
+    coefficient_words: usize,
+}
+
+impl TemporalTableIndex {
+    fn build(
+        operator: &CanonicalTemporalWaveOperator,
+        manifest: CanonicalGpuTemporalManifest,
+    ) -> Result<Self, String> {
+        let contributions = operator.base().primary_contributions();
+        if manifest.coefficient_words == 0
+            || manifest.primary_record_count != contributions.len()
+            || manifest.complementary_record_count
+                != operator.base().complementary_degrees_of_freedom()
+        {
+            return Err("Temporal reconstruction does not match the GPU table layout".into());
+        }
+        let node_count = operator.base().degrees_of_freedom();
+        let mut counts = vec![0_u32; node_count + 1];
+        for contribution in contributions {
+            let node = contribution.node as usize;
+            if node >= node_count {
+                return Err("A temporal primary contribution names an unknown node".into());
+            }
+            counts[node + 1] += 1;
+        }
+        for index in 1..counts.len() {
+            counts[index] += counts[index - 1];
+        }
+        let node_starts = counts[..node_count]
+            .iter()
+            .map(|records| {
+                usize::try_from(*records)
+                    .ok()
+                    .and_then(|records| records.checked_mul(manifest.coefficient_words))
+                    .and_then(|offset| manifest.primary_record_offset.checked_add(offset))
+                    .and_then(|word| u32::try_from(word).ok())
+                    .ok_or_else(|| "A temporal primary table address exceeds u32".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut seen = vec![0_u32; node_count];
+        let mut contribution_ranks = Vec::with_capacity(contributions.len());
+        for contribution in contributions {
+            let node = contribution.node as usize;
+            contribution_ranks.push(seen[node]);
+            seen[node] += 1;
+        }
+        Ok(Self {
+            node_starts,
+            contribution_ranks,
+            complementary_offset: manifest.complementary_record_offset,
+            coefficient_words: manifest.coefficient_words,
+        })
+    }
+
+    /// The seven primary record words of one element, in local-node order.
+    fn primary_words(
+        &self,
+        operator: &CanonicalTemporalWaveOperator,
+        element: u32,
+    ) -> Result<[u32; LOCAL_NODES], String> {
+        let contributions = operator.base().primary_contributions();
+        let first = (element as usize)
+            .checked_mul(LOCAL_NODES)
+            .ok_or_else(|| "A temporal primary contribution range overflowed".to_string())?;
+        let owned = contributions
+            .get(first..first + LOCAL_NODES)
+            .filter(|owned| {
+                owned.iter().enumerate().all(|(local, contribution)| {
+                    contribution.element == element && contribution.local_node as usize == local
+                })
+            })
+            .ok_or_else(|| format!("Element {element} has no contiguous primary contributions"))?;
+        let mut words = [0_u32; LOCAL_NODES];
+        for (local, word) in words.iter_mut().enumerate() {
+            let contribution = owned[local];
+            let start = self
+                .node_starts
+                .get(contribution.node as usize)
+                .copied()
+                .ok_or_else(|| {
+                    "A temporal primary contribution names an unknown node".to_string()
+                })?;
+            let rank = self.contribution_ranks[first + local];
+            *word = u32::try_from(self.coefficient_words)
+                .ok()
+                .and_then(|words| rank.checked_mul(words))
+                .and_then(|offset| start.checked_add(offset))
+                .ok_or_else(|| "A temporal primary table address exceeds u32".to_string())?;
+        }
+        Ok(words)
+    }
+
+    /// The first of an element's six complementary records.
+    fn complementary_word(&self, element: u32) -> Result<u32, String> {
+        (element as usize)
+            .checked_mul(COMPLEMENTARY_SAMPLES)
+            .and_then(|record| record.checked_mul(self.coefficient_words))
+            .and_then(|offset| self.complementary_offset.checked_add(offset))
+            .and_then(|word| u32::try_from(word).ok())
+            .ok_or_else(|| "A temporal complementary table address exceeds u32".to_string())
+    }
+}
+
 fn gpu_temporal_canonical_point_stencil(
     stencil: CanonicalTemporalPointStencil,
     operator: &CanonicalTemporalWaveOperator,
-    manifest: CanonicalGpuTemporalManifest,
+    index: &TemporalTableIndex,
 ) -> Result<GpuCanonicalPointStencil, String> {
-    let coefficient_words = manifest.coefficient_words;
-    if coefficient_words == 0
-        || manifest.primary_record_count != operator.base().primary_contributions().len()
-        || manifest.complementary_record_count != operator.base().complementary_degrees_of_freedom()
-    {
-        return Err("Temporal point reconstruction does not match the GPU table layout".into());
-    }
     let element = stencil.element();
-    let contributions = operator.base().primary_contributions();
-    let mut primary_words = [0_u32; 7];
-    for (local_node, word) in primary_words.iter_mut().enumerate() {
-        let contribution_index = contributions
-            .iter()
-            .position(|contribution| {
-                contribution.element == element && contribution.local_node as usize == local_node
-            })
-            .ok_or_else(|| {
-                format!(
-                    "Temporal point element {element} has no primary contribution for local node {local_node}"
-                )
-            })?;
-        let contribution = contributions[contribution_index];
-        let record_index = contributions[..contribution_index]
-            .iter()
-            .filter(|candidate| candidate.node == contribution.node)
-            .count()
-            + contributions
-                .iter()
-                .filter(|candidate| candidate.node < contribution.node)
-                .count();
-        let absolute_word = manifest
-            .primary_record_offset
-            .checked_add(
-                record_index
-                    .checked_mul(coefficient_words)
-                    .ok_or_else(|| "Temporal point primary table address overflowed".to_string())?,
-            )
-            .ok_or_else(|| "Temporal point primary table address overflowed".to_string())?;
-        *word = u32::try_from(absolute_word)
-            .map_err(|_| "Temporal point primary table address exceeds u32".to_string())?;
-    }
-    let complementary_record = usize::try_from(element)
-        .ok()
-        .and_then(|element| element.checked_mul(6))
-        .ok_or_else(|| "Temporal point complementary table address overflowed".to_string())?;
-    let complementary_word = manifest
-        .complementary_record_offset
-        .checked_add(
-            complementary_record
-                .checked_mul(coefficient_words)
-                .ok_or_else(|| {
-                    "Temporal point complementary table address overflowed".to_string()
-                })?,
-        )
-        .ok_or_else(|| "Temporal point complementary table address overflowed".to_string())?;
+    let primary_words = index.primary_words(operator, element)?;
     let mut result = gpu_canonical_point_stencil(Some(stencil.fixed()));
     result.sample_valid.z = 1;
     result.temporal_primary_a = UVec4::from_array(primary_words[..4].try_into().unwrap());
     result.temporal_primary_b =
         UVec4::from_array([primary_words[4], primary_words[5], primary_words[6], 0]);
-    result.temporal_complementary = UVec4::new(
-        u32::try_from(complementary_word)
-            .map_err(|_| "Temporal point complementary table address exceeds u32".to_string())?,
-        0,
-        0,
-        0,
-    );
+    result.temporal_complementary = UVec4::new(index.complementary_word(element)?, 0, 0, 0);
     Ok(result)
 }
 
 fn gpu_canonical_area_contribution(
     element: QuadraticAreaElement,
     operator: &CanonicalWaveOperator,
+    temporal: Option<(&CanonicalTemporalWaveOperator, &TemporalTableIndex)>,
 ) -> Result<GpuCanonicalAreaContribution, String> {
     let contribution = canonical_area_contribution(element, operator)
         .map_err(|error| format!("Canonical area reconstruction failed: {error}"))?;
-    let shares = contribution.node_mass_shares.map(|value| value as f32);
+    let shares = contribution.node_references.map(|value| value as f32);
+    let (valid, primary_words, complementary_word) = match temporal {
+        Some((temporal, index)) => (
+            1,
+            index.primary_words(temporal, element.element)?,
+            index.complementary_word(element.element)?,
+        ),
+        None => (0, [0_u32; LOCAL_NODES], 0),
+    };
     Ok(GpuCanonicalAreaContribution {
         nodes_a: UVec4::new(
             element.nodes[0],
@@ -3343,7 +3477,7 @@ fn gpu_canonical_area_contribution(
             element.nodes[3],
         ),
         nodes_b: UVec4::new(element.nodes[4], element.nodes[5], element.nodes[6], 0),
-        sample_valid: UVec4::new(element.element * COMPLEMENTARY_SAMPLES as u32, 1, 0, 0),
+        sample_valid: UVec4::new(element.element * COMPLEMENTARY_SAMPLES as u32, 1, valid, 0),
         sample_inverse: std::array::from_fn(|local| {
             let tensor = contribution.sample_inverses[local];
             Vec4::new(
@@ -3359,6 +3493,13 @@ fn gpu_canonical_area_contribution(
             shares[5],
             shares[6],
             contribution.covered_fraction as f32,
+        ]),
+        temporal_primary_a: UVec4::from_array(primary_words[..4].try_into().unwrap()),
+        temporal_primary_b: UVec4::from_array([
+            primary_words[4],
+            primary_words[5],
+            primary_words[6],
+            complementary_word,
         ]),
         quadrature: contribution.quadrature.map(|point| {
             let primary = point.primary_weights.map(|value| value as f32);
@@ -3876,6 +4017,7 @@ pub(crate) struct WavePipeline {
     canonical_probe_layout: BindGroupLayoutDescriptor,
     canonical_curve_probe_layout: BindGroupLayoutDescriptor,
     canonical_area_probe_layout: BindGroupLayoutDescriptor,
+    canonical_area_reduce_layout: BindGroupLayoutDescriptor,
     canonical_far_field_layout: BindGroupLayoutDescriptor,
     canonical_vector_overlay_layout: BindGroupLayoutDescriptor,
     transfer_old_layout: BindGroupLayoutDescriptor,
@@ -4106,38 +4248,78 @@ fn init_pipeline(
         entry_point: Some(Cow::Borrowed("sample_curve_probes")),
         ..default()
     });
+    // Sparse indices, because the two passes share one set of shader binding
+    // numbers but each declares only the buffers its own entry point reads.
     let canonical_area_probe_layout = BindGroupLayoutDescriptor::new(
-        "canonical area-probe buffers",
-        &BindGroupLayoutEntries::sequential(
+        "canonical area-probe element buffers",
+        &BindGroupLayoutEntries::with_indices(
             ShaderStages::COMPUTE,
             (
-                storage_buffer_read_only::<GpuCanonicalControl>(false),
-                storage_buffer_read_only::<Vec<GpuCanonicalStateWord>>(false),
-                storage_buffer_read_only::<Vec<GpuCanonicalNode>>(false),
-                storage_buffer_read_only::<Vec<GpuCanonicalAreaContribution>>(false),
-                storage_buffer_read_only::<Vec<GpuAreaProbeDescriptor>>(false),
-                storage_buffer_read_only::<GpuProbeControl>(false),
-                storage_buffer::<Vec<GpuAreaProbeContributionSample>>(false),
-                storage_buffer::<Vec<GpuAreaProbeSample>>(false),
+                (0, storage_buffer_read_only::<GpuCanonicalControl>(false)),
+                (
+                    1,
+                    storage_buffer_read_only::<Vec<GpuCanonicalStateWord>>(false),
+                ),
+                (2, storage_buffer_read_only::<Vec<GpuCanonicalNode>>(false)),
+                (
+                    3,
+                    storage_buffer_read_only::<Vec<GpuCanonicalAreaContribution>>(false),
+                ),
+                (5, storage_buffer_read_only::<GpuProbeControl>(false)),
+                (
+                    6,
+                    storage_buffer::<Vec<GpuAreaProbeContributionSample>>(false),
+                ),
+                (
+                    8,
+                    storage_buffer_read_only::<Vec<GpuCanonicalTableWord>>(false),
+                ),
+            ),
+        ),
+    );
+    let canonical_area_reduce_layout = BindGroupLayoutDescriptor::new(
+        "canonical area-probe reduction buffers",
+        &BindGroupLayoutEntries::with_indices(
+            ShaderStages::COMPUTE,
+            (
+                (0, storage_buffer_read_only::<GpuCanonicalControl>(false)),
+                (
+                    4,
+                    storage_buffer_read_only::<Vec<GpuAreaProbeDescriptor>>(false),
+                ),
+                (5, storage_buffer_read_only::<GpuProbeControl>(false)),
+                (
+                    6,
+                    storage_buffer::<Vec<GpuAreaProbeContributionSample>>(false),
+                ),
+                (7, storage_buffer::<Vec<GpuAreaProbeSample>>(false)),
             ),
         ),
     );
     let canonical_area_shader =
         load_embedded_asset!(asset_server.as_ref(), "canonical_area_probe.wgsl");
     let canonical_area_pipeline =
-        |label: &'static str, entry: &'static str| ComputePipelineDescriptor {
-            label: Some(Cow::Borrowed(label)),
-            layout: vec![canonical_area_probe_layout.clone()],
-            shader: canonical_area_shader.clone(),
-            entry_point: Some(Cow::Borrowed(entry)),
-            ..default()
+        |label: &'static str, entry: &'static str, layout: &BindGroupLayoutDescriptor| {
+            ComputePipelineDescriptor {
+                label: Some(Cow::Borrowed(label)),
+                layout: vec![layout.clone()],
+                shader: canonical_area_shader.clone(),
+                entry_point: Some(Cow::Borrowed(entry)),
+                ..default()
+            }
         };
-    let canonical_area_probe_elements = pipeline_cache.queue_compute_pipeline(
-        canonical_area_pipeline("canonical area-probe elements", "sample_area_elements"),
-    );
-    let canonical_area_probe_reduce = pipeline_cache.queue_compute_pipeline(
-        canonical_area_pipeline("canonical area-probe reduction", "reduce_area_probes"),
-    );
+    let canonical_area_probe_elements =
+        pipeline_cache.queue_compute_pipeline(canonical_area_pipeline(
+            "canonical area-probe elements",
+            "sample_area_elements",
+            &canonical_area_probe_layout,
+        ));
+    let canonical_area_probe_reduce =
+        pipeline_cache.queue_compute_pipeline(canonical_area_pipeline(
+            "canonical area-probe reduction",
+            "reduce_area_probes",
+            &canonical_area_reduce_layout,
+        ));
     let canonical_far_field_layout = BindGroupLayoutDescriptor::new(
         "canonical far-field buffers",
         &BindGroupLayoutEntries::sequential(
@@ -4250,6 +4432,7 @@ fn init_pipeline(
         canonical_probe_layout,
         canonical_curve_probe_layout,
         canonical_area_probe_layout,
+        canonical_area_reduce_layout,
         canonical_far_field_layout,
         canonical_vector_overlay_layout,
         transfer_old_layout,
@@ -4310,11 +4493,16 @@ pub(crate) struct CurveProbeBindGroup {
     pub(crate) bind_group: BindGroup,
 }
 
+/// The area recorder's two passes take separate bind groups. The element pass
+/// needs state, nodes and the law tables; the reduction needs the descriptors
+/// and the output ring. Splitting them keeps each pass inside the portable
+/// eight-storage-buffer limit, which one combined layout of nine exceeded.
 #[derive(Resource)]
 pub(crate) struct AreaProbeBindGroup {
     pub(crate) generation: u64,
     pub(crate) revision: u64,
     pub(crate) bind_group: BindGroup,
+    pub(crate) reduce: Option<BindGroup>,
 }
 
 #[derive(Resource)]
@@ -4520,6 +4708,7 @@ fn prepare_area_probe_bind_group(
     ) else {
         return;
     };
+    let mut reduce = None;
     let bind_group = if probes.canonical {
         let Some(canonical) = canonical_request
             .as_ref()
@@ -4527,25 +4716,36 @@ fn prepare_area_probe_bind_group(
         else {
             return;
         };
-        let (Some(canonical_control), Some(state), Some(nodes)) = (
+        let (Some(canonical_control), Some(state), Some(nodes), Some(tables)) = (
             gpu_buffers.get(&canonical.control),
             gpu_buffers.get(&canonical.state),
             gpu_buffers.get(&canonical.nodes),
+            gpu_buffers.get(&canonical.tables),
         ) else {
             return;
         };
+        reduce = Some(render_device.create_bind_group(
+            Some("canonical area-probe reduction bind group"),
+            &pipeline_cache.get_bind_group_layout(&pipeline.canonical_area_reduce_layout),
+            &BindGroupEntries::with_indices((
+                (0, canonical_control.buffer.as_entire_buffer_binding()),
+                (4, descriptors.buffer.as_entire_buffer_binding()),
+                (5, control.buffer.as_entire_buffer_binding()),
+                (6, scratch.buffer.as_entire_buffer_binding()),
+                (7, output.buffer.as_entire_buffer_binding()),
+            )),
+        ));
         render_device.create_bind_group(
-            Some("canonical area-probe bind group"),
+            Some("canonical area-probe element bind group"),
             &pipeline_cache.get_bind_group_layout(&pipeline.canonical_area_probe_layout),
-            &BindGroupEntries::sequential((
-                canonical_control.buffer.as_entire_buffer_binding(),
-                state.buffer.as_entire_buffer_binding(),
-                nodes.buffer.as_entire_buffer_binding(),
-                contributions.buffer.as_entire_buffer_binding(),
-                descriptors.buffer.as_entire_buffer_binding(),
-                control.buffer.as_entire_buffer_binding(),
-                scratch.buffer.as_entire_buffer_binding(),
-                output.buffer.as_entire_buffer_binding(),
+            &BindGroupEntries::with_indices((
+                (0, canonical_control.buffer.as_entire_buffer_binding()),
+                (1, state.buffer.as_entire_buffer_binding()),
+                (2, nodes.buffer.as_entire_buffer_binding()),
+                (3, contributions.buffer.as_entire_buffer_binding()),
+                (5, control.buffer.as_entire_buffer_binding()),
+                (6, scratch.buffer.as_entire_buffer_binding()),
+                (8, tables.buffer.as_entire_buffer_binding()),
             )),
         )
     } else {
@@ -4574,6 +4774,7 @@ fn prepare_area_probe_bind_group(
         generation: request.generation,
         revision: request.area_probe_revision,
         bind_group,
+        reduce,
     });
 }
 
@@ -5645,10 +5846,20 @@ mod tests {
             count(include_str!("area_probe.wgsl")),
             AREA_PROBE_STORAGE_BINDINGS
         );
+        // The area shader declares more than a stage may bind, which is the
+        // whole reason its two passes take separate layouts.
         assert_eq!(
             count(include_str!("canonical_area_probe.wgsl")),
-            CANONICAL_AREA_PROBE_STORAGE_BINDINGS
+            CANONICAL_AREA_ELEMENT_STORAGE_BINDINGS + CANONICAL_AREA_REDUCE_STORAGE_BINDINGS - 3,
+            "control, probe_control and scratch are shared by both passes"
         );
+        const {
+            assert!(
+                CANONICAL_AREA_ELEMENT_STORAGE_BINDINGS + CANONICAL_AREA_REDUCE_STORAGE_BINDINGS
+                    - 3
+                    > WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT
+            )
+        };
         assert_eq!(
             count(include_str!("canonical_probe.wgsl")),
             count(include_str!("canonical_curve_probe.wgsl")),
@@ -5726,8 +5937,12 @@ mod tests {
         assert!(area.contains("contribution.sample_inverse[local].xyz, accepted_b(start + local)"));
         // Canonical energy: lumped nodal shares plus the samples' own energies,
         // scaled by the piece's covered fraction of its parent.
-        assert!(area.contains("accumulated.w = shares_b.w * energy;"));
+        assert!(area.contains("accumulated.w = contribution.node_shares_b.w * energy;"));
         assert!(area.contains("0.5 * contribution.sample_inverse[local].w"));
+        assert!(area.contains("/ sample_factor(contribution, local, time);"));
+        // The area recorder assembles the nodal map the same way the shared
+        // block does, over every contribution owning the node.
+        assert!(area.contains("if !temporal_enabled() { return nodes[node].mass_loss.y; }"));
         // The area quadrature carries no material law at all now.
         assert!(!area.contains("reference_inverse"));
     }

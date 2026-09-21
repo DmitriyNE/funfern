@@ -9,11 +9,13 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    CanonicalPointSample, CanonicalPointStencil, CanonicalWaveOperator, CoefficientLaw,
-    CoefficientLawValues, DampingLaw, DampingLawValues, ElectromagneticPolarization, FieldLaw,
-    LossChannel, Material, MaterialCoordinates, MaterialError, MaterialId, MaterialSwitchRuntime,
-    PhysicsModel, Point2, QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues,
+    CanonicalAreaContribution, CanonicalAreaSample, CanonicalPointSample, CanonicalPointStencil,
+    CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, DampingLaw, DampingLawValues,
+    ElectromagneticPolarization, FieldLaw, LossChannel, Material, MaterialCoordinates,
+    MaterialError, MaterialId, MaterialSwitchRuntime, PhysicsModel, Point2, QuadraticAreaElement,
+    QuadraticAreaStencil, QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues,
     RestoringLaw, Scene, TimeDriveRuntime, TimeDriveValues, TopologyWaveModel, TriMesh, WaveError,
+    canonical_area_contribution,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,6 +470,195 @@ impl CanonicalTemporalPointStencil {
         } else {
             Err(WaveError::InvalidState)
         }
+    }
+}
+
+/// One clipped area piece compiled against a time-driven generation.
+///
+/// The fixed record already carries the geometry, the samples' constitutive
+/// inverses and each local node's time-independent mass contribution. What a
+/// driven material adds is a factor on each of those: one per primary
+/// contribution and one per complementary sample.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalTemporalAreaContribution {
+    fixed: CanonicalAreaContribution,
+    primary: [CanonicalTemporalCoefficientSample; 7],
+    samples: [CanonicalTemporalCoefficientSample; 6],
+}
+
+impl CanonicalTemporalAreaContribution {
+    pub fn from_element(
+        element: QuadraticAreaElement,
+        operator: &CanonicalTemporalWaveOperator,
+    ) -> Result<Self, WaveError> {
+        let fixed = canonical_area_contribution(element, operator.base())?;
+        let parent = element.element as usize;
+        let start = parent
+            .checked_mul(6)
+            .ok_or(WaveError::InvalidMesh("invalid complementary sample range"))?;
+        let samples =
+            operator
+                .complementary
+                .get(start..start + 6)
+                .ok_or(WaveError::InvalidMesh(
+                    "the area element has no temporal complementary samples",
+                ))?;
+        // The parent's seven contributions are emitted together in local
+        // order, so they are a direct slice rather than a scan.
+        let contributions = operator.base().primary_contributions();
+        let first = parent
+            .checked_mul(7)
+            .ok_or(WaveError::InvalidMesh("invalid primary contribution range"))?;
+        let owned = contributions
+            .get(first..first + 7)
+            .filter(|owned| {
+                owned.iter().enumerate().all(|(local, contribution)| {
+                    contribution.element as usize == parent
+                        && contribution.local_node as usize == local
+                        && contribution.node == element.nodes[local]
+                })
+            })
+            .ok_or(WaveError::InvalidMesh(
+                "area element does not match the canonical primary contributions",
+            ))?;
+        let temporal =
+            operator
+                .primary
+                .get(first..first + owned.len())
+                .ok_or(WaveError::InvalidMesh(
+                    "the area element has no temporal primary samples",
+                ))?;
+        let primary: [CanonicalTemporalCoefficientSample; 7] =
+            std::array::from_fn(|local| temporal[local].coefficient.into());
+        Ok(Self {
+            fixed,
+            primary,
+            samples: std::array::from_fn(|local| samples[local].coefficient.into()),
+        })
+    }
+
+    pub fn fixed(&self) -> &CanonicalAreaContribution {
+        &self.fixed
+    }
+
+    pub fn primary_coefficients(&self) -> [CanonicalTemporalCoefficientSample; 7] {
+        self.primary
+    }
+
+    pub fn sample_coefficients(&self) -> [CanonicalTemporalCoefficientSample; 6] {
+        self.samples
+    }
+}
+
+/// Area statistics and energy over a time-driven generation.
+///
+/// The field statistics are moments of the interpolated physical fields, and
+/// the energy is the solver's own discrete energy restricted to the covered
+/// elements, both evaluated with the laws in force at `time`.
+pub fn sample_temporal_canonical_area(
+    stencil: &QuadraticAreaStencil,
+    operator: &CanonicalTemporalWaveOperator,
+    primary_flux: &[f64],
+    complementary_flux: &[Point2],
+    time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<CanonicalAreaSample, WaveError> {
+    if primary_flux.len() != operator.base().degrees_of_freedom()
+        || complementary_flux.len() != operator.base().complementary_degrees_of_freedom()
+        || stencil.covered_area <= 0.0
+        || stencil.target_area <= 0.0
+        || !time.is_finite()
+    {
+        return Err(WaveError::InvalidState);
+    }
+    // The assembled nodal map at this instant. Every node's inverse mass is
+    // the one the solver itself would use for a step at `time`.
+    let mass = operator.primary_mass_at(time, runtime)?;
+    let mut primary_integral = 0.0;
+    let mut primary_squared = 0.0;
+    let mut complementary_squared = 0.0;
+    let mut total_energy = 0.0;
+
+    for element in &stencil.elements {
+        let compiled = CanonicalTemporalAreaContribution::from_element(*element, operator)?;
+        let contribution = compiled.fixed();
+        let start = element.element as usize * 6;
+
+        let mut sample_fields = [Point2::default(); 6];
+        for (local, field) in sample_fields.iter_mut().enumerate() {
+            let Some(flux) = complementary_flux.get(start + local) else {
+                return Err(WaveError::InvalidState);
+            };
+            let factor = compiled.samples[local].factor_at(time, runtime)?;
+            *field = contribution.sample_inverses[local].apply(*flux) / factor;
+        }
+
+        for point in contribution.quadrature {
+            let mut value = 0.0;
+            for (local, basis) in point.primary_weights.iter().enumerate() {
+                let node = element.nodes[local] as usize;
+                let (Some(flux), Some(mass)) = (primary_flux.get(node), mass.get(node)) else {
+                    return Err(WaveError::InvalidState);
+                };
+                value += basis * flux / mass;
+            }
+            let complementary = point
+                .complementary_weights
+                .iter()
+                .zip(sample_fields)
+                .fold(Point2::default(), |sum, (weight, field)| {
+                    sum + field * *weight
+                });
+            primary_integral += point.physical_weight * value;
+            primary_squared += point.physical_weight * value * value;
+            complementary_squared += point.physical_weight * complementary.dot(complementary);
+        }
+
+        let mut energy = 0.0;
+        for (local, reference) in contribution.node_references.into_iter().enumerate() {
+            let node = element.nodes[local] as usize;
+            let (Some(flux), Some(mass)) = (primary_flux.get(node), mass.get(node)) else {
+                return Err(WaveError::InvalidState);
+            };
+            if *mass <= 0.0 {
+                return Err(WaveError::InvalidState);
+            }
+            let factor = compiled.primary[local].factor_at(time, runtime)?;
+            energy += 0.5 * reference * factor * flux * flux / (mass * mass);
+        }
+        for (local, field) in sample_fields.into_iter().enumerate() {
+            let Some(flux) = complementary_flux.get(start + local) else {
+                return Err(WaveError::InvalidState);
+            };
+            energy += 0.5 * contribution.sample_weights[local] * flux.dot(field);
+        }
+        total_energy += contribution.covered_fraction * energy;
+    }
+
+    let result = CanonicalAreaSample {
+        mean_primary: primary_integral / stencil.covered_area,
+        rms_primary: (primary_squared / stencil.covered_area).max(0.0).sqrt(),
+        rms_complementary: (complementary_squared / stencil.covered_area)
+            .max(0.0)
+            .sqrt(),
+        mean_energy_density: total_energy / stencil.covered_area,
+        total_energy,
+        covered_area: stencil.covered_area,
+        coverage: (stencil.covered_area / stencil.target_area).clamp(0.0, 1.0),
+    };
+    if [
+        result.mean_primary,
+        result.rms_primary,
+        result.rms_complementary,
+        result.mean_energy_density,
+        result.total_energy,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        Ok(result)
+    } else {
+        Err(WaveError::InvalidState)
     }
 }
 
@@ -1645,7 +1836,7 @@ mod tests {
         BACKGROUND_REGION, CanonicalWaveState, ElectromagneticPolarization, LoopRole,
         MaterialFrame, MeshingOptions, Obstacle, ObstacleId, OuterBoundaryCondition,
         PeriodicCubicSpline, Region, RegionId, ScalarField, SymmetricTensor2, TimeDrive,
-        enriched_quadratic_basis, mesh_scene,
+        enriched_quadratic_basis, mesh_scene, sample_canonical_area,
     };
 
     fn compile(scene: &Scene) -> Result<CanonicalTemporalWaveOperator, WaveError> {
@@ -1969,6 +2160,99 @@ mod tests {
     /// instantaneous factor, so inverting at the samples and interpolating the
     /// physical field is not the same as interpolating the flux and inverting
     /// once at the probe. Nonlinear laws cannot do the latter at all.
+    /// A probe over every face must still report the solver's own energy when
+    /// the material is driven, which means evaluating the assembled nodal map
+    /// at the sampled instant rather than reusing the authored one.
+    #[test]
+    fn temporal_area_probe_over_every_face_reports_the_instantaneous_energy() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
+            depth: ScalarField::constant(0.31),
+            frequency_hz: ScalarField::constant(0.65),
+            phase_radians: ScalarField::constant(0.22),
+            wavenumber: ScalarField::constant(3.4),
+            angle_radians: ScalarField::constant(0.4),
+        };
+        scene.materials[0].stiffness_law.drive = pump(0.19, 0.5, -0.3);
+
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let stencil = QuadraticAreaStencil::build(
+            &mesh,
+            &quadratic,
+            &base_scene,
+            crate::AreaProbeShape::Region(BACKGROUND_REGION),
+        )
+        .unwrap();
+
+        let runtime = operator.initial_runtime();
+        let time = 0.53;
+        let primary = operator
+            .base()
+            .node_points()
+            .iter()
+            .map(|point| 0.14 + 0.21 * (1.1 * point.x - 0.6 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = operator
+            .base()
+            .node_points()
+            .iter()
+            .map(|point| 0.07 * (0.8 * point.x + 1.2 * point.y).cos())
+            .collect::<Vec<_>>();
+        let complementary = operator.base().compatible_flux(&potential).unwrap();
+
+        let sample = sample_temporal_canonical_area(
+            &stencil,
+            &operator,
+            &primary,
+            &complementary,
+            time,
+            &runtime,
+        )
+        .unwrap();
+        let expected = operator
+            .energy_at(&primary, &complementary, time, &runtime)
+            .unwrap();
+        assert!((sample.coverage - 1.0).abs() < 1.0e-9);
+        assert!(
+            (sample.total_energy - expected).abs() < 1.0e-9 * expected,
+            "area probe reported {} against the solver's {expected}",
+            sample.total_energy
+        );
+        // The driven answer must actually differ from the inert one, or this
+        // fixture would pass without exercising any of the new evaluation.
+        let inert =
+            sample_canonical_area(&stencil, operator.base(), &primary, &complementary).unwrap();
+        assert!(
+            relative_gap(sample.total_energy, inert.total_energy) > 1.0e-3,
+            "the drive must move the energy: {} against {}",
+            sample.total_energy,
+            inert.total_energy
+        );
+        assert!(relative_gap(sample.rms_complementary, inert.rms_complementary) > 1.0e-3);
+    }
+
+    fn relative_gap(left: f64, right: f64) -> f64 {
+        (left - right).abs() / left.abs().max(right.abs()).max(1.0e-12)
+    }
+
     #[test]
     fn travelling_complementary_drive_is_resolved_at_each_sample() {
         let mut scene = Scene::initial();

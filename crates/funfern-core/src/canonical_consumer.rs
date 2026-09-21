@@ -275,10 +275,14 @@ pub struct CanonicalAreaContribution {
     pub sample_inverses: [SymmetricTensor2; COMPLEMENTARY_SAMPLES],
     /// Integration weight carried by each of those samples.
     pub sample_weights: [f64; COMPLEMENTARY_SAMPLES],
-    /// Each local node's share of its own assembled lumped mass. Summed over
-    /// every element incident on a node these are exactly one, so a probe
-    /// covering the whole domain reports the solver's own energy.
-    pub node_mass_shares: [f64; LOCAL_NODES],
+    /// This element's contribution to each local node's assembled lumped
+    /// mass, before the node's inverse mass is applied. Summed over every
+    /// element incident on a node these are exactly that node's mass, so a
+    /// probe covering the whole domain reports the solver's own energy.
+    /// Storing the contribution rather than the finished share keeps the
+    /// record independent of time: a driven material changes the mass, not
+    /// this weight.
+    pub node_references: [f64; LOCAL_NODES],
     /// Fraction of the parent element covered by this clipped piece. The
     /// canonical terms are element-wide, so a partly covered element
     /// contributes in proportion to its covered area.
@@ -337,8 +341,8 @@ pub fn canonical_area_contribution(
     // element, so the share of each node is a direct index rather than a scan.
     let parent = element.element as usize;
     let contributions = operator.primary_contributions();
-    let mut node_mass_shares = [0.0; LOCAL_NODES];
-    for (local, share) in node_mass_shares.iter_mut().enumerate() {
+    let mut node_references = [0.0; LOCAL_NODES];
+    for (local, reference) in node_references.iter_mut().enumerate() {
         let contribution = contributions
             .get(parent * LOCAL_NODES + local)
             .filter(|contribution| {
@@ -349,13 +353,7 @@ pub fn canonical_area_contribution(
             .ok_or(WaveError::InvalidMesh(
                 "area element does not match the canonical primary contributions",
             ))?;
-        let mass = operator
-            .primary_mass()
-            .get(contribution.node as usize)
-            .copied()
-            .filter(|mass| *mass > 0.0)
-            .ok_or(WaveError::InvalidState)?;
-        *share = contribution.geometric_weight * contribution.reference_coefficient / mass;
+        *reference = contribution.geometric_weight * contribution.reference_coefficient;
     }
 
     // Area of the clipped triangle in the parent's own barycentric frame, so
@@ -371,7 +369,7 @@ pub fn canonical_area_contribution(
     Ok(CanonicalAreaContribution {
         sample_inverses: std::array::from_fn(|local| samples[local].complementary_inverse),
         sample_weights: std::array::from_fn(|local| samples[local].integration_weight),
-        node_mass_shares,
+        node_references,
         covered_fraction,
         quadrature: compiled,
     })
@@ -484,13 +482,16 @@ fn sample_area_element(
     // Reported energy is the solver's own discrete energy restricted to this
     // piece: the lumped nodal share plus the element's sample energies.
     let mut energy = 0.0;
-    for (local, share) in contribution.node_mass_shares.into_iter().enumerate() {
+    for (local, reference) in contribution.node_references.into_iter().enumerate() {
         let node = element.nodes[local] as usize;
         let (Some(flux), Some(mass)) = (primary.get(node), operator.primary_mass().get(node))
         else {
             return Err(WaveError::InvalidState);
         };
-        energy += share * 0.5 * flux * flux / mass;
+        if *mass <= 0.0 {
+            return Err(WaveError::InvalidState);
+        }
+        energy += 0.5 * reference * flux * flux / (mass * mass);
     }
     for (local, field) in sample_fields.into_iter().enumerate() {
         let Some(flux) = complementary_flux.get(start + local) else {

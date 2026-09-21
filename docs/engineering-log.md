@@ -5,6 +5,41 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — Temporal area probes
+
+- Area probes now compile against a time-driven generation. Each contribution
+  addresses its own law records, so the assembled nodal map, each node's share
+  of it and the samples' constitutive inverses are all evaluated at the
+  sampled instant rather than from the authored coefficients.
+- The area contribution stores each node's time-independent mass contribution
+  instead of its finished share, and the shader applies the node's inverse mass
+  itself. That is the same arithmetic on a static generation and stays correct
+  when a driven material moves the mass, so there is one code path rather than
+  two.
+- Splitting the recorder's two passes onto separate bind-group layouts made
+  room for the law tables. The shader declares nine buffers, one more than a
+  portable stage may bind, but the element pass uses seven and the reduction
+  five over the same numbering. The declared budgets are asserted against the
+  shader text, including that their union exceeds the limit, so the split
+  cannot be quietly undone.
+- Replaced the quadratic law-record lookup while there. Resolving an element's
+  node-major record addresses by scanning the contribution list is tolerable
+  for sixteen point probes and quadratic for an area probe covering a mesh; the
+  runs and ranks are now built once per recorder upload.
+- A core fixture pins the driven area probe against the operator's own
+  instantaneous energy at full coverage, and requires the driven answer to
+  differ from the inert one so the fixture cannot pass without exercising the
+  new evaluation. On Apple M1 Max / Metal the hidden gate now carries all three
+  consumers: area total energy `2.339e-7` and complementary RMS `1.094e-7` at
+  100% coverage, the five-sample line at `3.946e-7` primary, `1.108e-6`
+  complementary, `7.227e-7` energy and `1.855e-6` normal flow, and the point at
+  `8.836e-8`, `9.016e-6` rate, `6.812e-8`, `6.750e-8` flow and `1.273e-7`
+  energy.
+- Formatting, strict workspace Clippy, the workspace suite and a native release
+  build pass. Remaining in the diagnostic gate: temporal vector overlays,
+  far-field exterior policy, temporal-work accounting and the event-boundary
+  deferral fixtures.
+
 ## 2026-09-21 — Temporal line probes
 
 - Line probes now compile against a time-driven generation. Each sample

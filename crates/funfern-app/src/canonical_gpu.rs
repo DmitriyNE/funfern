@@ -5065,11 +5065,18 @@ fn compute_canonical_wave(
         if let Some((handles, bind_group, Some(elements), Some(reduce))) = area_recorder
             && probe_sample_due(step_after, handles.sample_stride)
         {
-            pass.set_bind_group(0, &bind_group.bind_group, &[]);
             if handles.contribution_count > 0 {
+                pass.set_bind_group(0, &bind_group.bind_group, &[]);
                 pass.set_pipeline(elements);
                 pass.dispatch_workgroups(handles.contribution_count.div_ceil(64), 1, 1);
             }
+            // The reduction reads the descriptors and the output ring, which
+            // the element pass does not bind, so it has its own group.
+            pass.set_bind_group(
+                0,
+                bind_group.reduce.as_ref().unwrap_or(&bind_group.bind_group),
+                &[],
+            );
             pass.set_pipeline(reduce);
             pass.dispatch_workgroups(1, 1, 1);
             pass.set_bind_group(0, &group.bind_group, &[]);
