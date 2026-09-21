@@ -483,3 +483,250 @@ impl Playground {
         self.amr_status = "preparing estimate".into();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use funfern_app::topology_editor::TopologyEditor;
+
+    /// An adaptation spans many frames while the user may remesh underneath
+    /// it. Once the active mesh is no longer the one the job started from, the
+    /// job is dropped quietly instead of finishing and being rejected at the
+    /// handoff as "Adapted mesh does not match the active topology".
+    #[test]
+    fn an_adaptation_of_a_replaced_mesh_is_discarded_without_an_error() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let first = activate(&mut state);
+        state.amr_enabled = true;
+        state.amr_adaptation_job = Some(MeshAdaptationJob::new_topology(
+            first.mesh.clone(),
+            &first.bundle.plan,
+            MeshAdaptationState::from_mesh(&first.mesh),
+            state.runtime.reserve_mesh_revision(),
+            Arc::new(|_, _| 0.09),
+            MeshAdaptationOptions::default(),
+        ));
+        state.amr_adaptation_source = Some(first.mesh.mesh_revision);
+
+        state
+            .editor
+            .set_domain(DomainRect {
+                max_x: 1.4,
+                ..DomainRect::UNIT
+            })
+            .unwrap();
+        settle(&mut state.editor);
+        let second = activate(&mut state);
+        assert_ne!(second.mesh.mesh_revision, first.mesh.mesh_revision);
+
+        state.refresh_amr(
+            &CanonicalGpuRequest::default(),
+            &CanonicalGpuDisplay::default(),
+            &WaveDisplay::default(),
+        );
+        assert!(state.amr_adaptation_job.is_none());
+        assert!(state.amr_adaptation_source.is_none());
+        assert_eq!(state.amr_error, None);
+        assert!(
+            state.amr_status.contains("discarded"),
+            "status was {:?}",
+            state.amr_status
+        );
+    }
+
+    #[test]
+    fn an_unchanged_adaptation_does_not_request_a_handoff() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let active = activate(&mut state);
+        state.amr_enabled = true;
+        state.amr_adaptation_job = Some(MeshAdaptationJob::new_topology(
+            active.mesh.clone(),
+            &active.bundle.plan,
+            MeshAdaptationState::from_mesh(&active.mesh),
+            state.runtime.reserve_mesh_revision(),
+            Arc::new(|_, _| 0.1),
+            MeshAdaptationOptions {
+                minimum_target_edge_length: 0.01,
+                maximum_target_edge_length: 1.0,
+                max_refinement_changes: 0,
+                max_coarsening_changes: 0,
+                ..Default::default()
+            },
+        ));
+        state.amr_adaptation_source = Some(active.mesh.mesh_revision);
+
+        for _ in 0..10_000 {
+            state.refresh_amr(
+                &CanonicalGpuRequest::default(),
+                &CanonicalGpuDisplay::default(),
+                &WaveDisplay::default(),
+            );
+            if state.amr_adaptation_job.is_none() {
+                break;
+            }
+        }
+
+        assert!(state.amr_adaptation_job.is_none());
+        assert!(state.runtime.ready().is_none());
+        assert_eq!(
+            state.runtime.active().unwrap().mesh.mesh_revision,
+            active.mesh.mesh_revision
+        );
+        assert_eq!(state.amr_report.as_ref().unwrap().topology_changes, 0);
+        assert_eq!(
+            state.amr_adaptation_state.as_ref().unwrap().mesh_revision,
+            active.mesh.mesh_revision
+        );
+        assert_eq!(state.amr_error, None);
+    }
+
+    /// The estimate has no notion of enough on its own. Its step down is
+    /// clamped, so an element it cannot satisfy - a boundary the field
+    /// disagrees with, the grid-scale leftovers of a wave that has passed -
+    /// asks for the same refinement however loose the target is, and walks to
+    /// the smallest element allowed. The accuracy target is what answers that,
+    /// and it answers for the whole field at once; the floors it does not
+    /// answer for at all.
+    #[test]
+    fn the_accuracy_target_and_deadband_choose_one_adaptation_direction() {
+        let report = |error, limit, coarsen, global| SolutionIndicatorReport {
+            refine_candidates: error + limit,
+            error_refine_candidates: error,
+            limit_refine_candidates: limit,
+            coarsen_candidates: coarsen,
+            global_indicator: global,
+            ..Default::default()
+        };
+        assert_eq!(
+            adaptation_decision(&report(2000, 0, 0, 0.2), 0.12),
+            AmrDecision::Refine
+        );
+        assert_eq!(
+            adaptation_decision(&report(2000, 0, 0, 0.05), 0.12),
+            AmrDecision::Hold
+        );
+        // The same estimate, asked for more: still running.
+        assert_eq!(
+            adaptation_decision(&report(2000, 0, 0, 0.05), 0.04),
+            AmrDecision::Refine
+        );
+        // A forced wavelength is carried whatever the error reads.
+        assert_eq!(
+            adaptation_decision(&report(0, 2000, 2000, 0.0), 0.12),
+            AmrDecision::Refine
+        );
+        // A handful of elements is noise, as it always was.
+        assert_eq!(
+            adaptation_decision(&report(3, 0, 0, 0.9), 0.12),
+            AmrDecision::Hold
+        );
+        // Coarsening waits below a broad deadband, even if local edges ask.
+        assert_eq!(
+            adaptation_decision(&report(0, 0, 2000, 0.10), 0.12),
+            AmrDecision::Hold
+        );
+        assert_eq!(
+            adaptation_decision(&report(0, 0, 2000, 0.05), 0.12),
+            AmrDecision::Coarsen
+        );
+        // Refinement wins when both local candidate sets are populated; one
+        // transaction never yanks the topology in both directions.
+        assert_eq!(
+            adaptation_decision(&report(2000, 0, 2000, 0.2), 0.12),
+            AmrDecision::Refine
+        );
+    }
+
+    /// An estimate owns a copied solution snapshot. Accepted-state maintenance
+    /// may continue while the CPU walks that snapshot; only a
+    /// topology/generation handoff makes it stale.
+    #[test]
+    fn a_live_gpu_event_does_not_disown_an_amr_snapshot() {
+        let token = TopologyToken {
+            document_revision: 4,
+            topology_revision: 3,
+            mesh_generation: 2,
+        };
+        let source = AmrIndicatorSource {
+            topology: token,
+            gpu_generation: 7,
+            accepted_step: 120,
+        };
+        assert!(source.is_current(token, 7));
+        assert!(!source.is_current(token, 8));
+        assert!(!source.is_current(
+            TopologyToken {
+                mesh_generation: 3,
+                ..token
+            },
+            7
+        ));
+    }
+
+    #[test]
+    fn the_accuracy_control_starts_on_the_medium_preset() {
+        let state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        assert_eq!(
+            amr_accuracy_preset_name(state.amr_accuracy_percent),
+            "Medium"
+        );
+        assert!((state.amr_target_accuracy() - 0.12).abs() < 1.0e-12);
+        for (percent, name) in AMR_ACCURACY_PRESETS {
+            assert_eq!(amr_accuracy_preset_name(percent), name);
+        }
+        assert_eq!(amr_accuracy_preset_name(9.0), "Custom");
+    }
+
+    /// Committing a mesh drops the estimate, and every adaptation commits one,
+    /// so a reading that only exists while an estimate is in hand blinks out of
+    /// the panel on every cycle and takes everything below it down a line.
+    #[test]
+    fn the_estimate_reading_holds_its_place_between_estimates() {
+        let state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        assert!(state.amr_indicator_result.is_none());
+        let line = state.amr_estimate_line();
+        assert!(line.contains("target 12%"), "the line read {line:?}");
+    }
+
+    /// The size limits and the wavelength live in the fold at the bottom of the
+    /// panel now, which is drawn after the adaptation section rather than
+    /// inside it. Every one of them still has to drop an estimate in flight, or
+    /// a change there is not felt until the next estimate happens to start.
+    #[test]
+    fn every_adaptation_setting_drops_an_estimate_in_flight() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        const WATCHED: [&str; 5] = [
+            "adaptation itself",
+            "the accuracy target",
+            "elements per wavelength",
+            "the smallest element",
+            "the largest element",
+        ];
+        for (step, name) in WATCHED.into_iter().enumerate() {
+            let before = state.amr_settings();
+            match step {
+                0 => state.amr_enabled = !state.amr_enabled,
+                1 => state.amr_accuracy_percent = 24.0,
+                2 => state.amr_elements_per_wavelength = 9.0,
+                3 => state.amr_minimum_edge = 0.01,
+                _ => state.amr_maximum_edge = 0.2,
+            }
+            assert_ne!(state.amr_settings(), before, "{name} is not watched");
+        }
+    }
+}

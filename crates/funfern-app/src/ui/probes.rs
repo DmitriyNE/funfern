@@ -705,3 +705,116 @@ impl Playground {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wave_gpu::PointProbeRecord;
+
+    fn probe_upload(token: TopologyToken, generation: u64, revision: u64) -> ProbeUpload {
+        ProbeUpload {
+            token,
+            generation,
+            revision,
+            curve_revision: revision,
+            area_revision: revision,
+            far_field_revision: revision,
+        }
+    }
+
+    #[test]
+    fn replacing_the_wave_buffers_asks_for_the_probe_buffers_again() {
+        let token = TopologyToken {
+            document_revision: 4,
+            topology_revision: 3,
+            mesh_generation: 2,
+        };
+        let upload = probe_upload(token, 7, 1);
+        assert!(probes_need_upload(None, token, 7));
+        assert!(!probes_need_upload(Some(upload), token, 7));
+
+        // A reset keeps the topology and replaces the wave buffers, and every
+        // probe buffer goes with them. Nothing else says so.
+        assert!(probes_need_upload(Some(upload), token, 8));
+
+        // A commit that reuses the buffers still moves the stencils.
+        assert!(probes_need_upload(
+            Some(upload),
+            TopologyToken {
+                mesh_generation: 3,
+                ..token
+            },
+            7
+        ));
+    }
+
+    #[test]
+    fn a_restarted_run_records_from_its_own_clock() {
+        let sample = |time: f64| PointProbeRecord {
+            probe_id: 1,
+            time,
+            ..PointProbeRecord::default()
+        };
+        let mut state = Playground::default();
+        let token = TopologyToken {
+            document_revision: 1,
+            topology_revision: 1,
+            mesh_generation: 1,
+        };
+        state.probe_upload = Some(probe_upload(token, 1, 1));
+        // A recorder stamps the solver's clock, which the transfer carries from
+        // one generation into the next. `sim_time_offset` turns this
+        // generation's step count into that clock; adding it to a time already
+        // on it counts the run so far a second time.
+        state.sim_time_offset = 4.0;
+        state.ingest_probes(&ProbeDisplay {
+            generation: 1,
+            revision: 1,
+            records: vec![sample(4.5), sample(5.0)],
+            readbacks: 1,
+        });
+        let samples = |state: &Playground| -> Vec<f64> {
+            state
+                .probe_traces
+                .get(&ProbeId(1))
+                .map(|trace| trace.samples.iter().map(|sample| sample.time).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(samples(&state), vec![4.5, 5.0]);
+
+        // The run restarts: new buffers, new probes, and a clock back at zero.
+        // With the previous run's samples still in the trace every record of the
+        // new one sits below its high-water mark and is dropped — the freeze
+        // that only Clear could undo.
+        state.sim_time_offset = 0.0;
+        state.probe_upload = Some(probe_upload(token, 2, 2));
+        state.ingest_probes(&ProbeDisplay {
+            generation: 2,
+            revision: 2,
+            records: vec![sample(0.25)],
+            readbacks: 2,
+        });
+        assert_eq!(samples(&state), vec![4.5, 5.0]);
+
+        state.restart_probe_traces();
+
+        // A readback still in flight from the run that ended carries times from
+        // a clock the trace has left behind, and would land ahead of everything
+        // the new run is about to record.
+        state.ingest_probes(&ProbeDisplay {
+            generation: 1,
+            revision: 1,
+            records: vec![sample(1.5)],
+            readbacks: 3,
+        });
+        assert_eq!(samples(&state), Vec::<f64>::new());
+
+        state.ingest_probes(&ProbeDisplay {
+            generation: 2,
+            revision: 2,
+            records: vec![sample(0.25)],
+            readbacks: 4,
+        });
+        assert_eq!(samples(&state), vec![0.25]);
+    }
+}
