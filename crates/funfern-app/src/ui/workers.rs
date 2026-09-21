@@ -1,0 +1,693 @@
+//! Work that runs off the UI thread: solver preparation, the AMR indicator,
+//! and the GPU upload compile, with the thread and worker-message plumbing
+//! each target needs.
+use super::PreparedGpuUpload;
+use crate::canonical_gpu::{
+    CanonicalGpuClock, CanonicalGpuPlan, CanonicalGpuRuntimeTransfer, CanonicalGpuTransferPlan,
+};
+use bevy::platform::time::Instant;
+use funfern_app::topology_runtime::{
+    PreparedTopology, TopologyPreparationError, TopologyPreparationJob, TopologyPreparationPhase,
+    TopologyPreparationTiming, TopologyToken,
+};
+use funfern_core::*;
+use std::sync::{
+    Arc, Mutex,
+    mpsc::{self, Receiver, Sender},
+};
+
+#[cfg_attr(
+    all(target_arch = "wasm32", not(feature = "browser-threads")),
+    allow(dead_code)
+)]
+pub(super) enum BackgroundPreparationEvent {
+    WorkerStarted,
+    Progress {
+        token: TopologyToken,
+        phase: TopologyPreparationPhase,
+        detail: &'static str,
+        timing: TopologyPreparationTiming,
+    },
+    Finished {
+        token: TopologyToken,
+        result: Box<Result<PreparedTopology, TopologyPreparationError>>,
+    },
+}
+
+/// One long-lived worker owns CPU candidate preparation. New jobs queue through
+/// one channel; between bounded quanta the worker drains that queue to its newest
+/// member, so rapid edits cannot create a growing set of competing assembly
+/// threads. Native uses an OS thread and an isolated browser uses one shared-
+/// memory Web Worker in the threaded browser bundle. The static-host bundle and
+/// browser worker bootstrap failure retain the cooperative main-thread runner.
+pub(super) struct BackgroundPreparationWorker {
+    pub(super) sender: Sender<TopologyPreparationJob>,
+    pub(super) receiver: Mutex<Receiver<BackgroundPreparationEvent>>,
+    pub(super) token: Option<TopologyToken>,
+    pub(super) phase: Option<TopologyPreparationPhase>,
+    pub(super) detail: Option<&'static str>,
+    pub(super) timing: Option<TopologyPreparationTiming>,
+}
+
+impl BackgroundPreparationWorker {
+    #[cfg(any(
+        not(target_arch = "wasm32"),
+        all(target_arch = "wasm32", feature = "browser-threads")
+    ))]
+    const QUANTUM: std::time::Duration = std::time::Duration::from_millis(8);
+
+    pub(super) fn spawn() -> Option<Self> {
+        let (job_sender, job_receiver) = mpsc::channel::<TopologyPreparationJob>();
+        let (event_sender, event_receiver) = mpsc::channel::<BackgroundPreparationEvent>();
+        if !spawn_preparation_worker(job_receiver, event_sender) {
+            return None;
+        }
+        Some(Self {
+            sender: job_sender,
+            receiver: Mutex::new(event_receiver),
+            token: None,
+            phase: None,
+            detail: None,
+            timing: None,
+        })
+    }
+
+    pub(super) fn submit(
+        &mut self,
+        job: TopologyPreparationJob,
+    ) -> Option<Box<TopologyPreparationJob>> {
+        self.token = Some(job.token());
+        self.phase = Some(job.phase());
+        self.detail = Some(job.detail());
+        self.timing = Some(job.timing());
+        self.sender.send(job).err().map(|error| Box::new(error.0))
+    }
+
+    pub(super) fn drain(&self) -> Vec<BackgroundPreparationEvent> {
+        let receiver = self.receiver.lock().unwrap();
+        std::iter::from_fn(|| receiver.try_recv().ok()).collect()
+    }
+
+    pub(super) fn observe(&mut self, event: &BackgroundPreparationEvent) {
+        match event {
+            BackgroundPreparationEvent::WorkerStarted => {}
+            BackgroundPreparationEvent::Progress {
+                token,
+                phase,
+                detail,
+                timing,
+            } if self.token == Some(*token) => {
+                self.phase = Some(*phase);
+                self.detail = Some(*detail);
+                self.timing = Some(*timing);
+            }
+            BackgroundPreparationEvent::Finished { token, .. } if self.token == Some(*token) => {
+                self.token = None;
+                self.phase = None;
+                self.detail = None;
+                self.timing = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(target_arch = "wasm32", feature = "browser-threads")
+))]
+pub(super) fn run_preparation_worker(
+    job_receiver: Receiver<TopologyPreparationJob>,
+    event_sender: Sender<BackgroundPreparationEvent>,
+) {
+    if event_sender
+        .send(BackgroundPreparationEvent::WorkerStarted)
+        .is_err()
+    {
+        return;
+    }
+    while let Ok(mut job) = job_receiver.recv() {
+        loop {
+            loop {
+                match job_receiver.try_recv() {
+                    Ok(newer) => job = newer,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                }
+            }
+            let token = job.token();
+            let result = job.advance_for(BackgroundPreparationWorker::QUANTUM);
+            if let Some(result) = result {
+                if event_sender
+                    .send(BackgroundPreparationEvent::Finished {
+                        token,
+                        result: Box::new(result),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                break;
+            }
+            if event_sender
+                .send(BackgroundPreparationEvent::Progress {
+                    token,
+                    phase: job.phase(),
+                    detail: job.detail(),
+                    timing: job.timing(),
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn spawn_preparation_worker(
+    job_receiver: Receiver<TopologyPreparationJob>,
+    event_sender: Sender<BackgroundPreparationEvent>,
+) -> bool {
+    std::thread::Builder::new()
+        .name("funfern-cpu-prepare".into())
+        .spawn(move || run_preparation_worker(job_receiver, event_sender))
+        .is_ok()
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+pub(super) fn spawn_preparation_worker(
+    job_receiver: Receiver<TopologyPreparationJob>,
+    event_sender: Sender<BackgroundPreparationEvent>,
+) -> bool {
+    if !BROWSER_BACKGROUND_POOL_READY.load(Ordering::Acquire) {
+        return false;
+    }
+    crate::set_browser_preparation_worker_status("scheduled");
+    rayon::spawn(move || run_preparation_worker(job_receiver, event_sender));
+    true
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "browser-threads")))]
+pub(super) fn spawn_preparation_worker(
+    _job_receiver: Receiver<TopologyPreparationJob>,
+    _event_sender: Sender<BackgroundPreparationEvent>,
+) -> bool {
+    false
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BackgroundAmrKind {
+    Indicator,
+    Adaptation,
+}
+
+pub(super) struct CanonicalAmrPreparation {
+    pub(super) mesh: Arc<TriMesh>,
+    pub(super) operator: Arc<CanonicalWaveOperator>,
+    pub(super) forcing: Arc<CanonicalForcing>,
+    pub(super) snapshot: CanonicalIndicatorSnapshot,
+}
+
+pub(super) struct AmrIndicatorJob {
+    pub(super) job: Option<SolutionIndicatorJob>,
+    pub(super) canonical: Option<CanonicalAmrPreparation>,
+}
+
+impl AmrIndicatorJob {
+    pub(super) fn with_canonical(
+        job: SolutionIndicatorJob,
+        mesh: Arc<TriMesh>,
+        operator: Arc<CanonicalWaveOperator>,
+        forcing: Arc<CanonicalForcing>,
+        snapshot: CanonicalIndicatorSnapshot,
+    ) -> Self {
+        Self {
+            job: Some(job),
+            canonical: Some(CanonicalAmrPreparation {
+                mesh,
+                operator,
+                forcing,
+                snapshot,
+            }),
+        }
+    }
+
+    pub(super) fn phase(&self) -> &'static str {
+        if self.canonical.is_some() {
+            "Preparing canonical AMR estimate"
+        } else {
+            self.job
+                .as_ref()
+                .map_or("AMR estimate ready", SolutionIndicatorJob::phase)
+        }
+    }
+
+    pub(super) fn advance(
+        &mut self,
+        budget: usize,
+    ) -> Option<Result<SolutionIndicatorResult, AmrIndicatorError>> {
+        if let Some(canonical) = self.canonical.take() {
+            let supplement = match canonical_indicator_supplement(
+                &canonical.mesh,
+                &canonical.operator,
+                &canonical.forcing,
+                &canonical.snapshot,
+            ) {
+                Ok(supplement) => supplement,
+                Err(error) => {
+                    self.job = None;
+                    return Some(Err(AmrIndicatorError::Canonical(error)));
+                }
+            };
+            self.job = self
+                .job
+                .take()
+                .map(|job| job.with_canonical_supplement(supplement));
+        }
+        self.job
+            .as_mut()
+            .and_then(|job| job.advance(budget))
+            .map(|result| result.map_err(AmrIndicatorError::Indicator))
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum AmrIndicatorError {
+    Canonical(WaveError),
+    Indicator(SolutionIndicatorError),
+}
+
+impl std::fmt::Display for AmrIndicatorError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Canonical(error) => write!(formatter, "Canonical AMR estimate failed: {error}"),
+            Self::Indicator(error) => error.fmt(formatter),
+        }
+    }
+}
+
+pub(super) enum BackgroundAmrJob {
+    Indicator(Box<AmrIndicatorJob>),
+    Adaptation(Box<MeshAdaptationJob>),
+}
+
+impl BackgroundAmrJob {
+    pub(super) fn kind(&self) -> BackgroundAmrKind {
+        match self {
+            Self::Indicator(_) => BackgroundAmrKind::Indicator,
+            Self::Adaptation(_) => BackgroundAmrKind::Adaptation,
+        }
+    }
+
+    pub(super) fn phase(&self) -> &'static str {
+        match self {
+            Self::Indicator(job) => job.phase(),
+            Self::Adaptation(job) => job.phase(),
+        }
+    }
+}
+
+#[cfg_attr(
+    all(target_arch = "wasm32", not(feature = "browser-threads")),
+    allow(dead_code)
+)]
+pub(super) enum BackgroundAmrCommand {
+    Run { serial: u64, job: BackgroundAmrJob },
+    Cancel,
+}
+
+#[cfg_attr(
+    all(target_arch = "wasm32", not(feature = "browser-threads")),
+    allow(dead_code)
+)]
+pub(super) enum BackgroundAmrResult {
+    Indicator(Result<SolutionIndicatorResult, AmrIndicatorError>),
+    Adaptation(Result<MeshAdaptationResult, MeshAdaptationError>),
+}
+
+#[cfg_attr(
+    all(target_arch = "wasm32", not(feature = "browser-threads")),
+    allow(dead_code)
+)]
+pub(super) enum BackgroundAmrEvent {
+    WorkerStarted,
+    Progress {
+        serial: u64,
+        kind: BackgroundAmrKind,
+        phase: &'static str,
+    },
+    Finished {
+        serial: u64,
+        result: Box<BackgroundAmrResult>,
+    },
+}
+
+impl BackgroundAmrEvent {
+    pub(super) fn serial(&self) -> Option<u64> {
+        match self {
+            Self::WorkerStarted => None,
+            Self::Progress { serial, .. } | Self::Finished { serial, .. } => Some(*serial),
+        }
+    }
+}
+
+/// One independent worker advances the immutable solution estimate and the
+/// subsequent mesh transaction. Their old two-millisecond UI slices made total
+/// AMR throughput proportional to display FPS: precisely when the GPU was
+/// overloaded, adaptation also appeared to stop. Assembly has its own worker,
+/// so accepting an adapted mesh can start candidate preparation without either
+/// job sharing a queue or a core with the other.
+pub(super) struct BackgroundAmrWorker {
+    pub(super) sender: Sender<BackgroundAmrCommand>,
+    pub(super) receiver: Mutex<Receiver<BackgroundAmrEvent>>,
+    pub(super) next_serial: u64,
+    pub(super) active_serial: Option<u64>,
+    pub(super) kind: Option<BackgroundAmrKind>,
+    pub(super) phase: Option<&'static str>,
+}
+
+impl BackgroundAmrWorker {
+    #[cfg(any(
+        not(target_arch = "wasm32"),
+        all(target_arch = "wasm32", feature = "browser-threads")
+    ))]
+    const QUANTUM: std::time::Duration = std::time::Duration::from_millis(8);
+
+    pub(super) fn spawn() -> Option<Self> {
+        let (job_sender, job_receiver) = mpsc::channel::<BackgroundAmrCommand>();
+        let (event_sender, event_receiver) = mpsc::channel::<BackgroundAmrEvent>();
+        if !spawn_amr_worker(job_receiver, event_sender) {
+            return None;
+        }
+        Some(Self {
+            sender: job_sender,
+            receiver: Mutex::new(event_receiver),
+            next_serial: 0,
+            active_serial: None,
+            kind: None,
+            phase: None,
+        })
+    }
+
+    pub(super) fn submit(&mut self, job: BackgroundAmrJob) -> Result<(), BackgroundAmrJob> {
+        let kind = job.kind();
+        let phase = job.phase();
+        let serial = self.next_serial.wrapping_add(1).max(1);
+        self.next_serial = serial;
+        match self.sender.send(BackgroundAmrCommand::Run { serial, job }) {
+            Ok(()) => {
+                self.active_serial = Some(serial);
+                self.kind = Some(kind);
+                self.phase = Some(phase);
+                Ok(())
+            }
+            Err(error) => match error.0 {
+                BackgroundAmrCommand::Run { job, .. } => Err(job),
+                BackgroundAmrCommand::Cancel => unreachable!(),
+            },
+        }
+    }
+
+    pub(super) fn cancel(&mut self) {
+        self.active_serial = None;
+        self.kind = None;
+        self.phase = None;
+        let _ = self.sender.send(BackgroundAmrCommand::Cancel);
+    }
+
+    pub(super) fn cancel_kind(&mut self, kind: BackgroundAmrKind) {
+        if self.kind == Some(kind) {
+            self.cancel();
+        }
+    }
+
+    pub(super) fn drain(&mut self) -> Vec<BackgroundAmrEvent> {
+        let events = {
+            let receiver = self.receiver.lock().unwrap();
+            std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>()
+        };
+        let mut current = Vec::new();
+        for event in events {
+            let Some(serial) = event.serial() else {
+                current.push(event);
+                continue;
+            };
+            if self.active_serial != Some(serial) {
+                continue;
+            }
+            match &event {
+                BackgroundAmrEvent::WorkerStarted => unreachable!("handled above"),
+                BackgroundAmrEvent::Progress { kind, phase, .. } => {
+                    self.kind = Some(*kind);
+                    self.phase = Some(*phase);
+                }
+                BackgroundAmrEvent::Finished { .. } => {
+                    self.active_serial = None;
+                    self.kind = None;
+                    self.phase = None;
+                }
+            }
+            current.push(event);
+        }
+        current
+    }
+}
+
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(target_arch = "wasm32", feature = "browser-threads")
+))]
+pub(super) fn run_amr_worker(
+    job_receiver: Receiver<BackgroundAmrCommand>,
+    event_sender: Sender<BackgroundAmrEvent>,
+) {
+    if event_sender
+        .send(BackgroundAmrEvent::WorkerStarted)
+        .is_err()
+    {
+        return;
+    }
+    while let Ok(command) = job_receiver.recv() {
+        let BackgroundAmrCommand::Run {
+            mut serial,
+            mut job,
+        } = command
+        else {
+            continue;
+        };
+        loop {
+            let mut cancelled = false;
+            loop {
+                match job_receiver.try_recv() {
+                    Ok(BackgroundAmrCommand::Run {
+                        serial: newer_serial,
+                        job: newer,
+                    }) => {
+                        serial = newer_serial;
+                        job = newer;
+                        cancelled = false;
+                    }
+                    Ok(BackgroundAmrCommand::Cancel) => cancelled = true,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                }
+            }
+            if cancelled {
+                break;
+            }
+
+            let started = Instant::now();
+            let result = loop {
+                let result = match &mut job {
+                    BackgroundAmrJob::Indicator(job) => {
+                        job.advance(64).map(BackgroundAmrResult::Indicator)
+                    }
+                    BackgroundAmrJob::Adaptation(job) => {
+                        job.advance(64).map(BackgroundAmrResult::Adaptation)
+                    }
+                };
+                if result.is_some() || started.elapsed() >= BackgroundAmrWorker::QUANTUM {
+                    break result;
+                }
+            };
+            if let Some(result) = result {
+                if event_sender
+                    .send(BackgroundAmrEvent::Finished {
+                        serial,
+                        result: Box::new(result),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                break;
+            }
+            if event_sender
+                .send(BackgroundAmrEvent::Progress {
+                    serial,
+                    kind: job.kind(),
+                    phase: job.phase(),
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn spawn_amr_worker(
+    job_receiver: Receiver<BackgroundAmrCommand>,
+    event_sender: Sender<BackgroundAmrEvent>,
+) -> bool {
+    std::thread::Builder::new()
+        .name("funfern-amr".into())
+        .spawn(move || run_amr_worker(job_receiver, event_sender))
+        .is_ok()
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+pub(super) fn spawn_amr_worker(
+    job_receiver: Receiver<BackgroundAmrCommand>,
+    event_sender: Sender<BackgroundAmrEvent>,
+) -> bool {
+    if !BROWSER_BACKGROUND_POOL_READY.load(Ordering::Acquire) {
+        return false;
+    }
+    crate::set_browser_amr_worker_status("scheduled");
+    rayon::spawn(move || run_amr_worker(job_receiver, event_sender));
+    true
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "browser-threads")))]
+pub(super) fn spawn_amr_worker(
+    _job_receiver: Receiver<BackgroundAmrCommand>,
+    _event_sender: Sender<BackgroundAmrEvent>,
+) -> bool {
+    false
+}
+
+pub(super) fn compile_gpu_upload(
+    candidate: PreparedTopology,
+    active: Option<Arc<PreparedTopology>>,
+    time_step: f64,
+    runtime_serials: [u32; 4],
+) -> Result<PreparedGpuUpload, String> {
+    let state = CanonicalWaveState::zero(&candidate.canonical_operator, time_step)
+        .map_err(|error| error.to_string())?;
+    let plan = CanonicalGpuPlan::compile_with_quadratic(
+        &candidate.canonical_operator,
+        &candidate.operator,
+        &state,
+        &candidate.canonical_forcing,
+        CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    if candidate.fresh || active.is_none() {
+        return Ok(PreparedGpuUpload {
+            plan,
+            transfer: None,
+        });
+    }
+    let active = active.unwrap();
+    let transfer = candidate
+        .canonical_transfer
+        .as_ref()
+        .ok_or_else(|| "Canonical handoff maps are not prepared".to_owned())?;
+    let runtime = CanonicalGpuRuntimeTransfer::from_primary_transfer(
+        &active.canonical_operator,
+        &candidate.canonical_operator,
+        &active.canonical_forcing,
+        &candidate.canonical_forcing,
+        &transfer.primary,
+        runtime_serials,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let gpu_transfer = CanonicalGpuTransferPlan::compile_prepared(
+        &active.canonical_operator,
+        &candidate.canonical_operator,
+        &active.canonical_forcing,
+        &candidate.canonical_forcing,
+        &transfer.primary,
+        &transfer.complementary,
+        &transfer.thin_gap,
+        &transfer.outgoing,
+        &runtime,
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    Ok(PreparedGpuUpload {
+        plan,
+        transfer: Some(gpu_transfer),
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn dispatch_gpu_upload_preparation(
+    sender: Sender<Result<PreparedGpuUpload, String>>,
+    candidate: PreparedTopology,
+    active: Option<Arc<PreparedTopology>>,
+    time_step: f64,
+    runtime_serials: [u32; 4],
+) {
+    let failure_sender = sender.clone();
+    if std::thread::Builder::new()
+        .name("funfern-gpu-pack".into())
+        .spawn(move || {
+            let _ = sender.send(compile_gpu_upload(
+                candidate,
+                active,
+                time_step,
+                runtime_serials,
+            ));
+        })
+        .is_err()
+    {
+        let _ = failure_sender.send(Err("Canonical GPU packing worker did not start".into()));
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+pub(super) fn dispatch_gpu_upload_preparation(
+    sender: Sender<Result<PreparedGpuUpload, String>>,
+    candidate: PreparedTopology,
+    active: Option<Arc<PreparedTopology>>,
+    time_step: f64,
+    runtime_serials: [u32; 4],
+) {
+    if BROWSER_BACKGROUND_POOL_READY.load(Ordering::Acquire) {
+        crate::set_browser_gpu_pack_status("scheduled");
+        rayon::spawn(move || {
+            let _ = sender.send(compile_gpu_upload(
+                candidate,
+                active,
+                time_step,
+                runtime_serials,
+            ));
+        });
+    } else {
+        let _ = sender.send(compile_gpu_upload(
+            candidate,
+            active,
+            time_step,
+            runtime_serials,
+        ));
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "browser-threads")))]
+pub(super) fn dispatch_gpu_upload_preparation(
+    sender: Sender<Result<PreparedGpuUpload, String>>,
+    candidate: PreparedTopology,
+    active: Option<Arc<PreparedTopology>>,
+    time_step: f64,
+    runtime_serials: [u32; 4],
+) {
+    let _ = sender.send(compile_gpu_upload(
+        candidate,
+        active,
+        time_step,
+        runtime_serials,
+    ));
+}
