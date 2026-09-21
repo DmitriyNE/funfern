@@ -1042,9 +1042,12 @@ phase for explicit phase/drive-kind changes, and translates an active Switch
 into the target epoch. A production-render-graph gate combining those cases
 matched its f64 oracle after handoff to `2.99e-7` relative Q and `2.09e-6`
 relative b error. Mixed static/temporal generations remain rejected pending an
-explicit physical initialization contract. Injected temporal-event rollback and
-the filter, AMR, diagnostic and supported-boundary composition gates are still
-open.
+explicit physical initialization contract. Injected temporal-law rejection now
+leaves accepted physical storage byte-identical, advances neither clock nor
+material serial, and resumes for one old-law step before a clean retry; the
+combined production-render-graph fixture retains `2.65e-7` relative Q and
+`2.43e-6` relative b agreement. The filter, AMR, diagnostic and
+supported-boundary composition gates are still open.
 
 ## 13. Verification and acceptance
 

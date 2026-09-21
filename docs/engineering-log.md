@@ -5,6 +5,22 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-21 — Temporal event rejection retains the accepted generation
+
+- Added a production-render-graph failure gate for a temporal law patch. A
+  deterministic final-validation failure leaves accepted physical storage
+  byte-identical, does not advance the clock or material serial, and reports a
+  rejected live-event receipt rather than latching the whole solver.
+- After clearing only the injected status, the same generation advances one
+  step under the old law before retrying. Its agreement with the f64 old-law
+  oracle proves the rejected candidate coefficient/runtime bank did not leak
+  into execution; the subsequent clean retry then commits at its own paused
+  GPU boundary and evolution continues under the target law.
+- On Apple M1 Max / Metal, the rejected-event/old-step/retry fixture ended at
+  `2.65e-7` relative Q error, `2.43e-6` relative b error and `8.92e-9 s`
+  absolute clock error. The remaining Stage 7 work moves to filter, dynamic
+  AMR, diagnostic, supported-boundary composition and incremental-cost gates.
+
 ## 2026-09-21 — Temporal runtime survives generation handoff
 
 - Extended the canonical transfer layout with stable material-ID ownership and
@@ -23,8 +39,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   24 source and 40 target steps, relative f64-oracle errors were `2.99e-7` for
   Q and `2.09e-6` for b; absolute clock error was `1.25e-8 s`.
 - Host tests pin stable-ID mapping and the frequency/phase distinction; Naga
-  accepts both transfer shaders. Next: inject rejection into a temporal live
-  event and prove byte-exact field, coefficient and runtime rollback.
+  accepts both transfer shaders.
 
 ## 2026-09-21 — GPU-stamped temporal material events
 
