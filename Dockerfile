@@ -15,7 +15,7 @@ RUN --mount=type=cache,id=funfern-cargo-registry-${TARGETARCH},target=/usr/local
 
 WORKDIR /opt/funfern
 
-COPY Cargo.toml Cargo.lock Trunk.toml rust-toolchain.toml index.html ./
+COPY Cargo.toml Cargo.lock Trunk.toml rust-toolchain.toml index.html coi-serviceworker.js ./
 COPY scripts/trunk ./scripts/trunk
 COPY crates ./crates
 COPY assets ./assets
