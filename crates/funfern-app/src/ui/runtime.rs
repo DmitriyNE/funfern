@@ -23,6 +23,12 @@ use std::sync::{
 use super::*;
 
 impl Playground {
+    /// Wall time a frame lends to topology preparation. The runtime checks the
+    /// deadline between individual work units, including each formula-heavy
+    /// canonical element, so this remains a latency bound rather than only an
+    /// average throughput target.
+    pub(super) const PREPARATION_FRAME_BUDGET: std::time::Duration =
+        std::time::Duration::from_millis(4);
     /// Candidate state can live either in the cooperative runtime runner or in
     /// a background worker. Keep that placement detail out of UI/status policy.
     pub(super) fn preparation_phase(&self) -> Option<TopologyPreparationPhase> {

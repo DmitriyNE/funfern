@@ -1,0 +1,349 @@
+//! The drawing tools: placing points, finishing a curve, creating it in the
+//! topology, and deleting a selection back out of it.
+
+use bevy::prelude::*;
+use bevy_egui::egui::Rect;
+use funfern_app::topology_editor::{
+    ClosedCurvePurpose, OpenCurvePurpose, TopologyRemoval, TopologyRemovalTarget,
+};
+use funfern_app::topology_viewport::{
+    ScreenPoint, TopologyHandle, TopologySelection, TopologySpanTarget,
+};
+use funfern_core::*;
+use std::collections::BTreeSet;
+
+use super::*;
+
+impl Playground {
+    pub(super) fn draw_click(
+        &mut self,
+        mut point: Point2,
+        screen: ScreenPoint,
+        r: Rect,
+        snap_to_grid: bool,
+    ) {
+        let hit = self.draw_attachment_hit(screen, r);
+        let Some(mut gesture) = self.draw.take() else {
+            return;
+        };
+        let open = matches!(gesture.tool, DrawTool::Polyline | DrawTool::OpenSpline);
+        let mut attachment = None;
+        // An attachment is a snap of its own and outranks the grid: the point
+        // being welded to is where the curve has to land.
+        if open && let Some(hit) = hit {
+            point = hit.point;
+            attachment = Some(hit.attachment);
+        } else if snap_to_grid {
+            point = Self::snap_point(point, self.snap_step());
+        }
+        if gesture.tool == DrawTool::Circle {
+            let spline = PeriodicCubicSpline::rounded(point, 0.15);
+            let purpose = match self.closed_purpose {
+                ClosedPurpose::Subdomain => ClosedCurvePurpose::Subdomain {
+                    material: self.material_selection,
+                },
+                ClosedPurpose::Hole => ClosedCurvePurpose::Hole,
+            };
+            match self.editor.create_closed_curve(spline, purpose) {
+                Ok(curve) => {
+                    self.select_curve(curve);
+                    self.notify("Closed curve added");
+                }
+                Err(error) => self.notify(error),
+            }
+            self.invalidate_samples();
+            return;
+        }
+        if gesture
+            .points
+            .first()
+            .is_some_and(|first| (point - *first).norm() < 8.0 / self.scale)
+            && gesture.points.len() >= 3
+            && !open
+        {
+            self.draw = Some(gesture);
+            self.finish_draw();
+            return;
+        }
+        gesture.points.push(point);
+        gesture.attachments.push(attachment);
+        let finish = gesture.tool == DrawTool::Rectangle && gesture.points.len() == 2;
+        self.draw = Some(gesture);
+        if finish {
+            self.finish_draw();
+        }
+    }
+    pub(super) fn finish_draw(&mut self) {
+        let Some(gesture) = self.draw.take() else {
+            return;
+        };
+        let result: Result<CurveId, String> = match gesture.tool {
+            DrawTool::Rectangle if gesture.points.len() == 2 => {
+                let a = gesture.points[0];
+                let b = gesture.points[1];
+                let points = vec![
+                    Point2::new(a.x, a.y),
+                    Point2::new(b.x, a.y),
+                    Point2::new(b.x, b.y),
+                    Point2::new(a.x, b.y),
+                ];
+                PeriodicCubicSpline::polygon(points)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| self.create_closed(s))
+            }
+            DrawTool::Polygon if gesture.points.len() >= 3 => {
+                PeriodicCubicSpline::polygon(gesture.points.clone())
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| self.create_closed(s))
+            }
+            DrawTool::ClosedSpline if gesture.points.len() >= 4 => {
+                PeriodicCubicSpline::uniform(gesture.points.clone())
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| self.create_closed(s))
+            }
+            DrawTool::Polyline if gesture.points.len() >= 2 => {
+                OpenCubicSpline::polyline(gesture.points.clone())
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| self.create_open(s, &gesture))
+            }
+            DrawTool::OpenSpline if gesture.points.len() == 2 => {
+                OpenCubicSpline::polyline(gesture.points.clone())
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| self.create_open(s, &gesture))
+            }
+            DrawTool::OpenSpline if gesture.points.len() >= 4 => {
+                OpenCubicSpline::uniform(gesture.points.clone())
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| self.create_open(s, &gesture))
+            }
+            _ => Err("Add enough points to finish this curve".into()),
+        };
+        match result {
+            Ok(curve) => {
+                self.select_curve(curve);
+                self.notify("Curve added");
+                self.invalidate_samples();
+            }
+            Err(error) => {
+                self.message = error;
+                self.draw = Some(gesture);
+            }
+        }
+    }
+    pub(super) fn create_closed(&mut self, spline: PeriodicCubicSpline) -> Result<CurveId, String> {
+        let purpose = match self.closed_purpose {
+            ClosedPurpose::Subdomain => ClosedCurvePurpose::Subdomain {
+                material: self.material_selection,
+            },
+            ClosedPurpose::Hole => ClosedCurvePurpose::Hole,
+        };
+        self.editor.create_closed_curve(spline, purpose)
+    }
+    pub(super) fn create_open(
+        &mut self,
+        spline: OpenCubicSpline,
+        gesture: &DrawGesture,
+    ) -> Result<CurveId, String> {
+        let purpose = match self.open_purpose {
+            OpenPurpose::Separator => OpenCurvePurpose::SubdomainSeparator {
+                material: self.new_separator_material,
+            },
+            OpenPurpose::Baffle => OpenCurvePurpose::BoundaryBaffle,
+        };
+        let start = gesture.attachments.first().copied().flatten();
+        let end = gesture.attachments.last().copied().flatten();
+        self.editor
+            .create_open_curve(spline, purpose, start, end)
+            .map(|edit| edit.curve)
+    }
+    pub(super) fn select_curve(&mut self, id: CurveId) {
+        if let Some(curve) = self
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .find(|curve| curve.id == id)
+        {
+            self.selection = TopologySelection::Spans(
+                curve
+                    .spans
+                    .iter()
+                    .map(|span| TopologySpanTarget::Curve(span.id))
+                    .collect(),
+            );
+        }
+    }
+    pub(super) fn delete_selection(&mut self) {
+        if let Some(probe) = self.selected_probe {
+            match self.editor.delete_probe(probe) {
+                Ok(()) => {
+                    self.selected_probe = None;
+                    self.probe_windows.remove(&probe);
+                }
+                Err(error) => self.message = error,
+            }
+            return;
+        }
+        if let TopologySelection::Handle(TopologyHandle::Control { curve, control }) =
+            &self.selection
+        {
+            let (curve, control) = (*curve, *control);
+            match self.editor.remove_control(curve, control) {
+                Ok(()) => {
+                    self.selection = TopologySelection::None;
+                    self.invalidate_samples();
+                }
+                Err(error) => self.message = error,
+            }
+            return;
+        }
+        let TopologySelection::Spans(targets) = &self.selection else {
+            return;
+        };
+        let spans = targets
+            .iter()
+            .filter_map(|target| match target {
+                TopologySpanTarget::Curve(span) => Some(*span),
+                TopologySpanTarget::Outer(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if spans.is_empty() {
+            return;
+        }
+        // The whole selection is one removal, planned once. Which subdomains a
+        // deletion merges is a property of all of it together, so asking curve
+        // by curve asked the wrong question, closed the history entry to ask it,
+        // and left everything after the first question undeleted.
+        let target = match self.editor.removal_target(&spans) {
+            Ok(target) => target,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        let choices = match self.editor.removal_choices(&target) {
+            Ok(choices) => choices,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        // Merging two assigned subdomains needs an explicit survivor, so hand
+        // the choice to the scene instead of failing the gesture.
+        if choices.len() > 1 {
+            self.pending_merge = Some(PendingMerge {
+                action: MergeAction::Delete(spans),
+                choices,
+            });
+            return;
+        }
+        match self.editor.remove(&target, choices.first().copied()) {
+            Ok(removal) => {
+                self.selection = TopologySelection::None;
+                self.material_edit = None;
+                self.material_formula_edits.clear();
+                self.material_formula_errors.clear();
+                self.invalidate_samples();
+                self.report_removal(&target, &removal);
+            }
+            Err(error) => self.message = error,
+        }
+    }
+    /// Says what the deletion did beyond the selection: a curve promoted to a
+    /// baffle or a probe dropped is not something to discover later.
+    pub(super) fn report_removal(
+        &mut self,
+        target: &TopologyRemovalTarget,
+        removal: &TopologyRemoval,
+    ) {
+        let curves = target.whole_curves();
+        let pieces = removal.pieces.len();
+        let lead = match (curves, pieces) {
+            (0 | 1, 0) => "Curve deleted".to_owned(),
+            (0, 1) => "Deleted spans; the rest is a baffle".to_owned(),
+            (0, pieces) => format!("Deleted spans; split into {pieces} baffles"),
+            (curves, 0) => format!("{curves} curves deleted"),
+            (curves, pieces) => format!(
+                "{curves} curve{} deleted and one cut, leaving {pieces} baffle{}",
+                if curves == 1 { "" } else { "s" },
+                if pieces == 1 { "" } else { "s" },
+            ),
+        };
+        let TopologyRemoval {
+            promoted,
+            joined,
+            removed_probes,
+            removed_regions,
+            ..
+        } = removal;
+        let mut parts = vec![lead];
+        if !promoted.is_empty() {
+            parts.push(format!(
+                "{} attached curve{} promoted to baffles",
+                promoted.len(),
+                if promoted.len() == 1 { "" } else { "s" }
+            ));
+        }
+        let closed = joined
+            .iter()
+            .filter(|record| record.survivor == record.absorbed)
+            .count();
+        let fused = joined.len() - closed;
+        if fused > 0 {
+            parts.push(format!(
+                "{} pair{} of loose ends welded into one curve",
+                fused,
+                if fused == 1 { "" } else { "s" }
+            ));
+        }
+        if closed > 0 {
+            parts.push(format!(
+                "{} curve{} closed into a loop",
+                closed,
+                if closed == 1 { "" } else { "s" }
+            ));
+        }
+        if !removed_probes.is_empty() {
+            parts.push(format!("{} probe(s) removed", removed_probes.len()));
+        }
+        if !removed_regions.is_empty() {
+            parts.push(format!("{} subdomain(s) merged", removed_regions.len()));
+        }
+        self.notify(parts.join(" · "));
+    }
+    /// Stable region owning the committed face under a world point.
+    pub(super) fn region_at(&self, point: Point2) -> Option<RegionId> {
+        let active = self.runtime.active()?;
+        let face = active.bundle.snapshot.face_at(point)?;
+        active
+            .bundle
+            .plan
+            .domains
+            .iter()
+            .find(|domain| domain.face == face)
+            .map(|domain| domain.region)
+    }
+    pub(super) fn place_pulse(&mut self, point: Point2) {
+        let Some(active) = self.runtime.active() else {
+            return;
+        };
+        let region = active.bundle.snapshot.face_at(point).and_then(|face| {
+            active
+                .bundle
+                .plan
+                .domains
+                .iter()
+                .find(|domain| domain.face == face)
+                .map(|domain| domain.region)
+        });
+        let Some(region) = region else {
+            self.message = "Pulse must be inside an active subdomain".into();
+            return;
+        };
+        self.pending_pulse = Some((point, region));
+        self.message = format!("Pulse queued in region {}", region.0);
+    }
+}
