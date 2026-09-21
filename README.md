@@ -86,9 +86,6 @@ obstacle scene as a standalone file as well.
 
 Nonlinear and time-dependent constitutive laws are work in progress.
 
-[docs/user-guide.md](docs/user-guide.md) describes the editor itself: tools,
-topology and boundary editing, materials, probes, adaptation and file handling.
-
 ## Implementation
 
 funfern is written in Rust. The application is built with
@@ -346,7 +343,7 @@ crates/funfern-core/       Geometry, topology, meshing, FEM and f64 reference so
 crates/funfern-app/        Bevy/egui application, GPU solver and visualization
 examples/                  Standalone scene files; the gallery scenes are built in
 assets/                    Logo and application assets
-docs/                      User guide, architecture, plans and verification notes
+docs/                      Architecture, development plans and verification notes
 ```
 
 Bevy owns the wgpu device, and the viewport draws through `bevy_egui` on that
@@ -355,7 +352,6 @@ WebGL fallback are disabled.
 
 Useful documentation:
 
-* [User guide](docs/user-guide.md) — the editor, its tools and its behavior.
 * [Architecture](docs/architecture.md) — representations and numerical machinery.
 * [Checks](docs/checks.md) — specialized verification runs and what they assert.
 * [Development plan](docs/plan.md) — milestones and planned work.
