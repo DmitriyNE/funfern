@@ -58,6 +58,8 @@ mod runtime;
 mod selection;
 mod session;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod theme;
 mod viewport;
 mod weld;
@@ -73,6 +75,8 @@ use exposure::*;
 use gesture::*;
 use pacing::*;
 use probe_view::*;
+#[cfg(test)]
+use test_support::*;
 use theme::*;
 use workers::*;
 
@@ -3653,10 +3657,6 @@ mod probe_interaction_tests {
     };
     use funfern_app::topology_viewport::TopologySpanTarget;
 
-    fn viewport() -> Rect {
-        Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))
-    }
-
     #[test]
     fn vector_overlay_layout_is_world_anchored_and_pan_stable() {
         let mut state = Playground {
@@ -4937,16 +4937,6 @@ mod probe_interaction_tests {
         assert!(state.pending_merge.is_none(), "{}", state.message);
         assert_eq!(state.editor.document.model.draft.regions.len(), 1);
         assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
-    }
-
-    fn settle(editor: &mut TopologyEditor) {
-        for _ in 0..100_000 {
-            editor.validate_frame(64);
-            if editor.acceptance != TopologyAcceptance::Pending {
-                return;
-            }
-        }
-        panic!("topology validation did not finish");
     }
 
     /// A subdomain marker is placed from the compiled geometry, so it exists
