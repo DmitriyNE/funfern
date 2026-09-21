@@ -13,7 +13,7 @@ bash experiments/material-laws-spike/run-scattering.sh --original-split
 The first command runs the corrected candidate (248 passing checks). The second
 reproduces the rejected split (21 failed checks; expected exit status 1).
 Both emit complete JSON on stdout and check progress on stderr. Capture stdout
-to a file if desired. See `docs/funfern-boundary-scattering-spike.md` for the
+to a file if desired. See `docs/spikes/funfern-boundary-scattering-spike.md` for the
 derivation and interpretation.
 
 Use an enriched-triangle strip with Bloch-periodic transverse boundaries. A

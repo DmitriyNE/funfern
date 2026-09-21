@@ -898,7 +898,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   one monolithic solver-blocking slice. Regression coverage exercises live-event
   AMR ownership, overlapping hard/error limits and cooperative eigensolving.
 - Details and the acceptance rationale are folded into the
-  [Stage 6 report](funfern-material-laws-stage6-report.md).
+  [Stage 6 report](spikes/funfern-material-laws-stage6-report.md).
 - Formatting, the 639-pass workspace suite (plus the one historical ignored
   reproducer), strict workspace Clippy, wasm32 checking and a release build pass.
 
@@ -928,7 +928,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   12.48/12.48/5.0 targets. Standard 1,000-step `Q,b`, auxiliary and energy
   accuracy fixtures pass. The standard core remains 7.64 MiB; second order is
   8.62 MiB including 0.93 MiB boundary data. See the
-  [full Stage 6 report](funfern-material-laws-stage6-report.md).
+  [full Stage 6 report](spikes/funfern-material-laws-stage6-report.md).
 - Formatting, strict workspace Clippy, all-target native checks, wasm32 checking,
   release build and a native app smoke test pass; the workspace suite has 639
   passes and one historical ignored legacy curved-second-order reproducer. Stage 7 is
@@ -959,7 +959,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   two packed main-state buffers are about 0.806 MiB. Changed second-order history,
   thin-gap, prescribed and mapped-source fixtures pass; injected failure rejects
   in 35.62 ms with byte-exact source rollback. See the
-  [full Stage 5 report](funfern-material-laws-stage5-report.md).
+  [full Stage 5 report](spikes/funfern-material-laws-stage5-report.md).
 - Formatting, strict workspace Clippy, wasm32 application check and all 602
   workspace tests pass; the one pre-existing curved-boundary reproducer remains
   ignored. Stage 6 is consumer migration, static-linear AMR/diagnostics and the
@@ -993,7 +993,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   302–311 ms, while a 128-step GPU request completed in 50.2 ms and sustained
   6.29 simulated seconds/wall second. The preparation cost is reported separately
   and remains a Stage 5 cooperative-preparation concern, not folded into steady
-  throughput. See the [full Stage 4 report](funfern-material-laws-stage4-report.md).
+  throughput. See the [full Stage 4 report](spikes/funfern-material-laws-stage4-report.md).
 - Formatting, strict workspace Clippy, wasm32 application check and all 598
   workspace tests pass; the one pre-existing curved-boundary reproducer remains
   ignored. Stage 5 is latest-state GPU transfer, physical-history handoff and
@@ -1021,7 +1021,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   deleted energy, and are invariant to modal signs, order and degenerate rotations.
   Irregular production meshes pass the declared 3% one-handoff and 5% twelve-cycle
   bounds; unchanged data is bit-exact and disconnected new islands stay zero.
-- Re-ran the [corrected scattering fixture](funfern-boundary-scattering-spike.md):
+- Re-ran the [corrected scattering fixture](spikes/funfern-boundary-scattering-spike.md):
   all 248 reflection, passivity, temporal and fixed-CFL checks pass; the rejected
   separate split remains its negative control. The core suite passes 268 tests
   with the one pre-existing ignored legacy curved-boundary reproducer. The full
@@ -1069,7 +1069,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 
 - Froze the operational source, legacy-loss, trace/history, transfer, event,
   failure, serialization, f32 and target-device contracts in the
-  [Stage 0 contract](funfern-material-laws-stage0-contracts.md). These are the
+  [Stage 0 contract](spikes/funfern-material-laws-stage0-contracts.md). These are the
   acceptance inputs for the direct-state implementation, not new solver behavior.
 - Coalesced the useful unfinished material-law scaffold into inert authoring
   infrastructure. Added physical coefficient roles, independent electric and
@@ -1092,8 +1092,8 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   thin-gap/outgoing/oscillator history. Adopted the passive three-state outgoing
   law with force-coupled midpoint kicks; retain both outgoing orders. No blanket
   nonlinear-domain ban, legacy unstable auxiliary port, or separate-boundary split.
-- Reconciled the [specification](funfern-material-laws-plan.md) and
-  [detailed stages](funfern-material-laws-review.md): removed production bulk
+- Reconciled the [specification](spikes/funfern-material-laws-plan.md) and
+  [detailed stages](spikes/funfern-material-laws-review.md): removed production bulk
   potential/gauge/seam-offset obligations and the assumed one-CSR fast path;
   added direct-state energy/filter/remap and physical-history contracts.
 - Linked all three spike reports and preserved their reproducible artifacts,
@@ -1115,7 +1115,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   21 refinement failures remain recorded. Coupling the held interior force into
   each boundary-aware midpoint kick removes the floor without making the bulk
   implicit. All 248 corrected checks pass, including full coarse-2D loss/stability
-  regressions. See [derivation and results](funfern-boundary-scattering-spike.md).
+  regressions. See [derivation and results](spikes/funfern-boundary-scattering-spike.md).
 - This supersedes the prior timestep recommendation, not its passive auxiliary
   law. Production source and unfinished NL work are unchanged. Performance,
   f32, nonlinear full-system composition and history handoff are to be validated
@@ -1133,7 +1133,7 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
 - All 64 follow-up checks pass: energy identities, spectral/long-time tests,
   second-order stepping, packets/corners, annular energy decay, nonlinear Kerr
   boundary substeps, and reduced trace-solve parity. Original spike failures
-  remain recorded separately. See [derivation/results](funfern-boundary-auxiliary-spike.md).
+  remain recorded separately. See [derivation/results](spikes/funfern-boundary-auxiliary-spike.md).
 - Remaining: review the reflection/nonlocal-cost tradeoff; implement and measure
   the actual solver core, including f32, boundary-history transfer and rollback.
   Curved radiation accuracy and the original ignored topology reproducer remain

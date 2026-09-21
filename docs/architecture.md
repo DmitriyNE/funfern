@@ -1016,9 +1016,9 @@ resources together. Upload and asynchronous admission do not freeze the source:
 the transfer records its exact absolute and epoch-local snapshot steps, subsequent
 requests keep the source display live, and the admitted target consumes that short
 step backlog from the transferred clock. A rejected target leaves the continuing
-source authoritative. The [material-law Stage 4](funfern-material-laws-stage4-report.md),
-[Stage 5](funfern-material-laws-stage5-report.md) and
-[Stage 6](funfern-material-laws-stage6-report.md) reports contain the equations,
+source authoritative. The [material-law Stage 4](spikes/funfern-material-laws-stage4-report.md),
+[Stage 5](spikes/funfern-material-laws-stage5-report.md) and
+[Stage 6](spikes/funfern-material-laws-stage6-report.md) reports contain the equations,
 layouts, transfer contracts and measured acceptance results.
 
 ## Legacy scalar evolution model
@@ -1571,8 +1571,8 @@ constrained factor and essential ownership wins at mixed junctions.
 The candidate retains the quadratic angular expansion of the old Engquist-Majda
 condition but trades some planar reflection accuracy for passivity and robustness.
 On curved/corner traces the graph realization is passive, not an exact exterior
-DtN map. The [auxiliary derivation](funfern-boundary-auxiliary-spike.md) and
-[corrected scattering study](funfern-boundary-scattering-spike.md) document the
+DtN map. The [auxiliary derivation](spikes/funfern-boundary-auxiliary-spike.md) and
+[corrected scattering study](spikes/funfern-boundary-scattering-spike.md) document the
 energy proof, reflection tradeoff and rejected split. Higher-order CRBC or
 shape-specific DtN variants remain future work behind this power-conjugate
 boundary interface.

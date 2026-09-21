@@ -39,9 +39,9 @@ including this boundary work, before production cutover. A cheaper CRBC/local
 realization or a more accurate DtN approximation remains possible behind the
 same power-conjugate boundary interface.
 
-Artifacts: [criteria](../experiments/material-laws-spike/boundary-README.md),
-[implementation](../experiments/material-laws-spike/boundary.py),
-[captured results](../experiments/material-laws-spike/boundary-results.json).
+Artifacts: [criteria](../../experiments/material-laws-spike/boundary-README.md),
+[implementation](../../experiments/material-laws-spike/boundary.py),
+[captured results](../../experiments/material-laws-spike/boundary-results.json).
 Run `bash experiments/material-laws-spike/run-boundary.sh` from the repo root.
 It compiles the pinned clean core in a temporary directory and uses its actual
 enriched FEM operators, without modifying production or the unfinished NL work.

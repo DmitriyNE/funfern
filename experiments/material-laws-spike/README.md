@@ -14,7 +14,7 @@ bash experiments/material-laws-spike/run.sh
 ```
 
 The captured run is in `results.json`; interpretation and the architecture
-recommendation are in `../../docs/funfern-material-laws-spike-report.md`.
+recommendation are in `../../docs/spikes/funfern-material-laws-spike-report.md`.
 The subsequent passive-boundary follow-up has its own `boundary-README.md`,
 `run-boundary.sh`, `boundary.py`, and `boundary-results.json`; its passing
 candidate does not change the retained legacy failures in this first run.

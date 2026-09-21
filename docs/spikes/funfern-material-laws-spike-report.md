@@ -41,10 +41,10 @@ exposed cells, and irregular AMR still need explicit acceptance cases.
 ## Reproduction and scope
 
 Run `bash experiments/material-laws-spike/run.sh` from the repository root.
-The [runner and criteria](../experiments/material-laws-spike/README.md),
-[Rust exporter](../experiments/material-laws-spike/export.rs),
-[f64 reference](../experiments/material-laws-spike/spike.py), and
-[captured results](../experiments/material-laws-spike/results.json) are isolated
+The [runner and criteria](../../experiments/material-laws-spike/README.md),
+[Rust exporter](../../experiments/material-laws-spike/export.rs),
+[f64 reference](../../experiments/material-laws-spike/spike.py), and
+[captured results](../../experiments/material-laws-spike/results.json) are isolated
 from production. A failing numerical check produces exit status 1 after the
 complete JSON is emitted; this run deliberately retains failures.
 

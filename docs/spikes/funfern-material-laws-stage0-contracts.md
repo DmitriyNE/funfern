@@ -264,8 +264,8 @@ The named target remains the Apple M1 Max / Metal machine used by the repository
 production enriched-quadratic measurements. The clean baseline is 9,326 DOFs,
 `dt=0.00479230`, 128 steps in 36.86 ms (16.64 simulated seconds per wall second),
 with 21.1–23.3 ms GPU transfer and 58–72 ms request-to-commit. These figures come
-from [architecture.md](architecture.md#initial-evolution-model) and the
-[engineering log](engineering-log.md#2026-09-09--production-enriched-quadratic-gpu-solver),
+from [architecture.md](../architecture.md#initial-evolution-model) and the
+[engineering log](../engineering-log.md#2026-09-09--production-enriched-quadratic-gpu-solver),
 not from the dirty authoring branch.
 
 At matched accuracy on that case, the linear common core must meet:

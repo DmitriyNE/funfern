@@ -70,7 +70,7 @@ spatial refinement target, requires both refinement and coarsening, transfers al
 quadratic state with no exposed nodes, verifies mesh/operator revision agreement,
 and exits.
 The field view tessellates every quadratic parent triangle into six display
-triangles around its shared edge-midpoint and element bubble nodes. Native GPU
-startup and the wave kernel were exercised on Apple M1 Max / Metal. The user
-reports completing the Milestone 1 browser interaction checks; browser metadata
-and interactive checks for the quadratic solver have not been recorded.
+triangles around its shared edge-midpoint and element bubble nodes.
+
+Which hardware each check has been run on, and when, is recorded in the
+engineering log rather than here.

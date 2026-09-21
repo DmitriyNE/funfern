@@ -29,10 +29,10 @@ prototype merely because its stability tests passed.
 
 Artifacts:
 
-- [Criteria and commands](../experiments/material-laws-spike/scattering-README.md)
-- [Bloch-strip and timestep implementation](../experiments/material-laws-spike/scattering.py)
-- [Corrected results](../experiments/material-laws-spike/scattering-results.json)
-- [Rejected split results](../experiments/material-laws-spike/scattering-original-split-results.json)
+- [Criteria and commands](../../experiments/material-laws-spike/scattering-README.md)
+- [Bloch-strip and timestep implementation](../../experiments/material-laws-spike/scattering.py)
+- [Corrected results](../../experiments/material-laws-spike/scattering-results.json)
+- [Rejected split results](../../experiments/material-laws-spike/scattering-original-split-results.json)
 
 Run `bash experiments/material-laws-spike/run-scattering.sh`. Add
 `--original-split` to reproduce the rejected scheme (expected exit status 1).

@@ -939,6 +939,22 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   `--wave-gpu-check` throughput figure in the same change, and accepting a
   slower native release build in CI.
 
+- Split `crates/funfern-app/src/ui.rs`. At 17,608 lines it holds the top bar,
+  all five inspectors, the status control, the diagnostics window and their
+  tests in one file, and it is the main obstacle to working anywhere near the
+  UI. The inspector boundaries are the natural seams.
+  `crates/funfern-app/src/topology_editor.rs`, at 10,282 lines, is second.
+
+- Factor the built-in example scenes out of
+  `crates/funfern-app/src/topology_examples.rs` into `examples/`. The gallery
+  scenes are compiled in while `examples/` carries one standalone file, so the
+  two can disagree with nothing to catch it.
+
+- Decide what `experiments/material-laws-spike/` is for. It is 500 KB committed,
+  160 KB of it results JSON, referenced from the spike reports in `docs/spikes/`.
+  Keeping it as the record behind those reports is a fine answer; drifting into
+  it is not.
+
 ## Working practice
 
 Keep the engineering log brief and useful. Update it after meaningful work with
