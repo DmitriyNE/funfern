@@ -939,11 +939,19 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   `--wave-gpu-check` throughput figure in the same change, and accepting a
   slower native release build in CI.
 
-- Split `crates/funfern-app/src/ui.rs`. At 17,608 lines it holds the top bar,
-  all five inspectors, the status control, the diagnostics window and their
-  tests in one file, and it is the main obstacle to working anywhere near the
-  UI. The inspector boundaries are the natural seams.
-  `crates/funfern-app/src/topology_editor.rs`, at 10,282 lines, is second.
+- Narrow what each `ui` submodule touches. `crates/funfern-app/src/ui.rs` is now
+  1,883 lines over 28 submodules, with every test beside the code it exercises,
+  but the split relocated the coupling rather than reducing it: `Playground` in
+  `ui/state.rs` carries 171 fields and nearly every method still takes `&mut
+  self` over all of them. Group those fields into sub-structs — probes, AMR,
+  recording, view — and narrow the methods of a module that only touches one
+  group to `&mut self.probes` and the like. Do one group at a time, and only
+  where the access pattern is already clean. Two smaller follow-ups belong with
+  it: `crates/funfern-app/src/topology_editor.rs` is 10,282 lines and wants the
+  same treatment, and the carving pass marked every moved method `pub(super)`
+  without working out which are actually called from outside their module, so a
+  visibility pass (make private, compile, promote only what fails) is cheap once
+  the boundaries stop moving.
 
 - Factor the built-in example scenes out of
   `crates/funfern-app/src/topology_examples.rs` into `examples/`. The gallery
