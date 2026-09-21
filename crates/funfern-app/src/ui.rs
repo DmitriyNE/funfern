@@ -3,9 +3,9 @@
 use crate::canonical_gpu::{
     CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuTransferPlan,
 };
-use crate::files::{self, FileEvent, SaveKind};
+use crate::files::FileEvent;
 use crate::material_overlay::MaterialOverlay;
-use crate::recording::{self, DestinationRequest, RecordingEvent, RecordingSpec};
+use crate::recording::{self, RecordingSpec};
 use crate::wave_gpu::{
     AreaProbeDisplay, CurveProbeDisplay, FarFieldDisplay, MAX_STEPS_PER_FRAME, ProbeDisplay,
     VectorOverlayDisplay, WaveDisplay, WaveGpuRequest,
@@ -19,19 +19,15 @@ use bevy_egui::{
     egui::{self, Color32, Pos2, Rect, Sense, Stroke},
 };
 use funfern_app::document::{ProbeId, ProbeSamplingPreset};
-use funfern_app::topology_editor::{TopologyDocument, TopologyEditor, TopologyProbeTarget};
 use funfern_app::topology_persistence::{self as persistence};
 use funfern_app::topology_runtime::{PreparedTopology, TopologyPreparationTiming, TopologyToken};
 use funfern_app::topology_viewport::{
-    SampledTopologyGeometry, ScreenPoint, TopologyHit, TopologySelection, TopologySpanTarget,
-    ViewportTransform,
+    SampledTopologyGeometry, ScreenPoint, TopologySelection, ViewportTransform,
 };
 use funfern_core::*;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
 use std::sync::atomic::AtomicBool;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::AtomicUsize;
 #[cfg(any(
     not(target_arch = "wasm32"),
     all(target_arch = "wasm32", feature = "browser-threads")
@@ -40,6 +36,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, mpsc::Receiver};
 
 mod amr;
+mod chrome;
 mod diagnostics;
 mod domain;
 mod draw_tools;
@@ -56,6 +53,8 @@ mod probe_view;
 mod probes;
 mod readouts;
 mod runtime;
+mod selection;
+mod session;
 mod state;
 mod theme;
 mod viewport;
@@ -528,653 +527,6 @@ impl Playground {
         self.pulse_mode = false;
         self.probe_mode = None;
         self.invalidate_samples();
-    }
-    fn set_document(
-        &mut self,
-        document: TopologyDocument,
-        history: bool,
-        fresh: bool,
-    ) -> Result<(), String> {
-        if history {
-            self.editor.replace_validated_with_history(document)?;
-        } else {
-            self.editor.replace_validated(document)?;
-        }
-        self.selection = TopologySelection::None;
-        self.selected_probe = None;
-        self.draw = None;
-        self.example_opened = None;
-        self.pending_merge = None;
-        self.requested_revision = None;
-        self.fresh_requested = fresh;
-        // The scale is left alone here and started again when the new field
-        // actually arrives, for the reason the reset path gives: the outgoing
-        // scene is still on display until its replacement is prepared, and a
-        // scale cleared now would measure that — magnifying a residue for as
-        // long as the new mesh takes.
-        self.invalidate_samples();
-        Ok(())
-    }
-    fn update_files(&mut self) {
-        let events = self.receiver.lock().unwrap().try_iter().collect::<Vec<_>>();
-        for event in events {
-            match event {
-                FileEvent::Loaded(bytes) => match persistence::parse(&bytes) {
-                    Ok(candidate) => {
-                        self.load = Some(candidate);
-                        self.file_busy = true;
-                    }
-                    Err(error) => {
-                        self.file_busy = false;
-                        self.notify(error);
-                    }
-                },
-                FileEvent::SnapshotCaptured(bytes) => {
-                    self.snapshot_state = SnapshotState::Saving;
-                    self.file_busy = true;
-                    files::save(self.sender.clone(), bytes, SaveKind::SnapshotPng);
-                }
-                FileEvent::Saved(message) => {
-                    self.file_busy = false;
-                    self.snapshot_state = SnapshotState::Idle;
-                    self.notify(message);
-                }
-                FileEvent::Cancelled => {
-                    self.file_busy = false;
-                    self.snapshot_state = SnapshotState::Idle;
-                }
-                FileEvent::Error(error) => {
-                    self.file_busy = false;
-                    self.snapshot_state = SnapshotState::Idle;
-                    self.notify(error);
-                }
-            }
-        }
-        if let Some(result) = self.load.as_mut().and_then(|load| load.advance(1)) {
-            self.load = None;
-            self.file_busy = false;
-            match result.and_then(|document| {
-                TopologyEditor::from_document(document.clone())?;
-                self.set_document(document, false, true)
-            }) {
-                Ok(()) => self.notify("Scene loaded; history cleared"),
-                Err(error) => self.notify(error),
-            }
-        }
-    }
-    fn autosave(&mut self) {
-        if self.editor.document != self.autosave_observed {
-            self.autosave_observed = self.editor.document.clone();
-            self.autosave_due = Some(Instant::now());
-        }
-        if self
-            .autosave_due
-            .is_some_and(|at| at.elapsed().as_secs_f32() > 0.8)
-        {
-            self.autosave_due = None;
-            let _ = crate::recovery::save(&self.editor.document);
-        }
-    }
-    fn save_scene(&mut self) {
-        match persistence::save(&self.editor.document) {
-            Ok(json) => {
-                self.file_busy = true;
-                files::save(self.sender.clone(), json.into_bytes(), SaveKind::Scene);
-            }
-            Err(error) => self.notify(error),
-        }
-    }
-    fn export_viewport_png(&mut self) {
-        if self.snapshot_state == SnapshotState::Idle
-            && self.recording_state == RecordingState::Idle
-        {
-            // The request is armed at the start of the next frame. This gives
-            // egui one complete frame to close the File menu before readback.
-            self.snapshot_state = SnapshotState::Requested;
-            self.file_busy = true;
-        }
-    }
-    fn request_video_recording(&mut self) {
-        if self.snapshot_state != SnapshotState::Idle
-            || self.recording_state != RecordingState::Idle
-        {
-            return;
-        }
-        self.recording_started = None;
-        self.recording_description.clear();
-        self.recording_dropped_frames = 0;
-        self.recording_last_requested_slot = None;
-        match self.video_recorder.request_destination() {
-            Ok(DestinationRequest::Ready) => self.recording_state = RecordingState::Requested,
-            Ok(DestinationRequest::Pending) => {
-                self.recording_state = RecordingState::SelectingDestination
-            }
-            Err(error) => self.notify(error),
-        }
-    }
-    fn stop_video_recording(&mut self) {
-        match self.recording_state {
-            RecordingState::Requested | RecordingState::Preparing => {
-                self.recording_state = RecordingState::Idle;
-            }
-            RecordingState::Starting | RecordingState::Recording => {
-                self.video_recorder.stop();
-                self.recording_state = RecordingState::Finalizing;
-            }
-            _ => {}
-        }
-    }
-    fn begin_capture_frame(&mut self) {
-        if self.snapshot_state == SnapshotState::Requested {
-            self.snapshot_state = SnapshotState::Armed;
-        }
-        if self.recording_state == RecordingState::Requested {
-            self.recording_state = RecordingState::Preparing;
-        }
-    }
-    fn update_recording(&mut self) {
-        for event in self.video_recorder.poll() {
-            match event {
-                RecordingEvent::DestinationReady => {
-                    if self.recording_state == RecordingState::SelectingDestination {
-                        self.recording_state = RecordingState::Requested;
-                    }
-                }
-                RecordingEvent::Started(description) => {
-                    if self.recording_state == RecordingState::Starting {
-                        self.recording_description = description;
-                        self.recording_started = Some(Instant::now());
-                        self.recording_last_requested_slot = None;
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            self.recording_readback_in_flight = Arc::new(AtomicUsize::new(0));
-                        }
-                        self.recording_state = RecordingState::Recording;
-                    }
-                }
-                RecordingEvent::Finished(message) => {
-                    self.video_recorder.stop();
-                    self.recording_state = RecordingState::Idle;
-                    self.recording_started = None;
-                    self.recording_last_requested_slot = None;
-                    #[cfg(not(target_arch = "wasm32"))]
-                    self.recording_readback_in_flight
-                        .store(0, Ordering::Release);
-                    self.notify(message);
-                }
-                RecordingEvent::Cancelled => self.recording_state = RecordingState::Idle,
-                RecordingEvent::DroppedFrame => self.recording_dropped_frames += 1,
-                RecordingEvent::Error(error) => {
-                    self.video_recorder.stop();
-                    self.recording_state = RecordingState::Idle;
-                    self.recording_started = None;
-                    self.recording_last_requested_slot = None;
-                    #[cfg(not(target_arch = "wasm32"))]
-                    self.recording_readback_in_flight
-                        .store(0, Ordering::Release);
-                    self.notify(error);
-                }
-            }
-        }
-    }
-    fn copy_link(&mut self, context: &egui::Context) {
-        match crate::sharing::encode(&self.editor.document)
-            .and_then(|fragment| crate::sharing::link(&fragment))
-        {
-            Ok(link) => {
-                context.copy_text(link.clone());
-                let _ = &link;
-                #[cfg(target_arch = "wasm32")]
-                if let Some(clipboard) = web_sys::window().map(|w| w.navigator().clipboard()) {
-                    let _ = clipboard.write_text(&link);
-                }
-                self.notify("Scene link copied");
-            }
-            Err(error) => self.notify(error),
-        }
-    }
-    fn top_bar(&mut self, root: &mut egui::Ui) {
-        let fold_panels = root.available_width() < 1080.0;
-        egui::Panel::top("top").exact_size(42.0).show(root, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Undo").clicked() && self.editor.undo() {
-                    self.material_edit = None;
-                    self.material_formula_edits.clear();
-                    self.material_formula_errors.clear();
-                    self.invalidate_samples();
-                }
-                if ui.button("Redo").clicked() && self.editor.redo() {
-                    self.material_edit = None;
-                    self.material_formula_edits.clear();
-                    self.material_formula_errors.clear();
-                    self.invalidate_samples();
-                }
-                ui.menu_button("File", |ui| {
-                    if ui.button("New").clicked() {
-                        self.new_scene();
-                        ui.close();
-                    }
-                    if ui.button("Examples…").clicked() {
-                        self.examples_open = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Open…").clicked() {
-                        self.file_busy = true;
-                        files::load(self.sender.clone());
-                        ui.close();
-                    }
-                    if ui.button("Save…").clicked() {
-                        self.save_scene();
-                        ui.close();
-                    }
-                    if ui.button("Copy scene link").clicked() {
-                        self.copy_link(ui.ctx());
-                        ui.close();
-                    }
-                    let capture_ready = self.snapshot_state == SnapshotState::Idle
-                        && self.recording_state == RecordingState::Idle;
-                    if ui
-                        .add_enabled(capture_ready, egui::Button::new("Export viewport PNG"))
-                        .clicked()
-                    {
-                        self.export_viewport_png();
-                        ui.close();
-                    }
-                    let recording_label = if matches!(
-                        self.recording_state,
-                        RecordingState::Starting | RecordingState::Recording
-                    ) {
-                        "Stop recording"
-                    } else if self.recording_state != RecordingState::Idle {
-                        "Preparing recording…"
-                    } else {
-                        "Record viewport"
-                    };
-                    if ui
-                        .add_enabled(
-                            capture_ready
-                                || matches!(
-                                    self.recording_state,
-                                    RecordingState::Starting | RecordingState::Recording
-                                ),
-                            egui::Button::new(recording_label),
-                        )
-                        .clicked()
-                    {
-                        if self.recording_state == RecordingState::Idle {
-                            self.request_video_recording();
-                        } else {
-                            self.stop_video_recording();
-                        }
-                        ui.close();
-                    }
-                });
-                if ui.button("Fit view").clicked() {
-                    self.fit = true;
-                }
-                let panels = [
-                    (InspectorPanel::Edit, "Edit"),
-                    (InspectorPanel::View, "View"),
-                    (InspectorPanel::Simulation, "Simulation"),
-                    (InspectorPanel::Materials, "Materials"),
-                    (InspectorPanel::Probes, "Probes"),
-                ];
-                if fold_panels {
-                    ui.menu_button("Panels", |ui| {
-                        for (panel, label) in panels {
-                            let selected = self.inspector == Some(panel);
-                            if ui.selectable_label(selected, label).clicked() {
-                                self.inspector = (!selected).then_some(panel);
-                            }
-                        }
-                    });
-                } else {
-                    for (panel, label) in panels {
-                        let selected = self.inspector == Some(panel);
-                        if ui.selectable_label(selected, label).clicked() {
-                            self.inspector = (!selected).then_some(panel);
-                        }
-                    }
-                }
-                if ui.button("+ Draw").clicked() {
-                    self.draw_open = !self.draw_open;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Reset").clicked() {
-                        self.reset_requested = true;
-                    }
-                    if ui.button("Step").clicked() {
-                        self.wave_step = true;
-                    }
-                    if ui
-                        .button(if self.wave_running { "Pause" } else { "Run" })
-                        .clicked()
-                    {
-                        self.wave_running = !self.wave_running;
-                    }
-                });
-            });
-        });
-        // The palette stays up across draws - one primitive after another is the
-        // usual way it is used - so it closes only from its own button or the
-        // toolbar toggle, and it floats where it was last dragged.
-        if self.draw_open && !self.capturing() {
-            let ctx = root.ctx().clone();
-            let mut open = true;
-            egui::Window::new("Draw")
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .default_pos([300.0, 42.0])
-                .show(&ctx, |ui| {
-                    ui.label("Closed curve");
-                    ui.horizontal(|ui| {
-                        ui.radio_value(
-                            &mut self.closed_purpose,
-                            ClosedPurpose::Subdomain,
-                            "Subdomain",
-                        );
-                        ui.radio_value(&mut self.closed_purpose, ClosedPurpose::Hole, "Hole");
-                    });
-                    ui.horizontal(|ui| {
-                        for (tool, label) in [
-                            (DrawTool::Circle, "Circle"),
-                            (DrawTool::Rectangle, "Rectangle"),
-                            (DrawTool::Polygon, "Polygon"),
-                            (DrawTool::ClosedSpline, "Spline"),
-                        ] {
-                            if ui.button(label).clicked() {
-                                self.begin_draw(tool);
-                            }
-                        }
-                    });
-                    ui.separator();
-                    ui.label("Open curve");
-                    ui.horizontal(|ui| {
-                        ui.radio_value(
-                            &mut self.open_purpose,
-                            OpenPurpose::Separator,
-                            "Subdomain separator",
-                        );
-                        ui.radio_value(&mut self.open_purpose, OpenPurpose::Baffle, "BC baffle");
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Polyline").clicked() {
-                            self.begin_draw(DrawTool::Polyline);
-                        }
-                        if ui.button("Spline").clicked() {
-                            self.begin_draw(DrawTool::OpenSpline);
-                        }
-                    });
-                });
-            self.draw_open = open;
-        }
-    }
-    fn side_panel(&mut self, root: &mut egui::Ui) {
-        let Some(panel) = self.inspector else { return };
-        let title = match panel {
-            InspectorPanel::Edit => "Edit",
-            InspectorPanel::View => "View",
-            InspectorPanel::Simulation => "Simulation",
-            InspectorPanel::Materials => "Materials",
-            InspectorPanel::Probes => "Probes",
-        };
-        // On a narrow layout the inspector floats over the viewport instead of
-        // docking beside it, which would put a panel inside the capture crop.
-        if self.capturing() && root.available_width() < 700.0 {
-            return;
-        }
-        if root.available_width() < 700.0 {
-            let mut open = true;
-            let maximum_height = (root.ctx().viewport_rect().height() - 54.0).max(96.0);
-            egui::Window::new(title)
-                .id(egui::Id::new("mobile-inspector"))
-                .open(&mut open)
-                .default_width(280.0)
-                .max_height(maximum_height)
-                .anchor(egui::Align2::RIGHT_TOP, [-6.0, 48.0])
-                .show(root.ctx(), |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt(("mobile-inspector-scroll", title))
-                        .show(ui, |ui| self.inspector_contents(ui, panel));
-                });
-            if !open {
-                self.inspector = None;
-            }
-            return;
-        }
-        egui::Panel::right("inspector")
-            .default_size(292.0)
-            .show(root, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt(("inspector-scroll", title))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.inspector_contents(ui, panel));
-            });
-    }
-    fn inspector_contents(&mut self, ui: &mut egui::Ui, panel: InspectorPanel) {
-        match panel {
-            InspectorPanel::Edit => self.edit_panel(ui),
-            InspectorPanel::View => self.view_panel(ui),
-            InspectorPanel::Simulation => self.simulation_panel(ui),
-            InspectorPanel::Materials => self.materials_panel(ui),
-            InspectorPanel::Probes => self.probes_panel(ui),
-        }
-    }
-    fn edit_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Edit");
-        ui.collapsing("Features", |ui| {
-            if ui.selectable_label(matches!(self.selection, TopologySelection::Spans(ref s) if s.iter().all(|v| matches!(v, TopologySpanTarget::Outer(_)))), "Outer boundary").clicked() {
-                self.selection = TopologySelection::Spans(OuterSide::ALL.into_iter().map(TopologySpanTarget::Outer).collect());
-            }
-            let curves = self.editor.document.model.draft.geometry.curves.iter().map(|curve| (curve.id, curve.spline.is_open(), curve.spans.iter().map(|span| span.id).collect::<Vec<_>>())).collect::<Vec<_>>();
-            for (curve, open, spans) in curves {
-                let selected = matches!(&self.selection, TopologySelection::Spans(selection) if spans.iter().all(|span| selection.contains(&TopologySpanTarget::Curve(*span))));
-                if ui.selectable_label(selected, format!("{} {}", if open { "Open curve" } else { "Closed curve" }, curve.0)).clicked() {
-                    self.selection = TopologySelection::Spans(spans.into_iter().map(TopologySpanTarget::Curve).collect());
-                }
-            }
-        });
-        ui.separator();
-        match self.selection.clone() {
-            TopologySelection::None => {
-                ui.weak("Select a control, junction, span, or face");
-            }
-            TopologySelection::Handle(handle) => self.handle_inspector(ui, handle),
-            TopologySelection::Spans(spans) => self.span_inspector(ui, spans),
-        }
-    }
-    fn selection_pivot(&self, spans: &BTreeSet<CurveSpanId>) -> Option<Point2> {
-        let mut sum = Point2::default();
-        let mut count = 0usize;
-        for curve in &self.editor.document.model.draft.geometry.curves {
-            for (index, span) in curve.spans.iter().enumerate() {
-                if spans.contains(&span.id) {
-                    let [a, b] = curve.spline.span_bounds(index)?;
-                    sum = sum
-                        + match &curve.spline {
-                            CurveSpline::Closed(s) => s.evaluate((a + b) * 0.5),
-                            CurveSpline::Open(s) => s.evaluate((a + b) * 0.5),
-                        };
-                    count += 1;
-                }
-            }
-        }
-        (count > 0).then(|| sum / count as f64)
-    }
-    fn gizmo_pivot_for(
-        &self,
-        selected: &BTreeSet<TopologySpanTarget>,
-        spans: &BTreeSet<CurveSpanId>,
-    ) -> Option<Point2> {
-        self.gizmo_pivot
-            .as_ref()
-            .filter(|(selection, _)| selection == selected)
-            .map(|(_, point)| *point)
-            .or_else(|| self.selection_pivot(spans))
-    }
-    /// One click while a probe is being placed. `raw` is where the pointer is;
-    /// `snap` puts it on the grid Shift snaps everything else to, with the same
-    /// conventions a probe already follows when it is dragged - a position goes
-    /// onto the grid, a radius is itself a multiple of it.
-    fn probe_placement_click(&mut self, raw: Point2, snap: bool) {
-        let Some(mode) = self.probe_mode else {
-            return;
-        };
-        let step = self.snap_step();
-        let point = if snap {
-            Self::snap_point(raw, step)
-        } else {
-            raw
-        };
-        let target = match mode {
-            ProbePlacement::Point => Some(TopologyProbeTarget::Point(point)),
-            ProbePlacement::Segment { start: None } => {
-                self.probe_mode = Some(ProbePlacement::Segment { start: Some(point) });
-                self.notify("Choose the line end");
-                None
-            }
-            ProbePlacement::Segment { start: Some(start) } => {
-                self.probe_mode = Some(ProbePlacement::Segment { start: None });
-                Some(TopologyProbeTarget::Segment {
-                    start,
-                    end: point,
-                    preset: ProbeSamplingPreset::Medium,
-                })
-            }
-            ProbePlacement::Disk { center: None } => {
-                self.probe_mode = Some(ProbePlacement::Disk {
-                    center: Some(point),
-                });
-                self.notify("Choose the disk radius");
-                None
-            }
-            ProbePlacement::Disk {
-                center: Some(center),
-            } => {
-                self.probe_mode = Some(ProbePlacement::Disk { center: None });
-                Some(TopologyProbeTarget::AreaDisk {
-                    center,
-                    radius: Self::placed_disk_radius(center, raw, snap, step),
-                })
-            }
-            // A region is picked by the face under the pointer, which
-            // the grid has nothing to say about.
-            ProbePlacement::Region => self.runtime.active().and_then(|active| {
-                let face = active.bundle.snapshot.face_at(raw)?;
-                active
-                    .bundle
-                    .plan
-                    .domains
-                    .iter()
-                    .find(|domain| domain.face == face)
-                    .map(|domain| TopologyProbeTarget::AreaRegion(domain.region))
-            }),
-        };
-        if let Some(target) = target {
-            match self.editor.create_probe(
-                format!("Probe {}", self.editor.document.model.probes.len() + 1),
-                [91, 220, 194],
-                target,
-            ) {
-                Ok(id) => {
-                    self.probe_windows.insert(id);
-                    self.notify("Probe added");
-                }
-                Err(error) => self.notify(error),
-            }
-        }
-    }
-    fn snap_point(point: Point2, step: f64) -> Point2 {
-        Point2::new(
-            (point.x / step).round() * step,
-            (point.y / step).round() * step,
-        )
-    }
-    fn scale_drag_distance(axis: GizmoScaleAxis, relative: Point2) -> f64 {
-        match axis {
-            GizmoScaleAxis::Uniform => relative.norm(),
-            GizmoScaleAxis::X => relative.x.abs(),
-            GizmoScaleAxis::Y => relative.y.abs(),
-        }
-    }
-    fn marquee_operation(modifiers: egui::Modifiers) -> MarqueeOperation {
-        if modifiers.alt {
-            MarqueeOperation::Subtract
-        } else if modifiers.shift {
-            MarqueeOperation::Add
-        } else {
-            MarqueeOperation::Replace
-        }
-    }
-    fn marquee_result(
-        base: &BTreeSet<TopologySpanTarget>,
-        hits: BTreeSet<TopologySpanTarget>,
-        operation: MarqueeOperation,
-    ) -> BTreeSet<TopologySpanTarget> {
-        match operation {
-            MarqueeOperation::Replace => hits,
-            MarqueeOperation::Add => base.union(&hits).copied().collect(),
-            MarqueeOperation::Subtract => base.difference(&hits).copied().collect(),
-        }
-    }
-    fn selection_from_spans(spans: BTreeSet<TopologySpanTarget>) -> TopologySelection {
-        if spans.is_empty() {
-            TopologySelection::None
-        } else {
-            TopologySelection::Spans(spans)
-        }
-    }
-    fn drag_starts_inside_span_selection(selection: &TopologySelection, hit: TopologyHit) -> bool {
-        matches!(
-            hit,
-            TopologyHit::Span { target, .. }
-                if selection
-                    .spans()
-                    .is_some_and(|spans| spans.contains(&target))
-        )
-    }
-    fn selected_end_continuity(&self, span: CurveSpanId) -> Option<(CurveId, usize, u8, bool)> {
-        let curve = self
-            .editor
-            .document
-            .model
-            .draft
-            .geometry
-            .curves
-            .iter()
-            .find(|curve| curve.spans.iter().any(|candidate| candidate.id == span))?;
-        let index = curve
-            .spans
-            .iter()
-            .position(|candidate| candidate.id == span)?;
-        let breakpoint = if curve.spline.is_open() {
-            index + 1
-        } else {
-            (index + 1) % curve.spans.len()
-        };
-        let continuity = match &curve.spline {
-            CurveSpline::Closed(spline) => spline.continuity(breakpoint),
-            CurveSpline::Open(spline) => spline.continuity(breakpoint),
-        }?;
-        let attached = curve
-            .nodes
-            .get(breakpoint)
-            .is_some_and(|node| node.vertex.is_some());
-        Some((curve.id, breakpoint, continuity, attached))
-    }
-    fn selected_complete_curves(&self, spans: &BTreeSet<CurveSpanId>) -> Vec<CurveId> {
-        self.editor
-            .document
-            .model
-            .draft
-            .geometry
-            .curves
-            .iter()
-            .filter(|curve| curve.spans.iter().all(|span| spans.contains(&span.id)))
-            .map(|curve| curve.id)
-            .collect()
     }
     fn show(
         &mut self,
@@ -2831,8 +2183,10 @@ mod tests {
     use super::theme::{field_color, field_color_over_overlay};
     use super::*;
     use crate::material_overlay::MaterialProperty;
-    use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyAcceptance};
+    use funfern_app::topology_editor::{ClosedCurvePurpose, TopologyAcceptance, TopologyEditor};
     use funfern_app::topology_viewport::TopologyHandle;
+    use funfern_app::topology_viewport::TopologyHit;
+    use funfern_app::topology_viewport::TopologySpanTarget;
     use funfern_app::topology_viewport::screen_side;
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -4593,10 +3947,12 @@ mod probe_interaction_tests {
     use super::*;
     use crate::wave_gpu::{CurveProbeRecord, PointProbeRecord};
     use funfern_app::document::VectorOverlay;
+    use funfern_app::topology_editor::TopologyProbeTarget;
     use funfern_app::topology_editor::{
         ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
-        TopologyBoundaryProbeTarget,
+        TopologyBoundaryProbeTarget, TopologyEditor,
     };
+    use funfern_app::topology_viewport::TopologySpanTarget;
 
     fn viewport() -> Rect {
         Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))
