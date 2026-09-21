@@ -3689,6 +3689,41 @@ pub(crate) fn probe_sample_due(completed_step: u64, stride: u64) -> bool {
     stride > 0 && completed_step.is_multiple_of(stride)
 }
 
+/// Whether `completed_step` is a resident grid-filter commit.
+///
+/// The filter flips the accepted state lane without advancing physical time,
+/// so at this boundary the other lane holds the pre-filter value at the same
+/// instant rather than the previous endpoint.
+pub(crate) fn resident_filter_commit(filtering: bool, completed_step: u64) -> bool {
+    filtering && completed_step > 0 && completed_step.is_multiple_of(GRID_SCALE_FILTER_CADENCE)
+}
+
+/// When a recorder that differences the two state lanes takes its sample.
+///
+/// A sample falling exactly on a filter commit is taken one step later
+/// instead, because differencing the lanes there yields a filter correction
+/// divided by `dt` rather than a rate. Measured before this existed: the
+/// reported rate collapsed to between 0.03% and 18% of the truth. The
+/// coincidence is not rare, because below about `0.3x` the paced step is the
+/// speed over 120, so the stride follows the speed control and shares a
+/// factor with the sixteen-step cadence; at `0.0625x` every point sample
+/// landed on a commit.
+///
+/// The deferred sample keeps its ring slot, since `step / stride` is
+/// unchanged by the extra step when `step` is a multiple of `stride`. With a
+/// stride of one there is no later step to move to and the boundary sample is
+/// dropped. Consumers that read only the accepted lane are unaffected and do
+/// not use this; the adaptation controller already waits the same way.
+pub(crate) fn differencing_sample_due(completed_step: u64, stride: u64, filtering: bool) -> bool {
+    if resident_filter_commit(filtering, completed_step) {
+        return false;
+    }
+    probe_sample_due(completed_step, stride)
+        || (completed_step > 0
+            && resident_filter_commit(filtering, completed_step - 1)
+            && probe_sample_due(completed_step - 1, stride))
+}
+
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuTransferEntry {
     indices_a: UVec4,
@@ -5871,6 +5906,58 @@ mod tests {
         assert!(shader.contains("dot(gradient, flux)"));
         assert!(shader.contains("length(potential_flux)"));
         assert!(shader.contains("let poynting = select(0.0, abs(displacement) * transverse"));
+    }
+
+    /// The collision is not rare. Below about `0.3x` the paced step is the
+    /// speed over 120, so the recorder stride follows the speed control; at
+    /// `0.0625x` a 120 Hz point probe strides 16 against a 16-step cadence
+    /// and every single sample would land on a commit.
+    #[test]
+    fn samples_step_past_a_filter_commit_and_keep_their_slot() {
+        let cadence = GRID_SCALE_FILTER_CADENCE;
+
+        // With the filter off nothing moves.
+        for step in 1..64 {
+            assert_eq!(
+                differencing_sample_due(step, 4, false),
+                probe_sample_due(step, 4)
+            );
+        }
+
+        // Stride sharing every factor with the cadence: each sample would
+        // collide, and each is taken one step later instead.
+        let stride = cadence;
+        for multiple in 1..6 {
+            let due = multiple * stride;
+            assert!(!differencing_sample_due(due, stride, true));
+            assert!(differencing_sample_due(due + 1, stride, true));
+            // The ring slot the shader computes is unchanged by the step.
+            assert_eq!(due / stride, (due + 1) / stride);
+        }
+
+        // A stride coprime with the cadence collides once every sixteen.
+        let stride = 3;
+        let collisions = (1..=16 * stride)
+            .filter(|step| {
+                probe_sample_due(*step, stride) && !differencing_sample_due(*step, stride, true)
+            })
+            .count();
+        assert_eq!(collisions, 1);
+        // The window runs one step past the last due sample, because that is
+        // where the colliding one now lands.
+        let taken = (1..=16 * stride + 1)
+            .filter(|step| differencing_sample_due(*step, stride, true))
+            .count();
+        assert_eq!(taken, 16, "every sample is still taken, one of them later");
+
+        // Stride one has no later step to move to, so the boundary sample is
+        // dropped rather than duplicated.
+        assert!(!differencing_sample_due(cadence, 1, true));
+        assert!(differencing_sample_due(cadence + 1, 1, true));
+        let taken = (1..=cadence)
+            .filter(|step| differencing_sample_due(*step, 1, true))
+            .count();
+        assert_eq!(taken as u64, cadence - 1);
     }
 
     #[test]

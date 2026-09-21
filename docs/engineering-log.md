@@ -5,6 +5,33 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — Recorders step past a filter commit
+
+- The point recorder and the far field now take a sample one step later when
+  its due step is a resident grid-filter commit, which is what the adaptation
+  controller already did at the same boundary. The other consumers read only
+  the accepted lane and keep their own cadence.
+- The deferred sample keeps its ring slot, because `step / stride` does not
+  change over the extra step when `step` is a multiple of `stride`. With a
+  stride of one there is no later step to move to and the boundary sample is
+  dropped instead. A host test covers the cadence arithmetic, including that
+  every sample is still taken and that the slot is unchanged.
+- Added a real-device regression on the worst case rather than a rare one:
+  `canonical_gpu_filter_boundary` runs a 120 Hz point probe at the step
+  `paced_time_step` gives for `0.0625x`, so the stride is exactly the
+  sixteen-step cadence and before the fix every sample collided. On Apple M1
+  Max / Metal the sample now matches the f64 oracle to `4.140e-7` in field and
+  `1.094e-6` in rate. The fixture prints what differencing at the commit would
+  have given: `-3.436e-3` against a true `-4.608`, so 0.07% of the truth.
+- Checked that the regression has teeth by reverting the dispatch change: it
+  fails, and reports that the last sample sat on the commit rather than one
+  step past it.
+- This is a static-path behaviour change. Rates sampled on a filter commit
+  previously read near zero and now read correctly, one step later than
+  before; nothing else about the traces moves.
+- Formatting, strict workspace Clippy, the workspace suite and a native
+  release build pass.
+
 ## 2026-09-22 — Temporal work, and a rate defect at filter boundaries
 
 - Added the f64 temporal energy breakdown: bulk energy split into primary and
@@ -21,9 +48,10 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   snapshot identity. The f64 contract above is what that readback will be
   compared against. The accounting gate is not closed.
 
-Measured while preparing the event-boundary work, not yet fixed:
+Measured while preparing the event-boundary work, and fixed in the entry
+above:
 
-- [ ] A probe rate sampled exactly on a resident grid-filter boundary is
+- [x] A probe rate sampled exactly on a resident grid-filter boundary is
   wrong by about its own magnitude. The spare state lane holds the pre-filter
   value at the *same* instant, not the endpoint one `dt` earlier, so the
   difference the recorder forms is a filter correction divided by `dt`. On a
@@ -62,9 +90,7 @@ Measured while preparing the event-boundary work, not yet fixed:
   never an overshoot, so it reads as a dropout rather than a glitch, and the
   field trace beside it stays correct.
 
-  The fix is to defer a recorder dispatch by one step when its due step is a
-  filter-cadence step, as the AMR adapter already does. That changes
-  static-path behaviour and is waiting on that decision.
+  Fixed the same day; see the entry above.
 
 ## 2026-09-22 — Far-field exterior must be time-invariant
 

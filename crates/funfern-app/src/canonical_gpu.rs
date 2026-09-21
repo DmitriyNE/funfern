@@ -45,7 +45,7 @@ use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
 use crate::wave_gpu::{
     AreaProbeBindGroup, CurveProbeBindGroup, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS,
     FarFieldBindGroup, ProbeBindGroup, VectorOverlayBindGroup, WaveGpuRequest, WavePipeline,
-    probe_sample_due,
+    differencing_sample_due, probe_sample_due,
 };
 
 // `ShaderBuffer::from(T)` serializes into an owned byte vector and then copies
@@ -5043,8 +5043,11 @@ fn compute_canonical_wave(
             pass.dispatch_workgroups(1, 1, 1);
             resident_filters += 1;
         }
+        // Point probes and the far field difference the two state lanes for a
+        // rate, so they step past a filter commit; the others read only the
+        // accepted lane and sample on their own cadence.
         if let Some((handles, bind_group, Some(consumer))) = point_recorder
-            && probe_sample_due(step_after, handles.sample_stride)
+            && differencing_sample_due(step_after, handles.sample_stride, request.grid_scale_filter)
         {
             pass.set_bind_group(0, &bind_group.bind_group, &[]);
             pass.set_pipeline(consumer);
@@ -5082,7 +5085,7 @@ fn compute_canonical_wave(
             pass.set_bind_group(0, &group.bind_group, &[]);
         }
         if let Some((handles, bind_group, Some(sample), Some(project))) = far_recorder
-            && probe_sample_due(step_after, handles.sample_stride)
+            && differencing_sample_due(step_after, handles.sample_stride, request.grid_scale_filter)
         {
             pass.set_bind_group(0, &bind_group.bind_group, &[]);
             pass.set_pipeline(sample);

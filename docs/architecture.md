@@ -411,7 +411,13 @@ stationary force-free complementary flux and is not a terminal-silence control.
 Because it flips the accepted lane without advancing time, its other lane is the
 pre-filter state rather than the endpoint one `dt` earlier. Temporal consumers
 must either consume explicit endpoint metadata or skip/rebase that maintenance
-boundary. The production AMR adapter skips it; complementary-arrow AC presentation
+boundary. Every consumer that differences the two lanes does so, which is the
+point probe's rate and the far field's, and both take their sample one step
+later when it would fall on a commit; the deferred sample keeps its ring slot,
+and at a stride of one the boundary sample is dropped. This matters more than
+it looks, because below about `0.3x` the paced step is the speed over 120, so
+a recorder's stride follows the speed control and can share every factor with
+the cadence. The production AMR adapter skips it; complementary-arrow AC presentation
 advances through the explicitly sampled pre-filter endpoint, then rebases its
 input to the post-filter state without presenting the zero-duration correction
 as a wave.

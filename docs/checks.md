@@ -14,6 +14,7 @@ cargo run -p funfern-app --release --locked -- --mesh-edit-benchmark
 cargo run -p funfern-app --release --locked -- --wave-gpu-check
 cargo run -p funfern-app --release --locked -- --wave-transfer-check
 cargo run -p funfern-app --release --locked -- --amr-check
+cargo run -p funfern-app --release --locked --example canonical_gpu_filter_boundary
 ```
 
 Set `PLAYWRIGHT_CHANNEL=chrome` to run the smoke test with an installed Google
@@ -71,6 +72,13 @@ quadratic state with no exposed nodes, verifies mesh/operator revision agreement
 and exits.
 The field view tessellates every quadratic parent triangle into six display
 triangles around its shared edge-midpoint and element bubble nodes.
+
+`canonical_gpu_filter_boundary` runs a point probe whose sample stride equals
+the resident grid filter's cadence, the worst case the speed control can
+produce, and requires the recorded field and rate to match an f64 oracle. The
+filter flips the accepted state lane without advancing time, so a recorder
+that differenced the lanes at that boundary reported a filter correction
+divided by the timestep instead of a rate.
 
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.
