@@ -1116,23 +1116,33 @@ nonlinear case with the same rule. Driven material inside the contour stays
 supported but cannot be exercised end to end until the far field compiles
 against a temporal generation.
 
-Temporal-work accounting has its f64 contract: bulk energy split by storage
-with the analytic pump power at fixed canonical state. It is deliberately not
-wired to the GPU, because the accepted material runtime bank must be read back
-in the same command stream as the state; a separately arriving runtime copy is
-status, not snapshot identity. That gate is open.
+Temporal-work accounting is closed. The f64 contract splits bulk energy by
+storage and reports the analytic pump power at fixed canonical state, and the
+accepted material runtime bank now travels in the state buffer after the
+metadata word, republished by the same commit that wrote the fields around
+it. A Switch origin is stamped at a commit boundary and a carrier is
+re-anchored at one, so neither is reconstructible from the clock, and a
+separately arriving runtime copy would be status rather than snapshot
+identity. The canonical state layout is version 4. A hidden gate stamps a
+Switch mid-run and matched the f64 oracle to `2.004e-7` in Switch start time,
+`2.649e-8` in duration, `8.249e-9` and `4.549e-9` in the two energy terms and
+`1.428e-8` in pump power; suppressing the bank leaves the pump power 41%
+wrong.
 
-One defect surfaced while preparing the event-boundary fixtures and is
-recorded in the engineering log rather than fixed: a probe rate sampled
-exactly on a resident grid-filter boundary differences the accepted lane
-against the pre-filter value at the same instant, so it reports a filter
-correction divided by `dt`. It collapses to roughly one per cent of the true
-rate, affects the point probe's rate and the far field's Kirchhoff rate, and
-is pre-existing on the static path.
+One defect surfaced while preparing the event-boundary fixtures and was fixed
+with them. A probe rate sampled exactly on a resident grid-filter boundary
+differenced the accepted lane against the pre-filter value at the same
+instant, reporting a filter correction divided by `dt`. It collapsed to
+roughly one per cent of the true rate, affected the point probe's rate and the
+far field's Kirchhoff rate, and was pre-existing on the static path. It was
+not rare either: below about `0.3x` the paced step is the speed over 120, so
+a recorder's stride follows the speed control, and at `0.0625x` every point
+sample landed on a commit. Both recorders now take such a sample one step
+later, as the adaptation controller already did.
 
-Modulation-aware AMR, supported boundary compositions and the incremental-cost
-measurement remain open, alongside the accounting and event-boundary gates
-above.
+The diagnostic gate is therefore closed. Modulation-aware AMR, supported
+boundary compositions under modulation and the incremental-cost measurement
+remain open before authoring controls can be enabled.
 
 ## 13. Verification and acceptance
 

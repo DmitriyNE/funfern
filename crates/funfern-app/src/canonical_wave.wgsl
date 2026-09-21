@@ -1,5 +1,5 @@
 // Canonical direct-state f32 solver. Rust layout version 3.
-const LAYOUT_VERSION: u32 = 3u;
+const LAYOUT_VERSION: u32 = 4u;
 const STATE_WORD_STRIDE: u32 = 16u;
 const NODE_STRIDE: u32 = 96u;
 const SAMPLE_STRIDE: u32 = 112u;
@@ -140,12 +140,33 @@ fn accepted_slot() -> u32 { return control.event.z & 1u; }
 fn event_operation() -> u32 { return control.event.z >> 8u; }
 fn live_event() -> bool { return (control.event.z & 2u) != 0u; }
 
+const TEMPORAL_RUNTIME_WORDS_PER_SLOT: u32 = 3u;
+
+// The accepted material runtime travels in the state buffer, after the
+// metadata word, rather than beside it. A Switch origin is stamped at a
+// commit boundary and a carrier is re-anchored at one, so a consumer needs
+// them from the same copy as the fields they explain; a separately arriving
+// runtime copy would be status, not snapshot identity.
 fn publish_snapshot_metadata() {
     state[control.counts_a.w].values = vec4<f32>(
         SNAPSHOT_METADATA_MAGIC,
         f32(accepted_slot()),
         f32(control.clock_u32.w & 0xffffu),
         f32(control.clock_u32.w >> 16u));
+    if !temporal_enabled() { return; }
+    let header = tables[control.runtime_slots.z].data;
+    let shape = tables[control.runtime_slots.z + 1u].data;
+    let slot = control.runtime_slots.y & 1u;
+    for (var record = 0u; record < shape.x; record += 1u) {
+        let from_word = header.w + record * shape.z
+            + slot * TEMPORAL_RUNTIME_WORDS_PER_SLOT;
+        let into_word = control.counts_a.w + 1u
+            + record * TEMPORAL_RUNTIME_WORDS_PER_SLOT;
+        for (var word = 0u; word < TEMPORAL_RUNTIME_WORDS_PER_SLOT; word += 1u) {
+            state[into_word + word].values =
+                bitcast<vec4<f32>>(tables[from_word + word].data);
+        }
+    }
 }
 
 fn inject_at(state_word: u32) {

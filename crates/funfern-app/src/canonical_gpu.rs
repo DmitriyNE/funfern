@@ -33,12 +33,13 @@ use bevy::{
 };
 use funfern_core::{
     CanonicalAuxiliaryState, CanonicalForcing, CanonicalMaterialDrive,
-    CanonicalOutgoingHistoryTransferMap, CanonicalOutgoingMidpointFactor,
-    CanonicalOutgoingNormalizedTransfer, CanonicalPrimaryTransferMap, CanonicalRateDrive,
-    CanonicalTemporalCoefficientSample, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CanonicalWaveOperator,
-    CanonicalWaveState, GRID_SCALE_FILTER_CADENCE, MaterialId, Point2, QuadraticWaveOperator,
-    TimeDriveValues, TimeSignal, WaveError,
+    CanonicalMaterialRuntimeState, CanonicalOutgoingHistoryTransferMap,
+    CanonicalOutgoingMidpointFactor, CanonicalOutgoingNormalizedTransfer,
+    CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalTemporalCoefficientSample,
+    CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalThinGapHistoryTransferMap,
+    CanonicalVectorTransferMap, CanonicalWaveOperator, CanonicalWaveState,
+    GRID_SCALE_FILTER_CADENCE, MaterialId, MaterialSwitchRuntime, Point2, QuadraticWaveOperator,
+    TimeDriveRuntime, TimeDriveValues, TimeSignal, WaveError,
 };
 
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
@@ -60,7 +61,7 @@ macro_rules! add_shader_buffer {
     }};
 }
 
-pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 3;
+pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 4;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
 pub const CANONICAL_GPU_WORKGROUP_SIZE: u32 = 128;
 pub const CANONICAL_GPU_MAX_TRACE: usize = 1024;
@@ -1097,6 +1098,12 @@ impl CanonicalGpuPlan {
         self.control.runtime_slots.y = 0;
         self.control.runtime_slots.z = usize_u32(header_offset)?;
         self.control.runtime_slots.w = TEMPORAL_ENABLED;
+        // Room after the metadata word for the accepted runtime bank, which
+        // every commit republishes so a full readback is self-describing.
+        self.state.extend(std::iter::repeat_n(
+            GpuCanonicalStateWord::default(),
+            runtime_records.len() * TEMPORAL_RUNTIME_WORDS_PER_SLOT,
+        ));
         self.control.boundary_offsets.w &= !4;
         self.control.clock_f32.w = finite_f32(operator.maximum_time_step(), "time step bound")?;
         self.control.evolution.x = finite_f32(
@@ -2995,8 +3002,11 @@ fn spawn_canonical_state_readback(
                 generation,
                 node_count: handles.node_count,
                 sample_count: handles.sample_count,
+                material_runtime_count: handles.material_runtime_count,
                 state_count: if full {
-                    handles.state_count + 1
+                    handles.state_count
+                        + 1
+                        + handles.material_runtime_count * TEMPORAL_RUNTIME_WORDS_PER_SLOT as u32
                 } else {
                     handles.node_count
                 },
@@ -3515,6 +3525,53 @@ impl CanonicalGpuRequest {
     }
 }
 
+impl CanonicalGpuDisplay {
+    /// The accepted material runtime from the latest full snapshot.
+    ///
+    /// `authored` supplies the material set, its IDs and its names as the
+    /// operator compiled them; only the anchors and Switch trajectories come
+    /// from the solver, because those are stamped at GPU commit boundaries.
+    /// `epoch_origin_seconds` is the clock origin the bank is relative to,
+    /// which the same snapshot's clock carries.
+    ///
+    /// Returns `None` on a static generation, or before a full snapshot has
+    /// arrived, rather than guessing a runtime the solver never published.
+    pub fn material_runtime(
+        &self,
+        authored: &CanonicalMaterialRuntimeState,
+        epoch_origin_seconds: f64,
+    ) -> Option<CanonicalMaterialRuntimeState> {
+        if self.raw_material_runtime.is_empty()
+            || self.raw_material_runtime.len()
+                != authored.records().len() * TEMPORAL_RUNTIME_WORDS_PER_SLOT
+            || !epoch_origin_seconds.is_finite()
+        {
+            return None;
+        }
+        let mut adopted = authored.clone();
+        for (index, record) in authored.records().iter().enumerate() {
+            let base = index * TEMPORAL_RUNTIME_WORDS_PER_SLOT;
+            let phases = self.raw_material_runtime[base].values.to_array();
+            let switch = self.raw_material_runtime[base + 1].values.to_array();
+            let mut drives = [TimeDriveRuntime::new(epoch_origin_seconds, 0.0).ok()?;
+                CanonicalMaterialDrive::COUNT];
+            for (lane, drive) in drives.iter_mut().enumerate() {
+                *drive =
+                    TimeDriveRuntime::new(epoch_origin_seconds, f64::from(phases[lane])).ok()?;
+            }
+            let switch = MaterialSwitchRuntime::restored(
+                f64::from(switch[0]),
+                f64::from(switch[1]),
+                f64::from(switch[2]) + epoch_origin_seconds,
+                f64::from(switch[3]),
+            )
+            .ok()?;
+            adopted.adopt(record.material(), drives, switch).ok()?;
+        }
+        Some(adopted)
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct CanonicalGpuDisplay {
     pub generation: u64,
@@ -3537,6 +3594,11 @@ pub struct CanonicalGpuDisplay {
     pub full_readback_at: u64,
     pub runtime_serials: [u32; 4],
     pub event_result: [u32; 4],
+    /// The accepted material runtime bank from the same copy as the state,
+    /// three words per material. Empty on a static generation or until a
+    /// full snapshot arrives. Decode it with
+    /// [`CanonicalGpuRequest::decode_material_runtime`].
+    raw_material_runtime: Vec<GpuCanonicalStateWord>,
     raw_state: Vec<GpuCanonicalStateWord>,
     raw_primary: Vec<GpuCanonicalStateWord>,
     node_count: usize,
@@ -3606,6 +3668,7 @@ struct CanonicalStateReadback {
     node_count: u32,
     sample_count: u32,
     state_count: u32,
+    material_runtime_count: u32,
     full: bool,
     one_shot: bool,
 }
@@ -3662,6 +3725,13 @@ fn receive_canonical_state(
     display.node_count = tag.node_count as usize;
     display.sample_count = tag.sample_count as usize;
     if tag.full {
+        // The accepted runtime bank sits after the metadata word, published
+        // by the same commit that wrote the state around it.
+        let runtime_words = tag.material_runtime_count as usize * TEMPORAL_RUNTIME_WORDS_PER_SLOT;
+        if words.len() < runtime_words + 1 {
+            return;
+        }
+        let runtime = words.split_off(words.len() - runtime_words);
         let Some(metadata) = words.pop() else { return };
         let metadata = metadata.values.to_array();
         if metadata[0] != SNAPSHOT_METADATA_MAGIC
@@ -3673,6 +3743,7 @@ fn receive_canonical_state(
         {
             return;
         }
+        display.raw_material_runtime = runtime;
         display.raw_state_slot = metadata[1] as u32;
         display.raw_state_completed_steps =
             u64::from(metadata[2] as u32 | (metadata[3] as u32) << 16);
@@ -3711,6 +3782,7 @@ fn begin_canonical_display_generation(display: &mut CanonicalGpuDisplay, generat
     display.raw_state.clear();
     display.node_count = 0;
     display.sample_count = 0;
+    display.raw_material_runtime.clear();
     display.raw_state_slot = 0;
     display.raw_state_completed_steps = 0;
     display.raw_primary_self_describing = false;
@@ -5608,7 +5680,7 @@ mod tests {
     fn rust_and_wgsl_layout_manifests_match_exactly() {
         let shader = include_str!("canonical_wave.wgsl");
         for declaration in [
-            "const LAYOUT_VERSION: u32 = 3u;",
+            "const LAYOUT_VERSION: u32 = 4u;",
             "const STATE_WORD_STRIDE: u32 = 16u;",
             "const NODE_STRIDE: u32 = 96u;",
             "const SAMPLE_STRIDE: u32 = 112u;",

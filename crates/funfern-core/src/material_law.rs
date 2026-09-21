@@ -999,6 +999,30 @@ impl Default for MaterialSwitchRuntime {
 }
 
 impl MaterialSwitchRuntime {
+    /// Rebuilds a trajectory read back from the solver.
+    ///
+    /// A Switch is stamped by the GPU at its actual commit boundary, so its
+    /// origin is not something the host can reconstruct; a consumer that
+    /// wants the accepted trajectory has to be handed these four numbers.
+    /// The same validity rule as an authored one applies.
+    pub fn restored(
+        start_blend: f64,
+        target_blend: f64,
+        start_time: f64,
+        duration: f64,
+    ) -> Result<Self, MaterialError> {
+        let restored = Self {
+            start_blend,
+            target_blend,
+            start_time,
+            duration,
+        };
+        restored
+            .valid()
+            .then_some(restored)
+            .ok_or(MaterialError::InvalidValue)
+    }
+
     pub fn start_blend(self) -> f64 {
         self.start_blend
     }

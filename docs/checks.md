@@ -15,6 +15,7 @@ cargo run -p funfern-app --release --locked -- --wave-gpu-check
 cargo run -p funfern-app --release --locked -- --wave-transfer-check
 cargo run -p funfern-app --release --locked -- --amr-check
 cargo run -p funfern-app --release --locked --example canonical_gpu_filter_boundary
+cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_work
 ```
 
 Set `PLAYWRIGHT_CHANNEL=chrome` to run the smoke test with an installed Google
@@ -79,6 +80,12 @@ produce, and requires the recorded field and rate to match an f64 oracle. The
 filter flips the accepted state lane without advancing time, so a recorder
 that differenced the lanes at that boundary reported a filter correction
 divided by the timestep instead of a rate.
+
+`canonical_gpu_temporal_work` stamps a material Switch mid-run and requires
+the runtime decoded from the state snapshot, and the bulk energy split and
+pump power computed from it, to match an f64 oracle. The Switch origin is
+stamped on the GPU, so this is the check that the accepted runtime reaches a
+consumer rather than being guessed from the clock.
 
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.

@@ -5,6 +5,39 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The accepted runtime travels with the state
+
+- Closed the temporal-work accounting gate. The accepted material runtime
+  bank is now published into the state buffer after the metadata word, by the
+  same commit that writes the fields around it, so a full snapshot carries
+  the anchors and Switch trajectories that explain those fields. A separately
+  arriving runtime copy would have been status rather than snapshot identity,
+  which is why it is not a second readback.
+- The host decodes the bank into a runtime state by adopting the solver's
+  anchors and Switch onto the operator's own material set: the IDs and names
+  come from compilation, only the runtime values move. A Switch origin is
+  stamped at a GPU commit boundary and a carrier is re-anchored at one, so
+  neither is reconstructible from the clock.
+- The canonical state layout version therefore moves to 4. The bank is three
+  words per material for the accepted slot only, and every existing
+  publication site picks it up because the copy lives inside
+  `publish_snapshot_metadata` rather than beside its callers.
+- A new hidden gate stamps a Switch mid-run, evolves past it, then compares
+  the decoded runtime and the energy breakdown against the f64 oracle. On
+  Apple M1 Max / Metal over 1,934 Q and 3,630 b: Switch start time `2.004e-7`,
+  duration `2.649e-8`, primary energy `8.249e-9`, complementary energy
+  `4.549e-9` and pump power `1.428e-8`, all relative.
+- Checked that it has teeth by suppressing the publication: the Switch
+  becomes invisible, its blend reads 0 to 0 instead of 0 to 1, and the
+  reported pump power is 41% wrong with the energy split 1.2% wrong. That is
+  the error the readback removes.
+- `target` is a reserved word in WGSL and the naga suite caught it before the
+  device did, which is the second time that test has paid for itself.
+- Formatting, strict workspace Clippy, the workspace suite and a native
+  release build pass. The Stage 7 diagnostic gate is now closed. What remains
+  in Stage 7 is modulation-aware AMR, supported boundary compositions under
+  modulation, and the incremental-cost measurement.
+
 ## 2026-09-22 — Recorders step past a filter commit
 
 - The point recorder and the far field now take a sample one step later when

@@ -1002,6 +1002,18 @@ state with that word rather than pairing it with the separately arriving
 continuous control readback. The latter remains appropriate for live status, but
 cannot identify the lane or time of an asynchronous state snapshot.
 
+On a time-driven generation the accepted material runtime bank follows that
+word in the same buffer, three words per material, republished by whichever
+commit wrote the state around it. It travels with the state for the same
+reason the metadata word does, and for a sharper one: a Switch origin is
+stamped at a commit boundary and a carrier is re-anchored at one, so a
+consumer reporting the power a driven material pumps into the field cannot
+reconstruct either from the clock. The host adopts those anchors onto the
+operator's own material set, taking IDs and names from compilation and only
+the runtime values from the solver. Suppressing the bank in a test left the
+reported pump power 41% wrong and the energy split 1.2% wrong after a
+Switch.
+
 The overlay draws all accepted triangle edges, emphasizes boundary labels, colors
 elements below 15° amber, and reports counts and extrema. A meshing failure is a
 structured diagnostic and never changes the draft, accepted geometry, or history.

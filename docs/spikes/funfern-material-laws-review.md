@@ -313,9 +313,19 @@ Status: in progress; temporal runtime/compiler, conservative bulk reference and
 the dormant production-layout f32 bulk KDK are complete. A real-device gate now
 runs that layout through the production render graph, accepted-state transaction,
 full readback and a material-runtime clock rebase with f64 parity. GPU-stamped
-Switch reversal and same-layout phase-preserving law patches also pass that
-gate. Application enablement, generation transfer, the remaining event
-compositions and dependent consumer gates remain.
+Switch reversal, same-layout phase-preserving law patches and generation
+transfer also pass that gate.
+
+The diagnostic gate is closed: point, line, area and arrow consumers on the
+temporal path, the time-invariant far-field exterior policy, and temporal-work
+accounting from a runtime bank that travels in the state snapshot. Two
+corrections landed with it. Every consumer now applies a constitutive inverse
+only where the solver owns one, which is what a Stage 8 nonlinear law needs.
+And recorders that difference the two state lanes step past a resident filter
+commit, where the spare lane holds the pre-filter value at the same instant.
+
+Application enablement, modulation-aware AMR, supported boundary compositions
+and the incremental-cost measurement remain.
 
 Implement stage-time coefficient evaluation on both physical sides, harmonic/smoothed-square/travelling drives, Switch stamping, phase anchors, ramp reversal and trajectory bounds. Sample travelling phase in actual material frames at nodes/quadrature. Validate reciprocal factors as reciprocal trajectories, not newly interpolated endpoints.
 

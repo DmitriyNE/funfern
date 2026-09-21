@@ -27,7 +27,9 @@ pub enum CanonicalMaterialDrive {
 }
 
 impl CanonicalMaterialDrive {
-    const COUNT: usize = 4;
+    /// Independently driven rows per material: the two constitutive
+    /// coefficients and the two named loss channels.
+    pub const COUNT: usize = 4;
 
     const fn index(self) -> usize {
         match self {
@@ -126,6 +128,26 @@ impl CanonicalMaterialRuntimeState {
 
     pub fn records(&self) -> &[CanonicalMaterialRuntimeRecord] {
         &self.records
+    }
+
+    /// Adopts one material's accepted anchors and Switch trajectory as read
+    /// back from the solver.
+    ///
+    /// The material set, its IDs and its names stay as the operator compiled
+    /// them; only the runtime values move. They have to come from the solver
+    /// rather than be recomputed here, because a Switch is stamped at its
+    /// actual GPU commit boundary and a frequency edit re-anchors a carrier
+    /// at one, neither of which the host can reconstruct from the clock.
+    pub fn adopt(
+        &mut self,
+        material: MaterialId,
+        drives: [TimeDriveRuntime; CanonicalMaterialDrive::COUNT],
+        switch: MaterialSwitchRuntime,
+    ) -> Result<(), WaveError> {
+        let record = self.record_mut(material)?;
+        record.drives = drives;
+        record.switch = switch;
+        Ok(())
     }
 
     pub fn begin_switch(
