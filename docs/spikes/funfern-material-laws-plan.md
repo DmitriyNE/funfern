@@ -1098,9 +1098,41 @@ magnitude from before the reordering, as expected for a change that is exact on
 a uniform linear element; the flow figure in particular is a fixture-specific
 cancellation and not a gain.
 
-Temporal vector overlays, area probes, far-field exterior policy,
-temporal-work accounting and event-boundary consumer fixtures remain open
-alongside AMR, supported boundaries and incremental cost.
+Line, area and arrow consumers then followed the point probe onto the
+temporal path, each against the same f64 contract on one hidden Apple M1 Max /
+Metal fixture. Worst relative errors were `3.946e-7` primary, `1.108e-6`
+complementary, `7.227e-7` energy and `1.855e-6` normal flow across a
+five-sample line; `2.339e-7` total energy and `1.094e-7` complementary RMS for
+an area probe at full coverage; and `1.119e-6` complementary with `1.354e-6`
+flow across five arrow samples. Making room for the law tables in the area
+recorder required splitting its two passes onto separate bind-group layouts,
+since the shader declares nine storage buffers and a portable stage may bind
+eight.
+
+Far-field compilation now refuses a time-varying exterior by name. The
+retarded projection integrates over a homogeneous linear time-invariant
+exterior, and one predicate on the authored material answers the Stage 8
+nonlinear case with the same rule. Driven material inside the contour stays
+supported but cannot be exercised end to end until the far field compiles
+against a temporal generation.
+
+Temporal-work accounting has its f64 contract: bulk energy split by storage
+with the analytic pump power at fixed canonical state. It is deliberately not
+wired to the GPU, because the accepted material runtime bank must be read back
+in the same command stream as the state; a separately arriving runtime copy is
+status, not snapshot identity. That gate is open.
+
+One defect surfaced while preparing the event-boundary fixtures and is
+recorded in the engineering log rather than fixed: a probe rate sampled
+exactly on a resident grid-filter boundary differences the accepted lane
+against the pre-filter value at the same instant, so it reports a filter
+correction divided by `dt`. It collapses to roughly one per cent of the true
+rate, affects the point probe's rate and the far field's Kirchhoff rate, and
+is pre-existing on the static path.
+
+Modulation-aware AMR, supported boundary compositions and the incremental-cost
+measurement remain open, alongside the accounting and event-boundary gates
+above.
 
 ## 13. Verification and acceptance
 

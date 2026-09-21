@@ -5,6 +5,46 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — Temporal work, and a rate defect at filter boundaries
+
+- Added the f64 temporal energy breakdown: bulk energy split into primary and
+  complementary storage, with the power the authored material trajectory is
+  pumping into it. The power is the analytic partial time derivative at fixed
+  canonical state, so one snapshot suffices and no history is kept; a test
+  pins it against a central difference of the energy with the state held
+  still, and a composed system carrying loss or an open boundary is refused
+  rather than summarised with its other exchanges missing.
+- This deliberately stops short of the GPU. The accounting gate needs the
+  accepted material runtime bank read back in the same command stream as the
+  state, because a GPU-stamped Switch origin is not something the host can
+  reconstruct, and a separately arriving runtime copy is status rather than
+  snapshot identity. The f64 contract above is what that readback will be
+  compared against. The accounting gate is not closed.
+
+Measured while preparing the event-boundary work, not yet fixed:
+
+- [ ] A probe rate sampled exactly on a resident grid-filter boundary is
+  wrong by about its own magnitude. The spare state lane holds the pre-filter
+  value at the *same* instant, not the endpoint one `dt` earlier, so the
+  difference the recorder forms is a filter correction divided by `dt`. On a
+  driven h=0.2 fixture at the cadence boundary the true rate was `4.008e-1`,
+  a recorder reading that lane would report `6.016e-3`, and the neighbouring
+  ordinary step was `4.478e-1`. The reported value collapses to about 1% of
+  the truth.
+  Only quantities that difference the two lanes are affected: the point
+  probe's rate and the far field's `rate`, which feeds its Kirchhoff
+  integrand. Field, energy, flow and complementary magnitude read the accepted
+  lane alone and are exact. The vector overlay already handles this boundary
+  deliberately, carrying the pre-filter complementary field for its
+  presentation high-pass.
+  This is pre-existing on the static path, not something the temporal work
+  introduced. At 120 Hz point sampling with `dt` near `9.2e-4` a sample lands
+  on the cadence about every sixteenth reading; the 60 Hz far-field contour
+  lands on it about every eighth. The fix is to defer a recorder dispatch by
+  one step when its due step is a filter-cadence step, as the AMR adapter
+  already does, which changes static-path behaviour and is waiting on that
+  decision.
+
 ## 2026-09-22 — Far-field exterior must be time-invariant
 
 - Far-field compilation now rejects an exterior medium whose response varies

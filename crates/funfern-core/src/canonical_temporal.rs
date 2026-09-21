@@ -550,6 +550,62 @@ impl CanonicalTemporalAreaContribution {
     }
 }
 
+/// Bulk energy split by storage, with the power an authored material
+/// trajectory is pumping into it at this instant.
+///
+/// `temporal_power` is the explicit partial time derivative of the
+/// Hamiltonian at fixed canonical state, evaluated from analytic coefficient
+/// rates. It is not a finite difference between steps, so a consumer can
+/// report it from one snapshot without keeping history, and it is the term
+/// that makes a driven medium's energy change legitimate rather than drift.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CanonicalTemporalEnergyBreakdown {
+    pub primary: f64,
+    pub complementary: f64,
+    pub temporal_power: f64,
+}
+
+impl CanonicalTemporalEnergyBreakdown {
+    pub fn total(self) -> f64 {
+        self.primary + self.complementary
+    }
+}
+
+/// Splits the conservative bulk energy and reports the instantaneous material
+/// pump power.
+///
+/// The conservative bulk contract excludes gaps, open boundaries, losses and
+/// forcing, so unlike the fixed breakdown there are no auxiliary terms to
+/// report; a generation carrying them is rejected rather than summarised
+/// with the driven terms missing.
+pub fn canonical_temporal_energy_breakdown(
+    operator: &CanonicalTemporalWaveOperator,
+    primary_flux: &[f64],
+    complementary_flux: &[Point2],
+    time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<CanonicalTemporalEnergyBreakdown, WaveError> {
+    if !operator.conservative_bulk_supported() {
+        return Err(WaveError::InvalidCoefficients);
+    }
+    let (primary, primary_rate) = operator.primary_energy_and_rate(primary_flux, time, runtime)?;
+    let (complementary, complementary_rate) =
+        operator.complementary_energy_and_rate(complementary_flux, time, runtime)?;
+    let result = CanonicalTemporalEnergyBreakdown {
+        primary,
+        complementary,
+        temporal_power: primary_rate + complementary_rate,
+    };
+    if [result.primary, result.complementary, result.temporal_power]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        Ok(result)
+    } else {
+        Err(WaveError::InvalidState)
+    }
+}
+
 /// Area statistics and energy over a time-driven generation.
 ///
 /// The field statistics are moments of the interpolated physical fields, and
@@ -2160,6 +2216,96 @@ mod tests {
     /// instantaneous factor, so inverting at the samples and interpolating the
     /// physical field is not the same as interpolating the flux and inverting
     /// once at the probe. Nonlinear laws cannot do the latter at all.
+    /// The pump power must be the actual time derivative of the energy at
+    /// fixed state, or a consumer reporting it would mislabel drift as
+    /// physics. Checked against a central difference of the energy with the
+    /// canonical state held still.
+    #[test]
+    fn temporal_energy_breakdown_reports_the_actual_pump_power() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = pump(0.27, 0.72, 0.19);
+        scene.materials[0].stiffness_law.drive = TimeDrive::TimeCrystal {
+            depth: ScalarField::constant(0.16),
+            frequency_hz: ScalarField::constant(0.54),
+            phase_radians: ScalarField::constant(-0.21),
+            sharpness: ScalarField::constant(2.6),
+        };
+        let operator = compile(&scene).unwrap();
+        let runtime = operator.initial_runtime();
+        let primary = operator
+            .base()
+            .node_points()
+            .iter()
+            .map(|point| 0.11 + 0.19 * (0.9 * point.x - 1.3 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = operator
+            .base()
+            .node_points()
+            .iter()
+            .map(|point| 0.06 * (1.4 * point.x + 0.5 * point.y).cos())
+            .collect::<Vec<_>>();
+        let complementary = operator.base().compatible_flux(&potential).unwrap();
+
+        let time = 0.41;
+        let breakdown = canonical_temporal_energy_breakdown(
+            &operator,
+            &primary,
+            &complementary,
+            time,
+            &runtime,
+        )
+        .unwrap();
+        let total = operator
+            .energy_at(&primary, &complementary, time, &runtime)
+            .unwrap();
+        assert!((breakdown.total() - total).abs() < 1.0e-12);
+        assert!(breakdown.primary > 0.0 && breakdown.complementary > 0.0);
+
+        let step = 1.0e-5;
+        let ahead = operator
+            .energy_at(&primary, &complementary, time + step, &runtime)
+            .unwrap();
+        let behind = operator
+            .energy_at(&primary, &complementary, time - step, &runtime)
+            .unwrap();
+        let difference = (ahead - behind) / (2.0 * step);
+        assert!(
+            (breakdown.temporal_power - difference).abs() < 1.0e-6 * difference.abs().max(1.0),
+            "analytic pump power {} against difference {difference}",
+            breakdown.temporal_power
+        );
+        assert!(
+            breakdown.temporal_power.abs() > 1.0e-6,
+            "the fixture must pump"
+        );
+    }
+
+    /// The breakdown covers only the free bulk, so a generation carrying loss
+    /// or an open boundary is refused rather than reported with its other
+    /// exchanges silently missing.
+    #[test]
+    fn temporal_energy_breakdown_refuses_a_composed_system() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = pump(0.2, 0.6, 0.0);
+        scene.materials[0].damping = ScalarField::constant(0.35);
+        let operator = compile(&scene).unwrap();
+        let runtime = operator.initial_runtime();
+        let primary = vec![0.1; operator.base().degrees_of_freedom()];
+        let complementary =
+            vec![Point2::default(); operator.base().complementary_degrees_of_freedom()];
+        assert!(!operator.conservative_bulk_supported());
+        assert!(
+            canonical_temporal_energy_breakdown(
+                &operator,
+                &primary,
+                &complementary,
+                0.3,
+                &runtime,
+            )
+            .is_err()
+        );
+    }
+
     /// A probe over every face must still report the solver's own energy when
     /// the material is driven, which means evaluating the assembled nodal map
     /// at the sampled instant rather than reusing the authored one.
