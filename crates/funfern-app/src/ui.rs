@@ -58,7 +58,14 @@ use std::sync::{
 };
 
 mod events;
+mod gesture;
 mod probe_view;
+
+use gesture::{
+    DomainDrag, DragGesture, DrawGesture, GizmoScaleAxis, MATERIAL_FRAME_RADIUS,
+    MarqueeContainment, MarqueeOperation, MaterialFrameGizmoHit, MergeAction, PendingMerge,
+    ProbeHit, TransformGizmoHit,
+};
 mod workers;
 
 use workers::{
@@ -302,198 +309,6 @@ enum RecordingState {
     Finalizing,
 }
 
-#[derive(Clone, Debug)]
-struct DrawGesture {
-    tool: DrawTool,
-    points: Vec<Point2>,
-    attachments: Vec<Option<TopologyAttachment>>,
-}
-
-/// Which part of the outer rectangle a domain resize has hold of.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum DomainDrag {
-    Side { side: OuterSide, start: DomainRect },
-    Corner { index: usize, start: DomainRect },
-}
-
-#[derive(Clone, Debug)]
-enum DragGesture {
-    Handle {
-        handle: TopologyHandle,
-    },
-    /// The outer rectangle being resized by one of its sides or corners.
-    Domain {
-        drag: DomainDrag,
-    },
-    /// A loose end of an open curve on the move. `snap` is the target it would
-    /// weld onto if released now, for the preview ring only.
-    Endpoint {
-        curve: CurveId,
-        node: usize,
-        snap: Option<AttachmentHit>,
-    },
-    Spans {
-        start: Point2,
-        pivot: Point2,
-        custom_pivot: bool,
-        gizmo_before: Option<(BTreeSet<TopologySpanTarget>, Point2)>,
-        geometry: TopologyGeometry,
-    },
-    Rotate {
-        pivot: Point2,
-        start_angle: f64,
-        geometry: TopologyGeometry,
-    },
-    Scale {
-        axis: GizmoScaleAxis,
-        pivot: Point2,
-        start_distance: f64,
-        geometry: TopologyGeometry,
-    },
-    Pivot {
-        previous: Option<(BTreeSet<TopologySpanTarget>, Point2)>,
-        offset: Point2,
-    },
-    Marquee {
-        start: Pos2,
-        current: Pos2,
-        base: BTreeSet<TopologySpanTarget>,
-        operation: MarqueeOperation,
-    },
-    Source,
-    MaterialFrame {
-        region: RegionId,
-        start: MaterialFrame,
-        hit: MaterialFrameGizmoHit,
-        grab: f64,
-    },
-    Probe {
-        hit: ProbeHit,
-        grab: Point2,
-        original: TopologyProbeTarget,
-    },
-}
-
-/// A change worked out as far as the survivor question, waiting for the click
-/// that answers it.
-#[derive(Clone, Debug)]
-struct PendingMerge {
-    action: MergeAction,
-    choices: Vec<RegionId>,
-}
-
-/// What will be done once the question is answered. Both kinds fold two
-/// subdomains into one face - a deletion by removing the edge between them, a
-/// weld by moving an end until the circuit that separated them no longer
-/// closes - and neither says by itself which material survives.
-#[derive(Clone, Debug)]
-enum MergeAction {
-    /// The span selection the deletion named, rather than the target planned
-    /// from it, so the staleness guard has one thing to check and the target is
-    /// rebuilt against whatever the document says when the answer arrives.
-    Delete(BTreeSet<CurveSpanId>),
-    Weld {
-        curve: CurveId,
-        node: usize,
-        endpoint: usize,
-        target: TopologyAttachment,
-    },
-}
-
-/// The two grips of a region's material/source frame: its origin and the ring
-/// that turns its local axes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MaterialFrameGizmoHit {
-    Origin,
-    Rotate,
-}
-
-const MATERIAL_FRAME_RADIUS: f32 = 42.0;
-
-/// What a pointer landed on within a probe. Endpoint and radius grips take
-/// priority over the body so a small probe stays reshapeable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProbeHit {
-    Point(ProbeId),
-    SegmentEndpoint(ProbeId, bool),
-    SegmentBody(ProbeId),
-    Boundary(ProbeId),
-    AreaDiskBody(ProbeId),
-    AreaDiskRadius(ProbeId),
-    AreaRegion(ProbeId),
-}
-
-impl ProbeHit {
-    const fn id(self) -> ProbeId {
-        match self {
-            Self::Point(id)
-            | Self::SegmentEndpoint(id, _)
-            | Self::SegmentBody(id)
-            | Self::Boundary(id)
-            | Self::AreaDiskBody(id)
-            | Self::AreaDiskRadius(id)
-            | Self::AreaRegion(id) => id,
-        }
-    }
-
-    const fn draggable(self) -> bool {
-        !matches!(self, Self::Boundary(_) | Self::AreaRegion(_))
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TransformGizmoHit {
-    Pivot,
-    Rotate,
-    Scale(GizmoScaleAxis),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GizmoScaleAxis {
-    Uniform,
-    X,
-    Y,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MarqueeOperation {
-    Replace,
-    Add,
-    Subtract,
-}
-
-impl MarqueeOperation {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Replace => "Replace",
-            Self::Add => "Add",
-            Self::Subtract => "Subtract",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MarqueeContainment {
-    Enclosed,
-    Crossing,
-}
-
-impl MarqueeContainment {
-    const fn from_drag(start: Pos2, current: Pos2) -> Self {
-        if current.x >= start.x {
-            Self::Enclosed
-        } else {
-            Self::Crossing
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Enclosed => "Enclosed",
-            Self::Crossing => "Crossing",
-        }
-    }
-}
 /// One completed geometry-to-GPU transaction, split into the three waits the
 /// user can actually act on: CPU preparation, draining the solver's requested
 /// steps, and the GPU upload itself.
