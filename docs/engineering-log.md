@@ -5,6 +5,30 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — Far-field exterior must be time-invariant
+
+- Far-field compilation now rejects an exterior medium whose response varies
+  in time, by name, alongside the existing non-uniform, anisotropic, lossy and
+  driven refusals. The retarded Kirchhoff projection integrates over a
+  homogeneous linear time-invariant exterior; a modulated one has no such
+  Green's function, and feeding instantaneous coefficients into the static
+  formula would have produced a plausible wrong pattern rather than a failure.
+- The check is one predicate on the authored material, covering a field law, a
+  drive or a Switch alternate on either constitutive row and a drive on either
+  loss channel. That answers Stage 8's nonlinear case with the same rule, so
+  the exterior policy does not need revisiting when field-dependent laws
+  arrive.
+- A spatially varying, anisotropic or lossy exterior is still judged by its own
+  existing rules, which the predicate deliberately does not touch. Driven
+  material *inside* the contour remains a different and supported case, but it
+  cannot be exercised end to end yet: scalar assembly still refuses a driven
+  material anywhere in the scene, so the interior case is pinned on the
+  predicate directly until the far field compiles against a temporal
+  generation.
+- No shader changed. The contour reconstruction reads the static inverse mass,
+  which stays exact while the exterior is time-invariant, so the policy is
+  what keeps that shader correct rather than an accident.
+
 ## 2026-09-22 — Temporal vector overlay
 
 - The arrow lattice now installs against a time-driven generation through the

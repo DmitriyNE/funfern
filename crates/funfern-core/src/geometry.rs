@@ -133,6 +133,24 @@ pub struct Material {
     pub switch_ramp: f64,
 }
 
+impl Material {
+    /// Whether this material's response is fixed in time: no field law, no
+    /// drive and no Switch alternate on either constitutive row, and no drive
+    /// on either loss channel. Consumers whose derivation assumes a
+    /// time-invariant medium test this rather than inspecting each slot.
+    pub fn time_invariant(&self) -> bool {
+        let channel_is_fixed = |channel: &Option<LossChannel>| {
+            channel
+                .as_ref()
+                .is_none_or(|channel| channel.law.drive.is_none())
+        };
+        self.mass_law.is_linear()
+            && self.stiffness_law.is_linear()
+            && channel_is_fixed(&self.electric_loss)
+            && channel_is_fixed(&self.magnetic_loss)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct VolumeSource {
     pub region: RegionId,

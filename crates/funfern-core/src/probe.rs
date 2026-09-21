@@ -186,6 +186,7 @@ pub enum FarFieldCompileError {
     LossyExterior,
     AnisotropicExterior,
     DrivenExterior,
+    TimeVaryingExterior,
     InvalidWaveSpeed,
     ContourUnavailable(PointProbeError),
     ContourLeavesExterior,
@@ -218,6 +219,9 @@ impl std::fmt::Display for FarFieldCompileError {
             Self::DrivenExterior => {
                 formatter.write_str("far-field projection requires a source-free exterior medium")
             }
+            Self::TimeVaryingExterior => formatter.write_str(
+                "far-field projection requires a linear, time-invariant exterior medium",
+            ),
             Self::InvalidWaveSpeed => formatter.write_str("the exterior wave speed is invalid"),
             Self::ContourUnavailable(error) => {
                 write!(
@@ -1140,10 +1144,20 @@ impl QuadraticFarFieldStencil {
         let region = model
             .region(exterior_region)
             .ok_or(FarFieldCompileError::InvalidInputs)?;
-        let material = model
+        let authored = model
             .material(region.material)
-            .and_then(crate::Material::uniform)
-            .ok_or(FarFieldCompileError::NonUniformExterior)?;
+            .ok_or(FarFieldCompileError::InvalidInputs)?;
+        // The retarded Kirchhoff projection integrates over a homogeneous
+        // linear time-invariant exterior. A driven or field-dependent medium
+        // out there has no such Green's function, and feeding instantaneous
+        // coefficients into the static formula would look plausible and be
+        // wrong. Time-driven or nonlinear material *inside* the contour is a
+        // different case and stays supported.
+        if !authored.time_invariant() {
+            return Err(FarFieldCompileError::TimeVaryingExterior);
+        }
+        let material =
+            crate::Material::uniform(authored).ok_or(FarFieldCompileError::NonUniformExterior)?;
         validate_far_field_material(material, volume_sources, exterior_region)?;
         let wave_speed = model.physics.wave_speed(WaveCoefficients {
             mass_density: material.mass_density,
@@ -2046,6 +2060,53 @@ mod tests {
         .unwrap();
     }
 
+    /// The exterior policy asks only whether the medium outside the contour
+    /// varies in time. A spatially varying or lossy one is judged by its own
+    /// rules; a driven interior is a different case entirely, and cannot be
+    /// exercised end to end until the far field compiles against a temporal
+    /// generation, because scalar assembly still rejects a driven material
+    /// anywhere in the scene.
+    #[test]
+    fn time_invariance_separates_driven_media_from_merely_varying_ones() {
+        let fixed = Material {
+            mass_density: ScalarField::formula("1 + 0.1 * x").unwrap(),
+            damping: ScalarField::constant(0.3),
+            axis_ratio: ScalarField::constant(1.4),
+            ..Material::default_medium()
+        };
+        assert!(fixed.time_invariant());
+
+        let mut pumped = Material::default_medium();
+        pumped.mass_law.drive = crate::TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(0.5),
+            phase_radians: ScalarField::constant(0.0),
+        };
+        assert!(!pumped.time_invariant());
+
+        let mut switched = Material::default_medium();
+        switched.stiffness_law.alternate = Some(ScalarField::constant(1.3));
+        assert!(!switched.time_invariant());
+
+        let mut lossy = Material::default_medium();
+        lossy.electric_loss = Some(crate::LossChannel {
+            base_rate: ScalarField::constant(0.2),
+            law: crate::DampingLaw {
+                rate: crate::RateLaw::Constant,
+                drive: crate::TimeDrive::None,
+            },
+        });
+        assert!(lossy.time_invariant());
+        if let Some(channel) = lossy.electric_loss.as_mut() {
+            channel.law.drive = crate::TimeDrive::ParametricPump {
+                depth: ScalarField::constant(0.4),
+                frequency_hz: ScalarField::constant(0.9),
+                phase_radians: ScalarField::constant(0.0),
+            };
+        }
+        assert!(!lossy.time_invariant());
+    }
+
     #[test]
     fn topology_far_field_rejects_nonuniform_driven_or_partitioned_exteriors() {
         let (plan, mesh, scene, operator) = topology_fixture(TopologyGeometry::default());
@@ -2077,6 +2138,31 @@ mod tests {
             compile(&anisotropic, &[]),
             Err(FarFieldCompileError::AnisotropicExterior)
         );
+
+        // The retarded projection has no Green's function for a driven
+        // exterior, so each way of making one time-dependent is refused by
+        // name rather than evaluated at an instant.
+        for driven in [
+            {
+                let mut scene = scene.clone();
+                scene.materials[0].mass_law.drive = crate::TimeDrive::ParametricPump {
+                    depth: ScalarField::constant(0.2),
+                    frequency_hz: ScalarField::constant(0.5),
+                    phase_radians: ScalarField::constant(0.0),
+                };
+                scene
+            },
+            {
+                let mut scene = scene.clone();
+                scene.materials[0].stiffness_law.alternate = Some(ScalarField::constant(1.3));
+                scene
+            },
+        ] {
+            assert_eq!(
+                compile(&driven, &[]),
+                Err(FarFieldCompileError::TimeVaryingExterior)
+            );
+        }
 
         let source = VolumeSource {
             region: BACKGROUND_REGION,
