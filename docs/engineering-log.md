@@ -38,12 +38,33 @@ Measured while preparing the event-boundary work, not yet fixed:
   deliberately, carrying the pre-filter complementary field for its
   presentation high-pass.
   This is pre-existing on the static path, not something the temporal work
-  introduced. At 120 Hz point sampling with `dt` near `9.2e-4` a sample lands
-  on the cadence about every sixteenth reading; the 60 Hz far-field contour
-  lands on it about every eighth. The fix is to defer a recorder dispatch by
-  one step when its due step is a filter-cadence step, as the AMR adapter
-  already does, which changes static-path behaviour and is waiting on that
-  decision.
+  introduced.
+
+  How often it bites is set by the speed control, which is worse than a first
+  look suggests. `paced_time_step` makes the step `speed/120` below about
+  `0.3x`, so the recorder stride tracks the slider directly and can share a
+  factor with the sixteen-step cadence. A sample is corrupted every
+  `16/gcd(stride, 16)` readings:
+
+  | Speed | Point probe | Far field |
+  | --- | --- | --- |
+  | 0.3x and above | 1 in 16 | 1 in 16 |
+  | 0.25x | 1 in 4 | 1 in 2 |
+  | 0.125x | 1 in 2 | every sample |
+  | 0.0625x | every sample | every sample |
+  | 0.05x | 1 in 4 | 1 in 2 |
+
+  So slow motion, which is when a probe trace is most likely being read
+  closely, is where it is worst, and at two speeds inside the `0.02..=2.0`
+  slider every single reading is affected. Measured magnitudes over eight
+  probe points and four boundaries: the reported rate was between 0.03% and
+  18% of the truth, median about 0.05%. It is always a collapse toward zero,
+  never an overshoot, so it reads as a dropout rather than a glitch, and the
+  field trace beside it stays correct.
+
+  The fix is to defer a recorder dispatch by one step when its due step is a
+  filter-cadence step, as the AMR adapter already does. That changes
+  static-path behaviour and is waiting on that decision.
 
 ## 2026-09-22 — Far-field exterior must be time-invariant
 
