@@ -1070,6 +1070,19 @@ respectively. The repeated-filter b bound is deliberately separate from the
 single-event bound because five-pass f32 roundoff accumulates. AMR, diagnostic,
 supported-boundary composition and incremental-cost gates are still open.
 
+The diagnostic gate has one completed checkpoint, but is not closed. The f64
+temporal point contract now reconstructs current `Q/M(t)`, previous
+`Q/M(t-dt)`, the current physical complementary field, endpoint energy and
+Poynting flow, evaluating travelling modulation at the actual probe point. The
+production point-recorder stencil stores addresses of the authoritative solver
+coefficient records rather than copied law values, so same-layout table patches
+cannot make the consumer stale. A hidden Apple M1 Max / Metal run over 2,214 Q,
+4,182 b and 16 steps matched the f64 point oracle to `1.26e-8` in the primary
+field, `2.87e-6` in its rate, `1.14e-7` in complementary magnitude, `1.31e-7`
+in flow and `5.78e-8` in energy. Temporal vector overlays, line/area probes,
+far-field exterior policy, temporal-work accounting and event-boundary consumer
+fixtures remain open alongside AMR, supported boundaries and incremental cost.
+
 ## 13. Verification and acceptance
 
 ### 13.1 Numerical tests

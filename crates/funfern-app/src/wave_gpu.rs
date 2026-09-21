@@ -28,7 +28,8 @@ use bevy::{
     },
 };
 use funfern_core::{
-    CanonicalPointStencil, CanonicalWaveOperator, CompiledVolumeSources, GRID_SCALE_FILTER_CADENCE,
+    CanonicalPointStencil, CanonicalTemporalPointStencil, CanonicalTemporalWaveOperator,
+    CanonicalWaveOperator, CompiledVolumeSources, GRID_SCALE_FILTER_CADENCE,
     GRID_SCALE_FILTER_STRENGTH, MAX_VOLUME_SOURCES, OuterBoundaryConditions, PhysicsModel, Point2,
     PointSource, QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil,
     QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh,
@@ -36,7 +37,8 @@ use funfern_core::{
 };
 
 use crate::canonical_gpu::{
-    CanonicalGpuRequest, GpuCanonicalControl, GpuCanonicalNode, GpuCanonicalStateWord,
+    CanonicalGpuRequest, CanonicalGpuTemporalManifest, GpuCanonicalControl, GpuCanonicalNode,
+    GpuCanonicalStateWord, GpuCanonicalTableWord,
 };
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
 
@@ -571,7 +573,6 @@ impl WaveGpuRequest {
             return Ok(());
         }
         let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
-        let ids = probes.iter().map(|(id, _)| *id).collect::<Arc<[u64]>>();
         let stencils = probes
             .iter()
             .map(|(_, stencil)| {
@@ -582,6 +583,83 @@ impl WaveGpuRequest {
                     .map_err(|error| format!("Canonical point reconstruction failed: {error}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        self.install_canonical_point_probes(
+            assets,
+            commands,
+            probes,
+            stencils,
+            sample_stride,
+            physics,
+            history,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_temporal_canonical_point_probes(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        operator: &CanonicalTemporalWaveOperator,
+        manifest: CanonicalGpuTemporalManifest,
+        probes: &[(u64, Option<QuadraticPointStencil>)],
+        sample_rate: f64,
+        context: RecorderContext,
+    ) -> Result<(), String> {
+        let RecorderContext {
+            time_step,
+            physics,
+            history,
+        } = context;
+        if probes.len() > MAX_POINT_PROBES
+            || !sample_rate.is_finite()
+            || !(30.0..=480.0).contains(&sample_rate)
+            || !time_step.is_finite()
+            || time_step <= 0.0
+        {
+            self.clear_probe_buffers(assets, commands);
+            return Err("Invalid point-probe recorder settings".into());
+        }
+        if probes.is_empty() {
+            self.clear_probe_buffers(assets, commands);
+            return Ok(());
+        }
+        let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
+        let stencils = probes
+            .iter()
+            .map(|(_, stencil)| match stencil {
+                Some(stencil) => {
+                    let stencil = CanonicalTemporalPointStencil::from_quadratic(*stencil, operator)
+                        .map_err(|error| {
+                            format!("Temporal point reconstruction failed: {error}")
+                        })?;
+                    gpu_temporal_canonical_point_stencil(stencil, operator, manifest)
+                }
+                None => Ok(GpuCanonicalPointStencil::default()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.install_canonical_point_probes(
+            assets,
+            commands,
+            probes,
+            stencils,
+            sample_stride,
+            physics,
+            history,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn install_canonical_point_probes(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        probes: &[(u64, Option<QuadraticPointStencil>)],
+        stencils: Vec<GpuCanonicalPointStencil>,
+        sample_stride: u64,
+        physics: PhysicsModel,
+        history: RecorderHistory,
+    ) -> Result<(), String> {
+        let ids = probes.iter().map(|(id, _)| *id).collect::<Arc<[u64]>>();
         let control = GpuProbeControl {
             values: Vec4::new(
                 sample_stride as f32,
@@ -3020,6 +3098,9 @@ struct GpuCanonicalPointStencil {
     sample_valid: UVec4,
     reference_inverse: Vec4,
     orientation: Vec4,
+    temporal_primary_a: UVec4,
+    temporal_primary_b: UVec4,
+    temporal_complementary: UVec4,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -3090,7 +3171,85 @@ fn gpu_canonical_point_stencil(stencil: Option<CanonicalPointStencil>) -> GpuCan
             stencil.complementary_inverse.yy as f32,
         ),
         orientation: Vec4::new(stencil.orientation as f32, 0.0, 0.0, 0.0),
+        temporal_primary_a: UVec4::ZERO,
+        temporal_primary_b: UVec4::ZERO,
+        temporal_complementary: UVec4::ZERO,
     }
+}
+
+fn gpu_temporal_canonical_point_stencil(
+    stencil: CanonicalTemporalPointStencil,
+    operator: &CanonicalTemporalWaveOperator,
+    manifest: CanonicalGpuTemporalManifest,
+) -> Result<GpuCanonicalPointStencil, String> {
+    let coefficient_words = manifest.coefficient_words;
+    if coefficient_words == 0
+        || manifest.primary_record_count != operator.base().primary_contributions().len()
+        || manifest.complementary_record_count != operator.base().complementary_degrees_of_freedom()
+    {
+        return Err("Temporal point reconstruction does not match the GPU table layout".into());
+    }
+    let element = stencil.element();
+    let contributions = operator.base().primary_contributions();
+    let mut primary_words = [0_u32; 7];
+    for (local_node, word) in primary_words.iter_mut().enumerate() {
+        let contribution_index = contributions
+            .iter()
+            .position(|contribution| {
+                contribution.element == element && contribution.local_node as usize == local_node
+            })
+            .ok_or_else(|| {
+                format!(
+                    "Temporal point element {element} has no primary contribution for local node {local_node}"
+                )
+            })?;
+        let contribution = contributions[contribution_index];
+        let record_index = contributions[..contribution_index]
+            .iter()
+            .filter(|candidate| candidate.node == contribution.node)
+            .count()
+            + contributions
+                .iter()
+                .filter(|candidate| candidate.node < contribution.node)
+                .count();
+        let absolute_word = manifest
+            .primary_record_offset
+            .checked_add(
+                record_index
+                    .checked_mul(coefficient_words)
+                    .ok_or_else(|| "Temporal point primary table address overflowed".to_string())?,
+            )
+            .ok_or_else(|| "Temporal point primary table address overflowed".to_string())?;
+        *word = u32::try_from(absolute_word)
+            .map_err(|_| "Temporal point primary table address exceeds u32".to_string())?;
+    }
+    let complementary_record = usize::try_from(element)
+        .ok()
+        .and_then(|element| element.checked_mul(6))
+        .ok_or_else(|| "Temporal point complementary table address overflowed".to_string())?;
+    let complementary_word = manifest
+        .complementary_record_offset
+        .checked_add(
+            complementary_record
+                .checked_mul(coefficient_words)
+                .ok_or_else(|| {
+                    "Temporal point complementary table address overflowed".to_string()
+                })?,
+        )
+        .ok_or_else(|| "Temporal point complementary table address overflowed".to_string())?;
+    let mut result = gpu_canonical_point_stencil(Some(stencil.fixed()));
+    result.sample_valid.z = 1;
+    result.temporal_primary_a = UVec4::from_array(primary_words[..4].try_into().unwrap());
+    result.temporal_primary_b =
+        UVec4::from_array([primary_words[4], primary_words[5], primary_words[6], 0]);
+    result.temporal_complementary = UVec4::new(
+        u32::try_from(complementary_word)
+            .map_err(|_| "Temporal point complementary table address exceeds u32".to_string())?,
+        0,
+        0,
+        0,
+    );
+    Ok(result)
 }
 
 fn gpu_canonical_area_contribution(
@@ -3804,6 +3963,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuCanonicalPointStencil>>(false),
                 storage_buffer_read_only::<GpuProbeControl>(false),
                 storage_buffer::<Vec<GpuCanonicalPointProbeSample>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalTableWord>>(false),
             ),
         ),
     );
@@ -3825,6 +3985,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuCanonicalPointStencil>>(false),
                 storage_buffer_read_only::<GpuProbeControl>(false),
                 storage_buffer::<Vec<GpuVectorOverlaySample>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalTableWord>>(false),
             ),
         ),
     );
@@ -4119,6 +4280,7 @@ fn prepare_vector_overlay_bind_group(
         Some(stencils),
         Some(probe_control),
         Some(output),
+        Some(tables),
     ) = (
         gpu_buffers.get(&canonical.control),
         gpu_buffers.get(&canonical.state),
@@ -4126,6 +4288,7 @@ fn prepare_vector_overlay_bind_group(
         gpu_buffers.get(&overlay.stencils),
         gpu_buffers.get(&overlay.control),
         gpu_buffers.get(&overlay.output),
+        gpu_buffers.get(&canonical.tables),
     )
     else {
         return;
@@ -4140,6 +4303,7 @@ fn prepare_vector_overlay_bind_group(
             stencils.buffer.as_entire_buffer_binding(),
             probe_control.buffer.as_entire_buffer_binding(),
             output.buffer.as_entire_buffer_binding(),
+            tables.buffer.as_entire_buffer_binding(),
         )),
     );
     commands.insert_resource(VectorOverlayBindGroup {
@@ -4447,10 +4611,11 @@ fn prepare_probe_bind_group(
         else {
             return;
         };
-        let (Some(canonical_control), Some(state), Some(nodes)) = (
+        let (Some(canonical_control), Some(state), Some(nodes), Some(tables)) = (
             gpu_buffers.get(&canonical.control),
             gpu_buffers.get(&canonical.state),
             gpu_buffers.get(&canonical.nodes),
+            gpu_buffers.get(&canonical.tables),
         ) else {
             return;
         };
@@ -4464,6 +4629,7 @@ fn prepare_probe_bind_group(
                 stencils.buffer.as_entire_buffer_binding(),
                 control.buffer.as_entire_buffer_binding(),
                 output.buffer.as_entire_buffer_binding(),
+                tables.buffer.as_entire_buffer_binding(),
             )),
         )
     } else {
@@ -5385,7 +5551,9 @@ mod tests {
     #[test]
     fn canonical_probe_shaders_consume_direct_accepted_state() {
         let point = include_str!("canonical_probe.wgsl");
-        assert!(point.contains("accepted_q(a.x) * nodes[a.x].mass_loss.y"));
+        assert!(point.contains("if !temporal_enabled() { return nodes[node].mass_loss.y; }"));
+        assert!(point.contains("accepted_q(a.x) * primary_inverse_mass(a.x, control.clock_f32.y)"));
+        assert!(point.contains("previous_q(a.x) * primary_inverse_mass(a.x, previous_time)"));
         assert!(point.contains("return select(value.xy, value.zw"));
         assert!(point.contains("dot(flux, complement)"));
         assert!(point.contains("orientation.x * primary.x"));

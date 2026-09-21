@@ -5,6 +5,28 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-21 — Temporal point diagnostics use accepted endpoint maps
+
+- Added the first modulation-aware diagnostic subgate: the CPU point contract
+  reconstructs current `Q/M(t)`, previous `Q/M(t-dt)`, the current physical
+  complementary field, energy density and Poynting flow from one synchronized
+  accepted endpoint. Travelling modulation is evaluated at the actual probe
+  point rather than at a borrowed quadrature sample.
+- Production point stencils reference the authoritative coefficient records in
+  the solver table. They do not cache copies of material-law values, so a
+  same-layout live law patch cannot leave point diagnostics on stale metadata.
+  Static stencils remain explicit, and a temporal point consumer without the
+  temporal references is invalid rather than silently using fixed coefficients.
+- The hidden production-render-graph fixture uses travelling primary modulation
+  and time-crystal complementary modulation on 2,214 Q / 4,182 b unknowns. On
+  Apple M1 Max / Metal, after 16 steps its relative f64-oracle errors were
+  `1.26e-8` for the primary field, `2.87e-6` for its rate, `1.14e-7` for the
+  complementary magnitude, `1.31e-7` for flow and `5.78e-8` for energy.
+- This is a checkpoint inside the diagnostic gate, not its closure. Temporal
+  vector-overlay installation, line/area integrals, far-field exterior policy,
+  temporal-work accounting, event-boundary deferral/rebase fixtures and
+  modulation-aware AMR remain open.
+
 ## 2026-09-21 — Time-driven generations gain the paired grid filter
 
 - Adopted the exact frozen-time extension rather than a reference-operator

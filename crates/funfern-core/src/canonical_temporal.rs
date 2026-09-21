@@ -9,11 +9,11 @@
 use std::collections::BTreeSet;
 
 use crate::{
-    CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, DampingLaw, DampingLawValues,
-    ElectromagneticPolarization, FieldLaw, LossChannel, Material, MaterialCoordinates,
-    MaterialError, MaterialId, MaterialSwitchRuntime, PhysicsModel, Point2, QuadraticWaveOperator,
-    RateLaw, RateLawValues, RestoringLaw, Scene, TimeDriveRuntime, TimeDriveValues,
-    TopologyWaveModel, TriMesh, WaveError,
+    CanonicalPointSample, CanonicalPointStencil, CanonicalWaveOperator, CoefficientLaw,
+    CoefficientLawValues, DampingLaw, DampingLawValues, ElectromagneticPolarization, FieldLaw,
+    LossChannel, Material, MaterialCoordinates, MaterialError, MaterialId, MaterialSwitchRuntime,
+    PhysicsModel, Point2, QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues,
+    RestoringLaw, Scene, TimeDriveRuntime, TimeDriveValues, TopologyWaveModel, TriMesh, WaveError,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,6 +248,192 @@ pub struct CanonicalTemporalCoefficientSample {
     pub coordinates: MaterialCoordinates,
     pub drive: CanonicalMaterialDrive,
     pub law: CoefficientLawValues,
+}
+
+impl CanonicalTemporalCoefficientSample {
+    pub fn factor_at(
+        self,
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<f64, WaveError> {
+        if !time.is_finite() {
+            return Err(WaveError::InvalidState);
+        }
+        let record = runtime.record(self.material)?;
+        self.law
+            .temporal_factor(
+                time,
+                self.coordinates,
+                record.drive(self.drive),
+                record.switch(),
+            )
+            .map_err(|_| WaveError::InvalidState)
+    }
+}
+
+/// Synchronized endpoint reconstruction for a point consumer in a driven
+/// field-linear material. Nodal primary masses use the complete assembled map
+/// (including junction contributions), while the local energy and
+/// complementary observable use the owning element's law at the actual probe
+/// point rather than borrowing one quadrature sample.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanonicalTemporalPointStencil {
+    fixed: CanonicalPointStencil,
+    primary: CanonicalTemporalCoefficientSample,
+    complementary: CanonicalTemporalCoefficientSample,
+}
+
+impl CanonicalTemporalPointStencil {
+    pub fn from_quadratic(
+        stencil: QuadraticPointStencil,
+        operator: &CanonicalTemporalWaveOperator,
+    ) -> Result<Self, WaveError> {
+        let fixed = CanonicalPointStencil::from_quadratic(stencil, operator.base())?;
+        let element = stencil.element as usize;
+        let start = element
+            .checked_mul(6)
+            .ok_or(WaveError::InvalidMesh("invalid complementary sample range"))?;
+        let samples =
+            operator
+                .complementary
+                .get(start..start + 6)
+                .ok_or(WaveError::InvalidMesh(
+                    "the point stencil has no temporal complementary samples",
+                ))?;
+        let material = samples[0].coefficient.material;
+        if samples
+            .iter()
+            .any(|sample| sample.coefficient.material != material)
+        {
+            return Err(WaveError::InvalidMesh(
+                "one element has several temporal materials",
+            ));
+        }
+        let x = fixed
+            .complementary_weights
+            .iter()
+            .zip(samples)
+            .map(|(weight, sample)| weight * sample.coefficient.coordinates.x)
+            .sum::<f64>();
+        let y = fixed
+            .complementary_weights
+            .iter()
+            .zip(samples)
+            .map(|(weight, sample)| weight * sample.coefficient.coordinates.y)
+            .sum::<f64>();
+        let coordinates = MaterialCoordinates {
+            x,
+            y,
+            r: x.hypot(y),
+            theta: y.atan2(x),
+        };
+        let mut complementary: CanonicalTemporalCoefficientSample = samples[0].coefficient.into();
+        complementary.coordinates = coordinates;
+        let mut primary: CanonicalTemporalCoefficientSample = operator
+            .base
+            .primary_contributions()
+            .iter()
+            .zip(&operator.primary)
+            .find(|(contribution, sample)| {
+                contribution.element as usize == element && sample.coefficient.material == material
+            })
+            .map(|(_, sample)| sample.coefficient.into())
+            .ok_or(WaveError::InvalidMesh(
+                "the point stencil has no temporal primary samples",
+            ))?;
+        primary.coordinates = coordinates;
+        Ok(Self {
+            fixed,
+            primary,
+            complementary,
+        })
+    }
+
+    pub fn fixed(&self) -> CanonicalPointStencil {
+        self.fixed
+    }
+
+    pub fn element(&self) -> u32 {
+        self.fixed.complementary_samples[0] / 6
+    }
+
+    pub fn primary_coefficient(&self) -> CanonicalTemporalCoefficientSample {
+        self.primary
+    }
+
+    pub fn complementary_coefficient(&self) -> CanonicalTemporalCoefficientSample {
+        self.complementary
+    }
+
+    /// Samples an ordinary completed step. `previous_primary_flux` belongs to
+    /// `time-time_step`; zero-duration filter/event boundaries must continue
+    /// to use their explicit consumer deferral/rebase policy instead.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample(
+        &self,
+        operator: &CanonicalTemporalWaveOperator,
+        primary_flux: &[f64],
+        previous_primary_flux: &[f64],
+        complementary_flux: &[Point2],
+        time: f64,
+        time_step: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<CanonicalPointSample, WaveError> {
+        if !time.is_finite() || !time_step.is_finite() || time_step <= 0.0 {
+            return Err(WaveError::InvalidState);
+        }
+        let current = operator.primary_field_at(primary_flux, time, runtime)?;
+        let previous =
+            operator.primary_field_at(previous_primary_flux, time - time_step, runtime)?;
+        let mut primary = 0.0;
+        let mut previous_primary = 0.0;
+        for local in 0..self.fixed.nodes.len() {
+            let node = self.fixed.nodes[local] as usize;
+            let (Some(current), Some(previous)) = (current.get(node), previous.get(node)) else {
+                return Err(WaveError::InvalidState);
+            };
+            primary += self.fixed.primary_weights[local] * current;
+            previous_primary += self.fixed.primary_weights[local] * previous;
+        }
+        let primary_rate = (primary - previous_primary) / time_step;
+        let mut flux = Point2::default();
+        for local in 0..self.fixed.complementary_samples.len() {
+            let sample = self.fixed.complementary_samples[local] as usize;
+            let Some(value) = complementary_flux.get(sample) else {
+                return Err(WaveError::InvalidState);
+            };
+            flux = flux + *value * self.fixed.complementary_weights[local];
+        }
+        let primary_factor = self.primary.factor_at(time, runtime)?;
+        let complementary_factor = self.complementary.factor_at(time, runtime)?;
+        let complementary = self.fixed.complementary_inverse.apply(flux) / complementary_factor;
+        let energy_density = 0.5
+            * (self.fixed.primary_reference * primary_factor * primary * primary
+                + flux.dot(complementary));
+        let energy_flow =
+            Point2::new(-complementary.y, complementary.x) * (self.fixed.orientation * primary);
+        if [
+            primary,
+            primary_rate,
+            energy_density,
+            energy_flow.x,
+            energy_flow.y,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            && complementary.finite()
+        {
+            Ok(CanonicalPointSample {
+                primary,
+                primary_rate,
+                complementary,
+                energy_density,
+                energy_flow,
+            })
+        } else {
+            Err(WaveError::InvalidState)
+        }
+    }
 }
 
 impl From<TemporalCoefficientSample> for CanonicalTemporalCoefficientSample {
@@ -1424,7 +1610,7 @@ mod tests {
         BACKGROUND_REGION, CanonicalWaveState, ElectromagneticPolarization, LoopRole,
         MaterialFrame, MeshingOptions, Obstacle, ObstacleId, OuterBoundaryCondition,
         PeriodicCubicSpline, Region, RegionId, ScalarField, SymmetricTensor2, TimeDrive,
-        mesh_scene,
+        enriched_quadratic_basis, mesh_scene,
     };
 
     fn compile(scene: &Scene) -> Result<CanonicalTemporalWaveOperator, WaveError> {
@@ -1627,6 +1813,105 @@ mod tests {
         let unchanged = state.clone();
         assert_eq!(state.apply_grid_filter(&temporal, 0.0).unwrap(), 0.0);
         assert_eq!(state, unchanged);
+    }
+
+    #[test]
+    fn temporal_point_consumer_uses_endpoint_mass_and_the_probe_point_law() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
+            depth: ScalarField::constant(0.24),
+            frequency_hz: ScalarField::constant(0.8),
+            phase_radians: ScalarField::constant(0.31),
+            wavenumber: ScalarField::constant(2.7),
+            angle_radians: ScalarField::constant(-0.4),
+        };
+        scene.materials[0].stiffness_law.drive = TimeDrive::TimeCrystal {
+            depth: ScalarField::constant(0.17),
+            frequency_hz: ScalarField::constant(0.6),
+            phase_radians: ScalarField::constant(-0.23),
+            sharpness: ScalarField::constant(3.2),
+        };
+        let operator = compile(&scene).unwrap();
+        let barycentric = [0.19, 0.33, 0.48];
+        let nodes = operator.base().element_nodes()[0];
+        let quadratic = QuadraticPointStencil {
+            element: 0,
+            barycentric,
+            nodes,
+            value_weights: enriched_quadratic_basis(barycentric),
+            gradient_weights: [Point2::default(); 7],
+            region: BACKGROUND_REGION,
+            mass_density: 2.3,
+            stiffness: SymmetricTensor2::new(1.7, 0.18, 1.25),
+        };
+        let stencil = CanonicalTemporalPointStencil::from_quadratic(quadratic, &operator).unwrap();
+        let expected_point = stencil
+            .fixed()
+            .primary_weights
+            .iter()
+            .zip(nodes)
+            .fold(Point2::default(), |sum, (weight, node)| {
+                sum + operator.base().node_points()[node as usize] * *weight
+            });
+        let coordinates = stencil.primary_coefficient().coordinates;
+        assert!((Point2::new(coordinates.x, coordinates.y) - expected_point).norm() < 2.0e-12);
+
+        let runtime = operator.initial_runtime();
+        let time_step = 0.21 * operator.maximum_time_step();
+        let time = 0.37;
+        let current_value = 0.42;
+        let previous_value = 0.39;
+        let primary = operator
+            .primary_mass_at(time, &runtime)
+            .unwrap()
+            .into_iter()
+            .map(|mass| mass * current_value)
+            .collect::<Vec<_>>();
+        let previous = operator
+            .primary_mass_at(time - time_step, &runtime)
+            .unwrap()
+            .into_iter()
+            .map(|mass| mass * previous_value)
+            .collect::<Vec<_>>();
+        let flux = Point2::new(0.31, -0.22);
+        let complementary = vec![flux; operator.base().complementary_degrees_of_freedom()];
+        let sample = stencil
+            .sample(
+                &operator,
+                &primary,
+                &previous,
+                &complementary,
+                time,
+                time_step,
+                &runtime,
+            )
+            .unwrap();
+        let fixed = stencil.fixed();
+        let primary_factor = stencil
+            .primary_coefficient()
+            .factor_at(time, &runtime)
+            .unwrap();
+        let complementary_factor = stencil
+            .complementary_coefficient()
+            .factor_at(time, &runtime)
+            .unwrap();
+        let expected_complementary = fixed.complementary_inverse.apply(flux) / complementary_factor;
+        let expected_energy = 0.5
+            * (fixed.primary_reference * primary_factor * current_value.powi(2)
+                + flux.dot(expected_complementary));
+        assert!((sample.primary - current_value).abs() < 2.0e-12);
+        assert!(
+            (sample.primary_rate - (current_value - previous_value) / time_step).abs() < 2.0e-12
+        );
+        assert!((sample.complementary - expected_complementary).norm() < 2.0e-12);
+        assert!((sample.energy_density - expected_energy).abs() < 2.0e-12);
+        assert!(
+            (sample.energy_flow
+                - Point2::new(-expected_complementary.y, expected_complementary.x)
+                    * (fixed.orientation * current_value))
+                .norm()
+                < 2.0e-12
+        );
     }
 
     #[test]

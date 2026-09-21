@@ -17,6 +17,8 @@ struct PointStencil {
     primary_a: vec4<f32>, primary_b: vec4<f32>,
     complementary_a: vec4<f32>, complementary_b: vec4<f32>,
     sample_valid: vec4<u32>, reference_inverse: vec4<f32>, orientation: vec4<f32>,
+    temporal_primary_a: vec4<u32>, temporal_primary_b: vec4<u32>,
+    temporal_complementary: vec4<u32>,
 }
 struct CurveStencil { point: PointStencil, normal_stride_valid: vec4<f32> }
 struct ProbeControl { values: vec4<f32> }

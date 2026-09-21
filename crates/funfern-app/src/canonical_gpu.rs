@@ -856,6 +856,9 @@ pub struct CanonicalGpuLayoutManifest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanonicalGpuTemporalManifest {
     pub header_offset: usize,
+    pub primary_record_offset: usize,
+    pub complementary_record_offset: usize,
+    pub runtime_record_offset: usize,
     pub primary_record_count: usize,
     pub complementary_record_count: usize,
     pub runtime_record_count: usize,
@@ -1103,6 +1106,9 @@ impl CanonicalGpuPlan {
         self.manifest.bytes.tables = self.tables.len() * size_of::<GpuCanonicalTableWord>();
         self.manifest.temporal = Some(CanonicalGpuTemporalManifest {
             header_offset,
+            primary_record_offset: primary_offset,
+            complementary_record_offset: complementary_offset,
+            runtime_record_offset: runtime_offset,
             primary_record_count: operator.base().primary_contributions().len(),
             complementary_record_count: self.sample_count,
             runtime_record_count: runtime_records.len(),
