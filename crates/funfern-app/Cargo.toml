@@ -3,6 +3,7 @@ name = "funfern-app"
 description = "Bevy WebGPU geometry playground"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [features]

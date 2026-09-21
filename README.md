@@ -698,3 +698,7 @@ Bevy owns the wgpu device. The current viewport uses egui's painter through
 `bevy_egui` on that device; there is no second renderer/device. Audio, 3D render
 pipelines, and the WebGL fallback are disabled. All numerical geometry remains
 independent of Bevy, egui, serde, and external numerical libraries.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
