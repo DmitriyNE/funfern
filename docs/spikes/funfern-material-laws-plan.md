@@ -1093,10 +1093,14 @@ accounting lanes, while field statistics keep their smooth quadrature rule.
 After that correction the hidden Apple M1 Max / Metal point run over 2,214 Q,
 4,182 b and 16 steps matched the f64 point oracle to `1.256e-8` in the primary
 field, `2.866e-6` in its rate, `1.142e-7` in complementary magnitude,
-`1.427e-10` in flow and `5.778e-8` in energy. Temporal vector overlays,
-line/area probes, far-field exterior policy, temporal-work accounting and
-event-boundary consumer fixtures remain open alongside AMR, supported
-boundaries and incremental cost.
+`1.427e-10` in flow and `5.778e-8` in energy. Agreement is unchanged in
+magnitude from before the reordering, as expected for a change that is exact on
+a uniform linear element; the flow figure in particular is a fixture-specific
+cancellation and not a gain.
+
+Temporal vector overlays, area probes, far-field exterior policy,
+temporal-work accounting and event-boundary consumer fixtures remain open
+alongside AMR, supported boundaries and incremental cost.
 
 ## 13. Verification and acceptance
 

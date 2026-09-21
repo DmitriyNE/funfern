@@ -561,43 +561,13 @@ impl WaveGpuRequest {
         sample_rate: f64,
         context: RecorderContext,
     ) -> Result<(), String> {
-        let RecorderContext {
-            time_step,
-            physics,
-            history,
-        } = context;
-        if probes.len() > MAX_POINT_PROBES
-            || !sample_rate.is_finite()
-            || !(30.0..=480.0).contains(&sample_rate)
-            || !time_step.is_finite()
-            || time_step <= 0.0
-        {
-            self.clear_probe_buffers(assets, commands);
-            return Err("Invalid point-probe recorder settings".into());
-        }
-        if probes.is_empty() {
-            self.clear_probe_buffers(assets, commands);
-            return Ok(());
-        }
-        let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
-        let stencils = probes
-            .iter()
-            .map(|(_, stencil)| {
-                stencil
-                    .map(|stencil| CanonicalPointStencil::from_quadratic(stencil, operator))
-                    .transpose()
-                    .map(gpu_canonical_point_stencil)
-                    .map_err(|error| format!("Canonical point reconstruction failed: {error}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.install_canonical_point_probes(
+        self.update_point_probes_from(
             assets,
             commands,
+            CanonicalStencilSource::Fixed(operator),
             probes,
-            stencils,
-            sample_stride,
-            physics,
-            history,
+            sample_rate,
+            context,
         )
     }
 
@@ -608,6 +578,25 @@ impl WaveGpuRequest {
         commands: &mut Commands,
         operator: &CanonicalTemporalWaveOperator,
         manifest: CanonicalGpuTemporalManifest,
+        probes: &[(u64, Option<QuadraticPointStencil>)],
+        sample_rate: f64,
+        context: RecorderContext,
+    ) -> Result<(), String> {
+        self.update_point_probes_from(
+            assets,
+            commands,
+            CanonicalStencilSource::Temporal { operator, manifest },
+            probes,
+            sample_rate,
+            context,
+        )
+    }
+
+    fn update_point_probes_from(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        source: CanonicalStencilSource<'_>,
         probes: &[(u64, Option<QuadraticPointStencil>)],
         sample_rate: f64,
         context: RecorderContext,
@@ -634,13 +623,7 @@ impl WaveGpuRequest {
         let stencils = probes
             .iter()
             .map(|(_, stencil)| match stencil {
-                Some(stencil) => {
-                    let stencil = CanonicalTemporalPointStencil::from_quadratic(*stencil, operator)
-                        .map_err(|error| {
-                            format!("Temporal point reconstruction failed: {error}")
-                        })?;
-                    gpu_temporal_canonical_point_stencil(stencil, operator, manifest)
-                }
+                Some(stencil) => source.build(*stencil, "point"),
                 None => Ok(GpuCanonicalPointStencil::default()),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -958,6 +941,44 @@ impl WaveGpuRequest {
         probes: &[CurveProbeInput],
         context: RecorderContext,
     ) -> Result<(), String> {
+        self.update_curve_probes_from(
+            assets,
+            commands,
+            CanonicalStencilSource::Fixed(operator),
+            probes,
+            context,
+        )
+    }
+
+    /// Line probes over a time-driven generation. Each sample reconstructs
+    /// through the same shared shader block the point recorder uses, so a
+    /// travelling drive is resolved at the element's own samples here too.
+    pub fn update_temporal_canonical_curve_probes(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        operator: &CanonicalTemporalWaveOperator,
+        manifest: CanonicalGpuTemporalManifest,
+        probes: &[CurveProbeInput],
+        context: RecorderContext,
+    ) -> Result<(), String> {
+        self.update_curve_probes_from(
+            assets,
+            commands,
+            CanonicalStencilSource::Temporal { operator, manifest },
+            probes,
+            context,
+        )
+    }
+
+    fn update_curve_probes_from(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        source: CanonicalStencilSource<'_>,
+        probes: &[CurveProbeInput],
+        context: RecorderContext,
+    ) -> Result<(), String> {
         let RecorderContext {
             time_step,
             physics,
@@ -998,15 +1019,7 @@ impl WaveGpuRequest {
             let stride = (1.0 / (probe.sample_rate * time_step)).round().max(1.0) as u64;
             for sample in &probe.samples {
                 let (point, normal, valid) = match sample {
-                    Some((stencil, normal)) => (
-                        gpu_canonical_point_stencil(Some(
-                            CanonicalPointStencil::from_quadratic(*stencil, operator).map_err(
-                                |error| format!("Canonical line reconstruction failed: {error}"),
-                            )?,
-                        )),
-                        *normal,
-                        1.0,
-                    ),
+                    Some((stencil, normal)) => (source.build(*stencil, "line")?, *normal, 1.0),
                     None => (GpuCanonicalPointStencil::default(), Point2::default(), 0.0),
                 };
                 stencils.push(GpuCanonicalCurveStencil {
@@ -3163,6 +3176,40 @@ struct GpuCanonicalFarFieldStencil {
     gradient_y_a: Vec4,
     gradient_y_b: Vec4,
     position_normal: Vec4,
+}
+
+/// Where a consumer's point reconstruction comes from. The fixed operator and
+/// the temporal one produce the same GPU record; only the temporal case also
+/// addresses the law tables, so every recorder takes this rather than growing
+/// a second copy of its installer.
+#[derive(Clone, Copy)]
+enum CanonicalStencilSource<'a> {
+    Fixed(&'a CanonicalWaveOperator),
+    Temporal {
+        operator: &'a CanonicalTemporalWaveOperator,
+        manifest: CanonicalGpuTemporalManifest,
+    },
+}
+
+impl CanonicalStencilSource<'_> {
+    fn build(
+        &self,
+        stencil: QuadraticPointStencil,
+        consumer: &str,
+    ) -> Result<GpuCanonicalPointStencil, String> {
+        match self {
+            Self::Fixed(operator) => CanonicalPointStencil::from_quadratic(stencil, operator)
+                .map(|stencil| gpu_canonical_point_stencil(Some(stencil)))
+                .map_err(|error| format!("Canonical {consumer} reconstruction failed: {error}")),
+            Self::Temporal { operator, manifest } => {
+                let stencil = CanonicalTemporalPointStencil::from_quadratic(stencil, operator)
+                    .map_err(|error| {
+                        format!("Temporal {consumer} reconstruction failed: {error}")
+                    })?;
+                gpu_temporal_canonical_point_stencil(stencil, operator, *manifest)
+            }
+        }
+    }
 }
 
 fn gpu_canonical_point_stencil(stencil: Option<CanonicalPointStencil>) -> GpuCanonicalPointStencil {

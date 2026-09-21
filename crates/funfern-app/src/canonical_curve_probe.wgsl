@@ -267,7 +267,8 @@ fn sample_curve_probes(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if stride == 0u || control.clock_u32.w % stride != 0u { return; }
     let frame = (control.clock_u32.w / stride) % u32(probe_control.values.y);
     let slot = frame * u32(probe_control.values.z) + index;
-    if record.normal_stride_valid.w < 0.5 || record.point.sample_valid.y == 0u {
+    if record.normal_stride_valid.w < 0.5 || record.point.sample_valid.y == 0u
+        || (temporal_enabled() && record.point.sample_valid.z == 0u) {
         let nan = bitcast<f32>(0x7fc00000u | (index & 1u));
         output[slot].primary = vec4<f32>(nan, nan, nan, absolute_time());
         output[slot].secondary = vec4<f32>(nan);

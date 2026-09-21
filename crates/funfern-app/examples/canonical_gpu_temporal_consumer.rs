@@ -1,8 +1,11 @@
-//! Real-device validation for synchronized temporal point diagnostics.
+//! Real-device validation for synchronized temporal point and line
+//! diagnostics.
 //!
-//! The fixture uses the production canonical render graph and point-recorder
-//! shader. It compares the final endpoint field, rate, energy and flow
-//! magnitudes against the f64 temporal consumer contract.
+//! The fixture uses the production canonical render graph with the point and
+//! line recorder shaders, which share one reconstruction block. It compares
+//! the final endpoint field, rate, energy and flow against the f64 temporal
+//! consumer contract, and the line samples against the same contract dotted
+//! with each sample's normal.
 
 use std::time::{Duration, Instant};
 
@@ -11,7 +14,10 @@ use funfern_app::{
     canonical_gpu::{
         CanonicalGpuClock, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalWaveGpuPlugin,
     },
-    wave_gpu::{ProbeDisplay, RecorderContext, RecorderHistory, WaveGpuPlugin, WaveGpuRequest},
+    wave_gpu::{
+        CurveProbeDisplay, CurveProbeInput, ProbeDisplay, RecorderContext, RecorderHistory,
+        WaveGpuPlugin, WaveGpuRequest,
+    },
 };
 use funfern_core::{
     CanonicalTemporalPointStencil, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
@@ -20,13 +26,26 @@ use funfern_core::{
 };
 
 const PROBE_ID: u64 = 71;
+const LINE_PROBE_ID: u64 = 72;
 const SAMPLE_RATE: f64 = 480.0;
+const LINE_SAMPLE_RATE: f64 = 120.0;
 
 #[derive(Resource)]
 struct Pending {
     plan: Option<CanonicalGpuPlan>,
     operator: CanonicalTemporalWaveOperator,
     stencil: QuadraticPointStencil,
+    line: Vec<(QuadraticPointStencil, Point2)>,
+}
+
+/// One line sample's expected values, from the same f64 contract the point
+/// probe uses. Normal flow is the contract's flow dotted with the sample's
+/// normal.
+struct ExpectedLineSample {
+    primary: f64,
+    complementary_magnitude: f64,
+    energy: f64,
+    normal_flux: f64,
 }
 
 #[derive(Resource)]
@@ -38,6 +57,8 @@ struct Expected {
     complementary_magnitude: f64,
     flow_magnitude: f64,
     energy: f64,
+    line: Vec<ExpectedLineSample>,
+    line_time: f64,
     started: Instant,
     deadline: Instant,
     finished: bool,
@@ -90,11 +111,28 @@ fn main() {
         / 3.0;
     let stencil = QuadraticPointStencil::build(&mesh, &scalar, &fixed_scene, point)
         .expect("interior point stencil");
+    // A straight interior line, slanted so the travelling drive varies along
+    // it, and clear of the scene's central hole.
+    let ends = (Point2::new(-0.52, 0.38), Point2::new(0.54, 0.61));
+    let span = ends.1 - ends.0;
+    let normal = Point2::new(-span.y, span.x) / span.norm();
+    let line = (0..5)
+        .map(|index| {
+            let position = ends.0 + span * (index as f64 / 4.0);
+            let stencil = QuadraticPointStencil::build(&mesh, &scalar, &fixed_scene, position)
+                .expect("interior line stencil");
+            (stencil, normal)
+        })
+        .collect::<Vec<_>>();
+
     let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
         .expect("temporal consumer operator");
     let time_step = 0.38 * operator.maximum_time_step();
     let sample_stride = (1.0 / (SAMPLE_RATE * time_step)).round().max(1.0) as u64;
-    let steps = 8 * sample_stride;
+    let line_stride = (1.0 / (LINE_SAMPLE_RATE * time_step)).round().max(1.0) as u64;
+    // Both recorders must land their last sample on the compared state.
+    let cadence = sample_stride / gcd(sample_stride, line_stride) * line_stride;
+    let steps = (8 * sample_stride).div_ceil(cadence) * cadence;
 
     let primary = operator
         .base()
@@ -134,6 +172,30 @@ fn main() {
             state.runtime(),
         )
         .expect("f64 temporal point sample");
+    let line_expected = line
+        .iter()
+        .map(|(stencil, normal)| {
+            let consumer = CanonicalTemporalPointStencil::from_quadratic(*stencil, &operator)
+                .expect("temporal line consumer");
+            let sample = consumer
+                .sample(
+                    &operator,
+                    state.primary_flux(),
+                    &previous_primary,
+                    state.complementary_flux(),
+                    state.time(),
+                    time_step,
+                    state.runtime(),
+                )
+                .expect("f64 temporal line sample");
+            ExpectedLineSample {
+                primary: sample.primary,
+                complementary_magnitude: sample.complementary.norm(),
+                energy: sample.energy_density,
+                normal_flux: sample.energy_flow.dot(*normal),
+            }
+        })
+        .collect::<Vec<_>>();
     let expected = Expected {
         steps,
         time: state.time(),
@@ -142,6 +204,8 @@ fn main() {
         complementary_magnitude: sample.complementary.norm(),
         flow_magnitude: sample.energy_flow.norm(),
         energy: sample.energy_density,
+        line: line_expected,
+        line_time: state.time(),
         started: Instant::now(),
         deadline: Instant::now() + Duration::from_secs(60),
         finished: false,
@@ -171,6 +235,7 @@ fn main() {
         plan: Some(plan),
         operator,
         stencil,
+        line,
     })
     .insert_resource(expected)
     .add_systems(Startup, install)
@@ -211,6 +276,24 @@ fn install(
             },
         )
         .expect("install temporal point recorder");
+    recorders
+        .update_temporal_canonical_curve_probes(
+            &mut assets,
+            &mut commands,
+            &pending.operator,
+            temporal_manifest,
+            &[CurveProbeInput {
+                id: LINE_PROBE_ID,
+                sample_rate: LINE_SAMPLE_RATE,
+                samples: pending.line.iter().copied().map(Some).collect(),
+            }],
+            RecorderContext {
+                time_step: 0.38 * pending.operator.maximum_time_step(),
+                physics: PhysicsModel::Mechanical,
+                history: RecorderHistory::Restart,
+            },
+        )
+        .expect("install temporal line recorder");
     canonical.request_steps(expected.steps);
     commands.spawn(Camera2d);
 }
@@ -218,6 +301,7 @@ fn install(
 fn finish_when_ready(
     canonical: Res<CanonicalGpuRequest>,
     display: Res<ProbeDisplay>,
+    curves: Res<CurveProbeDisplay>,
     mut expected: ResMut<Expected>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -251,6 +335,45 @@ fn finish_when_ready(
     if (sample.time - expected.time).abs() > 2.0e-4 {
         return;
     }
+    let Some(line) = curves
+        .records
+        .iter()
+        .filter(|record| record.probe_id == LINE_PROBE_ID)
+        .max_by(|left, right| left.time.total_cmp(&right.time))
+    else {
+        return;
+    };
+    if (line.time - expected.line_time).abs() > 2.0e-4
+        || line.displacement.len() != expected.line.len()
+    {
+        return;
+    }
+    let mut line_errors = [0.0_f64; 4];
+    for (index, want) in expected.line.iter().enumerate() {
+        let got = [
+            f64::from(line.displacement[index]),
+            f64::from(line.transverse_magnitude[index]),
+            f64::from(line.energy_density[index]),
+            f64::from(line.normal_flux[index]),
+        ];
+        let reference = [
+            want.primary,
+            want.complementary_magnitude,
+            want.energy,
+            want.normal_flux,
+        ];
+        for lane in 0..4 {
+            line_errors[lane] = line_errors[lane].max(relative_error(got[lane], reference[lane]));
+        }
+    }
+    println!(
+        "temporal line consumer worst errors over {} samples: u {:.3e}, complement {:.3e}, energy {:.3e}, normal flow {:.3e}",
+        expected.line.len(),
+        line_errors[0],
+        line_errors[1],
+        line_errors[2],
+        line_errors[3]
+    );
     let errors = [
         relative_error(sample.displacement, expected.primary),
         relative_error(sample.velocity, expected.primary_rate),
@@ -271,7 +394,11 @@ fn finish_when_ready(
         errors[4]
     );
     expected.finished = true;
-    if errors.into_iter().any(|error| error > 2.0e-4) {
+    if errors
+        .into_iter()
+        .chain(line_errors)
+        .any(|error| error > 2.0e-4)
+    {
         expected.failed = true;
         exit.write(AppExit::error());
     } else {
@@ -281,4 +408,12 @@ fn finish_when_ready(
 
 fn relative_error(actual: f64, expected: f64) -> f64 {
     (actual - expected).abs() / expected.abs().max(1.0e-8)
+}
+
+fn gcd(left: u64, right: u64) -> u64 {
+    if right == 0 {
+        left
+    } else {
+        gcd(right, left % right)
+    }
 }

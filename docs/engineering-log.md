@@ -5,6 +5,27 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-21 — Temporal line probes
+
+- Line probes now compile against a time-driven generation. Each sample
+  reconstructs through the same shader block the point recorder uses, so a
+  travelling drive is resolved at the element's own samples on a line exactly
+  as at a point, and a sample without temporal addresses reports a gap instead
+  of being read with fixed coefficients.
+- The point and line recorders no longer carry separate installers for the
+  fixed and temporal operators. One stencil source builds either record, which
+  removed a duplicated point installer and made the line variant a few lines
+  rather than a copy of sixty.
+- Extended the hidden consumer gate with a five-sample slanted interior line,
+  its cadence aligned with the point recorder's so both land their last sample
+  on the compared state. On Apple M1 Max / Metal over 2,214 Q, 4,182 b and 20
+  steps, the worst relative f64-oracle errors across the line were `3.946e-7`
+  primary, `1.108e-6` complementary magnitude, `7.227e-7` energy density and
+  `1.855e-6` normal flow. The point probe in the same run was `8.836e-8`,
+  `9.016e-6` rate, `6.812e-8`, `6.750e-8` flow and `1.273e-7` energy.
+- Formatting, strict workspace Clippy, the workspace suite and a native release
+  build pass. Next: temporal area probes.
+
 ## 2026-09-21 — Consumers invert where the solver owns an inverse
 
 - Fixed the evaluation order every diagnostic consumer uses, before the rest of
@@ -40,11 +61,14 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   them, so copying them into a stencil cannot go stale the way a copied law
   value would.
 - Re-ran the temporal point gate on Apple M1 Max / Metal over 2,214 Q and 4,182
-  b. Relative f64-oracle errors are `1.256e-8` primary, `2.866e-6` rate,
-  `1.142e-7` complementary, `1.427e-10` flow and `5.778e-8` energy. Flow
-  improved three orders of magnitude from `1.31e-7`: both sides now read each
-  sample's own stored phase instead of interpolating it independently in f64
-  and f32. Energy is unchanged because it still uses the probe-point factor.
+  b. At the original 16 steps the relative f64-oracle errors are `1.256e-8`
+  primary, `2.866e-6` rate, `1.142e-7` complementary, `1.427e-10` flow and
+  `5.778e-8` energy, against `1.26e-8`, `2.87e-6`, `1.14e-7`, `1.31e-7` and
+  `5.78e-8` before. Do not read the flow figure as an improvement: at 20 steps
+  the same build gives `6.750e-8`, so that one value was a near-cancellation in
+  that fixture rather than a systematic gain. Agreement is unchanged in
+  magnitude, which is the expected result for a reordering that is exact on a
+  uniform linear element.
 - Formatting, strict workspace Clippy, the 727-pass workspace suite with the one
   historical ignored reproducer, and a native release build pass. Next in the
   diagnostic gate: temporal line probes, then temporal area probes.
