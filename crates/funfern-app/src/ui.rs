@@ -43,11 +43,7 @@ mod draw_tools;
 mod events;
 mod exposure;
 
-use exposure::{
-    AutoExposure, FIELD_EXPOSURE_QUANTILE, VECTOR_DC_REJECTION_RATE,
-    VECTOR_OVERLAY_READBACK_TIMEOUT, VECTOR_OVERLAY_VISIBILITY_CUTOFF, exposure_level, field_scale,
-    vector_arrow_length,
-};
+use exposure::*;
 mod gesture;
 mod gizmo;
 mod input;
@@ -55,10 +51,7 @@ mod inspectors;
 mod materials;
 mod pacing;
 
-use pacing::{
-    TIME_STEP_HYSTERESIS, canonical_steps_withheld, hold_rate, paced_time_step, speed_shortfall,
-    steps_for_frame, steps_with_gpu_backpressure,
-};
+use pacing::*;
 mod paint;
 mod panels;
 mod probe_hit;
@@ -73,29 +66,18 @@ mod theme;
 mod viewport;
 mod weld;
 
-use gesture::{
-    DomainDrag, DragGesture, DrawGesture, GizmoScaleAxis, MATERIAL_FRAME_RADIUS,
-    MarqueeContainment, MarqueeOperation, MaterialFrameGizmoHit, MergeAction, PendingMerge,
-    ProbeHit, TransformGizmoHit,
-};
+use gesture::*;
 mod workers;
 
 pub use state::Playground;
 
-use theme::{
-    GOLD, RED, SELECT, TEAL, amr_target_color, face_condition_color, outer_condition_color,
-    overlay_property_color, subdomain_color, waterfall_color,
-};
+use theme::*;
 
-use workers::{
-    AmrIndicatorError, AmrIndicatorJob, BackgroundAmrEvent, BackgroundAmrJob, BackgroundAmrKind,
-    BackgroundAmrResult, BackgroundAmrWorker, BackgroundPreparationEvent,
-    BackgroundPreparationWorker, dispatch_gpu_upload_preparation,
-};
+use workers::*;
 
-use probe_view::{FarFieldTrace, LineProbeQuantity, LineProbeRepresentation, ProbeViewState};
+use probe_view::*;
 
-use events::{EVENT_LOG_ENTRIES, EventEntry, EventSource, event_line};
+use events::*;
 
 const FRAME_HISTORY: usize = 120;
 
@@ -1900,9 +1882,6 @@ pub fn frame(
 
 #[cfg(test)]
 mod tests {
-    use super::exposure::FIELD_EXPOSURE_GAIN;
-    use super::pacing::PACING_FRAME_SECONDS;
-    use super::theme::{field_color, field_color_over_overlay};
     use super::*;
     use crate::material_overlay::MaterialProperty;
     use crate::wave_gpu::MAX_STEPS_PER_FRAME;
