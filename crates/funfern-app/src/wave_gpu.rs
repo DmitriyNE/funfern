@@ -33,7 +33,7 @@ use funfern_core::{
     GRID_SCALE_FILTER_STRENGTH, MAX_VOLUME_SOURCES, OuterBoundaryConditions, PhysicsModel, Point2,
     PointSource, QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil,
     QuadraticTransferMap, QuadraticWaveOperator, QuadraticWaveState, RegionId, TimeSignal, TriMesh,
-    canonical_area_quadrature, source_ramp_seconds,
+    canonical_area_contribution, source_ramp_seconds,
 };
 
 use crate::canonical_gpu::{
@@ -43,6 +43,8 @@ use crate::canonical_gpu::{
 use crate::paced_readback::{PacedReadback, PacedReadbackPlugin};
 
 const WORKGROUP_SIZE: u32 = 128;
+/// Independent complementary flux samples per enriched-quadratic element.
+const COMPLEMENTARY_SAMPLES: usize = 6;
 pub const MAX_POINT_PROBES: usize = 16;
 const PROBE_RING_FRAMES: usize = 2048;
 pub const MAX_CURVE_PROBE_POINTS: usize = 512;
@@ -57,11 +59,16 @@ pub const MAX_VECTOR_OVERLAY_SAMPLES: usize = 16_384;
 const WAVE_STORAGE_BINDINGS: usize = 8;
 const TRANSFER_STORAGE_BINDINGS: usize = 8;
 const AREA_PROBE_STORAGE_BINDINGS: usize = 7;
+/// The canonical area recorder is at the portable limit, which is why it
+/// carries per-sample constitutive data in its contributions rather than
+/// binding the law tables the point-family shaders read.
+const CANONICAL_AREA_PROBE_STORAGE_BINDINGS: usize = 8;
 const WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT: usize = 8;
 const _: () = {
     assert!(WAVE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
     assert!(TRANSFER_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
     assert!(AREA_PROBE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
+    assert!(CANONICAL_AREA_PROBE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
 };
 /// Steps encoded per rendered frame. The host paces its own requests with the
 /// same bound so the requested and completed counters cannot diverge without
@@ -3085,8 +3092,14 @@ struct GpuFarFieldControl {
 }
 
 /// Direct-state point reconstruction. Primary weights act on `Q / M`; the
-/// complementary weights reconstruct the six independent quadrature samples
-/// belonging to one element.
+/// complementary weights interpolate the physical field recovered at the six
+/// independent quadrature samples belonging to one element.
+///
+/// `reference_inverse.yzw` is the *forward* coefficient at the probe point,
+/// used only for the energy density. The inverses live per sample, because
+/// that is where the solver owns one. These base tensors are immutable for
+/// the life of a generation, unlike the law records the temporal words
+/// address, so holding them here cannot go stale.
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuCanonicalPointStencil {
     nodes_a: UVec4,
@@ -3098,6 +3111,9 @@ struct GpuCanonicalPointStencil {
     sample_valid: UVec4,
     reference_inverse: Vec4,
     orientation: Vec4,
+    /// `xyz` is the constitutive inverse at sample `i`; `w` is unused here and
+    /// carries the integration weight in the area contribution.
+    sample_inverse: [Vec4; COMPLEMENTARY_SAMPLES],
     temporal_primary_a: UVec4,
     temporal_primary_b: UVec4,
     temporal_complementary: UVec4,
@@ -3109,13 +3125,15 @@ struct GpuCanonicalCurveStencil {
     normal_stride_valid: Vec4,
 }
 
+/// No constitutive coefficient: field statistics are moments of the
+/// interpolated fields, and the energy comes from the parent element's
+/// canonical terms below.
 #[derive(Clone, Copy, Default, ShaderType)]
 struct GpuCanonicalAreaQuadrature {
     primary_a: Vec4,
     primary_b: Vec4,
     complementary_a: Vec4,
     complementary_b: Vec4,
-    reference_inverse: Vec4,
     weight: Vec4,
 }
 
@@ -3124,6 +3142,13 @@ struct GpuCanonicalAreaContribution {
     nodes_a: UVec4,
     nodes_b: UVec4,
     sample_valid: UVec4,
+    /// `xyz` is the constitutive inverse at sample `i` of the parent element,
+    /// `w` its integration weight. Shared by all twelve quadrature points.
+    sample_inverse: [Vec4; COMPLEMENTARY_SAMPLES],
+    /// Each local node's share of its own lumped mass, locals 0-3 then 4-6,
+    /// with the piece's covered fraction of its parent in the last lane.
+    node_shares_a: Vec4,
+    node_shares_b: Vec4,
     quadrature: [GpuCanonicalAreaQuadrature; 12],
 }
 
@@ -3166,11 +3191,15 @@ fn gpu_canonical_point_stencil(stencil: Option<CanonicalPointStencil>) -> GpuCan
         sample_valid: UVec4::new(stencil.complementary_samples[0], 1, 0, 0),
         reference_inverse: Vec4::new(
             stencil.primary_reference as f32,
-            stencil.complementary_inverse.xx as f32,
-            stencil.complementary_inverse.xy as f32,
-            stencil.complementary_inverse.yy as f32,
+            stencil.complementary_reference.xx as f32,
+            stencil.complementary_reference.xy as f32,
+            stencil.complementary_reference.yy as f32,
         ),
         orientation: Vec4::new(stencil.orientation as f32, 0.0, 0.0, 0.0),
+        sample_inverse: std::array::from_fn(|local| {
+            let tensor = stencil.sample_inverses[local];
+            Vec4::new(tensor.xx as f32, tensor.xy as f32, tensor.yy as f32, 0.0)
+        }),
         temporal_primary_a: UVec4::ZERO,
         temporal_primary_b: UVec4::ZERO,
         temporal_complementary: UVec4::ZERO,
@@ -3256,8 +3285,9 @@ fn gpu_canonical_area_contribution(
     element: QuadraticAreaElement,
     operator: &CanonicalWaveOperator,
 ) -> Result<GpuCanonicalAreaContribution, String> {
-    let quadrature = canonical_area_quadrature(element, operator)
+    let contribution = canonical_area_contribution(element, operator)
         .map_err(|error| format!("Canonical area reconstruction failed: {error}"))?;
+    let shares = contribution.node_mass_shares.map(|value| value as f32);
     Ok(GpuCanonicalAreaContribution {
         nodes_a: UVec4::new(
             element.nodes[0],
@@ -3266,8 +3296,24 @@ fn gpu_canonical_area_contribution(
             element.nodes[3],
         ),
         nodes_b: UVec4::new(element.nodes[4], element.nodes[5], element.nodes[6], 0),
-        sample_valid: UVec4::new(element.element * 6, 1, 0, 0),
-        quadrature: quadrature.map(|point| {
+        sample_valid: UVec4::new(element.element * COMPLEMENTARY_SAMPLES as u32, 1, 0, 0),
+        sample_inverse: std::array::from_fn(|local| {
+            let tensor = contribution.sample_inverses[local];
+            Vec4::new(
+                tensor.xx as f32,
+                tensor.xy as f32,
+                tensor.yy as f32,
+                contribution.sample_weights[local] as f32,
+            )
+        }),
+        node_shares_a: Vec4::from_array([shares[0], shares[1], shares[2], shares[3]]),
+        node_shares_b: Vec4::from_array([
+            shares[4],
+            shares[5],
+            shares[6],
+            contribution.covered_fraction as f32,
+        ]),
+        quadrature: contribution.quadrature.map(|point| {
             let primary = point.primary_weights.map(|value| value as f32);
             let complementary = point.complementary_weights.map(|value| value as f32);
             GpuCanonicalAreaQuadrature {
@@ -3280,12 +3326,6 @@ fn gpu_canonical_area_contribution(
                     complementary[3],
                 ]),
                 complementary_b: Vec4::from_array([complementary[4], complementary[5], 0.0, 0.0]),
-                reference_inverse: Vec4::new(
-                    point.primary_reference as f32,
-                    point.complementary_inverse.xx as f32,
-                    point.complementary_inverse.xy as f32,
-                    point.complementary_inverse.yy as f32,
-                ),
                 weight: Vec4::new(point.physical_weight as f32, 0.0, 0.0, 0.0),
             }
         }),
@@ -4008,6 +4048,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<Vec<GpuCanonicalCurveStencil>>(false),
                 storage_buffer_read_only::<GpuProbeControl>(false),
                 storage_buffer::<Vec<GpuCurveProbeSample>>(false),
+                storage_buffer_read_only::<Vec<GpuCanonicalTableWord>>(false),
             ),
         ),
     );
@@ -4526,10 +4567,11 @@ fn prepare_curve_probe_bind_group(
         else {
             return;
         };
-        let (Some(canonical_control), Some(state), Some(nodes)) = (
+        let (Some(canonical_control), Some(state), Some(nodes), Some(tables)) = (
             gpu_buffers.get(&canonical.control),
             gpu_buffers.get(&canonical.state),
             gpu_buffers.get(&canonical.nodes),
+            gpu_buffers.get(&canonical.tables),
         ) else {
             return;
         };
@@ -4543,6 +4585,7 @@ fn prepare_curve_probe_bind_group(
                 stencils.buffer.as_entire_buffer_binding(),
                 control.buffer.as_entire_buffer_binding(),
                 output.buffer.as_entire_buffer_binding(),
+                tables.buffer.as_entire_buffer_binding(),
             )),
         )
     } else {
@@ -5549,14 +5592,30 @@ mod tests {
     }
 
     #[test]
+    fn shader_binding_counts_match_their_declared_budgets() {
+        let count = |source: &str| source.matches("@group(0) @binding").count();
+        assert_eq!(
+            count(include_str!("area_probe.wgsl")),
+            AREA_PROBE_STORAGE_BINDINGS
+        );
+        assert_eq!(
+            count(include_str!("canonical_area_probe.wgsl")),
+            CANONICAL_AREA_PROBE_STORAGE_BINDINGS
+        );
+        assert_eq!(
+            count(include_str!("canonical_probe.wgsl")),
+            count(include_str!("canonical_curve_probe.wgsl")),
+            "the point-family shaders share one bind-group shape"
+        );
+    }
+
+    #[test]
     fn canonical_probe_shaders_consume_direct_accepted_state() {
         let point = include_str!("canonical_probe.wgsl");
         assert!(point.contains("if !temporal_enabled() { return nodes[node].mass_loss.y; }"));
-        assert!(point.contains("accepted_q(a.x) * primary_inverse_mass(a.x, control.clock_f32.y)"));
+        assert!(point.contains("accepted_q(a.x) * primary_inverse_mass(a.x, local_time)"));
         assert!(point.contains("previous_q(a.x) * primary_inverse_mass(a.x, previous_time)"));
         assert!(point.contains("return select(value.xy, value.zw"));
-        assert!(point.contains("dot(flux, complement)"));
-        assert!(point.contains("orientation.x * primary.x"));
         assert!(point.contains("fn sample_vector_overlay"));
         assert!(point.contains("output[sample].primary = vec4<f32>(complement, flow)"));
         assert!(point.contains("vec4<u32>(control.clock_u32.w, 1u,"));
@@ -5573,6 +5632,57 @@ mod tests {
         assert!(area.contains("fn reduce_area_probes"));
         assert!(area.contains("weight * dot(complement, complement)"));
         assert!(area.contains("total_energy / covered_area"));
+    }
+
+    fn shared_reconstruction_block(source: &str) -> &str {
+        let start = source
+            .find("// ---- shared canonical point reconstruction ----")
+            .expect("the shared block opens");
+        let end_marker = "// ---- end shared canonical point reconstruction ----";
+        let end = source[start..]
+            .find(end_marker)
+            .expect("the shared block closes")
+            + start
+            + end_marker.len();
+        &source[start..end]
+    }
+
+    /// Point and line consumers must reconstruct fields with exactly the same
+    /// text. A consumer that drifts from its neighbours does not fail; it
+    /// reports a plausible wrong number, which is far more expensive to find.
+    #[test]
+    fn point_and_curve_consumers_share_one_reconstruction_block() {
+        let point = shared_reconstruction_block(include_str!("canonical_probe.wgsl"));
+        let curve = shared_reconstruction_block(include_str!("canonical_curve_probe.wgsl"));
+        assert_eq!(point, curve);
+        assert!(point.contains("fn physical_complement"));
+        assert!(point.contains("fn sample_temporal_factor"));
+        assert!(point.len() > 4_000, "the block lost its contents");
+    }
+
+    /// Every consumer recovers the physical complementary field at the
+    /// element's own samples and interpolates that, rather than inverting once
+    /// at an interpolated flux. The area shader cannot share the text above,
+    /// so its arithmetic is pinned here instead.
+    #[test]
+    fn consumers_invert_at_solver_samples_before_interpolating() {
+        let point = include_str!("canonical_probe.wgsl");
+        assert!(point.contains(
+            "let recovered = apply_symmetric(stencil.sample_inverse[local].xyz, flux[local])"
+        ));
+        assert!(point.contains("/ sample_temporal_factor(stencil, local, local_time)"));
+        assert!(
+            point.contains("dot(field, apply_symmetric(stencil.reference_inverse.yzw, field))")
+        );
+
+        let area = include_str!("canonical_area_probe.wgsl");
+        assert!(area.contains("contribution.sample_inverse[local].xyz, accepted_b(start + local)"));
+        // Canonical energy: lumped nodal shares plus the samples' own energies,
+        // scaled by the piece's covered fraction of its parent.
+        assert!(area.contains("accumulated.w = shares_b.w * energy;"));
+        assert!(area.contains("0.5 * contribution.sample_inverse[local].w"));
+        // The area quadrature carries no material law at all now.
+        assert!(!area.contains("reference_inverse"));
     }
 
     #[test]

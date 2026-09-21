@@ -264,15 +264,10 @@ pub fn canonical_indicator_supplement(
                 .complementary_inverse
                 .apply(snapshot.complementary_flux[start + sample_index]);
             let defect = physical - recovered;
-            let determinant = sample.complementary_inverse.determinant();
-            if !determinant.is_finite() || determinant <= 0.0 {
-                return Err(WaveError::InvalidState);
-            }
-            let reference = crate::SymmetricTensor2::new(
-                sample.complementary_inverse.yy / determinant,
-                -sample.complementary_inverse.xy / determinant,
-                sample.complementary_inverse.xx / determinant,
-            );
+            let reference = sample
+                .complementary_inverse
+                .inverse()
+                .ok_or(WaveError::InvalidState)?;
             element_complementary_recovery[element] +=
                 omega * omega * sample.integration_weight * defect.dot(reference.apply(defect));
         }

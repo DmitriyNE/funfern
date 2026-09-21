@@ -1070,18 +1070,33 @@ respectively. The repeated-filter b bound is deliberately separate from the
 single-event bound because five-pass f32 roundoff accumulates. AMR, diagnostic,
 supported-boundary composition and incremental-cost gates are still open.
 
-The diagnostic gate has one completed checkpoint, but is not closed. The f64
-temporal point contract now reconstructs current `Q/M(t)`, previous
-`Q/M(t-dt)`, the current physical complementary field, endpoint energy and
-Poynting flow, evaluating travelling modulation at the actual probe point. The
-production point-recorder stencil stores addresses of the authoritative solver
-coefficient records rather than copied law values, so same-layout table patches
-cannot make the consumer stale. A hidden Apple M1 Max / Metal run over 2,214 Q,
-4,182 b and 16 steps matched the f64 point oracle to `1.26e-8` in the primary
-field, `2.87e-6` in its rate, `1.14e-7` in complementary magnitude, `1.31e-7`
-in flow and `5.78e-8` in energy. Temporal vector overlays, line/area probes,
-far-field exterior policy, temporal-work accounting and event-boundary consumer
-fixtures remain open alongside AMR, supported boundaries and incremental cost.
+The diagnostic gate has two completed checkpoints, but is not closed. The f64
+temporal point contract reconstructs current `Q/M(t)`, previous `Q/M(t-dt)`,
+the current physical complementary field, endpoint energy and Poynting flow.
+The production point-recorder stencil stores addresses of the authoritative
+solver coefficient records rather than copied law values, so same-layout table
+patches cannot make the consumer stale.
+
+Every consumer's evaluation order was then corrected before the remaining
+diagnostics were built on it. A constitutive inverse is applied only where the
+solver owns one, at the assembled nodal map and at an element's own six
+complementary samples; the recovered physical fields are interpolated to the
+reported point, where densities and flow use forward coefficients. The previous
+order, interpolating flux and inverting once at the report point, is identical
+for a uniform linear element but invents an evaluation site the solver does not
+own: it already differs across an element under a travelling drive, and a Stage
+8 nonlinear law could only serve it with an extra uncached bracketed solve per
+reported point. Area probes correspondingly report the canonical decomposition
+of the solver's own energy, so a probe covering every face closes against the
+accounting lanes, while field statistics keep their smooth quadrature rule.
+
+After that correction the hidden Apple M1 Max / Metal point run over 2,214 Q,
+4,182 b and 16 steps matched the f64 point oracle to `1.256e-8` in the primary
+field, `2.866e-6` in its rate, `1.142e-7` in complementary magnitude,
+`1.427e-10` in flow and `5.778e-8` in energy. Temporal vector overlays,
+line/area probes, far-field exterior policy, temporal-work accounting and
+event-boundary consumer fixtures remain open alongside AMR, supported
+boundaries and incremental cost.
 
 ## 13. Verification and acceptance
 

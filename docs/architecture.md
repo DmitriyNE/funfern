@@ -366,7 +366,21 @@ semantic variants to canonical prescribed/free ownership before numerical work.
 The production solver stores integrated nodal primary flux `Q` and an independent
 two-component complementary flux `b` at six quadrature samples per element. A
 consumer obtains `u=Q/M`, evaluates the physical complementary field `c=B^-1 b`,
-and uses `orientation*u*R*c` for directed energy flow. Mechanical, TM and TE are
+and uses `orientation*u*R*c` for directed energy flow.
+
+Where each of those is evaluated is part of the contract, not an implementation
+detail. A constitutive inverse is applied only where the solver owns one: the
+assembled nodal map at a node, and the element's own six samples for `b`. The
+recovered physical fields are then interpolated to wherever a consumer reports
+them, and densities and flow use forward coefficients at that point. Consumers
+originally interpolated `b` first and inverted once at the report point, which
+is identical for a uniform linear element and cheaper. It was replaced because
+it invents a constitutive evaluation site the solver does not have: under a
+travelling drive the two orders differ across one element, and a nonlinear law
+would need an extra uncached bracketed solve per reported point. The point,
+line, area and arrow consumers therefore carry the element's per-sample
+inverses, and the two point-family shaders share one reconstruction block that
+a test holds byte-identical. Mechanical, TM and TE are
 presentations of this same state. No skin reconstructs a transverse field from a
 bulk potential or inverse derivative, so stationary complementary modes remain
 part of the physical state across handoff and remain visible to direct probes and diagnostics.
@@ -1147,6 +1161,17 @@ ring rather than mesh density. The recorder runs at most 120 samples per simulat
 second and limits one compiled set to 200,000 element contributions. CPU and GPU
 paths report mean and RMS primary field, mean energy density, total energy, covered
 area, geometric coverage and RMS in-plane complementary-field magnitude.
+
+Field statistics come from the smooth twelve-point rule, but the reported energy
+does not. It is the solver's own discrete energy restricted to the covered
+elements: each node's lumped energy apportioned by that element's share of the
+node's mass, plus the element's sample energies, scaled by the piece's covered
+fraction of its parent. A probe covering every face therefore reports exactly
+the bulk energy in the diagnostics panel and the accounting lanes, which an
+integral of a pointwise density cannot do, because the primary energy the solver
+conserves is mass-lumped. The price is that a partly covered element contributes
+in proportion to its area rather than exactly, which shows only at the clipped
+rim of a disk.
 Definitions and host histories survive ordinary
 solver handoffs; stencils rebuild for each committed mesh.
 

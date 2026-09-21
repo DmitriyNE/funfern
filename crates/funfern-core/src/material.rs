@@ -329,6 +329,20 @@ impl SymmetricTensor2 {
         self.xx * self.yy - self.xy * self.xy
     }
 
+    /// The inverse of a finite positive-definite tensor. A constitutive
+    /// coefficient and its inverse are both exact data in this design, so the
+    /// same arithmetic is shared rather than rewritten at each use.
+    pub fn inverse(self) -> Option<Self> {
+        let determinant = self.determinant();
+        self.finite_spd().then(|| {
+            Self::new(
+                self.yy / determinant,
+                -self.xy / determinant,
+                self.xx / determinant,
+            )
+        })
+    }
+
     pub fn eigenvalues(self) -> [f64; 2] {
         let mean = 0.5 * (self.xx + self.yy);
         let radius = (0.25 * (self.xx - self.yy).powi(2) + self.xy * self.xy).sqrt();

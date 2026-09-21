@@ -3550,14 +3550,7 @@ fn rotate_tensor(values: DirectionalWaveCoefficients) -> SymmetricTensor2 {
 }
 
 fn inverse_tensor(tensor: SymmetricTensor2) -> Option<SymmetricTensor2> {
-    let determinant = tensor.determinant();
-    (tensor.finite_spd() && determinant.is_finite() && determinant > 0.0).then(|| {
-        SymmetricTensor2::new(
-            tensor.yy / determinant,
-            -tensor.xy / determinant,
-            tensor.xx / determinant,
-        )
-    })
+    tensor.inverse()
 }
 
 fn validate_time_step(operator: &CanonicalWaveOperator, time_step: f64) -> Result<(), WaveError> {

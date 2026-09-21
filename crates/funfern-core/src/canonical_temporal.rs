@@ -280,6 +280,10 @@ impl CanonicalTemporalCoefficientSample {
 pub struct CanonicalTemporalPointStencil {
     fixed: CanonicalPointStencil,
     primary: CanonicalTemporalCoefficientSample,
+    /// The law at each of the element's own samples, where the constitutive
+    /// inverse is applied before the physical field is interpolated.
+    sample_coefficients: [CanonicalTemporalCoefficientSample; 6],
+    /// The same law at the probe point, for the pointwise energy density.
     complementary: CanonicalTemporalCoefficientSample,
 }
 
@@ -327,6 +331,8 @@ impl CanonicalTemporalPointStencil {
             r: x.hypot(y),
             theta: y.atan2(x),
         };
+        let sample_coefficients: [CanonicalTemporalCoefficientSample; 6] =
+            std::array::from_fn(|local| samples[local].coefficient.into());
         let mut complementary: CanonicalTemporalCoefficientSample = samples[0].coefficient.into();
         complementary.coordinates = coordinates;
         let mut primary: CanonicalTemporalCoefficientSample = operator
@@ -345,6 +351,7 @@ impl CanonicalTemporalPointStencil {
         Ok(Self {
             fixed,
             primary,
+            sample_coefficients,
             complementary,
         })
     }
@@ -363,6 +370,38 @@ impl CanonicalTemporalPointStencil {
 
     pub fn complementary_coefficient(&self) -> CanonicalTemporalCoefficientSample {
         self.complementary
+    }
+
+    pub fn sample_coefficients(&self) -> [CanonicalTemporalCoefficientSample; 6] {
+        self.sample_coefficients
+    }
+
+    /// The physical complementary field at the probe point. Each sample is
+    /// divided by its own instantaneous factor before interpolation, so a
+    /// travelling modulation is resolved at the samples rather than smeared
+    /// through one factor at the probe.
+    pub fn complementary_field(
+        &self,
+        complementary_flux: &[Point2],
+        time: f64,
+        runtime: &CanonicalMaterialRuntimeState,
+    ) -> Result<Point2, WaveError> {
+        let mut field = Point2::default();
+        for local in 0..self.fixed.complementary_samples.len() {
+            let sample = self.fixed.complementary_samples[local] as usize;
+            let Some(flux) = complementary_flux.get(sample) else {
+                return Err(WaveError::InvalidState);
+            };
+            let factor = self.sample_coefficients[local].factor_at(time, runtime)?;
+            field = field
+                + self.fixed.sample_inverses[local].apply(*flux) / factor
+                    * self.fixed.complementary_weights[local];
+        }
+        if field.finite() {
+            Ok(field)
+        } else {
+            Err(WaveError::InvalidState)
+        }
     }
 
     /// Samples an ordinary completed step. `previous_primary_flux` belongs to
@@ -396,20 +435,16 @@ impl CanonicalTemporalPointStencil {
             previous_primary += self.fixed.primary_weights[local] * previous;
         }
         let primary_rate = (primary - previous_primary) / time_step;
-        let mut flux = Point2::default();
-        for local in 0..self.fixed.complementary_samples.len() {
-            let sample = self.fixed.complementary_samples[local] as usize;
-            let Some(value) = complementary_flux.get(sample) else {
-                return Err(WaveError::InvalidState);
-            };
-            flux = flux + *value * self.fixed.complementary_weights[local];
-        }
+        let complementary = self.complementary_field(complementary_flux, time, runtime)?;
         let primary_factor = self.primary.factor_at(time, runtime)?;
         let complementary_factor = self.complementary.factor_at(time, runtime)?;
-        let complementary = self.fixed.complementary_inverse.apply(flux) / complementary_factor;
         let energy_density = 0.5
             * (self.fixed.primary_reference * primary_factor * primary * primary
-                + flux.dot(complementary));
+                + complementary_factor
+                    * self
+                        .fixed
+                        .complementary_reference
+                        .quadratic_form(complementary));
         let energy_flow =
             Point2::new(-complementary.y, complementary.x) * (self.fixed.orientation * primary);
         if [
@@ -1816,7 +1851,7 @@ mod tests {
     }
 
     #[test]
-    fn temporal_point_consumer_uses_endpoint_mass_and_the_probe_point_law() {
+    fn temporal_point_consumer_inverts_at_the_samples_and_weighs_density_at_the_point() {
         let mut scene = Scene::initial();
         scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
             depth: ScalarField::constant(0.24),
@@ -1895,10 +1930,25 @@ mod tests {
             .complementary_coefficient()
             .factor_at(time, &runtime)
             .unwrap();
-        let expected_complementary = fixed.complementary_inverse.apply(flux) / complementary_factor;
+        // The rule, spelled out: invert at each of the element's own samples,
+        // divide by that sample's own factor, interpolate the physical field,
+        // and only then evaluate the density with the probe point's forward
+        // coefficient.
+        let mut expected_complementary = Point2::default();
+        for local in 0..6 {
+            let factor = stencil.sample_coefficients()[local]
+                .factor_at(time, &runtime)
+                .unwrap();
+            expected_complementary = expected_complementary
+                + fixed.sample_inverses[local].apply(flux) / factor
+                    * fixed.complementary_weights[local];
+        }
         let expected_energy = 0.5
             * (fixed.primary_reference * primary_factor * current_value.powi(2)
-                + flux.dot(expected_complementary));
+                + complementary_factor
+                    * fixed
+                        .complementary_reference
+                        .quadratic_form(expected_complementary));
         assert!((sample.primary - current_value).abs() < 2.0e-12);
         assert!(
             (sample.primary_rate - (current_value - previous_value) / time_step).abs() < 2.0e-12
@@ -1912,6 +1962,76 @@ mod tests {
                 .norm()
                 < 2.0e-12
         );
+    }
+
+    /// The reason the consumers carry per-sample data at all. A travelling
+    /// complementary drive gives each of an element's six samples a different
+    /// instantaneous factor, so inverting at the samples and interpolating the
+    /// physical field is not the same as interpolating the flux and inverting
+    /// once at the probe. Nonlinear laws cannot do the latter at all.
+    #[test]
+    fn travelling_complementary_drive_is_resolved_at_each_sample() {
+        let mut scene = Scene::initial();
+        scene.materials[0].stiffness_law.drive = TimeDrive::TravellingModulation {
+            depth: ScalarField::constant(0.42),
+            frequency_hz: ScalarField::constant(0.7),
+            phase_radians: ScalarField::constant(0.15),
+            wavenumber: ScalarField::constant(9.0),
+            angle_radians: ScalarField::constant(0.3),
+        };
+        let operator = compile(&scene).unwrap();
+        let barycentric = [0.21, 0.37, 0.42];
+        let nodes = operator.base().element_nodes()[0];
+        let quadratic = QuadraticPointStencil {
+            element: 0,
+            barycentric,
+            nodes,
+            value_weights: enriched_quadratic_basis(barycentric),
+            gradient_weights: [Point2::default(); 7],
+            region: BACKGROUND_REGION,
+            mass_density: 1.0,
+            stiffness: SymmetricTensor2::isotropic(1.0),
+        };
+        let stencil = CanonicalTemporalPointStencil::from_quadratic(quadratic, &operator).unwrap();
+        let runtime = operator.initial_runtime();
+        let time = 0.44;
+        let flux = Point2::new(0.27, -0.19);
+        let complementary = vec![flux; operator.base().complementary_degrees_of_freedom()];
+
+        let factors = (0..6)
+            .map(|local| {
+                stencil.sample_coefficients()[local]
+                    .factor_at(time, &runtime)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let spread = factors.iter().copied().fold(f64::MIN, f64::max)
+            - factors.iter().copied().fold(f64::MAX, f64::min);
+        assert!(
+            spread > 0.05,
+            "the fixture must actually vary across the element, got {spread}"
+        );
+
+        let fixed = stencil.fixed();
+        let mut expected = Point2::default();
+        for (local, factor) in factors.iter().enumerate() {
+            expected = expected
+                + fixed.sample_inverses[local].apply(flux) / *factor
+                    * fixed.complementary_weights[local];
+        }
+        let actual = stencil
+            .complementary_field(&complementary, time, &runtime)
+            .unwrap();
+        assert!((actual - expected).norm() < 1.0e-12);
+
+        // The order that a nonlinear law could not serve, kept here only to
+        // show the two answers are genuinely different under modulation.
+        let probe_factor = stencil
+            .complementary_coefficient()
+            .factor_at(time, &runtime)
+            .unwrap();
+        let flux_first = fixed.sample_inverses[0].apply(flux) / probe_factor;
+        assert!((actual - flux_first).norm() > 1.0e-4);
     }
 
     #[test]

@@ -5,6 +5,50 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-21 — Consumers invert where the solver owns an inverse
+
+- Fixed the evaluation order every diagnostic consumer uses, before the rest of
+  the Stage 7 diagnostic gate is built on it. A constitutive inverse is now
+  applied only at the assembled nodal map and at an element's own six
+  complementary samples; the recovered physical fields are interpolated to
+  wherever a consumer reports them, and densities and flow use forward
+  coefficients there. Point, line, area and arrow consumers previously
+  interpolated the flux and inverted once at the report point.
+- The old order is identical for a uniform linear element and cheaper, so this
+  is not a bug fix. It is a prerequisite: it invents a constitutive evaluation
+  site the solver does not own, which under a travelling drive already differs
+  across one element, and which a Stage 8 nonlinear law could only serve with an
+  extra uncached bracketed solve per reported point. A new core test builds a
+  travelling complementary drive whose six per-sample factors span more than
+  0.05 and pins the consumer to the sample-first answer.
+- Area probes now report the solver's own discrete energy over their covered
+  elements: each node's lumped energy apportioned by that element's share of the
+  node's mass, plus the element's sample energies, scaled by the piece's covered
+  fraction. A probe covering every face equals the diagnostics panel's bulk
+  energy to `1e-9` relative, which an integral of a pointwise density cannot do
+  because the conserved primary energy is mass-lumped. Field means and RMS keep
+  the smooth twelve-point rule; a partly covered element contributes in
+  proportion to its area, which shows only at a disk's clipped rim. The area
+  quadrature record consequently carries no material law at all, which removed
+  one packed vector per quadrature point.
+- The point and line shaders now share one reconstruction block held
+  byte-identical by a test, and the line recorder gained the law-table binding
+  it needs for temporal samples. The canonical area recorder is at the portable
+  eight-binding limit, so it carries per-sample constitutive data in its
+  contributions instead; both budgets are now asserted against the shaders. Base
+  constitutive tensors are immutable for a generation and no event rewrites
+  them, so copying them into a stencil cannot go stale the way a copied law
+  value would.
+- Re-ran the temporal point gate on Apple M1 Max / Metal over 2,214 Q and 4,182
+  b. Relative f64-oracle errors are `1.256e-8` primary, `2.866e-6` rate,
+  `1.142e-7` complementary, `1.427e-10` flow and `5.778e-8` energy. Flow
+  improved three orders of magnitude from `1.31e-7`: both sides now read each
+  sample's own stored phase instead of interpolating it independently in f64
+  and f32. Energy is unchanged because it still uses the probe-point factor.
+- Formatting, strict workspace Clippy, the 727-pass workspace suite with the one
+  historical ignored reproducer, and a native release build pass. Next in the
+  diagnostic gate: temporal line probes, then temporal area probes.
+
 ## 2026-09-21 — Temporal point diagnostics use accepted endpoint maps
 
 - Added the first modulation-aware diagnostic subgate: the CPU point contract
