@@ -1,16 +1,24 @@
 //! Work that runs off the UI thread: solver preparation, the AMR indicator,
 //! and the GPU upload compile, with the thread and worker-message plumbing
 //! each target needs.
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+use super::BROWSER_BACKGROUND_POOL_READY;
 use super::PreparedGpuUpload;
 use crate::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuPlan, CanonicalGpuRuntimeTransfer, CanonicalGpuTransferPlan,
 };
+#[cfg(any(
+    not(target_arch = "wasm32"),
+    all(target_arch = "wasm32", feature = "browser-threads")
+))]
 use bevy::platform::time::Instant;
 use funfern_app::topology_runtime::{
     PreparedTopology, TopologyPreparationError, TopologyPreparationJob, TopologyPreparationPhase,
     TopologyPreparationTiming, TopologyToken,
 };
 use funfern_core::*;
+#[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+use std::sync::atomic::Ordering;
 use std::sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, Sender},

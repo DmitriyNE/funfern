@@ -7,10 +7,9 @@ use crate::canonical_gpu::{
 use crate::field_paint::{FieldPaintCallback, FieldPaintEdge, FieldPaintTopology};
 use crate::files::{self, FileEvent, SaveKind};
 use crate::material_overlay::{
-    MaterialOverlay, MaterialOverlayJob, MaterialOverlaySnapshot, MaterialProperty, OverlayKey,
-    OverlayRange,
+    MaterialOverlay, MaterialOverlayJob, MaterialProperty, OverlayKey, OverlayRange,
 };
-use crate::recording::{self, DestinationRequest, RecordingEvent, RecordingSpec, VideoRecorder};
+use crate::recording::{self, DestinationRequest, RecordingEvent, RecordingSpec};
 use crate::wave_gpu::{
     AreaProbeDisplay, AreaProbeInput, AreaProbeRecord, CurveProbeDisplay, CurveProbeInput,
     CurveProbeRecord, FAR_FIELD_DIRECTIONS, FarFieldDisplay, FarFieldHandoff, FarFieldInput,
@@ -31,10 +30,10 @@ use funfern_app::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyDocument, TopologyEditor, TopologyProbeDefinition,
     TopologyProbeTarget, TopologyRemoval, TopologyRemovalTarget, TopologyWeldOutcome,
 };
-use funfern_app::topology_persistence::{self as persistence, TopologyLoadCandidate};
+use funfern_app::topology_persistence::{self as persistence};
 use funfern_app::topology_runtime::{
     PreparedSolverUpdate, PreparedTopology, TopologyPreparationPhase, TopologyPreparationTiming,
-    TopologyProbeCompilation, TopologyProbeStencil, TopologyRuntime, TopologyToken,
+    TopologyProbeCompilation, TopologyProbeStencil, TopologyToken,
 };
 use funfern_app::topology_viewport::{
     AttachmentHit, RigidTransform, SampledTopologyGeometry, ScreenPoint, TopologyHandle,
@@ -42,7 +41,7 @@ use funfern_app::topology_viewport::{
     plan_handle_drag, plan_rigid_transform, selected_span_controls, span_context, weld_hit,
 };
 use funfern_core::*;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
 use std::sync::atomic::AtomicBool;
 #[cfg(not(target_arch = "wasm32"))]
@@ -54,12 +53,13 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::{
     Arc, Mutex,
-    mpsc::{self, Receiver, Sender},
+    mpsc::{self, Receiver},
 };
 
 mod events;
 mod gesture;
 mod probe_view;
+mod state;
 mod theme;
 
 use gesture::{
@@ -68,6 +68,8 @@ use gesture::{
     ProbeHit, TransformGizmoHit,
 };
 mod workers;
+
+pub use state::Playground;
 
 use theme::{
     GOLD, RED, SELECT, TEAL, amr_target_color, face_condition_color, outer_condition_color,
@@ -80,10 +82,7 @@ use workers::{
     BackgroundPreparationWorker, dispatch_gpu_upload_preparation,
 };
 
-use probe_view::{
-    AreaTrace, CurveTrace, FarFieldTrace, LineProbeQuantity, LineProbeRepresentation, ProbeTrace,
-    ProbeViewState,
-};
+use probe_view::{FarFieldTrace, LineProbeQuantity, LineProbeRepresentation, ProbeViewState};
 
 use events::{EVENT_LOG_ENTRIES, EventEntry, EventSource, event_line};
 
@@ -451,440 +450,6 @@ struct VectorAcState {
 struct VectorOverlayAcOwner {
     mesh_revision: u64,
     physics: PhysicsModel,
-}
-
-#[derive(Resource)]
-pub struct Playground {
-    editor: TopologyEditor,
-    runtime: TopologyRuntime,
-    background_preparation: Option<BackgroundPreparationWorker>,
-    background_amr: Option<BackgroundAmrWorker>,
-    selection: TopologySelection,
-    inspector: Option<InspectorPanel>,
-    draw_open: bool,
-    closed_purpose: ClosedPurpose,
-    open_purpose: OpenPurpose,
-    draw: Option<DrawGesture>,
-    drag: Option<DragGesture>,
-    touch_navigation: bool,
-    touch_active: bool,
-    suppress_touch_click: bool,
-    center: Point2,
-    scale: f64,
-    fit: bool,
-    sampled: Option<SampledTopologyGeometry>,
-    sampled_revision: u64,
-    sampled_scale: f64,
-    selected_side: CurveTraceSide,
-    transform_translation: Point2,
-    transform_rotation_degrees: f64,
-    transform_scale: f64,
-    gizmo_pivot: Option<(BTreeSet<TopologySpanTarget>, Point2)>,
-    pending_merge: Option<PendingMerge>,
-    material_selection: MaterialId,
-    region_selection: RegionId,
-    /// Whether a widget held keyboard focus when the previous frame ended. egui
-    /// clears focus on Escape before any app code runs, so the live predicate is
-    /// already false on the one frame where it matters.
-    keyboard_focus_previous: bool,
-    /// Whether the Materials panel lists compiled faces or material regions, and
-    /// which of the two a viewport click picks.
-    subdomain_listing: SubdomainListing,
-    /// Index into `face_assignments` while the panel lists faces.
-    face_selection: usize,
-    material_edit: Option<Material>,
-    material_formula_edits: BTreeMap<(u64, u8), String>,
-    material_formula_errors: BTreeMap<(u64, u8), String>,
-    /// Whether the formula reference is showing. It is a window rather than a
-    /// menu so it stays readable while a formula is being typed.
-    formula_help_open: bool,
-    /// Whether the example gallery is showing. It stays open across a pick, so
-    /// the catalog can be clicked through.
-    examples_open: bool,
-    /// One thumbnail per catalog entry, built lazily and at most one per frame.
-    example_previews: Vec<Option<ExamplePreview>>,
-    /// The catalog entry the document came from, for the gallery's own marker.
-    /// Any other load clears it.
-    example_opened: Option<usize>,
-    material_color_edit: Option<(MaterialId, [u8; 3])>,
-    new_separator_material: MaterialId,
-    mesh_edge: f64,
-    /// The slider produces a value per frame; the rebuild waits for release.
-    mesh_edge_dragging: bool,
-    /// The Remesh button: rebuild at the current resolution even though
-    /// nothing changed, which also leaves an adapted mesh.
-    remesh_requested: bool,
-    requested_edge: f64,
-    requested_revision: Option<u64>,
-    uploading: Option<Uploading>,
-    source_commit: Option<PendingSourceCommit>,
-    gpu_upload_preparation: Option<GpuUploadPreparation>,
-    wave_running: bool,
-    wave_step: bool,
-    reset_requested: bool,
-    /// Set when a whole document is replaced: the next preparation must start
-    /// the field from zero rather than transfer the outgoing scene's into it.
-    /// Separate from `reset_requested` because that one is spent by the GPU
-    /// reset below, which runs earlier in the frame and against the topology
-    /// still active — the scene being replaced. Sharing one flag let the load
-    /// reset the outgoing scene, which then ran on for the seconds its
-    /// replacement took to prepare and handed over a full-amplitude field.
-    fresh_requested: bool,
-    accumulator: f64,
-    sim_time_offset: f64,
-    completed_steps: u64,
-    steps_per_second: f64,
-    /// The best simulated-seconds-per-wall-second seen lately, which is what the
-    /// shortfall note reads. The raw measurement dips whenever a handoff
-    /// withholds stepping inside its window.
-    speed_reached: f64,
-    /// The step the GPU was last uploaded with. Not the active operator's
-    /// recommendation: the speed ceiling can ask for a smaller one, and between
-    /// a speed change and the republish that carries it the two differ.
-    uploaded_time_step: f64,
-    /// The accepted-step total at the previous observation. Ordinary handovers
-    /// preserve it; a fresh install may reset it, so every new generation first
-    /// establishes a baseline before its increments are counted.
-    rate_steps: u64,
-    /// The generation `rate_steps` was read from.
-    rate_generation: u64,
-    /// Steps banked since the window opened, across however many generations.
-    rate_window_steps: u64,
-    rate_started: Instant,
-    pulse_mode: bool,
-    pulse_amplitude: f32,
-    pulse_width: f32,
-    pending_pulse: Option<(Point2, RegionId)>,
-    canonical_event_serial: u32,
-    canonical_event_observed: u32,
-    probe_mode: Option<ProbePlacement>,
-    selected_probe: Option<ProbeId>,
-    probe_windows: BTreeSet<ProbeId>,
-    far_field_window: bool,
-    probe_traces: BTreeMap<ProbeId, ProbeTrace>,
-    probe_views: BTreeMap<ProbeId, ProbeViewState>,
-    probe_status: BTreeMap<ProbeId, String>,
-    probe_metrics: BTreeMap<ProbeId, (f64, bool)>,
-    probe_anchors: BTreeMap<ProbeId, Point2>,
-    probe_metadata_token: Option<(Option<TopologyToken>, u64)>,
-    probe_name_edit: Option<(ProbeId, String)>,
-    probe_history_seconds: f64,
-    far_field_view: ProbeViewState,
-    probe_readback: u64,
-    curve_probe_readback: u64,
-    area_probe_readback: u64,
-    far_field_readback: u64,
-    curve_probe_traces: BTreeMap<ProbeId, CurveTrace>,
-    area_probe_traces: BTreeMap<ProbeId, AreaTrace>,
-    far_field_trace: FarFieldTrace,
-    logo_texture: Option<egui::TextureHandle>,
-    message: String,
-    file_busy: bool,
-    load: Option<TopologyLoadCandidate>,
-    sender: Sender<FileEvent>,
-    receiver: Mutex<Receiver<FileEvent>>,
-    snapshot_state: SnapshotState,
-    video_recorder: VideoRecorder,
-    recording_state: RecordingState,
-    recording_started: Option<Instant>,
-    recording_description: String,
-    recording_dropped_frames: u64,
-    recording_last_requested_slot: Option<u64>,
-    #[cfg(not(target_arch = "wasm32"))]
-    recording_readback_in_flight: Arc<AtomicUsize>,
-    startup_done: bool,
-    autosave_observed: TopologyDocument,
-    autosave_due: Option<Instant>,
-    probe_upload: Option<ProbeUpload>,
-    /// The upload before it, kept because the readback it issued is still in
-    /// flight when the next one is made, and the samples in it are the last of
-    /// the old mesh rather than anything the new one will record again.
-    probe_upload_previous: Option<ProbeUpload>,
-    probe_clock_restarted: bool,
-    /// Skin whose physical labels and observable meanings own the current
-    /// traces. A skin change starts a new history segment rather than joining
-    /// differently named fields into one plot.
-    probe_history_physics: Option<PhysicsModel>,
-    /// Simulated time the far-field ring started recording from, or `None` when
-    /// no recorder is running.
-    far_field_recording_from: Option<f64>,
-    frame_ms: f32,
-    wave_energy: Option<f64>,
-    /// Full-state energy is a diagnostic, not a render input. Recomputing it
-    /// over every canonical node and sample at display rate made large meshes
-    /// consume a main-thread core even when the diagnostics window was closed.
-    energy_readback: u64,
-    energy_updated: Instant,
-    full_snapshot_requested: Instant,
-    viewport_rect: Rect,
-    /// Latest sampling lattice submitted to the GPU. Camera changes are
-    /// coalesced while this revision is in flight instead of continually
-    /// replacing the readback before it can complete.
-    vector_overlay_layout: Option<VectorOverlayLayout>,
-    /// World-space lattice corresponding to the last completed readback. It
-    /// remains drawable while a camera/remesh replacement is in flight, so
-    /// arrows reproject with the view instead of blinking out.
-    vector_overlay_previous_layout: Option<VectorOverlayLayout>,
-    /// Presentation-only DC-blocker state for complementary-field arrows. It
-    /// never feeds the canonical solver or physical consumers.
-    vector_overlay_ac_state: BTreeMap<u32, VectorAcState>,
-    vector_overlay_ac_owner: Option<VectorOverlayAcOwner>,
-    vector_overlay_dc_step: u64,
-    vector_overlay_dc_active: bool,
-    vector_overlay_mode: VectorOverlay,
-    vector_overlay_exposure: AutoExposure,
-    field_exposure: AutoExposure,
-    /// Static field-surface geometry. Egui's ordinary mesh path recopies every
-    /// index every frame; the paint callback keeps this topology on the GPU.
-    field_paint_topology: Option<Arc<FieldPaintTopology>>,
-    /// Reused by the field's quantile so a frame's sample costs no allocation.
-    exposure_scratch: Vec<f64>,
-    /// Wall-clock seconds since the previous frame, which is what the exposures
-    /// release against so they behave the same at any frame rate.
-    frame_delta: f32,
-    material_overlay_job: Option<MaterialOverlayJob>,
-    material_overlay_snapshot: Option<MaterialOverlaySnapshot>,
-    material_overlay_error: Option<String>,
-    amr_enabled: bool,
-    /// Estimated error of the whole field the adaptation aims for, as a
-    /// percentage. Held in the units the control shows so the presets are the
-    /// round numbers they read as.
-    amr_accuracy_percent: f64,
-    amr_elements_per_wavelength: f64,
-    amr_minimum_edge: f64,
-    amr_maximum_edge: f64,
-    grid_scale_filter: bool,
-    amr_status: String,
-    amr_error: Option<String>,
-    amr_last_started: Option<Instant>,
-    amr_last_analyzed_step: Option<u64>,
-    amr_coarsen_streak: u8,
-    amr_indicator_job: Option<AmrIndicatorJob>,
-    amr_indicator_completed: Option<Result<SolutionIndicatorResult, AmrIndicatorError>>,
-    amr_indicator_source: Option<AmrIndicatorSource>,
-    amr_indicator_result: Option<SolutionIndicatorResult>,
-    amr_energy_peak: f64,
-    amr_adaptation_job: Option<MeshAdaptationJob>,
-    amr_adaptation_completed: Option<Result<MeshAdaptationResult, MeshAdaptationError>>,
-    /// Revision of the active mesh the running adaptation started from. The
-    /// job is dropped as soon as that mesh is no longer the active one.
-    amr_adaptation_source: Option<u64>,
-    amr_adaptation_state: Option<MeshAdaptationState>,
-    amr_pending_state: Option<MeshAdaptationState>,
-    amr_report: Option<MeshAdaptationReport>,
-    gpu_status: &'static str,
-    gpu_dispatches: u64,
-    canonical_gpu_bytes: Option<usize>,
-    step_backlog: u64,
-    diagnostics_open: bool,
-    /// What the transient channels said before they were overwritten, newest
-    /// last. Entries are appended when a channel's value changes, which is why
-    /// the last value logged from each is kept beside them.
-    events: VecDeque<EventEntry>,
-    logged_status: Option<String>,
-    logged_preparation: Option<String>,
-    logged_adaptation: Option<String>,
-    /// Repair fallbacks a committed transaction reported, waiting for the next
-    /// frame to stamp them. A fallback is an event rather than a state, so two
-    /// transactions that fall back the same way are two of them.
-    pending_repairs: Vec<String>,
-    /// An error was logged since the diagnostics were last open. Keeps the
-    /// status marker lit for an error that clears itself a frame later.
-    unseen_error: bool,
-    frame_history: VecDeque<f32>,
-    handoff_requested: Option<Instant>,
-    handoff_ready: Option<Instant>,
-    handoff_packed: Option<Instant>,
-    handoff_upload: Option<Instant>,
-    last_handoff: Option<HandoffRecord>,
-    ready: bool,
-}
-
-impl Default for Playground {
-    fn default() -> Self {
-        let document = funfern_app::topology_examples::catalog()[0]
-            .document
-            .clone();
-        let editor = TopologyEditor::from_document(document.clone()).unwrap_or_default();
-        let (sender, receiver) = mpsc::channel();
-        Self {
-            editor,
-            runtime: TopologyRuntime::default(),
-            background_preparation: BackgroundPreparationWorker::spawn(),
-            background_amr: BackgroundAmrWorker::spawn(),
-            selection: TopologySelection::None,
-            inspector: Some(InspectorPanel::Edit),
-            draw_open: false,
-            closed_purpose: ClosedPurpose::Subdomain,
-            open_purpose: OpenPurpose::Baffle,
-            draw: None,
-            drag: None,
-            touch_navigation: false,
-            touch_active: false,
-            suppress_touch_click: false,
-            center: Point2::default(),
-            scale: 300.0,
-            fit: true,
-            sampled: None,
-            sampled_revision: u64::MAX,
-            sampled_scale: 0.0,
-            selected_side: CurveTraceSide::Left,
-            transform_translation: Point2::default(),
-            transform_rotation_degrees: 0.0,
-            transform_scale: 1.0,
-            gizmo_pivot: None,
-            pending_merge: None,
-            material_selection: DEFAULT_MATERIAL,
-            region_selection: BACKGROUND_REGION,
-            keyboard_focus_previous: false,
-            subdomain_listing: SubdomainListing::Regions,
-            face_selection: 0,
-            material_edit: None,
-            material_formula_edits: BTreeMap::new(),
-            material_formula_errors: BTreeMap::new(),
-            formula_help_open: false,
-            examples_open: false,
-            example_previews: funfern_app::topology_examples::catalog()
-                .iter()
-                .map(|_| None)
-                .collect(),
-            example_opened: Some(0),
-            material_color_edit: None,
-            new_separator_material: DEFAULT_MATERIAL,
-            mesh_edge: 0.08,
-            mesh_edge_dragging: false,
-            remesh_requested: false,
-            requested_edge: f64::NAN,
-            requested_revision: None,
-            uploading: None,
-            source_commit: None,
-            gpu_upload_preparation: None,
-            wave_running: true,
-            wave_step: false,
-            reset_requested: false,
-            fresh_requested: false,
-            accumulator: 0.0,
-            sim_time_offset: 0.0,
-            completed_steps: 0,
-            steps_per_second: 0.0,
-            speed_reached: 0.0,
-            uploaded_time_step: 0.0,
-            rate_steps: 0,
-            rate_generation: 0,
-            rate_window_steps: 0,
-            rate_started: Instant::now(),
-            pulse_mode: false,
-            pulse_amplitude: 1.0,
-            pulse_width: 0.06,
-            pending_pulse: None,
-            canonical_event_serial: 0,
-            canonical_event_observed: 0,
-            probe_mode: None,
-            selected_probe: None,
-            probe_windows: BTreeSet::new(),
-            far_field_window: false,
-            probe_traces: BTreeMap::new(),
-            probe_views: BTreeMap::new(),
-            probe_status: BTreeMap::new(),
-            probe_metrics: BTreeMap::new(),
-            probe_anchors: BTreeMap::new(),
-            probe_metadata_token: None,
-            probe_name_edit: None,
-            probe_history_seconds: 10.0,
-            far_field_view: ProbeViewState::new(10.0),
-            probe_readback: 0,
-            curve_probe_readback: 0,
-            area_probe_readback: 0,
-            far_field_readback: 0,
-            curve_probe_traces: BTreeMap::new(),
-            area_probe_traces: BTreeMap::new(),
-            far_field_trace: FarFieldTrace::default(),
-            logo_texture: None,
-            message: String::new(),
-            file_busy: false,
-            load: None,
-            sender,
-            receiver: Mutex::new(receiver),
-            snapshot_state: SnapshotState::Idle,
-            video_recorder: VideoRecorder::default(),
-            recording_state: RecordingState::Idle,
-            recording_started: None,
-            recording_description: String::new(),
-            recording_dropped_frames: 0,
-            recording_last_requested_slot: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            recording_readback_in_flight: Arc::new(AtomicUsize::new(0)),
-            startup_done: false,
-            autosave_observed: document,
-            autosave_due: None,
-            probe_upload: None,
-            probe_upload_previous: None,
-            probe_clock_restarted: true,
-            probe_history_physics: None,
-            far_field_recording_from: None,
-            frame_ms: 16.0,
-            wave_energy: None,
-            energy_readback: 0,
-            energy_updated: Instant::now(),
-            full_snapshot_requested: Instant::now(),
-            viewport_rect: Rect::NOTHING,
-            vector_overlay_layout: None,
-            vector_overlay_previous_layout: None,
-            vector_overlay_ac_state: BTreeMap::new(),
-            vector_overlay_ac_owner: None,
-            vector_overlay_dc_step: u64::MAX,
-            vector_overlay_dc_active: false,
-            vector_overlay_mode: VectorOverlay::Off,
-            vector_overlay_exposure: AutoExposure::default(),
-            field_exposure: AutoExposure::default(),
-            field_paint_topology: None,
-            exposure_scratch: Vec::new(),
-            frame_delta: 0.0,
-            material_overlay_job: None,
-            material_overlay_snapshot: None,
-            material_overlay_error: None,
-            amr_enabled: true,
-            amr_accuracy_percent: AMR_ACCURACY_PRESETS[1].0,
-            amr_elements_per_wavelength: 6.0,
-            amr_minimum_edge: 0.02,
-            amr_maximum_edge: 0.16,
-            grid_scale_filter: true,
-            amr_status: "waiting for solution".into(),
-            amr_error: None,
-            amr_last_started: None,
-            amr_last_analyzed_step: None,
-            amr_coarsen_streak: 0,
-            amr_indicator_job: None,
-            amr_indicator_completed: None,
-            amr_indicator_source: None,
-            amr_indicator_result: None,
-            amr_energy_peak: 0.0,
-            amr_adaptation_job: None,
-            amr_adaptation_completed: None,
-            amr_adaptation_source: None,
-            amr_adaptation_state: None,
-            amr_pending_state: None,
-            amr_report: None,
-            gpu_status: "loading",
-            gpu_dispatches: 0,
-            canonical_gpu_bytes: None,
-            step_backlog: 0,
-            diagnostics_open: false,
-            events: VecDeque::with_capacity(EVENT_LOG_ENTRIES),
-            logged_status: None,
-            logged_preparation: None,
-            logged_adaptation: None,
-            pending_repairs: vec![],
-            unseen_error: false,
-            frame_history: VecDeque::with_capacity(FRAME_HISTORY),
-            handoff_requested: None,
-            handoff_ready: None,
-            handoff_packed: None,
-            handoff_upload: None,
-            last_handoff: None,
-            ready: false,
-        }
-    }
 }
 
 impl Playground {
