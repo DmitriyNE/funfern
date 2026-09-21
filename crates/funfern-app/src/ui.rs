@@ -59,12 +59,15 @@ use std::sync::{
     mpsc::{self, Receiver, Sender},
 };
 
+mod events;
+
+use events::{EVENT_LOG_ENTRIES, EventEntry, EventSource, event_line};
+
 const TEAL: Color32 = Color32::from_rgb(91, 220, 194);
 const SELECT: Color32 = Color32::from_rgb(72, 166, 255);
 const RED: Color32 = Color32::from_rgb(255, 106, 123);
 const GOLD: Color32 = Color32::from_rgb(248, 196, 112);
 const FRAME_HISTORY: usize = 120;
-const EVENT_LOG_ENTRIES: usize = 200;
 
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
 static BROWSER_BACKGROUND_POOL_READY: AtomicBool = AtomicBool::new(false);
@@ -713,59 +716,6 @@ struct HandoffRecord {
     triangles: usize,
     carve: Option<CarveReport>,
     repair_fallback: Option<String>,
-}
-
-/// Which transient channel a log entry was caught from, which is also how much
-/// it matters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EventSource {
-    Status,
-    Repair,
-    Preparation,
-    Adaptation,
-}
-
-impl EventSource {
-    const fn tag(self) -> &'static str {
-        match self {
-            Self::Status => "status",
-            Self::Repair => "repair",
-            Self::Preparation => "preparation",
-            Self::Adaptation => "adaptation",
-        }
-    }
-    /// Whether an entry from here lights the status marker until the
-    /// diagnostics are opened. A repair fallback explains a rebuild that
-    /// succeeded, so it is worth keeping but not worth interrupting for.
-    const fn error(self) -> bool {
-        matches!(self, Self::Preparation | Self::Adaptation)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct EventEntry {
-    /// Seconds since the window system started, as egui counts them.
-    time: f64,
-    source: EventSource,
-    text: String,
-    /// How many times in a row this same line arrived, so a channel that
-    /// clears and returns every frame cannot flood the ring.
-    repeats: usize,
-}
-
-fn event_line(entry: &EventEntry) -> String {
-    let minutes = (entry.time / 60.0).floor().max(0.0);
-    let seconds = entry.time - minutes * 60.0;
-    format!(
-        "{minutes:.0}:{seconds:04.1} · {} · {}{}",
-        entry.source.tag(),
-        entry.text,
-        if entry.repeats > 1 {
-            format!(" ×{}", entry.repeats)
-        } else {
-            String::new()
-        }
-    )
 }
 
 struct Uploading {
