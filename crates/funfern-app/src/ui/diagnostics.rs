@@ -740,6 +740,7 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::material_overlay::MaterialProperty;
 
     #[test]
     fn the_formula_reference_names_what_the_parser_accepts() {
@@ -849,5 +850,181 @@ mod tests {
             !state.diagnostics_warning(),
             "a rebuild that carried the edit through is not an error"
         );
+    }
+    /// A thumbnail is rasterized, not traced, so a face covers area rather than
+    /// only an outline, and every quad lands inside the scene it came from.
+    #[test]
+    fn a_thumbnail_fills_the_faces_of_the_scene_it_previews() {
+        let example = &funfern_app::topology_examples::catalog()[0];
+        let preview = build_example_preview(example);
+        let domain = example.document.model.accepted.geometry.domain;
+        assert!(preview.quads.len() > PREVIEW_ROWS, "a face was not filled");
+        assert!(!preview.strokes.is_empty(), "nothing was outlined");
+        for quad in &preview.quads {
+            assert!(quad.low.x < quad.high.x && quad.low.y < quad.high.y);
+            assert!(
+                quad.low.x >= domain.min_x - 1e-9
+                    && quad.high.x <= domain.max_x + 1e-9
+                    && quad.low.y >= domain.min_y - 1e-9
+                    && quad.high.y <= domain.max_y + 1e-9,
+                "a quad left the domain"
+            );
+        }
+        let colors = preview
+            .quads
+            .iter()
+            .map(|quad| quad.color.to_array())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            colors.len() > 1,
+            "the obstacle is the same colour as the background it sits in"
+        );
+    }
+
+    /// The reason a thumbnail samples cell centres rather than polygon corners:
+    /// every corner of a Luneburg lens sits on the same circle, so a profile
+    /// read at the corners alone is one flat colour.
+    #[test]
+    fn a_radial_material_profile_reaches_the_thumbnail() {
+        let example = funfern_app::topology_examples::catalog()
+            .iter()
+            .find(|example| example.name == "Luneburg lens")
+            .expect("the catalog still carries the Luneburg lens");
+        assert!(matches!(
+            example.document.presentation.material_overlay,
+            MaterialOverlay::Property(MaterialProperty::WaveSpeed)
+        ));
+        let preview = build_example_preview(example);
+        let shades = preview
+            .quads
+            .iter()
+            .map(|quad| quad.color.to_array())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            shades.len() > 8,
+            "the lens reads as {} colour(s), not a profile",
+            shades.len()
+        );
+    }
+
+    /// Even-odd pairing across every cycle at once is what keeps a face out of
+    /// its own holes, and a slit traced out and back contributes nothing.
+    #[test]
+    fn scanline_spans_skip_the_holes_in_a_face() {
+        let outer = vec![
+            Point2::new(-1.0, -1.0),
+            Point2::new(1.0, -1.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(-1.0, 1.0),
+        ];
+        let hole = vec![
+            Point2::new(-0.5, -0.5),
+            Point2::new(-0.5, 0.5),
+            Point2::new(0.5, 0.5),
+            Point2::new(0.5, -0.5),
+        ];
+        assert_eq!(
+            face_spans(std::slice::from_ref(&outer), 0.0),
+            vec![(-1.0, 1.0)]
+        );
+        assert_eq!(
+            face_spans(&[outer.clone(), hole], 0.0),
+            vec![(-1.0, -0.5), (0.5, 1.0)]
+        );
+        // A line above the face crosses nothing.
+        assert!(face_spans(&[outer], 2.0).is_empty());
+    }
+
+    /// New is a scene that can be run, not just an empty one.
+    #[test]
+    fn a_new_scene_is_empty_outgoing_and_driven() {
+        let mut state = Playground::default();
+        state.new_scene();
+        let scene = &state.editor.document.model.accepted;
+        assert!(scene.geometry.curves.is_empty());
+        assert_eq!(scene.regions.len(), 1);
+        for side in OuterSide::ALL {
+            assert_eq!(
+                scene.outer_boundaries.sides[side.index()],
+                OuterBoundaryCondition::SecondOrderOutgoing
+            );
+        }
+        assert!(state.editor.document.model.source.enabled);
+        assert_eq!(state.example_opened, None, "a new scene is not an example");
+        assert!(state.editor.undo(), "New is one undoable action");
+    }
+
+    /// The gallery survives a pick, and the pick is what changes the document.
+    #[test]
+    fn opening_an_example_leaves_the_gallery_open_and_marks_the_row() {
+        let mut state = Playground {
+            examples_open: true,
+            ..Playground::default()
+        };
+        let index = funfern_app::topology_examples::catalog()
+            .iter()
+            .position(|example| example.name == "Double slit")
+            .unwrap();
+        state.open_example(index);
+        assert!(state.examples_open, "the gallery closed on a pick");
+        assert_eq!(state.example_opened, Some(index));
+        assert_eq!(
+            state.editor.document.model,
+            funfern_app::topology_examples::catalog()[index]
+                .document
+                .model
+        );
+        state.new_scene();
+        assert_eq!(state.example_opened, None, "the marker outlived its scene");
+    }
+
+    /// Every catalog entry has to reach the gallery, and building them all is
+    /// spread over frames because the largest one costs a frame by itself.
+    #[test]
+    fn every_example_previews_and_the_cache_fills_one_per_frame() {
+        let mut state = Playground::default();
+        let total = funfern_app::topology_examples::catalog().len();
+        assert_eq!(state.example_previews.len(), total);
+        assert!(state.example_previews.iter().all(Option::is_none));
+        for filled in 1..=total {
+            let index = state
+                .example_previews
+                .iter()
+                .position(Option::is_none)
+                .expect("an unbuilt preview");
+            state.example_previews[index] = Some(build_example_preview(
+                &funfern_app::topology_examples::catalog()[index],
+            ));
+            assert_eq!(
+                state
+                    .example_previews
+                    .iter()
+                    .filter(|p| p.is_some())
+                    .count(),
+                filled
+            );
+        }
+        for (index, preview) in state.example_previews.iter().enumerate() {
+            let preview = preview.as_ref().unwrap();
+            assert!(
+                !preview.quads.is_empty(),
+                "{} previews as nothing",
+                funfern_app::topology_examples::catalog()[index].name
+            );
+        }
+    }
+
+    /// The random start has to land on every example and never off the end.
+    #[test]
+    fn the_random_start_stays_inside_the_catalog() {
+        let total = funfern_app::topology_examples::catalog().len();
+        let mut seen = BTreeSet::new();
+        for step in 0..=1000 {
+            let index = random_example_index(f64::from(step) / 1000.0, total);
+            assert!(index < total, "{step} lands past the catalog");
+            seen.insert(index);
+        }
+        assert_eq!(seen.len(), total, "some example can never open at startup");
+        assert!((0.0..1.0).contains(&random_fraction()));
     }
 }

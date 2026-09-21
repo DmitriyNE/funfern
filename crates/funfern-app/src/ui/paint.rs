@@ -1309,4 +1309,256 @@ mod tests {
             "Off"
         );
     }
+    #[test]
+    fn arrow_ac_coupling_rejects_static_state_in_simulation_time() {
+        let mut state = Playground::default();
+        let sample = |value| {
+            let value = Point2::new(value, 0.0);
+            vec![(0, Pos2::ZERO, value, value)]
+        };
+
+        let mut first = sample(1.0);
+        state.ac_couple_vector_samples(&mut first, 0, 0.0, false);
+        assert_eq!(first[0].2.x, 0.0);
+
+        let mut after_one_second = sample(1.0);
+        state.ac_couple_vector_samples(&mut after_one_second, 100, 1.0, false);
+        assert_eq!(after_one_second[0].2.x, 0.0);
+
+        let mut after_two_seconds = sample(1.0);
+        state.ac_couple_vector_samples(&mut after_two_seconds, 200, 2.0, false);
+        assert_eq!(after_two_seconds[0].2.x, 0.0);
+    }
+
+    #[test]
+    fn amr_generation_change_orphans_an_in_flight_arrow_lattice() {
+        assert!(vector_overlay_revision_owned(7, 12, 7, 12, true));
+        assert!(
+            !vector_overlay_revision_owned(7, 12, 8, 12, true),
+            "AMR generation incorrectly kept the stale zoom readback alive"
+        );
+        assert!(!vector_overlay_revision_owned(7, 12, 7, 13, true));
+        assert!(!vector_overlay_revision_owned(7, 12, 7, 12, false));
+    }
+
+    #[test]
+    fn resident_filter_boundaries_are_not_ordinary_time_endpoints() {
+        assert!(!resident_filter_boundary(true, 0));
+        assert!(!resident_filter_boundary(true, 15));
+        assert!(resident_filter_boundary(true, 16));
+        assert!(resident_filter_boundary(true, 32));
+        assert!(!resident_filter_boundary(false, 16));
+    }
+
+    #[test]
+    fn arrow_ac_coupling_does_not_turn_filter_maintenance_into_a_wave() {
+        let mut state = Playground::default();
+        let mut first = vec![(0, Pos2::ZERO, Point2::default(), Point2::default())];
+        state.ac_couple_vector_samples(&mut first, 14, 0.14, false);
+
+        let mut ordinary = vec![(0, Pos2::ZERO, Point2::new(0.2, 0.0), Point2::new(0.2, 0.0))];
+        state.ac_couple_vector_samples(&mut ordinary, 15, 0.15, false);
+        assert!((0.19..0.21).contains(&ordinary[0].2.x));
+
+        // Deliberately exaggerated maintenance correction. Feeding the raw
+        // input jump to the high-pass would produce an arrow near 9.0.
+        let mut filtered = vec![(0, Pos2::ZERO, Point2::new(9.0, 0.0), Point2::new(0.2, 0.0))];
+        state.ac_couple_vector_samples(&mut filtered, 16, 0.16, true);
+        assert!((0.19..0.21).contains(&filtered[0].2.x));
+
+        let mut after = vec![(0, Pos2::ZERO, Point2::new(9.1, 0.0), Point2::new(9.1, 0.0))];
+        state.ac_couple_vector_samples(&mut after, 17, 0.17, false);
+        assert!((0.28..0.31).contains(&after[0].2.x));
+    }
+
+    #[test]
+    fn arrow_ac_coupling_keeps_evolution_before_filter_maintenance() {
+        let mut state = Playground::default();
+        let mut first = vec![(0, Pos2::ZERO, Point2::new(0.2, 0.0), Point2::new(0.2, 0.0))];
+        state.ac_couple_vector_samples(&mut first, 15, 0.15, false);
+
+        // The ordinary endpoint advanced to 0.5 before an intentionally huge
+        // same-time maintenance correction moved the accepted state to 9.0.
+        // The wave increment must survive while the correction itself does not.
+        let mut filtered = vec![(0, Pos2::ZERO, Point2::new(9.0, 0.0), Point2::new(0.5, 0.0))];
+        state.ac_couple_vector_samples(&mut filtered, 16, 0.16, true);
+        assert!((0.29..0.31).contains(&filtered[0].2.x));
+    }
+
+    #[test]
+    fn arrow_ac_coupling_tracks_physical_samples_and_cold_starts_new_ones() {
+        let mut state = Playground::default();
+        let mut first = vec![(7, Pos2::ZERO, Point2::new(1.0, 0.0), Point2::new(1.0, 0.0))];
+        state.ac_couple_vector_samples(&mut first, 0, 0.0, false);
+        assert_eq!(first[0].2, Point2::default());
+
+        // The same mesh element carries temporal history even if its screen
+        // cell changes. A genuinely new element does not inherit that history
+        // or flash its unknown baseline into the AC view.
+        let mut moved = vec![
+            (
+                7,
+                Pos2::new(80.0, 40.0),
+                Point2::new(1.5, 0.0),
+                Point2::new(1.5, 0.0),
+            ),
+            (11, Pos2::ZERO, Point2::new(9.0, 0.0), Point2::new(9.0, 0.0)),
+        ];
+        state.ac_couple_vector_samples(&mut moved, 1, 0.01, false);
+        assert!(moved[0].2.x > 0.49, "lost physical-sample history");
+        assert_eq!(moved[1].2, Point2::default(), "new sample flashed DC");
+
+        // A lazily retained element uses its own last accepted step when it
+        // returns to view; time spent off-screen still decays its baseline.
+        let mut elsewhere = vec![(11, Pos2::ZERO, Point2::new(9.0, 0.0), Point2::new(9.0, 0.0))];
+        state.ac_couple_vector_samples(&mut elsewhere, 100, 1.0, false);
+        let mut returned = vec![(7, Pos2::ZERO, Point2::new(1.5, 0.0), Point2::new(1.5, 0.0))];
+        state.ac_couple_vector_samples(&mut returned, 101, 1.01, false);
+        assert!(
+            (0.29..0.31).contains(&returned[0].2.x),
+            "off-screen time was lost: {}",
+            returned[0].2.x
+        );
+    }
+
+    #[test]
+    fn arrow_ac_history_survives_a_compatible_generation_handoff() {
+        let mut state = Playground::default();
+        let owner = VectorOverlayAcOwner {
+            mesh_revision: 17,
+            physics: PhysicsModel::Mechanical,
+        };
+        state.retain_vector_overlay_ac_owner(owner, &[], 100, 2.0, 80.0);
+        let mut first = vec![(3, Pos2::ZERO, Point2::new(1.0, 0.0), Point2::new(1.0, 0.0))];
+        state.ac_couple_vector_samples(&mut first, 100, 2.0, false);
+        let mut changing = vec![(3, Pos2::ZERO, Point2::new(1.4, 0.0), Point2::new(1.4, 0.0))];
+        state.ac_couple_vector_samples(&mut changing, 110, 2.1, false);
+        assert!(changing[0].2.x > 0.39);
+
+        // A GPU generation is deliberately absent from the owner. Rebinding
+        // material-dependent stencils on the same mesh therefore retains the
+        // temporal baseline and continues at the transferred absolute time.
+        state.retain_vector_overlay_ac_owner(owner, &[], 120, 2.2, 80.0);
+        let mut after_handoff = vec![(3, Pos2::ZERO, Point2::new(1.5, 0.0), Point2::new(1.5, 0.0))];
+        state.ac_couple_vector_samples(&mut after_handoff, 120, 2.2, false);
+        assert!(after_handoff[0].2.x > 0.45, "handoff cold-started arrows");
+
+        state.retain_vector_overlay_ac_owner(
+            VectorOverlayAcOwner {
+                mesh_revision: 18,
+                ..owner
+            },
+            &[],
+            120,
+            2.2,
+            80.0,
+        );
+        let mut after_remesh = vec![(3, Pos2::ZERO, Point2::new(1.5, 0.0), Point2::new(1.5, 0.0))];
+        state.ac_couple_vector_samples(&mut after_remesh, 120, 2.2, false);
+        assert_eq!(after_remesh[0].2, Point2::default());
+    }
+
+    #[test]
+    fn arrow_ac_history_is_spatially_rebased_across_a_remesh() {
+        let mut state = Playground::default();
+        let old_owner = VectorOverlayAcOwner {
+            mesh_revision: 17,
+            physics: PhysicsModel::Mechanical,
+        };
+        state.retain_vector_overlay_ac_owner(old_owner, &[], 100, 2.0, 80.0);
+        let mut first = vec![(
+            3,
+            Pos2::new(40.0, 50.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 0.0),
+        )];
+        state.ac_couple_vector_samples(&mut first, 100, 2.0, false);
+        let mut changing = vec![(
+            3,
+            Pos2::new(40.0, 50.0),
+            Point2::new(1.4, 0.0),
+            Point2::new(1.4, 0.0),
+        )];
+        state.ac_couple_vector_samples(&mut changing, 110, 2.1, false);
+        let before = changing[0].2;
+
+        let new_samples = vec![(
+            91,
+            Pos2::new(43.0, 48.0),
+            Point2::new(1.45, 0.0),
+            Point2::new(1.45, 0.0),
+        )];
+        state.retain_vector_overlay_ac_owner(
+            VectorOverlayAcOwner {
+                mesh_revision: 18,
+                ..old_owner
+            },
+            &new_samples,
+            110,
+            2.1,
+            80.0,
+        );
+        let mut accepted = new_samples;
+        state.ac_couple_vector_samples(&mut accepted, 110, 2.1, false);
+        assert_eq!(accepted[0].2, before, "remesh blinked the AC arrows");
+        assert_eq!(state.vector_overlay_ac_state[&91].input.x, 1.45);
+    }
+
+    #[test]
+    fn sparse_arrow_outliers_cannot_defeat_the_global_quiet_fade() {
+        let maximum = 55.2;
+        let visibility = VECTOR_OVERLAY_VISIBILITY_CUTOFF;
+        let ordinary = vector_arrow_length(1.0, 1.0, 1.0, maximum, visibility);
+        let outlier = vector_arrow_length(1.0e12, 1.0, 5.0, maximum, visibility);
+        assert!((ordinary - outlier).abs() < f32::EPSILON);
+        assert!(outlier < 0.11, "quiet outlier still spans {outlier} px");
+    }
+
+    #[test]
+    fn arrow_ac_coupling_preserves_an_ordinary_source_frequency() {
+        let mut state = Playground {
+            uploaded_time_step: 1.0 / 600.0,
+            ..Playground::default()
+        };
+        let frequency = 3.0;
+        let mut input_square = 0.0;
+        let mut output_square = 0.0;
+        // The solver advances ten small steps between display-rate samples.
+        for frame in 0..600_u64 {
+            let step = frame * 10;
+            let time = step as f64 * state.uploaded_time_step;
+            let scalar = (std::f64::consts::TAU * frequency * time).sin();
+            let value = Point2::new(scalar, 0.0);
+            let mut samples = vec![(0, Pos2::ZERO, value, value)];
+            state.ac_couple_vector_samples(&mut samples, step, time, false);
+            if frame >= 300 {
+                input_square += scalar * scalar;
+                output_square += samples[0].2.x * samples[0].2.x;
+            }
+        }
+        let retained = (output_square / input_square).sqrt();
+        assert!(retained > 0.999, "3 Hz amplitude retention {retained}");
+    }
+
+    #[test]
+    fn arrow_ac_coupling_does_not_leave_a_mean_on_a_dc_offset_sine() {
+        let mut state = Playground::default();
+        let sample_rate = 60.0;
+        let frequency = 2.3;
+        let mut mean = 0.0;
+        let mut count = 0_u64;
+        for frame in 0..1_800_u64 {
+            let time = frame as f64 / sample_rate;
+            let scalar = 4.0 + (std::f64::consts::TAU * frequency * time).sin();
+            let value = Point2::new(scalar, 0.0);
+            let mut samples = vec![(0, Pos2::ZERO, value, value)];
+            state.ac_couple_vector_samples(&mut samples, frame, time, false);
+            if time >= 20.0 {
+                mean += samples[0].2.x;
+                count += 1;
+            }
+        }
+        mean /= count as f64;
+        assert!(mean.abs() < 1.0e-4, "high-pass mean was {mean}");
+    }
 }

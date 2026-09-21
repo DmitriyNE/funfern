@@ -188,3 +188,315 @@ pub(super) fn field_scale(gain: f32, reference: Option<f64>, automatic: bool) ->
         f64::from(gain) * f64::from(FIELD_EXPOSURE_GAIN) / reference
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The point of the whole mechanism: the catalog's quietest example and its
+    /// loudest sit a hundredfold apart, and both must paint the same picture.
+    #[test]
+    fn an_exposure_paints_the_same_picture_at_any_field_scale() {
+        let scale = 118.0;
+        let mut levels = vec![0.0, 1.0e-3, 6.0e-3, 4.0e-3, 6.2e-3, 5.9e-3, 2.0e-2];
+        // Then all the way down past the exposure's own floor, so a scale that
+        // is relative to the field is told apart from one pinned to a constant.
+        let mut decaying = 2.0e-2;
+        for _ in 0..40 {
+            decaying *= 0.5;
+            levels.push(decaying);
+        }
+        let mut quiet = AutoExposure::default();
+        let mut loud = AutoExposure::default();
+        let mut floored = false;
+        for level in levels {
+            let (Some(a), Some(b)) = (quiet.update(level, 0.1), loud.update(level * scale, 0.1))
+            else {
+                assert_eq!(level, 0.0, "a measured level produced no reference");
+                continue;
+            };
+            floored |= a > level * 2.0;
+            let probe = level * 0.7;
+            assert!(
+                (probe / a - probe * scale / b).abs() < 1.0e-9 * (probe / a).max(1.0e-9),
+                "{level}: {a} against {b}"
+            );
+            assert!(
+                (quiet.visibility(level) - loud.visibility(level * scale)).abs() < 1.0e-12,
+                "the quiet-tail fade changed with absolute field scale"
+            );
+        }
+        assert!(floored, "the run never reached the quiet floor");
+    }
+
+    /// The failure the monotone run peak had: one placed pulse set the scale for
+    /// the rest of the run.
+    #[test]
+    fn an_exposure_recovers_after_a_transient_spike() {
+        let mut exposure = AutoExposure::default();
+        for _ in 0..120 {
+            exposure.update(1.0, 1.0 / 60.0);
+        }
+        assert_eq!(exposure.update(20.0, 1.0 / 60.0), Some(20.0), "clipped");
+        // The release gives up a factor of 1.15 a second, so a twentyfold spike
+        // takes some twenty-one seconds to walk off. Bounded is the property
+        // that matters — the run peak it replaced never gave it up at all.
+        for _ in 0..1_500 {
+            exposure.update(1.0, 1.0 / 60.0);
+        }
+        assert_eq!(exposure.reference(), Some(1.0));
+    }
+
+    /// The failure this release rate was chosen for. A scale that falls faster
+    /// than the field does simply follows it down, so a domain that has emptied
+    /// still paints at full brightness and the wave looks like it never left.
+    /// The shape here is the recorded one: full amplitude, then three decades
+    /// over eight seconds once the sources stop.
+    #[test]
+    fn a_field_that_drains_away_stops_being_painted() {
+        let mut exposure = AutoExposure::default();
+        for _ in 0..600 {
+            exposure.update(3.0e-2, 1.0 / 60.0);
+        }
+        let mut level = 3.0e-2;
+        for _ in 0..480 {
+            level *= 0.985_7;
+            exposure.update(level, 1.0 / 60.0);
+        }
+        let reference = exposure.reference().unwrap();
+        let painted = level / reference;
+        assert!(
+            level < 3.0e-5,
+            "the fixture did not actually drain: {level:e}"
+        );
+        assert!(
+            painted < 0.05,
+            "a drained domain still paints at {:.1}%",
+            painted * 100.0
+        );
+    }
+
+    /// And the failure the other way: once a field has decayed into rounding
+    /// noise, renormalizing it would fill the view with structure that is not
+    /// there.
+    #[test]
+    fn an_exposure_refuses_to_magnify_decayed_noise() {
+        let mut exposure = AutoExposure::default();
+        exposure.update(1.0, 1.0 / 60.0);
+        // Two decades down to the floor at 1.15 a second is about thirty-three.
+        for _ in 0..3_600 {
+            exposure.update(1.0e-9, 1.0 / 60.0);
+        }
+        let floor = exposure.reference().unwrap();
+        assert!(
+            (floor - AutoExposure::QUIET_FLOOR).abs() < 1.0e-12,
+            "{floor}"
+        );
+        assert!(1.0e-9 / floor < 1.0e-5, "noise would still be drawn");
+        assert!(
+            exposure.visibility(1.0e-9) < 1.0e-10,
+            "late residue was not faded out"
+        );
+    }
+
+    #[test]
+    fn exposure_fades_smoothly_below_its_run_relative_floor() {
+        let mut exposure = AutoExposure::default();
+        exposure.update(1.0, 0.0);
+        assert_eq!(exposure.visibility(AutoExposure::QUIET_FLOOR), 1.0);
+        let tenth = exposure.visibility(AutoExposure::QUIET_FLOOR * 0.1);
+        assert!((0.0..1.0e-3).contains(&tenth), "weak fade {tenth}");
+        assert_eq!(exposure.visibility(0.0), 0.0);
+        assert_eq!(exposure.visibility(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn measured_damped_tail_is_not_renormalized_into_a_field() {
+        let mut exposure = AutoExposure::default();
+        exposure.update(1.0, 0.0);
+        // The saved source-free TM drain fixture settles near 0.2--0.3% of
+        // its propagated peak. Let the release reach its run-relative floor,
+        // then verify that tail still paints below two percent of full scale.
+        let tail = 3.0e-3;
+        for _ in 0..6_000 {
+            exposure.update(tail, 1.0 / 60.0);
+        }
+        let painted = tail / exposure.reference().unwrap() * exposure.visibility(tail);
+        assert!(painted < 0.02, "tail still paints at {painted:.3}");
+        assert_eq!(
+            DORMANT_ENERGY_RATIO,
+            AutoExposure::QUIET_FLOOR * AutoExposure::QUIET_FLOOR
+        );
+    }
+
+    /// Release is a rate in seconds, so the same second of wall clock has to
+    /// land in the same place whether it took two frames or two hundred.
+    #[test]
+    fn an_exposure_releases_by_wall_clock_not_by_frame_count() {
+        let mut coarse = AutoExposure::default();
+        let mut fine = AutoExposure::default();
+        coarse.update(10.0, 0.016);
+        fine.update(10.0, 0.016);
+        coarse.update(1.0, 0.5);
+        coarse.update(1.0, 0.5);
+        for _ in 0..100 {
+            fine.update(1.0, 0.01);
+        }
+        // A relative tolerance: the two differ only in how the same decay was
+        // recomposed in floating point.
+        let (a, b) = (coarse.reference().unwrap(), fine.reference().unwrap());
+        assert!((a - b).abs() < a * 1.0e-6, "{a} against {b}");
+    }
+
+    #[test]
+    fn a_sampled_quantile_matches_the_sorted_one() {
+        let mut scratch = Vec::new();
+        let values = (0..50_000)
+            .map(|index| index as f32 / 50_000.0)
+            .collect::<Vec<_>>();
+        let level = exposure_level(&values, 0.98, &mut scratch);
+        assert!((level - 0.98).abs() < 0.01, "{level}");
+        assert_eq!(exposure_level(&[0.0; 32], 0.98, &mut scratch), 0.0);
+        assert_eq!(exposure_level(&[], 0.98, &mut scratch), 0.0);
+        let broken = [f32::NAN, f32::INFINITY, -3.0, 1.0];
+        assert_eq!(exposure_level(&broken, 0.5, &mut scratch), 3.0);
+    }
+
+    /// The default gain has to land the reference level somewhere legible, and
+    /// leave the nodes above it room to read brighter still.
+    #[test]
+    fn the_default_gain_paints_the_reference_level_in_the_readable_band() {
+        let default = funfern_app::document::PresentationSettings::default().field_gain;
+        let scale = default * FIELD_EXPOSURE_GAIN;
+        let base = field_color(0.0, Color32::TRANSPARENT);
+        let at_reference = field_color(scale, Color32::TRANSPARENT);
+        let above = field_color(2.0 * scale, Color32::TRANSPARENT);
+        let reach = |color: Color32| f32::from(color.r() - base.r()) / f32::from(244 - base.r());
+        assert!(
+            (0.7..0.85).contains(&reach(at_reference)),
+            "{}",
+            reach(at_reference)
+        );
+        assert!(reach(above) > reach(at_reference) + 0.1, "no room above");
+        assert_eq!(
+            field_color_over_overlay(scale).a(),
+            (0.761_594_f32 * 220.0).round() as u8
+        );
+    }
+
+    /// Adaptation hands the field to a new mesh every second or two. It is the
+    /// same field, so its scale has to carry across: restarting it there dropped
+    /// the reference onto the instantaneous level, and a decaying field fell in
+    /// visible steps instead of easing down at the release rate.
+    #[test]
+    fn a_mesh_handoff_leaves_the_scale_alone() {
+        let mut state = Playground::default();
+        state.field_exposure.update(0.71, 0.016);
+        state.vector_overlay_exposure.update(0.71, 0.016);
+        state.vector_overlay_ac_owner = Some(VectorOverlayAcOwner {
+            mesh_revision: 3,
+            physics: PhysicsModel::Mechanical,
+        });
+        state.vector_overlay_ac_state.insert(
+            4,
+            VectorAcState {
+                input: Point2::new(1.0, 0.0),
+                output: Point2::new(0.2, 0.0),
+                step: 10,
+                time: 0.1,
+                origin: Pos2::new(20.0, 30.0),
+            },
+        );
+        state.restart_exposures_after_handoff(false);
+        assert_eq!(state.field_exposure.reference(), Some(0.71));
+        assert_eq!(state.vector_overlay_exposure.reference(), Some(0.71));
+        assert_eq!(state.vector_overlay_ac_state.len(), 1);
+
+        // A field replaced with zeros starts the scale again.
+        state.restart_exposures_after_handoff(true);
+        assert_eq!(state.field_exposure.reference(), None);
+        assert_eq!(state.vector_overlay_exposure.reference(), None);
+        assert!(state.vector_overlay_ac_state.is_empty());
+        assert_eq!(state.vector_overlay_ac_owner, None);
+    }
+
+    /// Loading a document and pressing Reset both leave the scale alone. Each
+    /// zeroes the field on the GPU, but the outgoing scene stays on display
+    /// until the replacement arrives — a reset for a few frames, a load for as
+    /// long as the new mesh takes. A scale cleared at the request measures that
+    /// residue and paints it at full brightness: measured at 0.09 % before, 100 %
+    /// after, for a tenth of a second on a reset and four tenths on a load.
+    #[test]
+    fn asking_for_a_new_field_does_not_magnify_the_outgoing_one() {
+        let mut state = Playground::default();
+        state.field_exposure.update(3.0e-2, 0.016);
+        let residue = 3.8e-6;
+        let held = state.field_exposure.update(residue, 0.016).unwrap();
+        assert!(residue / held < 0.01, "the residue was not already dark");
+
+        state.reset_requested = true;
+        let document = state.editor.document.clone();
+        state.set_document(document, false, true).unwrap();
+        let after = state.field_exposure.update(residue, 0.016).unwrap();
+        assert!(
+            residue / after < 0.01,
+            "the outgoing field was magnified to {:.0}%",
+            100.0 * residue / after
+        );
+    }
+
+    /// The first frames of a replaced field are numerical dust, and an instant
+    /// attack onto a scale with nothing behind it paints that dust at full
+    /// colour. Measured at 3.5e-10 arriving one frame before the real field.
+    #[test]
+    fn a_restarted_scale_does_not_latch_onto_the_first_dust() {
+        let mut exposure = AutoExposure::default();
+        exposure.update(3.0e-2, 0.016);
+        exposure.restart();
+        let dust = 3.5e-10;
+        let reference = exposure.update(dust, 0.016).unwrap();
+        assert!(
+            dust / reference < 1.0e-4,
+            "dust painted at {:.0}%",
+            100.0 * dust / reference
+        );
+        // The real field, when it arrives, takes the scale straight over.
+        assert_eq!(exposure.update(2.0e-2, 0.016), Some(2.0e-2));
+    }
+
+    /// The symptom the handoff bug showed as: a scale that falls faster than the
+    /// release allows. Nothing `update` does may outrun that rate.
+    #[test]
+    fn the_scale_never_falls_faster_than_the_release_rate() {
+        let mut exposure = AutoExposure::default();
+        let mut level = 1.0_f64;
+        let step = 1.0_f32 / 60.0;
+        let mut previous = exposure.update(level, step).unwrap();
+        for _ in 0..1_200 {
+            level *= 0.98;
+            let reference = exposure.update(level, step).unwrap();
+            // The same widening `update` does, so the two agree to the bit.
+            let allowed = previous * AutoExposure::RELEASE_PER_SECOND.powf(-f64::from(step));
+            assert!(
+                reference >= allowed * (1.0 - 1.0e-12),
+                "the scale fell to {reference:e} when {allowed:e} was the floor"
+            );
+            previous = reference;
+        }
+    }
+
+    /// Turning the automatic scale off has to put the field back exactly where it
+    /// was before there was one: the slider as the whole scale.
+    #[test]
+    fn turning_auto_exposure_off_restores_the_plain_gain() {
+        let default = funfern_app::document::PresentationSettings::default();
+        assert!(default.field_auto_exposure, "it should start on");
+        assert_eq!(field_scale(2.0, Some(0.02), false), 2.0);
+        assert_eq!(field_scale(0.25, None, false), 0.25);
+        // Automatic, the same field paints the same whatever its size.
+        let quiet = field_scale(2.0, Some(6.0e-3), true) * 6.0e-3;
+        let loud = field_scale(2.0, Some(7.1e-1), true) * 7.1e-1;
+        assert!((quiet - loud).abs() < 1.0e-12);
+        assert_eq!(field_scale(2.0, None, true), 0.0);
+    }
+}

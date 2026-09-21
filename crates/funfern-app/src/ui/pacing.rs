@@ -117,3 +117,199 @@ pub(super) fn speed_shortfall(measured: f64, target: f64, stepping: bool) -> Opt
     }
     (measured < target * SPEED_SHORTFALL_MARGIN).then_some(measured)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handoff_withholds_steps_only_when_the_source_cannot_advance() {
+        assert!(!canonical_steps_withheld(false, false));
+        // A packed candidate drains the requests already published before the
+        // UI calls begin_handoff.
+        assert!(canonical_steps_withheld(true, false));
+        // A fresh install has no accepted source generation to advance.
+        assert!(canonical_steps_withheld(false, true));
+        // Ordinary target upload and validation are not solver pauses. Later
+        // requests become a target catch-up backlog after admission.
+        assert!(!canonical_steps_withheld(false, false));
+    }
+
+    /// Below a ceiling of `recommended / PACING_FRAME_SECONDS`, pacing by step
+    /// count alone leaves whole frames without one. The step shrinks there
+    /// instead — always downward, since the mesh's figure is a stability limit.
+    #[test]
+    fn a_low_ceiling_shrinks_the_step_rather_than_skipping_frames() {
+        // The GRIN rod's step at the default mesh, whose threshold is most of
+        // the slider.
+        let recommended = 6.6e-3;
+        let threshold = recommended / PACING_FRAME_SECONDS;
+        assert!(
+            (0.7..0.85).contains(&threshold),
+            "threshold moved: {threshold}"
+        );
+
+        // At and above it the mesh keeps its own step and the count does the work.
+        assert_eq!(paced_time_step(recommended, 1.0), recommended);
+        assert_eq!(paced_time_step(recommended, 2.0), recommended);
+        assert!(
+            paced_time_step(recommended, 1.0e6) <= recommended,
+            "went above the limit"
+        );
+
+        // Below it the step follows the ceiling down.
+        assert_eq!(
+            paced_time_step(recommended, 0.1),
+            PACING_FRAME_SECONDS * 0.1
+        );
+        assert_eq!(
+            paced_time_step(recommended, 0.02),
+            PACING_FRAME_SECONDS * 0.02
+        );
+
+        // Nonsense leaves the mesh's own step alone.
+        assert_eq!(paced_time_step(recommended, 0.0), recommended);
+        assert_eq!(paced_time_step(recommended, f64::NAN), recommended);
+        assert_eq!(paced_time_step(recommended, -1.0), recommended);
+    }
+
+    /// What the cap is for: a frame's budget buys at least one step at every
+    /// ceiling, on coarse meshes and fine. Without it a coarse mesh leaves half
+    /// the frames unadvanced below 0.8x and the picture judders.
+    #[test]
+    fn a_frame_advances_at_every_ceiling() {
+        for recommended in [6.6e-3, 8.9e-4, 6.2e-4] {
+            for speed in [2.0, 1.0, 0.5, 0.2, 0.05, 0.02] {
+                let step = paced_time_step(recommended, speed);
+                assert!(step <= recommended, "{recommended:e} {speed}");
+                let mut accumulator = 0.0;
+                let idle = (0..600)
+                    .filter(|_| {
+                        steps_for_frame(&mut accumulator, PACING_FRAME_SECONDS, speed, step) == 0
+                    })
+                    .count();
+                assert_eq!(
+                    idle, 0,
+                    "recommended {recommended:e} at {speed}x left {idle} frames unadvanced"
+                );
+            }
+        }
+    }
+
+    /// The ceiling is on simulated seconds per wall second, so half the speed
+    /// asks for half the steps out of the same frame.
+    #[test]
+    fn speed_scales_the_steps_a_frame_asks_for() {
+        let step = 1.0e-3;
+        let frame = 16.0e-3;
+        let mut full = 0.0;
+        let mut half = 0.0;
+        let mut quiet = 0.0;
+        let (mut full_total, mut half_total, mut quiet_total) = (0, 0, 0);
+        for _ in 0..60 {
+            full_total += steps_for_frame(&mut full, frame, 1.0, step);
+            half_total += steps_for_frame(&mut half, frame, 0.5, step);
+            quiet_total += steps_for_frame(&mut quiet, frame, 0.02, step);
+        }
+        // A second of frames at one millisecond a step.
+        assert_eq!(full_total, 960);
+        assert_eq!(half_total, 480);
+        assert_eq!(quiet_total, 19);
+    }
+
+    /// A late display frame drops missed wall time instead of asking the GPU to
+    /// catch up and making the next frame later still. Very high requested
+    /// speeds retain the independent solver-batch ceiling.
+    #[test]
+    fn late_frames_preserve_the_display_budget_and_cap_the_leftover() {
+        let step = 1.0e-3;
+        let mut on_time = 0.0;
+        let mut late = 0.0;
+        let expected = steps_for_frame(&mut on_time, 1.0 / 60.0, 1.0, step);
+        assert_eq!(steps_for_frame(&mut late, 1.0, 1.0, step), expected);
+        assert!((late - on_time).abs() < 1.0e-12);
+
+        let mut accumulator = 0.0;
+        let steps = steps_for_frame(&mut accumulator, 1.0, 8.0, step);
+        assert_eq!(steps, MAX_STEPS_PER_FRAME);
+        assert!(
+            accumulator <= MAX_STEPS_PER_FRAME as f64 * step + 1.0e-12,
+            "the leftover built a backlog: {accumulator}"
+        );
+        // And it stays capped however long the solver is behind.
+        for _ in 0..100 {
+            steps_for_frame(&mut accumulator, 1.0, 8.0, step);
+        }
+        assert!(accumulator <= MAX_STEPS_PER_FRAME as f64 * step + 1.0e-12);
+
+        // Nonsense asks for nothing rather than panicking or racing.
+        let mut idle = 0.0;
+        assert_eq!(steps_for_frame(&mut idle, 0.016, 1.0, 0.0), 0);
+        assert_eq!(steps_for_frame(&mut idle, 0.016, 0.0, 1.0e-3), 0);
+        assert_eq!(steps_for_frame(&mut idle, -1.0, 1.0, 1.0e-3), 0);
+    }
+
+    #[test]
+    fn gpu_backpressure_drops_requests_beyond_the_completed_lead() {
+        assert_eq!(steps_with_gpu_backpressure(100, 100, 12), 12);
+        assert_eq!(
+            steps_with_gpu_backpressure(100, 150, 20),
+            MAX_STEPS_PER_FRAME - 50
+        );
+        assert_eq!(steps_with_gpu_backpressure(100, 164, 20), 0);
+        assert_eq!(steps_with_gpu_backpressure(100, 200, 20), 0);
+    }
+
+    /// The windowed rate dips whenever a handoff withholds stepping inside its
+    /// window, at every speed and including ones the solver reaches easily, so
+    /// the note reads a held best rather than the raw measurement.
+    #[test]
+    fn a_held_rate_rides_over_a_dip_but_not_a_slowdown() {
+        let frame = 1.0 / 60.0;
+        let mut held = 0.0;
+        for _ in 0..120 {
+            held = hold_rate(held, 1.0, frame);
+        }
+        assert_eq!(held, 1.0);
+
+        // A second of the worst dip measured still reads as keeping up.
+        let mut dipped = held;
+        for _ in 0..60 {
+            dipped = hold_rate(dipped, 0.74, frame);
+        }
+        assert!(
+            speed_shortfall(dipped, 1.0, true).is_none(),
+            "a dip was reported as a shortfall: {dipped}"
+        );
+
+        // A real slowdown gets through inside two seconds.
+        let mut slow = held;
+        for _ in 0..120 {
+            slow = hold_rate(slow, 0.5, frame);
+        }
+        assert_eq!(speed_shortfall(slow, 1.0, true), Some(slow));
+
+        // A better reading is taken at once, and nonsense is ignored.
+        assert_eq!(hold_rate(0.5, 2.0, frame), 2.0);
+        assert_eq!(hold_rate(0.5, f64::NAN, frame), 0.5);
+        assert_eq!(hold_rate(0.5, -1.0, frame), 0.5);
+    }
+
+    /// A rate below the one asked for is worth saying, but only when the solver
+    /// is actually trying to reach it.
+    #[test]
+    fn a_shortfall_is_only_reported_while_the_solver_is_trying() {
+        assert_eq!(speed_shortfall(0.34, 1.0, true), Some(0.34));
+        assert_eq!(
+            speed_shortfall(0.98, 1.0, true),
+            None,
+            "jitter is not a shortfall"
+        );
+        assert_eq!(speed_shortfall(0.19, 0.2, true), None);
+        assert_eq!(speed_shortfall(0.09, 0.2, true), Some(0.09));
+        // Paused, mid-handoff, or before anything has been measured.
+        assert_eq!(speed_shortfall(0.34, 1.0, false), None);
+        assert_eq!(speed_shortfall(0.0, 1.0, true), None);
+        assert_eq!(speed_shortfall(f64::NAN, 1.0, true), None);
+    }
+}

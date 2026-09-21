@@ -273,4 +273,35 @@ mod tests {
         state.recording_state = RecordingState::Idle;
         assert!(state.span_selected(TopologySpanTarget::Outer(OuterSide::Bottom)));
     }
+    /// Loading a document used to raise `reset_requested`, which the GPU reset
+    /// spends earlier in the frame and against the topology still active — the
+    /// scene on its way out. That scene was zeroed and then ran on for the
+    /// seconds its replacement took to prepare, so by the time the new mesh was
+    /// ready the transfer carried a full-amplitude field into it. Only the
+    /// oscillation radiated away; the constant it left behind is in the
+    /// stiffness operator's null space and no outgoing wall can remove it, so
+    /// opening the Luneburg lens and then anything else washed the new scene
+    /// flat.
+    #[test]
+    fn loading_a_document_asks_for_a_field_that_starts_at_zero() {
+        let mut state = Playground::default();
+        let example = &funfern_app::topology_examples::catalog()[0];
+        state
+            .set_document(example.document.clone(), false, true)
+            .unwrap();
+        assert!(
+            state.fresh_requested,
+            "the load did not ask to start at zero"
+        );
+        assert!(
+            !state.reset_requested,
+            "the load armed the flag the GPU reset spends against the outgoing scene"
+        );
+        // The shape of the bug: a topology is already active and the GPU reset
+        // has taken its flag, and the load must still start the field at zero.
+        assert!(starts_from_zero(true, false, true));
+        assert!(starts_from_zero(true, true, false));
+        assert!(starts_from_zero(false, false, false));
+        assert!(!starts_from_zero(true, false, false));
+    }
 }

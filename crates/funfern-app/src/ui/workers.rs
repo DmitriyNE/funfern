@@ -699,3 +699,198 @@ pub(super) fn dispatch_gpu_upload_preparation(
         runtime_serials,
     ));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use super::*;
+    use funfern_app::topology_editor::TopologyAcceptance;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn background_worker_returns_a_candidate_to_the_runtime_transaction() {
+        let mut state = Playground::default();
+        assert!(state.background_preparation.is_some());
+        for _ in 0..100_000 {
+            state.editor.validate_frame(64);
+            if state.editor.acceptance != TopologyAcceptance::Pending {
+                break;
+            }
+        }
+        assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
+        state.request_runtime();
+        assert!(state.runtime.phase().is_some());
+
+        state.advance_runtime_preparation();
+        assert!(state.runtime.phase().is_none());
+        assert!(state.preparation_in_progress());
+
+        let started = std::time::Instant::now();
+        while state.runtime.ready().is_none()
+            && state.runtime.last_error().is_none()
+            && started.elapsed() < std::time::Duration::from_secs(5)
+        {
+            std::thread::yield_now();
+            state.advance_runtime_preparation();
+        }
+        assert!(state.runtime.last_error().is_none());
+        assert!(
+            state.runtime.ready().is_some(),
+            "native preparation timed out"
+        );
+        assert!(state.handoff_ready.is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn background_amr_worker_finishes_a_mesh_transaction() {
+        let scene = Scene::default();
+        let mesh = Arc::new(
+            mesh_scene(
+                &scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.2,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let job = MeshAdaptationJob::new(
+            mesh.clone(),
+            scene,
+            MeshAdaptationState::from_mesh(&mesh),
+            2,
+            Arc::new(|_, _| 0.2),
+            MeshAdaptationOptions {
+                minimum_target_edge_length: 0.01,
+                maximum_target_edge_length: 0.3,
+                max_refinement_changes: 0,
+                max_coarsening_changes: 0,
+                ..Default::default()
+            },
+        );
+        let mut worker = BackgroundAmrWorker::spawn().expect("native AMR worker");
+        worker
+            .submit(BackgroundAmrJob::Adaptation(Box::new(job)))
+            .map_err(|_| ())
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        loop {
+            for event in worker.drain() {
+                if let BackgroundAmrEvent::Finished { result, .. } = event {
+                    let BackgroundAmrResult::Adaptation(result) = *result else {
+                        panic!("wrong AMR result kind");
+                    };
+                    let result = result.unwrap();
+                    assert_eq!(result.report.topology_changes, 0);
+                    return;
+                }
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "native AMR worker timed out"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn background_amr_worker_prepares_the_canonical_supplement() {
+        let mut scene = Scene::initial();
+        scene.outer_boundaries =
+            OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+        let mesh = Arc::new(
+            mesh_scene(
+                &scene,
+                1,
+                MeshingOptions {
+                    target_edge_length: 0.2,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_scene(
+                &mesh,
+                &scene,
+                OuterBoundaryCondition::Reflecting,
+            )
+            .unwrap(),
+        );
+        let canonical =
+            Arc::new(CanonicalWaveOperator::compile_scene(&mesh, &operator, &scene, 1).unwrap());
+        let forcing = Arc::new(CanonicalForcing::none(&canonical));
+        let dofs = operator.degrees_of_freedom();
+        let snapshot = QuadraticSolutionSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            displacement: vec![0.0; dofs],
+            velocity: vec![0.0; dofs],
+            acceleration: vec![0.0; dofs],
+            auxiliary: vec![0.0; dofs],
+            volume_acceleration: vec![0.0; dofs],
+            time: 0.01,
+            time_step: 0.01,
+        };
+        let canonical_snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            primary_flux: vec![0.0; canonical.degrees_of_freedom()],
+            previous_primary_flux: vec![0.0; canonical.degrees_of_freedom()],
+            complementary_flux: vec![
+                Point2::default();
+                canonical.complementary_degrees_of_freedom()
+            ],
+            previous_complementary_flux: vec![
+                Point2::default();
+                canonical.complementary_degrees_of_freedom()
+            ],
+            auxiliary: Vec::new(),
+            previous_auxiliary: Vec::new(),
+            time: 0.01,
+            time_step: 0.01,
+        };
+        let job = AmrIndicatorJob::with_canonical(
+            SolutionIndicatorJob::new(
+                mesh.clone(),
+                operator,
+                scene,
+                snapshot,
+                SolutionIndicatorOptions::default(),
+            ),
+            mesh,
+            canonical,
+            forcing,
+            canonical_snapshot,
+        );
+        assert_eq!(job.phase(), "Preparing canonical AMR estimate");
+
+        let mut worker = BackgroundAmrWorker::spawn().expect("native AMR worker");
+        worker
+            .submit(BackgroundAmrJob::Indicator(Box::new(job)))
+            .map_err(|_| ())
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        loop {
+            for event in worker.drain() {
+                if let BackgroundAmrEvent::Finished { result, .. } = event {
+                    let BackgroundAmrResult::Indicator(result) = *result else {
+                        panic!("wrong AMR result kind");
+                    };
+                    let result = result.unwrap();
+                    assert_eq!(result.report.canonical_drift_contribution, 0.0);
+                    assert_eq!(result.report.complementary_recovery_contribution, 0.0);
+                    return;
+                }
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "native canonical AMR worker timed out"
+            );
+            std::thread::yield_now();
+        }
+    }
+}
