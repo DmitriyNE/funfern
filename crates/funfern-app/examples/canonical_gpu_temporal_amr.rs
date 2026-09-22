@@ -75,6 +75,9 @@ struct Generation {
     quadratic: Arc<QuadraticWaveOperator>,
     operator: CanonicalTemporalWaveOperator,
     oracle: Estimate,
+    /// The host's own copy of the accepted runtime, so a disagreement can be
+    /// attributed to the coefficients as well as to the state.
+    runtime: CanonicalMaterialRuntimeState,
     /// The host's own copy of the accepted state, so a disagreement can be
     /// attributed to the state or to the estimate built on it.
     primary: Vec<f64>,
@@ -87,6 +90,7 @@ struct Generation {
 enum Phase {
     Evolve,
     Handoff,
+    Transferred,
     Settled,
     Done,
 }
@@ -102,8 +106,15 @@ struct Pending {
 struct Expected {
     source: Generation,
     target: Generation,
+    /// The maps the GPU transfer plan was compiled from, kept so the host can
+    /// apply the same transfer to the same input and attribute any difference
+    /// to the transfer itself rather than to the state it started from.
+    primary_map: CanonicalPrimaryTransferMap,
+    vector_map: CanonicalVectorTransferMap,
+    /// The device's own accepted state just before the handoff.
+    departing: Option<(Vec<f64>, Vec<Point2>)>,
+    readbacks_at_handoff: u64,
     scene: Scene,
-    epoch_origin: f64,
     time: f64,
     target_time: f64,
     time_step: f64,
@@ -280,9 +291,19 @@ fn main() {
         target_operator.base(),
     )
     .expect("temporal AMR outgoing map");
-    let totals = vec![None; primary_map.target_component_count()];
     let prescribed = vec![false; primary_map.target_node_count()];
+    let components = primary_map.target_component_count();
+    let labels = operator.base().component_labels().to_vec();
+    // Interpolating a field onto another mesh must not create or destroy any
+    // of it, so each isolated component's total is carried across. This is the
+    // transfer the device performs; asking for the free one instead moves the
+    // state by 2e-4 and was the first version of this oracle's mistake.
     let move_primary = |flux: &[f64]| {
+        let mut totals = vec![0.0; components];
+        for (value, label) in flux.iter().zip(&labels) {
+            totals[*label as usize] += value;
+        }
+        let totals = totals.into_iter().map(Some).collect::<Vec<_>>();
         primary_map
             .transfer(flux, &totals, &prescribed)
             .expect("temporal AMR primary transfer")
@@ -335,7 +356,6 @@ fn main() {
     );
 
     let clock = CanonicalGpuClock::initial(time_step).expect("temporal AMR clock");
-    let epoch_origin = clock.epoch_origin_seconds;
     let plan = CanonicalGpuPlan::compile_temporal_bulk(&operator, &gpu_state, clock)
         .expect("temporal AMR GPU plan");
     // Only a layout template for the target plan; the device fills it from
@@ -403,11 +423,16 @@ fn main() {
         transfer: Some(transfer),
     })
     .insert_resource(Expected {
+        primary_map,
+        vector_map,
+        departing: None,
+        readbacks_at_handoff: 0,
         source: Generation {
             mesh,
             quadratic,
             operator,
             oracle,
+            runtime: oracle_state.runtime().clone(),
             primary: oracle_state.primary_flux().to_vec(),
             previous_primary,
             complementary: oracle_state.complementary_flux().to_vec(),
@@ -418,13 +443,13 @@ fn main() {
             quadratic: target_quadratic,
             operator: target_operator,
             oracle: target_oracle,
+            runtime: target_state.runtime().clone(),
             primary: target_state.primary_flux().to_vec(),
             previous_primary: target_previous_primary,
             complementary: target_state.complementary_flux().to_vec(),
             previous_complementary: target_previous_complementary,
         },
         scene,
-        epoch_origin,
         time: oracle_state.time(),
         target_time,
         time_step,
@@ -582,6 +607,21 @@ fn drive(
                 expected.phase = Phase::Done;
                 return;
             }
+            // Keep what the device is about to hand over, so the transfer
+            // can be measured against its own input.
+            expected.departing = Some((
+                display
+                    .primary_flux
+                    .iter()
+                    .map(|value| f64::from(*value))
+                    .collect(),
+                display
+                    .complementary_flux
+                    .iter()
+                    .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
+                    .collect(),
+            ));
+            expected.readbacks_at_handoff = display.full_readbacks;
             request
                 .begin_handoff(
                     &mut assets,
@@ -594,8 +634,7 @@ fn drive(
         }
         Phase::Handoff => match request.handoff_outcome() {
             CanonicalGpuHandoffOutcome::Accepted => {
-                request.request_steps(SETTLE_STEPS);
-                expected.phase = Phase::Settled;
+                expected.phase = Phase::Transferred;
             }
             CanonicalGpuHandoffOutcome::Rejected(reason) => {
                 eprintln!("temporal AMR handoff rejected with {reason}");
@@ -604,6 +643,102 @@ fn drive(
             }
             _ => {}
         },
+        // The transfer on its own, with no stepping either side of it: the
+        // host applies the same maps to the same input the device just
+        // consumed, so whatever is left is the transfer's own arithmetic.
+        Phase::Transferred => {
+            if !request.request_full_state_readback(&mut commands)
+                && display.full_readbacks <= expected.readbacks_at_handoff
+            {
+                return;
+            }
+            if display.full_readbacks <= expected.readbacks_at_handoff {
+                return;
+            }
+            let (departing_primary, departing_complementary) =
+                expected.departing.take().expect("a departing state");
+            // The transfer can be asked to preserve each isolated component's
+            // total, which is the physical statement that interpolating a
+            // field onto another mesh must not create or destroy any of it.
+            // Asking and not asking are different transfers, and which one the
+            // device performs is the question.
+            let mut departing_totals = vec![0.0; expected.primary_map.target_component_count()];
+            for (value, label) in departing_primary
+                .iter()
+                .zip(expected.source.operator.base().component_labels())
+            {
+                departing_totals[*label as usize] += value;
+            }
+            let prescribed = vec![false; expected.primary_map.target_node_count()];
+            let host_primary = |conserving: bool| {
+                let totals = departing_totals
+                    .iter()
+                    .map(|total| conserving.then_some(*total))
+                    .collect::<Vec<_>>();
+                expected
+                    .primary_map
+                    .transfer(&departing_primary, &totals, &prescribed)
+                    .expect("host primary transfer")
+                    .0
+            };
+            let host_complementary = expected
+                .vector_map
+                .transfer(&departing_complementary)
+                .expect("host vector transfer")
+                .0;
+            let device_primary = display
+                .primary_flux
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect::<Vec<_>>();
+            let device_complementary = display
+                .complementary_flux
+                .iter()
+                .map(|value| Point2::new(f64::from(value[0]), f64::from(value[1])))
+                .collect::<Vec<_>>();
+            if device_primary.len() != expected.primary_map.target_node_count() {
+                return;
+            }
+            let free = relative_l2(&device_primary, &host_primary(false));
+            let conserving = relative_l2(&device_primary, &host_primary(true));
+            let complementary = relative_l2_flux(&device_complementary, &host_complementary);
+            println!(
+                "  transfer alone, same input both sides: Q {free:.3e} free, {conserving:.3e} conserving, b {complementary:.3e}"
+            );
+            // Which of the two transfers the device performs, stated as a
+            // check rather than left to a comment. The free one misses by
+            // `2e-4`; the conserving one lands at f32 level, and the
+            // complementary transfer is exact.
+            if conserving > 1.0e-6 || complementary > 1.0e-6 || free <= conserving {
+                eprintln!("the device is not performing the conserving primary transfer");
+                expected.failed = true;
+                expected.phase = Phase::Done;
+                return;
+            }
+            let component_total = |flux: &[f64], labels: &[u32]| {
+                let mut totals = vec![0.0; expected.primary_map.target_component_count()];
+                for (value, label) in flux.iter().zip(labels) {
+                    totals[*label as usize] += value;
+                }
+                totals
+            };
+            println!(
+                "  component totals: departing {:?}, device {:?}",
+                departing_totals
+                    .iter()
+                    .map(|total| format!("{total:.6e}"))
+                    .collect::<Vec<_>>(),
+                component_total(
+                    &device_primary,
+                    expected.target.operator.base().component_labels()
+                )
+                .iter()
+                .map(|total| format!("{total:.6e}"))
+                .collect::<Vec<_>>(),
+            );
+            request.request_steps(SETTLE_STEPS);
+            expected.phase = Phase::Settled;
+        }
         Phase::Settled => {
             if display
                 .clock
@@ -655,10 +790,16 @@ fn read_estimate(
         &expected.source
     };
     // The runtime the device actually used, decoded from the same copy as the
-    // fields it explains.
+    // fields it explains, against the epoch origin in force now.
+    //
+    // A handoff rebases the clock, so an origin captured before one is stale
+    // by the handoff time. Decoding with a stale origin displaces every
+    // carrier phase by that much: here it moved the instantaneous mass by four
+    // percent while the state itself agreed to `2e-7`, which reads exactly
+    // like a transfer defect and is not one.
     let runtime = display.material_runtime(
         &generation.operator.initial_runtime(),
-        expected.epoch_origin,
+        display.clock?.epoch_origin_seconds,
     )?;
     let nodes = generation.operator.base().degrees_of_freedom();
     let samples = generation
@@ -696,12 +837,16 @@ fn read_estimate(
         expected.time
     };
     println!(
-        "  clock: device {:.9e} against assumed {:.9e}, accepted steps {}",
+        "  clock: device {:.9e} against assumed {:.9e}, steps {}, epoch {} origin {:.9e}",
         display
             .clock
             .map_or(f64::NAN, |clock| clock.absolute_seconds),
         assumed,
         display.clock.map_or(0, |clock| clock.accepted_steps),
+        display.clock.map_or(0, |clock| clock.epoch),
+        display
+            .clock
+            .map_or(f64::NAN, |clock| clock.epoch_origin_seconds),
     );
     let lanes = [
         relative_l2(&primary, &generation.primary),
@@ -714,6 +859,25 @@ fn read_estimate(
         lanes[0], lanes[1], lanes[2], lanes[3]
     );
     let lanes = lanes.into_iter().fold(0.0_f64, f64::max);
+    // The coefficients the two sides are actually using. A mass-row drive puts
+    // its whole effect here, and nowhere in the flux terms, so this separates
+    // a state disagreement from a coefficient one.
+    let assumed_time = if refined {
+        expected.target_time
+    } else {
+        expected.time
+    };
+    if let (Ok(device_mass), Ok(host_mass)) = (
+        generation.operator.primary_mass_at(assumed_time, &runtime),
+        generation
+            .operator
+            .primary_mass_at(assumed_time, &generation.runtime),
+    ) {
+        println!(
+            "  instantaneous mass: {:.3e}",
+            relative_l2(&device_mass, &host_mass)
+        );
+    }
     estimate(
         &generation.mesh,
         &generation.quadratic,
@@ -791,29 +955,20 @@ fn compare(
     for (name, error) in errors {
         println!("  {name}: {error:.3e}");
     }
-    // Bounds set from the first measured run on an M1 Max, with room for
-    // device variation but not for a regression, which would be orders out.
-    //
-    // On the accepted generation the whole estimate is checked. The cell
-    // residual gets its own looser bound because it is the one term that still
-    // differentiates the nodal primary quotient, twice, and it measured a
-    // hundredfold worse than everything else for that reason.
-    //
-    // Across a refinement transfer only the flux terms are checked, and that is
-    // a deliberate limit rather than a relaxed one. The device's transferred
-    // lanes differ from a host application of the same maps by about `2e-4`,
-    // which is the transfer's own behaviour and is asserted separately; what
-    // this gate can say about the estimator is that the flux terms are
-    // insensitive to a state difference that the rate-sensitive terms amplify
-    // by six orders. Bounding those terms here would be asserting the
-    // transfer's precision under the estimator's name.
+    // The same bounds on both generations, because the estimate is as good
+    // after a refinement transfer as before one. They come from measured runs
+    // on an M1 Max, which reproduce exactly, with room for a device difference
+    // but not for a regression, which would be orders out. The cell residual
+    // is the weakest term at `1.7e-5`: it is the one term that still
+    // differentiates the nodal primary quotient, twice, through a Hessian.
+    // The worst single element indicator is looser because one element's
+    // relative error is a noisier quantity than any field-wide sum.
+    let _ = refined;
     !errors.into_iter().any(|(name, error)| {
-        let bound = match (refined, name) {
-            (false, "cell residual") => 1.0e-3,
-            (false, "worst element") => 1.0e-2,
-            (false, _) => 1.0e-4,
-            (true, "recovery" | "interior jump") => 1.0e-5,
-            (true, _) => f64::INFINITY,
+        let bound = if name == "worst element" {
+            1.0e-2
+        } else {
+            1.0e-4
         };
         !error.is_finite() || error > bound
     })

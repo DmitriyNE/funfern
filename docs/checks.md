@@ -84,9 +84,12 @@ decoded out of the same buffer copy as the state. On the accepted generation it
 requires every term within `1e-4` of the f64 oracle, except the cell residual at
 `1e-3` and the worst element indicator at `1e-2`. It then refines where the
 estimate asks, hands the generation over on the device, steps the new one, and
-requires the flux terms within `1e-5` and the transferred state within `1e-3`.
-It deliberately does not bound the rate-sensitive terms across that transfer;
-see the log for why.
+requires the same bounds again - the estimate is as good after a refinement
+transfer as before one. In between it measures the transfer on its own, host
+and device applying the same maps to the same input, and requires that the
+device is performing the *conserving* primary transfer: the free one misses by
+`2e-4`, the conserving one lands at `6e-8`, and the complementary transfer is
+exact.
 The field view tessellates every quadratic parent triangle into six display
 triangles around its shared edge-midpoint and element bubble nodes.
 

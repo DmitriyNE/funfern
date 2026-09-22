@@ -5,6 +5,75 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The transfer was never wrong; the oracle watching it was, twice
+
+- **Correcting the entry two below.** It reported that a refinement transfer
+  moves the state by `1.9e-4` against a `2.7e-7` input and called that a
+  roughly seven-hundredfold amplification belonging to the transfer path. That
+  is wrong. The transfer is sound. Both discrepancies were defects in the
+  host-side oracle the gate compared it against, and the gate now measures the
+  transfer directly rather than inferring it.
+- The decisive experiment was to apply the same maps on the host to the
+  device's *own* pre-transfer state, with no stepping either side, so nothing
+  but the transfer itself is between the two answers. That separates the
+  transfer from the trajectory in one number, which the earlier comparison
+  could not.
+- **First defect: the wrong transfer.** With identical input, host and device
+  differ by `1.841e-4` on `Q` and exactly zero on `b`. The complementary
+  transfer being bit-exact rules out precision as the explanation. The primary
+  transfer can be asked to preserve each isolated component's total - the
+  physical statement that interpolating a field onto another mesh must not
+  create or destroy any of it - and the device does. The host oracle passed
+  `None` and got the free transfer. Asked to conserve, the two agree to
+  `5.505e-8`, and the component total is carried across exactly, `1.971303e-1`
+  on both sides.
+- **Second defect: a stale epoch origin.** With the transfer corrected the
+  state agreed to `2.5e-7`, but the estimate's rate-sensitive terms were still
+  percent-level apart while the flux terms agreed to `4e-8`. That split is a
+  fingerprint: the fixture drives the mass row only, so a coefficient error
+  lands in the energy and the rate and nowhere in the flux. The instantaneous
+  mass differed by `4.077e-2`. A handoff rebases the clock - epoch 0 to 1,
+  origin `0` to `4.648e-2` - and the gate was decoding the material runtime
+  with the origin it had captured before the handoff. At `0.9 Hz` that stale
+  origin displaces the carrier phase by `0.26 rad`, which at depth `0.22` is
+  the four percent. Decoding against the live origin closes it to `7.2e-10`.
+- With both fixed, the estimate is as good after a genuine refinement transfer
+  as before one, and the gate now applies one set of bounds to both
+  generations rather than carving the post-transfer terms out:
+
+  | Term | Before refinement | After |
+  | --- | --- | --- |
+  | interior jump | `1.2e-7` | `3.7e-8` |
+  | recovery | `1.1e-7` | `7.1e-8` |
+  | total energy | `3.0e-7` | `3.4e-7` |
+  | global indicator | `4.6e-7` | `4.0e-7` |
+  | cell residual | `1.7e-5` | `8.4e-6` |
+  | instantaneous mass | `9.5e-10` | `7.2e-10` |
+
+- The gate keeps both measurements as checks rather than as comments. It
+  requires the device to be performing the conserving primary transfer, by
+  measuring both candidate transfers and requiring the conserving one to win.
+  And it decodes the runtime against `display.clock`'s own origin, so the
+  staleness cannot come back.
+- **An API hazard worth a decision, not fixed here.**
+  `CanonicalGpuDisplay::material_runtime` takes `epoch_origin_seconds` as a
+  parameter while the same `CanonicalGpuDisplay` already holds the
+  authoritative value in `self.clock`. A caller that stores the origin once -
+  which is the natural thing to do, and what `canonical_gpu_temporal_work`
+  does - is silently wrong the moment a handoff rebases the clock. That gate
+  performs no handoff so it is correct today, but the shape invites the bug.
+  Defaulting to the display's own clock would remove it. That is a public
+  signature change, so it is reported rather than folded in.
+- The lesson for the log: an oracle is code too. Two of the three surprises in
+  this AMR work turned out to be the measurement rather than the thing
+  measured, and in both cases the tell was a term that agreed far better than
+  its neighbours - the complementary transfer being exact, and the flux terms
+  holding while the mass-dependent ones drifted.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (739 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`, and
+  `canonical_gpu_temporal_amr` on an M1 Max / Metal.
+
 ## 2026-09-22 — One accuracy target, one true accuracy, on both estimator paths
 
 - The driven estimate is multiplied by `DRIVEN_INDICATOR_CALIBRATION = 1.88`
