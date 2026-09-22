@@ -5,6 +5,58 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The error estimator is not calibrated for a patterned medium
+
+- Measured the efficiency index, estimator over true error, across a
+  refinement sequence, which the material-law review requires before the
+  static `6%` target is quoted for driven media. The static number had itself
+  only ever been checked by watching a production run settle, so the inert
+  sweep is the control rather than the assumption.
+- The study is a bare rectangle with a reflecting-box mode released from rest,
+  so the initial state satisfies the walls exactly and the solution stays
+  smooth. A first attempt on the starter scene converged at `h^0.3` and gave a
+  meaningless index; a curved hole and data that fights the boundary limit
+  convergence by geometry, not by the scheme. Every mesh starts from the same
+  analytic data and runs at the finest mesh's timestep, so what differs is
+  space, and is compared on a lattice belonging to no mesh.
+- Isolating which kind of drive breaks it settles the cause. Efficiency index
+  over a 15x range of unknowns:
+
+  | Medium | Index | Spread |
+  | --- | --- | --- |
+  | inert | 1.54, 1.26, 1.36 | 1.22x |
+  | stiffness pumped, uniform in space | 1.65, 1.41, 1.49 | 1.17x |
+  | mass travelling, patterned in space | 7.53, 9.92, 17.36 | 2.31x |
+  | both | 7.62, 11.30, 17.62 | 2.31x |
+
+- So it is the spatial pattern, not the time dependence. A drive that varies
+  only in time leaves the estimator as calibrated as the inert one. A
+  travelling drive inflates it about thirtyfold and makes the index climb with
+  refinement, which is worse than the inflation: a fixed target maps to a
+  different true error at every mesh, so the controller would chase it and
+  never settle.
+- The dominant term is the interior flux jump, which converges at about
+  `h^1.3` when patterned against about `h^4` inert. The displacement recovery
+  behaves the same way. The mechanism follows: the estimator's per-element
+  material samples are the static ones, so the jump is the discontinuity of
+  `A_static . grad(u_driven)`, whose mismatch against the flux that actually
+  produced the field is itself patterned at the modulation wavenumber. That
+  mismatch shrinks only as the mesh resolves the pattern.
+- Separated two roles that one option had been doing, which is how this became
+  visible. `forcing_frequency_hz` is the spectral scale that converts the
+  complementary recovery channel and weights the energy denominator, and stays
+  the driving frequency. The new `resolved_frequency_hz` is what the size rule
+  must resolve and takes the modulation reach. Feeding the reach into the
+  former inflated the energy denominator by its square and partly masked the
+  jump inflation; the inert sweep is unchanged by the separation, so it exposed
+  the defect rather than causing it. This supersedes the previous entry's
+  wiring, where the demand went into `forcing_frequency_hz`.
+- Not fixed. Making the scalar estimator's material samples instantaneous is a
+  change to how the resumable job builds them, with a cost decision in it, so
+  it is reported rather than folded in here. Until then the estimator is
+  conservative on a patterned medium, never optimistic, and the size rule's
+  pattern limit is what actually protects that case.
+
 ## 2026-09-22 — Modulation-aware mesh sizing and estimator inputs
 
 - Started modulation-aware AMR from the two places a driven medium breaks the

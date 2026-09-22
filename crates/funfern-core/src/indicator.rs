@@ -460,11 +460,23 @@ pub struct SolutionIndicatorOptions {
     pub maximum_edge_length: f64,
     pub relative_tolerance: f64,
     pub elements_per_wavelength: f64,
-    /// Highest temporal frequency the field is expected to carry. In a driven
-    /// medium this is not the source frequency: mixing puts energy at
-    /// `f_source +/- n f_drive`, and
-    /// [`CanonicalTemporalWaveOperator::resolution_demand`] is what raises it.
+    /// Frequency at which the field itself oscillates, used as the spectral
+    /// scale that converts the complementary recovery channel into a
+    /// displacement-equivalent one and weights the energy denominator.
+    ///
+    /// This is the driving frequency, not what a modulated medium generates.
+    /// Raising it for a driven medium inflates the recovery term by its
+    /// square while the field oscillates no faster, which measurably wrecked
+    /// the estimator's calibration: the efficiency index went from about 1.4
+    /// and flat to between 4 and 9 and climbing. The size rule's frequency is
+    /// `resolved_frequency_hz`, separately.
     pub forcing_frequency_hz: f64,
+    /// Highest temporal frequency the mesh must resolve. In a driven medium
+    /// this exceeds the source frequency, because mixing puts energy at
+    /// `f_source +/- n f_drive`;
+    /// [`CanonicalTemporalWaveOperator::resolution_demand`] computes it. Zero
+    /// falls back to `forcing_frequency_hz`.
+    pub resolved_frequency_hz: f64,
     /// Shortest spatial period the operator's own coefficients carry, from a
     /// travelling modulation. Infinity where none does.
     ///
@@ -494,6 +506,7 @@ impl Default for SolutionIndicatorOptions {
             relative_tolerance: 0.06,
             elements_per_wavelength: 5.0,
             forcing_frequency_hz: 0.0,
+            resolved_frequency_hz: 0.0,
             coefficient_wavelength: f64::INFINITY,
             grading_ratio: 1.5,
             minimum_scale: 0.6,
@@ -1033,6 +1046,8 @@ impl SolutionIndicatorJob {
             || options.elements_per_wavelength <= 0.0
             || !options.forcing_frequency_hz.is_finite()
             || options.forcing_frequency_hz < 0.0
+            || !options.resolved_frequency_hz.is_finite()
+            || options.resolved_frequency_hz < 0.0
             || options.coefficient_wavelength.is_nan()
             || options.coefficient_wavelength <= 0.0
             || !options.grading_ratio.is_finite()
@@ -1842,9 +1857,14 @@ impl SolutionIndicatorJob {
         // applies wherever the material carries that wave, so which of the two
         // rules set this element's size is worth keeping - only one of them
         // answers to an accuracy target.
-        let wavelength_target = (self.options.forcing_frequency_hz > 0.0).then(|| {
+        let resolved_frequency_hz = if self.options.resolved_frequency_hz > 0.0 {
+            self.options.resolved_frequency_hz
+        } else {
+            self.options.forcing_frequency_hz
+        };
+        let wavelength_target = (resolved_frequency_hz > 0.0).then(|| {
             material.minimum_wave_speed
-                / (self.options.forcing_frequency_hz * self.options.elements_per_wavelength)
+                / (resolved_frequency_hz * self.options.elements_per_wavelength)
         });
         // A travelling modulation patterns the coefficients themselves, so
         // the same elements-per-wavelength rule applies to that pattern

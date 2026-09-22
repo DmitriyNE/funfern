@@ -1,0 +1,407 @@
+//! Does the estimator's relative-error number mean anything in a driven
+//! medium?
+//!
+//! The static path's `6%` target was calibrated by watching a production run
+//! settle, not against a known answer, and the material-law review forbids
+//! quoting that number for time-driven media without validating it again.
+//! This is that validation: the efficiency index, estimator over true error,
+//! across a refinement sequence.
+//!
+//! True error needs a reference, and the study has to be clean enough that
+//! the reference converges. The domain is a bare rectangle and the initial
+//! data is a reflecting-box mode, so it satisfies the boundary conditions
+//! exactly and stays smooth: a curved hole or data that fights the walls
+//! limits convergence by geometry and makes an efficiency index meaningless.
+//! Every mesh starts from the same analytic data and runs with the finest
+//! mesh's timestep, so the temporal error is common to all of them. What is
+//! left is spatial discretization error, which is what the estimator claims
+//! to measure.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use funfern_core::{
+    CanonicalIndicatorSnapshot, CanonicalTemporalPointStencil, CanonicalTemporalWaveOperator,
+    CanonicalTemporalWaveState, CoefficientLaw, MeshingOptions, OuterBoundaryCondition, Point2,
+    QuadraticPointStencil, QuadraticSolutionSnapshot, QuadraticWaveOperator, ScalarField, Scene,
+    SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive, TriMesh,
+    canonical_temporal_indicator_supplement, mesh_scene,
+};
+
+/// Coarse to fine; the last is the reference.
+const EDGES: [f64; 4] = [0.20, 0.14, 0.10, 0.05];
+const TARGET_TIME: f64 = 0.35;
+const LATTICE: usize = 21;
+const ELEMENTS_PER_WAVELENGTH: f64 = 5.0;
+
+struct Solved {
+    edge: f64,
+    degrees_of_freedom: usize,
+    /// Physical primary field and complementary field at the shared lattice.
+    primary: Vec<f64>,
+    complementary: Vec<Point2>,
+    /// Energy density at the lattice, for the norm's denominator.
+    density: Vec<f64>,
+    estimator: Option<f64>,
+    breakdown: Option<funfern_core::SolutionIndicatorReport>,
+    steps: u64,
+    wall_seconds: f64,
+}
+
+fn main() {
+    println!("Bare rectangle, reflecting walls, a box mode released from rest.");
+    println!(
+        "All meshes share the finest timestep, so what differs is space. Target time {TARGET_TIME}.\n"
+    );
+    println!(
+        "The inert sweep is the control. Whatever the driven one does, the question\n\
+         is whether modulation changes it: a number that was never a calibrated\n\
+         percentage cannot be reported as having lost that property.\n"
+    );
+
+    for (label, scene) in [
+        ("inert", inert_scene()),
+        ("mass travelling", mass_only_scene()),
+        ("stiffness pumped", stiffness_only_scene()),
+        ("driven", driven_scene()),
+    ] {
+        // The finest mesh sets the timestep every mesh in the sweep uses.
+        let reference_edge = *EDGES.last().expect("one reference edge");
+        let (_, _, reference_operator) = build(&scene, reference_edge);
+        let time_step = 0.4 * reference_operator.maximum_time_step();
+        let lattice = lattice_points();
+        let solved = EDGES
+            .iter()
+            .map(|edge| solve(&scene, *edge, time_step, &lattice))
+            .collect::<Vec<_>>();
+        let reference = solved.last().expect("a reference solution");
+        println!("{label}: shared time step {time_step:.4e} from h={reference_edge}");
+        println!(
+            "{:<6} {:>8} {:>7} {:>12} {:>12} {:>10}",
+            "h", "DOFs", "steps", "true error", "estimator", "efficiency"
+        );
+        let mut indices = Vec::new();
+        for solution in &solved[..solved.len() - 1] {
+            let truth = relative_error(solution, reference);
+            let estimate = solution.estimator.unwrap_or(f64::NAN);
+            indices.push(estimate / truth);
+            println!(
+                "{:<6} {:>8} {:>7} {:>12.4e} {:>12.4e} {:>10.3}",
+                solution.edge,
+                solution.degrees_of_freedom,
+                solution.steps,
+                truth,
+                estimate,
+                estimate / truth
+            );
+            if let Some(report) = &solution.breakdown {
+                println!(
+                    "       energy {:.3e} | recovery {:.3e} complementary {:.3e} jump {:.3e} drift {:.3e} boundary {:.3e}",
+                    report.total_energy,
+                    report.displacement_recovery_contribution,
+                    report.complementary_recovery_contribution,
+                    report.interior_jump_contribution,
+                    report.canonical_drift_contribution,
+                    report.boundary_residual_contribution
+                );
+            }
+        }
+        let spread = indices.iter().copied().fold(0.0_f64, f64::max)
+            / indices.iter().copied().fold(f64::MAX, f64::min);
+        println!(
+            "{label}: efficiency index spans {spread:.2}x over {}x the unknowns; reference \
+             h={} at {} DOFs in {:.1} s\n",
+            reference.degrees_of_freedom / solved[0].degrees_of_freedom,
+            reference.edge,
+            reference.degrees_of_freedom,
+            reference.wall_seconds
+        );
+    }
+    println!(
+        "An estimator worth reading as a percentage has an efficiency index bounded\n\
+         and roughly constant under refinement. A drifting index means the number\n\
+         moves with the mesh."
+    );
+}
+
+fn inert_scene() -> Scene {
+    Scene::default()
+}
+
+/// Spatially patterned modulation only. The stiffness the estimator's jump
+/// term uses is untouched, so this isolates whether a moving pattern in the
+/// mass row is what the jump is charging for.
+fn mass_only_scene() -> Scene {
+    let mut scene = Scene::default();
+    scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
+        depth: ScalarField::constant(0.22),
+        frequency_hz: ScalarField::constant(0.9),
+        phase_radians: ScalarField::constant(0.15),
+        wavenumber: ScalarField::constant(3.0),
+        angle_radians: ScalarField::constant(0.3),
+    };
+    scene
+}
+
+/// Uniform-in-space modulation of the row the jump term reads. At any instant
+/// this is the static stiffness times one scalar, so if the jump converges
+/// cleanly here the problem is spatial, not temporal.
+fn stiffness_only_scene() -> Scene {
+    let mut scene = Scene::default();
+    scene.materials[0].stiffness_law.drive = TimeDrive::ParametricPump {
+        depth: ScalarField::constant(0.18),
+        frequency_hz: ScalarField::constant(0.7),
+        phase_radians: ScalarField::constant(-0.2),
+    };
+    scene
+}
+
+fn driven_scene() -> Scene {
+    // A bare rectangle. No hole, so nothing limits convergence but the mesh.
+    let mut scene = Scene::default();
+    scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
+        depth: ScalarField::constant(0.22),
+        frequency_hz: ScalarField::constant(0.9),
+        phase_radians: ScalarField::constant(0.15),
+        wavenumber: ScalarField::constant(3.0),
+        angle_radians: ScalarField::constant(0.3),
+    };
+    scene.materials[0].stiffness_law.drive = TimeDrive::ParametricPump {
+        depth: ScalarField::constant(0.18),
+        frequency_hz: ScalarField::constant(0.7),
+        phase_radians: ScalarField::constant(-0.2),
+    };
+    scene
+}
+
+fn build(
+    scene: &Scene,
+    edge: f64,
+) -> (
+    Arc<TriMesh>,
+    Arc<QuadraticWaveOperator>,
+    CanonicalTemporalWaveOperator,
+) {
+    let mut fixed = scene.clone();
+    for material in &mut fixed.materials {
+        material.mass_law = CoefficientLaw::linear();
+        material.stiffness_law = CoefficientLaw::linear();
+    }
+    let mesh = Arc::new(
+        mesh_scene(
+            &fixed,
+            1,
+            MeshingOptions {
+                target_edge_length: edge,
+                ..MeshingOptions::default()
+            },
+        )
+        .expect("calibration mesh"),
+    );
+    let quadratic = Arc::new(
+        QuadraticWaveOperator::assemble_scene(&mesh, &fixed, OuterBoundaryCondition::Reflecting)
+            .expect("calibration scalar operator"),
+    );
+    let temporal = CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1)
+        .expect("calibration temporal operator");
+    (mesh, quadratic, temporal)
+}
+
+/// A reflecting-box mode released from rest, analytic on every mesh so none
+/// starts from another's interpolation. `cos(n*pi*(x+1)/2)` has zero normal
+/// derivative on both walls, which is what reflecting means here, so the
+/// initial state is compatible and the solution stays smooth.
+fn initial(operator: &CanonicalTemporalWaveOperator) -> (Vec<f64>, Vec<Point2>) {
+    const MODE_X: f64 = 2.0;
+    const MODE_Y: f64 = 1.0;
+    let base = operator.base();
+    let half = std::f64::consts::PI / 2.0;
+    let primary = base
+        .primary_mass()
+        .iter()
+        .zip(base.node_points())
+        .map(|(mass, point)| {
+            mass * 0.08
+                * (MODE_X * half * (point.x + 1.0)).cos()
+                * (MODE_Y * half * (point.y + 1.0)).cos()
+        })
+        .collect::<Vec<_>>();
+    // From rest: zero complementary flux is the compatible companion of a
+    // displacement-only start.
+    let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+    (primary, complementary)
+}
+
+fn lattice_points() -> Vec<Point2> {
+    let mut points = Vec::new();
+    for row in 0..LATTICE {
+        for column in 0..LATTICE {
+            let x = -0.9 + 1.8 * column as f64 / (LATTICE - 1) as f64;
+            let y = -0.9 + 1.8 * row as f64 / (LATTICE - 1) as f64;
+            points.push(Point2::new(x, y));
+        }
+    }
+    points
+}
+
+fn solve(scene: &Scene, edge: f64, time_step: f64, lattice: &[Point2]) -> Solved {
+    let started = Instant::now();
+    let (mesh, quadratic, operator) = build(scene, edge);
+    let mut fixed = scene.clone();
+    for material in &mut fixed.materials {
+        material.mass_law = CoefficientLaw::linear();
+        material.stiffness_law = CoefficientLaw::linear();
+    }
+    let (primary, complementary) = initial(&operator);
+    let mut state = CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+        .expect("calibration state");
+    let steps = (TARGET_TIME / time_step).round().max(1.0) as u64;
+    let mut previous = state.primary_flux().to_vec();
+    let mut previous_complementary = state.complementary_flux().to_vec();
+    for _ in 0..steps {
+        previous = state.primary_flux().to_vec();
+        previous_complementary = state.complementary_flux().to_vec();
+        state.step(&operator).expect("calibration step");
+    }
+
+    // Sample the solution where every mesh can be compared.
+    let mut sampled_primary = Vec::with_capacity(lattice.len());
+    let mut sampled_complementary = Vec::with_capacity(lattice.len());
+    let mut density = Vec::with_capacity(lattice.len());
+    for point in lattice {
+        let stencil = QuadraticPointStencil::build(&mesh, &quadratic, &fixed, *point)
+            .expect("lattice stencil");
+        let consumer = CanonicalTemporalPointStencil::from_quadratic(stencil, &operator)
+            .expect("lattice consumer");
+        let sample = consumer
+            .sample(
+                &operator,
+                state.primary_flux(),
+                &previous,
+                state.complementary_flux(),
+                state.time(),
+                time_step,
+                state.runtime(),
+            )
+            .expect("lattice sample");
+        sampled_primary.push(sample.primary);
+        sampled_complementary.push(sample.complementary);
+        density.push(sample.energy_density);
+    }
+
+    let estimator = estimate(
+        &mesh,
+        &quadratic,
+        &fixed,
+        &operator,
+        &state,
+        &previous,
+        &previous_complementary,
+    );
+    let breakdown = estimator.clone();
+    Solved {
+        edge,
+        degrees_of_freedom: operator.base().degrees_of_freedom(),
+        primary: sampled_primary,
+        complementary: sampled_complementary,
+        density,
+        estimator: breakdown.as_ref().map(|report| report.global_indicator),
+        breakdown,
+        steps,
+        wall_seconds: started.elapsed().as_secs_f64(),
+    }
+}
+
+fn estimate(
+    mesh: &Arc<TriMesh>,
+    quadratic: &Arc<QuadraticWaveOperator>,
+    fixed: &Scene,
+    operator: &CanonicalTemporalWaveOperator,
+    state: &CanonicalTemporalWaveState,
+    previous: &[f64],
+    previous_complementary: &[Point2],
+) -> Option<funfern_core::SolutionIndicatorReport> {
+    let count = operator.base().degrees_of_freedom();
+    let demand = operator.resolution_demand(0.0);
+    let snapshot = CanonicalIndicatorSnapshot {
+        mesh_revision: mesh.mesh_revision,
+        primary_flux: state.primary_flux().to_vec(),
+        previous_primary_flux: previous.to_vec(),
+        complementary_flux: state.complementary_flux().to_vec(),
+        previous_complementary_flux: previous_complementary.to_vec(),
+        auxiliary: vec![],
+        previous_auxiliary: vec![],
+        time: state.time(),
+        time_step: state.time_step(),
+    };
+    let supplement =
+        canonical_temporal_indicator_supplement(mesh, operator, &snapshot, state.runtime(), 0.0)
+            .ok()?;
+    // Production zeroes acceleration on purpose, because the canonical
+    // estimator excludes the scalar strong cell residual, but it does supply
+    // a real rate: the energy denominator uses it. In a driven medium each
+    // endpoint divides by the mass in force at its own time.
+    let current = operator
+        .primary_field_at(state.primary_flux(), state.time(), state.runtime())
+        .ok()?;
+    let earlier = operator
+        .primary_field_at(previous, state.time() - state.time_step(), state.runtime())
+        .ok()?;
+    let velocity = current
+        .iter()
+        .zip(&earlier)
+        .map(|(now, before)| (now - before) / state.time_step())
+        .collect::<Vec<_>>();
+    let scalar_snapshot = QuadraticSolutionSnapshot {
+        mesh_revision: mesh.mesh_revision,
+        displacement: current,
+        velocity,
+        acceleration: vec![0.0; count],
+        auxiliary: vec![0.0; count],
+        volume_acceleration: vec![0.0; count],
+        time: state.time(),
+        time_step: state.time_step(),
+    };
+    let mut job = SolutionIndicatorJob::new(
+        mesh.clone(),
+        quadratic.clone(),
+        fixed.clone(),
+        scalar_snapshot,
+        SolutionIndicatorOptions {
+            minimum_edge_length: 0.005,
+            maximum_edge_length: 0.3,
+            elements_per_wavelength: ELEMENTS_PER_WAVELENGTH,
+            // No sources here, so the field's own scale is zero; the drive's
+            // reach belongs to the size rule alone.
+            forcing_frequency_hz: 0.0,
+            resolved_frequency_hz: demand.frequency_hz,
+            coefficient_wavelength: demand.coefficient_wavelength,
+            ..Default::default()
+        },
+    )
+    .with_canonical_supplement(supplement);
+    loop {
+        if let Some(result) = job.advance(8_192) {
+            return result.ok().map(|result| result.report);
+        }
+    }
+}
+
+/// Relative difference from the reference in a discrete energy norm over the
+/// shared lattice.
+fn relative_error(solution: &Solved, reference: &Solved) -> f64 {
+    let mut difference = 0.0;
+    let mut scale = 0.0;
+    for index in 0..solution.primary.len() {
+        let primary = solution.primary[index] - reference.primary[index];
+        let complementary = solution.complementary[index] - reference.complementary[index];
+        difference += primary * primary + complementary.dot(complementary);
+        scale += reference.primary[index] * reference.primary[index]
+            + reference.complementary[index].dot(reference.complementary[index]);
+        let _ = reference.density[index];
+    }
+    if scale <= 0.0 {
+        return f64::NAN;
+    }
+    (difference / scale).sqrt()
+}

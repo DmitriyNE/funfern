@@ -458,7 +458,13 @@ impl Playground {
                 maximum_edge_length: self.amr_maximum_edge,
                 relative_tolerance: self.amr_target_accuracy(),
                 elements_per_wavelength: self.amr_elements_per_wavelength,
-                forcing_frequency_hz: demand.frequency_hz,
+                // The estimator's spectral scale is what the field oscillates
+                // at; only the size rule takes what the medium generates.
+                forcing_frequency_hz: highest_forcing_frequency(
+                    &active.bundle.authored,
+                    active.point_source,
+                ),
+                resolved_frequency_hz: demand.frequency_hz,
                 coefficient_wavelength: demand.coefficient_wavelength,
                 coarsen_ratio: AMR_COARSEN_EDGE_RATIO,
                 dormant_below_energy: self.amr_energy_peak * DORMANT_ENERGY_RATIO,

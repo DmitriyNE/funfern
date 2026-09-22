@@ -10,6 +10,7 @@ cargo run -p funfern-core --release --example mesh_timing -- --wave --slices
 cargo run -p funfern-core --release --example mesh_edit_timing -- --paced
 cargo run -p funfern-core --release --example wave_convergence
 cargo run -p funfern-core --release --example wave_boundary_reflection
+cargo run -p funfern-core --release --example temporal_amr_calibration
 cargo run -p funfern-app --release --locked -- --mesh-edit-benchmark
 cargo run -p funfern-app --release --locked -- --wave-gpu-check
 cargo run -p funfern-app --release --locked -- --wave-transfer-check
@@ -46,6 +47,13 @@ These are meshing timings. `wave_convergence` separately measures the analytic
 reflecting-box mode for P1 at h=0.04 and h=0.02 and enriched quadratic triangles
 at parent h=0.08 and h=0.04, with independent temporal refinement over one and
 five box-crossing times.
+`temporal_amr_calibration` measures the AMR estimator's efficiency index, its
+estimate over the true error, across a refinement sequence on a smooth
+reflecting-box problem. It sweeps an inert medium, a medium modulated
+uniformly in space, one modulated with a travelling spatial pattern, and both.
+The index should be bounded and roughly constant; where it climbs with
+refinement the estimate cannot be read as a percentage.
+
 `wave_boundary_reflection` sends finite Gaussian P2e packets at the outer box and
 compares first- and second-order residual-energy reflection at two angles and two
 wavelengths, alongside the ideal continuous plane-wave coefficients and a
