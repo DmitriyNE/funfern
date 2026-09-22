@@ -1330,8 +1330,7 @@ impl CanonicalTemporalWaveOperator {
         model: TopologyWaveModel<'_>,
         constitutive_revision: u64,
     ) -> Result<Self, WaveError> {
-        let authored = model.to_owned();
-        let mut stripped = authored.clone();
+        let mut stripped = model.to_owned();
         strip_temporal_laws(&mut stripped.materials);
         let base = CanonicalWaveOperator::compile(
             mesh,
@@ -1339,7 +1338,31 @@ impl CanonicalTemporalWaveOperator {
             stripped.as_model(),
             constitutive_revision,
         )?;
-        let authored = authored.as_model();
+        Self::from_base(base, mesh, quadratic, model)
+    }
+
+    /// The law samples alone, over a base someone else has already compiled.
+    ///
+    /// The base must come from this model with its temporal laws stripped,
+    /// which is what [`Self::compile`] does before calling this. An
+    /// application whose assembly is incremental builds that base through its
+    /// own resumable job and would otherwise compile it twice: once for the
+    /// solver and once inside here. Everything this adds is per-sample law
+    /// evaluation with no linear algebra, so it is cheap next to the assembly
+    /// it reuses.
+    ///
+    /// Splitting it out is also what lets an application hold a law-carrying
+    /// document at all. The fixed compiler refuses one - that is the gate
+    /// stopping a law from being executed as a static medium - so the stripped
+    /// model is not an optimization there, it is the only thing that compiles.
+    pub fn from_base(
+        base: CanonicalWaveOperator,
+        mesh: &TriMesh,
+        quadratic: &QuadraticWaveOperator,
+        model: TopologyWaveModel<'_>,
+    ) -> Result<Self, WaveError> {
+        let authored_owned = model.to_owned();
+        let authored = authored_owned.as_model();
         let mut primary = Vec::with_capacity(base.primary_contributions().len());
         let mut complementary = Vec::with_capacity(base.constitutive_samples().len());
         let mut used_materials = BTreeSet::new();
@@ -4532,6 +4555,72 @@ mod tests {
             }
             previous = Some((time_step, residual));
         }
+    }
+
+    /// What an application holding a law-carrying document actually hits.
+    #[test]
+    fn a_law_carrying_scene_needs_a_stripped_base_the_temporal_operator_can_reuse() {
+        let mut scene = Scene::default();
+        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(1.0),
+            phase_radians: ScalarField::constant(0.0),
+        };
+        let mut stripped = scene.clone();
+        strip_temporal_laws(&mut stripped.materials);
+        let mesh = mesh_scene(
+            &stripped,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &stripped,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        // The fixed compiler refuses it, by the same gate that stops a law
+        // being executed as a static medium.
+        assert!(crate::CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).is_err());
+        // The temporal one strips for its base and keeps the laws for itself.
+        let whole =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+
+        // And an application that already built that stripped base reuses it
+        // rather than compiling the assembly twice. The two routes must agree,
+        // or the reuse would be a second definition of the operator.
+        let base =
+            crate::CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &stripped, 1).unwrap();
+        let reused = CanonicalTemporalWaveOperator::from_base(
+            base,
+            &mesh,
+            &quadratic,
+            crate::TopologyWaveModel::from_scene(&scene),
+        )
+        .unwrap();
+        assert_eq!(
+            whole.maximum_time_step(),
+            reused.maximum_time_step(),
+            "the reused base must give the same trajectory bound"
+        );
+        assert_eq!(
+            whole.forced_composition_supported(),
+            reused.forced_composition_supported()
+        );
+        assert_eq!(
+            whole.conservative_bulk_supported(),
+            reused.conservative_bulk_supported()
+        );
+        let runtime = whole.initial_runtime();
+        assert_eq!(
+            whole.primary_mass_at(0.3, &runtime).unwrap(),
+            reused.primary_mass_at(0.3, &runtime).unwrap(),
+            "the reused base must give the same instantaneous coefficients"
+        );
     }
 
     /// Two things the variable-coefficient supplement has to get right. On an

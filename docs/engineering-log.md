@@ -5,6 +5,40 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — A law-carrying document cannot compile at all, which reshapes enablement
+
+- Started wiring the application to run a driven scene and found the premise
+  wrong. The plan assumed enablement meant "also compile a temporal operator
+  beside the canonical one". It does not. **The fixed compiler refuses a
+  law-carrying model outright** - that is the same gate that stops a law being
+  executed as a static medium, enforced at `Material::evaluate` - so the
+  application's canonical assembly would fail before anything temporal was
+  reached. A document with a pump does not run today; it does not load.
+- So the application's assembly has to be fed the *stripped* model, and the
+  temporal operator built from the authored one over that same base. Which
+  raised the second problem: `CanonicalTemporalWaveOperator::compile` builds
+  its own base internally, so an application that already assembled one through
+  its resumable job would compile the whole thing twice, synchronously, in a
+  pipeline whose entire design is to stay responsive.
+- `from_base` is the split that fixes it. Everything it does is per-sample law
+  evaluation with no linear algebra, over a base the caller supplies. `compile`
+  is now that base plus this, so there is one definition rather than two, and a
+  test pins the two routes to the same trajectory bound, the same admission
+  predicates and the same instantaneous coefficients.
+- Both findings are recorded as a test rather than as prose:
+  `a_law_carrying_scene_needs_a_stripped_base_the_temporal_operator_can_reuse`
+  asserts that the fixed compiler refuses the scene, that the temporal one
+  accepts it, and that a reused base agrees with a freshly compiled one.
+- What this means for the remaining enablement work, which is now better
+  understood than when it was planned: the application's canonical assembly job
+  needs the stripped model, `PreparedTopology` needs to carry the temporal
+  operator, the timestep must come from the temporal ceiling, and the two plan
+  sites switch to `compile_temporal`. The restructuring of the assembly is the
+  part the plan did not anticipate and is where the risk now sits.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (750 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-22 — On the core anyone actually runs, the drive is free per step
 
 - The CPU oracle's driven path costs about thirteen times its fixed path, and
