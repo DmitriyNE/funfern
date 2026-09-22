@@ -46,6 +46,23 @@ belong in [architecture.md](architecture.md) and milestone scope in [plan.md](pl
   refactorization. This is traced by eye through `prepare`, not derived - the
   auxiliary elimination folds terms into the trace block and that step has to
   be checked before the structure can be relied on.
+- **And the machinery that option needs already exists.** Measured on the same
+  mesh, an outgoing boundary costs `280.88 ms` to compile against `4.99 ms`
+  without one - fifty-six times, with the boundary accounting for about
+  ninety-eight per cent of it. That is not the factorization, which is a
+  separate `22.5 ms`: the assembly builds the tangential operator and takes a
+  symmetric eigendecomposition of it over the trace, carrying each mode as
+  `eigenvector * sqrt(damping)`. So the expensive part of the modal route is
+  already paid, once, and the open question narrows usefully. If the existing
+  basis also diagonalizes the mass-scaled system, a stage costs a diagonal
+  inverse in coordinates that already exist. If a second, differently weighted
+  decomposition is needed, that is another assembly-time cost paid on remesh or
+  material edit - not per stage. Either branch beats refactorizing, which is
+  `30x` per step.
+- What survives either way: this only helps when the mass's spatial *pattern*
+  at the trace is fixed and only its amplitude moves, which a pump or a time
+  crystal satisfies. A travelling modulation changes the pattern's shape along
+  the trace, so no fixed basis diagonalizes it.
 - Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
   -- -D warnings`, `cargo test --workspace --locked` (752 passed, 1 known
   ignored reproducer), and the end-to-end gate both ways - `2.46e-7` running,
