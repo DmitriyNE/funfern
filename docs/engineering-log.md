@@ -5,6 +5,43 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-23 — The estimator learns the boundaries the stepper already runs
+
+Reported: adaptation fails at load on the autosaved scene. Reproduced against
+that autosave - the estimate returns `InvalidCoefficients` - and the cause is a
+capability gap rather than a defect.
+
+- `canonical_temporal_indicator_supplement` refused unless
+  `conservative_bulk_supported()`, which is
+  `!open && ungapped && undamped_boundary && !has_loss && undriven_boundary`.
+  The reported scene has four second-order outgoing sides, so `open` blocked it;
+  nothing else did. The guard was correct when written, and said so in its own
+  doc, but the temporal path executed only the conservative bulk then. This
+  session closed all six boundary compositions, so the stepper runs open
+  boundaries while the estimate never learned them - and a document with an
+  outgoing wall is the default one.
+- The supplement now carries the thin-gap and outgoing defect terms, which are
+  the fixed path's own with the mass and force in force at the instant standing
+  in for the authored ones. `diagnostic_derivative` gained a mass-taking variant
+  for the same reason the kick did: the trace admittance and the modal couplings
+  divide by the mass at the instant being measured.
+- The guard narrowed to `indicator_supplement_supported`. Loss, a damped
+  boundary and prescribed boundary data are still refused, because each puts a
+  term in the evolution that the defect would otherwise charge to the mesh and
+  none of those has been derived here.
+- `open_boundary_supplement_matches_the_fixed_one_when_inert` is the check that
+  was missing: an undriven medium behind an outgoing wall must produce exactly
+  the fixed supplement's outgoing contribution and per-element boundary
+  residual. It asserts the fixture exercises the term before comparing, so it
+  cannot pass on a scene without a wall. The existing parity fixture is a
+  reflecting box, which is why nothing caught this.
+- End to end on the reported autosave the estimate goes from
+  `InvalidCoefficients` to succeeding.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`, the device AMR
+  gate, and `temporal_amr_calibration` - whose efficiency indices stay bounded,
+  the widest row spanning `1.12x` over `15x` the unknowns.
+
 ## 2026-09-23 — A field survives its medium starting to move
 
 Reported, and the last of the four: enabling a non-stationary material threw the

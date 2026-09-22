@@ -614,22 +614,34 @@ impl CanonicalTemporalAreaContribution {
 /// charge the estimator for the medium's own modulation and refine against
 /// it.
 ///
-/// Only the conservative bulk is covered, which is what the temporal path
-/// executes: an operator carrying loss, thin gaps, open boundaries or
-/// prescribed data is refused rather than reported with those terms missing.
+/// Thin gaps and open boundaries are covered: their defects are the fixed
+/// path's own, with the mass and force in force at the instant standing in for
+/// the authored ones. Loss, a damped boundary and prescribed boundary data are
+/// refused rather than reported with those terms missing, because each puts a
+/// term in the evolution the defect would otherwise charge to the mesh.
 pub fn canonical_temporal_indicator_supplement(
     mesh: &TriMesh,
     operator: &CanonicalTemporalWaveOperator,
+    forcing: &CanonicalForcing,
     snapshot: &CanonicalIndicatorSnapshot,
     runtime: &CanonicalMaterialRuntimeState,
     resolved_frequency_hz: f64,
 ) -> Result<CanonicalIndicatorSupplement, WaveError> {
-    if !operator.conservative_bulk_supported() {
+    if !operator.indicator_supplement_supported() {
         return Err(WaveError::InvalidCoefficients);
     }
     let base = operator.base();
     let node_count = base.degrees_of_freedom();
     let sample_count = base.complementary_degrees_of_freedom();
+    let gap_count = base.thin_gap_samples().len();
+    let outgoing_count = base
+        .outgoing_boundary()
+        .map_or(0, |boundary| boundary.auxiliary_count());
+    if snapshot.auxiliary.len() != gap_count + outgoing_count
+        || snapshot.previous_auxiliary.len() != gap_count + outgoing_count
+    {
+        return Err(WaveError::InvalidState);
+    }
     if snapshot.mesh_revision != mesh.mesh_revision
         || base.generation().mesh_revision != mesh.mesh_revision
         || base.element_nodes().len() != mesh.triangles.len()
@@ -663,7 +675,7 @@ pub fn canonical_temporal_indicator_supplement(
     let element_count = mesh.triangles.len();
     let mut element_complementary_recovery = vec![0.0; element_count];
     let mut element_cell_residual = vec![0.0; element_count];
-    let element_boundary_residual = vec![0.0; element_count];
+    let mut element_boundary_residual = vec![0.0; element_count];
     let mut element_energy = vec![0.0; element_count];
 
     // Instantaneous complementary inverses, once per sample rather than once
@@ -912,6 +924,133 @@ pub fn canonical_temporal_indicator_supplement(
     }
     let drift_contribution = element_cell_residual.iter().sum();
 
+    // Which elements own a node, so a boundary defect measured at the trace
+    // lands on the elements that would have to be refined for it.
+    let mut node_elements = vec![Vec::new(); node_count];
+    for (element, nodes) in base.element_nodes().iter().enumerate() {
+        for node in nodes {
+            if !node_elements[*node as usize].contains(&element) {
+                node_elements[*node as usize].push(element);
+            }
+        }
+    }
+
+    // A gap stores `stiffness * jump^2 / 2` against the field across it, and
+    // the field is the instantaneous one computed above.
+    let mut thin_gap_contribution = 0.0;
+    for (index, gap) in base.thin_gap_samples().iter().enumerate() {
+        let left = gap.left_node as usize;
+        let right = gap.right_node as usize;
+        let expected = snapshot.time_step
+            * 0.5
+            * ((current_field[left] - current_field[right])
+                + (previous_field[left] - previous_field[right]));
+        let defect = snapshot.auxiliary[index] - snapshot.previous_auxiliary[index] - expected;
+        let residual = 0.5 * gap.stiffness * defect * defect;
+        thin_gap_contribution += residual;
+        let mut owners = node_elements[left].clone();
+        for element in &node_elements[right] {
+            if !owners.contains(element) {
+                owners.push(*element);
+            }
+        }
+        let share = residual / owners.len().max(1) as f64;
+        let energy_share =
+            0.5 * gap.stiffness * snapshot.auxiliary[index].powi(2) / owners.len().max(1) as f64;
+        for element in owners {
+            element_boundary_residual[element] += share;
+            element_energy[element] += energy_share;
+        }
+    }
+
+    // The outgoing wall's own defect. Everything that divides by the nodal
+    // mass takes the one in force at this instant, which is the whole
+    // difference from the fixed term: the trace admittance and the modal
+    // couplings inside the generator, and the residual's own normalization.
+    let mut outgoing_contribution = 0.0;
+    if let Some(boundary) = base.outgoing_boundary() {
+        let current_z = &snapshot.auxiliary[gap_count..];
+        let previous_z = &snapshot.previous_auxiliary[gap_count..];
+        let trace_of = |flux: &[f64]| {
+            boundary
+                .trace_nodes()
+                .iter()
+                .map(|node| flux[*node as usize])
+                .collect::<Vec<_>>()
+        };
+        let current_trace = trace_of(&snapshot.primary_flux);
+        let previous_trace = trace_of(&snapshot.previous_primary_flux);
+        let midpoint_trace = current_trace
+            .iter()
+            .zip(&previous_trace)
+            .map(|(current, previous)| 0.5 * (current + previous))
+            .collect::<Vec<_>>();
+        let midpoint_z = current_z
+            .iter()
+            .zip(previous_z)
+            .map(|(current, previous)| 0.5 * (current + previous))
+            .collect::<Vec<_>>();
+        let midpoint_mass = operator.primary_mass_at(time - 0.5 * snapshot.time_step, runtime)?;
+        let mut derivative = boundary.diagnostic_derivative_with(
+            base,
+            &midpoint_mass,
+            &midpoint_trace,
+            &midpoint_z,
+        )?;
+        let instantaneous_force =
+            |complementary: &[Point2], auxiliary: &[f64], at: f64| -> Result<Vec<f64>, WaveError> {
+                let mut force = operator.force_at(complementary, at, runtime)?;
+                add_gap_force(operator, &auxiliary[..gap_count], &mut force)?;
+                Ok(force)
+            };
+        let current_force =
+            instantaneous_force(&snapshot.complementary_flux, &snapshot.auxiliary, time)?;
+        let previous_force = instantaneous_force(
+            &snapshot.previous_complementary_flux,
+            &snapshot.previous_auxiliary,
+            previous_time,
+        )?;
+        let current_source = forcing.integrated_rate(time)?;
+        let previous_source = forcing.integrated_rate(previous_time)?;
+        for (trace, node) in boundary.trace_nodes().iter().enumerate() {
+            if forcing.prescribed()[*node as usize].is_none() {
+                derivative[trace] += 0.5
+                    * (current_source[*node as usize] + previous_source[*node as usize]
+                        - current_force[*node as usize]
+                        - previous_force[*node as usize]);
+            }
+        }
+        let mut residual = 0.0;
+        for (trace, node) in boundary.trace_nodes().iter().enumerate() {
+            if forcing.prescribed()[*node as usize].is_some() {
+                continue;
+            }
+            let defect = current_trace[trace]
+                - previous_trace[trace]
+                - snapshot.time_step * derivative[trace];
+            residual += 0.5 * defect * defect / midpoint_mass[*node as usize];
+        }
+        for auxiliary in 0..outgoing_count {
+            let defect = current_z[auxiliary]
+                - previous_z[auxiliary]
+                - snapshot.time_step * derivative[boundary.trace_nodes().len() + auxiliary];
+            residual += 0.5 * defect * defect;
+        }
+        outgoing_contribution = residual;
+        let mut owners = Vec::new();
+        for node in boundary.trace_nodes() {
+            for element in &node_elements[*node as usize] {
+                if !owners.contains(element) {
+                    owners.push(*element);
+                }
+            }
+        }
+        let share = residual / owners.len().max(1) as f64;
+        for element in owners {
+            element_boundary_residual[element] += share;
+        }
+    }
+
     Ok(CanonicalIndicatorSupplement {
         mesh_revision: mesh.mesh_revision,
         element_complementary_recovery,
@@ -922,10 +1061,8 @@ pub fn canonical_temporal_indicator_supplement(
         drift_contribution,
         complementary_recovery_contribution,
         complementary_jump_contribution,
-        // The conservative bulk carries neither, by the contract checked
-        // above; they are zero rather than unreported.
-        thin_gap_contribution: 0.0,
-        outgoing_contribution: 0.0,
+        thin_gap_contribution,
+        outgoing_contribution,
     })
 }
 
@@ -1310,6 +1447,7 @@ pub struct CanonicalTemporalWaveOperator {
     has_temporal_laws: bool,
     has_loss: bool,
     conservative_bulk_supported: bool,
+    indicator_supplement_supported: bool,
     forced_composition_supported: bool,
     maximum_time_step: f64,
 }
@@ -1481,6 +1619,13 @@ impl CanonicalTemporalWaveOperator {
         let forced_composition_supported = passive_composition;
         let conservative_bulk_supported =
             !open && ungapped && undamped_boundary && !has_loss && undriven_boundary;
+        // What the error estimate's defect terms cover. Open boundaries and
+        // thin gaps are in, because their defects are the fixed path's own with
+        // the instantaneous mass and force in place of the authored ones. Loss,
+        // a damped boundary and prescribed boundary data are not: each puts a
+        // term in the evolution that the defect would otherwise charge to the
+        // mesh, and none has been derived here.
+        let indicator_supplement_supported = undamped_boundary && !has_loss && undriven_boundary;
         Ok(Self {
             base,
             primary,
@@ -1489,6 +1634,7 @@ impl CanonicalTemporalWaveOperator {
             has_temporal_laws,
             has_loss,
             conservative_bulk_supported,
+            indicator_supplement_supported,
             forced_composition_supported,
             maximum_time_step,
         })
@@ -1514,6 +1660,12 @@ impl CanonicalTemporalWaveOperator {
     /// lossy, forced, prescribed-boundary, or auxiliary subsystem.
     pub fn conservative_bulk_supported(&self) -> bool {
         self.conservative_bulk_supported
+    }
+
+    /// Whether [`canonical_temporal_indicator_supplement`] covers this
+    /// generation's defect terms.
+    pub fn indicator_supplement_supported(&self) -> bool {
+        self.indicator_supplement_supported
     }
 
     /// Whether the stepper can compose prescribed data, volume sources and
@@ -3518,9 +3670,15 @@ mod tests {
             time: time_step,
             time_step,
         };
-        let supplement =
-            canonical_temporal_indicator_supplement(&mesh, &temporal, &snapshot, &runtime, 0.0)
-                .unwrap();
+        let supplement = canonical_temporal_indicator_supplement(
+            &mesh,
+            &temporal,
+            &CanonicalForcing::none(temporal.base()),
+            &snapshot,
+            &runtime,
+            0.0,
+        )
+        .unwrap();
         assert!(supplement.element_complementary_jump.is_some());
         assert!(supplement.complementary_jump_contribution > 0.0);
 
@@ -4651,8 +4809,109 @@ mod tests {
     /// driven one it must differ, because reusing the authored coefficients
     /// charges the estimator for the medium's own modulation and refines
     /// against it.
+    /// The supplement's boundary defect terms, against the fixed path's own.
+    ///
+    /// An outgoing wall used to be refused outright here, on a contract written
+    /// when the temporal path executed only the conservative bulk. It executes
+    /// open boundaries now, so the estimate has to carry their defect - and a
+    /// document with an outgoing wall is the default one, which is how this
+    /// reached a user as "AMR fails at load". The earlier parity fixture is a
+    /// reflecting box, so it could not have caught it.
+    fn open_boundary_supplement_matches_the_fixed_one_when_inert() {
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let inert =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let base = inert.base();
+        assert!(
+            base.outgoing_boundary().is_some(),
+            "the fixture needs the wall it is about"
+        );
+        let time_step = 0.4 * inert.maximum_time_step();
+        let primary = base
+            .node_points()
+            .iter()
+            .map(|point| 0.05 * (1.7 * point.x - 0.9 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.03 * (1.1 * point.x + 1.4 * point.y).cos())
+            .collect::<Vec<_>>();
+        let state =
+            CanonicalWaveState::from_primary_and_potential(base, time_step, &primary, &potential)
+                .unwrap();
+        let forcing = CanonicalForcing::none(base);
+        let mut next = state.clone();
+        next.step_with_forcing(base, &forcing).unwrap();
+        let auxiliary_of = |state: &CanonicalWaveState| match state.auxiliaries() {
+            crate::CanonicalAuxiliaryState::Linear(auxiliaries) => auxiliaries
+                .thin_gap_jump()
+                .iter()
+                .chain(auxiliaries.outgoing_z())
+                .copied()
+                .collect::<Vec<_>>(),
+            crate::CanonicalAuxiliaryState::None => Vec::new(),
+        };
+        let snapshot = CanonicalIndicatorSnapshot {
+            mesh_revision: mesh.mesh_revision,
+            primary_flux: next.primary_flux().to_vec(),
+            previous_primary_flux: state.primary_flux().to_vec(),
+            complementary_flux: next.complementary_flux().to_vec(),
+            previous_complementary_flux: state.complementary_flux().to_vec(),
+            auxiliary: auxiliary_of(&next),
+            previous_auxiliary: auxiliary_of(&state),
+            time: time_step,
+            time_step,
+        };
+        let fixed =
+            crate::canonical_indicator_supplement(&mesh, base, &forcing, &snapshot).unwrap();
+        let runtime = inert.initial_runtime();
+        let temporal = canonical_temporal_indicator_supplement(
+            &mesh, &inert, &forcing, &snapshot, &runtime, 0.0,
+        )
+        .expect("an open boundary must not refuse the estimate");
+        assert!(
+            fixed.outgoing_contribution > 0.0,
+            "the fixture must exercise the term it is checking"
+        );
+        assert!(
+            (temporal.outgoing_contribution - fixed.outgoing_contribution).abs()
+                <= 1.0e-10 * fixed.outgoing_contribution.abs().max(1.0e-12),
+            "inert outgoing defect differs: {} against {}",
+            temporal.outgoing_contribution,
+            fixed.outgoing_contribution
+        );
+        for (element, (left, right)) in temporal
+            .element_boundary_residual
+            .iter()
+            .zip(&fixed.element_boundary_residual)
+            .enumerate()
+        {
+            assert!(
+                (left - right).abs() <= 1.0e-10 * right.abs().max(1.0e-12),
+                "inert boundary residual differs at {element}: {left} against {right}"
+            );
+        }
+    }
+
     #[test]
     fn temporal_supplement_matches_the_fixed_one_when_inert_and_departs_when_driven() {
+        open_boundary_supplement_matches_the_fixed_one_when_inert();
         let inert_scene = Scene::initial();
         let mesh = mesh_scene(
             &inert_scene,
@@ -4706,9 +4965,15 @@ mod tests {
         let fixed =
             crate::canonical_indicator_supplement(&mesh, base, &forcing, &snapshot).unwrap();
         let runtime = inert.initial_runtime();
-        let temporal =
-            canonical_temporal_indicator_supplement(&mesh, &inert, &snapshot, &runtime, 0.0)
-                .unwrap();
+        let temporal = canonical_temporal_indicator_supplement(
+            &mesh,
+            &inert,
+            &CanonicalForcing::none(inert.base()),
+            &snapshot,
+            &runtime,
+            0.0,
+        )
+        .unwrap();
         for (element, (left, right)) in temporal
             .element_energy
             .iter()
@@ -4743,9 +5008,15 @@ mod tests {
             CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &driven_scene, 1)
                 .unwrap();
         let runtime = driven.initial_runtime();
-        let driven_supplement =
-            canonical_temporal_indicator_supplement(&mesh, &driven, &snapshot, &runtime, 0.0)
-                .unwrap();
+        let driven_supplement = canonical_temporal_indicator_supplement(
+            &mesh,
+            &driven,
+            &CanonicalForcing::none(driven.base()),
+            &snapshot,
+            &runtime,
+            0.0,
+        )
+        .unwrap();
         let energy: f64 = driven_supplement.element_energy.iter().sum();
         let inert_energy: f64 = fixed.element_energy.iter().sum();
         assert!(

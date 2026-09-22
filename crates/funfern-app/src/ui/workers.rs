@@ -276,6 +276,7 @@ impl AmrIndicatorJob {
                 (Some(temporal), Some(runtime)) => canonical_temporal_indicator_supplement(
                     &canonical.mesh,
                     temporal,
+                    &canonical.forcing,
                     &canonical.snapshot,
                     runtime,
                     // The spectral scale the supplement's own recovery uses.

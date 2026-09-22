@@ -384,8 +384,15 @@ fn estimate(
         )
         .ok()?
     } else {
-        canonical_temporal_indicator_supplement(mesh, operator, &snapshot, state.runtime(), 0.0)
-            .ok()?
+        canonical_temporal_indicator_supplement(
+            mesh,
+            operator,
+            &funfern_core::CanonicalForcing::none(operator.base()),
+            &snapshot,
+            state.runtime(),
+            0.0,
+        )
+        .ok()?
     };
     // Production zeroes acceleration on purpose, because the canonical
     // estimator excludes the scalar strong cell residual, but it does supply

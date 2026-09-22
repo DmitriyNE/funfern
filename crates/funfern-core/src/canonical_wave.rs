@@ -617,6 +617,25 @@ impl CanonicalOutgoingBoundary {
         trace_primary_flux: &[f64],
         normalized_memory: &[f64],
     ) -> Result<Vec<f64>, WaveError> {
+        self.diagnostic_derivative_with(
+            operator,
+            operator.primary_mass(),
+            trace_primary_flux,
+            normalized_memory,
+        )
+    }
+
+    /// The same derivative against a nodal mass supplied by the caller, which
+    /// is what a driven generation's diagnostics need: the trace admittance and
+    /// the modal couplings both divide by the mass in force at the instant
+    /// being measured, not by the authored one.
+    pub fn diagnostic_derivative_with(
+        &self,
+        operator: &CanonicalWaveOperator,
+        mass: &[f64],
+        trace_primary_flux: &[f64],
+        normalized_memory: &[f64],
+    ) -> Result<Vec<f64>, WaveError> {
         if trace_primary_flux.len() != self.trace_nodes.len()
             || normalized_memory.len() != self.auxiliary_count
         {
@@ -625,7 +644,7 @@ impl CanonicalOutgoingBoundary {
         let mut state = Vec::with_capacity(trace_primary_flux.len() + normalized_memory.len());
         state.extend_from_slice(trace_primary_flux);
         state.extend_from_slice(normalized_memory);
-        apply_outgoing_generator(operator, self, operator.primary_mass(), &state)
+        apply_outgoing_generator(operator, self, mass, &state)
     }
 
     pub fn physical_memory(

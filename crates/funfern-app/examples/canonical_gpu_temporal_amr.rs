@@ -491,8 +491,15 @@ fn estimate(
         time,
         time_step,
     };
-    let supplement =
-        canonical_temporal_indicator_supplement(mesh, operator, &snapshot, runtime, 0.0).ok()?;
+    let supplement = canonical_temporal_indicator_supplement(
+        mesh,
+        operator,
+        &CanonicalForcing::none(operator.base()),
+        &snapshot,
+        runtime,
+        0.0,
+    )
+    .ok()?;
     let current = operator
         .primary_field_at(primary_flux, time, runtime)
         .ok()?;
