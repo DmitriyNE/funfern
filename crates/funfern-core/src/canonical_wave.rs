@@ -4535,6 +4535,91 @@ mod tests {
         );
     }
 
+    /// The trace system behind the outgoing midpoint solve is
+    /// `I + (h/2) K M^-1`, where `K` collects the first-order impedance
+    /// diagonal and the modal outer products, and does not depend on the nodal
+    /// mass at all: the three-pole blocks are eliminated by coefficients built
+    /// only from a mode's decay and the step, so they rescale a mode's
+    /// coefficient without touching the shape. This recovers `K` from
+    /// factorizations built against three different masses and requires them to
+    /// agree, because that invariance is the whole basis for letting a moving
+    /// mass reuse one preparation.
+    #[test]
+    fn the_outgoing_trace_system_hides_a_mass_free_operator() {
+        let mesh = square_with_outer_boundary();
+        let scene = Scene::default();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 73).unwrap();
+        let boundary = operator.outgoing_boundary().unwrap();
+        let trace_count = boundary.trace_nodes().len();
+        let kick = 0.5 * 0.08 * operator.maximum_time_step();
+        let half = 0.5 * kick;
+
+        let recover = |mass: &[f64]| {
+            let cache =
+                CanonicalOutgoingMidpointFactor::prepare(&operator, boundary, mass, kick).unwrap();
+            let mut inverse = vec![0.0; trace_count * trace_count];
+            for column in 0..trace_count {
+                let mut basis = vec![0.0; trace_count];
+                basis[column] = 1.0;
+                for (row, value) in cache.schur.solve(&basis).unwrap().into_iter().enumerate() {
+                    inverse[row * trace_count + column] = value;
+                }
+            }
+            let mut recovered = vec![0.0; trace_count * trace_count];
+            for column in 0..trace_count {
+                let mut basis = vec![0.0; trace_count];
+                basis[column] = 1.0;
+                let solved = solve_dense(inverse.clone(), basis, trace_count).unwrap();
+                let node = boundary.trace_nodes()[column] as usize;
+                for (row, value) in solved.into_iter().enumerate() {
+                    recovered[row * trace_count + column] =
+                        (value - f64::from(row == column)) * mass[node] / half;
+                }
+            }
+            recovered
+        };
+
+        let authored = operator.primary_mass().to_vec();
+        let pumped = authored.iter().map(|value| 2.7 * value).collect::<Vec<_>>();
+        let travelling = authored
+            .iter()
+            .enumerate()
+            .map(|(node, value)| value * (1.0 + 0.4 * (0.9 * node as f64).sin()))
+            .collect::<Vec<_>>();
+
+        let reference = recover(&authored);
+        let scale = reference
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0, f64::max);
+        assert!(scale > 0.0);
+        for candidate in [recover(&pumped), recover(&travelling)] {
+            let difference = maximum_difference(&reference, &candidate);
+            assert!(
+                difference < 1.0e-9 * scale,
+                "the recovered trace operator followed the mass by {difference:e}"
+            );
+        }
+
+        let asymmetry = (0..trace_count)
+            .flat_map(|row| (0..row).map(move |column| (row, column)))
+            .map(|(row, column)| {
+                (reference[row * trace_count + column] - reference[column * trace_count + row])
+                    .abs()
+            })
+            .fold(0.0, f64::max);
+        assert!(
+            asymmetry < 1.0e-9 * scale,
+            "the recovered trace operator is not symmetric by {asymmetry:e}"
+        );
+    }
+
     #[test]
     fn passive_second_order_trace_has_normalized_memory_and_contracts_long_runs() {
         let mesh = square_with_outer_boundary();

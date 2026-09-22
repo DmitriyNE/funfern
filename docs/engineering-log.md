@@ -5,6 +5,70 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The outgoing trace system hides a mass-free operator
+
+- Paper work on `prepare`, before any implementation, to decide whether the
+  outgoing refusal can be lifted. Two questions: does the Schur elimination of
+  the three-pole blocks preserve a `K M^-1` shape, and does the assembly's
+  existing modal basis diagonalize the mass-scaled result.
+- The first answer is yes, exactly. The matrix the midpoint solve factors is
+  `S = I + (h/2) K M^-1`, where `K = D + sum_k a_k t_k t_k^T` collects the
+  first-order impedance diagonal and the modal outer products. Mass enters
+  `prepare` in exactly two places, both of them the `/ mass[node]` on the right.
+  The pole blocks never see it: their 3x3 inverse, `aqz`, `azq` and the resulting
+  `schur_coefficient` are built from a mode's decay and the step alone, so
+  eliminating them rescales `a_k` and leaves the shape alone.
+- `the_outgoing_trace_system_hides_a_mass_free_operator` is the falsifier. It
+  recovers `K` from the factored `DenseLu` at three masses - authored, a uniform
+  2.7x pump, and an arbitrary non-uniform wobble - and requires them to agree.
+  They do, to `1e-9` of scale, and `K` is symmetric to `4e-17`. Dropping the mass
+  factor from the recovery makes it fail by `8.4`, so the test is measuring what
+  it claims.
+- The second answer is no. The existing eigensolve diagonalizes
+  `Gamma^-1/2 K Gamma^-1/2` with `Gamma` the second-order trace impedance; the
+  driven path would need `M^-1/2 K M^-1/2`. Those differ because `Gamma` is a
+  line integral and `M` is the lumped volume mass: on the square fixture their
+  ratio spreads 2:1 across the trace, and the existing basis leaves **25.6%**
+  off-diagonal. Reusing it is not an option; a second Jacobi of the same cubic
+  cost would be.
+- That second eigensolve turns out to be unnecessary, which is the useful
+  finding. Because the eigenvectors are orthonormal,
+  `sum_k 1 * t_k t_k^T = Gamma` exactly, so
+  `K = (D + Gamma) + sum_k (a_k - 1) t_k t_k^T` - a **diagonal** matrix plus a
+  correction carrying only the pole modes' deviation from one. The three-pole
+  DtN residues `6/7, -8/7, 2/7` sum to zero, which makes
+  `a_k - 1 = (1/7)(h * decay_k)^2 + O((h decay)^3)`. Measured: `1.37e-4` at
+  `0.08` of the CFL step and `5.28e-3` at half of it, a ratio of 39 against the
+  predicted 39.1.
+- So the solve can be a diagonal-preconditioned Jacobi iteration.
+  `Delta(t) = I + (h/2)(D + Gamma) M(t)^-1` is diagonal and follows an arbitrary
+  mass for free; the correction `C = sum_k (a_k - 1) t_k t_k^T` is mass-free and
+  uploads once. Contraction per sweep, measured: `4.7e-6` at 0.08 CFL,
+  `9.5e-4` at half, `4.7e-3` at 0.9, `6.2e-3` at the full CFL bound. Eight sweeps
+  reproduce the direct solve to `2.2e-16` at every step size.
+- The contraction has a closed form that is free of the mass. With `D = 0`,
+  `Gamma^-1/2 C Gamma^-1/2 = V (A - I) V^T`, so the iteration matrix's spectral
+  radius tends to `max_k |a_k - 1|` as the mass shrinks and to zero as it grows,
+  and `D >= 0` only lowers it. Checked against 400 random masses spanning `1e4`
+  in scale with arbitrary non-uniformity: the bound held at both half and full
+  CFL, and it is tight to 3%.
+- This is strictly better than the eigendecomposition route on every axis. No
+  second eigensolve, so the outgoing assembly cost recorded two entries ago does
+  not double. No uniformity restriction, so the refusal lifts for a travelling
+  modulation and not only a pump. And the sweep count is a plan-time number
+  derived from `a_k`, which `prepare` already computes, so the gate becomes a
+  computed bound rather than a blanket rule.
+- Measured on the square fixture at 8 trace nodes. The `a_k` bound is structural,
+  but the constant is mesh and material dependent, so a real implementation
+  should compute it per plan rather than hardcode a sweep count.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked` (753 passing, 1
+  known ignored reproducer).
+- Next: implement it - split `prepare` into the mass-free `K` plus the diagonal,
+  carry the contraction bound, replace the cached `DenseLu` with the iteration on
+  both the CPU reference and the device export, and delete
+  `outgoing_trace_mass_is_static`.
+
 ## 2026-09-22 — The outgoing refusal is about the trace, not the generation
 
 - The refusal landed in the previous entry was broader than the defect. The
