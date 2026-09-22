@@ -385,6 +385,20 @@ impl Material {
         if self.has_laws() {
             return Err(MaterialError::UnsupportedMaterialLaw);
         }
+        self.evaluate_base(frame, point)
+    }
+
+    /// The base coefficients, with any authored law left unapplied.
+    ///
+    /// [`Self::evaluate`] refuses a law-carrying material on purpose, so that
+    /// nothing executes an authored law as a static medium by accident. A
+    /// consumer that applies the law itself needs the base underneath it, and
+    /// declares that by calling this instead.
+    pub fn evaluate_base(
+        &self,
+        frame: MaterialFrame,
+        point: Point2,
+    ) -> Result<EvaluatedMaterial, MaterialError> {
         let coordinates = frame.coordinates(point);
         let values = EvaluatedMaterial {
             mass_density: self.mass_density.evaluate(coordinates, &self.parameters)?,

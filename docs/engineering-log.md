@@ -5,6 +5,105 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The estimator samples the instant, and what breaks it is narrower than reported
+
+- Landed the approved fix: the scalar estimator's material samples are now
+  evaluated at the instant the snapshot belongs to, through
+  `SolutionIndicatorJob::with_instantaneous_materials`. Every error term reads
+  them - vertex stiffness for the recovery, the six interior samples, the
+  stiffness divergence, the edge samples the interior jump compares across a
+  face, and the boundary residual.
+- Per sample point, not per element. The cheaper per-element factor was the
+  other option offered and it would have been wrong for the case in question:
+  the divergence term differentiates the stiffness across an element and the
+  jump term compares two elements at a shared edge point, so a factor held
+  constant over an element erases exactly the modulation gradient those terms
+  exist to see.
+- It costs no extra material evaluation. One lookup yields the authored
+  coefficients and the instant's, because the instantaneous form is the
+  authored one with each solver row scaled: the primary row multiplies the
+  mass, the complementary row is the reciprocal of the stiffness tensor so its
+  factor divides that tensor. Which authored law owns which row is the physics
+  skin's business, and `coefficient_for` already answered it, so this holds for
+  Mechanical, TM and TE without a case of its own. The added work is two factor
+  evaluations per sample point per estimate.
+- `Material::evaluate` refuses a law-carrying material on purpose, so that
+  nothing executes an authored law as a static medium by accident. That gate is
+  why the scalar path has always been handed a law-stripped scene. Rather than
+  weaken it, there is now an explicit `evaluate_base` that a consumer applying
+  the law itself declares it wants, and the instantaneous evaluator refuses a
+  medium whose law reaches past the two constitutive rows - a loss channel or a
+  restoring law - which is the same line the temporal supplement draws.
+- The wavelength limit deliberately keeps the authored wave speed. A limit that
+  breathed with the drive would retarget the same element every cycle; a
+  drive's reach belongs to `resolved_frequency_hz` and
+  `coefficient_wavelength`, which the caller already supplies for it. A
+  trajectory-minimum speed for that limit is a separate question, left open.
+- Locked down by two tests. A uniform pump is exactly a scene whose coefficient
+  was authored at the pumped value, and every error term now agrees with that
+  scene's to `1e-12`, which makes the instantaneous samples a reconstruction of
+  the medium rather than a correction to it. And an inert medium's report is
+  unchanged by supplying a runtime at all.
+
+- **The previous entry's mechanism was wrong, and so was its conclusion about
+  what breaks.** It attributed the inflation to the estimator's static material
+  samples and named the spatial pattern as the cause. Both fail on measurement.
+  The two driven sweeps it compared differed in the driven row *and* in the
+  spatial pattern, so neither could be attributed. Crossing them says:
+
+  | Medium | Efficiency index | Spread |
+  | --- | --- | --- |
+  | inert | 1.54, 1.26, 1.36 | 1.22x |
+  | mass pumped | 2.08, 1.71, 1.86 | 1.21x |
+  | mass travelling, `k=0.75` | 2.53, 3.28, 5.10 | 2.01x |
+  | mass travelling, `k=3` | 7.77, 10.24, 17.92 | 2.31x |
+  | stiffness pumped | 1.62, 1.38, 1.46 | 1.17x |
+  | stiffness travelling, `k=3` | 1.85, 1.66, 1.74 | 1.11x |
+  | both travelling, `k=3` | 8.05, 10.94, 17.21 | 2.14x |
+
+- A spatial pattern is not the cause: a travelling drive on the stiffness row
+  is the best-behaved sweep in the table. The mass row is not the cause either:
+  pumped uniformly it matches the inert control. It is the two together, and
+  the size of it scales with the pattern's own wavenumber - at `h=0.1` the jump
+  term sits at `5.4e-7` inert, `6.5e-6` at `k=0.75` and `1.4e-4` at `k=3`,
+  about `k^2` across a fourfold change, which is the signature of a term
+  carrying `|grad m|^2`.
+- Making the samples instantaneous did not fix it, and could not have: in the
+  mass-travelling sweep the stiffness row is not driven, so the tensor the jump
+  term reads was already correct. What the change did fix is the energy
+  denominator, which had been dividing by an authored mass while the field was
+  driven.
+- Where it does come from, on the evidence. The scalar field handed to the
+  estimator is the solver's nodal quotient `u = Q / M(t)`, and `M` is the
+  lumped instantaneous primary mass, assembled by row sum. A spatially uniform
+  factor cancels in that quotient exactly. A patterned one does not: the lumped
+  inverse is not the consistent one, and the discrepancy is patterned at the
+  modulation wavenumber. It is nearly invisible in the field's own norm - true
+  error still converges at about `h^1.8` - and very visible to anything
+  differentiating that field across a face. On the same `k=3` run the scalar
+  interior jump converges at `h^1.2` and the scalar displacement recovery at
+  `h^1.5`, while the canonical complementary recovery, which never passes
+  through the nodal quotient and inverts at each element's own six samples with
+  the instantaneous map, converges at `h^3.9`. Four independent legs agree, so
+  this is the best-supported reading rather than a proven one.
+- Still not calibrated for a patterned mass row, and the practical damage is
+  the drifting index rather than the inflation: a fixed target maps to a
+  different true error at every mesh, so a controller would refine at the
+  modulation pattern and never settle. The estimate stays conservative, never
+  optimistic, and the size rule's pattern limit is what protects the case
+  today. Reported rather than fixed, because every remedy is a design change
+  to which field the estimator differentiates - taking the gradient terms from
+  the canonical complementary flux where a runtime is present, inverting the
+  mass consistently for the estimator's own reconstruction, or reporting only
+  the canonical terms on a patterned mass row - and that is not a measurement
+  commit's decision to make.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (738 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`.
+  `crates/funfern-core/examples/temporal_amr_calibration.rs` carries the
+  crossed design and now prints why an estimate was refused instead of leaving
+  a blank column.
+
 ## 2026-09-22 — The error estimator is not calibrated for a patterned medium
 
 - Measured the efficiency index, estimator over true error, across a

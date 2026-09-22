@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    BACKGROUND_REGION, EvaluatedMaterial, Material, MaterialError, MaterialFrame, OuterSide,
-    Point2, Region, RegionId, SymmetricTensor2, TriMesh,
+    BACKGROUND_REGION, CanonicalMaterialRuntimeState, EvaluatedMaterial, FieldLawValues, Material,
+    MaterialError, MaterialFrame, OuterSide, Point2, Region, RegionId, SymmetricTensor2, TriMesh,
 };
 
 pub(crate) fn evaluate_material_library_at(
@@ -57,6 +57,103 @@ pub(crate) fn evaluate_directional_material_library_at(
     values
         .valid()
         .then_some(values)
+        .ok_or(MaterialError::InvalidValue)
+}
+
+/// One material sample in both of the forms an estimator needs: at the
+/// authored coefficients, and at the instant a snapshot belongs to.
+pub(crate) struct TimedDirectionalWaveCoefficients {
+    pub authored: DirectionalWaveCoefficients,
+    pub instantaneous: DirectionalWaveCoefficients,
+}
+
+impl TimedDirectionalWaveCoefficients {
+    /// A time-invariant medium, whose two forms are the same sample.
+    pub fn fixed(coefficients: DirectionalWaveCoefficients) -> Self {
+        Self {
+            authored: coefficients,
+            instantaneous: coefficients,
+        }
+    }
+}
+
+/// Evaluates one material sample both as authored and as it stands at `time`.
+///
+/// Both forms come out of a single material lookup: the instantaneous one is
+/// the authored one with each solver row scaled by the drive and Switch factor
+/// in force. The primary row is the mass, which the factor multiplies. The
+/// complementary row is the reciprocal of the stiffness tensor, so its factor
+/// divides that tensor instead. Which authored law owns which row is the
+/// physics skin's business and `coefficient_for` answers it, which is why this
+/// holds for all three skins without a case of its own.
+pub(crate) fn evaluate_timed_directional_material_library_at(
+    physics: PhysicsModel,
+    materials: &[Material],
+    regions: &[Region],
+    region: RegionId,
+    point: Point2,
+    time: f64,
+    runtime: &CanonicalMaterialRuntimeState,
+) -> Result<TimedDirectionalWaveCoefficients, MaterialError> {
+    if !time.is_finite() {
+        return Err(MaterialError::InvalidValue);
+    }
+    let region = regions
+        .iter()
+        .find(|candidate| candidate.id == region)
+        .ok_or(MaterialError::InvalidValue)?;
+    let material = materials
+        .iter()
+        .find(|material| material.id == region.material)
+        .ok_or(MaterialError::InvalidValue)?;
+    // Only the two constitutive rows are applied here, so a medium whose law
+    // reaches anywhere else is refused rather than half-evaluated. That is the
+    // same line the temporal supplement draws: it covers the conservative bulk
+    // and refuses an operator carrying loss.
+    if material.electric_loss.is_some()
+        || material.magnetic_loss.is_some()
+        || !material.restoring.is_none()
+    {
+        return Err(MaterialError::UnsupportedMaterialLaw);
+    }
+    let properties = material.evaluate_base(region.frame, point)?;
+    let authored = physics.directional_wave_coefficients(properties, region.frame);
+    if !authored.valid() {
+        return Err(MaterialError::InvalidValue);
+    }
+    let coordinates = region.frame.coordinates(point);
+    let mut factors = [1.0; 2];
+    for (factor, primary) in factors.iter_mut().zip([true, false]) {
+        let (drive, law) = crate::canonical_temporal::coefficient_for(physics, material, primary);
+        let law = law.evaluate_at(coordinates, &material.parameters)?;
+        // A field-dependent response is Stage 8 and the temporal operator
+        // refuses to compile one, so a runtime that reached here cannot
+        // describe one. Refusing rather than ignoring the field law keeps that
+        // true if the operator's gate ever moves.
+        if !matches!(law.field, FieldLawValues::Linear) {
+            return Err(MaterialError::UnsupportedMaterialLaw);
+        }
+        *factor = runtime.coefficient_law_factor(material.id, drive, law, coordinates, time)?;
+        if !factor.is_finite() || *factor <= 0.0 {
+            return Err(MaterialError::InvalidValue);
+        }
+    }
+    let [mass, stiffness] = factors;
+    let instantaneous = DirectionalWaveCoefficients {
+        mass_density: authored.mass_density * mass,
+        stiffness: SymmetricTensor2::new(
+            authored.stiffness.xx / stiffness,
+            authored.stiffness.xy / stiffness,
+            authored.stiffness.yy / stiffness,
+        ),
+        damping: authored.damping,
+    };
+    instantaneous
+        .valid()
+        .then_some(TimedDirectionalWaveCoefficients {
+            authored,
+            instantaneous,
+        })
         .ok_or(MaterialError::InvalidValue)
 }
 

@@ -1,13 +1,14 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::canonical_consumer::complementary_interpolation_weights;
+use crate::wave::TimedDirectionalWaveCoefficients;
 use crate::{
-    BoundaryLabel, BoundarySide, CanonicalForcing, CanonicalWaveOperator,
-    DirectionalWaveCoefficients, FaceBoundaryCondition, InternalBoundaryCoupling,
-    InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField, OuterBoundaryCondition,
-    OwnedTopologyWaveModel, PlannedBoundarySource, Point2, QuadraticWaveOperator, RegionId, Scene,
-    SpanBehavior, TopologyMeshPlan, TopologyWaveModel, TriMesh, WaveError,
-    enriched_quadratic_basis, enriched_quadratic_basis_gradients,
+    BoundaryLabel, BoundarySide, CanonicalForcing, CanonicalMaterialRuntimeState,
+    CanonicalWaveOperator, DirectionalWaveCoefficients, FaceBoundaryCondition,
+    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, LoopRole, MeshSizeField,
+    OuterBoundaryCondition, OwnedTopologyWaveModel, PlannedBoundarySource, Point2,
+    QuadraticWaveOperator, RegionId, Scene, SpanBehavior, TopologyMeshPlan, TopologyWaveModel,
+    TriMesh, WaveError, enriched_quadratic_basis, enriched_quadratic_basis_gradients,
     enriched_quadratic_basis_hessians,
 };
 
@@ -861,6 +862,7 @@ pub struct SolutionIndicatorJob {
     total_area: f64,
     report: SolutionIndicatorReport,
     canonical: Option<CanonicalIndicatorSupplement>,
+    runtime: Option<CanonicalMaterialRuntimeState>,
 }
 
 enum IndicatorInput {
@@ -940,6 +942,7 @@ impl SolutionIndicatorJob {
             total_area: 0.0,
             report: SolutionIndicatorReport::default(),
             canonical: None,
+            runtime: None,
         }
     }
 
@@ -947,6 +950,33 @@ impl SolutionIndicatorJob {
     /// estimator. The caller must provide the same accepted mesh generation.
     pub fn with_canonical_supplement(mut self, supplement: CanonicalIndicatorSupplement) -> Self {
         self.canonical = Some(supplement);
+        self
+    }
+
+    /// Samples every material at the instant the snapshot belongs to rather
+    /// than at its authored coefficients.
+    ///
+    /// A time-driven medium makes the two differ, and leaving them authored
+    /// charges the estimator for the medium's own modulation. The interior
+    /// flux jump is where it shows: it then measures a static stiffness
+    /// against a driven gradient, and that mismatch is patterned wherever the
+    /// drive is, so the estimate inflates and stops converging with the mesh.
+    /// Measured on a smooth reflecting-box problem, a travelling modulation
+    /// took the efficiency index from about 1.4 to between 7 and 17, climbing
+    /// with refinement, which is what makes a fixed accuracy target
+    /// meaningless rather than merely pessimistic.
+    ///
+    /// The runtime has to be the solver's own accepted one, not a recomputed
+    /// one: a Switch is stamped at its GPU commit boundary and a frequency
+    /// edit re-anchors a carrier at one, so the clock alone does not
+    /// determine the factor.
+    ///
+    /// The wavelength limit deliberately keeps the authored wave speed. A
+    /// limit that breathed with the drive would retarget the same element
+    /// every cycle; a drive's reach belongs to `resolved_frequency_hz` and
+    /// `coefficient_wavelength`, which the caller supplies for it.
+    pub fn with_instantaneous_materials(mut self, runtime: CanonicalMaterialRuntimeState) -> Self {
+        self.runtime = Some(runtime);
         self
     }
 
@@ -1468,19 +1498,23 @@ impl SolutionIndicatorJob {
         let geometry = element_geometry(&self.mesh, triangle.vertices)?;
         let mut vertex_stiffness = [crate::SymmetricTensor2::default(); 3];
         let mut minimum_wave_speed = f64::INFINITY;
+        // Every error term samples the instant; the wavelength limit samples
+        // the authored medium. One lookup answers both, so making the
+        // estimator instantaneous costs two factor evaluations per point and
+        // no extra material evaluation.
         for (local, point) in geometry.points.into_iter().enumerate() {
-            let material = self.material_at(triangle.region, point)?;
-            vertex_stiffness[local] = material.stiffness;
-            minimum_wave_speed = minimum_wave_speed.min(material.minimum_wave_speed());
+            let material = self.timed_material_at(triangle.region, point)?;
+            vertex_stiffness[local] = material.instantaneous.stiffness;
+            minimum_wave_speed = minimum_wave_speed.min(material.authored.minimum_wave_speed());
         }
         let mut samples = [None; 6];
         for (sample, (barycentric, _)) in samples.iter_mut().zip(quadrature()) {
-            let material = self.material_at(
+            let material = self.timed_material_at(
                 triangle.region,
                 barycentric_point(geometry.points, barycentric),
             )?;
-            minimum_wave_speed = minimum_wave_speed.min(material.minimum_wave_speed());
-            *sample = Some(material);
+            minimum_wave_speed = minimum_wave_speed.min(material.authored.minimum_wave_speed());
+            *sample = Some(material.instantaneous);
         }
         let [Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)] = samples else {
             return Err(SolutionIndicatorError::InvalidScene);
@@ -1534,16 +1568,53 @@ impl SolutionIndicatorJob {
         ])
     }
 
+    /// The coefficients every error term measures against. Under a runtime
+    /// these are the instantaneous ones; the authored form survives only where
+    /// a size limit needs it.
     fn material_at(
         &self,
         region: RegionId,
         point: Point2,
     ) -> Result<DirectionalWaveCoefficients, SolutionIndicatorError> {
-        let result = match &self.input {
-            IndicatorInput::Scene(scene) => scene.directional_material_at(region, point),
-            IndicatorInput::Topology { model, .. } => {
-                model.as_model().directional_material_at(region, point)
+        self.timed_material_at(region, point)
+            .map(|timed| timed.instantaneous)
+    }
+
+    fn timed_material_at(
+        &self,
+        region: RegionId,
+        point: Point2,
+    ) -> Result<TimedDirectionalWaveCoefficients, SolutionIndicatorError> {
+        let result = match (&self.input, &self.runtime) {
+            (IndicatorInput::Scene(scene), Some(runtime)) => {
+                crate::wave::evaluate_timed_directional_material_library_at(
+                    scene.physics,
+                    &scene.materials,
+                    &scene.regions,
+                    region,
+                    point,
+                    self.snapshot.time,
+                    runtime,
+                )
             }
+            (IndicatorInput::Topology { model, .. }, Some(runtime)) => {
+                crate::wave::evaluate_timed_directional_material_library_at(
+                    model.physics,
+                    &model.materials,
+                    &model.regions,
+                    region,
+                    point,
+                    self.snapshot.time,
+                    runtime,
+                )
+            }
+            (IndicatorInput::Scene(scene), None) => scene
+                .directional_material_at(region, point)
+                .map(TimedDirectionalWaveCoefficients::fixed),
+            (IndicatorInput::Topology { model, .. }, None) => model
+                .as_model()
+                .directional_material_at(region, point)
+                .map(TimedDirectionalWaveCoefficients::fixed),
         };
         result.map_err(|error| SolutionIndicatorError::MaterialEvaluation {
             region,

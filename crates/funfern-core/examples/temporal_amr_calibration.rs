@@ -59,11 +59,17 @@ fn main() {
          percentage cannot be reported as having lost that property.\n"
     );
 
+    // Row crossed with spatial pattern. A sweep that changed both at once
+    // cannot say which one the estimator is charging for, and the first
+    // version of this study changed both.
     for (label, scene) in [
         ("inert", inert_scene()),
-        ("mass travelling", mass_only_scene()),
-        ("stiffness pumped", stiffness_only_scene()),
-        ("driven", driven_scene()),
+        ("mass pumped", driven(true, None)),
+        ("mass travelling k=0.75", driven(true, Some(0.75))),
+        ("mass travelling k=3", driven(true, Some(3.0))),
+        ("stiffness pumped", driven(false, None)),
+        ("stiffness travelling k=3", driven(false, Some(3.0))),
+        ("both travelling k=3", both_scene()),
     ] {
         // The finest mesh sets the timestep every mesh in the sweep uses.
         let reference_edge = *EDGES.last().expect("one reference edge");
@@ -128,49 +134,50 @@ fn inert_scene() -> Scene {
     Scene::default()
 }
 
-/// Spatially patterned modulation only. The stiffness the estimator's jump
-/// term uses is untouched, so this isolates whether a moving pattern in the
-/// mass row is what the jump is charging for.
-fn mass_only_scene() -> Scene {
+/// One driven row, optionally carrying a spatial pattern at `wavenumber`.
+///
+/// The depth and frequency of a row are the same either way, so the pumped and
+/// travelling members of a pair differ in nothing but the pattern. That is
+/// what makes them a crossed design: the pattern is isolated within a row, and
+/// the row is isolated at a fixed pattern. Two wavenumbers on the same row
+/// then say whether what the estimator charges for scales with the pattern's
+/// own gradient.
+fn driven(mass: bool, wavenumber: Option<f64>) -> Scene {
     let mut scene = Scene::default();
-    scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
-        depth: ScalarField::constant(0.22),
-        frequency_hz: ScalarField::constant(0.9),
-        phase_radians: ScalarField::constant(0.15),
-        wavenumber: ScalarField::constant(3.0),
-        angle_radians: ScalarField::constant(0.3),
+    let (depth, frequency_hz, phase_radians) = if mass {
+        (0.22, 0.9, 0.15)
+    } else {
+        (0.18, 0.7, -0.2)
     };
+    let drive = match wavenumber {
+        Some(wavenumber) => TimeDrive::TravellingModulation {
+            depth: ScalarField::constant(depth),
+            frequency_hz: ScalarField::constant(frequency_hz),
+            phase_radians: ScalarField::constant(phase_radians),
+            wavenumber: ScalarField::constant(wavenumber),
+            angle_radians: ScalarField::constant(0.3),
+        },
+        None => TimeDrive::ParametricPump {
+            depth: ScalarField::constant(depth),
+            frequency_hz: ScalarField::constant(frequency_hz),
+            phase_radians: ScalarField::constant(phase_radians),
+        },
+    };
+    let material = &mut scene.materials[0];
+    if mass {
+        material.mass_law.drive = drive;
+    } else {
+        material.stiffness_law.drive = drive;
+    }
     scene
 }
 
-/// Uniform-in-space modulation of the row the jump term reads. At any instant
-/// this is the static stiffness times one scalar, so if the jump converges
-/// cleanly here the problem is spatial, not temporal.
-fn stiffness_only_scene() -> Scene {
-    let mut scene = Scene::default();
-    scene.materials[0].stiffness_law.drive = TimeDrive::ParametricPump {
-        depth: ScalarField::constant(0.18),
-        frequency_hz: ScalarField::constant(0.7),
-        phase_radians: ScalarField::constant(-0.2),
-    };
-    scene
-}
-
-fn driven_scene() -> Scene {
-    // A bare rectangle. No hole, so nothing limits convergence but the mesh.
-    let mut scene = Scene::default();
-    scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
-        depth: ScalarField::constant(0.22),
-        frequency_hz: ScalarField::constant(0.9),
-        phase_radians: ScalarField::constant(0.15),
-        wavenumber: ScalarField::constant(3.0),
-        angle_radians: ScalarField::constant(0.3),
-    };
-    scene.materials[0].stiffness_law.drive = TimeDrive::ParametricPump {
-        depth: ScalarField::constant(0.18),
-        frequency_hz: ScalarField::constant(0.7),
-        phase_radians: ScalarField::constant(-0.2),
-    };
+/// Both rows patterned at once, to check the two effects compose rather than
+/// cancel.
+fn both_scene() -> Scene {
+    let mut scene = driven(true, Some(3.0));
+    let stiffness = driven(false, Some(3.0));
+    scene.materials[0].stiffness_law.drive = stiffness.materials[0].stiffness_law.drive.clone();
     scene
 }
 
@@ -289,10 +296,13 @@ fn solve(scene: &Scene, edge: f64, time_step: f64, lattice: &[Point2]) -> Solved
         density.push(sample.energy_density);
     }
 
+    // The estimator gets the authored scene, laws and all, which is what
+    // production holds. The law-stripped copy exists only because the scalar
+    // operator and the point stencils cannot carry a law.
     let estimator = estimate(
         &mesh,
         &quadratic,
-        &fixed,
+        scene,
         &operator,
         &state,
         &previous,
@@ -315,7 +325,7 @@ fn solve(scene: &Scene, edge: f64, time_step: f64, lattice: &[Point2]) -> Solved
 fn estimate(
     mesh: &Arc<TriMesh>,
     quadratic: &Arc<QuadraticWaveOperator>,
-    fixed: &Scene,
+    authored: &Scene,
     operator: &CanonicalTemporalWaveOperator,
     state: &CanonicalTemporalWaveState,
     previous: &[f64],
@@ -365,7 +375,7 @@ fn estimate(
     let mut job = SolutionIndicatorJob::new(
         mesh.clone(),
         quadratic.clone(),
-        fixed.clone(),
+        authored.clone(),
         scalar_snapshot,
         SolutionIndicatorOptions {
             minimum_edge_length: 0.005,
@@ -379,10 +389,19 @@ fn estimate(
             ..Default::default()
         },
     )
-    .with_canonical_supplement(supplement);
+    .with_canonical_supplement(supplement)
+    .with_instantaneous_materials(state.runtime().clone());
     loop {
         if let Some(result) = job.advance(8_192) {
-            return result.ok().map(|result| result.report);
+            // A swallowed estimate reads as a missing number rather than a
+            // wrong one, which is worse than either; say why.
+            match result {
+                Ok(result) => return Some(result.report),
+                Err(error) => {
+                    eprintln!("estimate refused: {error}");
+                    return None;
+                }
+            }
         }
     }
 }
