@@ -3092,11 +3092,29 @@ fn linear_material_sample(
     let material = model
         .material(region.material)
         .ok_or(WaveError::InvalidCoefficients)?;
-    if !material.mass_law.is_linear()
-        || !material.stiffness_law.is_linear()
-        || !material.restoring.is_none()
-    {
-        return Err(WaveError::InvalidCoefficients);
+    // Naming the slot matters more than it looks. This shares its error with a
+    // coefficient that is genuinely not positive and finite, and the two read
+    // identically in the application - "wave coefficients must be finite with
+    // positive mass and stiffness" for a material that carries a perfectly good
+    // pump. A report of that is unactionable; this says which material and
+    // which row.
+    let carried = if !material.mass_law.is_linear() {
+        Some("mass law")
+    } else if !material.stiffness_law.is_linear() {
+        Some("stiffness law")
+    } else if !material.restoring.is_none() {
+        Some("restoring law")
+    } else {
+        None
+    };
+    if let Some(coefficient) = carried {
+        return Err(WaveError::MaterialEvaluation {
+            material: material.name.clone(),
+            coefficient,
+            point,
+            reason: "the fixed assembly cannot execute an authored law; a driven                      generation assembles from the stripped model instead"
+                .into(),
+        });
     }
     let coordinates = region.frame.coordinates(point);
     let evaluate = |field: &crate::ScalarField,

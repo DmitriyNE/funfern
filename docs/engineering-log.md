@@ -5,6 +5,32 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-23 — A refusal that could not be told from a bad number
+
+Reported: switching a driven material to Linear failed with "wave coefficients
+must be finite with positive mass and stiffness and nonnegative damping".
+
+- Not reproducible from what the document holds. Both saved states - the driven
+  one and the one after the switch - prepare cleanly, and the switch itself
+  applied correctly: the accepted scene is linear and the preset's parameters
+  were retired. The adapted preparation path is not implicated either; it
+  refuses a changed document and takes the ordinary path instead.
+- What is wrong regardless is the message. `linear_material_sample` returns
+  `WaveError::InvalidCoefficients` both for a coefficient that is genuinely not
+  positive and finite *and* for a material carrying an authored law the fixed
+  assembly cannot execute. Those read identically in the application, so a
+  perfectly good pump reports as a bad number and the report cannot say which
+  material or which row.
+- The law refusal now returns `MaterialEvaluation`, naming the material, the row
+  and the sample point, and saying that a driven generation assembles from the
+  stripped model instead. The same ambiguity cost a diagnosis earlier today,
+  when a probe stencil mapped a law refusal onto its own "cannot use the current
+  mesh".
+- So the next occurrence identifies itself. Until then the cause is unknown
+  rather than fixed, and this entry should not be read as closing it.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`.
+
 ## 2026-09-23 — The estimator learns the boundaries the stepper already runs
 
 Reported: adaptation fails at load on the autosaved scene. Reproduced against

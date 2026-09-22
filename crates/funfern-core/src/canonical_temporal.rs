@@ -5678,10 +5678,20 @@ mod tests {
             OuterBoundaryCondition::Reflecting,
         )
         .unwrap();
-        assert_eq!(
-            CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1),
-            Err(WaveError::InvalidCoefficients)
-        );
+        // The refusal names the material and the row, because it shares its
+        // error with a genuinely invalid coefficient and the two are
+        // indistinguishable to anyone reading the application's message.
+        let refusal = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1);
+        let Err(WaveError::MaterialEvaluation {
+            material,
+            coefficient,
+            ..
+        }) = &refusal
+        else {
+            panic!("expected a named refusal, got {refusal:?}");
+        };
+        assert_eq!(material, &scene.materials[0].name);
+        assert_eq!(*coefficient, "mass law");
         assert_eq!(scene.regions[0].id, BACKGROUND_REGION);
     }
 
