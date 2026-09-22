@@ -857,7 +857,7 @@ mod second_preset_reproduction {
     /// reading the candidate's `fresh` flag instead left it waiting forever
     /// with Reset gated behind the upload it was stuck in.
     #[test]
-    fn a_preset_that_undrives_a_generation_is_installed_rather_than_handed_off() {
+    fn presets_hand_off_in_both_directions_of_a_drivenness_change() {
         let mut state = Playground::default();
         activate(&mut state);
 
@@ -927,13 +927,88 @@ mod second_preset_reproduction {
             !inert.fresh,
             "an edit against a running generation does not start from zero"
         );
+        // A medium that stops being driven still shares its field with what
+        // came before. Only the runtime bank goes, and a bank with no records
+        // to write is nothing to carry, so this hands off like any other edit.
         let packed =
             compile_gpu_upload(PreparedTopology::clone(&inert), Some(crystal), step, [0; 4])
                 .expect("undriving a generation still packs");
-        assert!(
-            packed.transfer.is_none(),
-            "a generation that stops being driven carries nothing across, so it \
-             is installed - and an install publishes its generation at once"
+        let transfer = packed
+            .transfer
+            .as_ref()
+            .expect("a generation that stops being driven keeps its field");
+        assert_eq!(
+            transfer.material_runtime_counts(),
+            (1, 0),
+            "the bank it had is dropped and none is written"
+        );
+    }
+
+    /// Switching a drive *on* is the direction that was reported: the field
+    /// vanished the moment a non-stationary material was enabled.
+    ///
+    /// The two generations share everything that exists in both. What the
+    /// target has and the source does not is the material runtime bank, and a
+    /// record with no source is written from the target's own authored anchors,
+    /// which is where a drive just switched on should begin. So there is
+    /// nothing to invent and no reason to drop the field.
+    #[test]
+    fn enabling_a_drive_keeps_the_field() {
+        let mut state = Playground::default();
+        activate(&mut state);
+        let prepare = |state: &mut Playground| {
+            let token = state
+                .runtime
+                .request(
+                    state.editor.revision,
+                    &state.editor.document,
+                    state.editor.compiled_accepted.clone(),
+                    MeshingOptions {
+                        target_edge_length: 0.18,
+                        ..MeshingOptions::default()
+                    },
+                    false,
+                )
+                .unwrap();
+            for _ in 0..1_000_000 {
+                if let Some(result) = state.runtime.advance(4096) {
+                    result.unwrap();
+                    return state.runtime.commit_ready(token).unwrap();
+                }
+            }
+            panic!("preparation did not finish");
+        };
+        let inert = prepare(&mut state);
+        assert!(!inert.driven());
+
+        let material = state.editor.document.model.draft.materials[0].clone();
+        let pump = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Parametric pump")
+            .expect("catalogue entry");
+        state
+            .editor
+            .update_material(apply_law_preset(pump, &material).unwrap())
+            .unwrap();
+        settle(&mut state.editor);
+        let driven = prepare(&mut state);
+        assert!(driven.driven() && !driven.fresh);
+
+        let packed = compile_gpu_upload(
+            PreparedTopology::clone(&driven),
+            Some(inert),
+            driven.recommended_time_step(),
+            [0; 4],
+        )
+        .expect("enabling a drive still packs");
+        let transfer = packed
+            .transfer
+            .as_ref()
+            .expect("enabling a drive must carry the field across");
+        assert_eq!(
+            transfer.material_runtime_counts(),
+            (0, 1),
+            "the target's bank is written from its own anchors, with no source"
         );
     }
 }

@@ -616,30 +616,7 @@ pub(super) fn compile_gpu_upload(
     runtime_serials: [u32; 4],
 ) -> Result<PreparedGpuUpload, String> {
     let clock = CanonicalGpuClock::initial(time_step).map_err(|error| format!("{error:?}"))?;
-    let plan = match &candidate.canonical_temporal_operator {
-        Some(temporal) => {
-            let state = CanonicalTemporalWaveState::zero(temporal, time_step)
-                .map_err(|error| error.to_string())?;
-            CanonicalGpuPlan::compile_temporal(
-                temporal,
-                &state,
-                &candidate.canonical_forcing,
-                clock,
-            )
-        }
-        None => {
-            let state = CanonicalWaveState::zero(&candidate.canonical_operator, time_step)
-                .map_err(|error| error.to_string())?;
-            CanonicalGpuPlan::compile_with_quadratic(
-                &candidate.canonical_operator,
-                &candidate.operator,
-                &state,
-                &candidate.canonical_forcing,
-                clock,
-            )
-        }
-    }
-    .map_err(|error| format!("{error:?}"))?;
+    let plan = compile_generation_plan(&candidate, time_step, clock)?;
     if candidate.fresh || active.is_none() {
         return Ok(PreparedGpuUpload {
             plan,
@@ -647,16 +624,6 @@ pub(super) fn compile_gpu_upload(
         });
     }
     let active = active.unwrap();
-    // Adding or removing a drive changes what the state buffer carries, so the
-    // generations do not share a layout and there is nothing to transfer
-    // between. A fresh start is the honest outcome rather than a transfer that
-    // would have to invent the missing half.
-    if active.driven() != candidate.driven() {
-        return Ok(PreparedGpuUpload {
-            plan,
-            transfer: None,
-        });
-    }
     let transfer = candidate
         .canonical_transfer
         .as_ref()
@@ -693,27 +660,50 @@ pub(super) fn compile_gpu_upload(
     // its drives' identities are read, and those follow from the operator and
     // the forcing, so rebuilding recovers them exactly. It is packing work on a
     // worker thread, not frame work.
-    let gpu_transfer = match &active.canonical_temporal_operator {
-        Some(temporal) => {
-            let state = CanonicalTemporalWaveState::zero(temporal, time_step)
-                .map_err(|error| error.to_string())?;
-            let source = CanonicalGpuPlan::compile_temporal(
-                temporal,
-                &state,
-                &active.canonical_forcing,
-                clock,
-            )
-            .map_err(|error| format!("{error:?}"))?;
-            gpu_transfer
-                .with_temporal_material_runtime(&source, &plan)
-                .map_err(|error| format!("{error:?}"))?
-        }
-        None => gpu_transfer,
+    let gpu_transfer = if active.driven() || candidate.driven() {
+        let source = compile_generation_plan(&active, time_step, clock)?;
+        gpu_transfer
+            .with_temporal_material_runtime(&source, &plan)
+            .map_err(|error| format!("{error:?}"))?
+    } else {
+        gpu_transfer
     };
     Ok(PreparedGpuUpload {
         plan,
         transfer: Some(gpu_transfer),
     })
+}
+
+/// The device plan for one prepared generation, driven or not.
+///
+/// The source plan is rebuilt rather than kept, because the request holds
+/// device buffers rather than the plan they came from. Only its layout and its
+/// drives' identities are read back out of it, and both follow from the
+/// operator and the forcing, so rebuilding recovers them exactly.
+fn compile_generation_plan(
+    prepared: &PreparedTopology,
+    time_step: f64,
+    clock: CanonicalGpuClock,
+) -> Result<CanonicalGpuPlan, String> {
+    match &prepared.canonical_temporal_operator {
+        Some(temporal) => {
+            let state = CanonicalTemporalWaveState::zero(temporal, time_step)
+                .map_err(|error| error.to_string())?;
+            CanonicalGpuPlan::compile_temporal(temporal, &state, &prepared.canonical_forcing, clock)
+        }
+        None => {
+            let state = CanonicalWaveState::zero(&prepared.canonical_operator, time_step)
+                .map_err(|error| error.to_string())?;
+            CanonicalGpuPlan::compile_with_quadratic(
+                &prepared.canonical_operator,
+                &prepared.operator,
+                &state,
+                &prepared.canonical_forcing,
+                clock,
+            )
+        }
+    }
+    .map_err(|error| format!("{error:?}"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

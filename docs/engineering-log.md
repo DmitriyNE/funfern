@@ -5,6 +5,38 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-23 — A field survives its medium starting to move
+
+Reported, and the last of the four: enabling a non-stationary material threw the
+field away. A change of drivenness skipped the transfer entirely, on the reading
+that the two generations share no layout and a fresh start is more honest than
+inventing the missing half.
+
+- Nothing was missing. `Q` and `b` exist in both and map as they always do. What
+  the driven side has and the inert side does not is the material runtime bank,
+  and the transfer shader already writes a target record with no source from the
+  target's *own* authored anchors - which is exactly where a drive that was just
+  switched on should begin. The capability was there and gated off.
+- Both gates were host-side. `with_temporal_material_runtime` required a
+  temporal manifest on both plans and now treats a missing one as zero records,
+  so an inert source maps every target material to `NO_INDEX` and an inert
+  target has nothing to write. `compile_gpu_upload` returned no transfer
+  whenever drivenness changed; that early return is gone, and one
+  `compile_generation_plan` helper builds the source plan for either kind.
+- The handoff's layout check needed nothing: it compares each side's record
+  count against its own plan, so `(0, 1)` and `(1, 0)` both pass. `state_count`
+  excludes the runtime words, which is why driven-to-driven already worked.
+- Tests assert `(0, 1)` enabling a drive and `(1, 0)` disabling one, on
+  generations prepared the way the application prepares them.
+- One consequence worth watching rather than asserting: the field now carries
+  into a medium that starts moving under it, in one step. That is a temporal
+  interface by hand, which suits a toy about them, but it is a discontinuity
+  rather than a clean start. If it reads badly in motion the answer is a ramp,
+  not a return to discarding the field.
+- Verification: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+  --locked -- -D warnings`, `cargo test --workspace --locked`, and the device
+  gates that exercise a handoff.
+
 ## 2026-09-23 — The host was preparing the same generation every frame
 
 Reported with a driven medium running: the phase label churned every frame and

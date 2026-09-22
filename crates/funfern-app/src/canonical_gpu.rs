@@ -2207,26 +2207,26 @@ impl CanonicalGpuTransferPlan {
         source: &CanonicalGpuPlan,
         target: &CanonicalGpuPlan,
     ) -> Result<Self, CanonicalGpuBuildError> {
-        let source_manifest =
-            source
-                .manifest
-                .temporal
-                .ok_or(CanonicalGpuBuildError::InvalidLayout(
-                    "temporal runtime transfer requires a temporal source generation",
-                ))?;
-        let target_manifest =
-            target
-                .manifest
-                .temporal
-                .ok_or(CanonicalGpuBuildError::InvalidLayout(
-                    "temporal runtime transfer requires a temporal target generation",
-                ))?;
+        // Either side may carry no runtime bank at all, because a medium can
+        // start or stop being driven. A target record with no source is written
+        // from the target's own authored anchors, which is what a drive that
+        // was just switched on should begin from - so the two generations still
+        // share everything that exists in both, and the field crosses rather
+        // than being thrown away.
+        let source_records = source
+            .manifest
+            .temporal
+            .map_or(0, |manifest| manifest.runtime_record_count);
+        let target_records = target
+            .manifest
+            .temporal
+            .map_or(0, |manifest| manifest.runtime_record_count);
         if source.node_count != self.source_node_count
             || source.sample_count != self.source_sample_count
             || target.node_count != self.target_node_count
             || target.sample_count != self.target_sample_count
-            || source_manifest.runtime_record_count != source.temporal_runtime_materials.len()
-            || target_manifest.runtime_record_count != target.temporal_runtime_materials.len()
+            || source_records != source.temporal_runtime_materials.len()
+            || target_records != target.temporal_runtime_materials.len()
             || self.words[8].data.w != 0
         {
             return Err(CanonicalGpuBuildError::InvalidLayout(
@@ -2234,8 +2234,14 @@ impl CanonicalGpuTransferPlan {
             ));
         }
 
-        let source_signatures = temporal_drive_signatures(source)?;
-        let target_signatures = temporal_drive_signatures(target)?;
+        let source_signatures = match source.manifest.temporal {
+            Some(_) => temporal_drive_signatures(source)?,
+            None => Vec::new(),
+        };
+        let target_signatures = match target.manifest.temporal {
+            Some(_) => temporal_drive_signatures(target)?,
+            None => Vec::new(),
+        };
         let source_indices = source
             .temporal_runtime_materials
             .iter()
@@ -2281,8 +2287,8 @@ impl CanonicalGpuTransferPlan {
                 0,
             ));
         }
-        self.source_material_runtime_count = source_manifest.runtime_record_count;
-        self.target_material_runtime_count = target_manifest.runtime_record_count;
+        self.source_material_runtime_count = source_records;
+        self.target_material_runtime_count = target_records;
         self.words[8] = transfer_word(
             usize_u32(mapping_offset)?,
             usize_u32(self.source_material_runtime_count)?,
