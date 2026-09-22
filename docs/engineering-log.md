@@ -5,6 +5,42 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — Thin gaps compose, and the gap's own store joins the energy
+
+- The fourth boundary capability, and the smallest: a thin gap is a spring
+  across a trace with a displacement of its own. One scalar per sample, a force
+  that pushes the two sides apart in proportion to it, and a drift that
+  integrates the field jump. The specification calls this a cheap exact local
+  split and admits it to the structure claim once verified; this is that
+  verification on the time-driven path.
+- Two things had to be got right and both are checked rather than assumed. The
+  gap stores `stiffness * jump^2 / 2`, which the bulk fields cannot account
+  for, so it belongs to the state's total energy - leave it out and the balance
+  charges a real store to the splitting remainder. And its drift belongs to the
+  *same* subflow as the complementary flux's, over the same interval and on the
+  same midpoint field; splitting them would cost the exactness the local split
+  is admitted for. With both, a pumped medium with an open baffle keeps its
+  second-order balance across two halvings.
+- A new generation's gaps start closed, which is the unexcited physical history
+  the specification asks for. A nonzero one needs an explicit initializer
+  rather than being implied by zero bulk fields, and that is stated where the
+  state is built.
+- Inert parity is the guard again, and here it is the strongest form yet:
+  primary flux, complementary flux *and* total energy all agree with
+  `CanonicalWaveState::step_with_forcing` to `1e-12` over a run with the gap
+  genuinely open. That covers the gap force, the gap drift and the gap energy
+  in one statement.
+- **Stage 7's boundary compositions are now done except one.** Prescribed data,
+  volume sources, loss, a first-order absorbing wall and thin gaps all compose
+  with a driven medium. Only the second-order outgoing boundary remains
+  refused, and for a concrete reason: it carries pole currents that have no
+  state on this path. `conservative_bulk_supported` has narrowed step by step
+  as each capability landed, and now means what it says - the freely evolving
+  Poisson system, with every exchange lane absent.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (747 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`.
+
 ## 2026-09-22 — A first-order absorbing wall composes, and what freezing its impedance costs
 
 - Split the outgoing capability rather than taking it whole, after finding that

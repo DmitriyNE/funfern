@@ -1419,8 +1419,11 @@ impl CanonicalTemporalWaveOperator {
         // the kick and nothing more. The second-order boundary carries pole
         // currents of its own and stays refused until that state exists on
         // this path, as do thin gaps.
-        let passive_composition =
-            base.thin_gap_samples().is_empty() && base.outgoing_boundary().is_none();
+        // Thin gaps are admitted: a gap is a local spring with its own
+        // displacement, which the specification calls a cheap exact local
+        // split, and it carries its own stored energy into the balance.
+        let passive_composition = base.outgoing_boundary().is_none();
+        let ungapped = base.thin_gap_samples().is_empty();
         let undamped_boundary = base
             .first_order_boundary_damping()
             .iter()
@@ -1438,7 +1441,7 @@ impl CanonicalTemporalWaveOperator {
                 .all(|load| load.normalized_weight == 0.0);
         let forced_composition_supported = passive_composition;
         let conservative_bulk_supported =
-            passive_composition && undamped_boundary && !has_loss && undriven_boundary;
+            passive_composition && ungapped && undamped_boundary && !has_loss && undriven_boundary;
         Ok(Self {
             base,
             primary,
@@ -1841,6 +1844,11 @@ pub struct CanonicalTemporalStepAccounting {
 pub struct CanonicalTemporalWaveState {
     primary_flux: Vec<f64>,
     complementary_flux: Vec<Point2>,
+    /// One integrated field jump per thin-gap sample. The gap is a spring
+    /// across a trace with a displacement of its own, and it stores
+    /// `stiffness * jump^2 / 2`, so it belongs to the state and to the energy
+    /// rather than being reconstructible from the bulk.
+    thin_gap_jump: Vec<f64>,
     runtime: CanonicalMaterialRuntimeState,
     time_step: f64,
     time: f64,
@@ -1868,9 +1876,10 @@ impl CanonicalTemporalWaveState {
         time: f64,
     ) -> Result<Self, WaveError> {
         // A state exists wherever the stepper can compose, which is now wider
-        // than the free bulk: loss, prescribed data and sources are accounted
-        // exchange lanes. What the bulk claim still refuses - thin gaps,
-        // boundary damping, open boundaries - has no state here either.
+        // than the free bulk: loss, prescribed data, sources, an absorbing
+        // wall and thin gaps are accounted lanes or local states of their own.
+        // What the bulk claim still refuses - a second-order open boundary -
+        // has no state here either.
         if !operator.forced_composition_supported()
             || !time_step.is_finite()
             || time_step <= 0.0
@@ -1898,6 +1907,10 @@ impl CanonicalTemporalWaveState {
         Ok(Self {
             primary_flux,
             complementary_flux,
+            // A new generation's gaps start closed, which is the unexcited
+            // physical history the specification asks for. A nonzero one needs
+            // an explicit initializer rather than being implied by zero bulk.
+            thin_gap_jump: vec![0.0; operator.base().thin_gap_samples().len()],
             runtime: operator.initial_runtime(),
             time_step,
             time,
@@ -1940,13 +1953,27 @@ impl CanonicalTemporalWaveState {
         self.time
     }
 
+    /// Energy stored in the thin-gap springs, which is part of the state's
+    /// total and not reconstructible from the bulk fields.
+    fn gap_energy(&self, operator: &CanonicalTemporalWaveOperator) -> f64 {
+        self.thin_gap_jump
+            .iter()
+            .zip(operator.base().thin_gap_samples())
+            .map(|(jump, sample)| 0.5 * sample.stiffness * jump * jump)
+            .sum()
+    }
+
+    pub fn thin_gap_jump(&self) -> &[f64] {
+        &self.thin_gap_jump
+    }
+
     pub fn energy(&self, operator: &CanonicalTemporalWaveOperator) -> Result<f64, WaveError> {
-        operator.energy_at(
+        Ok(operator.energy_at(
             &self.primary_flux,
             &self.complementary_flux,
             self.time,
             &self.runtime,
-        )
+        )? + self.gap_energy(operator))
     }
 
     /// Zero-duration paired grid filter with the material maps frozen at the
@@ -2151,7 +2178,8 @@ impl CanonicalTemporalWaveState {
         // here: a pin at an instant the work quadrature does not know about
         // leaves a first-order hole in the energy balance, measured at order
         // 0.99 before this was moved.
-        let first_force = operator.force_at(&complementary, start_time, &self.runtime)?;
+        let mut first_force = operator.force_at(&complementary, start_time, &self.runtime)?;
+        add_gap_force(operator, &self.thin_gap_jump, &mut first_force)?;
         let first_source = forcing.integrated_rate(start_time)?;
         let (work, exchange, escaped) = forced_kick(
             operator,
@@ -2170,6 +2198,18 @@ impl CanonicalTemporalWaveState {
 
         let (_, primary_rate_middle) =
             operator.primary_energy_and_rate(&primary, middle_time, &self.runtime)?;
+        // The gap's own displacement drifts on the same field and over the
+        // same interval as the complementary flux does: both are the drift
+        // subflow, and splitting them would break the exactness the local gap
+        // split is admitted for.
+        let midpoint_field = operator.primary_field_at(&primary, middle_time, &self.runtime)?;
+        let mut gap_jump = self.thin_gap_jump.clone();
+        for (sample, jump) in operator.base().thin_gap_samples().iter().zip(&mut gap_jump) {
+            *jump += duration
+                * (midpoint_field[sample.left_node as usize]
+                    - midpoint_field[sample.right_node as usize]);
+        }
+        validate_finite(&gap_jump)?;
         operator.drift_at(
             &mut complementary,
             &primary,
@@ -2180,7 +2220,8 @@ impl CanonicalTemporalWaveState {
         let (_, complementary_rate_end) =
             operator.complementary_energy_and_rate(&complementary, end_time, &self.runtime)?;
 
-        let second_force = operator.force_at(&complementary, end_time, &self.runtime)?;
+        let mut second_force = operator.force_at(&complementary, end_time, &self.runtime)?;
+        add_gap_force(operator, &gap_jump, &mut second_force)?;
         let second_source = forcing.integrated_rate(end_time)?;
         let (work, exchange, escaped) = forced_kick(
             operator,
@@ -2239,9 +2280,31 @@ impl CanonicalTemporalWaveState {
         }
         self.primary_flux = primary;
         self.complementary_flux = complementary;
+        self.thin_gap_jump = gap_jump;
         self.time = end_time;
         Ok(accounting)
     }
+}
+
+/// Adds the thin-gap spring force, which pushes the two sides of a trace apart
+/// in proportion to the field jump the gap has integrated.
+fn add_gap_force(
+    operator: &CanonicalTemporalWaveOperator,
+    gap_jump: &[f64],
+    force: &mut [f64],
+) -> Result<(), WaveError> {
+    if gap_jump.is_empty() {
+        return Ok(());
+    }
+    if gap_jump.len() != operator.base().thin_gap_samples().len() {
+        return Err(WaveError::InvalidState);
+    }
+    for (sample, jump) in operator.base().thin_gap_samples().iter().zip(gap_jump) {
+        let value = sample.stiffness * jump;
+        force[sample.left_node as usize] += value;
+        force[sample.right_node as usize] -= value;
+    }
+    validate_finite(force)
 }
 
 /// One half of the Strang dissipation map, and the energy it removed.
@@ -4023,6 +4086,208 @@ mod tests {
             .zip(fixed.complementary_flux())
         {
             assert!((*temporal - *fixed).norm() < 1.0e-12);
+        }
+    }
+
+    /// The same gap, inert, must evolve exactly as the fixed path's does.
+    #[test]
+    fn an_inert_thin_gap_evolves_exactly_as_the_fixed_path_does() {
+        let mut scene = Scene::default();
+        scene.internal_boundaries.push(crate::InternalBoundary {
+            id: crate::InternalBoundaryId(1),
+            spline: crate::OpenCubicSpline::uniform(vec![
+                Point2::new(-0.65, 0.0),
+                Point2::new(-0.2, 0.0),
+                Point2::new(0.2, 0.0),
+                Point2::new(0.65, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![crate::InternalBoundaryLaw {
+                coupling: crate::InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 120.0,
+                },
+                ..crate::InternalBoundaryLaw::REFLECTING
+            }],
+        });
+        let mesh = mesh_scene(
+            &scene,
+            17,
+            MeshingOptions {
+                target_edge_length: 0.18,
+                minimum_angle_degrees: 14.0,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let base = operator.base();
+        assert!(!base.thin_gap_samples().is_empty());
+        let forcing = CanonicalForcing::none(base);
+        let time_step = 0.4 * operator.maximum_time_step();
+
+        let primary = base
+            .node_points()
+            .iter()
+            .map(|point| 0.05 * (1.6 * point.x - 1.0 * point.y).sin())
+            .collect::<Vec<_>>();
+        let potential = base
+            .node_points()
+            .iter()
+            .map(|point| 0.03 * (0.8 * point.x + 1.4 * point.y).cos())
+            .collect::<Vec<_>>();
+        let complementary = base.compatible_flux(&potential).unwrap();
+        let mut temporal = CanonicalTemporalWaveState::new(
+            &operator,
+            time_step,
+            primary.clone(),
+            complementary.clone(),
+        )
+        .unwrap();
+        let mut fixed = CanonicalWaveState::new(base, time_step, primary, complementary).unwrap();
+
+        for _ in 0..24 {
+            temporal.step_with_forcing(&operator, &forcing).unwrap();
+            fixed.step_with_forcing(base, &forcing).unwrap();
+        }
+        assert!(
+            temporal
+                .thin_gap_jump()
+                .iter()
+                .any(|jump| jump.abs() > 1.0e-9),
+            "the gap must actually open"
+        );
+        for (temporal, fixed) in temporal.primary_flux().iter().zip(fixed.primary_flux()) {
+            assert!((temporal - fixed).abs() < 1.0e-12);
+        }
+        for (temporal, fixed) in temporal
+            .complementary_flux()
+            .iter()
+            .zip(fixed.complementary_flux())
+        {
+            assert!((*temporal - *fixed).norm() < 1.0e-12);
+        }
+        assert!(
+            (temporal.energy(&operator).unwrap() - fixed.energy(base).unwrap()).abs() < 1.0e-12
+        );
+    }
+
+    /// A thin gap across a baffle, in a driven medium.
+    ///
+    /// The gap is a spring with a displacement of its own, so it stores energy
+    /// the bulk fields cannot account for. Two things follow, and both are
+    /// checked: that store belongs to the state's total energy, or the balance
+    /// charges it to the splitting remainder; and its drift belongs to the
+    /// same subflow as the complementary flux's, over the same interval and on
+    /// the same midpoint field, which is what makes the local split exact.
+    #[test]
+    fn a_thin_gap_stores_energy_and_keeps_the_balance_second_order() {
+        let mut scene = Scene::default();
+        scene.internal_boundaries.push(crate::InternalBoundary {
+            id: crate::InternalBoundaryId(1),
+            spline: crate::OpenCubicSpline::uniform(vec![
+                Point2::new(-0.65, 0.0),
+                Point2::new(-0.2, 0.0),
+                Point2::new(0.2, 0.0),
+                Point2::new(0.65, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![crate::InternalBoundaryLaw {
+                coupling: crate::InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 120.0,
+                },
+                ..crate::InternalBoundaryLaw::REFLECTING
+            }],
+        });
+        scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
+            depth: ScalarField::constant(0.2),
+            frequency_hz: ScalarField::constant(1.1),
+            phase_radians: ScalarField::constant(0.3),
+        };
+
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(
+            &base_scene,
+            17,
+            MeshingOptions {
+                target_edge_length: 0.18,
+                minimum_angle_degrees: 14.0,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &base_scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator =
+            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let base = operator.base();
+        assert!(
+            !base.thin_gap_samples().is_empty(),
+            "the fixture needs a thin gap"
+        );
+        assert!(operator.forced_composition_supported());
+        assert!(!operator.conservative_bulk_supported());
+        let forcing = CanonicalForcing::none(base);
+
+        let ceiling = 0.4 * operator.maximum_time_step();
+        let target = 0.25;
+        let mut previous: Option<(f64, f64)> = None;
+        for refinement in [1.0, 0.5, 0.25] {
+            let steps = (target / (ceiling * refinement)).ceil() as u64;
+            let time_step = target / steps as f64;
+            let primary = base
+                .node_points()
+                .iter()
+                .map(|point| 0.05 * (1.6 * point.x - 1.0 * point.y).sin())
+                .collect::<Vec<_>>();
+            let potential = base
+                .node_points()
+                .iter()
+                .map(|point| 0.03 * (0.8 * point.x + 1.4 * point.y).cos())
+                .collect::<Vec<_>>();
+            let complementary = base.compatible_flux(&potential).unwrap();
+            let mut state =
+                CanonicalTemporalWaveState::new(&operator, time_step, primary, complementary)
+                    .unwrap();
+
+            let before = state.energy(&operator).unwrap();
+            let mut work = 0.0;
+            for _ in 0..steps {
+                work += state
+                    .step_with_forcing(&operator, &forcing)
+                    .unwrap()
+                    .temporal_work;
+            }
+            let after = state.energy(&operator).unwrap();
+            assert!(
+                state.thin_gap_jump().iter().any(|jump| jump.abs() > 1.0e-9),
+                "the gap must actually open"
+            );
+
+            let residual = after - before - work;
+            if let Some((coarse_step, coarse_residual)) = previous {
+                let order = (coarse_residual.abs() / residual.abs()).log2()
+                    / (coarse_step / time_step).log2();
+                assert!(
+                    order > 1.7,
+                    "a gap must not cost the balance its order, measured {order:.2} between \
+                     dt {coarse_step:.3e} and {time_step:.3e}"
+                );
+            }
+            previous = Some((time_step, residual));
         }
     }
 
