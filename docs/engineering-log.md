@@ -5,6 +5,44 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — On the core anyone actually runs, the drive is free per step
+
+- The CPU oracle's driven path costs about thirteen times its fixed path, and
+  the obvious inference from that is that time-driven media are expensive. The
+  inference is wrong, and the previous entry said the deciding measurement had
+  not been made. It has now.
+- `canonical_gpu_temporal_timing` runs the f32 GPU core with and without a
+  drive on an identical fixture - same mesh, same operator, same initial state.
+  On an M1 Max at 15270 degrees of freedom:
+
+  | | us/step | simulated s per wall s |
+  | --- | --- | --- |
+  | driven | 516.9 | 1.7 |
+  | fixed | 516.5 | 2.1 |
+
+- **Per step the drive is free**, at a ratio of `1.001`. The shader reads a
+  stage's coefficients once where the reference recomputes them in every helper
+  that wants them, and that difference is the whole thirteen times.
+- What a drive does cost is the timestep. The driven ceiling is `8.93e-4`
+  against the fixed `1.097e-3`, because the CFL bound is taken over the whole
+  coefficient trajectory rather than one set of coefficients. So the honest
+  figure for the product is about `1.23x` wall clock per simulated second, and
+  it comes from stability rather than arithmetic - which also means it shrinks
+  with modulation depth instead of being a fixed tax.
+- One caveat worth stating rather than leaving to be discovered: at this size a
+  step may be dominated by dispatch and synchronization rather than by shader
+  arithmetic. The equality therefore establishes that the drive's extra work is
+  not the bottleneck, which is the operative question, rather than proving that
+  work to be free in isolation.
+- This changes what the CPU oracle's thirteen times means. It is a reference
+  implementation's redundancy, it slows the test suite and the calibration
+  examples, and it is worth fixing on those grounds - but it is not a statement
+  about the feature's cost, and the earlier entry should be read with this one.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (749 passed, 1 known
+  ignored reproducer), and the timing pair on an M1 Max / Metal with `HOME`
+  isolated from the live autosave.
+
 ## 2026-09-22 — A third of the driven cost was a walk taken for gaps that were not there
 
 - The thin-gap composition reconstructed the midpoint primary field on every

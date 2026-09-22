@@ -16,6 +16,8 @@ cargo run -p funfern-app --release --locked --example canonical_gpu_filter_bound
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_work
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_amr
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_forced
+cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing
+cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --fixed
 ```
 
 The `funfern-app` examples open a window and read the autosave, so run them with
@@ -86,6 +88,13 @@ The `--mesh-edit-benchmark`, `--wave-gpu-check`, `--wave-transfer-check` and
 `--amr-check` application flags no longer exist; the unified-topology cutover
 removed them and the hidden `canonical_gpu_*` examples took over what they
 covered.
+`canonical_gpu_temporal_timing` is the throughput comparison that decides
+whether a drive is affordable, run twice with and without `--fixed` on an
+otherwise identical fixture. On an M1 Max at 15270 DOFs both read `517 us/step`:
+per step the drive is free on the production core. What it does cost is the
+timestep, because the CFL bound tightens with the coefficient trajectory, so a
+driven medium runs about `1.23x` the wall clock per simulated second.
+
 `canonical_gpu_temporal_forced` runs a pumped medium with a volume source and
 an absorbing wall - three stages that each divide by the nodal mass - against
 the f64 reference, and requires both state lanes within `2e-4`. It exists
