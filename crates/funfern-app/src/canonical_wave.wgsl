@@ -469,13 +469,25 @@ fn force(node: u32, second: bool) -> f32 {
     return gathered_force(node, second);
 }
 
-fn stiffness_force(node: u32) -> f32 {
+// `time` is the instant whose nodal mass converts `Q` into a field. A driven
+// medium's mass moves, so a caller inside the drift passes that stage's own
+// midpoint; on a fixed generation the authored inverse mass is the same thing
+// at every instant and the branch costs nothing.
+fn stiffness_force(node: u32, time: f32) -> f32 {
     let range = nodes[node].stiffness.xy;
-    let row_field = candidate_q(node) * nodes[node].mass_loss.y;
+    var inverse_mass = nodes[node].mass_loss.y;
+    if temporal_enabled() {
+        inverse_mass = temporal_inverse_primary_mass(node, time);
+    }
+    let row_field = candidate_q(node) * inverse_mass;
     var result = 0.0;
     for (var entry = range.x; entry < range.x + range.y; entry += 1u) {
         let column = tables[entry].data.x;
-        let column_field = candidate_q(column) * nodes[column].mass_loss.y;
+        var column_inverse_mass = nodes[column].mass_loss.y;
+        if temporal_enabled() {
+            column_inverse_mass = temporal_inverse_primary_mass(column, time);
+        }
+        let column_field = candidate_q(column) * column_inverse_mass;
         result += table_float(entry, 2u) * (column_field - row_field);
     }
     return result;
@@ -862,7 +874,7 @@ fn filter_first(@builtin(global_invocation_id) id: vec3<u32>) {
         scratch[node].values.y = constitutive_force(node);
         return;
     }
-    scratch[node].values.x = stiffness_force(node);
+    scratch[node].values.x = stiffness_force(node, control.clock_f32.y);
     scratch[node].values.y = constitutive_force(node);
 }
 
@@ -1668,7 +1680,8 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
     if stopped() { return; }
     if i < control.counts_a.x && use_force_cache() {
         let next_force = accepted_force(i)
-            + control.clock_f32.x * stiffness_force(i);
+            + control.clock_f32.x
+                * stiffness_force(i, control.clock_f32.y + 0.5 * control.clock_f32.x);
         set_candidate_force(i, next_force);
         if !finite_scalar(next_force) { reject(STATUS_NON_FINITE); }
     }

@@ -18,6 +18,7 @@ cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_amr
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_forced
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing
 cargo run -p funfern-app --release --locked --example canonical_gpu_temporal_timing -- --fixed
+cargo run -p funfern-app --release --locked --example canonical_gpu_driven_document
 ```
 
 The `funfern-app` examples open a window and read the autosave, so run them with
@@ -88,6 +89,14 @@ The `--mesh-edit-benchmark`, `--wave-gpu-check`, `--wave-transfer-check` and
 `--amr-check` application flags no longer exist; the unified-topology cutover
 removed them and the hidden `canonical_gpu_*` examples took over what they
 covered.
+`canonical_gpu_driven_document` is the only end-to-end run: an authored
+document with a material drive, meshed and assembled by the application's own
+resumable jobs, compiled into a temporal plan and stepped on the device against
+an f64 oracle. **It currently fails**, and is committed failing on purpose. `Q`
+misses by `8.45e-3` after one step and `5.49e-2` after forty-eight, on a
+mass-driven medium where every solver-level gate passes at `1e-6`. `DRIVEN_STEPS`
+overrides the step count for bisecting it.
+
 `canonical_gpu_temporal_timing` is the throughput comparison that decides
 whether a drive is affordable, run twice with and without `--fixed` on an
 otherwise identical fixture. On an M1 Max at 15270 DOFs both read `517 us/step`:

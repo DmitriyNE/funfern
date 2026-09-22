@@ -5,6 +5,45 @@ next steps. Short bullets are enough; no entry is required for every tiny edit.
 Keep current actions near the top and dated entries newest first. Durable decisions
 belong in [architecture.md](architecture.md) and milestone scope in [plan.md](plan.md).
 
+## 2026-09-22 — The end-to-end run fails, and every piece of it passes separately
+
+- The check I said would be worth doing before the authoring UI, because it is
+  where a surprise would hide. `canonical_gpu_driven_document` takes an
+  authored document with a material drive through the application's own
+  preparation - meshing, both assemblies from the stripped model, the temporal
+  operator over the shared base - compiles a temporal plan from the result and
+  steps it on the device against an f64 oracle.
+- **It fails.** `Q` misses by `8.45e-3` after one step and `5.49e-2` after
+  forty-eight. Committed failing on purpose, per the review's instruction to
+  retain expected-failing artifacts rather than erase them.
+- What makes it worth stating rather than fixing in the same breath: every
+  solver-level gate passes on the same physics. The forced gate runs a pumped
+  medium with a source and an absorbing wall at `5.978e-6`, the AMR gate at
+  `4.6e-7`, the work gate at `1e-8`. The difference is the path into the
+  solver, not the solver: this is the only fixture assembled by the
+  application's topology jobs rather than by `assemble_scene`.
+- Localized so far. The error is per step, not accumulated - one step already
+  shows `8.45e-3`, and `DRIVEN_STEPS` is there to bisect it. The complementary
+  lane reports a relative difference below f32 resolution, which is
+  uninformative rather than clean: `b` starts large and the drift increment is
+  small against it.
+- One suspect raised and eliminated, which is worth recording so it is not
+  raised again. The drift's force-cache update calls `stiffness_force`, which
+  converted `Q` to a field with the authored inverse mass - wrong under a mass
+  drive, and its sibling at the other call site already had the instantaneous
+  branch. Fixed, and it changed the measurement by nothing at all, because this
+  fixture runs with the force cache off. The fix is kept as a latent
+  correctness repair with that limitation stated: it is not exercised here and
+  is therefore unverified by measurement.
+- The three passing device gates were re-run after that change and are
+  unmoved, so it is a repair rather than a regression.
+- Next step on this is bisection rather than more suspects: the per-step error
+  with one step is small enough to compare stage by stage against the oracle.
+- Checks: `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+  -- -D warnings`, `cargo test --workspace --locked` (751 passed, 1 known
+  ignored reproducer), `cargo build --release -p funfern-app --locked`, three
+  device gates passing and one failing as recorded.
+
 ## 2026-09-22 — A driven document runs
 
 - The plumbing the previous entry listed, all of it. Both plan sites - the
